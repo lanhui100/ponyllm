@@ -117,3 +117,49 @@ async fn test_gateway_chat_and_messages_endpoints() {
     let recorder_body: serde_json::Value = recorder_resp.json().await.unwrap();
     assert!(recorder_body.as_array().unwrap().len() >= 2);
 }
+
+#[tokio::test]
+async fn test_multi_provider_dynamic_model_routing() {
+    let mut config = GatewayConfig::default();
+    config.providers.insert(
+        "deepseek".to_string(),
+        ProviderConfig {
+            base_url: "https://api.deepseek.com".to_string(),
+            default_model: "deepseek-reasoner".to_string(),
+        },
+    );
+    config.providers.insert(
+        "openai".to_string(),
+        ProviderConfig {
+            base_url: "https://api.openai.com".to_string(),
+            default_model: "gpt-4o".to_string(),
+        },
+    );
+    config.providers.insert(
+        "anthropic".to_string(),
+        ProviderConfig {
+            base_url: "https://api.anthropic.com".to_string(),
+            default_model: "claude-3-7-sonnet-20250219".to_string(),
+        },
+    );
+
+    let state = AppState::new(config);
+
+    // 1. Exact default model match
+    let (prov_ds, _) = state.resolve_provider("deepseek-reasoner").unwrap();
+    assert_eq!(prov_ds, "deepseek");
+
+    let (prov_ant, _) = state.resolve_provider("claude-3-7-sonnet-20250219").unwrap();
+    assert_eq!(prov_ant, "anthropic");
+
+    // 2. Prefix slash match
+    let (prov_pref, _) = state.resolve_provider("openai/gpt-3.5-turbo").unwrap();
+    assert_eq!(prov_pref, "openai");
+
+    // 3. Keyword heuristic match
+    let (prov_gpt, _) = state.resolve_provider("gpt-4o-mini").unwrap();
+    assert_eq!(prov_gpt, "openai");
+
+    let (prov_cl, _) = state.resolve_provider("claude-3-5-sonnet").unwrap();
+    assert_eq!(prov_cl, "anthropic");
+}

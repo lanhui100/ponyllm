@@ -4,6 +4,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
+use futures_util::StreamExt;
 use ponyllm_core::executor::UpstreamExecutor;
 use ponyllm_core::telemetry::FlightFrame;
 use ponyllm_protocol::anthropic::messages::MessageRequest;
@@ -18,13 +19,13 @@ pub async fn handle_messages(
     let start_time = Instant::now();
     let request_id = format!("req_{}", uuid_simple());
 
-    // Resolve provider from model or default
-    let (provider_name, provider_cfg) = match state.config.providers.iter().next() {
-        Some((name, cfg)) => (name.clone(), cfg.clone()),
+    // Resolve provider dynamically based on model name
+    let (provider_name, provider_cfg) = match state.resolve_provider(&req.model) {
+        Some((name, cfg)) => (name, cfg),
         None => {
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({"error": {"message": "No upstream provider configured"}})),
+                Json(serde_json::json!({"error": {"message": format!("No upstream provider found for model '{}'", req.model)}})),
             )
                 .into_response();
         }
@@ -69,10 +70,60 @@ pub async fn handle_messages(
 
     let req_snippet = serde_json::to_string(&req).ok();
 
+    // Handle streaming request
+    if req.stream.unwrap_or(false) {
+        match executor.execute_stream_request(&target_url, &req_val).await {
+            Ok(upstream_resp) => {
+                let latency = start_time.elapsed();
+                state.metrics.record_request("/v1/messages", latency, 0, 0, true);
+                state.flight_recorder.record(FlightFrame {
+                    request_id,
+                    endpoint: "/v1/messages".to_string(),
+                    key_id: provider_name,
+                    raw_key: None,
+                    status_code: Some(200),
+                    latency,
+                    error: None,
+                    request_snippet: req_snippet,
+                    response_snippet: Some("[STREAM_STARTED]".to_string()),
+                });
+
+                let stream = upstream_resp.bytes_stream().map(|res| match res {
+                    Ok(bytes) => Ok::<_, std::convert::Infallible>(axum::response::sse::Event::default().data(String::from_utf8_lossy(&bytes).to_string())),
+                    Err(e) => Ok::<_, std::convert::Infallible>(axum::response::sse::Event::default().data(
+                        serde_json::json!({"error": {"message": format!("Stream error: {}", e), "type": "upstream_error"}}).to_string(),
+                    )),
+                });
+
+                return axum::response::Sse::new(stream).into_response();
+            }
+            Err(err) => {
+                let latency = start_time.elapsed();
+                state.metrics.record_request("/v1/messages", latency, 0, 0, false);
+                state.flight_recorder.record(FlightFrame {
+                    request_id,
+                    endpoint: "/v1/messages".to_string(),
+                    key_id: provider_name,
+                    raw_key: None,
+                    status_code: Some(502),
+                    latency,
+                    error: Some(err.to_string()),
+                    request_snippet: req_snippet,
+                    response_snippet: None,
+                });
+
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    Json(serde_json::json!({"error": {"message": err.to_string()}})),
+                )
+                    .into_response();
+            }
+        }
+    }
+
     match executor.execute_json_request(&target_url, &req_val).await {
         Ok(resp_val) => {
             let latency = start_time.elapsed();
-            // Parse upstream Chat completion response
             let chat_resp: ChatCompletionResponse = match serde_json::from_value(resp_val) {
                 Ok(cr) => cr,
                 Err(e) => {
@@ -84,7 +135,6 @@ pub async fn handle_messages(
                 }
             };
 
-            // Translate back to Anthropic MessageResponse
             let ant_resp = match chat_to_anthropic_response(&chat_resp) {
                 Ok(ar) => ar,
                 Err(e) => {

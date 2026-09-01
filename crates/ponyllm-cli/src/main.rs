@@ -24,8 +24,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Commands::Provider(cmd) => match cmd {
             ProviderCommands::List { config } => {
-                let path = config.as_deref().unwrap_or("ponyllm.toml");
-                let cfg = ConfigFile::load_or_default(Some(path))?;
+                let path = config.as_deref();
+                let cfg = ConfigFile::load_or_default(path)?;
                 println!("=== 已配置的模型提供商 (共 {} 个) ===", cfg.providers.len());
                 println!("{:<15} {:<32} {:<28} {:<12} {:<8}", "提供商名称", "Base URL", "默认模型", "调度策略", "Key 数量");
                 println!("{}", "-".repeat(95));
@@ -38,7 +38,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             ProviderCommands::Add { name, base_url, model, strategy, config } => {
                 let path = config.as_deref().unwrap_or("ponyllm.toml");
-                let mut cfg = ConfigFile::load_or_default(Some(path))?;
+                let mut cfg = ConfigFile::load_or_default(Some(path).filter(|_| std::path::Path::new(path).exists()))
+                    .unwrap_or_default();
                 cfg.add_provider(&name, &base_url, &model, &strategy);
                 cfg.save_to_path(path)?;
                 println!("✅ 成功添加/更新提供商 '{}' (Base URL: {}, Model: {})", name, base_url, model);
@@ -56,8 +57,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
         Commands::Key(cmd) => match cmd {
             KeyCommands::List { provider, config } => {
-                let path = config.as_deref().unwrap_or("ponyllm.toml");
-                let cfg = ConfigFile::load_or_default(Some(path))?;
+                let path = config.as_deref();
+                let cfg = ConfigFile::load_or_default(path)?;
                 println!("=== API Key 账户池 ===");
                 println!("{:<15} {:<20} {:<25} {:<8} {:<8}", "所属提供商", "Key ID", "API Key (已脱敏)", "优先级", "权重");
                 println!("{}", "-".repeat(80));
@@ -77,7 +78,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             KeyCommands::Add { provider, id, key, priority, weight, config } => {
                 let path = config.as_deref().unwrap_or("ponyllm.toml");
-                let mut cfg = ConfigFile::load_or_default(Some(path))?;
+                let mut cfg = ConfigFile::load_or_default(Some(path).filter(|_| std::path::Path::new(path).exists()))
+                    .unwrap_or_default();
                 cfg.add_key(&provider, &id, &key, priority, weight)
                     .map_err(|e| std::io::Error::new(std::io::ErrorKind::NotFound, e))?;
                 cfg.save_to_path(path)?;
@@ -100,8 +102,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             KeyCommands::Test { provider, config } => {
-                let path = config.as_deref().unwrap_or("ponyllm.toml");
-                let cfg = ConfigFile::load_or_default(Some(path))?;
+                let path = config.as_deref();
+                let cfg = ConfigFile::load_or_default(path)?;
                 let client = reqwest::Client::builder()
                     .timeout(std::time::Duration::from_secs(5))
                     .build()?;
@@ -118,10 +120,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         print!("  • 测试 Key '{}' ({})... ", k.id, ConfigFile::mask_key(&k.api_key));
                         let start = std::time::Instant::now();
                         let test_url = format!("{}/v1/models", p.base_url.trim_end_matches('/'));
-                        let res = client.get(&test_url)
-                            .header("Authorization", format!("Bearer {}", k.api_key))
-                            .send()
-                            .await;
+                        
+                        let req = client.get(&test_url)
+                            .header("Authorization", format!("Bearer {}", k.api_key.trim()))
+                            .header("x-api-key", k.api_key.trim())
+                            .header("anthropic-version", "2023-06-01");
+
+                        let res = req.send().await;
 
                         let elapsed = start.elapsed().as_millis();
                         match res {
@@ -144,8 +149,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
         Commands::Model(cmd) => match cmd {
             ModelCommands::List { config } => {
-                let path = config.as_deref().unwrap_or("ponyllm.toml");
-                let cfg = ConfigFile::load_or_default(Some(path))?;
+                let path = config.as_deref();
+                let cfg = ConfigFile::load_or_default(path)?;
                 println!("=== 各提供商默认模型 ===");
                 println!("{:<15} {:<35}", "提供商", "默认模型 (Default Model)");
                 println!("{}", "-".repeat(50));
@@ -179,8 +184,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .with(tracing_subscriber::fmt::layer())
                 .init();
 
-            let config_path = config.as_deref().unwrap_or("ponyllm.toml");
-            let config_file = ConfigFile::load_or_default(Some(config_path))?;
+            let config_path = config.as_deref();
+            let config_file = ConfigFile::load_or_default(config_path)?;
 
             let mut gw_config = GatewayConfig::default();
             if let Some(b) = bind {
@@ -231,24 +236,51 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             axum::serve(listener, app).await?;
         }
         Commands::Status { gateway_url } => {
-            let client = reqwest::Client::new();
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(3))
+                .build()?;
             let health_url = format!("{}/health", gateway_url.trim_end_matches('/'));
             let metrics_url = format!("{}/v1/telemetry/metrics", gateway_url.trim_end_matches('/'));
 
-            let health = client.get(&health_url).send().await?.json::<serde_json::Value>().await?;
-            let metrics = client.get(&metrics_url).send().await?.json::<serde_json::Value>().await?;
-
-            println!("=== ponyllm Gateway Status ===");
-            println!("Health:  {}", health);
-            println!("Metrics: {}", metrics);
+            match client.get(&health_url).send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    let health = resp.json::<serde_json::Value>().await?;
+                    let metrics = client.get(&metrics_url).send().await?.json::<serde_json::Value>().await?;
+                    println!("=== ponyllm Gateway Status ===");
+                    println!("Health:  {}", health);
+                    println!("Metrics: {}", metrics);
+                }
+                Ok(resp) => {
+                    eprintln!("⚠️ 网关响应非 200 状态码: HTTP {}", resp.status());
+                    std::process::exit(1);
+                }
+                Err(e) => {
+                    eprintln!("❌ 无法连接到 ponyllm 网关 ({})。\n👉 排错提示: 请先运行 'ponyllm serve' 启动服务，或检查 '--gateway-url' 是否正确。\n(底层错误: {})", gateway_url, e);
+                    std::process::exit(1);
+                }
+            }
         }
         Commands::Telemetry { gateway_url } => {
-            let client = reqwest::Client::new();
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(3))
+                .build()?;
             let rec_url = format!("{}/v1/telemetry/recorder", gateway_url.trim_end_matches('/'));
-            let frames = client.get(&rec_url).send().await?.json::<serde_json::Value>().await?;
 
-            println!("=== ponyllm Flight Recorder Frames ===");
-            println!("{}", serde_json::to_string_pretty(&frames)?);
+            match client.get(&rec_url).send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    let frames = resp.json::<serde_json::Value>().await?;
+                    println!("=== ponyllm Flight Recorder Frames ===");
+                    println!("{}", serde_json::to_string_pretty(&frames)?);
+                }
+                Ok(resp) => {
+                    eprintln!("⚠️ 网关响应非 200 状态码: HTTP {}", resp.status());
+                    std::process::exit(1);
+                }
+                Err(e) => {
+                    eprintln!("❌ 无法连接到 ponyllm 网关 ({})。\n👉 排错提示: 请先运行 'ponyllm serve' 启动服务。\n(底层错误: {})", gateway_url, e);
+                    std::process::exit(1);
+                }
+            }
         }
     }
 

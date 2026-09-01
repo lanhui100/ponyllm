@@ -29,19 +29,19 @@ pub fn run_interactive_init(output_path: &str) -> Result<(), Box<dyn std::error:
 
         let selection = Select::new("2. 选择要配置的提供商模板:", provider_options).prompt()?;
 
-        let (p_name, default_url, default_model, _default_strat) = if selection.starts_with("DeepSeek") {
-            ("deepseek", "https://api.deepseek.com", "deepseek-reasoner", "priority")
+        let (p_name, default_url, default_model) = if selection.starts_with("DeepSeek") {
+            ("deepseek".to_string(), "https://api.deepseek.com", "deepseek-reasoner")
         } else if selection.starts_with("OpenAI") {
-            ("openai", "https://api.openai.com", "gpt-4o", "round_robin")
+            ("openai".to_string(), "https://api.openai.com", "gpt-4o")
         } else if selection.starts_with("Anthropic") {
-            ("anthropic", "https://api.anthropic.com", "claude-3-7-sonnet-20250219", "round_robin")
+            ("anthropic".to_string(), "https://api.anthropic.com", "claude-3-7-sonnet-20250219")
         } else if selection.starts_with("OpenRouter") {
-            ("openrouter", "https://openrouter.ai/api", "anthropic/claude-3.7-sonnet", "round_robin")
+            ("openrouter".to_string(), "https://openrouter.ai/api", "anthropic/claude-3.7-sonnet")
         } else {
             let custom_name = Text::new("  请输入自定义提供商标识名称 (英文小写):")
                 .with_default("my-provider")
                 .prompt()?;
-            (Box::leak(custom_name.into_boxed_str()) as &str, "https://api.example.com", "default-model", "round_robin")
+            (custom_name, "https://api.example.com", "default-model")
         };
 
         let base_url = Text::new("  提供商 Base URL:")

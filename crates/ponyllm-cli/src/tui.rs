@@ -1,7 +1,7 @@
 use std::io;
 use std::time::Duration;
 use crossterm::{
-    event::{Event, KeyCode, KeyEventKind},
+    event::{Event, KeyCode, KeyEventKind, KeyModifiers},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -18,6 +18,37 @@ use ratatui::{
 };
 use serde_json::Value;
 use crate::config::ConfigFile;
+
+pub struct TerminalGuard {
+    pub terminal: Terminal<CrosstermBackend<io::Stdout>>,
+}
+
+impl TerminalGuard {
+    pub fn new() -> io::Result<Self> {
+        enable_raw_mode()?;
+        let mut stdout = io::stdout();
+        execute!(stdout, EnterAlternateScreen, crossterm::cursor::Hide)?;
+        let backend = CrosstermBackend::new(stdout);
+        let terminal = Terminal::new(backend)?;
+
+        let default_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |panic_info| {
+            let _ = disable_raw_mode();
+            let mut stdout = io::stdout();
+            let _ = execute!(stdout, LeaveAlternateScreen, crossterm::cursor::Show);
+            default_hook(panic_info);
+        }));
+
+        Ok(Self { terminal })
+    }
+}
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        let _ = disable_raw_mode();
+        let _ = execute!(self.terminal.backend_mut(), LeaveAlternateScreen, crossterm::cursor::Show);
+    }
+}
 
 pub struct TuiApp {
     pub active_tab: usize,
@@ -93,12 +124,7 @@ impl TuiApp {
 }
 
 pub async fn run_tui(config: ConfigFile, config_path: String, gateway_url: String) -> Result<(), Box<dyn std::error::Error>> {
-    enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
-
+    let mut guard = TerminalGuard::new()?;
     let mut app = TuiApp::new(config, config_path, gateway_url);
     app.poll_gateway().await;
 
@@ -106,7 +132,7 @@ pub async fn run_tui(config: ConfigFile, config_path: String, gateway_url: Strin
     let mut poll_interval = tokio::time::interval(Duration::from_millis(1000));
 
     loop {
-        terminal.draw(|f| ui(f, &mut app))?;
+        guard.terminal.draw(|f| ui(f, &mut app))?;
 
         tokio::select! {
             _ = poll_interval.tick() => {
@@ -115,47 +141,51 @@ pub async fn run_tui(config: ConfigFile, config_path: String, gateway_url: Strin
             maybe_event = reader.next() => {
                 if let Some(Ok(Event::Key(key))) = maybe_event {
                     if key.kind == KeyEventKind::Press {
-                        match key.code {
-                            KeyCode::Char('q') | KeyCode::Esc => {
-                                app.should_quit = true;
-                            }
-                            KeyCode::Tab => {
-                                app.active_tab = (app.active_tab + 1) % 4;
-                            }
-                            KeyCode::BackTab => {
-                                app.active_tab = if app.active_tab == 0 { 3 } else { app.active_tab - 1 };
-                            }
-                            KeyCode::Char('1') => app.active_tab = 0,
-                            KeyCode::Char('2') => app.active_tab = 1,
-                            KeyCode::Char('3') => app.active_tab = 2,
-                            KeyCode::Char('4') => app.active_tab = 3,
-                            KeyCode::Char('r') => {
-                                app.poll_gateway().await;
-                                app.status_message = "已手动拉取最新遥测数据。".to_string();
-                            }
-                            KeyCode::Down | KeyCode::Char('j') => {
-                                match app.active_tab {
-                                    1 => scroll_table(&mut app.provider_table_state, app.config.providers.len(), 1),
-                                    2 => {
-                                        let total_keys = app.config.providers.values().map(|p| p.keys.len()).sum();
-                                        scroll_table(&mut app.key_table_state, total_keys, 1);
-                                    }
-                                    3 => scroll_table(&mut app.log_table_state, app.flight_frames.len(), 1),
-                                    _ => {}
+                        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+                            app.should_quit = true;
+                        } else {
+                            match key.code {
+                                KeyCode::Char('q') | KeyCode::Esc => {
+                                    app.should_quit = true;
                                 }
-                            }
-                            KeyCode::Up | KeyCode::Char('k') => {
-                                match app.active_tab {
-                                    1 => scroll_table(&mut app.provider_table_state, app.config.providers.len(), -1),
-                                    2 => {
-                                        let total_keys = app.config.providers.values().map(|p| p.keys.len()).sum();
-                                        scroll_table(&mut app.key_table_state, total_keys, -1);
-                                    }
-                                    3 => scroll_table(&mut app.log_table_state, app.flight_frames.len(), -1),
-                                    _ => {}
+                                KeyCode::Tab => {
+                                    app.active_tab = (app.active_tab + 1) % 4;
                                 }
+                                KeyCode::BackTab => {
+                                    app.active_tab = if app.active_tab == 0 { 3 } else { app.active_tab - 1 };
+                                }
+                                KeyCode::Char('1') => app.active_tab = 0,
+                                KeyCode::Char('2') => app.active_tab = 1,
+                                KeyCode::Char('3') => app.active_tab = 2,
+                                KeyCode::Char('4') => app.active_tab = 3,
+                                KeyCode::Char('r') => {
+                                    app.poll_gateway().await;
+                                    app.status_message = "已手动拉取最新遥测数据。".to_string();
+                                }
+                                KeyCode::Down | KeyCode::Char('j') => {
+                                    match app.active_tab {
+                                        1 => scroll_table(&mut app.provider_table_state, app.config.providers.len(), 1),
+                                        2 => {
+                                            let total_keys = app.config.providers.values().map(|p| p.keys.len()).sum();
+                                            scroll_table(&mut app.key_table_state, total_keys, 1);
+                                        }
+                                        3 => scroll_table(&mut app.log_table_state, app.flight_frames.len(), 1),
+                                        _ => {}
+                                    }
+                                }
+                                KeyCode::Up | KeyCode::Char('k') => {
+                                    match app.active_tab {
+                                        1 => scroll_table(&mut app.provider_table_state, app.config.providers.len(), -1),
+                                        2 => {
+                                            let total_keys = app.config.providers.values().map(|p| p.keys.len()).sum();
+                                            scroll_table(&mut app.key_table_state, total_keys, -1);
+                                        }
+                                        3 => scroll_table(&mut app.log_table_state, app.flight_frames.len(), -1),
+                                        _ => {}
+                                    }
+                                }
+                                _ => {}
                             }
-                            _ => {}
                         }
                     }
                 }
@@ -166,10 +196,6 @@ pub async fn run_tui(config: ConfigFile, config_path: String, gateway_url: Strin
             break;
         }
     }
-
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-    terminal.show_cursor()?;
 
     Ok(())
 }
@@ -185,6 +211,18 @@ fn scroll_table(state: &mut TableState, max_len: usize, delta: isize) {
 }
 
 fn ui(f: &mut Frame, app: &mut TuiApp) {
+    let area = f.area();
+    if area.width < 60 || area.height < 12 {
+        let warn_msg = Paragraph::new(format!(
+            "⚠️ 终端窗口过小 (当前: {}x{})，请调整至至少 60x12 以正常显示看板。",
+            area.width, area.height
+        ))
+        .style(Style::default().fg(Color::Yellow))
+        .block(Block::default().borders(Borders::ALL).title(" 尺寸警告 "));
+        f.render_widget(warn_msg, area);
+        return;
+    }
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -192,7 +230,7 @@ fn ui(f: &mut Frame, app: &mut TuiApp) {
             Constraint::Min(0),    // Main Content Area
             Constraint::Length(3), // Footer / Status Bar
         ])
-        .split(f.area());
+        .split(area);
 
     // 1. Header Tabs
     let tab_titles = vec![
@@ -251,7 +289,7 @@ fn ui(f: &mut Frame, app: &mut TuiApp) {
             Span::raw("上下移动  "),
             Span::styled(" [r] ", Style::default().fg(Color::Yellow)),
             Span::raw("手动刷新  "),
-            Span::styled(" [q/Esc] ", Style::default().fg(Color::Yellow)),
+            Span::styled(" [q/Esc/Ctrl+C] ", Style::default().fg(Color::Yellow)),
             Span::raw("退出控制台"),
         ]),
     ])

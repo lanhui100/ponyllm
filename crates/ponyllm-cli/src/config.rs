@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::fs;
+use std::io::Write;
 use std::path::Path;
+use ponyllm_core::telemetry::FlightRecorder;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -74,9 +76,15 @@ fn default_weight() -> u32 {
 
 impl ConfigFile {
     pub fn load_or_default(path: Option<&str>) -> Result<Self, Box<dyn std::error::Error>> {
-        let config_path = path.unwrap_or("ponyllm.toml");
-        if Path::new(config_path).exists() {
-            let content = fs::read_to_string(config_path)?;
+        if let Some(p) = path {
+            if !Path::new(p).exists() {
+                return Err(format!("指定的配置文件 '{}' 不存在，请检查路径或执行 'ponyllm init' 生成配置", p).into());
+            }
+            let content = fs::read_to_string(p)?;
+            let cfg: ConfigFile = toml::from_str(&content)?;
+            Ok(cfg)
+        } else if Path::new("ponyllm.toml").exists() {
+            let content = fs::read_to_string("ponyllm.toml")?;
             let cfg: ConfigFile = toml::from_str(&content)?;
             Ok(cfg)
         } else {
@@ -86,10 +94,39 @@ impl ConfigFile {
         }
     }
 
+    /// Save configuration atomically (write to temp file, sync, then rename)
     pub fn save_to_path(&self, path: &str) -> std::io::Result<()> {
         let content = toml::to_string_pretty(self)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        fs::write(path, content)
+
+        let target_path = Path::new(path);
+        let parent = target_path.parent().unwrap_or_else(|| Path::new("."));
+        if !parent.as_os_str().is_empty() && !parent.exists() {
+            fs::create_dir_all(parent)?;
+        }
+        let temp_file_name = format!(
+            ".{}.tmp.{}",
+            target_path.file_name().and_then(|f| f.to_str()).unwrap_or("ponyllm"),
+            std::process::id()
+        );
+        let temp_path = parent.join(temp_file_name);
+
+        {
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&temp_path)?;
+            file.write_all(content.as_bytes())?;
+            file.sync_all()?;
+        }
+
+        if let Err(e) = fs::rename(&temp_path, target_path) {
+            let _ = fs::remove_file(&temp_path);
+            return Err(e);
+        }
+
+        Ok(())
     }
 
     pub fn add_provider(&mut self, name: &str, base_url: &str, default_model: &str, strategy: &str) {
@@ -136,13 +173,7 @@ impl ConfigFile {
     }
 
     pub fn mask_key(api_key: &str) -> String {
-        if api_key.len() <= 8 {
-            "****".to_string()
-        } else {
-            let prefix = &api_key[..3];
-            let suffix = &api_key[api_key.len() - 4..];
-            format!("{}***{}", prefix, suffix)
-        }
+        FlightRecorder::sanitize_key(api_key)
     }
 }
 

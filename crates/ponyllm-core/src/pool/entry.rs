@@ -61,17 +61,29 @@ impl ApiKeyEntry {
         }
     }
 
-    /// Check the current effective state of the key
+    /// Check the current effective state of the key with fast read-path
     pub fn current_state(&self) -> KeyState {
         if self.stats.disabled_reason.read().is_some() {
             return KeyState::Disabled;
         }
 
-        let mut cd = self.stats.cooldown_until.write();
-        if let Some(until) = *cd {
+        // Fast read path: avoid write-lock contention under heavy concurrent reads
+        {
+            let cd_read = self.stats.cooldown_until.read();
+            if let Some(until) = *cd_read {
+                if Instant::now() < until {
+                    return KeyState::CoolingDown;
+                }
+            } else {
+                return KeyState::Active;
+            }
+        }
+
+        // Slow path: upgrade to write lock only to reset expired cooldown
+        let mut cd_write = self.stats.cooldown_until.write();
+        if let Some(until) = *cd_write {
             if Instant::now() >= until {
-                // Cooldown period has expired! Automatically reset to Active
-                *cd = None;
+                *cd_write = None;
                 self.stats.consecutive_failures.store(0, Ordering::SeqCst);
                 KeyState::Active
             } else {
@@ -98,9 +110,10 @@ impl ApiKeyEntry {
         match err_type {
             PoolErrorType::RateLimit { retry_after } => {
                 let duration = retry_after.unwrap_or_else(|| {
-                    // Exponential backoff: base 2s * 2^(consecutive - 1), capped at 60s
-                    let secs = (2u64.saturating_pow((consecutive as u32).saturating_sub(1))).min(60);
-                    Duration::from_secs(secs)
+                    // Exponential backoff with light jitter (base 2s * 2^(consecutive - 1) + jitter)
+                    let base_secs = (2u64.saturating_pow((consecutive as u32).saturating_sub(1))).min(60);
+                    let jitter_millis = (consecutive as u64 * 37) % 500;
+                    Duration::from_millis(base_secs * 1000 + jitter_millis)
                 });
                 *self.stats.cooldown_until.write() = Some(Instant::now() + duration);
             }

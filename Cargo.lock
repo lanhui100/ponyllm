@@ -1182,7 +1182,7 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
 name = "ponyllm"
-version = "0.1.0"
+version = "0.2.1"
 dependencies = [
  "axum",
  "ponyllm-core",
@@ -1195,7 +1195,7 @@ dependencies = [
 
 [[package]]
 name = "ponyllm-cli"
-version = "0.1.0"
+version = "0.2.1"
 dependencies = [
  "axum",
  "clap",
@@ -1217,7 +1217,7 @@ dependencies = [
 
 [[package]]
 name = "ponyllm-core"
-version = "0.1.0"
+version = "0.2.1"
 dependencies = [
  "axum",
  "chrono",
@@ -1237,7 +1237,7 @@ dependencies = [
 
 [[package]]
 name = "ponyllm-protocol"
-version = "0.1.0"
+version = "0.2.1"
 dependencies = [
  "bytes",
  "serde",
@@ -1247,9 +1247,11 @@ dependencies = [
 
 [[package]]
 name = "ponyllm-server"
-version = "0.1.0"
+version = "0.2.1"
 dependencies = [
  "axum",
+ "bytes",
+ "futures-util",
  "parking_lot",
  "ponyllm-core",
  "ponyllm-protocol",
@@ -1258,6 +1260,7 @@ dependencies = [
  "serde_json",
  "thiserror",
  "tokio",
+ "tokio-stream",
  "tower",
  "tower-http",
  "tracing",
@@ -1910,6 +1913,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1729aa945f29d91ba541258c8df89027d5792d85a8841fb65e8bf0f4ede4ef61"
 dependencies = [
  "rustls",
+ "tokio",
+]
+
+[[package]]
+name = "tokio-stream"
+version = "0.1.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a3d06f0b082ba57c26b79407372e57cf2a1e28124f78e9479fe80322cf53420b"
+dependencies = [
+ "futures-core",
+ "pin-project-lite",
  "tokio",
 ]
 

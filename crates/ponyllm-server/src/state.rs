@@ -3,7 +3,7 @@ use parking_lot::RwLock;
 use std::collections::HashMap;
 use ponyllm_core::pool::KeyPool;
 use ponyllm_core::telemetry::{FlightRecorder, MetricsCollector};
-use crate::config::GatewayConfig;
+use crate::config::{GatewayConfig, ProviderConfig};
 
 #[derive(Debug)]
 pub struct AppState {
@@ -30,5 +30,37 @@ impl AppState {
 
     pub fn get_pool(&self, provider: &str) -> Option<Arc<KeyPool>> {
         self.pools.read().get(provider).cloned()
+    }
+
+    /// Resolve target upstream provider dynamically based on requested model name
+    pub fn resolve_provider(&self, model: &str) -> Option<(String, ProviderConfig)> {
+        // 1. Exact match on default_model
+        for (name, cfg) in &self.config.providers {
+            if cfg.default_model == model {
+                return Some((name.clone(), cfg.clone()));
+            }
+        }
+
+        // 2. Explicit prefix matching (e.g. "deepseek/deepseek-reasoner" or "anthropic/claude-3-7-sonnet")
+        if let Some((prefix, _)) = model.split_once('/') {
+            if let Some(cfg) = self.config.providers.get(prefix) {
+                return Some((prefix.to_string(), cfg.clone()));
+            }
+        }
+
+        // 3. Keyword / model family heuristic matching
+        let lower = model.to_lowercase();
+        for (name, cfg) in &self.config.providers {
+            if lower.contains(name)
+                || (name == "openai" && (lower.starts_with("gpt") || lower.starts_with("o1") || lower.starts_with("o3") || lower.starts_with("text-embedding")))
+                || (name == "anthropic" && lower.starts_with("claude"))
+                || (name == "deepseek" && lower.starts_with("deepseek"))
+            {
+                return Some((name.clone(), cfg.clone()));
+            }
+        }
+
+        // 4. Fallback to first available provider
+        self.config.providers.iter().next().map(|(n, c)| (n.clone(), c.clone()))
     }
 }

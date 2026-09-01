@@ -28,6 +28,51 @@ fn test_flight_recorder_record_and_sanitize() {
 }
 
 #[test]
+fn test_unicode_and_emoji_key_sanitization_safety() {
+    // 1. Emoji prefix key (must not panic!)
+    let emoji_key = "🔑sk-12345678abcdef";
+    let sanitized_emoji = FlightRecorder::sanitize_key(emoji_key);
+    assert!(sanitized_emoji.contains("***"));
+
+    // 2. Multibyte Chinese key
+    let cn_key = "自定义密钥-abcdef123456";
+    let sanitized_cn = FlightRecorder::sanitize_key(cn_key);
+    assert!(sanitized_cn.contains("***"));
+
+    // 3. Short keys (<= 8 chars)
+    assert_eq!(FlightRecorder::sanitize_key("123"), "****");
+    assert_eq!(FlightRecorder::sanitize_key("sk-12345"), "****");
+
+    // 4. Standard sk- key
+    let std_key = "sk-1234567890abcdef";
+    assert_eq!(FlightRecorder::sanitize_key(std_key), "sk-***cdef");
+}
+
+#[test]
+fn test_flight_recorder_snippet_truncation() {
+    let recorder = FlightRecorder::new(5);
+    let giant_snippet = "x".repeat(2000);
+
+    recorder.record(FlightFrame {
+        request_id: "req-giant".to_string(),
+        endpoint: "/v1/chat/completions".to_string(),
+        key_id: "k1".to_string(),
+        raw_key: None,
+        status_code: Some(200),
+        latency: Duration::from_millis(50),
+        error: None,
+        request_snippet: Some(giant_snippet),
+        response_snippet: None,
+    });
+
+    let frames = recorder.get_recent_frames();
+    assert_eq!(frames.len(), 1);
+    let snip = frames[0].request_snippet.as_ref().unwrap();
+    assert!(snip.len() < 1000);
+    assert!(snip.ends_with("...[TRUNCATED]"));
+}
+
+#[test]
 fn test_flight_recorder_ring_buffer_capacity() {
     let recorder = FlightRecorder::new(3);
 

@@ -3,7 +3,7 @@ use std::time::Duration;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use serde_json::Value;
 use crate::error::{CoreError, Result};
-use crate::pool::{KeyPool, PoolErrorType};
+use crate::pool::{ApiKeyEntry, KeyPool, PoolErrorType};
 
 #[derive(Debug, Clone)]
 pub struct UpstreamExecutor {
@@ -27,6 +27,29 @@ impl UpstreamExecutor {
         }
     }
 
+    fn build_headers(&self, key: &ApiKeyEntry) -> Result<HeaderMap> {
+        let mut headers = HeaderMap::new();
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
+
+        let clean_key = key.api_key.trim();
+        if clean_key.is_empty() {
+            return Err(CoreError::Internal(format!("API key for '{}' is empty", key.id)));
+        }
+
+        // Bearer header for OpenAI/DeepSeek
+        let bearer_val = HeaderValue::from_str(&format!("Bearer {}", clean_key))
+            .map_err(|e| CoreError::Internal(format!("Invalid characters in API key for '{}': {}", key.id, e)))?;
+        headers.insert(AUTHORIZATION, bearer_val);
+
+        // x-api-key header for Anthropic
+        let x_api_val = HeaderValue::from_str(clean_key)
+            .map_err(|e| CoreError::Internal(format!("Invalid characters in API key for '{}': {}", key.id, e)))?;
+        headers.insert("x-api-key", x_api_val);
+
+        Ok(headers)
+    }
+
     /// Execute a JSON request with transparent automatic failover before response body starts
     pub async fn execute_json_request(&self, url: &str, body: &Value) -> Result<Value> {
         let mut last_error = String::new();
@@ -42,17 +65,14 @@ impl UpstreamExecutor {
                 }
             };
 
-            let mut headers = HeaderMap::new();
-            headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-            
-            // Support both standard Bearer and x-api-key (Anthropic)
-            if let Ok(hv) = HeaderValue::from_str(&format!("Bearer {}", key.api_key)) {
-                headers.insert(AUTHORIZATION, hv);
-            }
-            if let Ok(hv) = HeaderValue::from_str(&key.api_key) {
-                headers.insert("x-api-key", hv);
-            }
-            headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
+            let headers = match self.build_headers(&key) {
+                Ok(h) => h,
+                Err(e) => {
+                    self.pool.record_error(&key.id, PoolErrorType::AuthInvalid);
+                    last_error = e.to_string();
+                    continue;
+                }
+            };
 
             let req = self.client.post(url).headers(headers).json(body);
 
@@ -121,15 +141,14 @@ impl UpstreamExecutor {
                 }
             };
 
-            let mut headers = HeaderMap::new();
-            headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-            if let Ok(hv) = HeaderValue::from_str(&format!("Bearer {}", key.api_key)) {
-                headers.insert(AUTHORIZATION, hv);
-            }
-            if let Ok(hv) = HeaderValue::from_str(&key.api_key) {
-                headers.insert("x-api-key", hv);
-            }
-            headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
+            let headers = match self.build_headers(&key) {
+                Ok(h) => h,
+                Err(e) => {
+                    self.pool.record_error(&key.id, PoolErrorType::AuthInvalid);
+                    last_error = e.to_string();
+                    continue;
+                }
+            };
 
             let req = self.client.post(url).headers(headers).json(body);
 

@@ -27,7 +27,34 @@ impl PonyGateway {
         PonyGatewayBuilder::default()
     }
 
-    fn resolve_provider(&self, _model: &str) -> Result<&ProviderInfo> {
+    fn resolve_provider(&self, model: &str) -> Result<&ProviderInfo> {
+        // 1. Exact match on default_model
+        for info in self.providers.values() {
+            if info.default_model == model {
+                return Ok(info);
+            }
+        }
+
+        // 2. Prefix matching e.g. "deepseek/deepseek-chat"
+        if let Some((prefix, _)) = model.split_once('/') {
+            if let Some(info) = self.providers.get(prefix) {
+                return Ok(info);
+            }
+        }
+
+        // 3. Keyword / model family heuristic matching
+        let lower = model.to_lowercase();
+        for (name, info) in &self.providers {
+            if lower.contains(name)
+                || (name == "openai" && (lower.starts_with("gpt") || lower.starts_with("o1") || lower.starts_with("o3")))
+                || (name == "anthropic" && lower.starts_with("claude"))
+                || (name == "deepseek" && lower.starts_with("deepseek"))
+            {
+                return Ok(info);
+            }
+        }
+
+        // 4. Fallback to first registered provider
         self.providers
             .values()
             .next()

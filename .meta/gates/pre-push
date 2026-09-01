@@ -6,7 +6,9 @@ echo "=== [pre-push 1/3] Full workspace tests execution ==="
 cargo test --workspace
 
 echo "=== [pre-push 2/3] ponygo governance status check ==="
-if [ -f "D:/Documents/ponygo/ponygo" ]; then
+if command -v ponygo >/dev/null 2>&1; then
+  ponygo status
+elif [ -f "D:/Documents/ponygo/ponygo" ]; then
   bash "D:/Documents/ponygo/ponygo" status
 fi
 

@@ -31,11 +31,22 @@ pub fn chat_to_anthropic_request(req: &ChatCompletionRequest) -> Result<MessageR
                                     });
                                 }
                                 ContentPart::ImageUrl { image_url } => {
+                                    let (media_type, data, src_type) = if image_url.url.starts_with("data:") {
+                                        let rest = &image_url.url["data:".len()..];
+                                        if let Some((mime, b64)) = rest.split_once(";base64,") {
+                                            (mime.to_string(), b64.to_string(), "base64".to_string())
+                                        } else {
+                                            ("image/jpeg".to_string(), image_url.url.clone(), "url".to_string())
+                                        }
+                                    } else {
+                                        ("image/jpeg".to_string(), image_url.url.clone(), "url".to_string())
+                                    };
+
                                     blocks.push(AnthropicContentBlock::Image {
                                         source: AnthropicImageSource {
-                                            r#type: "url".to_string(),
-                                            media_type: "image/jpeg".to_string(),
-                                            data: image_url.url.clone(),
+                                            r#type: src_type,
+                                            media_type,
+                                            data,
                                         },
                                         cache_control: None,
                                     });
@@ -203,9 +214,14 @@ pub fn anthropic_to_chat_request(req: &MessageRequest) -> Result<ChatCompletionR
                                 user_parts.push(ContentPart::Text { text: text.clone() });
                             }
                             AnthropicContentBlock::Image { source, .. } => {
+                                let url = if source.r#type == "base64" && !source.data.starts_with("data:") {
+                                    format!("data:{};base64,{}", source.media_type, source.data)
+                                } else {
+                                    source.data.clone()
+                                };
                                 user_parts.push(ContentPart::ImageUrl {
                                     image_url: ImageUrlObject {
-                                        url: source.data.clone(),
+                                        url,
                                         detail: None,
                                     },
                                 });
@@ -215,6 +231,13 @@ pub fn anthropic_to_chat_request(req: &MessageRequest) -> Result<ChatCompletionR
                                 content,
                                 ..
                             } => {
+                                if !user_parts.is_empty() {
+                                    let parts = std::mem::take(&mut user_parts);
+                                    messages.push(ChatMessage::User(UserMessage {
+                                        content: MessageContent::Parts(parts),
+                                        name: None,
+                                    }));
+                                }
                                 let res_text = match content {
                                     ToolResultContent::Text(t) => t.clone(),
                                     ToolResultContent::Blocks(b_list) => b_list

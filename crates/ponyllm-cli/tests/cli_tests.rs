@@ -147,3 +147,26 @@ fn test_config_crud_and_mask_methods() {
     assert!(p_removed);
     assert_eq!(cfg.providers.len(), 0);
 }
+
+#[test]
+fn test_config_strict_load_and_atomic_save() {
+    // 1. Specified non-existent config path must return error
+    let res = ConfigFile::load_or_default(Some("non_existent_path_12345.toml"));
+    assert!(res.is_err());
+
+    // 2. Test atomic save and read back
+    let temp_dir = std::env::temp_dir();
+    let temp_file = temp_dir.join(format!("test_atomic_config_{}.toml", std::process::id()));
+    let temp_file_str = temp_file.to_str().unwrap();
+
+    let mut cfg = ConfigFile::default();
+    cfg.gateway.bind = "0.0.0.0:9999".to_string();
+    cfg.add_provider("atomic-p", "https://api.atomic.com", "m-atomic", "priority");
+    cfg.save_to_path(temp_file_str).unwrap();
+
+    let loaded = ConfigFile::load_or_default(Some(temp_file_str)).unwrap();
+    assert_eq!(loaded.gateway.bind, "0.0.0.0:9999");
+    assert_eq!(loaded.providers["atomic-p"].default_model, "m-atomic");
+
+    let _ = std::fs::remove_file(temp_file);
+}
