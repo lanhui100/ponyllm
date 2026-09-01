@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# ponyllm 一键安装脚本 (Linux & macOS)
+# ponyllm 一键安装脚本 (Linux, macOS & Git Bash)
 # 用法: curl -fsSL https://raw.githubusercontent.com/lanhui100/ponyllm/main/install.sh | bash
 # ==============================================================================
 set -euo pipefail
@@ -11,8 +11,9 @@ BINARY_NAME="ponyllm"
 # 1. 探测操作系统
 OS="$(uname -s)"
 case "$OS" in
-  Linux*)  PLATFORM="linux" ;;
-  Darwin*) PLATFORM="macos" ;;
+  Linux*)               PLATFORM="linux" ;;
+  Darwin*)              PLATFORM="macos" ;;
+  MINGW*|MSYS*|CYGWIN*) PLATFORM="windows"; BINARY_NAME="ponyllm.exe" ;;
   *)
     echo "错误: 暂不支持的操作系统: $OS" >&2
     exit 1
@@ -31,7 +32,11 @@ case "$ARCH" in
 esac
 
 # 匹配 Release 资产文件名
-ASSET_NAME="ponyllm-${PLATFORM}-${ARCH_NAME}.tar.gz"
+if [ "$PLATFORM" = "windows" ]; then
+  ASSET_NAME="ponyllm-windows-x86_64.zip"
+else
+  ASSET_NAME="ponyllm-${PLATFORM}-${ARCH_NAME}.tar.gz"
+fi
 DOWNLOAD_URL="https://github.com/${REPO}/releases/latest/download/${ASSET_NAME}"
 
 echo "========================================================"
@@ -55,30 +60,51 @@ else
 fi
 
 echo "--> 正在解压发布包..."
-tar -xzf "$TMP_DIR/$ASSET_NAME" -C "$TMP_DIR"
+if [ "$PLATFORM" = "windows" ]; then
+  if command -v unzip >/dev/null 2>&1; then
+    unzip -q "$TMP_DIR/$ASSET_NAME" -d "$TMP_DIR"
+  elif command -v tar >/dev/null 2>&1; then
+    tar -xf "$TMP_DIR/$ASSET_NAME" -C "$TMP_DIR"
+  fi
+else
+  tar -xzf "$TMP_DIR/$ASSET_NAME" -C "$TMP_DIR"
+fi
 
-if [ ! -f "$TMP_DIR/$BINARY_NAME" ]; then
+# 查找解压后的二进制
+TARGET_BIN=""
+if [ -f "$TMP_DIR/$BINARY_NAME" ]; then
+  TARGET_BIN="$TMP_DIR/$BINARY_NAME"
+else
+  TARGET_BIN="$(find "$TMP_DIR" -type f -name "$BINARY_NAME" | head -n1)"
+fi
+
+if [ -z "$TARGET_BIN" ] || [ ! -f "$TARGET_BIN" ]; then
   echo "错误: 解压后未找到可执行文件 $BINARY_NAME" >&2
   exit 1
 fi
-chmod +x "$TMP_DIR/$BINARY_NAME"
+chmod +x "$TARGET_BIN"
 
 # 4. 确定安装目标路径
-INSTALL_DIR="/usr/local/bin"
-USE_SUDO=0
-
-if [ -w "$INSTALL_DIR" ]; then
-  DEST_FILE="$INSTALL_DIR/$BINARY_NAME"
-  cp "$TMP_DIR/$BINARY_NAME" "$DEST_FILE"
-elif command -v sudo >/dev/null 2>&1 && [ -t 0 ]; then
-  echo "--> 需要 sudo 权限以安装到 $INSTALL_DIR..."
-  sudo cp "$TMP_DIR/$BINARY_NAME" "$INSTALL_DIR/$BINARY_NAME"
-  DEST_FILE="$INSTALL_DIR/$BINARY_NAME"
-else
-  INSTALL_DIR="$HOME/.local/bin"
+if [ "$PLATFORM" = "windows" ]; then
+  INSTALL_DIR="$HOME/.ponyllm/bin"
   mkdir -p "$INSTALL_DIR"
   DEST_FILE="$INSTALL_DIR/$BINARY_NAME"
-  cp "$TMP_DIR/$BINARY_NAME" "$DEST_FILE"
+  cp "$TARGET_BIN" "$DEST_FILE"
+else
+  INSTALL_DIR="/usr/local/bin"
+  if [ -w "$INSTALL_DIR" ]; then
+    DEST_FILE="$INSTALL_DIR/$BINARY_NAME"
+    cp "$TARGET_BIN" "$DEST_FILE"
+  elif command -v sudo >/dev/null 2>&1 && [ -t 0 ]; then
+    echo "--> 需要 sudo 权限以安装到 $INSTALL_DIR..."
+    sudo cp "$TARGET_BIN" "$INSTALL_DIR/$BINARY_NAME"
+    DEST_FILE="$INSTALL_DIR/$BINARY_NAME"
+  else
+    INSTALL_DIR="$HOME/.local/bin"
+    mkdir -p "$INSTALL_DIR"
+    DEST_FILE="$INSTALL_DIR/$BINARY_NAME"
+    cp "$TARGET_BIN" "$DEST_FILE"
+  fi
 fi
 
 echo "--> ponyllm 已成功安装至: $DEST_FILE"
@@ -89,7 +115,7 @@ case ":$PATH:" in
   *)
     echo ""
     echo "警告: $INSTALL_DIR 不在当前 PATH 环境变量中。"
-    echo "请将以下内容添加到你的 ~/.bashrc 或 ~/.zshrc 中:"
+    echo "请将以下内容添加到你的 profile 或环境变量中:"
     echo "    export PATH=\"$INSTALL_DIR:\$PATH\""
     echo ""
     ;;
@@ -100,7 +126,7 @@ echo "  ponyllm 安装完成！"
 echo ""
 echo "  快速上手:"
 echo "    ponyllm init      # 生成默认配置文件 ponyllm.toml"
-echo "    ponyllm serve     # 启动网关服务 (默认 127.0.0.1:8080)"
+echo "    ponyllm serve     # 启动网关服务 (默认 http://127.0.0.1:8080)"
 echo "    ponyllm status    # 巡检运行中网关状态与 QPS 指标"
 echo "    ponyllm telemetry # 查看黑匣子故障录波记录"
 echo "========================================================"
