@@ -4,6 +4,9 @@ pub mod common;
 pub mod error;
 pub mod openai;
 pub mod anthropic;
+pub mod translator;
 
 pub use common::*;
 pub use error::{ProtocolError, Result};
+pub use translator::*;
+
