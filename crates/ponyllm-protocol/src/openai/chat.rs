@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::common::StopCondition;
 
 /// OpenAI Chat Completion Request
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct ChatCompletionRequest {
     pub model: String,
     pub messages: Vec<ChatMessage>,

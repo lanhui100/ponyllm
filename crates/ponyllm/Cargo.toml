@@ -11,7 +11,14 @@ description = "High-performance LLM unified gateway and management library for R
 ponyllm-protocol = { workspace = true }
 ponyllm-core = { workspace = true }
 ponyllm-server = { workspace = true, optional = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 
 [features]
 default = ["server"]
 server = ["dep:ponyllm-server"]
+
+[dev-dependencies]
+axum = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
