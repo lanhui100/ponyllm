@@ -1,0 +1,23 @@
+[package]
+name = "ponyllm-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "CLI client and management executable for ponyllm"
+
+[[bin]]
+name = "ponyllm"
+path = "src/main.rs"
+
+[dependencies]
+ponyllm-protocol = { workspace = true }
+ponyllm-core = { workspace = true }
+ponyllm-server = { workspace = true }
+clap = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

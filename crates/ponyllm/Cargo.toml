@@ -1,0 +1,17 @@
+[package]
+name = "ponyllm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "High-performance LLM unified gateway and management library for Rust"
+
+[dependencies]
+ponyllm-protocol = { workspace = true }
+ponyllm-core = { workspace = true }
+ponyllm-server = { workspace = true, optional = true }
+
+[features]
+default = ["server"]
+server = ["dep:ponyllm-server"]

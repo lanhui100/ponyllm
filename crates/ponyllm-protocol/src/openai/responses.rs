@@ -1,0 +1,195 @@
+use std::collections::HashMap;
+use serde::{Deserialize, Serialize};
+
+/// OpenAI Responses API Create Request (`/v1/responses`)
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CreateResponseRequest {
+    pub model: String,
+    pub input: ResponseInput,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub modalities: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<ResponseToolDefinition>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub top_p: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<HashMap<String, String>>,
+    #[serde(flatten)]
+    pub extra: HashMap<String, serde_json::Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ResponseInput {
+    Text(String),
+    Items(Vec<ResponseInputItem>),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ResponseInputItem {
+    Message {
+        role: String,
+        content: Vec<ResponseContentPart>,
+    },
+    FunctionCall {
+        call_id: String,
+        name: String,
+        arguments: String,
+    },
+    FunctionResponse {
+        call_id: String,
+        output: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ResponseToolDefinition {
+    Function {
+        name: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        parameters: Option<serde_json::Value>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        strict: Option<bool>,
+    },
+    WebSearch {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        user_location: Option<serde_json::Value>,
+    },
+    FileSearch,
+    CodeInterpreter,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ResponseObject {
+    pub id: String,
+    pub object: String,
+    pub status: String,
+    pub model: String,
+    pub output: Vec<ResponseOutputItem>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage: Option<ResponseUsage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<ResponseError>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ResponseError {
+    pub code: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ResponseOutputItem {
+    Message {
+        id: String,
+        status: String,
+        role: String,
+        content: Vec<ResponseContentPart>,
+    },
+    FunctionCall {
+        id: String,
+        status: String,
+        call_id: String,
+        name: String,
+        arguments: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ResponseContentPart {
+    Text { text: String },
+    Refusal { refusal: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ResponseUsage {
+    pub total_tokens: u32,
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+}
+
+/// Streaming events for OpenAI Responses API
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ResponseStreamEvent {
+    #[serde(rename = "response.created")]
+    ResponseCreated { response: ResponseObject },
+
+    #[serde(rename = "response.done")]
+    ResponseDone { response: ResponseObject },
+
+    #[serde(rename = "response.output_item.added")]
+    OutputItemAdded {
+        response_id: String,
+        output_index: u32,
+        item: ResponseOutputItem,
+    },
+
+    #[serde(rename = "response.output_item.done")]
+    OutputItemDone {
+        response_id: String,
+        output_index: u32,
+        item: ResponseOutputItem,
+    },
+
+    #[serde(rename = "response.content_part.added")]
+    ContentPartAdded {
+        response_id: String,
+        item_id: String,
+        output_index: u32,
+        content_index: u32,
+        part: ResponseContentPart,
+    },
+
+    #[serde(rename = "response.content_part.done")]
+    ContentPartDone {
+        response_id: String,
+        item_id: String,
+        output_index: u32,
+        content_index: u32,
+        part: ResponseContentPart,
+    },
+
+    #[serde(rename = "response.text.delta")]
+    TextDelta(ResponseTextDelta),
+
+    #[serde(rename = "response.function_call_arguments.delta")]
+    FunctionCallArgumentsDelta(ResponseFunctionCallDelta),
+
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ResponseTextDelta {
+    pub response_id: String,
+    pub item_id: String,
+    pub output_index: u32,
+    pub content_index: u32,
+    pub delta: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ResponseFunctionCallDelta {
+    pub response_id: String,
+    pub item_id: String,
+    pub output_index: u32,
+    pub call_id: String,
+    pub delta: String,
+}

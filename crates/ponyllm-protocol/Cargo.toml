@@ -1,0 +1,17 @@
+[package]
+name = "ponyllm-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Core protocol definitions (OpenAI Chat, OpenAI Responses, Anthropic Messages) for ponyllm"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+bytes = { workspace = true, optional = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

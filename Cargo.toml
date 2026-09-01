@@ -1,0 +1,49 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/ponyllm-protocol",
+    "crates/ponyllm-core",
+    "crates/ponyllm-server",
+    "crates/ponyllm-cli",
+    "crates/ponyllm",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["ponyllm team"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/lanhui100/ponyllm"
+
+[workspace.dependencies]
+# Protocol & serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0", features = ["preserve_order"] }
+thiserror = "2.0"
+
+# Async & Networking
+tokio = { version = "1.43", features = ["full"] }
+tokio-stream = "0.1"
+bytes = "1.10"
+futures = "0.3"
+futures-util = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+axum = { version = "0.8", features = ["tokio", "http2"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+eventsource-stream = "0.2"
+
+# Observability & CLI
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "time"] }
+clap = { version = "4.5", features = ["derive", "env"] }
+parking_lot = "0.12"
+dashmap = "6.1"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1.13", features = ["v4", "serde"] }
+
+# Internal workspace crates
+ponyllm-protocol = { path = "crates/ponyllm-protocol" }
+ponyllm-core = { path = "crates/ponyllm-core" }
+ponyllm-server = { path = "crates/ponyllm-server" }
+ponyllm = { path = "crates/ponyllm" }
