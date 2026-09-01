@@ -212,14 +212,24 @@ pub fn responses_to_chat_request(req: &CreateResponseRequest) -> Result<ChatComp
 /// Convert ResponseObject to ChatCompletionResponse
 pub fn responses_to_chat_response(resp: &ResponseObject) -> Result<ChatCompletionResponse> {
     let mut text_acc = String::new();
+    let mut reasoning_acc = String::new();
     let mut tool_calls = Vec::new();
 
     for item in &resp.output {
         match item {
             ResponseOutputItem::Message { content, .. } => {
                 for part in content {
-                    if let ResponseContentPart::Text { text } = part {
-                        text_acc.push_str(text);
+                    match part {
+                        ResponseContentPart::Text { text } => {
+                            text_acc.push_str(text);
+                        }
+                        ResponseContentPart::Thought { thought } => {
+                            reasoning_acc.push_str(thought);
+                        }
+                        ResponseContentPart::Reasoning { reasoning } => {
+                            reasoning_acc.push_str(reasoning);
+                        }
+                        ResponseContentPart::Refusal { .. } => {}
                     }
                 }
             }
@@ -242,6 +252,7 @@ pub fn responses_to_chat_response(resp: &ResponseObject) -> Result<ChatCompletio
     }
 
     let content = if text_acc.is_empty() { None } else { Some(text_acc) };
+    let reasoning_content = if reasoning_acc.is_empty() { None } else { Some(reasoning_acc) };
     let tool_calls_opt = if tool_calls.is_empty() { None } else { Some(tool_calls) };
 
     let usage = resp.usage.as_ref().map(|u| Usage {
@@ -262,7 +273,7 @@ pub fn responses_to_chat_response(resp: &ResponseObject) -> Result<ChatCompletio
             message: AssistantResponseChoiceMessage {
                 role: "assistant".to_string(),
                 content,
-                reasoning_content: None,
+                reasoning_content,
                 refusal: None,
                 tool_calls: tool_calls_opt,
             },
@@ -274,3 +285,4 @@ pub fn responses_to_chat_response(resp: &ResponseObject) -> Result<ChatCompletio
         service_tier: None,
     })
 }
+

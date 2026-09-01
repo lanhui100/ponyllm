@@ -1,5 +1,6 @@
 use ponyllm_protocol::anthropic::messages::*;
 use ponyllm_protocol::openai::chat::*;
+use ponyllm_protocol::openai::responses::*;
 use ponyllm_protocol::translator::*;
 use serde_json::json;
 
@@ -328,6 +329,47 @@ fn test_chat_to_responses_and_back() {
     assert_eq!(back_chat_req.model, "gpt-4o");
     assert_eq!(back_chat_req.messages.len(), 2);
 }
+
+#[test]
+fn test_responses_with_reasoning_to_chat_response() {
+    let resp_obj = ResponseObject {
+        id: "resp_deepseek_123".to_string(),
+        object: "response".to_string(),
+        status: "completed".to_string(),
+        model: "deepseek-reasoner".to_string(),
+        output: vec![ResponseOutputItem::Message {
+            id: "msg_1".to_string(),
+            status: "completed".to_string(),
+            role: "assistant".to_string(),
+            content: vec![
+                ResponseContentPart::Reasoning {
+                    reasoning: "DeepSeek step-by-step thinking...".to_string(),
+                },
+                ResponseContentPart::Text {
+                    text: "Final conclusion.".to_string(),
+                },
+            ],
+        }],
+        usage: Some(ResponseUsage {
+            total_tokens: 50,
+            input_tokens: 20,
+            output_tokens: 30,
+        }),
+        error: None,
+    };
+
+    let chat_resp = responses_to_chat_response(&resp_obj).unwrap();
+    assert_eq!(chat_resp.model, "deepseek-reasoner");
+    assert_eq!(
+        chat_resp.choices[0].message.reasoning_content.as_deref(),
+        Some("DeepSeek step-by-step thinking...")
+    );
+    assert_eq!(
+        chat_resp.choices[0].message.content.as_deref(),
+        Some("Final conclusion.")
+    );
+}
+
 
 #[test]
 fn test_streaming_anthropic_to_chat_fsm() {

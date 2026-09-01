@@ -114,6 +114,8 @@ pub enum ResponseOutputItem {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ResponseContentPart {
     Text { text: String },
+    Thought { thought: String },
+    Reasoning { reasoning: String },
     Refusal { refusal: String },
 }
 

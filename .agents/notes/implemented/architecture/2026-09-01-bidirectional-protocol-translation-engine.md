@@ -6,8 +6,8 @@ Status: implemented
 
 不同大模型生态的客户端与服务端存在严重的协议格式碎片化：
 1. **客户端多样性**：各类 AI 开发工具（如基于 OpenAI 协议的 Cline / Continue / Cursor，或基于 Anthropic 协议的 Claude Code / 各种 agent 工具）发出的请求格式各异；
-2. **服务端多样性**：上游提供商或自建模型可能仅提供特定协议端点（例如 Anthropic 仅提供 `/v1/messages`，DeepSeek/OpenAI 仅提供 `/v1/chat/completions`，OpenAI 新一代模型提供 `/v1/responses`）；
-3. **流式状态差异**：流式传输并非简单的单包转换，而是具有状态累积特性的事件流。OpenAI 的 `delta.tool_calls` 是分片追加的参数片段，而 Anthropic 采用 `content_block_start` -> `content_block_delta` -> `content_block_stop` 明确的块生命周期；另外思考链（Reasoning/Thinking Tokens）在各协议中的传递方式完全不同。
+2. **服务端多样性与接口演进**：主流提供商（如 OpenAI、Anthropic、DeepSeek 等）提供多样化的协议端点（OpenAI Chat Completions、Anthropic Messages、OpenAI Responses API）；
+3. **流式状态与思考链差异**：流式传输并非简单的单包转换，而是具有状态累积特性的事件流。OpenAI 的 `delta.tool_calls` 是分片追加的参数片段，而 Anthropic 采用 `content_block_start` -> `content_block_delta` -> `content_block_stop` 明确的块生命周期；各家推理模型（如 DeepSeek Reasoner、OpenAI o1/o3、Claude 3.7 Sonnet Thinking）在各协议中的 `reasoning_content` / `thinking` 传递形态各异，必须保持语义无损映射。
 
 如果缺乏系统化的双向转译引擎，网关将退化为只能直通的转发器，无法消除跨协议兼容的痛点。
 
