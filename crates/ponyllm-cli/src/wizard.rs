@@ -1,0 +1,151 @@
+use std::collections::HashMap;
+use inquire::{Confirm, Password, PasswordDisplayMode, Select, Text};
+use crate::config::{ConfigFile, GatewaySection, KeySection, ProviderSection};
+
+
+
+pub fn run_interactive_init(output_path: &str) -> Result<(), Box<dyn std::error::Error>> {
+    println!("\n========================================================");
+    println!("  🚀 欢迎使用 ponyllm 统一网关配置初始化向导");
+    println!("  我们将一步步引导你配置网关、模型提供商与多 Key 账户池");
+    println!("========================================================\n");
+
+    let bind_addr = Text::new("1. 请输入网关监听地址与端口:")
+        .with_default("127.0.0.1:8080")
+        .with_help_message("例如 127.0.0.1:8080 或 0.0.0.0:8080")
+        .prompt()?;
+
+    let mut providers: HashMap<String, ProviderSection> = HashMap::new();
+
+    loop {
+        println!("\n--- 配置模型提供商 (Provider) ---");
+        let provider_options = vec![
+            "DeepSeek (推荐: 支持 reasoning 思考链全协议转译)",
+            "OpenAI (官方接口及各大兼容中转)",
+            "Anthropic (官方 Messages 接口)",
+            "OpenRouter (聚合网关)",
+            "Custom (自定义兼容 API 提供商)",
+        ];
+
+        let selection = Select::new("2. 选择要配置的提供商模板:", provider_options).prompt()?;
+
+        let (p_name, default_url, default_model, _default_strat) = if selection.starts_with("DeepSeek") {
+            ("deepseek", "https://api.deepseek.com", "deepseek-reasoner", "priority")
+        } else if selection.starts_with("OpenAI") {
+            ("openai", "https://api.openai.com", "gpt-4o", "round_robin")
+        } else if selection.starts_with("Anthropic") {
+            ("anthropic", "https://api.anthropic.com", "claude-3-7-sonnet-20250219", "round_robin")
+        } else if selection.starts_with("OpenRouter") {
+            ("openrouter", "https://openrouter.ai/api", "anthropic/claude-3.7-sonnet", "round_robin")
+        } else {
+            let custom_name = Text::new("  请输入自定义提供商标识名称 (英文小写):")
+                .with_default("my-provider")
+                .prompt()?;
+            (Box::leak(custom_name.into_boxed_str()) as &str, "https://api.example.com", "default-model", "round_robin")
+        };
+
+        let base_url = Text::new("  提供商 Base URL:")
+            .with_default(default_url)
+            .prompt()?;
+
+        let model = Text::new("  默认映射模型名称 (Model):")
+            .with_default(default_model)
+            .prompt()?;
+
+        let strategy_options = vec!["priority (优先级主备)", "round_robin (多 Key 轮询)", "weighted (加权调度)"];
+        let strat_sel = Select::new("  多 Key 调度策略:", strategy_options).prompt()?;
+        let strat = if strat_sel.starts_with("priority") {
+            "priority"
+        } else if strat_sel.starts_with("weighted") {
+            "weighted"
+        } else {
+            "round_robin"
+        };
+
+        let mut keys: Vec<KeySection> = Vec::new();
+
+        loop {
+            let key_idx = keys.len() + 1;
+            println!("\n  [录入 Key #{}]", key_idx);
+            let key_id = Text::new("    Key 唯一标识 (ID):")
+                .with_default(&format!("{}-key-{}", p_name, key_idx))
+                .prompt()?;
+
+            let api_key = Password::new("    API Key 秘钥:")
+                .with_display_mode(PasswordDisplayMode::Masked)
+                .with_help_message("输入将被遮蔽，回车确认")
+                .prompt()?;
+
+            let priority: u32 = if strat == "priority" {
+                let p_str = Text::new("    优先级 (数字越小优先级越高，1 为最高主 Key):")
+                    .with_default(&key_idx.to_string())
+                    .prompt()?;
+                p_str.parse().unwrap_or(key_idx as u32)
+            } else {
+                1
+            };
+
+            let weight: u32 = if strat == "weighted" {
+                let w_str = Text::new("    权重 (数字越大流量分配越多):")
+                    .with_default("10")
+                    .prompt()?;
+                w_str.parse().unwrap_or(10)
+            } else {
+                10
+            };
+
+            keys.push(KeySection {
+                id: key_id,
+                api_key,
+                priority,
+                weight,
+            });
+
+            let add_another_key = Confirm::new("  是否为此提供商添加备用 Key (以启用故障无感倒换/池化)?")
+                .with_default(false)
+                .prompt()?;
+
+            if !add_another_key {
+                break;
+            }
+        }
+
+        providers.insert(p_name.to_string(), ProviderSection {
+            base_url,
+            default_model: model,
+            strategy: strat.to_string(),
+            keys,
+        });
+
+        let add_another_provider = Confirm::new("是否继续配置其他大模型提供商?")
+            .with_default(false)
+            .prompt()?;
+
+        if !add_another_provider {
+            break;
+        }
+    }
+
+    let config = ConfigFile {
+        gateway: GatewaySection {
+            bind: bind_addr,
+            max_retries: 3,
+            flight_recorder_capacity: 200,
+        },
+        providers,
+    };
+
+    config.save_to_path(output_path)?;
+
+    println!("\n========================================================");
+    println!("  🎉 配置文件已成功生成并写入: {}", output_path);
+    println!("  已配置提供商数: {}", config.providers.len());
+    println!("\n  快速测试与启动:");
+    println!("    ponyllm serve                    # 启动网关服务");
+    println!("    ponyllm provider list            # 查看已配置提供商");
+    println!("    ponyllm key list                 # 查看 Key 账户池");
+    println!("    ponyllm tui                      # 打开全屏交互监控看板");
+    println!("========================================================\n");
+
+    Ok(())
+}

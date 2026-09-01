@@ -16,6 +16,10 @@ ponyllm-protocol = { workspace = true }
 ponyllm-core = { workspace = true }
 ponyllm-server = { workspace = true }
 clap = { workspace = true }
+inquire = { workspace = true }
+ratatui = { workspace = true }
+crossterm = { workspace = true }
+futures-util = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
