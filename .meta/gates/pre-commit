@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# ponyllm pre-commit gate (L2)
+# ponyllm pre-commit gate (Second-level ~1-2s)
 set -eo pipefail
 
-echo "=== [Gate 1/3] Checking ADR note format & lifecycle ==="
+echo "=== [pre-commit 1/3] ADR note format & lifecycle check ==="
 bash .agents/skills/write-adr/verify-note.sh
 
-echo "=== [Gate 2/3] Checking ADR negative regression specs ==="
-bash .agents/skills/write-adr/tests/test-verify-note.sh
+echo "=== [pre-commit 2/3] ADR negative regression specs check ==="
+bash .meta/gates/pre-commit.spec.sh
 
-echo "=== [Gate 3/3] Running workspace unit & integration tests ==="
-cargo test --workspace
+echo "=== [pre-commit 3/3] Fast syntax & workspace compilation check ==="
+cargo check --workspace
 
-echo "=== All pre-commit gates passed successfully! ==="
+echo "=== [pre-commit PASS] Ready to commit! ==="

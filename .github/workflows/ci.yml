@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    name: Test on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Verify ADR notes and negative specs
+        shell: bash
+        run: |
+          bash .agents/skills/write-adr/verify-note.sh
+          bash .agents/skills/write-adr/tests/test-verify-note.sh
+
+      - name: Check workspace compilation
+        run: cargo check --workspace
+
+      - name: Run all workspace unit and integration tests
+        run: cargo test --workspace
