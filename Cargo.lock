@@ -972,8 +972,10 @@ name = "ponyllm-server"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "parking_lot",
  "ponyllm-core",
  "ponyllm-protocol",
+ "reqwest",
  "serde",
  "serde_json",
  "thiserror",

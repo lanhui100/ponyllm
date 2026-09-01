@@ -1,13 +1,10 @@
-//! ponyllm-server: Axum HTTP/SSE gateway.
+//! ponyllm-server: Axum HTTP and SSE gateway service for ponyllm.
 
-pub mod error {
-    use thiserror::Error;
+pub mod config;
+pub mod state;
+pub mod routes;
+pub mod app;
 
-    #[derive(Debug, Error)]
-    pub enum ServerError {
-        #[error("Core error: {0}")]
-        Core(#[from] ponyllm_core::error::CoreError),
-        #[error("Server internal error: {0}")]
-        Internal(String),
-    }
-}
+pub use config::{GatewayConfig, ProviderConfig};
+pub use state::AppState;
+pub use app::create_app;

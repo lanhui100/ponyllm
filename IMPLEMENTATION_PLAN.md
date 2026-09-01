@@ -26,7 +26,7 @@
 **目标**: 基于 Axum 构建对外兼容端点（`/v1/chat/completions`, `/v1/responses`, `/v1/messages`）；集成 Tracing、实时 Metrics（TTFT、TPS、Token 消耗）与环形缓冲区故障录波（Flight Recorder）系统。
 **成功标准**: 标准客户端直连网关完成端到端请求与流式消费；异常请求现场自动脱敏录制落盘。
 **测试**: 端到端 HTTP/SSE 网关集成测试、流式客户端模拟测试、故障录波输出校验。
-**状态**: 未开始
+**状态**: 已完成
 
 ## 阶段 5: CLI 交互终端、配置系统与库形态封装
 
