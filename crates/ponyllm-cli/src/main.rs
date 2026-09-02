@@ -5,7 +5,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use ponyllm_core::pool::{ApiKeyEntry, KeyPool, RoutingStrategy};
 use ponyllm_server::{create_app, AppState, GatewayConfig, ProviderConfig};
 use ponyllm_cli::cli::{Cli, Commands, KeyCommands, ModelCommands, ProviderCommands};
-use ponyllm_cli::config::{generate_sample_config, ConfigFile};
+use ponyllm_cli::config::{generate_sample_config, generate_secure_api_key, ConfigFile};
 use ponyllm_cli::wizard::run_interactive_init;
 use ponyllm_cli::tui::run_tui;
 
@@ -146,6 +146,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
             }
+            KeyCommands::Gateway { config, key } => {
+                handle_manage_gateway_auth(config.as_deref(), key)?;
+            }
         },
         Commands::Model(cmd) => match cmd {
             ModelCommands::List { config } => {
@@ -235,6 +238,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         },
+        Commands::Auth { config, key } => {
+            handle_manage_gateway_auth(config.as_deref(), key)?;
+        }
         Commands::Tui { config, gateway_url } => {
             let config_path = config.unwrap_or_else(|| "ponyllm.toml".to_string());
             let cfg = ConfigFile::load_or_default(Some(&config_path))?;
@@ -250,7 +256,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .init();
 
             let config_path = config.as_deref();
-            let config_file = ConfigFile::load_or_default(config_path)?;
+            let mut config_file = ConfigFile::load_or_default(config_path)?;
 
             let mut gw_config = GatewayConfig::default();
 
@@ -284,10 +290,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             gw_config.flight_recorder_capacity = config_file.gateway.flight_recorder_capacity;
+            
+            // 2. Resolve or auto-generate secure API key
+            let mut newly_generated_key: Option<String> = None;
             if let Some(k) = api_key {
                 gw_config.api_key = k;
-            } else {
+            } else if !config_file.gateway.api_key.trim().is_empty() {
                 gw_config.api_key = config_file.gateway.api_key.clone();
+            } else {
+                // Auto-generate high-entropy secure API key if not specified
+                let secure_key = generate_secure_api_key();
+                gw_config.api_key = secure_key.clone();
+                config_file.gateway.api_key = secure_key.clone();
+                let save_dest = config_path.unwrap_or("ponyllm.toml");
+                let _ = config_file.save_to_path(save_dest);
+                newly_generated_key = Some(secure_key);
             }
 
             for (p_name, p_sec) in &config_file.providers {
@@ -326,6 +343,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             } else {
                 gw_config.api_key.clone()
             };
+
+            if let Some(gen_k) = &newly_generated_key {
+                println!("\n💡 [自动生成访问凭证] 检测到未配置 API Key，已自动生成并保存高熵秘钥: {}", gen_k);
+            }
 
             println!("\n╔════════════════════════════════════════════════════════════════════════╗");
             println!("║              🚀 ponyllm AI Gateway 服务已就绪                          ║");
@@ -411,6 +432,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             ponyllm_cli::upgrade::run_upgrade(check, force, dry_run, version).await?;
         }
     }
+
+    Ok(())
+}
+
+fn handle_manage_gateway_auth(
+    config_path: Option<&str>,
+    custom_key: Option<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let path = config_path.unwrap_or("ponyllm.toml");
+    let mut cfg = ConfigFile::load_or_default(Some(path))?;
+
+    let final_key = match custom_key {
+        Some(k) if !k.trim().is_empty() => k.trim().to_string(),
+        _ => generate_secure_api_key(),
+    };
+
+    cfg.gateway.api_key = final_key.clone();
+    cfg.save_to_path(path)?;
+
+    println!("\n╔════════════════════════════════════════════════════════════════════════╗");
+    println!("║              🔑 网关访问 API Key (Token) 已更新就绪                   ║");
+    println!("╠════════════════════════════════════════════════════════════════════════╣");
+    println!("║                                                                        ║");
+    println!("║   API Key:  {}", format!("{:<58}", final_key));
+    println!("║                                                                        ║");
+    println!("╠════════════════════════════════════════════════════════════════════════╣");
+    println!("║  • 已同步持久化保存至: {:<46} ║", path);
+    println!("║  • 请复制上方 API Key，用于 Cursor / Claude Code / SDK 鉴权连接。      ║");
+    println!("╚════════════════════════════════════════════════════════════════════════╝\n");
 
     Ok(())
 }

@@ -404,3 +404,45 @@ fn test_upgrade_zip_and_targz_extraction() {
     let tar_content = std::fs::read(&extracted_tar_path).unwrap();
     assert_eq!(tar_content, b"MOCK_TAR_GZ_DATA");
 }
+
+#[test]
+fn test_secure_api_key_generation_and_cli_auth_commands() {
+    use ponyllm_cli::config::generate_secure_api_key;
+
+    // 1. Verify high-entropy key algorithm
+    let key1 = generate_secure_api_key();
+    let key2 = generate_secure_api_key();
+    assert!(key1.starts_with("sk-pony-"));
+    assert!(key2.starts_with("sk-pony-"));
+    assert_ne!(key1, key2);
+    assert_eq!(key1.len(), 8 + 32); // "sk-pony-" (8) + 32 hex chars
+
+    // 2. Verify CLI Commands::Auth parsing
+    let cli_auth_gen = Cli::try_parse_from(["ponyllm", "auth"]).unwrap();
+    match cli_auth_gen.command {
+        Commands::Auth { config, key } => {
+            assert_eq!(config, None);
+            assert_eq!(key, None);
+        }
+        _ => panic!("Expected Auth command"),
+    }
+
+    let cli_auth_set = Cli::try_parse_from(["ponyllm", "auth", "-c", "custom.toml", "sk-custom-secret"]).unwrap();
+    match cli_auth_set.command {
+        Commands::Auth { config, key } => {
+            assert_eq!(config, Some("custom.toml".to_string()));
+            assert_eq!(key, Some("sk-custom-secret".to_string()));
+        }
+        _ => panic!("Expected Auth command"),
+    }
+
+    // 3. Verify KeyCommands::Gateway parsing
+    let cli_key_gw = Cli::try_parse_from(["ponyllm", "key", "gateway", "sk-another-token"]).unwrap();
+    match cli_key_gw.command {
+        Commands::Key(KeyCommands::Gateway { config, key }) => {
+            assert_eq!(config, None);
+            assert_eq!(key, Some("sk-another-token".to_string()));
+        }
+        _ => panic!("Expected KeyCommands::Gateway"),
+    }
+}

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use inquire::{Confirm, Password, PasswordDisplayMode, Select, Text};
-use crate::config::{ConfigFile, GatewaySection, KeySection, ProviderSection};
+use crate::config::{generate_secure_api_key, ConfigFile, GatewaySection, KeySection, ProviderSection};
 
 
 
@@ -27,8 +27,9 @@ pub fn run_interactive_init(output_path: &str) -> Result<(), Box<dyn std::error:
             .prompt()?
     };
 
+    let default_generated_key = generate_secure_api_key();
     let api_token = Text::new("  设置网关对外访问鉴权 API Token (Key):")
-        .with_default("sk-ponyllm-local")
+        .with_default(&default_generated_key)
         .with_help_message("第三方客户端（如 Cursor、Claude Code、SDK）需使用该 Token 进行认证，留空或 none 为免鉴权")
         .prompt()?;
 
@@ -165,15 +166,21 @@ pub fn run_interactive_init(output_path: &str) -> Result<(), Box<dyn std::error:
 
     config.save_to_path(output_path)?;
 
-    println!("\n========================================================");
-    println!("  🎉 配置文件已成功生成并写入: {}", output_path);
-    println!("  已配置提供商数: {}", config.providers.len());
-    println!("\n  快速测试与启动:");
-    println!("    ponyllm serve                    # 启动网关服务");
-    println!("    ponyllm provider list            # 查看已配置提供商");
-    println!("    ponyllm key list                 # 查看 Key 账户池");
-    println!("    ponyllm tui                      # 打开全屏交互监控看板");
-    println!("========================================================\n");
+    println!("\n╔════════════════════════════════════════════════════════════════════════╗");
+    println!("║              🎉 ponyllm 网关初始化配置完成！                           ║");
+    println!("╠════════════════════════════════════════════════════════════════════════╣");
+    println!("║  • 配置文件已写入: {:<50} ║", output_path);
+    println!("║  • 监听模式与地址: {:<50} ║", config.gateway.bind);
+    println!("║  • 网关访问凭证:   {:<50} ║", config.gateway.api_key);
+    println!("╠════════════════════════════════════════════════════════════════════════╣");
+    println!("║  💡 请妥善保管或复制上方 API Key，用于客户端鉴权访问。                 ║");
+    println!("║                                                                        ║");
+    println!("║  快速启动与管理:                                                       ║");
+    println!("║    ponyllm serve                    # 启动网关服务                     ║");
+    println!("║    ponyllm auth                     # 重新生成/查看网关 API Key        ║");
+    println!("║    ponyllm provider list            # 查看已配置提供商                 ║");
+    println!("║    ponyllm tui                      # 打开全屏交互监控看板             ║");
+    println!("╚════════════════════════════════════════════════════════════════════════╝\n");
 
     Ok(())
 }

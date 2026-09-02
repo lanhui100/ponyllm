@@ -34,8 +34,13 @@ fn default_retries() -> usize {
 fn default_capacity() -> usize {
     200
 }
+pub fn generate_secure_api_key() -> String {
+    let raw = uuid::Uuid::new_v4().simple().to_string();
+    format!("sk-pony-{}", raw)
+}
+
 fn default_api_key() -> String {
-    "sk-ponyllm-local".to_string()
+    generate_secure_api_key()
 }
 
 impl Default for GatewaySection {

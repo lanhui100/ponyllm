@@ -38,6 +38,17 @@ pub enum Commands {
     #[command(subcommand)]
     Model(ModelCommands),
 
+    /// Manage, view or regenerate gateway access API Token (API Key)
+    Auth {
+        /// Path to configuration file
+        #[arg(short, long)]
+        config: Option<String>,
+
+        /// Custom API key / token to set (if omitted, a secure random key will be generated)
+        #[arg(value_name = "KEY")]
+        key: Option<String>,
+    },
+
     /// Launch interactive full-screen TUI terminal dashboard
     #[command(alias = "dashboard", alias = "top")]
     Tui {
@@ -206,6 +217,16 @@ pub enum KeyCommands {
 
         #[arg(short, long)]
         config: Option<String>,
+    },
+    /// Manage, view or regenerate gateway access API Token (API Key)
+    Gateway {
+        /// Path to configuration file
+        #[arg(short, long)]
+        config: Option<String>,
+
+        /// Custom API key / token to set (if omitted, a secure random key will be generated)
+        #[arg(value_name = "KEY")]
+        key: Option<String>,
     },
 }
 
