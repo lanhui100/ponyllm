@@ -372,3 +372,72 @@ async fn test_gateway_models_endpoints() {
         .unwrap();
     assert_eq!(not_found_resp.status(), 404);
 }
+
+#[tokio::test]
+async fn test_gateway_auth_middleware() {
+    let mut config = GatewayConfig::default();
+    config.api_key = "sk-ponyllm-secret-123".to_string();
+    config.providers.insert(
+        "openai".to_string(),
+        ProviderConfig {
+            base_url: "https://api.openai.com".to_string(),
+            default_model: "gpt-4o".to_string(),
+            models: vec![],
+        },
+    );
+
+    let state = Arc::new(AppState::new(config));
+    let gateway_app = create_app(state);
+    let gateway_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let gateway_addr = gateway_listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(gateway_listener, gateway_app).await.unwrap();
+    });
+
+    let client = reqwest::Client::new();
+
+    // 1. Health check is always exempt from authentication
+    let health_resp = client
+        .get(format!("http://{}/health", gateway_addr))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(health_resp.status(), 200);
+
+    // 2. Request without auth header should be rejected with 401
+    let unauth_resp = client
+        .get(format!("http://{}/v1/models", gateway_addr))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unauth_resp.status(), 401);
+    let unauth_body: serde_json::Value = unauth_resp.json().await.unwrap();
+    assert_eq!(unauth_body["error"]["code"], "invalid_api_key");
+
+    // 3. Request with wrong Bearer token should be rejected with 401
+    let wrong_token_resp = client
+        .get(format!("http://{}/v1/models", gateway_addr))
+        .header("Authorization", "Bearer wrong-key")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(wrong_token_resp.status(), 401);
+
+    // 4. Request with valid OpenAI Bearer token should succeed
+    let openai_auth_resp = client
+        .get(format!("http://{}/v1/models", gateway_addr))
+        .header("Authorization", "Bearer sk-ponyllm-secret-123")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(openai_auth_resp.status(), 200);
+
+    // 5. Request with valid Anthropic x-api-key header should succeed
+    let ant_auth_resp = client
+        .get(format!("http://{}/models", gateway_addr))
+        .header("x-api-key", "sk-ponyllm-secret-123")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ant_auth_resp.status(), 200);
+}

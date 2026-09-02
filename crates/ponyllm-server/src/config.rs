@@ -22,7 +22,7 @@ impl Default for GatewayConfig {
     fn default() -> Self {
         Self {
             bind_addr: "127.0.0.1:8080".to_string(),
-            api_key: "sk-ponyllm-local".to_string(),
+            api_key: String::new(),
             providers: HashMap::new(),
             max_retries: 3,
             flight_recorder_capacity: 100,

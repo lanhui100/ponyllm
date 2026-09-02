@@ -240,7 +240,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let cfg = ConfigFile::load_or_default(Some(&config_path))?;
             run_tui(cfg, config_path, gateway_url).await?;
         }
-        Commands::Serve { config, bind, retries } => {
+        Commands::Serve { config, bind, address, port, api_key, retries } => {
             tracing_subscriber::registry()
                 .with(
                     tracing_subscriber::EnvFilter::try_from_default_env()
@@ -253,11 +253,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let config_file = ConfigFile::load_or_default(config_path)?;
 
             let mut gw_config = GatewayConfig::default();
+
+            // 1. Resolve host and port hierarchy
+            let (mut host, mut p_str) = match config_file.gateway.bind.split_once(':') {
+                Some((h, port_val)) => (h.to_string(), port_val.to_string()),
+                None => ("127.0.0.1".to_string(), "8080".to_string()),
+            };
+
             if let Some(b) = bind {
-                gw_config.bind_addr = b;
-            } else {
-                gw_config.bind_addr = config_file.gateway.bind;
+                if let Some((h, port_val)) = b.split_once(':') {
+                    host = h.to_string();
+                    p_str = port_val.to_string();
+                } else {
+                    host = b;
+                }
             }
+            if let Some(a) = address {
+                host = a;
+            }
+            if let Some(port_num) = port {
+                p_str = port_num.to_string();
+            }
+
+            gw_config.bind_addr = format!("{}:{}", host, p_str);
 
             if let Some(r) = retries {
                 gw_config.max_retries = r;
@@ -266,7 +284,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             gw_config.flight_recorder_capacity = config_file.gateway.flight_recorder_capacity;
-            gw_config.api_key = config_file.gateway.api_key.clone();
+            if let Some(k) = api_key {
+                gw_config.api_key = k;
+            } else {
+                gw_config.api_key = config_file.gateway.api_key.clone();
+            }
 
             for (p_name, p_sec) in &config_file.providers {
                 let all_model_names: Vec<String> = p_sec.list_all_models().into_iter().map(|m| m.name).collect();
@@ -297,19 +319,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let app = create_app(state);
             let listener = tokio::net::TcpListener::bind(&gw_config.bind_addr).await?;
-            let port = gw_config.bind_addr.split(':').nth(1).unwrap_or("8080");
+
+            let is_all_interfaces = host == "0.0.0.0";
+            let auth_display = if gw_config.api_key.is_empty() || gw_config.api_key.eq_ignore_ascii_case("none") {
+                "免鉴权 (开放模式)".to_string()
+            } else {
+                gw_config.api_key.clone()
+            };
 
             println!("\n╔════════════════════════════════════════════════════════════════════════╗");
             println!("║              🚀 ponyllm AI Gateway 服务已就绪                          ║");
             println!("╠════════════════════════════════════════════════════════════════════════╣");
             println!("║  • 本地接入 Base URL:                                                  ║");
-            println!("║    - OpenAI 客户端:   http://127.0.0.1:{}/v1                            ║", port);
-            println!("║    - Anthropic 客户端: http://127.0.0.1:{}                               ║", port);
+            if is_all_interfaces {
+                println!("║    - OpenAI 客户端:   http://127.0.0.1:{}/v1 (局域网: http://0.0.0.0:{}/v1)║", p_str, p_str);
+                println!("║    - Anthropic 客户端: http://127.0.0.1:{}    (局域网: http://0.0.0.0:{})   ║", p_str, p_str);
+            } else {
+                println!("║    - OpenAI 客户端:   http://{}:{}/v1                             ║", host, p_str);
+                println!("║    - Anthropic 客户端: http://{}:{}                                ║", host, p_str);
+            }
             println!("║    - 监听全地址:      http://{}                                     ║", gw_config.bind_addr);
-            println!("║  • 访问凭据 (API Key):  {}                                     ║", gw_config.api_key);
+            println!("║  • 访问凭证 (API Token):{}                                   ║", format!("{:<30}", auth_display));
             println!("║  • 标准模型路由 (Models):                                              ║");
-            println!("║    - http://127.0.0.1:{}/v1/models                                      ║", port);
-            println!("║    - http://127.0.0.1:{}/models                                         ║", port);
+            println!("║    - http://127.0.0.1:{}/v1/models                                      ║", p_str);
+            println!("║    - http://127.0.0.1:{}/models                                         ║", p_str);
             println!("╠════════════════════════════════════════════════════════════════════════╣");
             println!("║  • 已挂载模型提供商 (Providers & Models):                              ║");
             for (p_name, p_sec) in &config_file.providers {

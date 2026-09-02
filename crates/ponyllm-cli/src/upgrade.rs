@@ -224,6 +224,50 @@ pub fn perform_self_replacement(new_binary_path: &Path) -> Result<PathBuf, Strin
     Ok(canonical_exe)
 }
 
+/// Download release asset with multi-mirror fallback and retries
+async fn download_asset_with_retry(
+    client: &reqwest::Client,
+    primary_url: &str,
+    user_agent: &str,
+) -> Result<Vec<u8>, String> {
+    let candidate_urls = vec![
+        primary_url.to_string(),
+        format!("https://ghfast.top/{}", primary_url),
+        format!("https://ghproxy.net/{}", primary_url),
+    ];
+
+    let mut last_err = String::new();
+
+    for (attempt, url) in candidate_urls.iter().enumerate() {
+        if attempt > 0 {
+            println!("--> [备选加速通道] 正在尝试备用下载源 #{}: {}", attempt, url);
+        }
+        match client
+            .get(url)
+            .header("User-Agent", user_agent)
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => {
+                match resp.bytes().await {
+                    Ok(b) if !b.is_empty() => return Ok(b.to_vec()),
+                    Ok(_) => last_err = "下载到空数据包".to_string(),
+                    Err(e) => last_err = format!("读取数据流失败: {e}"),
+                }
+            }
+            Ok(resp) => {
+                last_err = format!("HTTP 状态异常: {}", resp.status());
+            }
+            Err(e) => {
+                last_err = format!("网络连接错误: {e}");
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+
+    Err(format!("下载资产失败（已尝试主源及备用加速镜像）: {last_err}"))
+}
+
 /// Orchestrate the entire upgrade workflow
 pub async fn run_upgrade(
     check_only: bool,
@@ -295,18 +339,8 @@ pub async fn run_upgrade(
     }
 
     println!("--> 正在流式下载资产包...");
-    let download_res = client
-        .get(&matching_asset.browser_download_url)
-        .header("User-Agent", format!("ponyllm/{}", current_version))
-        .send()
-        .await
-        .map_err(|e| format!("下载资产失败: {e}"))?;
-
-    if !download_res.status().is_success() {
-        return Err(format!("下载服务器返回异常状态: {}", download_res.status()).into());
-    }
-
-    let archive_bytes = download_res.bytes().await?;
+    let user_agent = format!("ponyllm/{}", current_version);
+    let archive_bytes = download_asset_with_retry(&client, &matching_asset.browser_download_url, &user_agent).await?;
     println!("--> 下载完成 ({} 字节)，正在解压校验...", archive_bytes.len());
 
     let temp_dir = tempfile::tempdir()?;

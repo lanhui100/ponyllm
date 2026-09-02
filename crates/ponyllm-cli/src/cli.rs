@@ -56,9 +56,21 @@ pub enum Commands {
         #[arg(short, long)]
         config: Option<String>,
 
-        /// Override bind host and port (e.g. 127.0.0.1:8080)
-        #[arg(short, long)]
+        /// Override bind address and port (e.g. 0.0.0.0:8080 or 127.0.0.1:8080)
+        #[arg(short = 'b', long)]
         bind: Option<String>,
+
+        /// Override listening address / host (e.g. 0.0.0.0 or 127.0.0.1)
+        #[arg(short = 'a', long)]
+        address: Option<String>,
+
+        /// Override listening port (e.g. 8080, 9000)
+        #[arg(short = 'p', long)]
+        port: Option<u16>,
+
+        /// Override gateway access authorization API key / token
+        #[arg(long)]
+        api_key: Option<String>,
 
         /// Override maximum retry attempts on transient failures
         #[arg(short, long)]

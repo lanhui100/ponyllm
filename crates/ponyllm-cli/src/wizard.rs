@@ -10,7 +10,28 @@ pub fn run_interactive_init(output_path: &str) -> Result<(), Box<dyn std::error:
     println!("  请选择模型提供商接口并录入 API Key 以完成初始化");
     println!("========================================================\n");
 
-    let bind_addr = "127.0.0.1:8080".to_string();
+    println!("\n--- 配置网关服务基础网络与鉴权 ---");
+    let bind_options = vec![
+        "0.0.0.0:8080 (全网卡监听 / 允许局域网与外部访问，推荐)",
+        "127.0.0.1:8080 (仅限本机访问)",
+        "自定义监听地址与端口 (例如 0.0.0.0:9000)",
+    ];
+    let bind_sel = Select::new("选择网关服务监听模式:", bind_options).prompt()?;
+    let bind_addr = if bind_sel.starts_with("0.0.0.0") {
+        "0.0.0.0:8080".to_string()
+    } else if bind_sel.starts_with("127.0.0.1") {
+        "127.0.0.1:8080".to_string()
+    } else {
+        Text::new("  请输入自定义监听地址 (Host:Port):")
+            .with_default("0.0.0.0:8080")
+            .prompt()?
+    };
+
+    let api_token = Text::new("  设置网关对外访问鉴权 API Token (Key):")
+        .with_default("sk-ponyllm-local")
+        .with_help_message("第三方客户端（如 Cursor、Claude Code、SDK）需使用该 Token 进行认证，留空或 none 为免鉴权")
+        .prompt()?;
+
     let mut providers: HashMap<String, ProviderSection> = HashMap::new();
 
     loop {
@@ -137,7 +158,7 @@ pub fn run_interactive_init(output_path: &str) -> Result<(), Box<dyn std::error:
             bind: bind_addr,
             max_retries: 3,
             flight_recorder_capacity: 200,
-            api_key: "sk-ponyllm-local".to_string(),
+            api_key: api_token,
         },
         providers,
     };

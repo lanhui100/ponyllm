@@ -47,11 +47,13 @@ keys = [
 
 #[test]
 fn test_cli_commands_parsing() {
-    let cli = Cli::try_parse_from(["ponyllm", "serve", "--config", "test.toml", "--bind", "127.0.0.1:9000"]).unwrap();
+    let cli = Cli::try_parse_from(["ponyllm", "serve", "--config", "test.toml", "-a", "0.0.0.0", "-p", "9000", "--api-key", "sk-test-tok"]).unwrap();
     match cli.command {
-        Commands::Serve { config, bind, .. } => {
+        Commands::Serve { config, address, port, api_key, .. } => {
             assert_eq!(config, Some("test.toml".to_string()));
-            assert_eq!(bind, Some("127.0.0.1:9000".to_string()));
+            assert_eq!(address, Some("0.0.0.0".to_string()));
+            assert_eq!(port, Some(9000));
+            assert_eq!(api_key, Some("sk-test-tok".to_string()));
         }
         _ => panic!("Expected Serve command"),
     }
