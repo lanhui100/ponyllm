@@ -65,29 +65,42 @@ impl AppState {
             .clone()
     }
 
-    /// Resolve target upstream provider and physical model dynamically based on parsed request
-    pub fn resolve_routed_target(
+    /// Resolve ordered list of candidate targets for multi-provider transparent failover
+    pub fn resolve_routed_targets(
         &self,
         parsed: &ParsedRequestModel,
         header_strategy: Option<GatewayRoutingStrategy>,
-    ) -> Result<RoutedTarget> {
+    ) -> Result<Vec<RoutedTarget>> {
         let strategy = parsed
             .strategy_override
             .or(header_strategy)
             .unwrap_or(self.config.default_strategy);
 
         if parsed.is_auto {
-            self.resolve_auto_target(parsed, strategy)
+            self.resolve_auto_targets(parsed, strategy)
         } else {
-            self.resolve_pinned_target(parsed, strategy)
+            self.resolve_pinned_targets(parsed, strategy)
         }
     }
 
-    fn resolve_auto_target(
+    /// Resolve single best target
+    pub fn resolve_routed_target(
+        &self,
+        parsed: &ParsedRequestModel,
+        header_strategy: Option<GatewayRoutingStrategy>,
+    ) -> Result<RoutedTarget> {
+        let mut targets = self.resolve_routed_targets(parsed, header_strategy)?;
+        if targets.is_empty() {
+            return Err(CoreError::Internal("No routing candidates available".to_string()));
+        }
+        Ok(targets.remove(0))
+    }
+
+    fn resolve_auto_targets(
         &self,
         parsed: &ParsedRequestModel,
         strategy: GatewayRoutingStrategy,
-    ) -> Result<RoutedTarget> {
+    ) -> Result<Vec<RoutedTarget>> {
         let filter_1m = |c: &RoutedTarget| {
             if parsed.is_1m_context {
                 is_context_capacity_compatible("1M", &c.context_window)
@@ -119,7 +132,7 @@ impl AppState {
                     )));
                 }
             }
-            return Ok(self.select_best_candidate(candidates, strategy));
+            return Ok(self.sort_candidates(candidates, strategy));
         }
 
         // Default auto (no explicit tier): Try Standard -> Elevate to Flagship -> Fallback to Light
@@ -130,7 +143,7 @@ impl AppState {
             .collect();
 
         if !standard_candidates.is_empty() {
-            return Ok(self.select_best_candidate(standard_candidates, strategy));
+            return Ok(self.sort_candidates(standard_candidates, strategy));
         }
 
         // Adaptive Tier Elevation: Elevate to Flagship if Standard has no matching (or 1M) nodes
@@ -141,7 +154,7 @@ impl AppState {
             .collect();
 
         if !flagship_candidates.is_empty() {
-            return Ok(self.select_best_candidate(flagship_candidates, strategy));
+            return Ok(self.sort_candidates(flagship_candidates, strategy));
         }
 
         // Fallback to Light tier
@@ -152,7 +165,7 @@ impl AppState {
             .collect();
 
         if !light_candidates.is_empty() {
-            return Ok(self.select_best_candidate(light_candidates, strategy));
+            return Ok(self.sort_candidates(light_candidates, strategy));
         }
 
         if parsed.is_1m_context {
@@ -168,11 +181,11 @@ impl AppState {
         }
     }
 
-    fn resolve_pinned_target(
+    fn resolve_pinned_targets(
         &self,
         parsed: &ParsedRequestModel,
         strategy: GatewayRoutingStrategy,
-    ) -> Result<RoutedTarget> {
+    ) -> Result<Vec<RoutedTarget>> {
         let clean = &parsed.clean_model_name;
         let mut candidates = Vec::new();
 
@@ -276,7 +289,7 @@ impl AppState {
             }
         }
 
-        Ok(self.select_best_candidate(candidates, strategy))
+        Ok(self.sort_candidates(candidates, strategy))
     }
 
     fn collect_tier_candidates(&self, tier: ModelTier, strategy: GatewayRoutingStrategy) -> Vec<RoutedTarget> {
@@ -316,11 +329,11 @@ impl AppState {
         candidates
     }
 
-    fn select_best_candidate(
+    fn sort_candidates(
         &self,
         mut candidates: Vec<RoutedTarget>,
         strategy: GatewayRoutingStrategy,
-    ) -> RoutedTarget {
+    ) -> Vec<RoutedTarget> {
         match strategy {
             GatewayRoutingStrategy::Economy => {
                 candidates.sort_by(|a, b| {
@@ -367,7 +380,7 @@ impl AppState {
             }
             _ => {}
         }
-        candidates.into_iter().next().unwrap()
+        candidates
     }
 
     /// Return all configured and virtual models: (model_id, provider_name, display_name)

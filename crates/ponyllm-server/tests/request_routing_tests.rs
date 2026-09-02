@@ -250,6 +250,120 @@ async fn test_model_echo_policy_and_auto_routing() {
 }
 
 #[tokio::test]
+async fn test_cross_provider_transparent_failover() {
+    // 1. Setup healthy secondary upstream mock
+    let healthy_upstream = Router::new().route(
+        "/v1/chat/completions",
+        post(|Json(_req): Json<serde_json::Value>| async move {
+            axum::Json(json!({
+                "id": "chatcmpl-backup-123",
+                "object": "chat.completion",
+                "created": 1710000000,
+                "model": "deepseek-v4-flash",
+                "choices": [{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": "Hello from healthy backup provider!"
+                    },
+                    "finish_reason": "stop"
+                }],
+                "usage": { "prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15 }
+            }))
+        }),
+    );
+    let healthy_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let healthy_addr = healthy_listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(healthy_listener, healthy_upstream).await.unwrap();
+    });
+
+    // 2. Setup gateway with broken primary provider (bad url) and healthy backup provider
+    let pool_broken = Arc::new(KeyPool::new("broken_provider", RoutingStrategy::RoundRobin));
+    pool_broken.add_key(ApiKeyEntry::new("broken-k1", "sk-broken", 1, 10));
+
+    let pool_backup = Arc::new(KeyPool::new("backup_provider", RoutingStrategy::RoundRobin));
+    pool_backup.add_key(ApiKeyEntry::new("backup-k1", "sk-backup", 1, 10));
+
+    let mut config = GatewayConfig::default();
+    config.max_retries = 1;
+
+    // Primary broken provider has slightly lower price to be preferred first
+    config.providers.insert(
+        "broken_provider".to_string(),
+        ProviderConfig {
+            base_url: "http://127.0.0.1:1".to_string(), // Dead port
+            default_model: "deepseek-v4-flash".to_string(),
+            strategy: "priority".to_string(),
+            billing_mode: BillingMode::Metered,
+            input_price: 0.10,
+            cached_price: 0.01,
+            output_price: 0.20,
+            models: vec!["deepseek-v4-flash".to_string()],
+            model_specs: vec![ModelSpec {
+                name: "deepseek-v4-flash".to_string(),
+                tier: ModelTier::Flagship,
+                context_window: "1M".to_string(),
+                max_output: "32K".to_string(),
+                input_types: vec!["text".to_string()],
+                output_types: vec!["text".to_string()],
+            }],
+        },
+    );
+
+    config.providers.insert(
+        "backup_provider".to_string(),
+        ProviderConfig {
+            base_url: format!("http://{}", healthy_addr),
+            default_model: "deepseek-v4-flash".to_string(),
+            strategy: "priority".to_string(),
+            billing_mode: BillingMode::Metered,
+            input_price: 0.20,
+            cached_price: 0.02,
+            output_price: 0.40,
+            models: vec!["deepseek-v4-flash".to_string()],
+            model_specs: vec![ModelSpec {
+                name: "deepseek-v4-flash".to_string(),
+                tier: ModelTier::Flagship,
+                context_window: "1M".to_string(),
+                max_output: "32K".to_string(),
+                input_types: vec!["text".to_string()],
+                output_types: vec!["text".to_string()],
+            }],
+        },
+    );
+
+    let state = Arc::new(AppState::new(config));
+    state.register_pool("broken_provider", pool_broken);
+    state.register_pool("backup_provider", pool_backup);
+
+    let gateway_app = create_app(state);
+    let gateway_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let gateway_addr = gateway_listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(gateway_listener, gateway_app).await.unwrap();
+    });
+
+    let client = reqwest::Client::new();
+
+    // 3. Send request: broken provider fails, gateway MUST transparently failover to backup provider!
+    let resp = client
+        .post(format!("http://{}/v1/chat/completions", gateway_addr))
+        .json(&json!({
+            "model": "deepseek-v4-flash",
+            "messages": [{"role": "user", "content": "Hello failover"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.headers().get("x-ponyllm-provider").unwrap().to_str().unwrap(), "backup_provider");
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["choices"][0]["message"]["content"], "Hello from healthy backup provider!");
+}
+
+#[tokio::test]
 async fn test_anthropic_messages_routing_and_model_echo() {
     // Mock Anthropic upstream server
     let mock_anthropic = Router::new().route(
