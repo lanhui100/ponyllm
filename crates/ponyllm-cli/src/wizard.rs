@@ -7,14 +7,10 @@ use crate::config::{ConfigFile, GatewaySection, KeySection, ProviderSection};
 pub fn run_interactive_init(output_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     println!("\n========================================================");
     println!("  🚀 欢迎使用 ponyllm 统一网关配置初始化向导");
-    println!("  我们将一步步引导你配置网关、模型提供商与多 Key 账户池");
+    println!("  请选择模型提供商接口并录入 API Key 以完成初始化");
     println!("========================================================\n");
 
-    let bind_addr = Text::new("1. 请输入网关监听地址与端口:")
-        .with_default("127.0.0.1:8080")
-        .with_help_message("例如 127.0.0.1:8080 或 0.0.0.0:8080")
-        .prompt()?;
-
+    let bind_addr = "127.0.0.1:8080".to_string();
     let mut providers: HashMap<String, ProviderSection> = HashMap::new();
 
     loop {
@@ -28,7 +24,8 @@ pub fn run_interactive_init(output_path: &str) -> Result<(), Box<dyn std::error:
             "Custom (自定义兼容 API 提供商)",
         ];
 
-        let selection = Select::new("2. 选择要配置的提供商模板:", provider_options).prompt()?;
+        let selection = Select::new("选择要配置的提供商接口:", provider_options).prompt()?;
+        let is_custom = selection.starts_with("Custom");
 
         let (p_name, default_url, default_model) = if selection.contains("DeepSeek - Anthropic") {
             ("deepseek-anthropic".to_string(), "https://api.deepseek.com/anthropic", "deepseek-v4-flash")
@@ -47,9 +44,13 @@ pub fn run_interactive_init(output_path: &str) -> Result<(), Box<dyn std::error:
             (custom_name, "https://api.example.com", "default-model")
         };
 
-        let base_url = Text::new("  提供商 Base URL:")
-            .with_default(default_url)
-            .prompt()?;
+        let base_url = if is_custom {
+            Text::new("  提供商 Base URL:")
+                .with_default(default_url)
+                .prompt()?
+        } else {
+            default_url.to_string()
+        };
 
         let model = Text::new("  默认映射模型名称 (Model):")
             .with_default(default_model)
@@ -116,6 +117,7 @@ pub fn run_interactive_init(output_path: &str) -> Result<(), Box<dyn std::error:
         providers.insert(p_name.to_string(), ProviderSection {
             base_url,
             default_model: model,
+            models: Vec::new(),
             strategy: strat.to_string(),
             keys,
         });

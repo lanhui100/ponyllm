@@ -199,8 +199,30 @@ pub enum KeyCommands {
 
 #[derive(Debug, Subcommand)]
 pub enum ModelCommands {
-    /// List default models configured for each provider
+    /// List all models (default and additional) configured for each provider
     List {
+        #[arg(short, long)]
+        config: Option<String>,
+    },
+    /// Add a new supported model to a provider
+    Add {
+        /// Target provider name
+        provider: String,
+
+        /// Model name to add (e.g. deepseek-chat, deepseek-reasoner, gpt-4o-mini)
+        model: String,
+
+        #[arg(short, long)]
+        config: Option<String>,
+    },
+    /// Remove a model from a provider
+    Remove {
+        /// Target provider name
+        provider: String,
+
+        /// Model name to remove
+        model: String,
+
         #[arg(short, long)]
         config: Option<String>,
     },

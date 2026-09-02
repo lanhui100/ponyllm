@@ -174,3 +174,32 @@ async fn test_embedded_sdk_anthropic_upstream_direct() {
         Some("SDK Anthropic Echo: Hello from direct SDK Chat")
     );
 }
+
+#[tokio::test]
+async fn test_embedded_sdk_multi_model_routing_and_listing() {
+    let gateway = PonyGateway::builder()
+        .add_provider(
+            "deepseek",
+            "https://api.deepseek.com",
+            "deepseek-v4-flash",
+            RoutingStrategy::RoundRobin,
+        )
+        .add_model("deepseek", "deepseek-chat")
+        .add_model("deepseek", "deepseek-reasoner")
+        .add_provider(
+            "openai",
+            "https://api.openai.com",
+            "gpt-4o",
+            RoutingStrategy::Priority,
+        )
+        .add_model("openai", "gpt-4o-mini")
+        .build();
+
+    let models = gateway.list_models();
+    assert_eq!(models.len(), 5);
+    assert!(models.iter().any(|(m, p)| m == "deepseek-v4-flash" && p == "deepseek"));
+    assert!(models.iter().any(|(m, p)| m == "deepseek-chat" && p == "deepseek"));
+    assert!(models.iter().any(|(m, p)| m == "deepseek-reasoner" && p == "deepseek"));
+    assert!(models.iter().any(|(m, p)| m == "gpt-4o" && p == "openai"));
+    assert!(models.iter().any(|(m, p)| m == "gpt-4o-mini" && p == "openai"));
+}

@@ -14,6 +14,8 @@ pub fn create_app(state: Arc<AppState>) -> Router {
 
     Router::new()
         .route("/health", get(handle_health))
+        .route("/v1/models", get(handle_list_models))
+        .route("/v1/models/{model_id}", get(handle_get_model))
         .route("/v1/chat/completions", post(handle_chat_completions))
         .route("/v1/messages", post(handle_messages))
         .route("/v1/responses", post(handle_responses))

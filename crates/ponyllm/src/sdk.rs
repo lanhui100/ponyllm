@@ -13,6 +13,7 @@ pub struct ProviderInfo {
     pub name: String,
     pub base_url: String,
     pub default_model: String,
+    pub models: Vec<String>,
     pub pool: Arc<KeyPool>,
 }
 
@@ -27,10 +28,26 @@ impl PonyGateway {
         PonyGatewayBuilder::default()
     }
 
+    /// Return all configured model IDs across all providers: Vec<(model_id, provider_name)>
+    pub fn list_models(&self) -> Vec<(String, String)> {
+        let mut result = Vec::new();
+        for (provider_name, info) in &self.providers {
+            if !info.default_model.is_empty() {
+                result.push((info.default_model.clone(), provider_name.clone()));
+            }
+            for m in &info.models {
+                if m != &info.default_model && !result.iter().any(|(existing_m, _)| existing_m == m) {
+                    result.push((m.clone(), provider_name.clone()));
+                }
+            }
+        }
+        result
+    }
+
     fn resolve_provider(&self, model: &str) -> Result<&ProviderInfo> {
-        // 1. Exact match on default_model
+        // 1. Exact match on default_model or configured models list
         for info in self.providers.values() {
-            if info.default_model == model {
+            if info.default_model == model || info.models.iter().any(|m| m == model) {
                 return Ok(info);
             }
         }
@@ -136,6 +153,7 @@ impl PonyGateway {
 #[derive(Debug, Default)]
 pub struct PonyGatewayBuilder {
     providers: HashMap<String, (String, String, RoutingStrategy)>,
+    models: HashMap<String, Vec<String>>,
     keys: Vec<(String, ApiKeyEntry)>,
     max_retries: usize,
 }
@@ -149,6 +167,15 @@ impl PonyGatewayBuilder {
         strategy: RoutingStrategy,
     ) -> Self {
         self.providers.insert(name.into(), (base_url.into(), default_model.into(), strategy));
+        self
+    }
+
+    pub fn add_model(
+        mut self,
+        provider: impl Into<String>,
+        model: impl Into<String>,
+    ) -> Self {
+        self.models.entry(provider.into()).or_default().push(model.into());
         self
     }
 
@@ -185,12 +212,14 @@ impl PonyGatewayBuilder {
                     ));
                 }
             }
+            let extra_models = self.models.get(&name).cloned().unwrap_or_default();
             provider_infos.insert(
                 name.clone(),
                 ProviderInfo {
                     name,
                     base_url,
                     default_model,
+                    models: extra_models,
                     pool,
                 },
             );

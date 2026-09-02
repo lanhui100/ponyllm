@@ -47,6 +47,8 @@ impl Default for GatewaySection {
 pub struct ProviderSection {
     pub base_url: String,
     pub default_model: String,
+    #[serde(default)]
+    pub models: Vec<String>,
     #[serde(default = "default_strategy")]
     pub strategy: String,
     #[serde(default)]
@@ -133,12 +135,37 @@ impl ConfigFile {
         let entry = self.providers.entry(name.to_string()).or_insert_with(|| ProviderSection {
             base_url: base_url.to_string(),
             default_model: default_model.to_string(),
+            models: Vec::new(),
             strategy: strategy.to_string(),
             keys: Vec::new(),
         });
         entry.base_url = base_url.to_string();
         entry.default_model = default_model.to_string();
         entry.strategy = strategy.to_string();
+    }
+
+    pub fn add_model(&mut self, provider: &str, model: &str) -> Result<(), String> {
+        let p = self.providers.get_mut(provider)
+            .ok_or_else(|| format!("提供商 '{}' 不存在，请先使用 'ponyllm provider add' 添加", provider))?;
+        if !p.models.contains(&model.to_string()) && p.default_model != model {
+            p.models.push(model.to_string());
+        }
+        Ok(())
+    }
+
+    pub fn remove_model(&mut self, provider: &str, model: &str) -> Result<bool, String> {
+        let p = self.providers.get_mut(provider)
+            .ok_or_else(|| format!("提供商 '{}' 不存在", provider))?;
+        let len_before = p.models.len();
+        p.models.retain(|m| m != model);
+        Ok(p.models.len() < len_before)
+    }
+
+    pub fn set_default_model(&mut self, provider: &str, model: &str) -> Result<(), String> {
+        let p = self.providers.get_mut(provider)
+            .ok_or_else(|| format!("提供商 '{}' 不存在", provider))?;
+        p.default_model = model.to_string();
+        Ok(())
     }
 
     pub fn remove_provider(&mut self, name: &str) -> bool {

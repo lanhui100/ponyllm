@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 pub struct ProviderConfig {
     pub base_url: String,
     pub default_model: String,
+    #[serde(default)]
+    pub models: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

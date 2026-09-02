@@ -126,6 +126,32 @@ fn test_cli_provider_and_key_crud_commands_parsing() {
         }
         _ => panic!("Expected Model Set"),
     }
+
+    // Model Add
+    let m_add = Cli::try_parse_from([
+        "ponyllm", "model", "add", "deepseek", "deepseek-reasoner",
+    ]).unwrap();
+
+    match m_add.command {
+        Commands::Model(ModelCommands::Add { provider, model, .. }) => {
+            assert_eq!(provider, "deepseek");
+            assert_eq!(model, "deepseek-reasoner");
+        }
+        _ => panic!("Expected Model Add"),
+    }
+
+    // Model Remove
+    let m_remove = Cli::try_parse_from([
+        "ponyllm", "model", "remove", "deepseek", "deepseek-reasoner",
+    ]).unwrap();
+
+    match m_remove.command {
+        Commands::Model(ModelCommands::Remove { provider, model, .. }) => {
+            assert_eq!(provider, "deepseek");
+            assert_eq!(model, "deepseek-reasoner");
+        }
+        _ => panic!("Expected Model Remove"),
+    }
 }
 
 #[test]
@@ -137,6 +163,20 @@ fn test_config_crud_and_mask_methods() {
     cfg.add_provider("test-p", "https://api.test.com", "m1", "round_robin");
     assert_eq!(cfg.providers.len(), 1);
     assert_eq!(cfg.providers["test-p"].default_model, "m1");
+
+    // Add additional model
+    cfg.add_model("test-p", "m2").unwrap();
+    cfg.add_model("test-p", "m3").unwrap();
+    assert_eq!(cfg.providers["test-p"].models, vec!["m2", "m3"]);
+
+    // Remove additional model
+    let m_removed = cfg.remove_model("test-p", "m2").unwrap();
+    assert!(m_removed);
+    assert_eq!(cfg.providers["test-p"].models, vec!["m3"]);
+
+    // Set default model
+    cfg.set_default_model("test-p", "m-new").unwrap();
+    assert_eq!(cfg.providers["test-p"].default_model, "m-new");
 
     // Add key
     cfg.add_key("test-p", "k1", "sk-1234567890abcdef", 1, 10).unwrap();

@@ -51,6 +51,7 @@ async fn test_gateway_chat_and_messages_endpoints() {
         ProviderConfig {
             base_url: format!("http://{}", upstream_addr),
             default_model: "gpt-4o".to_string(),
+            models: Vec::new(),
         },
     );
 
@@ -126,6 +127,7 @@ async fn test_multi_provider_dynamic_model_routing() {
         ProviderConfig {
             base_url: "https://api.deepseek.com".to_string(),
             default_model: "deepseek-v4-flash".to_string(),
+            models: Vec::new(),
         },
     );
     config.providers.insert(
@@ -133,6 +135,7 @@ async fn test_multi_provider_dynamic_model_routing() {
         ProviderConfig {
             base_url: "https://api.deepseek.com/anthropic".to_string(),
             default_model: "deepseek-v4-flash".to_string(),
+            models: Vec::new(),
         },
     );
     config.providers.insert(
@@ -140,6 +143,7 @@ async fn test_multi_provider_dynamic_model_routing() {
         ProviderConfig {
             base_url: "https://api.openai.com".to_string(),
             default_model: "gpt-4o".to_string(),
+            models: Vec::new(),
         },
     );
     config.providers.insert(
@@ -147,6 +151,7 @@ async fn test_multi_provider_dynamic_model_routing() {
         ProviderConfig {
             base_url: "https://api.anthropic.com".to_string(),
             default_model: "claude-3-7-sonnet-20250219".to_string(),
+            models: Vec::new(),
         },
     );
 
@@ -216,6 +221,7 @@ async fn test_anthropic_upstream_direct_and_cross_routing() {
         ProviderConfig {
             base_url: format!("http://{}/anthropic", upstream_addr),
             default_model: "deepseek-v4-flash".to_string(),
+            models: Vec::new(),
         },
     );
 
@@ -260,4 +266,66 @@ async fn test_anthropic_upstream_direct_and_cross_routing() {
     assert_eq!(chat_resp.status(), 200);
     let chat_body: serde_json::Value = chat_resp.json().await.unwrap();
     assert_eq!(chat_body["choices"][0]["message"]["content"], "Anthropic Echo: Cross Chat Test");
+}
+
+#[tokio::test]
+async fn test_gateway_models_endpoints() {
+    let mut config = GatewayConfig::default();
+    config.providers.insert(
+        "deepseek".to_string(),
+        ProviderConfig {
+            base_url: "https://api.deepseek.com".to_string(),
+            default_model: "deepseek-v4-flash".to_string(),
+            models: vec!["deepseek-chat".to_string(), "deepseek-reasoner".to_string()],
+        },
+    );
+    config.providers.insert(
+        "openai".to_string(),
+        ProviderConfig {
+            base_url: "https://api.openai.com".to_string(),
+            default_model: "gpt-4o".to_string(),
+            models: vec!["gpt-4o-mini".to_string()],
+        },
+    );
+
+    let state = Arc::new(AppState::new(config));
+    let gateway_app = create_app(state);
+    let gateway_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let gateway_addr = gateway_listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(gateway_listener, gateway_app).await.unwrap();
+    });
+
+    let client = reqwest::Client::new();
+
+    // 1. Test GET /v1/models
+    let models_resp = client
+        .get(format!("http://{}/v1/models", gateway_addr))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(models_resp.status(), 200);
+    let models_body: serde_json::Value = models_resp.json().await.unwrap();
+    assert_eq!(models_body["object"], "list");
+    let list = models_body["data"].as_array().unwrap();
+    assert_eq!(list.len(), 5); // deepseek-v4-flash, deepseek-chat, deepseek-reasoner, gpt-4o, gpt-4o-mini
+
+    // 2. Test GET /v1/models/:model_id for existing model
+    let model_resp = client
+        .get(format!("http://{}/v1/models/deepseek-chat", gateway_addr))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(model_resp.status(), 200);
+    let model_body: serde_json::Value = model_resp.json().await.unwrap();
+    assert_eq!(model_body["id"], "deepseek-chat");
+    assert_eq!(model_body["owned_by"], "deepseek");
+
+    // 3. Test GET /v1/models/:model_id for non-existent model (404)
+    let not_found_resp = client
+        .get(format!("http://{}/v1/models/non-existent-model", gateway_addr))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(not_found_resp.status(), 404);
 }

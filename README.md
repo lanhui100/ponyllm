@@ -48,30 +48,48 @@ cargo install --git https://github.com/lanhui100/ponyllm.git ponyllm-cli
 ```bash
 ponyllm init
 ```
-进入交互向导，依次引导选择提供商模板（DeepSeek OpenAI 协议、DeepSeek Anthropic 协议、OpenAI、Anthropic、OpenRouter 或自定义）、填写 API Key、默认模型与调度策略。
+进入极简向导，选择模型接口模板（DeepSeek OpenAI 协议、DeepSeek Anthropic 协议、OpenAI、Anthropic、OpenRouter 等），内置模板自动锁定官方上游 Base URL，无需重复输入本地监听地址，录入 API Key 即可一键就绪。
 *(CI 或自动化脚本中可使用 `ponyllm init --non-interactive` 快速生成默认模板)*
 
-### 2. 提供商与 Key 账户池增删改查 (CLI CRUD)
+### 2. 提供商、Key 账户池与多模型管理 (CLI CRUD)
 ```bash
-# 查看与管理提供商
+# === 1. 管理提供商 (Provider) ===
 ponyllm provider list
-
-# 配置 DeepSeek 官方 OpenAI 协议接口 (默认模型 deepseek-v4-flash)
+# 挂载 DeepSeek 官方 OpenAI 接口 (默认模型 deepseek-v4-flash)
 ponyllm provider add deepseek --base-url https://api.deepseek.com --model deepseek-v4-flash --strategy priority
-
-# 配置 DeepSeek 官方 Anthropic Messages 协议接口 (默认模型 deepseek-v4-flash)
+# 挂载 DeepSeek 官方 Anthropic Messages 接口
 ponyllm provider add deepseek-anthropic --base-url https://api.deepseek.com/anthropic --model deepseek-v4-flash --strategy priority
+ponyllm provider remove my-provider
 
-# 查看与管理 Key 账户池
+# === 2. 管理模型映射与多模型追加 (Model) ===
+# 查看所有已配置提供商的默认主模型与附加支持模型
+ponyllm model list
+# 为提供商追加更多可用模型
+ponyllm model add deepseek deepseek-chat
+ponyllm model add deepseek deepseek-reasoner
+ponyllm model add openai gpt-4o-mini
+# 修改提供商的默认主模型
+ponyllm model set deepseek deepseek-v4-flash
+# 移除指定模型
+ponyllm model remove deepseek deepseek-chat
+
+# === 3. 管理 Key 账户池 (Key Pool) ===
 ponyllm key list
 ponyllm key add --provider deepseek --id ds-backup --key sk-xxxx --priority 2 --weight 5
 ponyllm key remove --provider deepseek --id ds-backup
-
-# 在线拨测 Key 连通性与网络延迟
+# 在线拨测 Key 连通性与网络延迟 (真实探测握手)
 ponyllm key test --provider deepseek
 ```
 
-### 3. 打开全屏交互式 TUI 监控看板
+### 3. 启动统一网关
+```bash
+ponyllm serve
+# 或自定义端口与重试次数
+ponyllm serve --bind 0.0.0.0:8080 --retries 5
+```
+网关就绪后，默认在 `http://127.0.0.1:8080` 提供高并发统一入口。
+
+### 4. 打开全屏交互式 TUI 监控看板
 ```bash
 ponyllm tui
 # 或 alias: ponyllm top / ponyllm dashboard
@@ -82,23 +100,74 @@ ponyllm tui
 - **🔑 Key 账户池治理**：查看所有 Key 的脱敏指纹与实时就绪状态；
 - **📼 黑匣子故障录波**：上下翻页审查最近请求与异常帧快照详情。
 
-### 4. 启动统一网关
-```bash
-ponyllm serve
-```
-默认在 `http://127.0.0.1:8080` 启动高并发 HTTP/SSE 统一服务。
-
 ### 5. 原生在线自升级
 ```bash
-# 检查是否有新版本
-ponyllm upgrade --check
+ponyllm upgrade --check              # 检查是否有新版本
+ponyllm upgrade                      # 一键原地升级到最新 Release 版本
+ponyllm upgrade --force              # 强制重新安装当前版本
+ponyllm upgrade --version v0.2.3     # 指定升降级到特定版本
+```
 
-# 一键原地升级到最新 Release 版本
-ponyllm upgrade
+---
 
-# 强制重装当前版本或安装指定版本
-ponyllm upgrade --force
-ponyllm upgrade --version v0.2.1
+## 🌐 标准接口与常用 AI 工具接入指南
+
+网关完全兼容各大主流大模型 API 协议标准，开箱支持各款 AI 开发工具与编辑器直接接入：
+
+### 1. 网关端点清单 (Endpoints)
+
+| 端点路径 | 请求方法 | 协议说明 | 适用场景 |
+|---|---|---|---|
+| `/v1/models` | `GET` | **OpenAI 标准模型查询** | 查询当前网关聚合的所有可用模型列表 |
+| `/v1/models/{model_id}` | `GET` | **单个模型详情** | 校验指定模型是否存在 |
+| `/v1/chat/completions` | `POST` | **OpenAI Chat Completions** | 绝大多数 AI 插件与客户端的通用对话流 |
+| `/v1/messages` | `POST` | **Anthropic Messages API** | Claude Dev、Cline、Roo Code 等专用协议 |
+| `/v1/responses` | `POST` | **OpenAI Responses API** | 新一代结构化响应协议 |
+| `/v1/telemetry/recorder` | `GET` | **黑匣子录波快照** | 取证分析最近 200 次请求与 429/5xx 现场 |
+| `/v1/telemetry/metrics` | `GET` | **实时吞吐指标** | 查看实时 QPS、Token 数与各 Key 倒换计数 |
+
+### 2. 常用 AI 编辑器与客户端配置方法
+
+#### 💻 Cursor / Windsurf
+- **API Base URL (OpenAI)**: `http://127.0.0.1:8080/v1`
+- **API Key**: 任意非空字符串（如 `ponyllm`）
+- **Model Name**: 直接填写 `deepseek-v4-flash`、`deepseek-chat` 或 `gpt-4o`
+
+#### 🤖 VS Code (Cline / Roo Code / Claude Dev)
+- **API Provider**: 选择 `Anthropic Compatible` 或 `OpenAI Compatible`
+- **Base URL**: `http://127.0.0.1:8080` (Anthropic) 或 `http://127.0.0.1:8080/v1` (OpenAI)
+- **API Key**: 任意非空字符串（如 `ponyllm`）
+- **Model ID**: `deepseek-v4-flash` 或 `claude-3-7-sonnet-20250219`
+
+#### 🍒 Cherry Studio / Chatbox / NextChat
+- **API 域名 / URL**: `http://127.0.0.1:8080`
+- **API Key**: 任意填写（如 `sk-ponyllm`）
+- 点击 **“获取模型列表”**（调用 `/v1/models`），自动同步已在 ponyllm 中配置的所有模型！
+
+#### ⚡ cURL 命令行快速测试
+```bash
+# 1. 查询所有可用模型
+curl http://127.0.0.1:8080/v1/models
+
+# 2. 发起 OpenAI Chat 对话 (智能自动路由至目标提供商并支持多 Key 熔断倒换)
+curl http://127.0.0.1:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer any-key" \
+  -d '{
+    "model": "deepseek-v4-flash",
+    "messages": [{"role": "user", "content": "你好，请自我介绍！"}]
+  }'
+
+# 3. 发起 Anthropic Messages 对话 (直通或自动跨协议转译)
+curl http://127.0.0.1:8080/v1/messages \
+  -H "Content-Type: application/json" \
+  -H "x-api-key: any-key" \
+  -H "anthropic-version: 2023-06-01" \
+  -d '{
+    "model": "deepseek-v4-flash",
+    "max_tokens": 1024,
+    "messages": [{"role": "user", "content": "请用一句话证明你是 ponyllm 后端"}]
+  }'
 ```
 
 ---
@@ -111,23 +180,30 @@ ponyllm upgrade --version v0.2.1
 ponyllm = { git = "https://github.com/lanhui100/ponyllm.git" }
 ```
 
-直接在内存中调用统一协议与多 Key 故障倒换：
+直接在内存中调用统一协议与多 Key 故障倒换（零网络端口开销）：
 ```rust
 use ponyllm::prelude::*;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let gateway = PonyGateway::builder()
-        .add_provider("deepseek", "https://api.deepseek.com", "deepseek-reasoner", RoutingStrategy::Priority)
+        .add_provider("deepseek", "https://api.deepseek.com", "deepseek-v4-flash", RoutingStrategy::Priority)
+        .add_model("deepseek", "deepseek-chat")
+        .add_model("deepseek", "deepseek-reasoner")
         .add_key("deepseek", "key-primary", "sk-...", 1, 10)
         .add_key("deepseek", "key-backup", "sk-...", 2, 5)
         .build();
 
+    // 1. 查询所有模型
+    let models = gateway.list_models();
+    println!("Available models: {:?}", models);
+
+    // 2. 调用 Anthropic Messages 协议
     let resp = gateway.create_message(&MessageRequest {
-        model: "deepseek-reasoner".to_string(),
+        model: "deepseek-v4-flash".to_string(),
         messages: vec![AnthropicMessage {
             role: AnthropicRole::User,
-            content: "Hello from ponyllm!".into(),
+            content: "Hello from ponyllm in-process SDK!".into(),
         }],
         max_tokens: 1024,
         ..Default::default()

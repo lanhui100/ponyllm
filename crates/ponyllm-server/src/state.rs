@@ -34,9 +34,9 @@ impl AppState {
 
     /// Resolve target upstream provider dynamically based on requested model name
     pub fn resolve_provider(&self, model: &str) -> Option<(String, ProviderConfig)> {
-        // 1. Exact match on default_model
+        // 1. Exact match on default_model or configured models list
         for (name, cfg) in &self.config.providers {
-            if cfg.default_model == model {
+            if cfg.default_model == model || cfg.models.iter().any(|m| m == model) {
                 return Some((name.clone(), cfg.clone()));
             }
         }
@@ -62,5 +62,21 @@ impl AppState {
 
         // 4. Fallback to first available provider
         self.config.providers.iter().next().map(|(n, c)| (n.clone(), c.clone()))
+    }
+
+    /// Return all unique configured models across all providers: (model_id, provider_name)
+    pub fn list_all_models(&self) -> Vec<(String, String)> {
+        let mut result = Vec::new();
+        for (provider_name, cfg) in &self.config.providers {
+            if !cfg.default_model.is_empty() {
+                result.push((cfg.default_model.clone(), provider_name.clone()));
+            }
+            for m in &cfg.models {
+                if m != &cfg.default_model && !result.iter().any(|(existing_m, _)| existing_m == m) {
+                    result.push((m.clone(), provider_name.clone()));
+                }
+            }
+        }
+        result
     }
 }

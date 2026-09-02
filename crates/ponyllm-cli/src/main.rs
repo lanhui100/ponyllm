@@ -151,22 +151,58 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             ModelCommands::List { config } => {
                 let path = config.as_deref();
                 let cfg = ConfigFile::load_or_default(path)?;
-                println!("=== 各提供商默认模型 ===");
-                println!("{:<15} {:<35}", "提供商", "默认模型 (Default Model)");
-                println!("{}", "-".repeat(50));
+                println!("=== 已配置模型清单 (Configured Models) ===");
+                println!("{:<20} {:<30} {:<30}", "提供商 (Provider)", "默认模型 (Default)", "附加支持模型 (Additional Models)");
+                println!("{}", "-".repeat(85));
                 for (name, p) in &cfg.providers {
-                    println!("{:<15} {:<35}", name, p.default_model);
+                    let additional = if p.models.is_empty() {
+                        "-".to_string()
+                    } else {
+                        p.models.join(", ")
+                    };
+                    println!("{:<20} {:<30} {:<30}", name, p.default_model, additional);
+                }
+            }
+            ModelCommands::Add { provider, model, config } => {
+                let path = config.as_deref().unwrap_or("ponyllm.toml");
+                let mut cfg = ConfigFile::load_or_default(Some(path))?;
+                match cfg.add_model(&provider, &model) {
+                    Ok(()) => {
+                        cfg.save_to_path(path)?;
+                        println!("✅ 成功为提供商 '{}' 添加支持模型 '{}'", provider, model);
+                    }
+                    Err(e) => {
+                        println!("❌ 添加失败: {}", e);
+                    }
+                }
+            }
+            ModelCommands::Remove { provider, model, config } => {
+                let path = config.as_deref().unwrap_or("ponyllm.toml");
+                let mut cfg = ConfigFile::load_or_default(Some(path))?;
+                match cfg.remove_model(&provider, &model) {
+                    Ok(true) => {
+                        cfg.save_to_path(path)?;
+                        println!("✅ 成功从提供商 '{}' 中移除模型 '{}'", provider, model);
+                    }
+                    Ok(false) => {
+                        println!("⚠️ 提供商 '{}' 中未找到附加模型 '{}' (注意: 默认模型请使用 'ponyllm model set' 修改)", provider, model);
+                    }
+                    Err(e) => {
+                        println!("❌ 移除失败: {}", e);
+                    }
                 }
             }
             ModelCommands::Set { provider, model, config } => {
                 let path = config.as_deref().unwrap_or("ponyllm.toml");
                 let mut cfg = ConfigFile::load_or_default(Some(path))?;
-                if let Some(p) = cfg.providers.get_mut(&provider) {
-                    p.default_model = model.clone();
-                    cfg.save_to_path(path)?;
-                    println!("✅ 成功将提供商 '{}' 的默认模型更新为 '{}'", provider, model);
-                } else {
-                    println!("⚠️ 未找到提供商 '{}'", provider);
+                match cfg.set_default_model(&provider, &model) {
+                    Ok(()) => {
+                        cfg.save_to_path(path)?;
+                        println!("✅ 成功将提供商 '{}' 的默认主模型更新为 '{}'", provider, model);
+                    }
+                    Err(e) => {
+                        println!("❌ 设置失败: {}", e);
+                    }
                 }
             }
         },
@@ -208,6 +244,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ProviderConfig {
                         base_url: p_sec.base_url.clone(),
                         default_model: p_sec.default_model.clone(),
+                        models: p_sec.models.clone(),
                     },
                 );
             }
