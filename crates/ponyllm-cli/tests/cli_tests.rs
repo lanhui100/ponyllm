@@ -133,11 +133,34 @@ fn test_cli_provider_and_key_crud_commands_parsing() {
     ]).unwrap();
 
     match m_add.command {
-        Commands::Model(ModelCommands::Add { provider, model, .. }) => {
+        Commands::Model(ModelCommands::Add { provider, model, context, max_output, .. }) => {
             assert_eq!(provider, "deepseek");
             assert_eq!(model, "deepseek-reasoner");
+            assert_eq!(context, "1M");
+            assert_eq!(max_output, "32K");
         }
         _ => panic!("Expected Model Add"),
+    }
+
+    // Model Add with parameters
+    let m_add_params = Cli::try_parse_from([
+        "ponyllm", "model", "add", "openai", "gpt-4o",
+        "--context", "2M",
+        "--max-output", "64K",
+        "--inputs", "text,image",
+        "--outputs", "text",
+    ]).unwrap();
+
+    match m_add_params.command {
+        Commands::Model(ModelCommands::Add { provider, model, context, max_output, inputs, outputs, .. }) => {
+            assert_eq!(provider, "openai");
+            assert_eq!(model, "gpt-4o");
+            assert_eq!(context, "2M");
+            assert_eq!(max_output, "64K");
+            assert_eq!(inputs, "text,image");
+            assert_eq!(outputs, "text");
+        }
+        _ => panic!("Expected Model Add with parameters"),
     }
 
     // Model Remove
@@ -172,11 +195,15 @@ fn test_config_crud_and_mask_methods() {
     // Remove additional model
     let m_removed = cfg.remove_model("test-p", "m2").unwrap();
     assert!(m_removed);
-    assert_eq!(cfg.providers["test-p"].models, vec!["m3"]);
-
-    // Set default model
+    // Set default model (old default 'm1' atomically migrates to models)
     cfg.set_default_model("test-p", "m-new").unwrap();
     assert_eq!(cfg.providers["test-p"].default_model, "m-new");
+    assert_eq!(cfg.providers["test-p"].models, vec!["m3", "m1"]);
+
+    // Attempting to remove active default model should be rejected
+    let del_default_err = cfg.remove_model("test-p", "m-new");
+    assert!(del_default_err.is_err());
+    assert!(del_default_err.unwrap_err().contains("无法直接删除默认主模型"));
 
     // Add key
     cfg.add_key("test-p", "k1", "sk-1234567890abcdef", 1, 10).unwrap();
@@ -195,6 +222,69 @@ fn test_config_crud_and_mask_methods() {
     let p_removed = cfg.remove_provider("test-p");
     assert!(p_removed);
     assert_eq!(cfg.providers.len(), 0);
+}
+
+#[test]
+fn test_model_config_crud_and_params() {
+    use ponyllm_cli::config::ModelConfig;
+
+    let mut cfg = ConfigFile::default();
+    cfg.add_provider("ai-hub", "https://api.aihub.com", "default-chat", "priority");
+
+    // 1. Check default model params automatically populated with defaults
+    let p = &cfg.providers["ai-hub"];
+    let def_cfg = p.get_model_config("default-chat");
+    assert_eq!(def_cfg.name, "default-chat");
+    assert_eq!(def_cfg.context_window, "1M");
+    assert_eq!(def_cfg.max_output, "32K");
+    assert_eq!(def_cfg.input_types, vec!["text".to_string()]);
+    assert_eq!(def_cfg.output_types, vec!["text".to_string()]);
+
+    // 2. Add custom model with multimodal parameters
+    let custom_model = ModelConfig {
+        name: "omni-v1".to_string(),
+        context_window: "2M".to_string(),
+        max_output: "64K".to_string(),
+        input_types: vec!["text".to_string(), "image".to_string(), "video".to_string(), "audio".to_string()],
+        output_types: vec!["text".to_string(), "audio".to_string()],
+    };
+    cfg.upsert_model_config("ai-hub", custom_model.clone()).unwrap();
+
+    let p = &cfg.providers["ai-hub"];
+    let fetched = p.get_model_config("omni-v1");
+    assert_eq!(fetched, custom_model);
+    assert!(p.models.contains(&"omni-v1".to_string()));
+
+    let all_models = p.list_all_models();
+    assert_eq!(all_models.len(), 2);
+    assert_eq!(all_models[0].name, "default-chat");
+    assert_eq!(all_models[1].name, "omni-v1");
+
+    // 3. Update provider
+    cfg.update_provider("ai-hub", "https://new.aihub.com", "omni-v1", "round_robin").unwrap();
+    assert_eq!(cfg.providers["ai-hub"].base_url, "https://new.aihub.com");
+    assert_eq!(cfg.providers["ai-hub"].default_model, "omni-v1");
+    assert_eq!(cfg.providers["ai-hub"].strategy, "round_robin");
+
+    // 4. Test serialization and deserialization
+    let serialized = toml::to_string_pretty(&cfg).unwrap();
+    let deserialized: ConfigFile = toml::from_str(&serialized).unwrap();
+    let des_p = &deserialized.providers["ai-hub"];
+    assert_eq!(des_p.default_model, "omni-v1");
+    let des_omni = des_p.get_model_config("omni-v1");
+    assert_eq!(des_omni.context_window, "2M");
+    assert_eq!(des_omni.max_output, "64K");
+    assert_eq!(des_omni.input_types.len(), 4);
+    assert_eq!(des_omni.output_types.len(), 2);
+
+    // 5. Remove model (must switch default model before removing active default)
+    let del_active_err = cfg.remove_model("ai-hub", "omni-v1");
+    assert!(del_active_err.is_err());
+
+    cfg.set_default_model("ai-hub", "default-chat").unwrap();
+    let removed = cfg.remove_model("ai-hub", "omni-v1").unwrap();
+    assert!(removed);
+    assert!(!cfg.providers["ai-hub"].models.contains(&"omni-v1".to_string()));
 }
 
 #[test]

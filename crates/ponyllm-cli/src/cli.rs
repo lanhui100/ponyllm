@@ -204,13 +204,29 @@ pub enum ModelCommands {
         #[arg(short, long)]
         config: Option<String>,
     },
-    /// Add a new supported model to a provider
+    /// Add a new supported model to a provider with parameters
     Add {
         /// Target provider name
         provider: String,
 
         /// Model name to add (e.g. deepseek-chat, deepseek-reasoner, gpt-4o-mini)
         model: String,
+
+        /// Context window size (e.g. 1M, 128K, 200K)
+        #[arg(short = 'w', long, default_value = "1M")]
+        context: String,
+
+        /// Maximum output token limit (e.g. 32K, 64K, 8K)
+        #[arg(short = 'o', long, default_value = "32K")]
+        max_output: String,
+
+        /// Supported input modalities (comma-separated: text,image,video,audio)
+        #[arg(short = 'i', long, default_value = "text")]
+        inputs: String,
+
+        /// Supported output modalities (comma-separated: text,image,video,audio)
+        #[arg(short = 'u', long, default_value = "text")]
+        outputs: String,
 
         #[arg(short, long)]
         config: Option<String>,

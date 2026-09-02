@@ -151,25 +151,54 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             ModelCommands::List { config } => {
                 let path = config.as_deref();
                 let cfg = ConfigFile::load_or_default(path)?;
-                println!("=== 已配置模型清单 (Configured Models) ===");
-                println!("{:<20} {:<30} {:<30}", "提供商 (Provider)", "默认模型 (Default)", "附加支持模型 (Additional Models)");
-                println!("{}", "-".repeat(85));
+                println!("=== 已配置模型清单与参数规格 (Configured Models & Specs) ===");
+                println!("{:<16} {:<24} {:<8} {:<10} {:<10} {:<18} {:<18}", "提供商", "模型名称", "默认", "上下文", "最大输出", "输入模态", "输出模态");
+                println!("{}", "-".repeat(108));
                 for (name, p) in &cfg.providers {
-                    let additional = if p.models.is_empty() {
-                        "-".to_string()
-                    } else {
-                        p.models.join(", ")
-                    };
-                    println!("{:<20} {:<30} {:<30}", name, p.default_model, additional);
+                    let all_models = p.list_all_models();
+                    for m in all_models {
+                        let is_def = if m.name == p.default_model { "★ 是" } else { "否" };
+                        let in_str = m.input_types.join(",");
+                        let out_str = m.output_types.join(",");
+                        println!(
+                            "{:<16} {:<24} {:<8} {:<10} {:<10} {:<18} {:<18}",
+                            name, m.name, is_def, m.context_window, m.max_output, in_str, out_str
+                        );
+                    }
                 }
             }
-            ModelCommands::Add { provider, model, config } => {
+            ModelCommands::Add { provider, model, context, max_output, inputs, outputs, config } => {
                 let path = config.as_deref().unwrap_or("ponyllm.toml");
                 let mut cfg = ConfigFile::load_or_default(Some(path))?;
-                match cfg.add_model(&provider, &model) {
+                let in_list: Vec<String> = inputs.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+                let out_list: Vec<String> = outputs.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+
+                const VALID_MODALITIES: [&str; 4] = ["text", "image", "video", "audio"];
+                for inp in &in_list {
+                    if !VALID_MODALITIES.contains(&inp.as_str()) {
+                        eprintln!("❌ 非法输入模态 '{}'，有效模态包括: text, image, video, audio", inp);
+                        return Ok(());
+                    }
+                }
+                for out in &out_list {
+                    if !VALID_MODALITIES.contains(&out.as_str()) {
+                        eprintln!("❌ 非法输出模态 '{}'，有效模态包括: text, image, video, audio", out);
+                        return Ok(());
+                    }
+                }
+
+                let model_cfg = ponyllm_cli::config::ModelConfig {
+                    name: model.clone(),
+                    context_window: context.clone(),
+                    max_output: max_output.clone(),
+                    input_types: if in_list.is_empty() { vec!["text".to_string()] } else { in_list },
+                    output_types: if out_list.is_empty() { vec!["text".to_string()] } else { out_list },
+                };
+
+                match cfg.upsert_model_config(&provider, model_cfg) {
                     Ok(()) => {
                         cfg.save_to_path(path)?;
-                        println!("✅ 成功为提供商 '{}' 添加支持模型 '{}'", provider, model);
+                        println!("✅ 成功为提供商 '{}' 添加/更新模型 '{}' (上下文: {}, 最大输出: {})", provider, model, context, max_output);
                     }
                     Err(e) => {
                         println!("❌ 添加失败: {}", e);
@@ -239,12 +268,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             gw_config.flight_recorder_capacity = config_file.gateway.flight_recorder_capacity;
 
             for (p_name, p_sec) in &config_file.providers {
+                let all_model_names: Vec<String> = p_sec.list_all_models().into_iter().map(|m| m.name).collect();
                 gw_config.providers.insert(
                     p_name.clone(),
                     ProviderConfig {
                         base_url: p_sec.base_url.clone(),
                         default_model: p_sec.default_model.clone(),
-                        models: p_sec.models.clone(),
+                        models: all_model_names,
                     },
                 );
             }

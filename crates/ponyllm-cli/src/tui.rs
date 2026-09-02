@@ -8,16 +8,17 @@ use crossterm::{
 use futures_util::StreamExt;
 use ratatui::{
     backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{
-        Block, BorderType, Borders, Cell, Paragraph, Row, Table, TableState, Tabs, Wrap,
+        Block, BorderType, Borders, Cell, Clear, Paragraph, Row, Table, TableState, Tabs, Wrap,
     },
     Frame, Terminal,
 };
 use serde_json::Value;
-use crate::config::ConfigFile;
+use tokio::sync::mpsc;
+use crate::config::{ConfigFile, ModelConfig};
 
 pub struct TerminalGuard {
     pub terminal: Terminal<CrosstermBackend<io::Stdout>>,
@@ -50,8 +51,72 @@ impl Drop for TerminalGuard {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tab2Focus {
+    Providers,
+    Models,
+}
+
+pub const MODALITIES: [&str; 4] = ["文本 (text)", "图像 (image)", "视频 (video)", "音频 (audio)"];
+pub const MODALITY_KEYS: [&str; 4] = ["text", "image", "video", "audio"];
+pub const STRATEGIES: [&str; 3] = ["round_robin", "priority", "weighted"];
+
+#[derive(Debug, Clone)]
+pub enum Modal {
+    None,
+    AddProvider {
+        name: String,
+        base_url: String,
+        default_model: String,
+        strategy_idx: usize,
+        active_field: usize, // 0: name, 1: base_url, 2: default_model, 3: strategy
+    },
+    EditProvider {
+        name: String, // readonly
+        base_url: String,
+        default_model: String,
+        strategy_idx: usize,
+        active_field: usize, // 0: base_url, 1: default_model, 2: strategy
+    },
+    DeleteProviderConfirm {
+        name: String,
+    },
+    AddModel {
+        provider_name: String,
+        model_name: String,
+        context_window: String,
+        max_output: String,
+        input_modalities: [bool; 4],
+        output_modalities: [bool; 4],
+        set_as_default: bool,
+        active_field: usize, // 0: name, 1: context, 2: max_output, 3: inputs, 4: outputs, 5: default
+    },
+    EditModel {
+        provider_name: String,
+        model_name: String, // readonly
+        context_window: String,
+        max_output: String,
+        input_modalities: [bool; 4],
+        output_modalities: [bool; 4],
+        set_as_default: bool,
+        active_field: usize, // 0: context, 1: max_output, 2: inputs, 3: outputs, 4: default
+    },
+    DeleteModelConfirm {
+        provider_name: String,
+        model_name: String,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct TelemetrySnapshot {
+    pub is_online: bool,
+    pub metrics: Option<Value>,
+    pub flight_frames: Vec<Value>,
+}
+
 pub struct TuiApp {
     pub active_tab: usize,
+    pub tab2_focus: Tab2Focus,
     pub config: ConfigFile,
     pub config_path: String,
     pub gateway_url: String,
@@ -59,8 +124,10 @@ pub struct TuiApp {
     pub metrics: Option<Value>,
     pub flight_frames: Vec<Value>,
     pub provider_table_state: TableState,
+    pub model_table_state: TableState,
     pub key_table_state: TableState,
     pub log_table_state: TableState,
+    pub modal: Modal,
     pub should_quit: bool,
     pub status_message: String,
 }
@@ -69,6 +136,8 @@ impl TuiApp {
     pub fn new(config: ConfigFile, config_path: String, gateway_url: String) -> Self {
         let mut provider_state = TableState::default();
         provider_state.select(Some(0));
+        let mut model_state = TableState::default();
+        model_state.select(Some(0));
         let mut key_state = TableState::default();
         key_state.select(Some(0));
         let mut log_state = TableState::default();
@@ -76,6 +145,7 @@ impl TuiApp {
 
         Self {
             active_tab: 0,
+            tab2_focus: Tab2Focus::Providers,
             config,
             config_path,
             gateway_url,
@@ -83,60 +153,139 @@ impl TuiApp {
             metrics: None,
             flight_frames: Vec::new(),
             provider_table_state: provider_state,
+            model_table_state: model_state,
             key_table_state: key_state,
             log_table_state: log_state,
+            modal: Modal::None,
             should_quit: false,
-            status_message: "就绪。按 [Tab] 切换面板，[r] 刷新指标，[q] 退出。".to_string(),
+            status_message: "就绪。按 [Tab] 切换面板，[a] 添加，[e] 编辑，[d] 删除，[q] 退出。".to_string(),
         }
     }
 
-    pub async fn poll_gateway(&mut self) {
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_millis(1500))
-            .build()
-            .unwrap_or_default();
+    pub fn sorted_provider_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.config.providers.keys().cloned().collect();
+        names.sort();
+        names
+    }
 
-        let base = self.gateway_url.trim_end_matches('/');
-        let health_url = format!("{}/health", base);
-        let metrics_url = format!("{}/v1/telemetry/metrics", base);
-        let rec_url = format!("{}/v1/telemetry/recorder", base);
+    pub fn selected_provider_name(&self) -> Option<String> {
+        let names = self.sorted_provider_names();
+        if names.is_empty() {
+            return None;
+        }
+        let idx = self.provider_table_state.selected().unwrap_or(0);
+        names.get(idx).cloned()
+    }
 
-        if let Ok(resp) = client.get(&health_url).send().await {
-            if resp.status().is_success() {
-                self.is_online = true;
-                if let Ok(m) = client.get(&metrics_url).send().await {
-                    if let Ok(val) = m.json::<Value>().await {
-                        self.metrics = Some(val);
-                    }
-                }
-                if let Ok(r) = client.get(&rec_url).send().await {
-                    if let Ok(val) = r.json::<Value>().await {
-                        if let Some(arr) = val.as_array() {
-                            self.flight_frames = arr.clone();
-                        }
-                    }
-                }
-                return;
+    pub fn selected_models_for_current_provider(&self) -> Vec<ModelConfig> {
+        if let Some(p_name) = self.selected_provider_name() {
+            if let Some(p) = self.config.providers.get(&p_name) {
+                return p.list_all_models();
             }
         }
-        self.is_online = false;
+        Vec::new()
+    }
+
+    pub fn selected_model_config(&self) -> Option<ModelConfig> {
+        let models = self.selected_models_for_current_provider();
+        if models.is_empty() {
+            return None;
+        }
+        let idx = self.model_table_state.selected().unwrap_or(0);
+        models.get(idx).cloned()
+    }
+
+    pub fn apply_telemetry(&mut self, snap: TelemetrySnapshot) {
+        self.is_online = snap.is_online;
+        self.metrics = snap.metrics;
+        self.flight_frames = snap.flight_frames;
+    }
+
+    pub fn save_config(&mut self) -> Result<(), String> {
+        self.config.save_to_path(&self.config_path)
+            .map_err(|e| format!("写入配置文件失败: {}", e))
+    }
+}
+
+async fn fetch_telemetry_snapshot(gateway_url: &str) -> TelemetrySnapshot {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_millis(1500))
+        .build()
+        .unwrap_or_default();
+
+    let base = gateway_url.trim_end_matches('/');
+    let health_url = format!("{}/health", base);
+    let metrics_url = format!("{}/v1/telemetry/metrics", base);
+    let rec_url = format!("{}/v1/telemetry/recorder", base);
+
+    if let Ok(resp) = client.get(&health_url).send().await {
+        if resp.status().is_success() {
+            let mut metrics = None;
+            let mut flight_frames = Vec::new();
+
+            if let Ok(m) = client.get(&metrics_url).send().await {
+                if let Ok(val) = m.json::<Value>().await {
+                    metrics = Some(val);
+                }
+            }
+            if let Ok(r) = client.get(&rec_url).send().await {
+                if let Ok(val) = r.json::<Value>().await {
+                    if let Some(arr) = val.as_array() {
+                        flight_frames = arr.clone();
+                    }
+                }
+            }
+
+            return TelemetrySnapshot {
+                is_online: true,
+                metrics,
+                flight_frames,
+            };
+        }
+    }
+
+    TelemetrySnapshot {
+        is_online: false,
+        metrics: None,
+        flight_frames: Vec::new(),
     }
 }
 
 pub async fn run_tui(config: ConfigFile, config_path: String, gateway_url: String) -> Result<(), Box<dyn std::error::Error>> {
     let mut guard = TerminalGuard::new()?;
-    let mut app = TuiApp::new(config, config_path, gateway_url);
-    app.poll_gateway().await;
+    let mut app = TuiApp::new(config, config_path, gateway_url.clone());
+
+    // 1. 初始化独立异步遥测通道（主循环 0 阻塞）
+    let (telemetry_tx, mut telemetry_rx) = mpsc::channel::<TelemetrySnapshot>(10);
+    let gw_url_clone = gateway_url.clone();
+
+    tokio::spawn(async move {
+        // 先立即拉取一次
+        let snap = fetch_telemetry_snapshot(&gw_url_clone).await;
+        let _ = telemetry_tx.send(snap).await;
+
+        let mut interval = tokio::time::interval(Duration::from_millis(1500));
+        loop {
+            interval.tick().await;
+            let snap = fetch_telemetry_snapshot(&gw_url_clone).await;
+            if telemetry_tx.send(snap).await.is_err() {
+                break;
+            }
+        }
+    });
 
     let mut reader = crossterm::event::EventStream::new();
-    let mut poll_interval = tokio::time::interval(Duration::from_millis(1000));
+    let mut render_tick = tokio::time::interval(Duration::from_millis(50));
 
     loop {
         guard.terminal.draw(|f| ui(f, &mut app))?;
 
         tokio::select! {
-            _ = poll_interval.tick() => {
-                app.poll_gateway().await;
+            _ = render_tick.tick() => {
+                // 定期消费遥测更新
+                while let Ok(snap) = telemetry_rx.try_recv() {
+                    app.apply_telemetry(snap);
+                }
             }
             maybe_event = reader.next() => {
                 if let Some(Ok(Event::Key(key))) = maybe_event {
@@ -144,48 +293,7 @@ pub async fn run_tui(config: ConfigFile, config_path: String, gateway_url: Strin
                         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
                             app.should_quit = true;
                         } else {
-                            match key.code {
-                                KeyCode::Char('q') | KeyCode::Esc => {
-                                    app.should_quit = true;
-                                }
-                                KeyCode::Tab => {
-                                    app.active_tab = (app.active_tab + 1) % 4;
-                                }
-                                KeyCode::BackTab => {
-                                    app.active_tab = if app.active_tab == 0 { 3 } else { app.active_tab - 1 };
-                                }
-                                KeyCode::Char('1') => app.active_tab = 0,
-                                KeyCode::Char('2') => app.active_tab = 1,
-                                KeyCode::Char('3') => app.active_tab = 2,
-                                KeyCode::Char('4') => app.active_tab = 3,
-                                KeyCode::Char('r') => {
-                                    app.poll_gateway().await;
-                                    app.status_message = "已手动拉取最新遥测数据。".to_string();
-                                }
-                                KeyCode::Down | KeyCode::Char('j') => {
-                                    match app.active_tab {
-                                        1 => scroll_table(&mut app.provider_table_state, app.config.providers.len(), 1),
-                                        2 => {
-                                            let total_keys = app.config.providers.values().map(|p| p.keys.len()).sum();
-                                            scroll_table(&mut app.key_table_state, total_keys, 1);
-                                        }
-                                        3 => scroll_table(&mut app.log_table_state, app.flight_frames.len(), 1),
-                                        _ => {}
-                                    }
-                                }
-                                KeyCode::Up | KeyCode::Char('k') => {
-                                    match app.active_tab {
-                                        1 => scroll_table(&mut app.provider_table_state, app.config.providers.len(), -1),
-                                        2 => {
-                                            let total_keys = app.config.providers.values().map(|p| p.keys.len()).sum();
-                                            scroll_table(&mut app.key_table_state, total_keys, -1);
-                                        }
-                                        3 => scroll_table(&mut app.log_table_state, app.flight_frames.len(), -1),
-                                        _ => {}
-                                    }
-                                }
-                                _ => {}
-                            }
+                            handle_key_event(&mut app, key.code, key.modifiers);
                         }
                     }
                 }
@@ -198,6 +306,660 @@ pub async fn run_tui(config: ConfigFile, config_path: String, gateway_url: Strin
     }
 
     Ok(())
+}
+
+fn handle_key_event(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
+    if !matches!(app.modal, Modal::None) {
+        handle_modal_key(app, key, modifiers);
+        return;
+    }
+
+    match key {
+        KeyCode::Char('q') | KeyCode::Esc => {
+            app.should_quit = true;
+        }
+        KeyCode::Tab => {
+            if app.active_tab == 1 {
+                app.tab2_focus = match app.tab2_focus {
+                    Tab2Focus::Providers => Tab2Focus::Models,
+                    Tab2Focus::Models => Tab2Focus::Providers,
+                };
+            } else {
+                app.active_tab = (app.active_tab + 1) % 4;
+            }
+        }
+        KeyCode::BackTab => {
+            if app.active_tab == 1 {
+                app.tab2_focus = match app.tab2_focus {
+                    Tab2Focus::Providers => Tab2Focus::Models,
+                    Tab2Focus::Models => Tab2Focus::Providers,
+                };
+            } else {
+                app.active_tab = if app.active_tab == 0 { 3 } else { app.active_tab - 1 };
+            }
+        }
+        KeyCode::Char('1') => app.active_tab = 0,
+        KeyCode::Char('2') => app.active_tab = 1,
+        KeyCode::Char('3') => app.active_tab = 2,
+        KeyCode::Char('4') => app.active_tab = 3,
+        KeyCode::Char('r') => {
+            app.status_message = "正在后台刷新遥测数据...".to_string();
+        }
+        KeyCode::Left | KeyCode::Char('h') => {
+            if app.active_tab == 1 {
+                app.tab2_focus = Tab2Focus::Providers;
+            }
+        }
+        KeyCode::Right | KeyCode::Char('l') => {
+            if app.active_tab == 1 {
+                app.tab2_focus = Tab2Focus::Models;
+            }
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            match app.active_tab {
+                0 => {}
+                1 => {
+                    match app.tab2_focus {
+                        Tab2Focus::Providers => {
+                            let len = app.config.providers.len();
+                            scroll_table(&mut app.provider_table_state, len, 1);
+                            let m_len = app.selected_models_for_current_provider().len();
+                            scroll_table(&mut app.model_table_state, m_len, 0);
+                        }
+                        Tab2Focus::Models => {
+                            let len = app.selected_models_for_current_provider().len();
+                            scroll_table(&mut app.model_table_state, len, 1);
+                        }
+                    }
+                }
+                2 => {
+                    let total_keys = app.config.providers.values().map(|p| p.keys.len()).sum();
+                    scroll_table(&mut app.key_table_state, total_keys, 1);
+                }
+                3 => scroll_table(&mut app.log_table_state, app.flight_frames.len(), 1),
+                _ => {}
+            }
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            match app.active_tab {
+                0 => {}
+                1 => {
+                    match app.tab2_focus {
+                        Tab2Focus::Providers => {
+                            let len = app.config.providers.len();
+                            scroll_table(&mut app.provider_table_state, len, -1);
+                            let m_len = app.selected_models_for_current_provider().len();
+                            scroll_table(&mut app.model_table_state, m_len, 0);
+                        }
+                        Tab2Focus::Models => {
+                            let len = app.selected_models_for_current_provider().len();
+                            scroll_table(&mut app.model_table_state, len, -1);
+                        }
+                    }
+                }
+                2 => {
+                    let total_keys = app.config.providers.values().map(|p| p.keys.len()).sum();
+                    scroll_table(&mut app.key_table_state, total_keys, -1);
+                }
+                3 => scroll_table(&mut app.log_table_state, app.flight_frames.len(), -1),
+                _ => {}
+            }
+        }
+        KeyCode::Char('a') | KeyCode::Char('A') => {
+            if app.active_tab == 1 {
+                match app.tab2_focus {
+                    Tab2Focus::Providers => {
+                        app.modal = Modal::AddProvider {
+                            name: String::new(),
+                            base_url: "https://api.openai.com".to_string(),
+                            default_model: "gpt-4o".to_string(),
+                            strategy_idx: 0,
+                            active_field: 0,
+                        };
+                    }
+                    Tab2Focus::Models => {
+                        if let Some(p_name) = app.selected_provider_name() {
+                            app.modal = Modal::AddModel {
+                                provider_name: p_name,
+                                model_name: String::new(),
+                                context_window: "1M".to_string(),
+                                max_output: "32K".to_string(),
+                                input_modalities: [true, false, false, false],
+                                output_modalities: [true, false, false, false],
+                                set_as_default: false,
+                                active_field: 0,
+                            };
+                        } else {
+                            app.status_message = "⚠️ 请先添加提供商，再添加模型。".to_string();
+                        }
+                    }
+                }
+            }
+        }
+        KeyCode::Char('e') | KeyCode::Char('E') => {
+            if app.active_tab == 1 {
+                match app.tab2_focus {
+                    Tab2Focus::Providers => {
+                        if let Some(p_name) = app.selected_provider_name() {
+                            if let Some(p) = app.config.providers.get(&p_name) {
+                                let strat_idx = match p.strategy.as_str() {
+                                    "priority" => 1,
+                                    "weighted" => 2,
+                                    _ => 0,
+                                };
+                                app.modal = Modal::EditProvider {
+                                    name: p_name,
+                                    base_url: p.base_url.clone(),
+                                    default_model: p.default_model.clone(),
+                                    strategy_idx: strat_idx,
+                                    active_field: 0,
+                                };
+                            }
+                        } else {
+                            app.status_message = "⚠️ 当前没有选中的提供商可供编辑。".to_string();
+                        }
+                    }
+                    Tab2Focus::Models => {
+                        if let Some(p_name) = app.selected_provider_name() {
+                            if let Some(m_cfg) = app.selected_model_config() {
+                                let is_def = app.config.providers.get(&p_name)
+                                    .map(|p| p.default_model == m_cfg.name)
+                                    .unwrap_or(false);
+
+                                let mut in_mods = [false; 4];
+                                for (i, key) in MODALITY_KEYS.iter().enumerate() {
+                                    if m_cfg.input_types.iter().any(|t| t == key) {
+                                        in_mods[i] = true;
+                                    }
+                                }
+                                let mut out_mods = [false; 4];
+                                for (i, key) in MODALITY_KEYS.iter().enumerate() {
+                                    if m_cfg.output_types.iter().any(|t| t == key) {
+                                        out_mods[i] = true;
+                                    }
+                                }
+
+                                app.modal = Modal::EditModel {
+                                    provider_name: p_name,
+                                    model_name: m_cfg.name,
+                                    context_window: m_cfg.context_window,
+                                    max_output: m_cfg.max_output,
+                                    input_modalities: in_mods,
+                                    output_modalities: out_mods,
+                                    set_as_default: is_def,
+                                    active_field: 0,
+                                };
+                            } else {
+                                app.status_message = "⚠️ 当前提供商下没有选中的模型可供编辑。".to_string();
+                            }
+                        } else {
+                            app.status_message = "⚠️ 当前没有选中的提供商。".to_string();
+                        }
+                    }
+                }
+            }
+        }
+        KeyCode::Char('d') | KeyCode::Char('D') => {
+            if app.active_tab == 1 {
+                match app.tab2_focus {
+                    Tab2Focus::Providers => {
+                        if let Some(p_name) = app.selected_provider_name() {
+                            app.modal = Modal::DeleteProviderConfirm { name: p_name };
+                        } else {
+                            app.status_message = "⚠️ 当前没有选中的提供商可供删除。".to_string();
+                        }
+                    }
+                    Tab2Focus::Models => {
+                        if let Some(p_name) = app.selected_provider_name() {
+                            if let Some(m_cfg) = app.selected_model_config() {
+                                app.modal = Modal::DeleteModelConfirm {
+                                    provider_name: p_name,
+                                    model_name: m_cfg.name,
+                                };
+                            } else {
+                                app.status_message = "⚠️ 当前没有选中的模型可供删除。".to_string();
+                            }
+                        } else {
+                            app.status_message = "⚠️ 当前没有选中的提供商。".to_string();
+                        }
+                    }
+                }
+            }
+        }
+        KeyCode::Char('s') | KeyCode::Char('S') => {
+            if app.active_tab == 1 {
+                if app.tab2_focus != Tab2Focus::Models {
+                    app.status_message = "👉 请先按 [Tab] 或 [→] 切换到右侧模型列表，再按 [s] 设为默认模型。".to_string();
+                    return;
+                }
+                if let Some(p_name) = app.selected_provider_name() {
+                    if let Some(m_cfg) = app.selected_model_config() {
+                        if let Err(e) = app.config.set_default_model(&p_name, &m_cfg.name) {
+                            app.status_message = format!("❌ 设置默认模型失败: {}", e);
+                        } else if let Err(e) = app.save_config() {
+                            app.status_message = format!("❌ 保存失败: {}", e);
+                        } else {
+                            app.status_message = format!("✅ 成功将 '{}' 设为 '{}' 的默认主模型", m_cfg.name, p_name);
+                        }
+                    } else {
+                        app.status_message = "⚠️ 当前没有选中的模型。".to_string();
+                    }
+                } else {
+                    app.status_message = "⚠️ 当前没有选中的提供商。".to_string();
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn handle_modal_key(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
+    let mut current_modal = std::mem::replace(&mut app.modal, Modal::None);
+    let mut keep_modal = false;
+
+    // 过滤有害的组合控制键
+    if modifiers.contains(KeyModifiers::CONTROL) || modifiers.contains(KeyModifiers::ALT) {
+        app.modal = current_modal;
+        return;
+    }
+
+    match &mut current_modal {
+        Modal::None => {}
+        Modal::DeleteProviderConfirm { name } => {
+            match key {
+                KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+                    let target = name.clone();
+                    app.config.remove_provider(&target);
+                    let _ = app.save_config();
+                    app.status_message = format!("✅ 成功删除提供商 '{}'", target);
+                    let p_len = app.config.providers.len();
+                    scroll_table(&mut app.provider_table_state, p_len, 0);
+                    let m_len = app.selected_models_for_current_provider().len();
+                    scroll_table(&mut app.model_table_state, m_len, 0);
+                }
+                KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
+                    app.status_message = "已取消删除。".to_string();
+                }
+                _ => {
+                    keep_modal = true;
+                }
+            }
+        }
+        Modal::DeleteModelConfirm { provider_name, model_name } => {
+            match key {
+                KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+                    let p = provider_name.clone();
+                    let m = model_name.clone();
+                    match app.config.remove_model(&p, &m) {
+                        Ok(true) => {
+                            let _ = app.save_config();
+                            app.status_message = format!("✅ 成功从 '{}' 中移除模型 '{}'", p, m);
+                            let new_m_len = app.selected_models_for_current_provider().len();
+                            scroll_table(&mut app.model_table_state, new_m_len, 0);
+                        }
+                        Ok(false) => {
+                            app.status_message = format!("⚠️ 未能移除模型 '{}'", m);
+                        }
+                        Err(e) => {
+                            app.status_message = format!("❌ 删除失败: {}", e);
+                        }
+                    }
+                }
+                KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
+                    app.status_message = "已取消删除。".to_string();
+                }
+                _ => {
+                    keep_modal = true;
+                }
+            }
+        }
+        Modal::AddProvider { name, base_url, default_model, strategy_idx, active_field } => {
+            match key {
+                KeyCode::Esc => {
+                    app.status_message = "已取消添加提供商。".to_string();
+                }
+                KeyCode::Tab | KeyCode::Down => {
+                    *active_field = (*active_field + 1) % 4;
+                    keep_modal = true;
+                }
+                KeyCode::BackTab | KeyCode::Up => {
+                    *active_field = if *active_field == 0 { 3 } else { *active_field - 1 };
+                    keep_modal = true;
+                }
+                KeyCode::Enter => {
+                    if name.trim().is_empty() {
+                        app.status_message = "❌ 提供商名称不能为空！".to_string();
+                        keep_modal = true;
+                    } else if base_url.trim().is_empty() {
+                        app.status_message = "❌ Base URL 不能为空！".to_string();
+                        keep_modal = true;
+                    } else if default_model.trim().is_empty() {
+                        app.status_message = "❌ 默认模型名不能为空！".to_string();
+                        keep_modal = true;
+                    } else {
+                        let strat = STRATEGIES[*strategy_idx];
+                        app.config.add_provider(name.trim(), base_url.trim(), default_model.trim(), strat);
+                        if let Err(e) = app.save_config() {
+                            app.status_message = format!("❌ 保存失败: {}", e);
+                        } else {
+                            app.status_message = format!("✅ 成功添加提供商 '{}'", name.trim());
+                            let len = app.config.providers.len();
+                            scroll_table(&mut app.provider_table_state, len, 0);
+                        }
+                    }
+                }
+                KeyCode::Left => {
+                    if *active_field == 3 && *strategy_idx > 0 {
+                        *strategy_idx -= 1;
+                    }
+                    keep_modal = true;
+                }
+                KeyCode::Right => {
+                    if *active_field == 3 && *strategy_idx < 2 {
+                        *strategy_idx += 1;
+                    }
+                    keep_modal = true;
+                }
+                KeyCode::Char('1') if *active_field == 3 => { *strategy_idx = 0; keep_modal = true; }
+                KeyCode::Char('2') if *active_field == 3 => { *strategy_idx = 1; keep_modal = true; }
+                KeyCode::Char('3') if *active_field == 3 => { *strategy_idx = 2; keep_modal = true; }
+                KeyCode::Backspace => {
+                    match *active_field {
+                        0 => { name.pop(); }
+                        1 => { base_url.pop(); }
+                        2 => { default_model.pop(); }
+                        _ => {}
+                    }
+                    keep_modal = true;
+                }
+                KeyCode::Char(c) => {
+                    match *active_field {
+                        0 => name.push(c),
+                        1 => base_url.push(c),
+                        2 => default_model.push(c),
+                        _ => {}
+                    }
+                    keep_modal = true;
+                }
+                _ => {
+                    keep_modal = true;
+                }
+            }
+        }
+        Modal::EditProvider { name, base_url, default_model, strategy_idx, active_field } => {
+            match key {
+                KeyCode::Esc => {
+                    app.status_message = "已取消编辑。".to_string();
+                }
+                KeyCode::Tab | KeyCode::Down => {
+                    *active_field = (*active_field + 1) % 3;
+                    keep_modal = true;
+                }
+                KeyCode::BackTab | KeyCode::Up => {
+                    *active_field = if *active_field == 0 { 2 } else { *active_field - 1 };
+                    keep_modal = true;
+                }
+                KeyCode::Enter => {
+                    if base_url.trim().is_empty() {
+                        app.status_message = "❌ Base URL 不能为空！".to_string();
+                        keep_modal = true;
+                    } else if default_model.trim().is_empty() {
+                        app.status_message = "❌ 默认模型名不能为空！".to_string();
+                        keep_modal = true;
+                    } else {
+                        let strat = STRATEGIES[*strategy_idx];
+                        let name_str = name.clone();
+                        if let Err(e) = app.config.update_provider(&name_str, base_url.trim(), default_model.trim(), strat) {
+                            app.status_message = format!("❌ 更新提供商失败: {}", e);
+                        } else if let Err(e) = app.save_config() {
+                            app.status_message = format!("❌ 保存配置失败: {}", e);
+                        } else {
+                            app.status_message = format!("✅ 成功更新提供商 '{}'", name_str);
+                        }
+                    }
+                }
+                KeyCode::Left => {
+                    if *active_field == 2 && *strategy_idx > 0 {
+                        *strategy_idx -= 1;
+                    }
+                    keep_modal = true;
+                }
+                KeyCode::Right => {
+                    if *active_field == 2 && *strategy_idx < 2 {
+                        *strategy_idx += 1;
+                    }
+                    keep_modal = true;
+                }
+                KeyCode::Char('1') if *active_field == 2 => { *strategy_idx = 0; keep_modal = true; }
+                KeyCode::Char('2') if *active_field == 2 => { *strategy_idx = 1; keep_modal = true; }
+                KeyCode::Char('3') if *active_field == 2 => { *strategy_idx = 2; keep_modal = true; }
+                KeyCode::Backspace => {
+                    match *active_field {
+                        0 => { base_url.pop(); }
+                        1 => { default_model.pop(); }
+                        _ => {}
+                    }
+                    keep_modal = true;
+                }
+                KeyCode::Char(c) => {
+                    match *active_field {
+                        0 => base_url.push(c),
+                        1 => default_model.push(c),
+                        _ => {}
+                    }
+                    keep_modal = true;
+                }
+                _ => {
+                    keep_modal = true;
+                }
+            }
+        }
+        Modal::AddModel {
+            provider_name,
+            model_name,
+            context_window,
+            max_output,
+            input_modalities,
+            output_modalities,
+            set_as_default,
+            active_field,
+        } => {
+            match key {
+                KeyCode::Esc => {
+                    app.status_message = "已取消添加模型。".to_string();
+                }
+                KeyCode::Tab | KeyCode::Down => {
+                    *active_field = (*active_field + 1) % 6;
+                    keep_modal = true;
+                }
+                KeyCode::BackTab | KeyCode::Up => {
+                    *active_field = if *active_field == 0 { 5 } else { *active_field - 1 };
+                    keep_modal = true;
+                }
+                KeyCode::Enter => {
+                    if model_name.trim().is_empty() {
+                        app.status_message = "❌ 模型名称不能为空！".to_string();
+                        keep_modal = true;
+                    } else {
+                        let in_types: Vec<String> = input_modalities.iter().enumerate()
+                            .filter(|(_, &on)| on)
+                            .map(|(i, _)| MODALITY_KEYS[i].to_string())
+                            .collect();
+                        let out_types: Vec<String> = output_modalities.iter().enumerate()
+                            .filter(|(_, &on)| on)
+                            .map(|(i, _)| MODALITY_KEYS[i].to_string())
+                            .collect();
+
+                        let m_name = model_name.trim().to_string();
+                        let cfg = ModelConfig {
+                            name: m_name.clone(),
+                            context_window: if context_window.trim().is_empty() { "1M".to_string() } else { context_window.trim().to_string() },
+                            max_output: if max_output.trim().is_empty() { "32K".to_string() } else { max_output.trim().to_string() },
+                            input_types: if in_types.is_empty() { vec!["text".to_string()] } else { in_types },
+                            output_types: if out_types.is_empty() { vec!["text".to_string()] } else { out_types },
+                        };
+
+                        let p_name = provider_name.clone();
+                        let is_def = *set_as_default;
+
+                        if let Err(e) = app.config.upsert_model_config(&p_name, cfg) {
+                            app.status_message = format!("❌ 添加模型配置失败: {}", e);
+                        } else {
+                            if is_def {
+                                let _ = app.config.set_default_model(&p_name, &m_name);
+                            }
+                            if let Err(e) = app.save_config() {
+                                app.status_message = format!("❌ 保存失败: {}", e);
+                            } else {
+                                app.status_message = format!("✅ 成功向 '{}' 添加模型 '{}'", p_name, m_name);
+                                let m_len = app.selected_models_for_current_provider().len();
+                                scroll_table(&mut app.model_table_state, m_len, 0);
+                            }
+                        }
+                    }
+                }
+                KeyCode::Char(' ') => {
+                    if *active_field == 3 {
+                        input_modalities[0] = !input_modalities[0];
+                    } else if *active_field == 4 {
+                        output_modalities[0] = !output_modalities[0];
+                    } else if *active_field == 5 {
+                        *set_as_default = !*set_as_default;
+                    }
+                    keep_modal = true;
+                }
+                KeyCode::Char('1') if *active_field == 3 => { input_modalities[0] = !input_modalities[0]; keep_modal = true; }
+                KeyCode::Char('2') if *active_field == 3 => { input_modalities[1] = !input_modalities[1]; keep_modal = true; }
+                KeyCode::Char('3') if *active_field == 3 => { input_modalities[2] = !input_modalities[2]; keep_modal = true; }
+                KeyCode::Char('4') if *active_field == 3 => { input_modalities[3] = !input_modalities[3]; keep_modal = true; }
+                KeyCode::Char('1') if *active_field == 4 => { output_modalities[0] = !output_modalities[0]; keep_modal = true; }
+                KeyCode::Char('2') if *active_field == 4 => { output_modalities[1] = !output_modalities[1]; keep_modal = true; }
+                KeyCode::Char('3') if *active_field == 4 => { output_modalities[2] = !output_modalities[2]; keep_modal = true; }
+                KeyCode::Char('4') if *active_field == 4 => { output_modalities[3] = !output_modalities[3]; keep_modal = true; }
+                KeyCode::Backspace => {
+                    match *active_field {
+                        0 => { model_name.pop(); }
+                        1 => { context_window.pop(); }
+                        2 => { max_output.pop(); }
+                        _ => {}
+                    }
+                    keep_modal = true;
+                }
+                KeyCode::Char(c) => {
+                    match *active_field {
+                        0 => model_name.push(c),
+                        1 => context_window.push(c),
+                        2 => max_output.push(c),
+                        _ => {}
+                    }
+                    keep_modal = true;
+                }
+                _ => {
+                    keep_modal = true;
+                }
+            }
+        }
+        Modal::EditModel {
+            provider_name,
+            model_name,
+            context_window,
+            max_output,
+            input_modalities,
+            output_modalities,
+            set_as_default,
+            active_field,
+        } => {
+            match key {
+                KeyCode::Esc => {
+                    app.status_message = "已取消编辑。".to_string();
+                }
+                KeyCode::Tab | KeyCode::Down => {
+                    *active_field = (*active_field + 1) % 5;
+                    keep_modal = true;
+                }
+                KeyCode::BackTab | KeyCode::Up => {
+                    *active_field = if *active_field == 0 { 4 } else { *active_field - 1 };
+                    keep_modal = true;
+                }
+                KeyCode::Enter => {
+                    let in_types: Vec<String> = input_modalities.iter().enumerate()
+                        .filter(|(_, &on)| on)
+                        .map(|(i, _)| MODALITY_KEYS[i].to_string())
+                        .collect();
+                    let out_types: Vec<String> = output_modalities.iter().enumerate()
+                        .filter(|(_, &on)| on)
+                        .map(|(i, _)| MODALITY_KEYS[i].to_string())
+                        .collect();
+
+                    let cfg = ModelConfig {
+                        name: model_name.clone(),
+                        context_window: if context_window.trim().is_empty() { "1M".to_string() } else { context_window.trim().to_string() },
+                        max_output: if max_output.trim().is_empty() { "32K".to_string() } else { max_output.trim().to_string() },
+                        input_types: if in_types.is_empty() { vec!["text".to_string()] } else { in_types },
+                        output_types: if out_types.is_empty() { vec!["text".to_string()] } else { out_types },
+                    };
+
+                    let p_name = provider_name.clone();
+                    let m_name = model_name.clone();
+                    let is_def = *set_as_default;
+
+                    if let Err(e) = app.config.upsert_model_config(&p_name, cfg) {
+                        app.status_message = format!("❌ 更新模型配置失败: {}", e);
+                    } else {
+                        if is_def {
+                            let _ = app.config.set_default_model(&p_name, &m_name);
+                        }
+                        if let Err(e) = app.save_config() {
+                            app.status_message = format!("❌ 保存失败: {}", e);
+                        } else {
+                            app.status_message = format!("✅ 成功更新模型 '{}' 参数配置", m_name);
+                        }
+                    }
+                }
+                KeyCode::Char(' ') => {
+                    if *active_field == 2 {
+                        input_modalities[0] = !input_modalities[0];
+                    } else if *active_field == 3 {
+                        output_modalities[0] = !output_modalities[0];
+                    } else if *active_field == 4 {
+                        *set_as_default = !*set_as_default;
+                    }
+                    keep_modal = true;
+                }
+                KeyCode::Char('1') if *active_field == 2 => { input_modalities[0] = !input_modalities[0]; keep_modal = true; }
+                KeyCode::Char('2') if *active_field == 2 => { input_modalities[1] = !input_modalities[1]; keep_modal = true; }
+                KeyCode::Char('3') if *active_field == 2 => { input_modalities[2] = !input_modalities[2]; keep_modal = true; }
+                KeyCode::Char('4') if *active_field == 2 => { input_modalities[3] = !input_modalities[3]; keep_modal = true; }
+                KeyCode::Char('1') if *active_field == 3 => { output_modalities[0] = !output_modalities[0]; keep_modal = true; }
+                KeyCode::Char('2') if *active_field == 3 => { output_modalities[1] = !output_modalities[1]; keep_modal = true; }
+                KeyCode::Char('3') if *active_field == 3 => { output_modalities[2] = !output_modalities[2]; keep_modal = true; }
+                KeyCode::Char('4') if *active_field == 3 => { output_modalities[3] = !output_modalities[3]; keep_modal = true; }
+                KeyCode::Backspace => {
+                    match *active_field {
+                        0 => { context_window.pop(); }
+                        1 => { max_output.pop(); }
+                        _ => {}
+                    }
+                    keep_modal = true;
+                }
+                KeyCode::Char(c) => {
+                    match *active_field {
+                        0 => context_window.push(c),
+                        1 => max_output.push(c),
+                        _ => {}
+                    }
+                    keep_modal = true;
+                }
+                _ => {
+                    keep_modal = true;
+                }
+            }
+        }
+    }
+
+    if keep_modal {
+        app.modal = current_modal;
+    }
 }
 
 fn scroll_table(state: &mut TableState, max_len: usize, delta: isize) {
@@ -218,7 +980,7 @@ fn ui(f: &mut Frame, app: &mut TuiApp) {
             area.width, area.height
         ))
         .style(Style::default().fg(Color::Yellow))
-        .block(Block::default().borders(Borders::ALL).title(" 尺寸警告 "));
+        .block(Block::default().borders(Borders::BOTTOM).border_style(Style::default().fg(Color::DarkGray)));
         f.render_widget(warn_msg, area);
         return;
     }
@@ -226,81 +988,137 @@ fn ui(f: &mut Frame, app: &mut TuiApp) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3), // Header & Tabs
-            Constraint::Min(0),    // Main Content Area
-            Constraint::Length(3), // Footer / Status Bar
+            Constraint::Length(2), // 极简 Header Tabs (单行+下细线)
+            Constraint::Min(0),    // 主内容区
+            Constraint::Length(2), // 极简 Footer (状态与快捷键提示)
         ])
         .split(area);
 
-    // 1. Header Tabs
-    let tab_titles = vec![
-        "1 📊 实时监控大盘",
-        "2 🏢 提供商 & 模型",
-        "3 🔑 Key 账户池治理",
-        "4 📼 黑匣子故障录波",
-    ];
-    let tabs = Tabs::new(tab_titles)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" ponyllm 统一网关控制台 ")
-                .border_type(BorderType::Rounded),
-        )
-        .select(app.active_tab)
-        .style(Style::default().fg(Color::Gray))
-        .highlight_style(
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        );
-    f.render_widget(tabs, chunks[0]);
+    // 1. Header (极简无大框导航)
+    render_header(f, chunks[0], app);
 
     // 2. Tab Contents
     match app.active_tab {
         0 => render_overview_tab(f, chunks[1], app),
-        1 => render_providers_tab(f, chunks[1], app),
+        1 => render_providers_and_models_tab(f, chunks[1], app),
         2 => render_keys_tab(f, chunks[1], app),
         3 => render_telemetry_tab(f, chunks[1], app),
         _ => {}
     }
 
-    // 3. Footer / Help Bar
-    let status_style = if app.is_online {
-        Style::default().fg(Color::Green)
+    // 3. Footer (极简状态栏)
+    render_footer(f, chunks[2], app);
+
+    // 4. Modal Dialog (如果有)
+    render_modal(f, area, app);
+}
+
+fn render_header(f: &mut Frame, area: Rect, app: &TuiApp) {
+    let header_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Min(0), Constraint::Length(26)])
+        .split(area);
+
+    let tab_titles = vec![
+        " 1 概览 ",
+        " 2 提供商与模型 ",
+        " 3 Key 治理 ",
+        " 4 故障录波 ",
+    ];
+
+    let tabs = Tabs::new(tab_titles)
+        .select(app.active_tab)
+        .style(Style::default().fg(Color::DarkGray))
+        .highlight_style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+                .bg(Color::Rgb(25, 35, 45)),
+        )
+        .divider("│");
+    f.render_widget(tabs, header_chunks[0]);
+
+    // 网关状态
+    let (status_icon, status_text, status_color) = if app.is_online {
+        ("●", "网关在线 UP", Color::Green)
     } else {
-        Style::default().fg(Color::Yellow)
-    };
-    let online_label = if app.is_online {
-        "● 网关在线 (ONLINE)"
-    } else {
-        "○ 网关未连通 (OFFLINE - 请先执行 ponyllm serve)"
+        ("○", "网关离线 DOWN", Color::Yellow)
     };
 
-    let footer = Paragraph::new(vec![
+    let status_widget = Paragraph::new(Line::from(vec![
+        Span::styled(format!("{} ", status_icon), Style::default().fg(status_color).add_modifier(Modifier::BOLD)),
+        Span::styled(status_text, Style::default().fg(status_color)),
+        Span::raw(" "),
+    ]))
+    .alignment(Alignment::Right);
+    f.render_widget(status_widget, header_chunks[1]);
+}
+
+fn render_footer(f: &mut Frame, area: Rect, app: &TuiApp) {
+    let help_line = if app.active_tab == 1 {
+        match app.tab2_focus {
+            Tab2Focus::Providers => {
+                Line::from(vec![
+                    Span::styled(" [Tab/→] ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                    Span::raw("切到模型  "),
+                    Span::styled(" [a] ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                    Span::raw("新建提供商  "),
+                    Span::styled(" [e] ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                    Span::raw("编辑  "),
+                    Span::styled(" [d] ", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+                    Span::raw("删除  "),
+                    Span::styled(" [j/k/↑/↓] ", Style::default().fg(Color::DarkGray)),
+                    Span::raw("移动  "),
+                    Span::styled(" [q] ", Style::default().fg(Color::DarkGray)),
+                    Span::raw("退出"),
+                ])
+            }
+            Tab2Focus::Models => {
+                Line::from(vec![
+                    Span::styled(" [Tab/←] ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                    Span::raw("切回提供商  "),
+                    Span::styled(" [a] ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                    Span::raw("添加模型  "),
+                    Span::styled(" [e] ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                    Span::raw("编辑参数  "),
+                    Span::styled(" [s] ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+                    Span::raw("设为默认  "),
+                    Span::styled(" [d] ", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+                    Span::raw("删除  "),
+                    Span::styled(" [q] ", Style::default().fg(Color::DarkGray)),
+                    Span::raw("退出"),
+                ])
+            }
+        }
+    } else {
         Line::from(vec![
-            Span::styled(format!(" {} ", online_label), status_style.add_modifier(Modifier::BOLD)),
-            Span::raw(" | "),
-            Span::styled(&app.status_message, Style::default().fg(Color::White)),
-        ]),
-        Line::from(vec![
-            Span::styled(" [Tab] ", Style::default().fg(Color::Yellow)),
+            Span::styled(" [Tab] ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
             Span::raw("切页  "),
-            Span::styled(" [↑/↓/j/k] ", Style::default().fg(Color::Yellow)),
-            Span::raw("上下移动  "),
-            Span::styled(" [r] ", Style::default().fg(Color::Yellow)),
-            Span::raw("手动刷新  "),
-            Span::styled(" [q/Esc/Ctrl+C] ", Style::default().fg(Color::Yellow)),
-            Span::raw("退出控制台"),
-        ]),
-    ])
-    .block(Block::default().borders(Borders::ALL).border_type(BorderType::Rounded));
-    f.render_widget(footer, chunks[2]);
+            Span::styled(" [1-4] ", Style::default().fg(Color::Yellow)),
+            Span::raw("直达  "),
+            Span::styled(" [j/k/↑/↓] ", Style::default().fg(Color::DarkGray)),
+            Span::raw("移动  "),
+            Span::styled(" [r] ", Style::default().fg(Color::DarkGray)),
+            Span::raw("刷新  "),
+            Span::styled(" [q/Esc] ", Style::default().fg(Color::DarkGray)),
+            Span::raw("退出"),
+        ])
+    };
+
+    let status_line = Line::from(vec![
+        Span::styled("  › ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+        Span::styled(&app.status_message, Style::default().fg(Color::White)),
+    ]);
+
+    let footer = Paragraph::new(vec![help_line, status_line])
+        .block(Block::default().borders(Borders::TOP).border_style(Style::default().fg(Color::Rgb(50, 60, 75))));
+    f.render_widget(footer, area);
 }
 
 fn render_overview_tab(f: &mut Frame, area: Rect, app: &TuiApp) {
     let vertical = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(7), Constraint::Min(0)])
+        .constraints([Constraint::Length(5), Constraint::Min(0)])
         .split(area);
 
     let top_row = Layout::default()
@@ -328,35 +1146,35 @@ fn render_overview_tab(f: &mut Frame, area: Rect, app: &TuiApp) {
         .unwrap_or(0);
 
     let card1 = Paragraph::new(vec![
-        Line::from("网关监听地址"),
+        Line::from(Span::styled("网关监听地址", Style::default().fg(Color::Gray))),
         Line::from(Span::styled(&app.config.gateway.bind, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))),
-        Line::from(format!("服务状态: {}", if app.is_online { "🟢 UP" } else { "🔴 DOWN" })),
+        Line::from(format!("服务: {}", if app.is_online { "🟢 在线运行" } else { "🔴 离线未连通" })),
     ])
-    .block(Block::default().borders(Borders::ALL).title(" 基础信息 ").border_type(BorderType::Rounded));
+    .block(Block::default().borders(Borders::BOTTOM).border_style(Style::default().fg(Color::DarkGray)));
     f.render_widget(card1, top_row[0]);
 
     let card2 = Paragraph::new(vec![
-        Line::from("总请求流量"),
+        Line::from(Span::styled("总请求流量", Style::default().fg(Color::Gray))),
         Line::from(Span::styled(format!("{} 次", total_reqs), Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))),
         Line::from(format!("成功调用: {} 次", total_success)),
     ])
-    .block(Block::default().borders(Borders::ALL).title(" 请求统计 ").border_type(BorderType::Rounded));
+    .block(Block::default().borders(Borders::BOTTOM).border_style(Style::default().fg(Color::DarkGray)));
     f.render_widget(card2, top_row[1]);
 
     let card3 = Paragraph::new(vec![
-        Line::from("429 / 故障自动倒换"),
+        Line::from(Span::styled("429 / 故障自动倒换", Style::default().fg(Color::Gray))),
         Line::from(Span::styled(format!("{} 次", total_failover), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))),
         Line::from("无感毫秒级熔断倒换"),
     ])
-    .block(Block::default().borders(Borders::ALL).title(" 容灾倒换 ").border_type(BorderType::Rounded));
+    .block(Block::default().borders(Borders::BOTTOM).border_style(Style::default().fg(Color::DarkGray)));
     f.render_widget(card3, top_row[2]);
 
     let card4 = Paragraph::new(vec![
-        Line::from("不可恢复异常 (5xx)"),
+        Line::from(Span::styled("不可恢复异常 (5xx)", Style::default().fg(Color::Gray))),
         Line::from(Span::styled(format!("{} 次", total_errors), Style::default().fg(Color::Red).add_modifier(Modifier::BOLD))),
         Line::from("全链路故障录波保障"),
     ])
-    .block(Block::default().borders(Borders::ALL).title(" 异常追踪 ").border_type(BorderType::Rounded));
+    .block(Block::default().borders(Borders::BOTTOM).border_style(Style::default().fg(Color::DarkGray)));
     f.render_widget(card4, top_row[3]);
 
     // Bottom Half
@@ -365,131 +1183,313 @@ fn render_overview_tab(f: &mut Frame, area: Rect, app: &TuiApp) {
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(vertical[1]);
 
-    // Provider summary
-    let prov_rows: Vec<Row> = app.config.providers.iter().map(|(name, p)| {
-        Row::new(vec![
-            Cell::from(name.as_str()),
-            Cell::from(p.default_model.as_str()),
-            Cell::from(p.strategy.as_str()),
-            Cell::from(p.keys.len().to_string()),
-        ])
+    // Provider summary table
+    let sorted_names = app.sorted_provider_names();
+    let prov_rows: Vec<Row> = sorted_names.iter().map(|name| {
+        if let Some(p) = app.config.providers.get(name) {
+            Row::new(vec![
+                Cell::from(name.as_str()),
+                Cell::from(p.default_model.as_str()),
+                Cell::from(p.strategy.as_str()),
+                Cell::from(p.list_all_models().len().to_string()),
+                Cell::from(p.keys.len().to_string()),
+            ])
+        } else {
+            Row::new(vec![Cell::from(name.as_str())])
+        }
     }).collect();
 
     let prov_table = Table::new(
         prov_rows,
         [
-            Constraint::Percentage(25),
-            Constraint::Percentage(35),
-            Constraint::Percentage(25),
-            Constraint::Percentage(15),
+            Constraint::Percentage(22),
+            Constraint::Percentage(32),
+            Constraint::Percentage(22),
+            Constraint::Percentage(12),
+            Constraint::Percentage(12),
         ],
     )
-    .header(Row::new(vec!["提供商", "默认模型", "调度策略", "Key 数量"]).style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)))
-    .block(Block::default().borders(Borders::ALL).title(" 已挂载模型提供商 ").border_type(BorderType::Rounded));
+    .header(
+        Row::new(vec!["提供商", "默认主模型", "调度策略", "模型数", "Key数"])
+            .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+    )
+    .block(
+        Block::default()
+            .borders(Borders::TOP)
+            .title(" ── 已挂载模型提供商 ────────────────────────────────────────── ")
+            .border_style(Style::default().fg(Color::DarkGray)),
+    );
     f.render_widget(prov_table, bottom_chunks[0]);
 
-    // Quickstart & Features
+    // Quickstart info
     let info = Paragraph::new(vec![
         Line::from(Span::styled("双向全协议转译引擎:", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))),
-        Line::from("  • OpenAI Chat Completions ⇄ Anthropic Messages ⇄ Responses API"),
+        Line::from("  • OpenAI Chat ⇄ Anthropic Messages ⇄ Responses API 双向直通"),
         Line::from("  • 完整支持 DeepSeek Reasoning 思考链无损传递"),
         Line::from(""),
         Line::from(Span::styled("多 Key 账户池与熔断机制:", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))),
-        Line::from("  • 429 频率超限自动冷却 (Cooldown) + 402/403 配额耗尽剔除"),
+        Line::from("  • 429 频率超限自动冷却 + 402/403 配额耗尽剔除"),
         Line::from("  • TTFT 首字节喷出前全透明自动故障倒换 (Failover)"),
         Line::from(""),
-        Line::from(Span::styled("快捷 CLI 命令:", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))),
-        Line::from("  • ponyllm provider add / list / remove"),
-        Line::from("  • ponyllm key add / list / remove / test"),
+        Line::from(Span::styled("极简交互与模型治理:", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))),
+        Line::from("  • 按 [2] 进入提供商 & 模型面板，支持上下文/最大输出/模态参数配置"),
     ])
-    .block(Block::default().borders(Borders::ALL).title(" 网关特性与使用指南 ").border_type(BorderType::Rounded))
+    .block(
+        Block::default()
+            .borders(Borders::TOP)
+            .title(" ── 网关特性与使用指南 ────────────────────────────────────────── ")
+            .border_style(Style::default().fg(Color::DarkGray)),
+    )
     .wrap(Wrap { trim: true });
     f.render_widget(info, bottom_chunks[1]);
 }
 
-fn render_providers_tab(f: &mut Frame, area: Rect, app: &mut TuiApp) {
-    let rows: Vec<Row> = app.config.providers.iter().map(|(name, p)| {
-        Row::new(vec![
-            Cell::from(name.as_str()),
-            Cell::from(p.base_url.as_str()),
-            Cell::from(p.default_model.as_str()),
-            Cell::from(p.strategy.as_str()),
-            Cell::from(p.keys.len().to_string()),
-        ])
+fn render_providers_and_models_tab(f: &mut Frame, area: Rect, app: &mut TuiApp) {
+    let split_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(35), Constraint::Percentage(65)])
+        .split(area);
+
+    let is_p_active = app.tab2_focus == Tab2Focus::Providers;
+    let is_m_active = app.tab2_focus == Tab2Focus::Models;
+
+    // ── Left: Provider List ──
+    let sorted_names = app.sorted_provider_names();
+    let selected_p_idx = app.provider_table_state.selected().unwrap_or(0);
+
+    let p_rows: Vec<Row> = sorted_names.iter().enumerate().map(|(i, name)| {
+        let is_sel = i == selected_p_idx;
+        let prefix = if is_sel { "› " } else { "  " };
+
+        let style = if is_sel && is_p_active {
+            Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD)
+        } else if is_sel {
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::White)
+        };
+
+        if let Some(p) = app.config.providers.get(name) {
+            Row::new(vec![
+                Cell::from(format!("{}{}", prefix, name)),
+                Cell::from(p.strategy.as_str()),
+                Cell::from(p.keys.len().to_string()),
+            ]).style(style)
+        } else {
+            Row::new(vec![Cell::from(format!("{}{}", prefix, name))]).style(style)
+        }
     }).collect();
 
-    let table = Table::new(
-        rows,
+    let p_header_style = if is_p_active {
+        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD)
+    };
+
+    let p_border_style = if is_p_active {
+        Style::default().fg(Color::Cyan)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+
+    let p_table = Table::new(
+        p_rows,
         [
-            Constraint::Percentage(18),
+            Constraint::Percentage(50),
             Constraint::Percentage(32),
-            Constraint::Percentage(25),
-            Constraint::Percentage(15),
-            Constraint::Percentage(10),
+            Constraint::Percentage(18),
         ],
     )
-    .header(
-        Row::new(vec!["提供商 (Provider)", "Base URL", "默认模型 (Model)", "调度策略", "Key 数量"])
-            .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-    )
-    .row_highlight_style(
-        Style::default()
-            .bg(Color::DarkGray)
-            .fg(Color::White)
-            .add_modifier(Modifier::BOLD),
-    )
+    .header(Row::new(vec!["提供商 (Provider)", "策略", "Keys"]).style(p_header_style))
     .block(
         Block::default()
-            .borders(Borders::ALL)
-            .title(format!(" 提供商列表 (共 {} 个) - 可使用 'ponyllm provider add' 增量扩展 ", app.config.providers.len()))
-            .border_type(BorderType::Rounded),
+            .borders(Borders::RIGHT | Borders::TOP)
+            .title(format!(" ── 提供商列表 (共 {} 个) ── ", app.config.providers.len()))
+            .border_style(p_border_style),
     );
 
-    f.render_stateful_widget(table, area, &mut app.provider_table_state);
+    f.render_stateful_widget(p_table, split_chunks[0], &mut app.provider_table_state);
+
+    // ── Right: Models Split (Top: Table, Bottom: Spec Card) ──
+    let right_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
+        .split(split_chunks[1]);
+
+    let p_name = app.selected_provider_name();
+    let current_p = p_name.as_ref().and_then(|n| app.config.providers.get(n));
+    let default_model_name = current_p.map(|p| p.default_model.as_str()).unwrap_or("");
+
+    let models = app.selected_models_for_current_provider();
+    let selected_m_idx = app.model_table_state.selected().unwrap_or(0);
+
+    let m_rows: Vec<Row> = models.iter().enumerate().map(|(i, m)| {
+        let is_def = m.name == default_model_name;
+        let is_sel = i == selected_m_idx;
+        let prefix = if is_sel { "› " } else { "  " };
+        let name_display = if is_def {
+            format!("{}{} ★", prefix, m.name)
+        } else {
+            format!("{}{}", prefix, m.name)
+        };
+
+        let style = if is_sel && is_m_active {
+            Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD)
+        } else if is_sel {
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::White)
+        };
+
+        let in_str = m.input_types.join(",");
+        let out_str = m.output_types.join(",");
+
+        Row::new(vec![
+            Cell::from(name_display),
+            Cell::from(m.context_window.as_str()),
+            Cell::from(m.max_output.as_str()),
+            Cell::from(in_str),
+            Cell::from(out_str),
+        ]).style(style)
+    }).collect();
+
+    let m_header_style = if is_m_active {
+        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD)
+    };
+
+    let m_border_style = if is_m_active {
+        Style::default().fg(Color::Yellow)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+
+    let title_name = p_name.as_deref().unwrap_or("未选择");
+    let m_table = Table::new(
+        m_rows,
+        [
+            Constraint::Percentage(34),
+            Constraint::Percentage(16),
+            Constraint::Percentage(16),
+            Constraint::Percentage(17),
+            Constraint::Percentage(17),
+        ],
+    )
+    .header(Row::new(vec!["模型名称 (Model)", "上下文", "最大输出", "输入模态", "输出模态"]).style(m_header_style))
+    .block(
+        Block::default()
+            .borders(Borders::TOP)
+            .title(format!(" ── 模型参数矩阵 [{}] (共 {} 个模型) ── ", title_name, models.len()))
+            .border_style(m_border_style),
+    );
+
+    f.render_stateful_widget(m_table, right_chunks[0], &mut app.model_table_state);
+
+    // Selected Model Spec Card
+    if let Some(m_cfg) = app.selected_model_config() {
+        let is_def = current_p.map(|p| p.default_model == m_cfg.name).unwrap_or(false);
+        let base_url = current_p.map(|p| p.base_url.as_str()).unwrap_or("-");
+
+        let in_tags: Vec<Span> = m_cfg.input_types.iter().map(|t| {
+            Span::styled(format!(" [{}] ", t), Style::default().fg(Color::Green).bg(Color::Rgb(20, 35, 20)))
+        }).collect();
+
+        let out_tags: Vec<Span> = m_cfg.output_types.iter().map(|t| {
+            Span::styled(format!(" [{}] ", t), Style::default().fg(Color::Cyan).bg(Color::Rgb(20, 30, 45)))
+        }).collect();
+
+        let lines = vec![
+            Line::from(vec![
+                Span::styled("模型名称: ", Style::default().fg(Color::Gray)),
+                Span::styled(&m_cfg.name, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+                Span::raw("   "),
+                Span::styled("默认主模型: ", Style::default().fg(Color::Gray)),
+                Span::styled(if is_def { "★ 是 (Primary)" } else { "否" }, if is_def { Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD) } else { Style::default().fg(Color::DarkGray) }),
+            ]),
+            Line::from(vec![
+                Span::styled("上下文窗口: ", Style::default().fg(Color::Gray)),
+                Span::styled(format!("{} (Context)", m_cfg.context_window), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                Span::raw("   "),
+                Span::styled("最大输出: ", Style::default().fg(Color::Gray)),
+                Span::styled(format!("{} (Max Output)", m_cfg.max_output), Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+            ]),
+            Line::from({
+                let mut v = vec![Span::styled("输入模态: ", Style::default().fg(Color::Gray))];
+                v.extend(in_tags);
+                v.push(Span::raw("   "));
+                v.push(Span::styled("输出模态: ", Style::default().fg(Color::Gray)));
+                v.extend(out_tags);
+                v
+            }),
+            Line::from(vec![
+                Span::styled("上游路由: ", Style::default().fg(Color::Gray)),
+                Span::styled(format!("{}/v1/chat/completions", base_url.trim_end_matches('/')), Style::default().fg(Color::DarkGray)),
+            ]),
+        ];
+
+        let spec_card = Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .borders(Borders::TOP)
+                    .title(" ── 当前选中模型规格详情 (Model Spec) ── ")
+                    .border_style(Style::default().fg(Color::DarkGray)),
+            )
+            .wrap(Wrap { trim: true });
+        f.render_widget(spec_card, right_chunks[1]);
+    } else {
+        let empty_msg = Paragraph::new("暂无选中的模型，按 [a] 快速添加模型参数。")
+            .style(Style::default().fg(Color::DarkGray))
+            .block(Block::default().borders(Borders::TOP).title(" ── 模型规格详情 ── ").border_style(Style::default().fg(Color::DarkGray)));
+        f.render_widget(empty_msg, right_chunks[1]);
+    }
 }
 
 fn render_keys_tab(f: &mut Frame, area: Rect, app: &mut TuiApp) {
     let mut rows: Vec<Row> = Vec::new();
-    for (p_name, p) in &app.config.providers {
-        for k in &p.keys {
-            let masked = ConfigFile::mask_key(&k.api_key);
-            rows.push(Row::new(vec![
-                Cell::from(p_name.as_str()),
-                Cell::from(k.id.as_str()),
-                Cell::from(masked),
-                Cell::from(k.priority.to_string()),
-                Cell::from(k.weight.to_string()),
-                Cell::from("🟢 就绪 (Active)"),
-            ]));
+    let sorted_names = app.sorted_provider_names();
+    for p_name in &sorted_names {
+        if let Some(p) = app.config.providers.get(p_name) {
+            for k in &p.keys {
+                let masked = ConfigFile::mask_key(&k.api_key);
+                rows.push(Row::new(vec![
+                    Cell::from(p_name.as_str()),
+                    Cell::from(k.id.as_str()),
+                    Cell::from(masked),
+                    Cell::from(k.priority.to_string()),
+                    Cell::from(k.weight.to_string()),
+                    Cell::from("🟢 正常就绪"),
+                ]));
+            }
         }
     }
 
     let table = Table::new(
         rows,
         [
-            Constraint::Percentage(15),
-            Constraint::Percentage(20),
-            Constraint::Percentage(25),
-            Constraint::Percentage(12),
-            Constraint::Percentage(12),
             Constraint::Percentage(16),
+            Constraint::Percentage(20),
+            Constraint::Percentage(28),
+            Constraint::Percentage(12),
+            Constraint::Percentage(12),
+            Constraint::Percentage(12),
         ],
     )
     .header(
-        Row::new(vec!["所属提供商", "Key ID", "API Key (已脱敏)", "优先级", "权重", "健康状态"])
-            .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Row::new(vec!["所属提供商", "Key ID", "API Key (已脱敏)", "优先级", "权重", "状态"])
+            .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
     )
     .row_highlight_style(
         Style::default()
-            .bg(Color::DarkGray)
+            .bg(Color::Rgb(30, 40, 55))
             .fg(Color::White)
             .add_modifier(Modifier::BOLD),
     )
     .block(
         Block::default()
-            .borders(Borders::ALL)
-            .title(" Key 账户池管理 - 支持 'ponyllm key add / remove / test' ")
-            .border_type(BorderType::Rounded),
+            .borders(Borders::TOP)
+            .title(" ── Key 账户池治理 ─────────────────────────────────────────────── ")
+            .border_style(Style::default().fg(Color::DarkGray)),
     );
 
     f.render_stateful_widget(table, area, &mut app.key_table_state);
@@ -540,38 +1540,381 @@ fn render_telemetry_tab(f: &mut Frame, area: Rect, app: &mut TuiApp) {
     )
     .header(
         Row::new(vec!["时间戳", "提供商", "Key ID", "状态码", "耗时", "故障原因/录波说明"])
-            .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
     )
     .row_highlight_style(
         Style::default()
-            .bg(Color::DarkGray)
+            .bg(Color::Rgb(30, 40, 55))
             .fg(Color::White)
             .add_modifier(Modifier::BOLD),
     )
     .block(
         Block::default()
-            .borders(Borders::ALL)
-            .title(format!(" 黑匣子故障录波帧记录 (最近 {} 条) ", app.flight_frames.len()))
-            .border_type(BorderType::Rounded),
+            .borders(Borders::TOP)
+            .title(format!(" ── 黑匣子故障录波帧记录 (最近 {} 条) ────────────────────────── ", app.flight_frames.len()))
+            .border_style(Style::default().fg(Color::DarkGray)),
     );
 
     f.render_stateful_widget(table, chunks[0], &mut app.log_table_state);
 
     // Selected frame detail
     let selected_idx = app.log_table_state.selected().unwrap_or(0);
-    let detail_text = if let Some(frame) = app.flight_frames.get(selected_idx) {
-        serde_json::to_string_pretty(frame).unwrap_or_else(|_| "无法格式化".to_string())
+    let (detail_title, detail_text) = if let Some(frame) = app.flight_frames.get(selected_idx) {
+        (
+            format!(" ── 录波帧快照详情 (第 {} 条) ────────────────────────────────── ", selected_idx + 1),
+            serde_json::to_string_pretty(frame).unwrap_or_else(|_| "无法格式化".to_string()),
+        )
     } else {
-        "暂无故障录波快照（当前网关运行良好或尚未产生请求）".to_string()
+        (
+            " ── 录波帧快照详情 (暂无数据) ────────────────────────────────── ".to_string(),
+            "暂无故障录波快照（当前网关运行良好或尚未产生请求）".to_string(),
+        )
     };
 
     let detail = Paragraph::new(detail_text)
         .block(
             Block::default()
-                .borders(Borders::ALL)
-                .title(format!(" 录波帧快照详情 (第 {} 条) ", selected_idx + 1))
-                .border_type(BorderType::Rounded),
+                .borders(Borders::TOP)
+                .title(detail_title)
+                .border_style(Style::default().fg(Color::DarkGray)),
         )
         .wrap(Wrap { trim: true });
     f.render_widget(detail, chunks[1]);
+}
+
+fn safe_centered_rect(min_w: u16, min_h: u16, r: Rect) -> Rect {
+    let target_w = min_w.clamp(20, r.width.saturating_sub(2).max(20));
+    let target_h = min_h.clamp(8, r.height.saturating_sub(2).max(8));
+
+    let pad_y = r.height.saturating_sub(target_h) / 2;
+    let pad_x = r.width.saturating_sub(target_w) / 2;
+
+    Rect {
+        x: r.x + pad_x,
+        y: r.y + pad_y,
+        width: target_w,
+        height: target_h,
+    }
+}
+
+fn render_modal(f: &mut Frame, area: Rect, app: &TuiApp) {
+    match &app.modal {
+        Modal::None => {}
+        Modal::DeleteProviderConfirm { name } => {
+            let modal_area = safe_centered_rect(54, 8, area);
+            f.render_widget(Clear, modal_area);
+
+            let text = vec![
+                Line::from(Span::styled("⚠️ 安全删除确认", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD))),
+                Line::from(""),
+                Line::from(format!("确定彻底删除提供商 '{}' 及其所有模型配置？", name)),
+                Line::from(""),
+                Line::from(vec![
+                    Span::styled(" [y/Enter] ", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+                    Span::raw("确认删除   "),
+                    Span::styled(" [n/Esc] ", Style::default().fg(Color::Gray)),
+                    Span::raw("取消返回"),
+                ]),
+            ];
+
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Plain)
+                .border_style(Style::default().fg(Color::Red))
+                .title(" 删除提供商 ");
+            let p = Paragraph::new(text).block(block).alignment(Alignment::Center);
+            f.render_widget(p, modal_area);
+        }
+        Modal::DeleteModelConfirm { provider_name, model_name } => {
+            let modal_area = safe_centered_rect(54, 8, area);
+            f.render_widget(Clear, modal_area);
+
+            let text = vec![
+                Line::from(Span::styled("⚠️ 删除模型确认", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD))),
+                Line::from(""),
+                Line::from(format!("确定从 '{}' 中删除模型 '{}' 吗？", provider_name, model_name)),
+                Line::from(""),
+                Line::from(vec![
+                    Span::styled(" [y/Enter] ", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+                    Span::raw("确认删除   "),
+                    Span::styled(" [n/Esc] ", Style::default().fg(Color::Gray)),
+                    Span::raw("取消返回"),
+                ]),
+            ];
+
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Plain)
+                .border_style(Style::default().fg(Color::Red))
+                .title(" 删除模型 ");
+            let p = Paragraph::new(text).block(block).alignment(Alignment::Center);
+            f.render_widget(p, modal_area);
+        }
+        Modal::AddProvider { name, base_url, default_model, strategy_idx, active_field } => {
+            let modal_area = safe_centered_rect(62, 12, area);
+            f.render_widget(Clear, modal_area);
+
+            let strat_options: Vec<Span> = STRATEGIES.iter().enumerate().map(|(i, &s)| {
+                let sel = i == *strategy_idx;
+                let text = format!(" [{}] {} ", i + 1, s);
+                if sel {
+                    Span::styled(text, Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD))
+                } else {
+                    Span::styled(text, Style::default().fg(Color::DarkGray))
+                }
+            }).collect();
+
+            let lines = vec![
+                Line::from(Span::styled("新建大模型提供商 (Add Provider)", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))),
+                Line::from(""),
+                render_form_field("提供商 ID", name, *active_field == 0),
+                render_form_field("Base URL", base_url, *active_field == 1),
+                render_form_field("默认模型名", default_model, *active_field == 2),
+                Line::from({
+                    let mut spans = vec![
+                        Span::styled(if *active_field == 3 { "› 调度策略: " } else { "  调度策略: " },
+                            if *active_field == 3 { Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD) } else { Style::default().fg(Color::Gray) }),
+                    ];
+                    spans.extend(strat_options);
+                    spans
+                }),
+                Line::from(""),
+                Line::from(vec![
+                    Span::styled(" [Tab/↓/↑] ", Style::default().fg(Color::Yellow)),
+                    Span::raw("切字段  "),
+                    Span::styled(" [Enter] ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+                    Span::raw("保存提交  "),
+                    Span::styled(" [Esc] ", Style::default().fg(Color::Gray)),
+                    Span::raw("取消"),
+                ]),
+            ];
+
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Plain)
+                .border_style(Style::default().fg(Color::Cyan))
+                .title(" 新建提供商 ");
+            let p = Paragraph::new(lines).block(block);
+            f.render_widget(p, modal_area);
+        }
+        Modal::EditProvider { name, base_url, default_model, strategy_idx, active_field } => {
+            let modal_area = safe_centered_rect(62, 11, area);
+            f.render_widget(Clear, modal_area);
+
+            let strat_options: Vec<Span> = STRATEGIES.iter().enumerate().map(|(i, &s)| {
+                let sel = i == *strategy_idx;
+                let text = format!(" [{}] {} ", i + 1, s);
+                if sel {
+                    Span::styled(text, Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD))
+                } else {
+                    Span::styled(text, Style::default().fg(Color::DarkGray))
+                }
+            }).collect();
+
+            let lines = vec![
+                Line::from(Span::styled(format!("编辑提供商 [{}]", name), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))),
+                Line::from(""),
+                render_form_field("Base URL", base_url, *active_field == 0),
+                render_form_field("默认模型名", default_model, *active_field == 1),
+                Line::from({
+                    let mut spans = vec![
+                        Span::styled(if *active_field == 2 { "› 调度策略: " } else { "  调度策略: " },
+                            if *active_field == 2 { Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD) } else { Style::default().fg(Color::Gray) }),
+                    ];
+                    spans.extend(strat_options);
+                    spans
+                }),
+                Line::from(""),
+                Line::from(vec![
+                    Span::styled(" [Tab/↓/↑] ", Style::default().fg(Color::Yellow)),
+                    Span::raw("切字段  "),
+                    Span::styled(" [Enter] ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+                    Span::raw("保存更改  "),
+                    Span::styled(" [Esc] ", Style::default().fg(Color::Gray)),
+                    Span::raw("取消"),
+                ]),
+            ];
+
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Plain)
+                .border_style(Style::default().fg(Color::Cyan))
+                .title(" 编辑提供商 ");
+            let p = Paragraph::new(lines).block(block);
+            f.render_widget(p, modal_area);
+        }
+        Modal::AddModel {
+            provider_name,
+            model_name,
+            context_window,
+            max_output,
+            input_modalities,
+            output_modalities,
+            set_as_default,
+            active_field,
+        } => {
+            let modal_area = safe_centered_rect(66, 14, area);
+            f.render_widget(Clear, modal_area);
+
+            let in_spans = render_modality_checkboxes(input_modalities, *active_field == 3);
+            let out_spans = render_modality_checkboxes(output_modalities, *active_field == 4);
+
+            let def_span = if *set_as_default {
+                Span::styled(" [x] 设为提供商默认主模型 ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+            } else {
+                Span::styled(" [ ] 设为提供商默认主模型 (按空格切换) ", Style::default().fg(Color::Gray))
+            };
+
+            let lines = vec![
+                Line::from(Span::styled(format!("添加模型参数 ── 所属: {}", provider_name), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))),
+                Line::from(""),
+                render_form_field("模型标识 (Name)", model_name, *active_field == 0),
+                render_form_field("上下文窗口 (如 1M/128K)", context_window, *active_field == 1),
+                render_form_field("最大输出限制 (如 32K/64K)", max_output, *active_field == 2),
+                Line::from({
+                    let mut spans = vec![
+                        Span::styled(if *active_field == 3 { "› 输入模态 (按1-4切换): " } else { "  输入模态 (按1-4切换): " },
+                            if *active_field == 3 { Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD) } else { Style::default().fg(Color::Gray) }),
+                    ];
+                    spans.extend(in_spans);
+                    spans
+                }),
+                Line::from({
+                    let mut spans = vec![
+                        Span::styled(if *active_field == 4 { "› 输出模态 (按1-4切换): " } else { "  输出模态 (按1-4切换): " },
+                            if *active_field == 4 { Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD) } else { Style::default().fg(Color::Gray) }),
+                    ];
+                    spans.extend(out_spans);
+                    spans
+                }),
+                Line::from(vec![
+                    Span::styled(if *active_field == 5 { "› 默认主模型: " } else { "  默认主模型: " },
+                        if *active_field == 5 { Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD) } else { Style::default().fg(Color::Gray) }),
+                    def_span,
+                ]),
+                Line::from(""),
+                Line::from(vec![
+                    Span::styled(" [Tab/↓/↑] ", Style::default().fg(Color::Yellow)),
+                    Span::raw("切字段  "),
+                    Span::styled(" [Enter] ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+                    Span::raw("确认添加  "),
+                    Span::styled(" [Esc] ", Style::default().fg(Color::Gray)),
+                    Span::raw("取消"),
+                ]),
+            ];
+
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Plain)
+                .border_style(Style::default().fg(Color::Yellow))
+                .title(" 添加模型配置 ");
+            let p = Paragraph::new(lines).block(block);
+            f.render_widget(p, modal_area);
+        }
+        Modal::EditModel {
+            provider_name,
+            model_name,
+            context_window,
+            max_output,
+            input_modalities,
+            output_modalities,
+            set_as_default,
+            active_field,
+        } => {
+            let modal_area = safe_centered_rect(66, 13, area);
+            f.render_widget(Clear, modal_area);
+
+            let in_spans = render_modality_checkboxes(input_modalities, *active_field == 2);
+            let out_spans = render_modality_checkboxes(output_modalities, *active_field == 3);
+
+            let def_span = if *set_as_default {
+                Span::styled(" [x] 设为提供商默认主模型 ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+            } else {
+                Span::styled(" [ ] 设为提供商默认主模型 (按空格切换) ", Style::default().fg(Color::Gray))
+            };
+
+            let lines = vec![
+                Line::from(Span::styled(format!("编辑模型参数: {} ({})", model_name, provider_name), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))),
+                Line::from(""),
+                render_form_field("上下文窗口", context_window, *active_field == 0),
+                render_form_field("最大输出限制", max_output, *active_field == 1),
+                Line::from({
+                    let mut spans = vec![
+                        Span::styled(if *active_field == 2 { "› 输入模态 (按1-4切换): " } else { "  输入模态 (按1-4切换): " },
+                            if *active_field == 2 { Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD) } else { Style::default().fg(Color::Gray) }),
+                    ];
+                    spans.extend(in_spans);
+                    spans
+                }),
+                Line::from({
+                    let mut spans = vec![
+                        Span::styled(if *active_field == 3 { "› 输出模态 (按1-4切换): " } else { "  输出模态 (按1-4切换): " },
+                            if *active_field == 3 { Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD) } else { Style::default().fg(Color::Gray) }),
+                    ];
+                    spans.extend(out_spans);
+                    spans
+                }),
+                Line::from(vec![
+                    Span::styled(if *active_field == 4 { "› 默认主模型: " } else { "  默认主模型: " },
+                        if *active_field == 4 { Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD) } else { Style::default().fg(Color::Gray) }),
+                    def_span,
+                ]),
+                Line::from(""),
+                Line::from(vec![
+                    Span::styled(" [Tab/↓/↑] ", Style::default().fg(Color::Yellow)),
+                    Span::raw("切字段  "),
+                    Span::styled(" [Enter] ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+                    Span::raw("保存修改  "),
+                    Span::styled(" [Esc] ", Style::default().fg(Color::Gray)),
+                    Span::raw("取消"),
+                ]),
+            ];
+
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Plain)
+                .border_style(Style::default().fg(Color::Yellow))
+                .title(" 编辑模型配置 ");
+            let p = Paragraph::new(lines).block(block);
+            f.render_widget(p, modal_area);
+        }
+    }
+}
+
+fn render_form_field<'a>(label: &'a str, value: &'a str, is_active: bool) -> Line<'a> {
+    if is_active {
+        Line::from(vec![
+            Span::styled(format!("› {}: ", label), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(if value.is_empty() { " " } else { value }, Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(" █", Style::default().fg(Color::Yellow)),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled(format!("  {}: ", label), Style::default().fg(Color::Gray)),
+            Span::styled(if value.is_empty() { "(未填写)" } else { value }, Style::default().fg(Color::White)),
+        ])
+    }
+}
+
+fn render_modality_checkboxes<'a>(modalities: &[bool; 4], is_active: bool) -> Vec<Span<'a>> {
+    let mut spans = Vec::new();
+    for (i, &on) in modalities.iter().enumerate() {
+        let label = MODALITIES[i];
+        let tag = if on {
+            format!("[x] {} ", label)
+        } else {
+            format!("[ ] {} ", label)
+        };
+
+        let style = if on {
+            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+        } else if is_active {
+            Style::default().fg(Color::Gray)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+
+        spans.push(Span::styled(tag, style));
+    }
+    spans
 }

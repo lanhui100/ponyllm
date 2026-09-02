@@ -118,6 +118,7 @@ pub fn run_interactive_init(output_path: &str) -> Result<(), Box<dyn std::error:
             base_url,
             default_model: model,
             models: Vec::new(),
+            model_configs: Vec::new(),
             strategy: strat.to_string(),
             keys,
         });

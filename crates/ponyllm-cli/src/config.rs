@@ -43,16 +43,112 @@ impl Default for GatewaySection {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ModelConfig {
+    pub name: String,
+    #[serde(default = "default_context_window")]
+    pub context_window: String,
+    #[serde(default = "default_max_output")]
+    pub max_output: String,
+    #[serde(default = "default_modalities")]
+    pub input_types: Vec<String>,
+    #[serde(default = "default_modalities")]
+    pub output_types: Vec<String>,
+}
+
+pub fn default_context_window() -> String {
+    "1M".to_string()
+}
+pub fn default_max_output() -> String {
+    "32K".to_string()
+}
+pub fn default_modalities() -> Vec<String> {
+    vec!["text".to_string()]
+}
+
+impl Default for ModelConfig {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            context_window: default_context_window(),
+            max_output: default_max_output(),
+            input_types: default_modalities(),
+            output_types: default_modalities(),
+        }
+    }
+}
+
+impl ModelConfig {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            context_window: default_context_window(),
+            max_output: default_max_output(),
+            input_types: default_modalities(),
+            output_types: default_modalities(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderSection {
     pub base_url: String,
     pub default_model: String,
-    #[serde(default)]
-    pub models: Vec<String>,
     #[serde(default = "default_strategy")]
     pub strategy: String,
     #[serde(default)]
+    pub models: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub model_configs: Vec<ModelConfig>,
+    #[serde(default)]
     pub keys: Vec<KeySection>,
+}
+
+impl ProviderSection {
+    pub fn get_model_config(&self, model_name: &str) -> ModelConfig {
+        if let Some(cfg) = self.model_configs.iter().find(|m| m.name == model_name) {
+            return cfg.clone();
+        }
+        ModelConfig::new(model_name)
+    }
+
+    pub fn upsert_model_config(&mut self, cfg: ModelConfig) {
+        if let Some(existing) = self.model_configs.iter_mut().find(|m| m.name == cfg.name) {
+            *existing = cfg.clone();
+        } else {
+            self.model_configs.push(cfg.clone());
+        }
+
+        if cfg.name != self.default_model && !self.models.contains(&cfg.name) {
+            self.models.push(cfg.name);
+        }
+    }
+
+    pub fn list_all_models(&self) -> Vec<ModelConfig> {
+        let mut result = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+
+        if !self.default_model.is_empty() {
+            result.push(self.get_model_config(&self.default_model));
+            seen.insert(self.default_model.clone());
+        }
+
+        for m in &self.models {
+            if !seen.contains(m) {
+                result.push(self.get_model_config(m));
+                seen.insert(m.clone());
+            }
+        }
+
+        for mc in &self.model_configs {
+            if !seen.contains(&mc.name) {
+                result.push(mc.clone());
+                seen.insert(mc.name.clone());
+            }
+        }
+
+        result
+    }
 }
 
 fn default_strategy() -> String {
@@ -136,12 +232,22 @@ impl ConfigFile {
             base_url: base_url.to_string(),
             default_model: default_model.to_string(),
             models: Vec::new(),
+            model_configs: Vec::new(),
             strategy: strategy.to_string(),
             keys: Vec::new(),
         });
         entry.base_url = base_url.to_string();
         entry.default_model = default_model.to_string();
         entry.strategy = strategy.to_string();
+    }
+
+    pub fn update_provider(&mut self, name: &str, base_url: &str, default_model: &str, strategy: &str) -> Result<(), String> {
+        let p = self.providers.get_mut(name)
+            .ok_or_else(|| format!("提供商 '{}' 不存在", name))?;
+        p.base_url = base_url.to_string();
+        p.default_model = default_model.to_string();
+        p.strategy = strategy.to_string();
+        Ok(())
     }
 
     pub fn add_model(&mut self, provider: &str, model: &str) -> Result<(), String> {
@@ -153,18 +259,34 @@ impl ConfigFile {
         Ok(())
     }
 
+    pub fn upsert_model_config(&mut self, provider: &str, model_cfg: ModelConfig) -> Result<(), String> {
+        let p = self.providers.get_mut(provider)
+            .ok_or_else(|| format!("提供商 '{}' 不存在", provider))?;
+        p.upsert_model_config(model_cfg);
+        Ok(())
+    }
+
     pub fn remove_model(&mut self, provider: &str, model: &str) -> Result<bool, String> {
         let p = self.providers.get_mut(provider)
             .ok_or_else(|| format!("提供商 '{}' 不存在", provider))?;
-        let len_before = p.models.len();
+        if p.default_model == model {
+            return Err(format!("无法直接删除默认主模型 '{}'。若要删除，请先指定其他模型为默认主模型", model));
+        }
+        let len_models_before = p.models.len();
         p.models.retain(|m| m != model);
-        Ok(p.models.len() < len_before)
+        let len_cfgs_before = p.model_configs.len();
+        p.model_configs.retain(|m| m.name != model);
+        Ok(p.models.len() < len_models_before || p.model_configs.len() < len_cfgs_before)
     }
 
     pub fn set_default_model(&mut self, provider: &str, model: &str) -> Result<(), String> {
         let p = self.providers.get_mut(provider)
             .ok_or_else(|| format!("提供商 '{}' 不存在", provider))?;
-        p.default_model = model.to_string();
+        let old_default = std::mem::replace(&mut p.default_model, model.to_string());
+        if !old_default.is_empty() && old_default != model && !p.models.contains(&old_default) {
+            p.models.push(old_default);
+        }
+        p.models.retain(|m| m != model);
         Ok(())
     }
 
