@@ -4,7 +4,6 @@ use axum::extract::State;
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::IntoResponse;
 use axum::Json;
-use futures_util::StreamExt;
 use ponyllm_core::error::CoreError;
 use ponyllm_core::executor::UpstreamExecutor;
 use ponyllm_core::pool::GatewayRoutingStrategy;
@@ -13,16 +12,34 @@ use ponyllm_protocol::anthropic::messages::MessageResponse;
 use ponyllm_protocol::openai::chat::ChatCompletionRequest;
 use ponyllm_protocol::translator::{anthropic_to_chat_response, chat_to_anthropic_request};
 use std::str::FromStr;
+use crate::extractors::AppJson;
 use crate::routes::models::ParsedRequestModel;
 use crate::state::{AppState, RoutedTarget};
+use crate::streaming::{anthropic_sse_to_openai_stream, passthrough_sse};
 
 pub async fn handle_chat_completions(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    Json(req): Json<ChatCompletionRequest>,
+    AppJson(req): AppJson<ChatCompletionRequest>,
 ) -> impl IntoResponse {
     let start_time = Instant::now();
     let request_id = format!("req_{}", uuid_simple());
+
+    // Client-side validation: empty messages are a client error, not an
+    // upstream exhaustion (previously surfaced as 502 after hitting upstream).
+    if req.messages.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": {
+                    "message": "messages must not be empty",
+                    "type": "invalid_request_error",
+                    "code": "invalid_messages"
+                }
+            })),
+        )
+            .into_response();
+    }
 
     // 1. Extract optional X-Pony-Strategy header
     let header_strategy = headers
@@ -40,10 +57,10 @@ pub async fn handle_chat_completions(
         Ok(ts) if !ts.is_empty() => ts,
         Ok(_) => {
             return (
-                StatusCode::SERVICE_UNAVAILABLE,
+                StatusCode::NOT_FOUND,
                 Json(serde_json::json!({
                     "error": {
-                        "message": "No matching model providers available",
+                        "message": format!("The model '{}' does not exist or you do not have access to it.", req.model),
                         "type": "invalid_request_error",
                         "code": "model_not_found"
                     }
@@ -52,9 +69,12 @@ pub async fn handle_chat_completions(
                 .into_response();
         }
         Err(err) => {
-            let status = match err {
-                CoreError::CapacityExhausted { .. } => StatusCode::TOO_MANY_REQUESTS,
-                _ => StatusCode::SERVICE_UNAVAILABLE,
+            let (status, code) = match err {
+                CoreError::CapacityExhausted { .. } => (StatusCode::TOO_MANY_REQUESTS, "capacity_exhausted"),
+                CoreError::Internal(ref msg) if msg.contains("No provider configured") => {
+                    (StatusCode::NOT_FOUND, "model_not_found")
+                }
+                _ => (StatusCode::SERVICE_UNAVAILABLE, "service_unavailable"),
             };
             return (
                 status,
@@ -62,7 +82,7 @@ pub async fn handle_chat_completions(
                     "error": {
                         "message": err.to_string(),
                         "type": "invalid_request_error",
-                        "code": "capacity_exhausted"
+                        "code": code
                     }
                 })),
             )
@@ -133,16 +153,25 @@ pub async fn handle_chat_completions(
                         response_snippet: Some("[STREAM_STARTED]".to_string()),
                     });
 
-                    let stream = upstream_resp.bytes_stream().map(|res| match res {
-                        Ok(bytes) => Ok::<_, std::convert::Infallible>(axum::response::sse::Event::default().data(String::from_utf8_lossy(&bytes).to_string())),
-                        Err(e) => Ok::<_, std::convert::Infallible>(axum::response::sse::Event::default().data(
-                            serde_json::json!({"error": {"message": format!("Stream error: {}", e), "type": "upstream_error"}}).to_string(),
-                        )),
-                    });
+                    // Stream the raw upstream SSE body. For an Anthropic upstream,
+                    // translate Anthropic SSE events into OpenAI chat chunks.
+                    let raw_stream = upstream_resp.bytes_stream();
+                    let body = if is_anthropic_upstream {
+                        axum::body::Body::from_stream(anthropic_sse_to_openai_stream(
+                            raw_stream,
+                            &target.physical_model,
+                        ))
+                    } else {
+                        axum::body::Body::from_stream(passthrough_sse(raw_stream))
+                    };
 
-                    let mut sse_resp = axum::response::Sse::new(stream).into_response();
-                    inject_routing_headers(&mut sse_resp, &target);
-                    return sse_resp;
+                    let mut resp = axum::response::Response::new(body);
+                    resp.headers_mut().insert(
+                        axum::http::header::CONTENT_TYPE,
+                        HeaderValue::from_static("text/event-stream"),
+                    );
+                    inject_routing_headers(&mut resp, &target);
+                    return resp;
                 }
                 Err(err) => {
                     tracing::warn!("Provider '{}' stream failed ({}). Attempting fallback...", target.provider_name, err);

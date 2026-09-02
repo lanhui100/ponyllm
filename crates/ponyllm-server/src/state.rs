@@ -250,23 +250,6 @@ impl AppState {
             }
         }
 
-        // 4. Fallback to first available provider
-        if candidates.is_empty() {
-            if let Some((p_name, p_cfg)) = self.config.providers.iter().next() {
-                let spec = p_cfg.get_model_spec(&p_cfg.default_model);
-                let is_ant = p_cfg.base_url.contains("anthropic");
-                candidates.push(RoutedTarget {
-                    provider_name: p_name.clone(),
-                    base_url: p_cfg.base_url.clone(),
-                    physical_model: p_cfg.default_model.clone(),
-                    tier: spec.tier,
-                    strategy,
-                    is_anthropic_upstream: is_ant,
-                    context_window: spec.context_window,
-                });
-            }
-        }
-
         if candidates.is_empty() {
             return Err(CoreError::Internal(format!(
                 "No provider configured to handle model '{}'",
