@@ -419,4 +419,22 @@ async fn test_gateway_auth_middleware() {
         .await
         .unwrap();
     assert_eq!(ant_auth_resp.status(), 200);
+
+    // 6. Lowercase "bearer " scheme is accepted (RFC 6750 scheme is case-insensitive)
+    let lower_bearer_resp = client
+        .get(format!("http://{}/v1/models", gateway_addr))
+        .header("Authorization", "bearer sk-ponyllm-secret-123")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(lower_bearer_resp.status(), 200);
+
+    // 7. Plain token without scheme also accepted (gateway convenience)
+    let plain_token_resp = client
+        .get(format!("http://{}/v1/models", gateway_addr))
+        .header("Authorization", "sk-ponyllm-secret-123")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(plain_token_resp.status(), 200);
 }

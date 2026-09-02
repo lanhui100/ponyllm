@@ -30,13 +30,17 @@ async fn auth_middleware(
 
     let headers = req.headers();
 
-    // 1. Check Authorization: Bearer <token>
+    // 1. Check Authorization: Bearer <token> (scheme is case-insensitive per RFC 6750)
     let mut provided_token = None;
     if let Some(auth_val) = headers.get("authorization").and_then(|v| v.to_str().ok()) {
-        if let Some(bearer) = auth_val.strip_prefix("Bearer ") {
-            provided_token = Some(bearer.trim());
+        let trimmed = auth_val.trim();
+        let lower = trimmed.to_ascii_lowercase();
+        if lower.starts_with("bearer ") {
+            // "bearer " is 7 ASCII bytes regardless of case; slice the original
+            // (non-lowercased) value so the token keeps its real casing.
+            provided_token = Some(trimmed[7..].trim());
         } else {
-            provided_token = Some(auth_val.trim());
+            provided_token = Some(trimmed);
         }
     }
 
