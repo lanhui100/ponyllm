@@ -21,19 +21,28 @@ keys = [
 
 [providers.deepseek]
 base_url = "https://api.deepseek.com"
-default_model = "deepseek-reasoner"
+default_model = "deepseek-v4-flash"
 strategy = "priority"
 keys = [
     { id = "ds-1", api_key = "sk-ds-1", priority = 1, weight = 10 },
+]
+
+[providers.deepseek-anthropic]
+base_url = "https://api.deepseek.com/anthropic"
+default_model = "deepseek-v4-flash"
+strategy = "priority"
+keys = [
+    { id = "ds-ant-1", api_key = "sk-ds-1", priority = 1, weight = 10 },
 ]
 "#;
 
     let cfg: ConfigFile = toml::from_str(toml_content).unwrap();
     assert_eq!(cfg.gateway.bind, "0.0.0.0:8080");
     assert_eq!(cfg.gateway.max_retries, 3);
-    assert_eq!(cfg.providers.len(), 2);
+    assert_eq!(cfg.providers.len(), 3);
     assert_eq!(cfg.providers["openai"].keys.len(), 2);
-    assert_eq!(cfg.providers["deepseek"].default_model, "deepseek-reasoner");
+    assert_eq!(cfg.providers["deepseek"].default_model, "deepseek-v4-flash");
+    assert_eq!(cfg.providers["deepseek-anthropic"].base_url, "https://api.deepseek.com/anthropic");
 }
 
 #[test]

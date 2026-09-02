@@ -125,7 +125,14 @@ async fn test_multi_provider_dynamic_model_routing() {
         "deepseek".to_string(),
         ProviderConfig {
             base_url: "https://api.deepseek.com".to_string(),
-            default_model: "deepseek-reasoner".to_string(),
+            default_model: "deepseek-v4-flash".to_string(),
+        },
+    );
+    config.providers.insert(
+        "deepseek-anthropic".to_string(),
+        ProviderConfig {
+            base_url: "https://api.deepseek.com/anthropic".to_string(),
+            default_model: "deepseek-v4-flash".to_string(),
         },
     );
     config.providers.insert(
@@ -146,8 +153,8 @@ async fn test_multi_provider_dynamic_model_routing() {
     let state = AppState::new(config);
 
     // 1. Exact default model match
-    let (prov_ds, _) = state.resolve_provider("deepseek-reasoner").unwrap();
-    assert_eq!(prov_ds, "deepseek");
+    let (prov_ds, _) = state.resolve_provider("deepseek-v4-flash").unwrap();
+    assert!(prov_ds.starts_with("deepseek"));
 
     let (prov_ant, _) = state.resolve_provider("claude-3-7-sonnet-20250219").unwrap();
     assert_eq!(prov_ant, "anthropic");
@@ -156,10 +163,101 @@ async fn test_multi_provider_dynamic_model_routing() {
     let (prov_pref, _) = state.resolve_provider("openai/gpt-3.5-turbo").unwrap();
     assert_eq!(prov_pref, "openai");
 
+    let (prov_ds_ant, _) = state.resolve_provider("deepseek-anthropic/deepseek-v4-flash").unwrap();
+    assert_eq!(prov_ds_ant, "deepseek-anthropic");
+
     // 3. Keyword heuristic match
     let (prov_gpt, _) = state.resolve_provider("gpt-4o-mini").unwrap();
     assert_eq!(prov_gpt, "openai");
 
     let (prov_cl, _) = state.resolve_provider("claude-3-5-sonnet").unwrap();
     assert_eq!(prov_cl, "anthropic");
+}
+
+#[tokio::test]
+async fn test_anthropic_upstream_direct_and_cross_routing() {
+    // 1. Mock upstream server that handles native Anthropic format at /v1/messages
+    let mock_anthropic_upstream = Router::new().route(
+        "/anthropic/v1/messages",
+        post(|Json(req): Json<serde_json::Value>| async move {
+            let user_text = req["messages"][0]["content"].as_str().unwrap_or_default();
+            axum::Json(json!({
+                "id": "msg_mock_999",
+                "type": "message",
+                "role": "assistant",
+                "content": [{
+                    "type": "text",
+                    "text": format!("Anthropic Echo: {}", user_text)
+                }],
+                "model": "deepseek-v4-flash",
+                "stop_reason": "end_turn",
+                "stop_sequence": null,
+                "usage": {
+                    "input_tokens": 12,
+                    "output_tokens": 18
+                }
+            }))
+        }),
+    );
+
+    let upstream_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_addr = upstream_listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(upstream_listener, mock_anthropic_upstream).await.unwrap();
+    });
+
+    // 2. Setup gateway pointing to deepseek-anthropic base_url (ends with /anthropic)
+    let pool = Arc::new(KeyPool::new("deepseek-anthropic", RoutingStrategy::Priority));
+    pool.add_key(ApiKeyEntry::new("ds-key-1", "sk-ds-secret-123456", 1, 10));
+
+    let mut config = GatewayConfig::default();
+    config.providers.insert(
+        "deepseek-anthropic".to_string(),
+        ProviderConfig {
+            base_url: format!("http://{}/anthropic", upstream_addr),
+            default_model: "deepseek-v4-flash".to_string(),
+        },
+    );
+
+    let state = Arc::new(AppState::new(config));
+    state.register_pool("deepseek-anthropic", pool);
+
+    let gateway_app = create_app(state);
+    let gateway_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let gateway_addr = gateway_listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(gateway_listener, gateway_app).await.unwrap();
+    });
+
+    let client = reqwest::Client::new();
+
+    // 3. Test Anthropic client requesting /v1/messages -> direct passthrough to Anthropic upstream!
+    let ant_resp = client
+        .post(format!("http://{}/v1/messages", gateway_addr))
+        .json(&json!({
+            "model": "deepseek-anthropic/deepseek-v4-flash",
+            "max_tokens": 1024,
+            "messages": [{"role": "user", "content": "Direct Anthropic Test"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ant_resp.status(), 200);
+    let ant_body: serde_json::Value = ant_resp.json().await.unwrap();
+    assert_eq!(ant_body["type"], "message");
+    assert_eq!(ant_body["content"][0]["text"], "Anthropic Echo: Direct Anthropic Test");
+
+    // 4. Test OpenAI Chat client requesting /v1/chat/completions -> translated to Anthropic upstream and back!
+    let chat_resp = client
+        .post(format!("http://{}/v1/chat/completions", gateway_addr))
+        .json(&json!({
+            "model": "deepseek-anthropic/deepseek-v4-flash",
+            "messages": [{"role": "user", "content": "Cross Chat Test"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(chat_resp.status(), 200);
+    let chat_body: serde_json::Value = chat_resp.json().await.unwrap();
+    assert_eq!(chat_body["choices"][0]["message"]["content"], "Anthropic Echo: Cross Chat Test");
 }

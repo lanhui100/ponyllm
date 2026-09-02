@@ -65,27 +65,58 @@ impl PonyGateway {
     pub async fn chat_completion(&self, req: &ChatCompletionRequest) -> Result<ChatCompletionResponse> {
         let provider = self.resolve_provider(&req.model)?;
         let executor = UpstreamExecutor::new(provider.pool.clone(), self.max_retries);
-        let url = format!("{}/v1/chat/completions", provider.base_url.trim_end_matches('/'));
+        let is_anthropic_upstream = provider.base_url.ends_with("/anthropic")
+            || provider.base_url.contains("api.anthropic.com")
+            || provider.base_url.ends_with("/messages");
 
-        let body = serde_json::to_value(req)?;
-        let resp_val = executor.execute_json_request(&url, &body).await?;
-        let resp: ChatCompletionResponse = serde_json::from_value(resp_val)?;
-        Ok(resp)
+        if is_anthropic_upstream {
+            let ant_req = chat_to_anthropic_request(req)?;
+            let url = if provider.base_url.ends_with("/messages") {
+                provider.base_url.clone()
+            } else {
+                format!("{}/v1/messages", provider.base_url.trim_end_matches('/'))
+            };
+            let body = serde_json::to_value(&ant_req)?;
+            let resp_val = executor.execute_json_request(&url, &body).await?;
+            let ant_resp: MessageResponse = serde_json::from_value(resp_val)?;
+            let chat_resp = anthropic_to_chat_response(&ant_resp)?;
+            Ok(chat_resp)
+        } else {
+            let url = format!("{}/v1/chat/completions", provider.base_url.trim_end_matches('/'));
+            let body = serde_json::to_value(req)?;
+            let resp_val = executor.execute_json_request(&url, &body).await?;
+            let resp: ChatCompletionResponse = serde_json::from_value(resp_val)?;
+            Ok(resp)
+        }
     }
 
     /// In-memory Anthropic Messages API (with transparent bidirectional translation)
     pub async fn create_message(&self, req: &MessageRequest) -> Result<MessageResponse> {
         let provider = self.resolve_provider(&req.model)?;
         let executor = UpstreamExecutor::new(provider.pool.clone(), self.max_retries);
+        let is_anthropic_upstream = provider.base_url.ends_with("/anthropic")
+            || provider.base_url.contains("api.anthropic.com")
+            || provider.base_url.ends_with("/messages");
 
-        let chat_req = anthropic_to_chat_request(req)?;
-        let url = format!("{}/v1/chat/completions", provider.base_url.trim_end_matches('/'));
-        let body = serde_json::to_value(&chat_req)?;
-
-        let resp_val = executor.execute_json_request(&url, &body).await?;
-        let chat_resp: ChatCompletionResponse = serde_json::from_value(resp_val)?;
-        let ant_resp = chat_to_anthropic_response(&chat_resp)?;
-        Ok(ant_resp)
+        if is_anthropic_upstream {
+            let url = if provider.base_url.ends_with("/messages") {
+                provider.base_url.clone()
+            } else {
+                format!("{}/v1/messages", provider.base_url.trim_end_matches('/'))
+            };
+            let body = serde_json::to_value(req)?;
+            let resp_val = executor.execute_json_request(&url, &body).await?;
+            let ant_resp: MessageResponse = serde_json::from_value(resp_val)?;
+            Ok(ant_resp)
+        } else {
+            let chat_req = anthropic_to_chat_request(req)?;
+            let url = format!("{}/v1/chat/completions", provider.base_url.trim_end_matches('/'));
+            let body = serde_json::to_value(&chat_req)?;
+            let resp_val = executor.execute_json_request(&url, &body).await?;
+            let chat_resp: ChatCompletionResponse = serde_json::from_value(resp_val)?;
+            let ant_resp = chat_to_anthropic_response(&chat_resp)?;
+            Ok(ant_resp)
+        }
     }
 
     /// In-memory OpenAI Responses API

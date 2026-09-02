@@ -20,17 +20,20 @@ pub fn run_interactive_init(output_path: &str) -> Result<(), Box<dyn std::error:
     loop {
         println!("\n--- 配置模型提供商 (Provider) ---");
         let provider_options = vec![
-            "DeepSeek (推荐: 支持 reasoning 思考链全协议转译)",
-            "OpenAI (官方接口及各大兼容中转)",
-            "Anthropic (官方 Messages 接口)",
+            "DeepSeek - OpenAI 协议 (https://api.deepseek.com, 默认模型: deepseek-v4-flash)",
+            "DeepSeek - Anthropic 协议 (https://api.deepseek.com/anthropic, 默认模型: deepseek-v4-flash)",
+            "OpenAI (官方接口及各大兼容中转: https://api.openai.com, 默认模型: gpt-4o)",
+            "Anthropic (官方 Messages 接口: https://api.anthropic.com, 默认模型: claude-3-7-sonnet-20250219)",
             "OpenRouter (聚合网关)",
             "Custom (自定义兼容 API 提供商)",
         ];
 
         let selection = Select::new("2. 选择要配置的提供商模板:", provider_options).prompt()?;
 
-        let (p_name, default_url, default_model) = if selection.starts_with("DeepSeek") {
-            ("deepseek".to_string(), "https://api.deepseek.com", "deepseek-reasoner")
+        let (p_name, default_url, default_model) = if selection.contains("DeepSeek - Anthropic") {
+            ("deepseek-anthropic".to_string(), "https://api.deepseek.com/anthropic", "deepseek-v4-flash")
+        } else if selection.contains("DeepSeek") {
+            ("deepseek".to_string(), "https://api.deepseek.com", "deepseek-v4-flash")
         } else if selection.starts_with("OpenAI") {
             ("openai".to_string(), "https://api.openai.com", "gpt-4o")
         } else if selection.starts_with("Anthropic") {

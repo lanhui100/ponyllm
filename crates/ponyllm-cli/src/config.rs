@@ -185,13 +185,22 @@ bind = "127.0.0.1:8080"
 max_retries = 3
 flight_recorder_capacity = 200
 
-# DeepSeek Provider
+# DeepSeek Provider (OpenAI 协议: /v1/chat/completions, /v1/responses)
 [providers.deepseek]
 base_url = "https://api.deepseek.com"
-default_model = "deepseek-reasoner"
+default_model = "deepseek-v4-flash"
 strategy = "priority"
 keys = [
     { id = "deepseek-primary", api_key = "sk-xxxx", priority = 1, weight = 10 },
+]
+
+# DeepSeek Provider (Anthropic Messages 协议: /v1/messages)
+[providers.deepseek-anthropic]
+base_url = "https://api.deepseek.com/anthropic"
+default_model = "deepseek-v4-flash"
+strategy = "priority"
+keys = [
+    { id = "ds-ant-primary", api_key = "sk-xxxx", priority = 1, weight = 10 },
 ]
 
 # OpenAI Provider

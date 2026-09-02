@@ -95,3 +95,82 @@ async fn test_embedded_sdk_in_memory_call() {
         }
     );
 }
+
+#[tokio::test]
+async fn test_embedded_sdk_anthropic_upstream_direct() {
+    let mock_anthropic = Router::new().route(
+        "/anthropic/v1/messages",
+        post(|Json(req): Json<serde_json::Value>| async move {
+            let user_text = req["messages"][0]["content"].as_str().unwrap_or_default();
+            axum::Json(json!({
+                "id": "msg_embed_999",
+                "type": "message",
+                "role": "assistant",
+                "content": [{
+                    "type": "text",
+                    "text": format!("SDK Anthropic Echo: {}", user_text)
+                }],
+                "model": "deepseek-v4-flash",
+                "stop_reason": "end_turn",
+                "stop_sequence": null,
+                "usage": {
+                    "input_tokens": 10,
+                    "output_tokens": 20
+                }
+            }))
+        }),
+    );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, mock_anthropic).await.unwrap();
+    });
+
+    let gateway = PonyGateway::builder()
+        .add_provider(
+            "deepseek-anthropic",
+            format!("http://{}/anthropic", addr),
+            "deepseek-v4-flash",
+            RoutingStrategy::Priority,
+        )
+        .add_key("deepseek-anthropic", "ds-key-1", "sk-ds-key-1", 1, 10)
+        .build();
+
+    // Anthropic direct call
+    let ant_req = MessageRequest {
+        model: "deepseek-v4-flash".to_string(),
+        messages: vec![AnthropicMessage {
+            role: AnthropicRole::User,
+            content: "Hello from direct SDK Anthropic".into(),
+        }],
+        max_tokens: 1024,
+        ..Default::default()
+    };
+
+    let ant_resp = gateway.create_message(&ant_req).await.unwrap();
+    assert_eq!(ant_resp.role, "assistant");
+    assert_eq!(
+        ant_resp.content[0],
+        AnthropicContentBlock::Text {
+            text: "SDK Anthropic Echo: Hello from direct SDK Anthropic".to_string(),
+            cache_control: None,
+        }
+    );
+
+    // Cross OpenAI Chat call translated to Anthropic upstream and back
+    let chat_req = ChatCompletionRequest {
+        model: "deepseek-v4-flash".to_string(),
+        messages: vec![ChatMessage::User(UserMessage {
+            content: "Hello from direct SDK Chat".into(),
+            name: None,
+        })],
+        ..Default::default()
+    };
+
+    let chat_resp = gateway.chat_completion(&chat_req).await.unwrap();
+    assert_eq!(
+        chat_resp.choices[0].message.content.as_deref(),
+        Some("SDK Anthropic Echo: Hello from direct SDK Chat")
+    );
+}

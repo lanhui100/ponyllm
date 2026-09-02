@@ -48,15 +48,19 @@ cargo install --git https://github.com/lanhui100/ponyllm.git ponyllm-cli
 ```bash
 ponyllm init
 ```
-进入交互向导，依次引导选择提供商模板（DeepSeek、OpenAI、Anthropic、OpenRouter 或自定义）、填写 API Key、默认模型与调度策略。
+进入交互向导，依次引导选择提供商模板（DeepSeek OpenAI 协议、DeepSeek Anthropic 协议、OpenAI、Anthropic、OpenRouter 或自定义）、填写 API Key、默认模型与调度策略。
 *(CI 或自动化脚本中可使用 `ponyllm init --non-interactive` 快速生成默认模板)*
 
 ### 2. 提供商与 Key 账户池增删改查 (CLI CRUD)
 ```bash
 # 查看与管理提供商
 ponyllm provider list
-ponyllm provider add deepseek --base-url https://api.deepseek.com --model deepseek-reasoner --strategy priority
-ponyllm provider remove my-provider
+
+# 配置 DeepSeek 官方 OpenAI 协议接口 (默认模型 deepseek-v4-flash)
+ponyllm provider add deepseek --base-url https://api.deepseek.com --model deepseek-v4-flash --strategy priority
+
+# 配置 DeepSeek 官方 Anthropic Messages 协议接口 (默认模型 deepseek-v4-flash)
+ponyllm provider add deepseek-anthropic --base-url https://api.deepseek.com/anthropic --model deepseek-v4-flash --strategy priority
 
 # 查看与管理 Key 账户池
 ponyllm key list

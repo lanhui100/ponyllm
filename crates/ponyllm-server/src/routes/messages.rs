@@ -7,7 +7,7 @@ use axum::Json;
 use futures_util::StreamExt;
 use ponyllm_core::executor::UpstreamExecutor;
 use ponyllm_core::telemetry::FlightFrame;
-use ponyllm_protocol::anthropic::messages::MessageRequest;
+use ponyllm_protocol::anthropic::messages::{MessageRequest, MessageResponse};
 use ponyllm_protocol::openai::chat::ChatCompletionResponse;
 use ponyllm_protocol::translator::{anthropic_to_chat_request, chat_to_anthropic_response};
 use crate::state::AppState;
@@ -43,29 +43,50 @@ pub async fn handle_messages(
     };
 
     let executor = UpstreamExecutor::new(pool, state.config.max_retries);
-    let target_url = format!("{}/v1/chat/completions", provider_cfg.base_url.trim_end_matches('/'));
+    let is_anthropic_upstream = provider_cfg.base_url.ends_with("/anthropic")
+        || provider_cfg.base_url.contains("api.anthropic.com")
+        || provider_cfg.base_url.ends_with("/messages");
 
-    // Translate incoming Anthropic request to OpenAI Chat request
-    let chat_req = match anthropic_to_chat_request(&req) {
-        Ok(cr) => cr,
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": {"message": format!("Translation error: {}", e)}})),
-            )
-                .into_response();
-        }
-    };
-
-    let req_val = match serde_json::to_value(&chat_req) {
-        Ok(v) => v,
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": {"message": format!("Serialization error: {}", e)}})),
-            )
-                .into_response();
-        }
+    let (target_url, req_val) = if is_anthropic_upstream {
+        let url = if provider_cfg.base_url.ends_with("/messages") {
+            provider_cfg.base_url.clone()
+        } else {
+            format!("{}/v1/messages", provider_cfg.base_url.trim_end_matches('/'))
+        };
+        let val = match serde_json::to_value(&req) {
+            Ok(v) => v,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": {"message": format!("Serialization error: {}", e)}})),
+                )
+                    .into_response();
+            }
+        };
+        (url, val)
+    } else {
+        let url = format!("{}/v1/chat/completions", provider_cfg.base_url.trim_end_matches('/'));
+        let chat_req = match anthropic_to_chat_request(&req) {
+            Ok(cr) => cr,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": {"message": format!("Translation error: {}", e)}})),
+                )
+                    .into_response();
+            }
+        };
+        let val = match serde_json::to_value(&chat_req) {
+            Ok(v) => v,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": {"message": format!("Serialization error: {}", e)}})),
+                )
+                    .into_response();
+            }
+        };
+        (url, val)
     };
 
     let req_snippet = serde_json::to_string(&req).ok();
@@ -124,25 +145,38 @@ pub async fn handle_messages(
     match executor.execute_json_request(&target_url, &req_val).await {
         Ok(resp_val) => {
             let latency = start_time.elapsed();
-            let chat_resp: ChatCompletionResponse = match serde_json::from_value(resp_val) {
-                Ok(cr) => cr,
-                Err(e) => {
-                    return (
-                        StatusCode::BAD_GATEWAY,
-                        Json(serde_json::json!({"error": {"message": format!("Invalid upstream response format: {}", e)}})),
-                    )
-                        .into_response();
+            let ant_resp: MessageResponse = if is_anthropic_upstream {
+                match serde_json::from_value(resp_val) {
+                    Ok(ar) => ar,
+                    Err(e) => {
+                        return (
+                            StatusCode::BAD_GATEWAY,
+                            Json(serde_json::json!({"error": {"message": format!("Invalid Anthropic upstream response: {}", e)}})),
+                        )
+                            .into_response();
+                    }
                 }
-            };
+            } else {
+                let chat_resp: ChatCompletionResponse = match serde_json::from_value(resp_val) {
+                    Ok(cr) => cr,
+                    Err(e) => {
+                        return (
+                            StatusCode::BAD_GATEWAY,
+                            Json(serde_json::json!({"error": {"message": format!("Invalid upstream response format: {}", e)}})),
+                        )
+                            .into_response();
+                    }
+                };
 
-            let ant_resp = match chat_to_anthropic_response(&chat_resp) {
-                Ok(ar) => ar,
-                Err(e) => {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(serde_json::json!({"error": {"message": format!("Egress translation error: {}", e)}})),
-                    )
-                        .into_response();
+                match chat_to_anthropic_response(&chat_resp) {
+                    Ok(ar) => ar,
+                    Err(e) => {
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(serde_json::json!({"error": {"message": format!("Egress translation error: {}", e)}})),
+                        )
+                            .into_response();
+                    }
                 }
             };
 
