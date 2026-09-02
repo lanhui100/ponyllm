@@ -170,3 +170,96 @@ fn test_config_strict_load_and_atomic_save() {
 
     let _ = std::fs::remove_file(temp_file);
 }
+
+#[test]
+fn test_cli_upgrade_command_parsing() {
+    let u_check = Cli::try_parse_from(["ponyllm", "upgrade", "--check"]).unwrap();
+    match u_check.command {
+        Commands::Upgrade { check, force, dry_run, version } => {
+            assert!(check);
+            assert!(!force);
+            assert!(!dry_run);
+            assert_eq!(version, None);
+        }
+        _ => panic!("Expected Upgrade check"),
+    }
+
+    let u_force = Cli::try_parse_from([
+        "ponyllm", "update", "--force", "--dry-run", "--version", "v0.3.0",
+    ]).unwrap();
+    match u_force.command {
+        Commands::Upgrade { check, force, dry_run, version } => {
+            assert!(!check);
+            assert!(force);
+            assert!(dry_run);
+            assert_eq!(version, Some("v0.3.0".to_string()));
+        }
+        _ => panic!("Expected Upgrade force with version"),
+    }
+}
+
+#[test]
+fn test_upgrade_version_comparison_and_platform_detection() {
+    use ponyllm_cli::upgrade::{detect_target_asset_name, is_newer_version, parse_version_triplet};
+
+    // Platform detection
+    let (asset_name, binary_name, _is_zip) = detect_target_asset_name().unwrap();
+    assert!(!asset_name.is_empty());
+    assert!(!binary_name.is_empty());
+
+    // Version triplet parser
+    assert_eq!(parse_version_triplet("0.2.1"), Some((0, 2, 1)));
+    assert_eq!(parse_version_triplet("v1.5.10"), Some((1, 5, 10)));
+    assert_eq!(parse_version_triplet("v2.0.0-rc1"), Some((2, 0, 0)));
+
+    // Newer version checks
+    assert!(is_newer_version("0.2.1", "0.2.2"));
+    assert!(is_newer_version("0.2.1", "0.3.0"));
+    assert!(is_newer_version("v0.2.1", "v1.0.0"));
+    assert!(!is_newer_version("0.2.1", "0.2.1"));
+    assert!(!is_newer_version("v0.3.0", "v0.2.1"));
+    assert!(!is_newer_version("1.0.0", "0.9.9"));
+}
+
+#[test]
+fn test_upgrade_zip_and_targz_extraction() {
+    use ponyllm_cli::upgrade::{extract_targz, extract_zip};
+    use std::io::Write;
+
+    let temp_dir = tempfile::tempdir().unwrap();
+
+    // 1. Create a mock zip archive in memory
+    let mut zip_buf = Vec::new();
+    {
+        let mut zip_writer = zip::ZipWriter::new(std::io::Cursor::new(&mut zip_buf));
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        zip_writer.start_file("mock_ponyllm.exe", options).unwrap();
+        zip_writer.write_all(b"MOCK_BINARY_DATA").unwrap();
+        zip_writer.finish().unwrap();
+    }
+
+    let extracted_zip_path = extract_zip(&zip_buf, "mock_ponyllm.exe", temp_dir.path()).unwrap();
+    assert!(extracted_zip_path.exists());
+    let content = std::fs::read(&extracted_zip_path).unwrap();
+    assert_eq!(content, b"MOCK_BINARY_DATA");
+
+    // 2. Create a mock tar.gz archive in memory
+    let mut targz_buf = Vec::new();
+    {
+        let gz_encoder = flate2::write::GzEncoder::new(&mut targz_buf, flate2::Compression::default());
+        let mut tar_builder = tar::Builder::new(gz_encoder);
+        let mut header = tar::Header::new_gnu();
+        header.set_path("mock_ponyllm").unwrap();
+        header.set_size(16);
+        header.set_mode(0o755);
+        header.set_cksum();
+        tar_builder.append(&header, &b"MOCK_TAR_GZ_DATA"[..]).unwrap();
+        tar_builder.finish().unwrap();
+    }
+
+    let extracted_tar_path = extract_targz(&targz_buf, "mock_ponyllm", temp_dir.path()).unwrap();
+    assert!(extracted_tar_path.exists());
+    let tar_content = std::fs::read(&extracted_tar_path).unwrap();
+    assert_eq!(tar_content, b"MOCK_TAR_GZ_DATA");
+}

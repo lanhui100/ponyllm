@@ -84,6 +84,19 @@ ponyllm serve
 ```
 默认在 `http://127.0.0.1:8080` 启动高并发 HTTP/SSE 统一服务。
 
+### 5. 原生在线自升级
+```bash
+# 检查是否有新版本
+ponyllm upgrade --check
+
+# 一键原地升级到最新 Release 版本
+ponyllm upgrade
+
+# 强制重装当前版本或安装指定版本
+ponyllm upgrade --force
+ponyllm upgrade --version v0.2.1
+```
+
 ---
 
 ## 📦 进程内嵌入式 SDK (嵌入 Rust 工程)

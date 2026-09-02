@@ -78,6 +78,26 @@ pub enum Commands {
         #[arg(short, long, default_value = "http://127.0.0.1:8080")]
         gateway_url: String,
     },
+
+    /// Upgrade ponyllm CLI to the latest (or specified) version
+    #[command(alias = "update", alias = "self-update")]
+    Upgrade {
+        /// Only check for updates without installing
+        #[arg(short, long)]
+        check: bool,
+
+        /// Force reinstallation even if already at latest version
+        #[arg(short, long)]
+        force: bool,
+
+        /// Simulate upgrade steps without downloading or modifying files
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Upgrade or downgrade to a specific version or tag (e.g. v0.2.1)
+        #[arg(short, long)]
+        version: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]

@@ -282,6 +282,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
+        Commands::Upgrade { check, force, dry_run, version } => {
+            ponyllm_cli::upgrade::run_upgrade(check, force, dry_run, version).await?;
+        }
     }
 
     Ok(())

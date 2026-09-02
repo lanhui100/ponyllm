@@ -10,4 +10,5 @@
 - `ponyllm model`: 默认映射模型管理；
 - `ponyllm serve`: 启动 HTTP/SSE 网关；
 - `ponyllm tui`: 启动全屏 Ratatui 交互式监控看板；
-- `ponyllm status / telemetry`: 遥测与黑匣子录波查看。
+- `ponyllm status / telemetry`: 遥测与黑匣子录波查看；
+- `ponyllm upgrade`: 原生在线自升级与版本自检。
