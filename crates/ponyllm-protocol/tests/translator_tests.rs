@@ -213,9 +213,9 @@ fn test_anthropic_response_to_chat_response() {
     );
 
     let usage = chat_resp.usage.unwrap();
-    assert_eq!(usage.prompt_tokens, 30);
+    assert_eq!(usage.prompt_tokens, 40); // 30 fresh input + 10 cached read
     assert_eq!(usage.completion_tokens, 50);
-    assert_eq!(usage.total_tokens, 80);
+    assert_eq!(usage.total_tokens, 90); // 40 prompt + 50 completion
     assert_eq!(usage.prompt_tokens_details.unwrap().cached_tokens, Some(10));
 }
 

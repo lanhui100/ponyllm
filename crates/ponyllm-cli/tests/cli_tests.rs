@@ -245,6 +245,7 @@ fn test_model_config_crud_and_params() {
     // 2. Add custom model with multimodal parameters
     let custom_model = ModelConfig {
         name: "omni-v1".to_string(),
+        tier: ponyllm_core::pool::ModelTier::Flagship,
         context_window: "2M".to_string(),
         max_output: "64K".to_string(),
         input_types: vec!["text".to_string(), "image".to_string(), "video".to_string(), "audio".to_string()],

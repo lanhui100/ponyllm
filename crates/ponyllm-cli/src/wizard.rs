@@ -2,8 +2,6 @@ use std::collections::HashMap;
 use inquire::{Confirm, Password, PasswordDisplayMode, Select, Text};
 use crate::config::{generate_secure_api_key, ConfigFile, GatewaySection, KeySection, ProviderSection};
 
-
-
 pub fn run_interactive_init(output_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     println!("\n========================================================");
     println!("  🚀 欢迎使用 ponyllm 统一网关配置初始化向导");
@@ -32,6 +30,23 @@ pub fn run_interactive_init(output_path: &str) -> Result<(), Box<dyn std::error:
         .with_default(&default_generated_key)
         .with_help_message("第三方客户端（如 Cursor、Claude Code、SDK）需使用该 Token 进行认证，留空或 none 为免鉴权")
         .prompt()?;
+
+    let strategy_options = vec![
+        "economy (省钱优先: 0元免费 > Plan套餐 > 缓存命中 > 按量低价，默认推荐)",
+        "speed (极速优先: 综合首字时延与生成速度选最快节点)",
+        "reliable (稳定优先: 高可用保障，429 智能避让)",
+        "balanced (综合平衡: 成本与生成速度综合最优)",
+    ];
+    let strat_sel = Select::new("选择网关全局默认调度策略:", strategy_options).prompt()?;
+    let default_strategy = if strat_sel.starts_with("speed") {
+        ponyllm_core::pool::GatewayRoutingStrategy::Speed
+    } else if strat_sel.starts_with("reliable") {
+        ponyllm_core::pool::GatewayRoutingStrategy::Reliable
+    } else if strat_sel.starts_with("balanced") {
+        ponyllm_core::pool::GatewayRoutingStrategy::Balanced
+    } else {
+        ponyllm_core::pool::GatewayRoutingStrategy::Economy
+    };
 
     let mut providers: HashMap<String, ProviderSection> = HashMap::new();
 
@@ -99,26 +114,20 @@ pub fn run_interactive_init(output_path: &str) -> Result<(), Box<dyn std::error:
 
             let api_key = Password::new("    API Key 秘钥:")
                 .with_display_mode(PasswordDisplayMode::Masked)
-                .with_help_message("输入将被遮蔽，回车确认")
+                .with_help_message("输入上游供应商给您的 API Key (输入内容已掩码)")
                 .prompt()?;
 
-            let priority: u32 = if strat == "priority" {
-                let p_str = Text::new("    优先级 (数字越小优先级越高，1 为最高主 Key):")
-                    .with_default(&key_idx.to_string())
-                    .prompt()?;
-                p_str.parse().unwrap_or(key_idx as u32)
-            } else {
-                1
-            };
+            let priority = Text::new("    优先级 (数值越小越优先，默认为 1):")
+                .with_default("1")
+                .prompt()?
+                .parse::<u32>()
+                .unwrap_or(1);
 
-            let weight: u32 = if strat == "weighted" {
-                let w_str = Text::new("    权重 (数字越大流量分配越多):")
-                    .with_default("10")
-                    .prompt()?;
-                w_str.parse().unwrap_or(10)
-            } else {
-                10
-            };
+            let weight = Text::new("    轮询权重 (默认 10):")
+                .with_default("10")
+                .prompt()?
+                .parse::<u32>()
+                .unwrap_or(10);
 
             keys.push(KeySection {
                 id: key_id,
@@ -139,9 +148,13 @@ pub fn run_interactive_init(output_path: &str) -> Result<(), Box<dyn std::error:
         providers.insert(p_name.to_string(), ProviderSection {
             base_url,
             default_model: model,
+            strategy: strat.to_string(),
+            billing_mode: ponyllm_core::pool::BillingMode::Metered,
+            input_price: ponyllm_core::pool::default_input_price(),
+            cached_price: ponyllm_core::pool::default_cached_price(),
+            output_price: ponyllm_core::pool::default_output_price(),
             models: Vec::new(),
             model_configs: Vec::new(),
-            strategy: strat.to_string(),
             keys,
         });
 
@@ -160,6 +173,7 @@ pub fn run_interactive_init(output_path: &str) -> Result<(), Box<dyn std::error:
             max_retries: 3,
             flight_recorder_capacity: 200,
             api_key: api_token,
+            default_strategy,
         },
         providers,
     };
@@ -171,12 +185,15 @@ pub fn run_interactive_init(output_path: &str) -> Result<(), Box<dyn std::error:
     println!("╠════════════════════════════════════════════════════════════════════════╣");
     println!("║  • 配置文件已写入: {:<50} ║", output_path);
     println!("║  • 监听模式与地址: {:<50} ║", config.gateway.bind);
+    println!("║  • 全局调度策略:   {:<50} ║", format!("{:?}", config.gateway.default_strategy));
     println!("║  • 网关访问凭证:   {:<50} ║", config.gateway.api_key);
     println!("╠════════════════════════════════════════════════════════════════════════╣");
     println!("║  💡 请妥善保管或复制上方 API Key，用于客户端鉴权访问。                 ║");
     println!("║                                                                        ║");
     println!("║  快速启动与管理:                                                       ║");
     println!("║    ponyllm serve                    # 启动网关服务                     ║");
+    println!("║    ponyllm strategy list            # 查看调度策略一览                 ║");
+    println!("║    ponyllm strategy set speed       # 切换为极速模式                   ║");
     println!("║    ponyllm auth                     # 重新生成/查看网关 API Key        ║");
     println!("║    ponyllm provider list            # 查看已配置提供商                 ║");
     println!("║    ponyllm tui                      # 打开全屏交互监控看板             ║");

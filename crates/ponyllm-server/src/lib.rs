@@ -5,6 +5,6 @@ pub mod state;
 pub mod routes;
 pub mod app;
 
-pub use config::{GatewayConfig, ProviderConfig};
+pub use config::{GatewayConfig, ModelSpec, ProviderConfig};
 pub use state::AppState;
 pub use app::create_app;

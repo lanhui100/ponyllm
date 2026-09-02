@@ -38,6 +38,10 @@ pub enum Commands {
     #[command(subcommand)]
     Model(ModelCommands),
 
+    /// Manage global gateway routing strategy (economy, speed, reliable, balanced)
+    #[command(subcommand)]
+    Strategy(StrategyCommands),
+
     /// Manage, view or regenerate gateway access API Token (API Key)
     Auth {
         /// Path to configuration file
@@ -102,55 +106,75 @@ pub enum Commands {
         gateway_url: String,
     },
 
-    /// Upgrade ponyllm CLI to the latest (or specified) version
-    #[command(alias = "update", alias = "self-update")]
+    /// Upgrade ponyllm to latest or specified release version
+    #[command(alias = "update")]
     Upgrade {
-        /// Only check for updates without installing
+        /// Check for available updates without installing
         #[arg(short, long)]
         check: bool,
 
-        /// Force reinstallation even if already at latest version
+        /// Force re-installation even if already up to date
         #[arg(short, long)]
         force: bool,
 
-        /// Simulate upgrade steps without downloading or modifying files
+        /// Dry-run mode: show what would be downloaded without applying changes
         #[arg(long)]
         dry_run: bool,
 
-        /// Upgrade or downgrade to a specific version or tag (e.g. v0.2.1)
-        #[arg(short, long)]
+        /// Target version tag (e.g. v0.2.8, latest)
+        #[arg(short, long, value_name = "VERSION")]
         version: Option<String>,
     },
 }
 
 #[derive(Debug, Subcommand)]
+pub enum StrategyCommands {
+    /// List all available routing strategies with human-friendly descriptions
+    List,
+    /// Get current default gateway strategy
+    Get {
+        /// Path to configuration file
+        #[arg(short, long)]
+        config: Option<String>,
+    },
+    /// Set default gateway strategy (economy, speed, reliable, balanced)
+    Set {
+        /// Strategy name (economy, speed, reliable, balanced, or shorthand e/s/r/b)
+        strategy: String,
+        /// Path to configuration file
+        #[arg(short, long)]
+        config: Option<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 pub enum ProviderCommands {
-    /// List all configured providers
+    /// List all configured upstream providers
     List {
         #[arg(short, long)]
         config: Option<String>,
     },
-    /// Add or update a model provider
+    /// Add a new provider interactively or via flags
     Add {
-        /// Unique provider name (e.g., deepseek, openai, anthropic)
+        /// Provider name (e.g. openai, deepseek, deepseek-anthropic, anthropic)
         name: String,
 
-        /// Upstream Base URL (e.g., https://api.deepseek.com)
-        #[arg(short, long)]
+        /// Base URL (e.g. https://api.deepseek.com or https://api.deepseek.com/anthropic)
+        #[arg(short, long, default_value = "https://api.openai.com")]
         base_url: String,
 
-        /// Default model name
-        #[arg(short, long)]
+        /// Default model name (e.g. deepseek-v4-flash, gpt-4o)
+        #[arg(short, long, default_value = "gpt-4o")]
         model: String,
 
-        /// Routing strategy (round_robin, priority, weighted)
+        /// Key balancing strategy (priority, round_robin, weighted)
         #[arg(short, long, default_value = "round_robin")]
         strategy: String,
 
         #[arg(short, long)]
         config: Option<String>,
     },
-    /// Remove a model provider
+    /// Remove an existing provider
     Remove {
         /// Provider name to delete
         name: String,
@@ -162,41 +186,41 @@ pub enum ProviderCommands {
 
 #[derive(Debug, Subcommand)]
 pub enum KeyCommands {
-    /// List API keys across providers (keys are automatically masked)
+    /// List all configured API keys for providers
     List {
-        /// Filter by specific provider
+        /// Filter keys by provider name
         #[arg(short, long)]
         provider: Option<String>,
 
         #[arg(short, long)]
         config: Option<String>,
     },
-    /// Add or update an API key in a provider's key pool
+    /// Add a new API Key to a provider
     Add {
         /// Target provider name
-        #[arg(short = 'P', long)]
+        #[arg(short, long)]
         provider: String,
 
-        /// Unique Key identifier ID
-        #[arg(short = 'i', long)]
+        /// Unique key identifier / label (e.g. deepseek-primary, key-backup-1)
+        #[arg(short, long)]
         id: String,
 
-        /// Secret API Key string
-        #[arg(short = 'k', long)]
+        /// Raw API Key / secret token (e.g. sk-xxxx)
+        #[arg(short, long)]
         key: String,
 
-        /// Failover priority (1 = highest primary)
-        #[arg(short = 'p', long, default_value_t = 1)]
+        /// Key priority (1 = highest, fallback to 2, 3...)
+        #[arg(short = 'P', long, default_value_t = 1)]
         priority: u32,
 
-        /// Weighted round-robin weight
-        #[arg(short = 'w', long, default_value_t = 10)]
+        /// Weight for weighted round-robin
+        #[arg(short = 'W', long, default_value_t = 10)]
         weight: u32,
 
         #[arg(short, long)]
         config: Option<String>,
     },
-    /// Remove an API key from a provider's key pool
+    /// Remove an API Key from a provider
     Remove {
         /// Target provider name
         #[arg(short, long)]

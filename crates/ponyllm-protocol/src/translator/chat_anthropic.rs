@@ -417,11 +417,15 @@ pub fn anthropic_to_chat_response(resp: &MessageResponse) -> Result<ChatCompleti
     let reasoning_content = if reasoning_acc.is_empty() { None } else { Some(reasoning_acc) };
     let tool_calls_opt = if tool_calls.is_empty() { None } else { Some(tool_calls) };
 
-    let prompt_cached = resp.usage.cache_read_input_tokens;
+    let cached_read = resp.usage.cache_read_input_tokens.unwrap_or(0);
+    let cached_create = resp.usage.cache_creation_input_tokens.unwrap_or(0);
+    let total_prompt = resp.usage.input_tokens + cached_read + cached_create;
+    let total_tokens = total_prompt + resp.usage.output_tokens;
+    let prompt_cached = if cached_read > 0 { Some(cached_read) } else { None };
     let usage = Usage {
-        prompt_tokens: resp.usage.input_tokens,
+        prompt_tokens: total_prompt,
         completion_tokens: resp.usage.output_tokens,
-        total_tokens: resp.usage.input_tokens + resp.usage.output_tokens,
+        total_tokens,
         prompt_tokens_details: prompt_cached.map(|c| PromptTokensDetails {
             cached_tokens: Some(c),
             audio_tokens: None,
@@ -491,12 +495,16 @@ pub fn chat_to_anthropic_response(resp: &ChatCompletionResponse) -> Result<Messa
     }
 
     let usage = match &resp.usage {
-        Some(u) => AnthropicUsage {
-            input_tokens: u.prompt_tokens,
-            output_tokens: u.completion_tokens,
-            cache_creation_input_tokens: None,
-            cache_read_input_tokens: u.prompt_tokens_details.as_ref().and_then(|d| d.cached_tokens),
-        },
+        Some(u) => {
+            let cached = u.prompt_tokens_details.as_ref().and_then(|d| d.cached_tokens).unwrap_or(0);
+            let fresh = u.prompt_tokens.saturating_sub(cached);
+            AnthropicUsage {
+                input_tokens: fresh,
+                output_tokens: u.completion_tokens,
+                cache_creation_input_tokens: None,
+                cache_read_input_tokens: if cached > 0 { Some(cached) } else { None },
+            }
+        }
         None => AnthropicUsage::default(),
     };
 

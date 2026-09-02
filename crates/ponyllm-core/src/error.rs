@@ -26,6 +26,12 @@ pub enum CoreError {
         body: String,
     },
 
+    #[error("Capacity exhausted: required context '{required_context}', {message}")]
+    CapacityExhausted {
+        required_context: String,
+        message: String,
+    },
+
     #[error("Internal core error: {0}")]
     Internal(String),
 }

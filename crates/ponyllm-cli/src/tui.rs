@@ -793,6 +793,7 @@ fn handle_modal_key(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                         let m_name = model_name.trim().to_string();
                         let cfg = ModelConfig {
                             name: m_name.clone(),
+                            tier: ponyllm_core::pool::ModelTier::Flagship,
                             context_window: if context_window.trim().is_empty() { "1M".to_string() } else { context_window.trim().to_string() },
                             max_output: if max_output.trim().is_empty() { "32K".to_string() } else { max_output.trim().to_string() },
                             input_types: if in_types.is_empty() { vec!["text".to_string()] } else { in_types },
@@ -893,6 +894,7 @@ fn handle_modal_key(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
 
                     let cfg = ModelConfig {
                         name: model_name.clone(),
+                        tier: ponyllm_core::pool::ModelTier::Flagship,
                         context_window: if context_window.trim().is_empty() { "1M".to_string() } else { context_window.trim().to_string() },
                         max_output: if max_output.trim().is_empty() { "32K".to_string() } else { max_output.trim().to_string() },
                         input_types: if in_types.is_empty() { vec!["text".to_string()] } else { in_types },

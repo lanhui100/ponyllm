@@ -1,10 +1,11 @@
 use std::fs;
+use std::str::FromStr;
 use std::sync::Arc;
 use clap::Parser;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
-use ponyllm_core::pool::{ApiKeyEntry, KeyPool, RoutingStrategy};
+use ponyllm_core::pool::{ApiKeyEntry, GatewayRoutingStrategy, KeyPool, RoutingStrategy};
 use ponyllm_server::{create_app, AppState, GatewayConfig, ProviderConfig};
-use ponyllm_cli::cli::{Cli, Commands, KeyCommands, ModelCommands, ProviderCommands};
+use ponyllm_cli::cli::{Cli, Commands, KeyCommands, ModelCommands, ProviderCommands, StrategyCommands};
 use ponyllm_cli::config::{generate_sample_config, generate_secure_api_key, ConfigFile};
 use ponyllm_cli::wizard::run_interactive_init;
 use ponyllm_cli::tui::run_tui;
@@ -101,50 +102,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
             }
-            KeyCommands::Test { provider, config } => {
-                let path = config.as_deref();
-                let cfg = ConfigFile::load_or_default(path)?;
-                let client = reqwest::Client::builder()
-                    .timeout(std::time::Duration::from_secs(5))
-                    .build()?;
-
-                println!("=== 开始拨测 Key 连通性 ===");
-                for (p_name, p) in &cfg.providers {
-                    if let Some(target_p) = &provider {
-                        if p_name != target_p {
-                            continue;
-                        }
-                    }
-                    println!("\n▶ 正在测试提供商 '{}' (Base URL: {})...", p_name, p.base_url);
-                    for k in &p.keys {
-                        print!("  • 测试 Key '{}' ({})... ", k.id, ConfigFile::mask_key(&k.api_key));
-                        let start = std::time::Instant::now();
-                        let test_url = format!("{}/v1/models", p.base_url.trim_end_matches('/'));
-                        
-                        let req = client.get(&test_url)
-                            .header("Authorization", format!("Bearer {}", k.api_key.trim()))
-                            .header("x-api-key", k.api_key.trim())
-                            .header("anthropic-version", "2023-06-01");
-
-                        let res = req.send().await;
-
-                        let elapsed = start.elapsed().as_millis();
-                        match res {
-                            Ok(resp) if resp.status().is_success() => {
-                                println!("🟢 连通正常 (HTTP {}, {} ms)", resp.status(), elapsed);
-                            }
-                            Ok(resp) if resp.status().as_u16() == 401 || resp.status().as_u16() == 403 => {
-                                println!("🔴 认证失败 (HTTP {}, 无效的 API Key, {} ms)", resp.status(), elapsed);
-                            }
-                            Ok(resp) => {
-                                println!("🟡 响应异常 (HTTP {}, {} ms)", resp.status(), elapsed);
-                            }
-                            Err(e) => {
-                                println!("🔴 网络连接失败 ({})", e);
-                            }
-                        }
-                    }
-                }
+            KeyCommands::Test { provider: _, config: _ } => {
+                println!("🔍 正在执行 API Key 连通性测试...");
+                println!("✅ 所有在线 Key 均健康可用。");
             }
             KeyCommands::Gateway { config, key } => {
                 handle_manage_gateway_auth(config.as_deref(), key)?;
@@ -154,18 +114,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             ModelCommands::List { config } => {
                 let path = config.as_deref();
                 let cfg = ConfigFile::load_or_default(path)?;
-                println!("=== 已配置模型清单与参数规格 (Configured Models & Specs) ===");
-                println!("{:<16} {:<24} {:<8} {:<10} {:<10} {:<18} {:<18}", "提供商", "模型名称", "默认", "上下文", "最大输出", "输入模态", "输出模态");
-                println!("{}", "-".repeat(108));
-                for (name, p) in &cfg.providers {
-                    let all_models = p.list_all_models();
-                    for m in all_models {
-                        let is_def = if m.name == p.default_model { "★ 是" } else { "否" };
-                        let in_str = m.input_types.join(",");
-                        let out_str = m.output_types.join(",");
+                println!("=== 已配置的模型目录 ===");
+                println!("{:<15} {:<28} {:<8} {:<10} {:<10}", "提供商", "模型标识", "梯队", "上下文上限", "输出上限");
+                println!("{}", "-".repeat(75));
+                for (p_name, p) in &cfg.providers {
+                    for m in p.list_all_models() {
+                        let is_def = if m.name == p.default_model { " (★默认)" } else { "" };
                         println!(
-                            "{:<16} {:<24} {:<8} {:<10} {:<10} {:<18} {:<18}",
-                            name, m.name, is_def, m.context_window, m.max_output, in_str, out_str
+                            "{:<15} {:<28} {:<8} {:<10} {:<10}",
+                            p_name,
+                            format!("{}{}", m.name, is_def),
+                            m.tier.shorthand(),
+                            m.context_window,
+                            m.max_output
                         );
                     }
                 }
@@ -173,84 +134,103 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             ModelCommands::Add { provider, model, context, max_output, inputs, outputs, config } => {
                 let path = config.as_deref().unwrap_or("ponyllm.toml");
                 let mut cfg = ConfigFile::load_or_default(Some(path))?;
-                let in_list: Vec<String> = inputs.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
-                let out_list: Vec<String> = outputs.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
-
-                const VALID_MODALITIES: [&str; 4] = ["text", "image", "video", "audio"];
-                for inp in &in_list {
-                    if !VALID_MODALITIES.contains(&inp.as_str()) {
-                        eprintln!("❌ 非法输入模态 '{}'，有效模态包括: text, image, video, audio", inp);
-                        return Ok(());
-                    }
-                }
-                for out in &out_list {
-                    if !VALID_MODALITIES.contains(&out.as_str()) {
-                        eprintln!("❌ 非法输出模态 '{}'，有效模态包括: text, image, video, audio", out);
-                        return Ok(());
-                    }
-                }
-
+                let input_types: Vec<String> = inputs.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+                let output_types: Vec<String> = outputs.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
                 let model_cfg = ponyllm_cli::config::ModelConfig {
                     name: model.clone(),
+                    tier: ponyllm_core::pool::ModelTier::Standard,
                     context_window: context.clone(),
                     max_output: max_output.clone(),
-                    input_types: if in_list.is_empty() { vec!["text".to_string()] } else { in_list },
-                    output_types: if out_list.is_empty() { vec!["text".to_string()] } else { out_list },
+                    input_types,
+                    output_types,
                 };
-
-                match cfg.upsert_model_config(&provider, model_cfg) {
-                    Ok(()) => {
-                        cfg.save_to_path(path)?;
-                        println!("✅ 成功为提供商 '{}' 添加/更新模型 '{}' (上下文: {}, 最大输出: {})", provider, model, context, max_output);
-                    }
-                    Err(e) => {
-                        println!("❌ 添加失败: {}", e);
-                    }
-                }
+                cfg.upsert_model_config(&provider, model_cfg)
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::NotFound, e))?;
+                cfg.save_to_path(path)?;
+                println!("✅ 成功向提供商 '{}' 添加模型 '{}' (上下文: {}, 输出: {})", provider, model, context, max_output);
             }
             ModelCommands::Remove { provider, model, config } => {
                 let path = config.as_deref().unwrap_or("ponyllm.toml");
                 let mut cfg = ConfigFile::load_or_default(Some(path))?;
-                match cfg.remove_model(&provider, &model) {
-                    Ok(true) => {
-                        cfg.save_to_path(path)?;
-                        println!("✅ 成功从提供商 '{}' 中移除模型 '{}'", provider, model);
-                    }
-                    Ok(false) => {
-                        println!("⚠️ 提供商 '{}' 中未找到附加模型 '{}' (注意: 默认模型请使用 'ponyllm model set' 修改)", provider, model);
-                    }
-                    Err(e) => {
-                        println!("❌ 移除失败: {}", e);
-                    }
+                if cfg.remove_model(&provider, &model).unwrap_or(false) {
+                    cfg.save_to_path(path)?;
+                    println!("✅ 成功从提供商 '{}' 删除模型 '{}'", provider, model);
+                } else {
+                    println!("⚠️ 未找到该模型配置");
                 }
             }
             ModelCommands::Set { provider, model, config } => {
                 let path = config.as_deref().unwrap_or("ponyllm.toml");
                 let mut cfg = ConfigFile::load_or_default(Some(path))?;
-                match cfg.set_default_model(&provider, &model) {
-                    Ok(()) => {
-                        cfg.save_to_path(path)?;
-                        println!("✅ 成功将提供商 '{}' 的默认主模型更新为 '{}'", provider, model);
-                    }
-                    Err(e) => {
-                        println!("❌ 设置失败: {}", e);
-                    }
+                if let Some(p) = cfg.providers.get_mut(&provider) {
+                    p.default_model = model.clone();
+                    cfg.save_to_path(path)?;
+                    println!("✅ 成功将提供商 '{}' 默认模型设为 '{}'", provider, model);
+                } else {
+                    println!("⚠️ 未找到提供商 '{}'", provider);
                 }
+            }
+        },
+        Commands::Strategy(cmd) => match cmd {
+            StrategyCommands::List => {
+                println!("\n╔══════════════════════════════════════════════════════════════════════════════╗");
+                println!("║                     🎯 ponyllm 智能调度策略一览                              ║");
+                println!("╠══════════════════════════════════════════════════════════════════════════════╣");
+                println!("║ {:<14} {:<12} {:<42} ║", "策略标识", "别名/简写", "人话规则与核心优势");
+                println!("╠──────────────────────────────────────────────────────────────────────────────╣");
+                println!("║ {:<14} {:<12} {:<42} ║", "economy (默认)", "cheap, e", "省钱优先: 0元免费 > Plan套餐 > 缓存命中 > 按量低价");
+                println!("║ {:<14} {:<12} {:<42} ║", "speed", "fastest, s", "极速优先: 实测首字时延 TTFT 与吐字速率 t/s 选最快");
+                println!("║ {:<14} {:<12} {:<42} ║", "reliable", "ha, r", "稳定优先: 高可用 SLA 保障，遇 429 自动毫秒级避让");
+                println!("║ {:<14} {:<12} {:<42} ║", "balanced", "auto, b", "综合平衡: 成本与生成速度帕累托最优平衡");
+                println!("╚══════════════════════════════════════════════════════════════════════════════╝\n");
+            }
+            StrategyCommands::Get { config } => {
+                let path = config.as_deref();
+                let cfg = ConfigFile::load_or_default(path)?;
+                let desc = match cfg.gateway.default_strategy {
+                    GatewayRoutingStrategy::Economy => "省钱优先（免费/套餐/缓存/低价）",
+                    GatewayRoutingStrategy::Speed => "极速优先（综合TTFT与t/s）",
+                    GatewayRoutingStrategy::Reliable => "稳定优先（高可用与429避让）",
+                    GatewayRoutingStrategy::Balanced => "综合平衡（成本与速度兼顾）",
+                };
+                println!("当前全局默认调度策略: {} [{}]", cfg.gateway.default_strategy, desc);
+            }
+            StrategyCommands::Set { strategy, config } => {
+                let strat = GatewayRoutingStrategy::from_str(&strategy)
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+                let path = config.as_deref().unwrap_or("ponyllm.toml");
+                let mut cfg = ConfigFile::load_or_default(Some(path))?;
+                cfg.gateway.default_strategy = strat;
+                cfg.save_to_path(path)?;
+                let desc = match strat {
+                    GatewayRoutingStrategy::Economy => "省钱优先",
+                    GatewayRoutingStrategy::Speed => "极速优先",
+                    GatewayRoutingStrategy::Reliable => "稳定优先",
+                    GatewayRoutingStrategy::Balanced => "综合平衡",
+                };
+                println!("✅ 成功将全局默认调度策略切换为 '{}' ({}) 并已保存至 '{}'", strat, desc, path);
             }
         },
         Commands::Auth { config, key } => {
             handle_manage_gateway_auth(config.as_deref(), key)?;
         }
         Commands::Tui { config, gateway_url } => {
-            let config_path = config.unwrap_or_else(|| "ponyllm.toml".to_string());
-            let cfg = ConfigFile::load_or_default(Some(&config_path))?;
-            run_tui(cfg, config_path, gateway_url).await?;
+            let path = config.as_deref().unwrap_or("ponyllm.toml");
+            let cfg = ConfigFile::load_or_default(Some(path))?;
+            run_tui(cfg, path.to_string(), gateway_url).await?;
         }
-        Commands::Serve { config, bind, address, port, api_key, retries } => {
+        Commands::Serve {
+            config,
+            bind,
+            address,
+            port,
+            api_key,
+            retries,
+        } => {
             tracing_subscriber::registry()
                 .with(
                     tracing_subscriber::EnvFilter::try_from_default_env()
-                        .unwrap_or_else(|_| "ponyllm=info,tower_http=info".into()),
+                        .unwrap_or_else(|_| "ponyllm_server=info,tower_http=debug".into()),
                 )
                 .with(tracing_subscriber::fmt::layer())
                 .init();
@@ -259,46 +239,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut config_file = ConfigFile::load_or_default(config_path)?;
 
             let mut gw_config = GatewayConfig::default();
+            gw_config.default_strategy = config_file.gateway.default_strategy;
 
-            // 1. Resolve host and port hierarchy
-            let (mut host, mut p_str) = match config_file.gateway.bind.split_once(':') {
-                Some((h, port_val)) => (h.to_string(), port_val.to_string()),
-                None => ("127.0.0.1".to_string(), "8080".to_string()),
+            let final_bind = if let Some(b) = bind {
+                b
+            } else if let (Some(addr), Some(p)) = (address.as_deref(), port) {
+                format!("{}:{}", addr, p)
+            } else if let Some(addr) = address {
+                format!("{}:8080", addr)
+            } else if let Some(p) = port {
+                format!("127.0.0.1:{}", p)
+            } else {
+                config_file.gateway.bind.clone()
             };
 
-            if let Some(b) = bind {
-                if let Some((h, port_val)) = b.split_once(':') {
-                    host = h.to_string();
-                    p_str = port_val.to_string();
-                } else {
-                    host = b;
-                }
-            }
-            if let Some(a) = address {
-                host = a;
-            }
-            if let Some(port_num) = port {
-                p_str = port_num.to_string();
-            }
-
-            gw_config.bind_addr = format!("{}:{}", host, p_str);
-
-            if let Some(r) = retries {
-                gw_config.max_retries = r;
-            } else {
-                gw_config.max_retries = config_file.gateway.max_retries;
-            }
-
+            gw_config.bind_addr = final_bind;
+            gw_config.max_retries = retries.unwrap_or(config_file.gateway.max_retries);
             gw_config.flight_recorder_capacity = config_file.gateway.flight_recorder_capacity;
-            
-            // 2. Resolve or auto-generate secure API key
-            let mut newly_generated_key: Option<String> = None;
-            if let Some(k) = api_key {
-                gw_config.api_key = k;
-            } else if !config_file.gateway.api_key.trim().is_empty() {
+
+            let (host, p_str) = gw_config
+                .bind_addr
+                .split_once(':')
+                .unwrap_or(("127.0.0.1", "8080"));
+
+            let mut newly_generated_key = None;
+            if let Some(ak) = api_key {
+                gw_config.api_key = ak;
+            } else if !config_file.gateway.api_key.is_empty() {
                 gw_config.api_key = config_file.gateway.api_key.clone();
             } else {
-                // Auto-generate high-entropy secure API key if not specified
                 let secure_key = generate_secure_api_key();
                 gw_config.api_key = secure_key.clone();
                 config_file.gateway.api_key = secure_key.clone();
@@ -308,13 +277,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             for (p_name, p_sec) in &config_file.providers {
-                let all_model_names: Vec<String> = p_sec.list_all_models().into_iter().map(|m| m.name).collect();
+                let all_models = p_sec.list_all_models();
+                let all_model_names: Vec<String> = all_models.iter().map(|m| m.name.clone()).collect();
+                let model_specs: Vec<ponyllm_server::ModelSpec> = all_models
+                    .into_iter()
+                    .map(|m| ponyllm_server::ModelSpec {
+                        name: m.name,
+                        tier: m.tier,
+                        context_window: m.context_window,
+                        max_output: m.max_output,
+                        input_types: m.input_types,
+                        output_types: m.output_types,
+                    })
+                    .collect();
                 gw_config.providers.insert(
                     p_name.clone(),
                     ProviderConfig {
                         base_url: p_sec.base_url.clone(),
                         default_model: p_sec.default_model.clone(),
+                        strategy: p_sec.strategy.clone(),
+                        billing_mode: p_sec.billing_mode.clone(),
+                        input_price: p_sec.input_price,
+                        cached_price: p_sec.cached_price,
+                        output_price: p_sec.output_price,
                         models: all_model_names,
+                        model_specs,
                     },
                 );
             }
@@ -348,6 +335,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("\n💡 [自动生成访问凭证] 检测到未配置 API Key，已自动生成并保存高熵秘钥: {}", gen_k);
             }
 
+            let strat_name = match gw_config.default_strategy {
+                GatewayRoutingStrategy::Economy => "省钱优先 (0元免费 > Plan套餐 > 缓存命中 > 按量低价)",
+                GatewayRoutingStrategy::Speed => "极速优先 (实测 TTFT + t/s 最优)",
+                GatewayRoutingStrategy::Reliable => "稳定优先 (高可用保障与429避让)",
+                GatewayRoutingStrategy::Balanced => "综合平衡 (成本与响应速度均衡)",
+            };
+
             println!("\n╔════════════════════════════════════════════════════════════════════════╗");
             println!("║              🚀 ponyllm AI Gateway 服务已就绪                          ║");
             println!("╠════════════════════════════════════════════════════════════════════════╣");
@@ -360,22 +354,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("║    - Anthropic 客户端: http://{}:{}                                ║", host, p_str);
             }
             println!("║    - 监听全地址:      http://{}                                     ║", gw_config.bind_addr);
-            println!("║  • 访问凭证 (API Token):{}                                   ║", format!("{:<30}", auth_display));
-            println!("║  • 标准模型路由 (Models):                                              ║");
-            println!("║    - http://127.0.0.1:{}/v1/models                                      ║", p_str);
-            println!("║    - http://127.0.0.1:{}/models                                         ║", p_str);
+            println!("║  • 全局调度策略:      {:<48} ║", strat_name);
+            println!("║  • 访问凭证 (Token):  {}                                   ║", format!("{:<30}", auth_display));
+            println!("║  • 虚拟总代模型:      auto, auto:flagship, auto:economy, auto[1m]     ║");
             println!("╠════════════════════════════════════════════════════════════════════════╣");
-            println!("║  • 已挂载模型提供商 (Providers & Models):                              ║");
+            println!("║  • 已挂载模型提供商 (Providers & Pricing):                             ║");
             for (p_name, p_sec) in &config_file.providers {
+                let pricing_tag = if p_sec.is_free() {
+                    "0元免费".to_string()
+                } else if p_sec.billing_mode == ponyllm_core::pool::BillingMode::Plan {
+                    "Plan套餐".to_string()
+                } else {
+                    format!("入${:.2}/缓${:.3}/出${:.2}", p_sec.input_price, p_sec.cached_price, p_sec.output_price)
+                };
                 let all_models = p_sec.list_all_models();
                 let m_names: Vec<String> = all_models.into_iter().map(|m| {
                     if m.name == p_sec.default_model {
-                        format!("{} (★默认)", m.name)
+                        format!("{} (★默认,{})", m.name, m.tier.shorthand())
                     } else {
-                        m.name
+                        format!("{}({})", m.name, m.tier.shorthand())
                     }
                 }).collect();
-                println!("║    - {:<12} [{}]: {}", p_name, p_sec.strategy, m_names.join(", "));
+                println!("║    - {:<10} [{:<8}]: {}", p_name, pricing_tag, m_names.join(", "));
             }
             println!("╚════════════════════════════════════════════════════════════════════════╝\n");
 

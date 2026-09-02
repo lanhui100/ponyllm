@@ -2,6 +2,10 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
 use std::path::Path;
+use ponyllm_core::pool::{
+    default_cached_price, default_input_price, default_output_price, BillingMode,
+    GatewayRoutingStrategy, ModelTier, PricingConfig,
+};
 use ponyllm_core::telemetry::FlightRecorder;
 use serde::{Deserialize, Serialize};
 
@@ -23,6 +27,8 @@ pub struct GatewaySection {
     pub flight_recorder_capacity: usize,
     #[serde(default = "default_api_key")]
     pub api_key: String,
+    #[serde(default)]
+    pub default_strategy: GatewayRoutingStrategy,
 }
 
 fn default_bind() -> String {
@@ -50,6 +56,7 @@ impl Default for GatewaySection {
             max_retries: default_retries(),
             flight_recorder_capacity: default_capacity(),
             api_key: default_api_key(),
+            default_strategy: GatewayRoutingStrategy::Economy,
         }
     }
 }
@@ -57,6 +64,8 @@ impl Default for GatewaySection {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ModelConfig {
     pub name: String,
+    #[serde(default)]
+    pub tier: ModelTier,
     #[serde(default = "default_context_window")]
     pub context_window: String,
     #[serde(default = "default_max_output")]
@@ -81,6 +90,7 @@ impl Default for ModelConfig {
     fn default() -> Self {
         Self {
             name: String::new(),
+            tier: ModelTier::Flagship,
             context_window: default_context_window(),
             max_output: default_max_output(),
             input_types: default_modalities(),
@@ -93,6 +103,7 @@ impl ModelConfig {
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
+            tier: ModelTier::Flagship,
             context_window: default_context_window(),
             max_output: default_max_output(),
             input_types: default_modalities(),
@@ -108,6 +119,14 @@ pub struct ProviderSection {
     #[serde(default = "default_strategy")]
     pub strategy: String,
     #[serde(default)]
+    pub billing_mode: BillingMode,
+    #[serde(default = "default_input_price")]
+    pub input_price: f64,
+    #[serde(default = "default_cached_price")]
+    pub cached_price: f64,
+    #[serde(default = "default_output_price")]
+    pub output_price: f64,
+    #[serde(default)]
     pub models: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub model_configs: Vec<ModelConfig>,
@@ -116,6 +135,17 @@ pub struct ProviderSection {
 }
 
 impl ProviderSection {
+    pub fn pricing(&self) -> PricingConfig {
+        PricingConfig {
+            input_price: self.input_price,
+            cached_price: self.cached_price,
+            output_price: self.output_price,
+        }
+    }
+
+    pub fn is_free(&self) -> bool {
+        self.pricing().is_free()
+    }
     pub fn get_model_config(&self, model_name: &str) -> ModelConfig {
         if let Some(cfg) = self.model_configs.iter().find(|m| m.name == model_name) {
             return cfg.clone();
@@ -242,9 +272,13 @@ impl ConfigFile {
         let entry = self.providers.entry(name.to_string()).or_insert_with(|| ProviderSection {
             base_url: base_url.to_string(),
             default_model: default_model.to_string(),
+            strategy: strategy.to_string(),
+            billing_mode: BillingMode::Metered,
+            input_price: default_input_price(),
+            cached_price: default_cached_price(),
+            output_price: default_output_price(),
             models: Vec::new(),
             model_configs: Vec::new(),
-            strategy: strategy.to_string(),
             keys: Vec::new(),
         });
         entry.base_url = base_url.to_string();
