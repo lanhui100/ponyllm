@@ -106,9 +106,32 @@ async fn test_gateway_chat_and_messages_endpoints() {
     assert_eq!(ant_body["role"], "assistant");
     assert_eq!(ant_body["content"][0]["type"], "thinking");
     assert_eq!(ant_body["content"][1]["type"], "text");
-    assert_eq!(ant_body["content"][1]["text"], "Echo: Hello from Claude Client");
+    // 6. Test Root-level Messages endpoint (/messages without /v1 prefix)
+    let root_ant_resp = client
+        .post(format!("http://{}/messages", gateway_addr))
+        .json(&json!({
+            "model": "gpt-4o",
+            "max_tokens": 1024,
+            "messages": [{"role": "user", "content": "Hello via root /messages"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(root_ant_resp.status(), 200);
 
-    // 6. Test Telemetry / Flight recorder endpoint
+    // 7. Test Root-level Chat endpoint (/chat/completions without /v1 prefix)
+    let root_chat_resp = client
+        .post(format!("http://{}/chat/completions", gateway_addr))
+        .json(&json!({
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "Hello via root /chat/completions"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(root_chat_resp.status(), 200);
+
+    // 8. Test Telemetry / Flight recorder endpoint
     let recorder_resp = client
         .get(format!("http://{}/v1/telemetry/recorder", gateway_addr))
         .send()
@@ -116,7 +139,7 @@ async fn test_gateway_chat_and_messages_endpoints() {
         .unwrap();
     assert_eq!(recorder_resp.status(), 200);
     let recorder_body: serde_json::Value = recorder_resp.json().await.unwrap();
-    assert!(recorder_body.as_array().unwrap().len() >= 2);
+    assert!(recorder_body.as_array().unwrap().len() >= 4);
 }
 
 #[tokio::test]
@@ -298,7 +321,7 @@ async fn test_gateway_models_endpoints() {
 
     let client = reqwest::Client::new();
 
-    // 1. Test GET /v1/models
+    // 1. Test GET /v1/models (OpenAI & Anthropic dual-compatible)
     let models_resp = client
         .get(format!("http://{}/v1/models", gateway_addr))
         .send()
@@ -307,12 +330,31 @@ async fn test_gateway_models_endpoints() {
     assert_eq!(models_resp.status(), 200);
     let models_body: serde_json::Value = models_resp.json().await.unwrap();
     assert_eq!(models_body["object"], "list");
+    assert_eq!(models_body["has_more"], false);
     let list = models_body["data"].as_array().unwrap();
     assert_eq!(list.len(), 5); // deepseek-v4-flash, deepseek-chat, deepseek-reasoner, gpt-4o, gpt-4o-mini
 
-    // 2. Test GET /v1/models/:model_id for existing model
+    // Check first model has both OpenAI and Anthropic fields
+    let first_model = &list[0];
+    assert!(first_model.get("id").is_some());
+    assert_eq!(first_model["object"], "model");
+    assert_eq!(first_model["type"], "model");
+    assert!(first_model.get("display_name").is_some());
+    assert!(first_model.get("created_at").is_some());
+
+    // 2. Test GET /models (Root-level models endpoint)
+    let root_models_resp = client
+        .get(format!("http://{}/models", gateway_addr))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(root_models_resp.status(), 200);
+    let root_models_body: serde_json::Value = root_models_resp.json().await.unwrap();
+    assert_eq!(root_models_body["data"].as_array().unwrap().len(), 5);
+
+    // 3. Test GET /models/:model_id and /v1/models/:model_id for existing model
     let model_resp = client
-        .get(format!("http://{}/v1/models/deepseek-chat", gateway_addr))
+        .get(format!("http://{}/models/deepseek-chat", gateway_addr))
         .send()
         .await
         .unwrap();
@@ -320,8 +362,9 @@ async fn test_gateway_models_endpoints() {
     let model_body: serde_json::Value = model_resp.json().await.unwrap();
     assert_eq!(model_body["id"], "deepseek-chat");
     assert_eq!(model_body["owned_by"], "deepseek");
+    assert_eq!(model_body["type"], "model");
 
-    // 3. Test GET /v1/models/:model_id for non-existent model (404)
+    // 4. Test GET /v1/models/:model_id for non-existent model (404)
     let not_found_resp = client
         .get(format!("http://{}/v1/models/non-existent-model", gateway_addr))
         .send()

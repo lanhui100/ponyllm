@@ -21,6 +21,8 @@ pub struct GatewaySection {
     pub max_retries: usize,
     #[serde(default = "default_capacity")]
     pub flight_recorder_capacity: usize,
+    #[serde(default = "default_api_key")]
+    pub api_key: String,
 }
 
 fn default_bind() -> String {
@@ -32,6 +34,9 @@ fn default_retries() -> usize {
 fn default_capacity() -> usize {
     200
 }
+fn default_api_key() -> String {
+    "sk-ponyllm-local".to_string()
+}
 
 impl Default for GatewaySection {
     fn default() -> Self {
@@ -39,6 +44,7 @@ impl Default for GatewaySection {
             bind: default_bind(),
             max_retries: default_retries(),
             flight_recorder_capacity: default_capacity(),
+            api_key: default_api_key(),
         }
     }
 }

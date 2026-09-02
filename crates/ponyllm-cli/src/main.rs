@@ -266,6 +266,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             gw_config.flight_recorder_capacity = config_file.gateway.flight_recorder_capacity;
+            gw_config.api_key = config_file.gateway.api_key.clone();
 
             for (p_name, p_sec) in &config_file.providers {
                 let all_model_names: Vec<String> = p_sec.list_all_models().into_iter().map(|m| m.name).collect();
@@ -296,9 +297,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let app = create_app(state);
             let listener = tokio::net::TcpListener::bind(&gw_config.bind_addr).await?;
-            println!("🚀 ponyllm gateway listening on http://{}", gw_config.bind_addr);
-            println!("📡 Active endpoints: /v1/chat/completions, /v1/messages, /v1/responses");
-            println!("📈 Telemetry: /health, /v1/telemetry/metrics, /v1/telemetry/recorder");
+            let port = gw_config.bind_addr.split(':').nth(1).unwrap_or("8080");
+
+            println!("\n╔════════════════════════════════════════════════════════════════════════╗");
+            println!("║              🚀 ponyllm AI Gateway 服务已就绪                          ║");
+            println!("╠════════════════════════════════════════════════════════════════════════╣");
+            println!("║  • 本地接入 Base URL:                                                  ║");
+            println!("║    - OpenAI 客户端:   http://127.0.0.1:{}/v1                            ║", port);
+            println!("║    - Anthropic 客户端: http://127.0.0.1:{}                               ║", port);
+            println!("║    - 监听全地址:      http://{}                                     ║", gw_config.bind_addr);
+            println!("║  • 访问凭据 (API Key):  {}                                     ║", gw_config.api_key);
+            println!("║  • 标准模型路由 (Models):                                              ║");
+            println!("║    - http://127.0.0.1:{}/v1/models                                      ║", port);
+            println!("║    - http://127.0.0.1:{}/models                                         ║", port);
+            println!("╠════════════════════════════════════════════════════════════════════════╣");
+            println!("║  • 已挂载模型提供商 (Providers & Models):                              ║");
+            for (p_name, p_sec) in &config_file.providers {
+                let all_models = p_sec.list_all_models();
+                let m_names: Vec<String> = all_models.into_iter().map(|m| {
+                    if m.name == p_sec.default_model {
+                        format!("{} (★默认)", m.name)
+                    } else {
+                        m.name
+                    }
+                }).collect();
+                println!("║    - {:<12} [{}]: {}", p_name, p_sec.strategy, m_names.join(", "));
+            }
+            println!("╚════════════════════════════════════════════════════════════════════════╝\n");
 
             axum::serve(listener, app).await?;
         }

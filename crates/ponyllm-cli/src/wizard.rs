@@ -137,6 +137,7 @@ pub fn run_interactive_init(output_path: &str) -> Result<(), Box<dyn std::error:
             bind: bind_addr,
             max_retries: 3,
             flight_recorder_capacity: 200,
+            api_key: "sk-ponyllm-local".to_string(),
         },
         providers,
     };
