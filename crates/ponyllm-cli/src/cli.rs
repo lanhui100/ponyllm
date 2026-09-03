@@ -30,7 +30,7 @@ pub enum Commands {
     #[command(subcommand)]
     Provider(ProviderCommands),
 
-    /// Manage API Key pools and perform live health checks
+    /// Manage upstream provider API Key pools (DeepSeek, OpenAI, SenseNova, etc.)
     #[command(subcommand)]
     Key(KeyCommands),
 
@@ -42,15 +42,19 @@ pub enum Commands {
     #[command(subcommand)]
     Strategy(StrategyCommands),
 
-    /// Manage, view or regenerate gateway access API Token (API Key)
+    /// View, set or rotate gateway access API Token (Gateway API Key)
     Auth {
         /// Path to configuration file
         #[arg(short, long)]
         config: Option<String>,
 
-        /// Custom API key / token to set (if omitted, a secure random key will be generated)
+        /// Custom API key to set, or action ('show', 'rotate')
         #[arg(value_name = "KEY")]
         key: Option<String>,
+
+        /// Rotate and regenerate a new secure random gateway API Key
+        #[arg(short, long)]
+        rotate: bool,
     },
 
     /// Launch interactive full-screen TUI terminal dashboard
@@ -92,11 +96,19 @@ pub enum Commands {
         retries: Option<usize>,
     },
 
-    /// Inspect health and live metrics from a running gateway
+    /// Inspect health, gateway token, provider pools and live metrics from a running gateway
     Status {
-        /// Target gateway URL
-        #[arg(short, long, default_value = "http://127.0.0.1:8080")]
-        gateway_url: String,
+        /// Path to configuration file
+        #[arg(short, long)]
+        config: Option<String>,
+
+        /// Override target gateway URL (defaults to bind from config, or http://127.0.0.1:8080)
+        #[arg(short, long)]
+        gateway_url: Option<String>,
+
+        /// Override gateway access authorization API key / token (defaults to api_key from config)
+        #[arg(long)]
+        api_key: Option<String>,
     },
 
     /// View black-box flight recorder forensic frames
@@ -242,15 +254,19 @@ pub enum KeyCommands {
         #[arg(short, long)]
         config: Option<String>,
     },
-    /// Manage, view or regenerate gateway access API Token (API Key)
+    /// View, set or rotate gateway access API Token (Gateway API Key)
     Gateway {
         /// Path to configuration file
         #[arg(short, long)]
         config: Option<String>,
 
-        /// Custom API key / token to set (if omitted, a secure random key will be generated)
+        /// Custom API key to set, or action ('show', 'rotate')
         #[arg(value_name = "KEY")]
         key: Option<String>,
+
+        /// Rotate and regenerate a new secure random gateway API Key
+        #[arg(short, long)]
+        rotate: bool,
     },
 }
 

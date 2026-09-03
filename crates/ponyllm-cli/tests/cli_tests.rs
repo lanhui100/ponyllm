@@ -419,20 +419,32 @@ fn test_secure_api_key_generation_and_cli_auth_commands() {
     assert_eq!(key1.len(), 8 + 32); // "sk-pony-" (8) + 32 hex chars
 
     // 2. Verify CLI Commands::Auth parsing
-    let cli_auth_gen = Cli::try_parse_from(["ponyllm", "auth"]).unwrap();
-    match cli_auth_gen.command {
-        Commands::Auth { config, key } => {
+    let cli_auth_view = Cli::try_parse_from(["ponyllm", "auth"]).unwrap();
+    match cli_auth_view.command {
+        Commands::Auth { config, key, rotate } => {
             assert_eq!(config, None);
             assert_eq!(key, None);
+            assert!(!rotate);
+        }
+        _ => panic!("Expected Auth command"),
+    }
+
+    let cli_auth_rotate = Cli::try_parse_from(["ponyllm", "auth", "--rotate"]).unwrap();
+    match cli_auth_rotate.command {
+        Commands::Auth { config, key, rotate } => {
+            assert_eq!(config, None);
+            assert_eq!(key, None);
+            assert!(rotate);
         }
         _ => panic!("Expected Auth command"),
     }
 
     let cli_auth_set = Cli::try_parse_from(["ponyllm", "auth", "-c", "custom.toml", "sk-custom-secret"]).unwrap();
     match cli_auth_set.command {
-        Commands::Auth { config, key } => {
+        Commands::Auth { config, key, rotate } => {
             assert_eq!(config, Some("custom.toml".to_string()));
             assert_eq!(key, Some("sk-custom-secret".to_string()));
+            assert!(!rotate);
         }
         _ => panic!("Expected Auth command"),
     }
@@ -440,10 +452,85 @@ fn test_secure_api_key_generation_and_cli_auth_commands() {
     // 3. Verify KeyCommands::Gateway parsing
     let cli_key_gw = Cli::try_parse_from(["ponyllm", "key", "gateway", "sk-another-token"]).unwrap();
     match cli_key_gw.command {
-        Commands::Key(KeyCommands::Gateway { config, key }) => {
+        Commands::Key(KeyCommands::Gateway { config, key, rotate }) => {
             assert_eq!(config, None);
             assert_eq!(key, Some("sk-another-token".to_string()));
+            assert!(!rotate);
         }
         _ => panic!("Expected KeyCommands::Gateway"),
     }
+
+    // 4. Verify Commands::Status parsing with config and api_key overrides
+    let cli_status_default = Cli::try_parse_from(["ponyllm", "status"]).unwrap();
+    match cli_status_default.command {
+        Commands::Status { config, gateway_url, api_key } => {
+            assert_eq!(config, None);
+            assert_eq!(gateway_url, None);
+            assert_eq!(api_key, None);
+        }
+        _ => panic!("Expected Status command"),
+    }
+
+    let cli_status_custom = Cli::try_parse_from(["ponyllm", "status", "-c", "my-pony.toml", "-g", "http://127.0.0.1:9090", "--api-key", "sk-test-key"]).unwrap();
+    match cli_status_custom.command {
+        Commands::Status { config, gateway_url, api_key } => {
+            assert_eq!(config, Some("my-pony.toml".to_string()));
+            assert_eq!(gateway_url, Some("http://127.0.0.1:9090".to_string()));
+            assert_eq!(api_key, Some("sk-test-key".to_string()));
+        }
+        _ => panic!("Expected Status command"),
+    }
 }
+
+#[test]
+fn test_gateway_auth_action_safety_rules() {
+    use ponyllm_cli::config::{parse_gateway_auth_action, GatewayAuthAction};
+
+    // 1. Default (no args, no rotate) must be read-only Show
+    assert_eq!(
+        parse_gateway_auth_action(None, false),
+        GatewayAuthAction::Show
+    );
+
+    // 2. Explicit show or get must be Show
+    assert_eq!(
+        parse_gateway_auth_action(Some("show"), false),
+        GatewayAuthAction::Show
+    );
+    assert_eq!(
+        parse_gateway_auth_action(Some("GET"), false),
+        GatewayAuthAction::Show
+    );
+
+    // 3. User typing "list" must be intercepted as MisdirectedList, never as Set("list")
+    assert_eq!(
+        parse_gateway_auth_action(Some("list"), false),
+        GatewayAuthAction::MisdirectedList
+    );
+    assert_eq!(
+        parse_gateway_auth_action(Some("LIST"), true),
+        GatewayAuthAction::MisdirectedList
+    );
+
+    // 4. Rotate flag or keywords must map to Rotate
+    assert_eq!(
+        parse_gateway_auth_action(None, true),
+        GatewayAuthAction::Rotate
+    );
+    assert_eq!(
+        parse_gateway_auth_action(Some("rotate"), false),
+        GatewayAuthAction::Rotate
+    );
+    assert_eq!(
+        parse_gateway_auth_action(Some("generate"), false),
+        GatewayAuthAction::Rotate
+    );
+
+    // 5. Explicit custom secret key must map to Set
+    assert_eq!(
+        parse_gateway_auth_action(Some("sk-pony-my-custom-key"), false),
+        GatewayAuthAction::Set("sk-pony-my-custom-key".to_string())
+    );
+}
+
+

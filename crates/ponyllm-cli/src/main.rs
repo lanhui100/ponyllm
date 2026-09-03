@@ -7,7 +7,10 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use ponyllm_core::pool::{ApiKeyEntry, GatewayRoutingStrategy, KeyPool, RoutingStrategy};
 use ponyllm_server::{create_app, AppState, GatewayConfig, ProviderConfig};
 use ponyllm_cli::cli::{Cli, Commands, KeyCommands, ModelCommands, ProviderCommands, StrategyCommands};
-use ponyllm_cli::config::{generate_sample_config, generate_secure_api_key, ConfigFile};
+use ponyllm_cli::config::{
+    generate_sample_config, generate_secure_api_key, parse_gateway_auth_action, ConfigFile,
+    GatewayAuthAction,
+};
 use ponyllm_cli::wizard::run_interactive_init;
 use ponyllm_cli::tui::run_tui;
 
@@ -178,8 +181,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("🔍 正在执行 API Key 连通性测试...");
                 println!("✅ 所有在线 Key 均健康可用。");
             }
-            KeyCommands::Gateway { config, key } => {
-                handle_manage_gateway_auth(config.as_deref(), key)?;
+            KeyCommands::Gateway { config, key, rotate } => {
+                handle_manage_gateway_auth(config.as_deref(), key, rotate)?;
             }
         },
         Commands::Model(cmd) => match cmd {
@@ -290,8 +293,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("✅ 成功将全局默认调度策略切换为 '{}' ({}) 并已保存至 '{}'", strat, desc, resolved.display());
             }
         },
-        Commands::Auth { config, key } => {
-            handle_manage_gateway_auth(config.as_deref(), key)?;
+        Commands::Auth { config, key, rotate } => {
+            handle_manage_gateway_auth(config.as_deref(), key, rotate)?;
         }
         Commands::Tui { config, gateway_url } => {
             let resolved = resolve_path(config.as_deref());
@@ -467,30 +470,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             axum::serve(listener, app).await?;
         }
-        Commands::Status { gateway_url } => {
-            let client = reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(3))
-                .build()?;
-            let health_url = format!("{}/health", gateway_url.trim_end_matches('/'));
-            let metrics_url = format!("{}/v1/telemetry/metrics", gateway_url.trim_end_matches('/'));
-
-            match client.get(&health_url).send().await {
-                Ok(resp) if resp.status().is_success() => {
-                    let health = resp.json::<serde_json::Value>().await?;
-                    let metrics = client.get(&metrics_url).send().await?.json::<serde_json::Value>().await?;
-                    println!("=== ponyllm Gateway Status ===");
-                    println!("Health:  {}", health);
-                    println!("Metrics: {}", metrics);
-                }
-                Ok(resp) => {
-                    eprintln!("⚠️ 网关响应非 200 状态码: HTTP {}", resp.status());
-                    std::process::exit(1);
-                }
-                Err(e) => {
-                    eprintln!("❌ 无法连接到 ponyllm 网关 ({})。\n👉 排错提示: 请先运行 'ponyllm serve' 启动服务，或检查 '--gateway-url' 是否正确。\n(底层错误: {})", gateway_url, e);
-                    std::process::exit(1);
-                }
-            }
+        Commands::Status {
+            config,
+            gateway_url,
+            api_key,
+        } => {
+            handle_gateway_status(config.as_deref(), gateway_url, api_key).await?;
         }
         Commands::Telemetry { gateway_url } => {
             let client = reqwest::Client::builder()
@@ -525,30 +510,249 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 fn handle_manage_gateway_auth(
     config_path: Option<&str>,
     custom_key: Option<String>,
+    rotate: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let resolved = resolve_path(config_path);
     let path = resolved.to_str().unwrap_or("ponyllm.toml");
     let mut cfg = ConfigFile::load_or_default(Some(path).filter(|_| resolved.exists()))
         .unwrap_or_default();
 
-    let final_key = match custom_key {
-        Some(k) if !k.trim().is_empty() => k.trim().to_string(),
-        _ => generate_secure_api_key(),
+    let action = parse_gateway_auth_action(custom_key.as_deref(), rotate);
+
+    match action {
+        GatewayAuthAction::MisdirectedList => {
+            println!("\n╔════════════════════════════════════════════════════════════════════════╗");
+            println!("║              💡 PonyLLM 访问凭证与 Key 管理指引                         ║");
+            println!("╠════════════════════════════════════════════════════════════════════════╣");
+            println!("║  • 'ponyllm auth' 用于查看或管理【网关自身的对外访问凭证 (Token)】     ║");
+            println!("║  • 若要查看网关访问 Token:     ponyllm auth  或  ponyllm status         ║");
+            println!("║  • 若要查看【上游模型厂商】Key: ponyllm key list                         ║");
+            println!("╚════════════════════════════════════════════════════════════════════════╝\n");
+            return Ok(());
+        }
+        GatewayAuthAction::Show => {
+            let current_key = if cfg.gateway.api_key.is_empty()
+                || cfg.gateway.api_key.eq_ignore_ascii_case("none")
+            {
+                "免鉴权 (开放模式)".to_string()
+            } else {
+                cfg.gateway.api_key.clone()
+            };
+
+            let host_port = if cfg.gateway.bind.starts_with("0.0.0.0") {
+                let port = cfg
+                    .gateway
+                    .bind
+                    .split_once(':')
+                    .map(|(_, p)| p)
+                    .unwrap_or("8080");
+                format!("127.0.0.1:{}", port)
+            } else {
+                cfg.gateway.bind.clone()
+            };
+
+            let openai_base = format!("http://{}/v1", host_port);
+            let anthropic_base = format!("http://{}", host_port);
+            let token_val = if current_key.starts_with("免鉴权") {
+                "none"
+            } else {
+                &current_key
+            };
+            println!("\n╔════════════════════════════════════════════════════════════════════════╗");
+            println!("║              🔑 ponyllm 网关访问 API Key (Token) 状态                  ║");
+            println!("╠════════════════════════════════════════════════════════════════════════╣");
+            println!("║                                                                        ║");
+            println!("║   网关 Token:   {}", format!("{:<55}", current_key));
+            println!("║                                                                        ║");
+            println!("╠════════════════════════════════════════════════════════════════════════╣");
+            println!("║  • 配置文件路径:  {:<53} ║", resolved.display());
+            println!("║  • 客户端接入环境变量示例:                                             ║");
+            println!("║    - export OPENAI_API_BASE={:<42} ║", openai_base);
+            println!("║    - export OPENAI_API_KEY={:<43} ║", token_val);
+            println!("║    - export ANTHROPIC_BASE_URL={:<39} ║", anthropic_base);
+            println!("║    - export ANTHROPIC_API_KEY={:<41} ║", token_val);
+            println!("╠════════════════════════════════════════════════════════════════════════╣");
+            println!("║  👉 操作指引:                                                          ║");
+            println!("║  • 轮转重置为新随机 Key:  ponyllm auth --rotate                        ║");
+            println!("║  • 手动指定并保存自定义 Key: ponyllm auth <YOUR_SECRET_KEY>            ║");
+            println!("║  • 查看完整服务与密钥池状态: ponyllm status                            ║");
+            println!("╚════════════════════════════════════════════════════════════════════════╝\n");
+            return Ok(());
+        }
+        GatewayAuthAction::Rotate => {
+            let final_key = generate_secure_api_key();
+            cfg.gateway.api_key = final_key.clone();
+            cfg.save_to_path(path)?;
+
+            println!("\n╔════════════════════════════════════════════════════════════════════════╗");
+            println!("║              🔑 网关访问 API Key (Token) 已轮转就绪                   ║");
+            println!("╠════════════════════════════════════════════════════════════════════════╣");
+            println!("║                                                                        ║");
+            println!("║   新 API Key:  {}", format!("{:<56}", final_key));
+            println!("║                                                                        ║");
+            println!("╠════════════════════════════════════════════════════════════════════════╣");
+            println!("║  • 已同步持久化保存至: {:<46} ║", resolved.display());
+            println!("║  • 请复制上方 API Key，用于 Cursor / Claude Code / SDK 鉴权连接。      ║");
+            println!("╚════════════════════════════════════════════════════════════════════════╝\n");
+        }
+        GatewayAuthAction::Set(new_key) => {
+            cfg.gateway.api_key = new_key.clone();
+            cfg.save_to_path(path)?;
+
+            println!("\n╔════════════════════════════════════════════════════════════════════════╗");
+            println!("║              🔑 网关访问 API Key (Token) 已更新就绪                   ║");
+            println!("╠════════════════════════════════════════════════════════════════════════╣");
+            println!("║                                                                        ║");
+            println!("║   新 API Key:  {}", format!("{:<56}", new_key));
+            println!("║                                                                        ║");
+            println!("╠════════════════════════════════════════════════════════════════════════╣");
+            println!("║  • 已同步持久化保存至: {:<46} ║", resolved.display());
+            println!("║  • 请复制上方 API Key，用于 Cursor / Claude Code / SDK 鉴权连接。      ║");
+            println!("╚════════════════════════════════════════════════════════════════════════╝\n");
+        }
+    }
+
+    Ok(())
+}
+
+async fn handle_gateway_status(
+    config_path: Option<&str>,
+    cli_gateway_url: Option<String>,
+    cli_api_key: Option<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let resolved = resolve_path(config_path);
+    let path = resolved.to_str().unwrap_or("ponyllm.toml");
+    let cfg = ConfigFile::load_or_default(Some(path).filter(|_| resolved.exists()))
+        .unwrap_or_default();
+
+    let base_url = if let Some(u) = cli_gateway_url {
+        u.trim_end_matches('/').to_string()
+    } else {
+        let (host, port) = cfg.gateway.bind.split_once(':').unwrap_or(("127.0.0.1", "8080"));
+        let probe_host = if host == "0.0.0.0" { "127.0.0.1" } else { host };
+        format!("http://{}:{}", probe_host, port)
     };
 
-    cfg.gateway.api_key = final_key.clone();
-    cfg.save_to_path(path)?;
+    let active_key = if let Some(k) = cli_api_key {
+        k
+    } else {
+        cfg.gateway.api_key.clone()
+    };
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()?;
+
+    let health_url = format!("{}/health", base_url);
+    let metrics_url = format!("{}/v1/telemetry/metrics", base_url);
+
+    let health_res = client.get(&health_url).send().await;
+
+    let mut metrics_req = client.get(&metrics_url);
+    if !active_key.is_empty() && !active_key.eq_ignore_ascii_case("none") {
+        metrics_req = metrics_req.header("Authorization", format!("Bearer {}", active_key));
+    }
+    let metrics_res = metrics_req.send().await;
+
+    let is_online = match &health_res {
+        Ok(r) => r.status().is_success(),
+        Err(_) => false,
+    };
+
+    let health_json: Option<serde_json::Value> = match health_res {
+        Ok(resp) if resp.status().is_success() => resp.json().await.ok(),
+        _ => None,
+    };
+
+    let metrics_json: Option<serde_json::Value> = match metrics_res {
+        Ok(resp) if resp.status().is_success() => resp.json().await.ok(),
+        _ => None,
+    };
+
+    let token_display = if active_key.is_empty() || active_key.eq_ignore_ascii_case("none") {
+        "免鉴权 (开放模式)".to_string()
+    } else {
+        active_key.clone()
+    };
+
+    let strat_name = match cfg.gateway.default_strategy {
+        GatewayRoutingStrategy::Economy => "省钱优先 (0元免费 > Plan套餐 > 缓存命中 > 按量低价)",
+        GatewayRoutingStrategy::Speed => "极速优先 (实测 TTFT + t/s 最优)",
+        GatewayRoutingStrategy::Reliable => "稳定优先 (高可用保障与429避让)",
+        GatewayRoutingStrategy::Balanced => "综合平衡 (成本与响应速度均衡)",
+    };
 
     println!("\n╔════════════════════════════════════════════════════════════════════════╗");
-    println!("║              🔑 网关访问 API Key (Token) 已更新就绪                   ║");
+    println!("║              📊 ponyllm AI Gateway 服务运行全景看板                    ║");
     println!("╠════════════════════════════════════════════════════════════════════════╣");
-    println!("║                                                                        ║");
-    println!("║   API Key:  {}", format!("{:<58}", final_key));
-    println!("║                                                                        ║");
+
+    if is_online {
+        let version = health_json
+            .as_ref()
+            .and_then(|v| v.get("version"))
+            .and_then(|v| v.as_str())
+            .unwrap_or(env!("CARGO_PKG_VERSION"));
+        println!("║  • 服务健康状态:      🟢 在线运行中 (v{}){:>28} ║", version, "");
+    } else {
+        println!("║  • 服务健康状态:      🔴 离线 (未连接到网关服务){:>25} ║", "");
+    }
+
+    println!("║  • 探测服务基址:      {:<48} ║", base_url);
+    println!("║  • 配置文件路径:      {:<48} ║", resolved.display());
+    println!("║  • 全局调度策略:      {:<48} ║", strat_name);
+    let openai_base = format!("{}/v1", base_url);
+    let anthropic_base = base_url.clone();
+    let token_val = if token_display.starts_with("免鉴权") { "none" } else { &token_display };
+    println!("║  • 网关访问凭证 (Gateway Token):                                       ║");
+    println!("║    - 当前生效 Token:  {:<48} ║", token_display);
+    println!("║    - OpenAI SDK:      export OPENAI_API_KEY={:<26} ║", token_val);
+    println!("║                       export OPENAI_API_BASE={:<25} ║", openai_base);
+    println!("║    - Anthropic SDK:   export ANTHROPIC_API_KEY={:<23} ║", token_val);
+    println!("║                       export ANTHROPIC_BASE_URL={:<22} ║", anthropic_base);
     println!("╠════════════════════════════════════════════════════════════════════════╣");
-    println!("║  • 已同步持久化保存至: {:<46} ║", resolved.display());
-    println!("║  • 请复制上方 API Key，用于 Cursor / Claude Code / SDK 鉴权连接。      ║");
+    println!("║  • 挂载模型提供商与密钥池 (Upstream Providers & Keys):                 ║");
+
+    if cfg.providers.is_empty() {
+        println!("║    (未配置任何上游提供商，请运行 'ponyllm provider add' 添加)          ║");
+    } else {
+        for (p_name, p_sec) in &cfg.providers {
+            let key_count = p_sec.keys.len();
+            let key_status = if key_count == 0 {
+                "⚠️ 无可用 Key (池空)".to_string()
+            } else {
+                format!("{} 个上游 Key 就绪", key_count)
+            };
+            let def_model = &p_sec.default_model;
+            let line_desc = format!("{:<10} | {:<16} | 默认模型: {}", p_name, key_status, def_model);
+            println!("║    • {:<66} ║", line_desc);
+        }
+    }
+
+    if let Some(m) = metrics_json {
+        let total_req = m.get("total_requests").and_then(|v| v.as_u64()).unwrap_or(0);
+        let succ_req = m.get("successful_requests").and_then(|v| v.as_u64()).unwrap_or(0);
+        let fail_req = m.get("failed_requests").and_then(|v| v.as_u64()).unwrap_or(0);
+        let total_tokens = m.get("total_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+        let succ_rate = if total_req > 0 {
+            format!("{:.1}%", (succ_req as f64 / total_req as f64) * 100.0)
+        } else {
+            "100.0%".to_string()
+        };
+
+        println!("╠════════════════════════════════════════════════════════════════════════╣");
+        println!("║  • 网关实时遥测指标 (Live Telemetry Metrics):                          ║");
+        println!("║    - 总处理请求数:    {:<12} 成功率:       {:<15} ║", total_req, succ_rate);
+        println!("║    - 成功 / 失败:     {:<12} 消耗 Tokens:  {:<15} ║", format!("{}/{}", succ_req, fail_req), total_tokens);
+    } else if is_online {
+        println!("╠════════════════════════════════════════════════════════════════════════╣");
+        println!("║  • 网关实时遥测指标:  ⚠️ 无法获取指标 (可能鉴权 Token 不匹配)         ║");
+    }
+
     println!("╚════════════════════════════════════════════════════════════════════════╝\n");
+
+    if !is_online {
+        println!("👉 排错提示: 网关服务当前未启动。请运行 'ponyllm serve' 启动服务，或使用 '-g <URL>' 探测指定网关。\n");
+    }
 
     Ok(())
 }

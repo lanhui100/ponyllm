@@ -45,6 +45,40 @@ pub fn generate_secure_api_key() -> String {
     format!("sk-pony-{}", raw)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GatewayAuthAction {
+    Show,
+    Rotate,
+    Set(String),
+    MisdirectedList,
+}
+
+pub fn parse_gateway_auth_action(custom_key: Option<&str>, rotate: bool) -> GatewayAuthAction {
+    if let Some(k) = custom_key {
+        let trimmed = k.trim();
+        if trimmed.eq_ignore_ascii_case("list") {
+            return GatewayAuthAction::MisdirectedList;
+        }
+        if trimmed.eq_ignore_ascii_case("show") || trimmed.eq_ignore_ascii_case("get") {
+            return GatewayAuthAction::Show;
+        }
+        if trimmed.eq_ignore_ascii_case("rotate")
+            || trimmed.eq_ignore_ascii_case("gen")
+            || trimmed.eq_ignore_ascii_case("generate")
+        {
+            return GatewayAuthAction::Rotate;
+        }
+        if !trimmed.is_empty() {
+            return GatewayAuthAction::Set(trimmed.to_string());
+        }
+    }
+    if rotate {
+        GatewayAuthAction::Rotate
+    } else {
+        GatewayAuthAction::Show
+    }
+}
+
 fn default_api_key() -> String {
     generate_secure_api_key()
 }
