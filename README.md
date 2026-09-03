@@ -86,8 +86,12 @@ ponyllm key test --provider deepseek
 ponyllm serve
 # 或自定义端口与重试次数
 ponyllm serve --bind 0.0.0.0:8080 --retries 5
+# 指定配置文件（不指定则按“配置文件寻路规则”自动定位，见 §6）
+ponyllm serve --config /path/to/ponyllm.toml
 ```
-网关就绪后，默认在 `http://127.0.0.1:8080` 提供高并发统一入口。
+网关就绪后，默认在 `http://127.0.0.1:8080` 提供高并发统一入口。启动横幅会打印本次实际加载的配置文件绝对路径。
+
+> **配置热更新（零停机）**：`serve` 运行时持续监听配置文件，`provider/key` 增删改或手改 `ponyllm.toml` 后约 500ms 内自动生效——新增 Provider 原子挂载、已有 Provider 保留健康度指标、剔除的 Provider 正在处理的请求安全执行完。语法损坏的写入会被拒绝并告警，网关不崩溃。长文本 SSE 流式推理不受任何干扰。
 
 ### 4. 打开全屏交互式 TUI 监控看板
 ```bash
@@ -97,7 +101,7 @@ ponyllm tui
 提供四大面板：
 - **📊 实时大盘**：监控网关 UP/DOWN 状态、实时 QPS、成功/429 倒换/5xx 统计指标；
 - **🏢 提供商 & 模型**：可视化查看提供商列表与调度策略；
-- **🔑 Key 账户池治理**：查看所有 Key 的脱敏指纹与实时就绪状态；
+- **🔑 Key 账户池治理**：查看所有 Key 的脱敏指纹与实时就绪状态；按 `a` 添加 Key（provider ←/→ 切换、填 Key ID/API Key/优先级/权重，Enter 保存，重复 ID 即覆盖更新），按 `d` 删除选中 Key（二次确认）；
 - **📼 黑匣子故障录波**：上下翻页审查最近请求与异常帧快照详情。
 
 ### 5. 原生在线自升级
@@ -106,6 +110,37 @@ ponyllm upgrade --check              # 检查是否有新版本
 ponyllm upgrade                      # 一键原地升级到最新 Release 版本
 ponyllm upgrade --force              # 强制重新安装当前版本
 ponyllm upgrade --version v0.2.3     # 指定升降级到特定版本
+```
+
+### 6. 网关巡检与鉴权管理
+```bash
+ponyllm status                       # 综合巡检：在线/离线、监听地址、Uptime、版本、网关 Token、
+                                     # 全局路由策略、各提供商密钥池健康、遥测指标汇总
+ponyllm status --config /path/to/ponyllm.toml --api-key <KEY>  # 显式指定配置与鉴权覆盖
+ponyllm auth                         # 默认只读：显示当前网关 API Key 与客户端接入示例（不覆盖）
+ponyllm auth set <KEY>               # 显式设置网关接入密钥
+ponyllm auth --rotate                # 显式轮转生成新密钥并持久化
+```
+> **概念区隔**：`ponyllm auth` 管的是**网关接入凭证**（客户端连网关用的 Gateway Token）；
+> `ponyllm key` 管的是**上游厂商密钥池**（网关连 OpenAI/DeepSeek 用的 Provider Keys）。两者不要混用。
+
+### 7. 配置文件与寻路规则
+
+网关与 CLI 共用一份 `ponyllm.toml`。定位优先级（高→低）：
+1. `--config <PATH>` 显式参数；
+2. 环境变量 `PONYLLM_CONFIG`；
+3. 从当前目录逐级向上找最近的 `ponyllm.toml`；
+4. 全局默认 `~/.config/ponyllm/ponyllm.toml` 或 `~/.ponyllm.toml`；
+5. 兜底：当前目录 `ponyllm.toml`。
+
+每次 CLI 写配置与 `serve` 启动都会打印实际加载的配置文件绝对路径——“CLI 改了但服务没生效”只会是配错了文件，一眼可查。
+
+`[gateway]` 节关键项：
+```toml
+[gateway]
+bind = "127.0.0.1:8080"
+api_key = "ponyllm"            # 网关接入凭证（见 §6 auth）
+request_body_limit = 134217728 # 请求体上限字节数，默认 128MB；1M 长上下文/大提示词场景无需再调
 ```
 
 ---

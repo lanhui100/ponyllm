@@ -11,4 +11,16 @@ bash .meta/gates/pre-commit.spec.sh
 echo "=== [pre-commit 3/3] Fast syntax & workspace compilation check ==="
 cargo check --workspace
 
+# [doc-freshness nudge] WARN 级提醒，非门禁：暂存区改了 .rs 却没带任何 .md/AGENTS.md 更新时
+# 提示检查"用户可见行为是否需要同步文档"。这是启发式（纯重构/内部改动无需文档），
+# 只 WARN 不 FAIL——新鲜度是语义判断，机器到不了（P6）；误报时忽略即可。
+# 依据：constitution 第 4 条 same-commit + 2026-09-03-doc-backfill 复检结论。
+staged_rs=$(git diff --cached --name-only --diff-filter=ACM 2>/dev/null | grep -E '\.rs$' || true)
+staged_md=$(git diff --cached --name-only --diff-filter=ACM 2>/dev/null | grep -E '(\.md$|AGENTS\.md$)' || true)
+if [ -n "$staged_rs" ] && [ -z "$staged_md" ]; then
+  echo "=== [doc-freshness WARN] 暂存区有 .rs 变更但无文档更新 ===" >&2
+  echo "  改了行为/契约请同步对应文档的家（README/crate README/docs/AGENTS.md，same-commit）；" >&2
+  echo "  纯重构/内部改动无需文档时忽略本提示（启发式，非门禁，不阻提交）。" >&2
+fi
+
 echo "=== [pre-commit PASS] Ready to commit! ==="
