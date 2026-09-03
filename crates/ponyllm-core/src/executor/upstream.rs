@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use serde_json::Value;
-use crate::error::{CoreError, Result};
+use crate::error::{CoreError, GatewayErrorKind, Result};
 use crate::pool::{ApiKeyEntry, KeyPool, PoolErrorType};
 
 #[derive(Debug, Clone)]
@@ -53,14 +53,25 @@ impl UpstreamExecutor {
     /// Execute a JSON request with transparent automatic failover before response body starts
     pub async fn execute_json_request(&self, url: &str, body: &Value) -> Result<Value> {
         let mut last_error = String::new();
+        let mut last_kind = GatewayErrorKind::Internal;
 
         for attempt in 0..self.max_retries.max(1) {
             let key = match self.pool.select_key() {
                 Ok(k) => k,
                 Err(e) => {
+                    let kind = if attempt > 0 {
+                        last_kind
+                    } else {
+                        e.kind()
+                    };
                     return Err(CoreError::AllRetriesFailed {
                         retries: attempt,
-                        last_error: format!("No available key in pool: {}", e),
+                        last_error: if !last_error.is_empty() {
+                            last_error
+                        } else {
+                            format!("No available key in pool: {}", e)
+                        },
+                        kind,
                     });
                 }
             };
@@ -70,6 +81,7 @@ impl UpstreamExecutor {
                 Err(e) => {
                     self.pool.record_error(&key.id, PoolErrorType::AuthInvalid);
                     last_error = e.to_string();
+                    last_kind = GatewayErrorKind::AuthInvalid;
                     continue;
                 }
             };
@@ -98,12 +110,16 @@ impl UpstreamExecutor {
                     last_error = format!("HTTP {} from {}: {}", status_code, key.id, err_body);
 
                     if status_code == 429 {
+                        last_kind = GatewayErrorKind::RateLimitExceeded { retry_after };
                         self.pool.record_error(&key.id, PoolErrorType::RateLimit { retry_after });
                     } else if status_code == 401 {
+                        last_kind = GatewayErrorKind::AuthInvalid;
                         self.pool.record_error(&key.id, PoolErrorType::AuthInvalid);
                     } else if status_code == 402 || (status_code == 403 && err_body.to_lowercase().contains("quota")) {
+                        last_kind = GatewayErrorKind::QuotaExhausted;
                         self.pool.record_error(&key.id, PoolErrorType::QuotaExhausted);
                     } else if status.is_server_error() {
+                        last_kind = GatewayErrorKind::UpstreamUnavailable;
                         self.pool.record_error(&key.id, PoolErrorType::ServerError);
                     } else {
                         // Client error that is not retryable (e.g. 400 Bad Request)
@@ -115,6 +131,7 @@ impl UpstreamExecutor {
                 }
                 Err(err) => {
                     last_error = format!("Network error with {}: {}", key.id, err);
+                    last_kind = GatewayErrorKind::UpstreamUnavailable;
                     self.pool.record_error(&key.id, PoolErrorType::NetworkError);
                 }
             }
@@ -123,20 +140,32 @@ impl UpstreamExecutor {
         Err(CoreError::AllRetriesFailed {
             retries: self.max_retries,
             last_error,
+            kind: last_kind,
         })
     }
 
     /// Execute a streaming request with failover before the first SSE chunk is yielded
     pub async fn execute_stream_request(&self, url: &str, body: &Value) -> Result<reqwest::Response> {
         let mut last_error = String::new();
+        let mut last_kind = GatewayErrorKind::Internal;
 
         for attempt in 0..self.max_retries.max(1) {
             let key = match self.pool.select_key() {
                 Ok(k) => k,
                 Err(e) => {
+                    let kind = if attempt > 0 {
+                        last_kind
+                    } else {
+                        e.kind()
+                    };
                     return Err(CoreError::AllRetriesFailed {
                         retries: attempt,
-                        last_error: format!("No available key in pool: {}", e),
+                        last_error: if !last_error.is_empty() {
+                            last_error
+                        } else {
+                            format!("No available key in pool: {}", e)
+                        },
+                        kind,
                     });
                 }
             };
@@ -146,6 +175,7 @@ impl UpstreamExecutor {
                 Err(e) => {
                     self.pool.record_error(&key.id, PoolErrorType::AuthInvalid);
                     last_error = e.to_string();
+                    last_kind = GatewayErrorKind::AuthInvalid;
                     continue;
                 }
             };
@@ -172,12 +202,16 @@ impl UpstreamExecutor {
                     last_error = format!("HTTP {} from {}: {}", status_code, key.id, err_body);
 
                     if status_code == 429 {
+                        last_kind = GatewayErrorKind::RateLimitExceeded { retry_after };
                         self.pool.record_error(&key.id, PoolErrorType::RateLimit { retry_after });
                     } else if status_code == 401 {
+                        last_kind = GatewayErrorKind::AuthInvalid;
                         self.pool.record_error(&key.id, PoolErrorType::AuthInvalid);
                     } else if status_code == 402 || (status_code == 403 && err_body.to_lowercase().contains("quota")) {
+                        last_kind = GatewayErrorKind::QuotaExhausted;
                         self.pool.record_error(&key.id, PoolErrorType::QuotaExhausted);
                     } else if status.is_server_error() {
+                        last_kind = GatewayErrorKind::UpstreamUnavailable;
                         self.pool.record_error(&key.id, PoolErrorType::ServerError);
                     } else {
                         return Err(CoreError::UpstreamStatusError {
@@ -188,6 +222,7 @@ impl UpstreamExecutor {
                 }
                 Err(err) => {
                     last_error = format!("Network error with {}: {}", key.id, err);
+                    last_kind = GatewayErrorKind::UpstreamUnavailable;
                     self.pool.record_error(&key.id, PoolErrorType::NetworkError);
                 }
             }
@@ -196,6 +231,7 @@ impl UpstreamExecutor {
         Err(CoreError::AllRetriesFailed {
             retries: self.max_retries,
             last_error,
+            kind: last_kind,
         })
     }
 }

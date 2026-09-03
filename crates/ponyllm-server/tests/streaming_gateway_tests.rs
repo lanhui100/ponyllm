@@ -301,3 +301,53 @@ async fn test_malformed_json_returns_standard_json_error() {
     assert_eq!(msg_err["type"], "error");
     assert_eq!(msg_err["error"]["type"], "invalid_request_error");
 }
+
+#[tokio::test]
+async fn test_upstream_429_projected_to_client_rate_limit() {
+    // Upstream always returns 429 Too Many Requests
+    let mock = Router::new()
+        .route(
+            "/v1/chat/completions",
+            post(|_: Json<serde_json::Value>| async {
+                (
+                    axum::http::StatusCode::TOO_MANY_REQUESTS,
+                    [("retry-after", "10")],
+                    Json(json!({"error": {"message": "TPM quota exceeded"}})),
+                )
+            }),
+        );
+    let base = spawn_gateway_with_upstream(mock).await;
+    let client = reqwest::Client::new();
+
+    // 1. OpenAI chat request -> must receive 429 + rate_limit_error
+    let resp_chat = client
+        .post(format!("{}/v1/chat/completions", base))
+        .json(&json!({
+            "model": "deepseek-v4-flash",
+            "messages": [{"role": "user", "content": "hi"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp_chat.status(), 429);
+    let chat_err: serde_json::Value = resp_chat.json().await.unwrap();
+    assert_eq!(chat_err["error"]["type"], "rate_limit_error");
+    assert_eq!(chat_err["error"]["code"], "rate_limit_exceeded");
+
+    // 2. Anthropic messages request -> must receive 429 + Anthropic rate_limit_error
+    let resp_msg = client
+        .post(format!("{}/v1/messages", base))
+        .json(&json!({
+            "model": "deepseek-v4-flash",
+            "max_tokens": 10,
+            "messages": [{"role": "user", "content": "hi"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp_msg.status(), 429);
+    let msg_err: serde_json::Value = resp_msg.json().await.unwrap();
+    assert_eq!(msg_err["type"], "error");
+    assert_eq!(msg_err["error"]["type"], "rate_limit_error");
+}
+

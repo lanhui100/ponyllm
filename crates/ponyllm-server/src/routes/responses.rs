@@ -140,11 +140,7 @@ pub async fn handle_responses(
                     response_snippet: None,
                 });
 
-                return (
-                    StatusCode::BAD_GATEWAY,
-                    Json(serde_json::json!({"error": {"message": err.to_string()}})),
-                )
-                    .into_response();
+                return crate::extractors::project_openai_error(&err.kind(), &err.to_string());
             }
         }
     }
@@ -189,11 +185,7 @@ pub async fn handle_responses(
                 response_snippet: None,
             });
 
-            (
-                StatusCode::BAD_GATEWAY,
-                Json(serde_json::json!({"error": {"message": err.to_string()}})),
-            )
-                .into_response()
+            crate::extractors::project_openai_error(&err.kind(), &err.to_string())
         }
     }
 }

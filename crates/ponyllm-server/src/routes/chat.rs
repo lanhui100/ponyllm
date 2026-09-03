@@ -92,6 +92,7 @@ pub async fn handle_chat_completions(
 
     let is_streaming = req.stream.unwrap_or(false);
     let mut last_error = String::new();
+    let mut last_kind = ponyllm_core::error::GatewayErrorKind::Internal;
 
     for target in targets {
         let pool = match state.get_pool(&target.provider_name) {
@@ -175,6 +176,7 @@ pub async fn handle_chat_completions(
                 }
                 Err(err) => {
                     tracing::warn!("Provider '{}' stream failed ({}). Attempting fallback...", target.provider_name, err);
+                    last_kind = err.kind();
                     last_error = err.to_string();
                     continue;
                 }
@@ -233,6 +235,7 @@ pub async fn handle_chat_completions(
                 }
                 Err(err) => {
                     tracing::warn!("Provider '{}' json request failed ({}). Attempting fallback...", target.provider_name, err);
+                    last_kind = err.kind();
                     last_error = err.to_string();
                     continue;
                 }
@@ -255,17 +258,8 @@ pub async fn handle_chat_completions(
         response_snippet: None,
     });
 
-    (
-        StatusCode::BAD_GATEWAY,
-        Json(serde_json::json!({
-            "error": {
-                "message": format!("All candidate upstream providers exhausted. Last error: {}", last_error),
-                "type": "bad_gateway",
-                "code": "upstream_exhausted"
-            }
-        })),
-    )
-        .into_response()
+    let msg = format!("All candidate upstream providers exhausted. Last error: {}", last_error);
+    crate::extractors::project_openai_error(&last_kind, &msg)
 }
 
 pub fn inject_routing_headers(response: &mut axum::response::Response, target: &RoutedTarget) {

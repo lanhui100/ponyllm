@@ -38,26 +38,152 @@ where
                 };
 
                 let is_anthropic = uri_path.ends_with("/messages") || uri_path.contains("/messages/");
-                let body = if is_anthropic {
-                    json!({
-                        "type": "error",
-                        "error": {
-                            "type": "invalid_request_error",
-                            "message": err_msg
-                        }
-                    })
+                let resp = if is_anthropic {
+                    render_anthropic_error(
+                        StatusCode::BAD_REQUEST,
+                        "invalid_request_error",
+                        &err_msg,
+                    )
                 } else {
-                    json!({
-                        "error": {
-                            "message": err_msg,
-                            "type": "invalid_request_error",
-                            "code": "invalid_payload"
-                        }
-                    })
+                    render_openai_error(
+                        StatusCode::BAD_REQUEST,
+                        "invalid_request_error",
+                        "invalid_payload",
+                        &err_msg,
+                    )
                 };
 
-                Err((StatusCode::BAD_REQUEST, Json(body)).into_response())
+                Err(resp)
             }
         }
     }
+}
+
+/// Render a standardized OpenAI error JSON response envelope.
+pub fn render_openai_error(
+    status: StatusCode,
+    err_type: &str,
+    code: &str,
+    message: &str,
+) -> Response {
+    (
+        status,
+        Json(json!({
+            "error": {
+                "message": message,
+                "type": err_type,
+                "code": code
+            }
+        })),
+    )
+        .into_response()
+}
+
+/// Render a standardized Anthropic error JSON response envelope.
+pub fn render_anthropic_error(
+    status: StatusCode,
+    err_type: &str,
+    message: &str,
+) -> Response {
+    (
+        status,
+        Json(json!({
+            "type": "error",
+            "error": {
+                "type": err_type,
+                "message": message
+            }
+        })),
+    )
+        .into_response()
+}
+
+/// Project a `GatewayErrorKind` into an OpenAI format HTTP response.
+pub fn project_openai_error(
+    kind: &ponyllm_core::error::GatewayErrorKind,
+    message: &str,
+) -> Response {
+    use ponyllm_core::error::GatewayErrorKind;
+    let (status, err_type, code) = match kind {
+        GatewayErrorKind::RateLimitExceeded { .. } => (
+            StatusCode::TOO_MANY_REQUESTS,
+            "rate_limit_error",
+            "rate_limit_exceeded",
+        ),
+        GatewayErrorKind::QuotaExhausted => (
+            StatusCode::TOO_MANY_REQUESTS,
+            "insufficient_quota",
+            "quota_exhausted",
+        ),
+        GatewayErrorKind::AuthInvalid => (
+            StatusCode::BAD_GATEWAY,
+            "invalid_request_error",
+            "upstream_auth_failed",
+        ),
+        GatewayErrorKind::UpstreamUnavailable => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "api_error",
+            "upstream_unavailable",
+        ),
+        GatewayErrorKind::ClientBadRequest => (
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            "invalid_request",
+        ),
+        GatewayErrorKind::CapacityExhausted => (
+            StatusCode::TOO_MANY_REQUESTS,
+            "invalid_request_error",
+            "capacity_exhausted",
+        ),
+        GatewayErrorKind::ModelNotFound => (
+            StatusCode::NOT_FOUND,
+            "invalid_request_error",
+            "model_not_found",
+        ),
+        GatewayErrorKind::Internal => (
+            StatusCode::BAD_GATEWAY,
+            "bad_gateway",
+            "upstream_exhausted",
+        ),
+    };
+    render_openai_error(status, err_type, code, message)
+}
+
+/// Project a `GatewayErrorKind` into an Anthropic format HTTP response.
+pub fn project_anthropic_error(
+    kind: &ponyllm_core::error::GatewayErrorKind,
+    message: &str,
+) -> Response {
+    use ponyllm_core::error::GatewayErrorKind;
+    let (status, err_type) = match kind {
+        GatewayErrorKind::RateLimitExceeded { .. } | GatewayErrorKind::QuotaExhausted => (
+            StatusCode::TOO_MANY_REQUESTS,
+            "rate_limit_error",
+        ),
+        GatewayErrorKind::UpstreamUnavailable => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "overloaded_error",
+        ),
+        GatewayErrorKind::AuthInvalid => (
+            StatusCode::BAD_GATEWAY,
+            "api_error",
+        ),
+        GatewayErrorKind::ClientBadRequest => (
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+        ),
+        GatewayErrorKind::CapacityExhausted => (
+            StatusCode::TOO_MANY_REQUESTS,
+            "overloaded_error",
+        ),
+        GatewayErrorKind::ModelNotFound => (
+            StatusCode::NOT_FOUND,
+            "not_found_error",
+        ),
+        GatewayErrorKind::Internal => (
+            StatusCode::BAD_GATEWAY,
+            "api_error",
+        ),
+    };
+    render_anthropic_error(status, err_type, message)
 }

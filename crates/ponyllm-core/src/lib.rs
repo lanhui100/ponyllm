@@ -5,7 +5,8 @@ pub mod pool;
 pub mod executor;
 pub mod telemetry;
 
-pub use error::{CoreError, Result};
+pub use error::{CoreError, GatewayErrorKind, Result};
 pub use pool::*;
 pub use executor::*;
 pub use telemetry::*;
+

@@ -93,6 +93,7 @@ pub async fn handle_messages(
 
     let is_streaming = req.stream.unwrap_or(false);
     let mut last_error = String::new();
+    let mut last_kind = ponyllm_core::error::GatewayErrorKind::Internal;
 
     for target in targets {
         let pool = match state.get_pool(&target.provider_name) {
@@ -176,6 +177,7 @@ pub async fn handle_messages(
                 }
                 Err(err) => {
                     tracing::warn!("Provider '{}' stream failed ({}). Attempting fallback...", target.provider_name, err);
+                    last_kind = err.kind();
                     last_error = err.to_string();
                     continue;
                 }
@@ -232,6 +234,7 @@ pub async fn handle_messages(
                 }
                 Err(err) => {
                     tracing::warn!("Provider '{}' json request failed ({}). Attempting fallback...", target.provider_name, err);
+                    last_kind = err.kind();
                     last_error = err.to_string();
                     continue;
                 }
@@ -254,17 +257,8 @@ pub async fn handle_messages(
         response_snippet: None,
     });
 
-    (
-        StatusCode::BAD_GATEWAY,
-        Json(serde_json::json!({
-            "type": "error",
-            "error": {
-                "type": "api_error",
-                "message": format!("All candidate upstream providers exhausted. Last error: {}", last_error)
-            }
-        })),
-    )
-        .into_response()
+    let msg = format!("All candidate upstream providers exhausted. Last error: {}", last_error);
+    crate::extractors::project_anthropic_error(&last_kind, &msg)
 }
 
 fn uuid_simple() -> String {
