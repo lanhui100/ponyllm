@@ -100,7 +100,8 @@ pub async fn handle_chat_completions(
             None => continue,
         };
 
-        let executor = UpstreamExecutor::new(pool, state.config.max_retries);
+        let max_retries = state.config.read().max_retries;
+        let executor = UpstreamExecutor::new(pool, max_retries);
         let is_anthropic_upstream = target.is_anthropic_upstream;
 
         let mut target_req = req.clone();

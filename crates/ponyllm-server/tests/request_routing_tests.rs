@@ -471,3 +471,144 @@ async fn test_anthropic_messages_routing_and_model_echo() {
 
     assert_eq!(resp_with_sys.status(), 200);
 }
+
+#[tokio::test]
+async fn test_gateway_configuration_hot_reload() {
+    let mock_b = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mock_b_addr = mock_b.local_addr().unwrap();
+
+    // Mock Upstream B
+    tokio::spawn(async move {
+        let app = axum::Router::new().route(
+            "/v1/chat/completions",
+            axum::routing::post(|axum::Json(req): axum::Json<serde_json::Value>| async move {
+                axum::Json(json!({
+                    "id": "chatcmpl-b",
+                    "object": "chat.completion",
+                    "created": 123456789,
+                    "model": req["model"],
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "Hello from Provider B"},
+                        "finish_reason": "stop"
+                    }]
+                }))
+            }),
+        );
+        axum::serve(mock_b, app).await.unwrap();
+    });
+
+    // 1. Initial configuration: prov_a only
+    let mut gw_config = GatewayConfig::default();
+    gw_config.bind_addr = "127.0.0.1:0".to_string();
+    gw_config.api_key = String::new();
+    gw_config.providers.insert(
+        "prov_a".to_string(),
+        ProviderConfig {
+            base_url: "http://127.0.0.1:12345/v1".to_string(),
+            default_model: "model-a".to_string(),
+            strategy: "round_robin".to_string(),
+            billing_mode: BillingMode::Metered,
+            input_price: 1.0,
+            cached_price: 0.5,
+            output_price: 2.0,
+            models: vec!["model-a".to_string()],
+            model_specs: vec![],
+        },
+    );
+
+    let state = Arc::new(AppState::new(gw_config.clone()));
+    let pool_a = Arc::new(KeyPool::new("prov_a", RoutingStrategy::RoundRobin));
+    pool_a.add_key(ApiKeyEntry::new("key-a", "sk-a", 1, 1));
+    state.register_pool("prov_a", pool_a);
+
+    let gateway_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let gateway_addr = gateway_listener.local_addr().unwrap();
+    let app = create_app(state.clone());
+    tokio::spawn(async move {
+        axum::serve(gateway_listener, app).await.unwrap();
+    });
+
+    let client = reqwest::Client::new();
+
+    // 2. Query /v1/models before reload: only model-a exists
+    let models_1: serde_json::Value = client
+        .get(format!("http://{}/v1/models", gateway_addr))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let ids_1: Vec<&str> = models_1["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["id"].as_str().unwrap())
+        .collect();
+    assert!(ids_1.contains(&"model-a"));
+    assert!(!ids_1.contains(&"model-b"));
+
+    // 3. Perform Hot Reload: remove prov_a, add prov_b
+    let mut new_config = GatewayConfig::default();
+    new_config.bind_addr = gw_config.bind_addr.clone();
+    new_config.providers.insert(
+        "prov_b".to_string(),
+        ProviderConfig {
+            base_url: format!("http://{}/v1", mock_b_addr),
+            default_model: "model-b".to_string(),
+            strategy: "round_robin".to_string(),
+            billing_mode: BillingMode::Metered,
+            input_price: 0.1,
+            cached_price: 0.05,
+            output_price: 0.2,
+            models: vec!["model-b".to_string()],
+            model_specs: vec![],
+        },
+    );
+
+    let mut new_pools = std::collections::HashMap::new();
+    let pool_b = Arc::new(KeyPool::new("prov_b", RoutingStrategy::RoundRobin));
+    pool_b.add_key(ApiKeyEntry::new("key-b", "sk-b", 1, 1));
+    new_pools.insert("prov_b".to_string(), pool_b);
+
+    state.reload_config_with_pools(new_config, new_pools);
+
+    // 4. Query /v1/models after reload: model-a is gone, model-b is live!
+    let models_2: serde_json::Value = client
+        .get(format!("http://{}/v1/models", gateway_addr))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let ids_2: Vec<&str> = models_2["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["id"].as_str().unwrap())
+        .collect();
+    assert!(!ids_2.contains(&"model-a"), "Old model-a should be removed");
+    assert!(ids_2.contains(&"model-b"), "New model-b should be exposed");
+
+    // 5. Query chat completions with model-b: should succeed seamlessly
+    let chat_resp = client
+        .post(format!("http://{}/v1/chat/completions", gateway_addr))
+        .json(&json!({
+            "model": "model-b",
+            "messages": [{"role": "user", "content": "Hello b"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(chat_resp.status(), 200);
+    assert_eq!(
+        chat_resp.headers().get("x-ponyllm-provider").unwrap().to_str().unwrap(),
+        "prov_b"
+    );
+    let chat_json: serde_json::Value = chat_resp.json().await.unwrap();
+    assert_eq!(chat_json["choices"][0]["message"]["content"], "Hello from Provider B");
+}
+

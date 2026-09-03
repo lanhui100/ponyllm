@@ -22,7 +22,10 @@ async fn auth_middleware(
         return next.run(req).await;
     }
 
-    let expected_key = state.config.api_key.trim();
+    let expected_key = {
+        let cfg = state.config.read();
+        cfg.api_key.trim().to_string()
+    };
     // If api_key is not configured, is empty or set to "none", allow all requests
     if expected_key.is_empty() || expected_key.eq_ignore_ascii_case("none") {
         return next.run(req).await;
@@ -30,28 +33,26 @@ async fn auth_middleware(
 
     let headers = req.headers();
 
-    // 1. Check Authorization: Bearer <token> (scheme is case-insensitive per RFC 6750)
+    // 1. Check Authorization: Bearer <token> (scheme is case-insensitive per RFC 6750) or plain token
     let mut provided_token = None;
     if let Some(auth_val) = headers.get("authorization").and_then(|v| v.to_str().ok()) {
         let trimmed = auth_val.trim();
         let lower = trimmed.to_ascii_lowercase();
         if lower.starts_with("bearer ") {
-            // "bearer " is 7 ASCII bytes regardless of case; slice the original
-            // (non-lowercased) value so the token keeps its real casing.
             provided_token = Some(trimmed[7..].trim());
         } else {
             provided_token = Some(trimmed);
         }
     }
 
-    // 2. Check x-api-key: <token> (Anthropic style)
+    // 2. Check X-Api-Key: <token>
     if provided_token.is_none() {
-        if let Some(x_key) = headers.get("x-api-key").and_then(|v| v.to_str().ok()) {
-            provided_token = Some(x_key.trim());
+        if let Some(key_val) = headers.get("x-api-key").and_then(|v| v.to_str().ok()) {
+            provided_token = Some(key_val.trim());
         }
     }
 
-    // 3. Validate
+    // Validate token
     if let Some(token) = provided_token {
         if token == expected_key {
             return next.run(req).await;

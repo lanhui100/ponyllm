@@ -23,7 +23,7 @@ pub struct RoutedTarget {
 
 #[derive(Debug)]
 pub struct AppState {
-    pub config: GatewayConfig,
+    pub config: RwLock<GatewayConfig>,
     pub pools: RwLock<HashMap<String, Arc<KeyPool>>>,
     pub flight_recorder: Arc<FlightRecorder>,
     pub metrics: Arc<MetricsCollector>,
@@ -35,13 +35,35 @@ impl AppState {
     pub fn new(config: GatewayConfig) -> Self {
         let capacity = config.flight_recorder_capacity;
         Self {
-            config,
+            config: RwLock::new(config),
             pools: RwLock::new(HashMap::new()),
             flight_recorder: Arc::new(FlightRecorder::new(capacity)),
             metrics: Arc::new(MetricsCollector::new()),
             hot_cache: Arc::new(HotCacheTracker::new()),
             node_metrics: RwLock::new(HashMap::new()),
         }
+    }
+
+    pub fn reload_config_with_pools(
+        &self,
+        new_config: GatewayConfig,
+        new_pools: HashMap<String, Arc<KeyPool>>,
+    ) {
+        let mut config_guard = self.config.write();
+        let mut pools_guard = self.pools.write();
+
+        for (name, pool) in new_pools {
+            pools_guard.insert(name, pool);
+        }
+
+        pools_guard.retain(|name, _| new_config.providers.contains_key(name));
+
+        tracing::info!(
+            "Gateway configuration reloaded. Active providers: {:?}",
+            pools_guard.keys().collect::<Vec<_>>()
+        );
+
+        *config_guard = new_config;
     }
 
     pub fn register_pool(&self, provider: &str, pool: Arc<KeyPool>) {
@@ -71,15 +93,16 @@ impl AppState {
         parsed: &ParsedRequestModel,
         header_strategy: Option<GatewayRoutingStrategy>,
     ) -> Result<Vec<RoutedTarget>> {
+        let config = self.config.read();
         let strategy = parsed
             .strategy_override
             .or(header_strategy)
-            .unwrap_or(self.config.default_strategy);
+            .unwrap_or(config.default_strategy);
 
         if parsed.is_auto {
-            self.resolve_auto_targets(parsed, strategy)
+            self.resolve_auto_targets(parsed, strategy, &config)
         } else {
-            self.resolve_pinned_targets(parsed, strategy)
+            self.resolve_pinned_targets(parsed, strategy, &config)
         }
     }
 
@@ -100,6 +123,7 @@ impl AppState {
         &self,
         parsed: &ParsedRequestModel,
         strategy: GatewayRoutingStrategy,
+        config: &GatewayConfig,
     ) -> Result<Vec<RoutedTarget>> {
         let filter_1m = |c: &RoutedTarget| {
             if parsed.is_1m_context {
@@ -111,7 +135,7 @@ impl AppState {
 
         if let Some(explicit_tier) = parsed.explicit_tier {
             let candidates: Vec<RoutedTarget> = self
-                .collect_tier_candidates(explicit_tier, strategy)
+                .collect_tier_candidates(explicit_tier, strategy, config)
                 .into_iter()
                 .filter(filter_1m)
                 .collect();
@@ -132,40 +156,40 @@ impl AppState {
                     )));
                 }
             }
-            return Ok(self.sort_candidates(candidates, strategy));
+            return Ok(self.sort_candidates(candidates, strategy, config));
         }
 
         // Default auto (no explicit tier): Try Standard -> Elevate to Flagship -> Fallback to Light
         let standard_candidates: Vec<RoutedTarget> = self
-            .collect_tier_candidates(ModelTier::Standard, strategy)
+            .collect_tier_candidates(ModelTier::Standard, strategy, config)
             .into_iter()
             .filter(filter_1m)
             .collect();
 
         if !standard_candidates.is_empty() {
-            return Ok(self.sort_candidates(standard_candidates, strategy));
+            return Ok(self.sort_candidates(standard_candidates, strategy, config));
         }
 
         // Adaptive Tier Elevation: Elevate to Flagship if Standard has no matching (or 1M) nodes
         let flagship_candidates: Vec<RoutedTarget> = self
-            .collect_tier_candidates(ModelTier::Flagship, strategy)
+            .collect_tier_candidates(ModelTier::Flagship, strategy, config)
             .into_iter()
             .filter(filter_1m)
             .collect();
 
         if !flagship_candidates.is_empty() {
-            return Ok(self.sort_candidates(flagship_candidates, strategy));
+            return Ok(self.sort_candidates(flagship_candidates, strategy, config));
         }
 
         // Fallback to Light tier
         let light_candidates: Vec<RoutedTarget> = self
-            .collect_tier_candidates(ModelTier::Light, strategy)
+            .collect_tier_candidates(ModelTier::Light, strategy, config)
             .into_iter()
             .filter(filter_1m)
             .collect();
 
         if !light_candidates.is_empty() {
-            return Ok(self.sort_candidates(light_candidates, strategy));
+            return Ok(self.sort_candidates(light_candidates, strategy, config));
         }
 
         if parsed.is_1m_context {
@@ -185,12 +209,13 @@ impl AppState {
         &self,
         parsed: &ParsedRequestModel,
         strategy: GatewayRoutingStrategy,
+        config: &GatewayConfig,
     ) -> Result<Vec<RoutedTarget>> {
         let clean = &parsed.clean_model_name;
         let mut candidates = Vec::new();
 
         // 1. Match exact model name across all providers
-        for (p_name, p_cfg) in &self.config.providers {
+        for (p_name, p_cfg) in &config.providers {
             if p_cfg.default_model == *clean || p_cfg.models.iter().any(|m| m == clean) {
                 let spec = p_cfg.get_model_spec(clean);
                 let is_ant = p_cfg.base_url.contains("anthropic")
@@ -210,7 +235,7 @@ impl AppState {
         // 2. Prefix matching (e.g. "deepseek/deepseek-chat")
         if candidates.is_empty() {
             if let Some((prefix, sub_model)) = clean.split_once('/') {
-                if let Some(p_cfg) = self.config.providers.get(prefix) {
+                if let Some(p_cfg) = config.providers.get(prefix) {
                     let spec = p_cfg.get_model_spec(sub_model);
                     let is_ant = p_cfg.base_url.contains("anthropic");
                     candidates.push(RoutedTarget {
@@ -229,7 +254,7 @@ impl AppState {
         // 3. Keyword heuristic matching
         if candidates.is_empty() {
             let lower = clean.to_lowercase();
-            for (p_name, p_cfg) in &self.config.providers {
+            for (p_name, p_cfg) in &config.providers {
                 if lower.contains(p_name)
                     || (p_name == "openai" && (lower.starts_with("gpt") || lower.starts_with("o1") || lower.starts_with("o3")))
                     || (p_name == "anthropic" && lower.starts_with("claude"))
@@ -272,12 +297,17 @@ impl AppState {
             }
         }
 
-        Ok(self.sort_candidates(candidates, strategy))
+        Ok(self.sort_candidates(candidates, strategy, config))
     }
 
-    fn collect_tier_candidates(&self, tier: ModelTier, strategy: GatewayRoutingStrategy) -> Vec<RoutedTarget> {
+    fn collect_tier_candidates(
+        &self,
+        tier: ModelTier,
+        strategy: GatewayRoutingStrategy,
+        config: &GatewayConfig,
+    ) -> Vec<RoutedTarget> {
         let mut candidates = Vec::new();
-        for (p_name, p_cfg) in &self.config.providers {
+        for (p_name, p_cfg) in &config.providers {
             let default_spec = p_cfg.get_model_spec(&p_cfg.default_model);
             if default_spec.tier == tier {
                 let is_ant = p_cfg.base_url.contains("anthropic");
@@ -316,12 +346,13 @@ impl AppState {
         &self,
         mut candidates: Vec<RoutedTarget>,
         strategy: GatewayRoutingStrategy,
+        config: &GatewayConfig,
     ) -> Vec<RoutedTarget> {
         match strategy {
             GatewayRoutingStrategy::Economy => {
                 candidates.sort_by(|a, b| {
-                    let p_a = self.config.providers.get(&a.provider_name);
-                    let p_b = self.config.providers.get(&b.provider_name);
+                    let p_a = config.providers.get(&a.provider_name);
+                    let p_b = config.providers.get(&b.provider_name);
                     let pricing_a = p_a.map(|p| p.pricing()).unwrap_or_default();
                     let pricing_b = p_b.map(|p| p.pricing()).unwrap_or_default();
                     let billing_a = p_a.map(|p| p.billing_mode.clone()).unwrap_or_default();
@@ -342,36 +373,44 @@ impl AppState {
             }
             GatewayRoutingStrategy::Balanced => {
                 candidates.sort_by(|a, b| {
-                    let p_a = self.config.providers.get(&a.provider_name);
-                    let p_b = self.config.providers.get(&b.provider_name);
+                    let p_a = config.providers.get(&a.provider_name);
+                    let p_b = config.providers.get(&b.provider_name);
                     let pricing_a = p_a.map(|p| p.pricing()).unwrap_or_default();
                     let pricing_b = p_b.map(|p| p.pricing()).unwrap_or_default();
                     let billing_a = p_a.map(|p| p.billing_mode.clone()).unwrap_or_default();
                     let billing_b = p_b.map(|p| p.billing_mode.clone()).unwrap_or_default();
-                    let econ_a = EconomyScorer::score_candidate(&pricing_a, billing_a, false, 100_000, 1000);
-                    let econ_b = EconomyScorer::score_candidate(&pricing_b, billing_b, false, 100_000, 1000);
+                    let score_a = EconomyScorer::score_candidate(&pricing_a, billing_a, false, 100_000, 1000);
+                    let score_b = EconomyScorer::score_candidate(&pricing_b, billing_b, false, 100_000, 1000);
 
                     let metrics_a = self.get_or_create_node_metrics(&a.provider_name);
                     let metrics_b = self.get_or_create_node_metrics(&b.provider_name);
-                    let speed_a = SpeedScorer::estimate_total_latency_ms(&metrics_a, 512);
-                    let speed_b = SpeedScorer::estimate_total_latency_ms(&metrics_b, 512);
+                    let lat_a = SpeedScorer::estimate_total_latency_ms(&metrics_a, 512);
+                    let lat_b = SpeedScorer::estimate_total_latency_ms(&metrics_b, 512);
 
-                    let score_a = econ_a * 0.5 + (speed_a / 100.0) * 0.5;
-                    let score_b = econ_b * 0.5 + (speed_b / 100.0) * 0.5;
-                    score_a.total_cmp(&score_b)
+                    let combined_a = score_a + (lat_a / 1000.0) * 0.1;
+                    let combined_b = score_b + (lat_b / 1000.0) * 0.1;
+                    combined_a.total_cmp(&combined_b)
                 });
             }
-            _ => {}
+            GatewayRoutingStrategy::Reliable => {
+                candidates.sort_by(|a, b| {
+                    let pool_a = self.get_pool(&a.provider_name);
+                    let pool_b = self.get_pool(&b.provider_name);
+                    let active_a = pool_a.map(|p| p.active_key_count()).unwrap_or(0);
+                    let active_b = pool_b.map(|p| p.active_key_count()).unwrap_or(0);
+                    active_b.cmp(&active_a)
+                });
+            }
         }
         candidates
     }
 
-    /// Return all configured and virtual models: (model_id, provider_name, display_name)
+    /// List all exposed models: virtual auto models and physical configured models
     pub fn list_all_models(&self) -> Vec<(String, String, Option<String>)> {
         let mut result = Vec::new();
         let mut seen = std::collections::HashSet::new();
 
-        // 1. Inject Auto virtual general models
+        // 1. auto virtual models
         result.push(("auto".to_string(), "ponyllm".to_string(), Some("PonyLLM Auto (智能总代·主力默认)".to_string())));
         result.push(("auto:standard".to_string(), "ponyllm".to_string(), Some("PonyLLM Auto (智能总代·主力)".to_string())));
         result.push(("auto:flagship".to_string(), "ponyllm".to_string(), Some("PonyLLM Auto (智能总代·旗舰)".to_string())));
@@ -387,7 +426,8 @@ impl AppState {
         seen.insert("auto[1m]".to_string());
 
         // 2. Physical configured models and their [1m] aliases
-        for (provider_name, cfg) in &self.config.providers {
+        let config = self.config.read();
+        for (provider_name, cfg) in &config.providers {
             let mut add_model_and_alias = |m: &str| {
                 if !seen.contains(m) {
                     result.push((m.to_string(), provider_name.clone(), None));
@@ -419,7 +459,8 @@ impl AppState {
     pub fn resolve_provider(&self, model: &str) -> Option<(String, ProviderConfig)> {
         let parsed = ParsedRequestModel::parse(model);
         if let Ok(target) = self.resolve_routed_target(&parsed, None) {
-            if let Some(cfg) = self.config.providers.get(&target.provider_name) {
+            let config = self.config.read();
+            if let Some(cfg) = config.providers.get(&target.provider_name) {
                 return Some((target.provider_name, cfg.clone()));
             }
         }

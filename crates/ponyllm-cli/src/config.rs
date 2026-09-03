@@ -214,18 +214,18 @@ fn default_weight() -> u32 {
 }
 
 impl ConfigFile {
+    pub fn resolve_path(path: Option<&str>) -> std::path::PathBuf {
+        ponyllm_core::resolve_config_path(path.map(Path::new))
+    }
+
     pub fn load_or_default(path: Option<&str>) -> Result<Self, Box<dyn std::error::Error>> {
-        if let Some(p) = path {
-            if !Path::new(p).exists() {
-                return Err(format!("指定的配置文件 '{}' 不存在，请检查路径或执行 'ponyllm init' 生成配置", p).into());
-            }
-            let content = fs::read_to_string(p)?;
+        let resolved = Self::resolve_path(path);
+        if resolved.exists() {
+            let content = fs::read_to_string(&resolved)?;
             let cfg: ConfigFile = toml::from_str(&content)?;
             Ok(cfg)
-        } else if Path::new("ponyllm.toml").exists() {
-            let content = fs::read_to_string("ponyllm.toml")?;
-            let cfg: ConfigFile = toml::from_str(&content)?;
-            Ok(cfg)
+        } else if let Some(p) = path {
+            Err(format!("指定的配置文件 '{}' 不存在，请检查路径或执行 'ponyllm init' 生成配置", p).into())
         } else {
             let content = generate_sample_config();
             let cfg: ConfigFile = toml::from_str(content)?;

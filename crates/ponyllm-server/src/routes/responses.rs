@@ -81,7 +81,8 @@ pub async fn handle_responses(
 
     // Responses API is OpenAI-protocol only; route to the provider's
     // /v1/responses endpoint and set the physical model in the body.
-    let executor = UpstreamExecutor::new(pool, state.config.max_retries);
+    let max_retries = state.config.read().max_retries;
+    let executor = UpstreamExecutor::new(pool, max_retries);
     let target_url = normalize_responses_url(&target.base_url);
 
     req.model = physical_model.clone();

@@ -94,4 +94,15 @@ impl KeyPool {
             entry.record_failure(error);
         }
     }
+
+    /// Count active healthy keys
+    pub fn active_key_count(&self) -> usize {
+        let keys = self.keys.read();
+        keys.iter().filter(|k| k.current_state() == KeyState::Active).count()
+    }
+
+    /// Total keys in pool
+    pub fn total_key_count(&self) -> usize {
+        self.keys.read().len()
+    }
 }
