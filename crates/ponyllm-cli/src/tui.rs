@@ -18,7 +18,7 @@ use ratatui::{
 };
 use serde_json::Value;
 use tokio::sync::mpsc;
-use crate::config::{ConfigFile, ModelConfig};
+use crate::config::{ConfigFile, KeySection, ModelConfig};
 
 pub struct TerminalGuard {
     pub terminal: Terminal<CrosstermBackend<io::Stdout>>,
@@ -104,6 +104,18 @@ pub enum Modal {
     DeleteModelConfirm {
         provider_name: String,
         model_name: String,
+    },
+    AddKey {
+        provider_idx: usize,   // index into sorted_provider_names()
+        id: String,
+        api_key: String,
+        priority: String,      // editable; parsed to u32 on submit
+        weight: String,        // editable; parsed to u32 on submit
+        active_field: usize,   // 0: provider, 1: id, 2: api_key, 3: priority, 4: weight
+    },
+    DeleteKeyConfirm {
+        provider: String,
+        id: String,
     },
 }
 
@@ -193,6 +205,21 @@ impl TuiApp {
         }
         let idx = self.model_table_state.selected().unwrap_or(0);
         models.get(idx).cloned()
+    }
+
+    /// Resolve the currently selected row in the Key 治理 tab back to its
+    /// owning (provider, KeySection) pair, so the row can be deleted.
+    pub fn selected_key(&self) -> Option<(String, KeySection)> {
+        let mut flat: Vec<(String, KeySection)> = Vec::new();
+        for p_name in self.sorted_provider_names() {
+            if let Some(p) = self.config.providers.get(&p_name) {
+                for k in &p.keys {
+                    flat.push((p_name.clone(), k.clone()));
+                }
+            }
+        }
+        let idx = self.key_table_state.selected().unwrap_or(0);
+        flat.get(idx).cloned()
     }
 
     pub fn apply_telemetry(&mut self, snap: TelemetrySnapshot) {
@@ -434,6 +461,24 @@ fn handle_key_event(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                         }
                     }
                 }
+            } else if app.active_tab == 2 {
+                let provider_names = app.sorted_provider_names();
+                if provider_names.is_empty() {
+                    app.status_message = "⚠️ 请先在 [2] 提供商面板添加提供商，再添加 Key。".to_string();
+                } else {
+                    // 默认定位到当前选中 Key 所属的提供商
+                    let provider_idx = app.selected_key()
+                        .and_then(|(name, _)| provider_names.iter().position(|n| *n == name))
+                        .unwrap_or(0);
+                    app.modal = Modal::AddKey {
+                        provider_idx,
+                        id: String::new(),
+                        api_key: String::new(),
+                        priority: "1".to_string(),
+                        weight: "10".to_string(),
+                        active_field: 0,
+                    };
+                }
             }
         }
         KeyCode::Char('e') | KeyCode::Char('E') => {
@@ -523,6 +568,15 @@ fn handle_key_event(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                             app.status_message = "⚠️ 当前没有选中的提供商。".to_string();
                         }
                     }
+                }
+            } else if app.active_tab == 2 {
+                if let Some((p_name, k)) = app.selected_key() {
+                    app.modal = Modal::DeleteKeyConfirm {
+                        provider: p_name,
+                        id: k.id,
+                    };
+                } else {
+                    app.status_message = "⚠️ 当前没有选中的 Key。".to_string();
                 }
             }
         }
@@ -957,6 +1011,126 @@ fn handle_modal_key(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                 }
             }
         }
+        Modal::DeleteKeyConfirm { provider, id } => {
+            match key {
+                KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+                    let p = provider.clone();
+                    let k = id.clone();
+                    match app.config.remove_key(&p, &k) {
+                        Ok(true) => {
+                            match app.save_config() {
+                                Ok(_) => {
+                                    app.status_message = format!("✅ 成功从提供商 '{}' 中删除 Key '{}'", p, k);
+                                }
+                                Err(e) => {
+                                    app.status_message = format!("⚠️ 已从内存删除 Key '{}'，但写入配置文件失败: {} (重启后可能恢复)", k, e);
+                                }
+                            }
+                            let total_keys = app.config.providers.values().map(|x| x.keys.len()).sum();
+                            scroll_table(&mut app.key_table_state, total_keys, 0);
+                        }
+                        Ok(false) => {
+                            app.status_message = format!("⚠️ 未能删除 Key '{}'", k);
+                        }
+                        Err(e) => {
+                            app.status_message = format!("❌ 删除失败: {}", e);
+                        }
+                    }
+                }
+                KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
+                    app.status_message = "已取消删除 Key。".to_string();
+                }
+                _ => {
+                    keep_modal = true;
+                }
+            }
+        }
+        Modal::AddKey { provider_idx, id, api_key, priority, weight, active_field } => {
+            match key {
+                KeyCode::Esc => {
+                    app.status_message = "已取消添加 Key。".to_string();
+                }
+                KeyCode::Tab | KeyCode::Down => {
+                    *active_field = (*active_field + 1) % 5;
+                    keep_modal = true;
+                }
+                KeyCode::BackTab | KeyCode::Up => {
+                    *active_field = if *active_field == 0 { 4 } else { *active_field - 1 };
+                    keep_modal = true;
+                }
+                KeyCode::Left => {
+                    if *active_field == 0 && *provider_idx > 0 {
+                        *provider_idx -= 1;
+                    }
+                    keep_modal = true;
+                }
+                KeyCode::Right => {
+                    if *active_field == 0 && *provider_idx + 1 < app.sorted_provider_names().len() {
+                        *provider_idx += 1;
+                    }
+                    keep_modal = true;
+                }
+                KeyCode::Enter => {
+                    let provider_names = app.sorted_provider_names();
+                    let prio_res: Result<u32, _> = priority.trim().parse();
+                    let weight_res: Result<u32, _> = weight.trim().parse();
+                    if provider_names.is_empty() {
+                        app.status_message = "❌ 无可用的提供商，请先添加提供商。".to_string();
+                        keep_modal = true;
+                    } else if id.trim().is_empty() {
+                        app.status_message = "❌ Key ID 不能为空！".to_string();
+                        keep_modal = true;
+                    } else if api_key.trim().is_empty() {
+                        app.status_message = "❌ API Key 内容不能为空！".to_string();
+                        keep_modal = true;
+                    } else if prio_res.is_err() {
+                        app.status_message = "❌ 优先级必须是非负整数 (1 为最高)。".to_string();
+                        keep_modal = true;
+                    } else if weight_res.is_err() {
+                        app.status_message = "❌ 权重必须是非负整数。".to_string();
+                        keep_modal = true;
+                    } else {
+                        let p_name = provider_names[*provider_idx % provider_names.len()].clone();
+                        let prio: u32 = prio_res.unwrap_or(1);
+                        let w: u32 = weight_res.unwrap_or(10);
+                        if let Err(e) = app.config.add_key(&p_name, id.trim(), api_key.trim(), prio, w) {
+                            app.status_message = format!("❌ 添加 Key 失败: {}", e);
+                            keep_modal = true;
+                        } else if let Err(e) = app.save_config() {
+                            app.status_message = format!("❌ 保存失败: {}", e);
+                            keep_modal = true;
+                        } else {
+                            app.status_message = format!("✅ 成功向提供商 '{}' 添加/更新 Key '{}' (优先级:{}, 权重:{})", p_name, id.trim(), prio, w);
+                            let total_keys = app.config.providers.values().map(|x| x.keys.len()).sum();
+                            scroll_table(&mut app.key_table_state, total_keys, 0);
+                        }
+                    }
+                }
+                KeyCode::Backspace => {
+                    match *active_field {
+                        1 => { id.pop(); }
+                        2 => { api_key.pop(); }
+                        3 => { priority.pop(); }
+                        4 => { weight.pop(); }
+                        _ => {}
+                    }
+                    keep_modal = true;
+                }
+                KeyCode::Char(c) => {
+                    match *active_field {
+                        1 => id.push(c),
+                        2 => api_key.push(c),
+                        3 => priority.push(c),
+                        4 => weight.push(c),
+                        _ => {}
+                    }
+                    keep_modal = true;
+                }
+                _ => {
+                    keep_modal = true;
+                }
+            }
+        }
     }
 
     if keep_modal {
@@ -1092,6 +1266,19 @@ fn render_footer(f: &mut Frame, area: Rect, app: &TuiApp) {
                 ])
             }
         }
+    } else if app.active_tab == 2 {
+        Line::from(vec![
+            Span::styled(" [a] ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::raw("添加Key  "),
+            Span::styled(" [d] ", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+            Span::raw("删除  "),
+            Span::styled(" [j/k/↑/↓] ", Style::default().fg(Color::DarkGray)),
+            Span::raw("移动  "),
+            Span::styled(" [Tab] ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::raw("切页  "),
+            Span::styled(" [q] ", Style::default().fg(Color::DarkGray)),
+            Span::raw("退出"),
+        ])
     } else {
         Line::from(vec![
             Span::styled(" [Tab] ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
@@ -1464,6 +1651,19 @@ fn render_keys_tab(f: &mut Frame, area: Rect, app: &mut TuiApp) {
                 ]));
             }
         }
+    }
+
+    if rows.is_empty() {
+        let empty = Paragraph::new("暂无 API Key。按 [a] 添加第一个 Key（需先在 [2] 提供商面板添加提供商）。")
+            .style(Style::default().fg(Color::DarkGray))
+            .block(
+                Block::default()
+                    .borders(Borders::TOP)
+                    .title(" ── Key 账户池治理 ─────────────────────────────────────────────── ")
+                    .border_style(Style::default().fg(Color::DarkGray)),
+            );
+        f.render_widget(empty, area);
+        return;
     }
 
     let table = Table::new(
@@ -1880,6 +2080,81 @@ fn render_modal(f: &mut Frame, area: Rect, app: &TuiApp) {
             let p = Paragraph::new(lines).block(block);
             f.render_widget(p, modal_area);
         }
+        Modal::DeleteKeyConfirm { provider, id } => {
+            let modal_area = safe_centered_rect(54, 8, area);
+            f.render_widget(Clear, modal_area);
+
+            let text = vec![
+                Line::from(Span::styled("⚠️ 删除 Key 确认", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD))),
+                Line::from(""),
+                Line::from(format!("确定从提供商 '{}' 中删除 Key '{}' 吗？", provider, id)),
+                Line::from("该操作会立即同步写入配置文件，无法撤销。"),
+                Line::from(""),
+                Line::from(vec![
+                    Span::styled(" [y/Enter] ", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+                    Span::raw("确认删除   "),
+                    Span::styled(" [n/Esc] ", Style::default().fg(Color::Gray)),
+                    Span::raw("取消返回"),
+                ]),
+            ];
+
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Plain)
+                .border_style(Style::default().fg(Color::Red))
+                .title(" 删除 Key ");
+            let p = Paragraph::new(text).block(block).alignment(Alignment::Center);
+            f.render_widget(p, modal_area);
+        }
+        Modal::AddKey { provider_idx, id, api_key, priority, weight, active_field } => {
+            let modal_area = safe_centered_rect(64, 13, area);
+            f.render_widget(Clear, modal_area);
+
+            let provider_names = app.sorted_provider_names();
+            let current_provider = provider_names
+                .get(*provider_idx % provider_names.len().max(1))
+                .map(|s| s.as_str())
+                .unwrap_or("(无提供商)");
+
+            let provider_span = if *active_field == 0 {
+                Span::styled(
+                    format!("› 提供商 (←/→ 切换, 共 {} 个): {} ", provider_names.len(), current_provider),
+                    Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD),
+                )
+            } else {
+                Span::styled(
+                    format!("  提供商: {}", current_provider),
+                    Style::default().fg(Color::Gray),
+                )
+            };
+
+            let lines = vec![
+                Line::from(Span::styled("添加/更新 API Key (Add Key)", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))),
+                Line::from(""),
+                Line::from(vec![provider_span]),
+                render_form_field("Key ID", id, *active_field == 1),
+                render_secret_field("API Key", api_key, *active_field == 2),
+                render_form_field("优先级 (1最高)", priority, *active_field == 3),
+                render_form_field("权重", weight, *active_field == 4),
+                Line::from(""),
+                Line::from(vec![
+                    Span::styled(" [Tab/↓/↑] ", Style::default().fg(Color::Yellow)),
+                    Span::raw("切字段  "),
+                    Span::styled(" [Enter] ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+                    Span::raw("确认添加  "),
+                    Span::styled(" [Esc] ", Style::default().fg(Color::Gray)),
+                    Span::raw("取消"),
+                ]),
+            ];
+
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Plain)
+                .border_style(Style::default().fg(Color::Cyan))
+                .title(" 添加 Key ");
+            let p = Paragraph::new(lines).block(block);
+            f.render_widget(p, modal_area);
+        }
     }
 }
 
@@ -1894,6 +2169,29 @@ fn render_form_field<'a>(label: &'a str, value: &'a str, is_active: bool) -> Lin
         Line::from(vec![
             Span::styled(format!("  {}: ", label), Style::default().fg(Color::Gray)),
             Span::styled(if value.is_empty() { "(未填写)" } else { value }, Style::default().fg(Color::White)),
+        ])
+    }
+}
+
+/// Render a secret field: plaintext while it is the active/focused field
+/// (so the user can verify what they type), masked otherwise to avoid
+/// leaking the key onto a shared or recorded terminal.
+fn render_secret_field<'a>(label: &'a str, value: &'a str, is_active: bool) -> Line<'a> {
+    if is_active {
+        Line::from(vec![
+            Span::styled(format!("› {}: ", label), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(if value.is_empty() { " ".to_string() } else { value.to_string() }, Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(" █", Style::default().fg(Color::Yellow)),
+        ])
+    } else {
+        let shown = if value.is_empty() {
+            "(未填写)".to_string()
+        } else {
+            ConfigFile::mask_key(value)
+        };
+        Line::from(vec![
+            Span::styled(format!("  {}: ", label), Style::default().fg(Color::Gray)),
+            Span::styled(shown, Style::default().fg(Color::White)),
         ])
     }
 }
@@ -1919,4 +2217,122 @@ fn render_modality_checkboxes<'a>(modalities: &[bool; 4], is_active: bool) -> Ve
         spans.push(Span::styled(tag, style));
     }
     spans
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::ConfigFile;
+
+    fn default_app() -> (TuiApp, tempfile::TempDir, String) {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg_path = tmp.path().join("ponyllm.toml").to_string_lossy().to_string();
+        let mut cfg = ConfigFile::default();
+        cfg.add_provider("bai", "https://api.bai.com", "bai-v4", "round_robin");
+        cfg.add_provider("openai", "https://api.openai.com", "gpt-4o", "priority");
+        let app = TuiApp::new(cfg, cfg_path.clone(), "http://127.0.0.1:8080".to_string());
+        (app, tmp, cfg_path)
+    }
+
+    #[test]
+    fn test_key_tab_add_via_modal() {
+        let (mut app, _tmp, _cfg_path) = default_app();
+        app.active_tab = 2;
+
+        // Press [a] on the Key tab -> opens the AddKey modal
+        handle_key_event(&mut app, KeyCode::Char('a'), KeyModifiers::NONE);
+        // No key selected yet -> provider_idx defaults to the first provider (sorted: bai)
+        match &app.modal {
+            Modal::AddKey { provider_idx, .. } => assert_eq!(*provider_idx, 0),
+            _ => panic!("expected AddKey modal"),
+        }
+
+        // Fill fields and submit
+        app.modal = Modal::AddKey {
+            provider_idx: 0, // "bai" (sorted)
+            id: "k1".to_string(),
+            api_key: "sk-bai-test-123".to_string(),
+            priority: "2".to_string(),
+            weight: "8".to_string(),
+            active_field: 1,
+        };
+        handle_modal_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+
+        // On success the modal is dismissed and the key is persisted to config
+        assert!(matches!(app.modal, Modal::None));
+        let p = &app.config.providers["bai"];
+        assert_eq!(p.keys.len(), 1);
+        assert_eq!(p.keys[0].id, "k1");
+        assert_eq!(p.keys[0].priority, 2);
+        assert_eq!(p.keys[0].weight, 8);
+
+        // selected_key() resolves the selected row back to (provider, key)
+        app.key_table_state.select(Some(0));
+        let (owner, key) = app.selected_key().unwrap();
+        assert_eq!(owner, "bai");
+        assert_eq!(key.id, "k1");
+    }
+
+    #[test]
+    fn test_key_tab_add_rejects_invalid_priority() {
+        let (mut app, _tmp, _cfg_path) = default_app();
+        app.active_tab = 2;
+
+        // A non-numeric priority must NOT be silently coerced to 1
+        app.modal = Modal::AddKey {
+            provider_idx: 0,
+            id: "k1".to_string(),
+            api_key: "sk-abc".to_string(),
+            priority: "not-a-number".to_string(),
+            weight: "10".to_string(),
+            active_field: 1,
+        };
+        handle_modal_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+
+        // The modal stays open and the key is NOT persisted
+        assert!(matches!(app.modal, Modal::AddKey { .. }));
+        assert_eq!(app.config.providers["bai"].keys.len(), 0);
+    }
+
+    #[test]
+    fn test_key_tab_delete_via_modal() {
+        let (mut app, _tmp, _cfg_path) = default_app();
+        app.config.add_key("bai", "k1", "sk-abc", 1, 10).unwrap();
+        app.active_tab = 2;
+        app.key_table_state.select(Some(0));
+
+        // Press [d] on the Key tab -> opens DeleteKeyConfirm for the selected row
+        handle_key_event(&mut app, KeyCode::Char('d'), KeyModifiers::NONE);
+        assert!(matches!(app.modal, Modal::DeleteKeyConfirm { .. }));
+
+        handle_modal_key(&mut app, KeyCode::Char('y'), KeyModifiers::NONE);
+        assert!(matches!(app.modal, Modal::None));
+        assert_eq!(app.config.providers["bai"].keys.len(), 0);
+    }
+
+    #[test]
+    fn test_key_tab_add_requires_provider() {
+        let cfg = ConfigFile::default(); // no providers configured
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = TuiApp::new(
+            cfg,
+            tmp.path().join("c.toml").to_string_lossy().to_string(),
+            "http://127.0.0.1:8080".to_string(),
+        );
+        app.active_tab = 2;
+
+        handle_key_event(&mut app, KeyCode::Char('a'), KeyModifiers::NONE);
+        // No provider => must NOT open the AddKey modal
+        assert!(matches!(app.modal, Modal::None));
+    }
+
+    #[test]
+    fn test_key_tab_delete_without_selection() {
+        let (mut app, _tmp, _cfg_path) = default_app();
+        app.active_tab = 2;
+        app.key_table_state.select(None);
+
+        handle_key_event(&mut app, KeyCode::Char('d'), KeyModifiers::NONE);
+        assert!(matches!(app.modal, Modal::None));
+    }
 }
