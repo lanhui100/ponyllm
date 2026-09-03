@@ -109,6 +109,41 @@ pub async fn handle_messages(
 
         let (target_url, req_val) = if is_anthropic_upstream {
             let url = crate::state::normalize_messages_url(&target.base_url);
+            // Sanitize messages for strict Anthropic upstreams:
+            // Extract any AnthropicRole::System messages into target_req.system,
+            // and normalize Unknown roles to User so upstream never throws 400.
+            let mut extracted_systems = Vec::new();
+            let mut clean_messages = Vec::with_capacity(target_req.messages.len());
+            for mut msg in target_req.messages {
+                match msg.role {
+                    ponyllm_protocol::anthropic::messages::AnthropicRole::System => {
+                        extracted_systems.push(msg.content.as_plain_text());
+                    }
+                    ponyllm_protocol::anthropic::messages::AnthropicRole::Unknown => {
+                        msg.role = ponyllm_protocol::anthropic::messages::AnthropicRole::User;
+                        clean_messages.push(msg);
+                    }
+                    _ => clean_messages.push(msg),
+                }
+            }
+            if !extracted_systems.is_empty() {
+                let joined = extracted_systems.join("\n\n");
+                target_req.system = match target_req.system {
+                    Some(ponyllm_protocol::anthropic::messages::AnthropicSystem::Text(t)) => {
+                        Some(ponyllm_protocol::anthropic::messages::AnthropicSystem::Text(format!("{}\n\n{}", t, joined)))
+                    }
+                    Some(ponyllm_protocol::anthropic::messages::AnthropicSystem::Blocks(mut blocks)) => {
+                        blocks.push(ponyllm_protocol::anthropic::messages::AnthropicSystemBlock::Text {
+                            text: joined,
+                            cache_control: None,
+                        });
+                        Some(ponyllm_protocol::anthropic::messages::AnthropicSystem::Blocks(blocks))
+                    }
+                    None => Some(ponyllm_protocol::anthropic::messages::AnthropicSystem::Text(joined)),
+                };
+            }
+            target_req.messages = clean_messages;
+
             let val = match serde_json::to_value(&target_req) {
                 Ok(v) => v,
                 Err(e) => {

@@ -143,3 +143,38 @@ fn test_anthropic_stream_events() {
         panic!("Expected ContentBlockDelta");
     }
 }
+
+#[test]
+fn test_messages_with_system_and_unknown_roles() {
+    let req_json = json!({
+        "model": "claude-3-7-sonnet",
+        "max_tokens": 1024,
+        "messages": [
+            {
+                "role": "user",
+                "content": "First turn"
+            },
+            {
+                "role": "system",
+                "content": "Context injection from Claude Code CLI"
+            },
+            {
+                "role": "custom_agent_role",
+                "content": "Third turn"
+            }
+        ]
+    });
+
+    let req: MessageRequest = serde_json::from_value(req_json).unwrap();
+    assert_eq!(req.messages.len(), 3);
+    assert_eq!(req.messages[0].role, AnthropicRole::User);
+    assert_eq!(req.messages[1].role, AnthropicRole::System);
+    assert_eq!(req.messages[2].role, AnthropicRole::Unknown);
+
+    // Also verify conversion to OpenAI chat request
+    let chat_req = ponyllm_protocol::translator::anthropic_to_chat_request(&req).unwrap();
+    assert_eq!(chat_req.messages.len(), 3);
+    assert!(matches!(chat_req.messages[0], ponyllm_protocol::openai::chat::ChatMessage::User(_)));
+    assert!(matches!(chat_req.messages[1], ponyllm_protocol::openai::chat::ChatMessage::System(_)));
+    assert!(matches!(chat_req.messages[2], ponyllm_protocol::openai::chat::ChatMessage::User(_)));
+}

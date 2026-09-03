@@ -452,4 +452,22 @@ async fn test_anthropic_messages_routing_and_model_echo() {
 
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["model"], "claude-3-7-sonnet[1m]:speed");
+
+    // Also send /v1/messages with system in messages[1] (as sent by Claude Code)
+    let resp_with_sys = client
+        .post(format!("http://{}/v1/messages", gateway_addr))
+        .json(&json!({
+            "model": "claude-3-7-sonnet[1m]:speed",
+            "max_tokens": 1024,
+            "messages": [
+                {"role": "user", "content": "Hello claude"},
+                {"role": "system", "content": "System instruction in messages array by Claude Code"},
+                {"role": "assistant", "content": "Understood"}
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp_with_sys.status(), 200);
 }

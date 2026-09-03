@@ -325,7 +325,19 @@ pub fn anthropic_to_chat_request(req: &MessageRequest) -> Result<ChatCompletionR
                         ..Default::default()
                     }));
                 }
-            },
+            }
+            AnthropicRole::System => {
+                messages.push(ChatMessage::System(SystemMessage {
+                    content: msg.content.as_plain_text().into(),
+                    name: None,
+                }));
+            }
+            AnthropicRole::Unknown => {
+                messages.push(ChatMessage::User(UserMessage {
+                    content: msg.content.as_plain_text().into(),
+                    name: None,
+                }));
+            }
         }
     }
 

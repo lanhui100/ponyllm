@@ -59,6 +59,9 @@ pub struct AnthropicMessage {
 pub enum AnthropicRole {
     User,
     Assistant,
+    System,
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
