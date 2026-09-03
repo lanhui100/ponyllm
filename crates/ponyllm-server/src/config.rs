@@ -95,6 +95,10 @@ impl ProviderConfig {
     }
 }
 
+pub fn default_request_body_limit() -> usize {
+    128 * 1024 * 1024 // 128MB default for 1M context / multimodal payloads
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GatewayConfig {
     pub bind_addr: String,
@@ -104,6 +108,8 @@ pub struct GatewayConfig {
     pub providers: HashMap<String, ProviderConfig>,
     pub max_retries: usize,
     pub flight_recorder_capacity: usize,
+    #[serde(default = "default_request_body_limit")]
+    pub request_body_limit: usize,
 }
 
 impl Default for GatewayConfig {
@@ -115,6 +121,8 @@ impl Default for GatewayConfig {
             providers: HashMap::new(),
             max_retries: 3,
             flight_recorder_capacity: 100,
+            request_body_limit: default_request_body_limit(),
         }
     }
 }
+

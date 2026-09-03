@@ -1,6 +1,9 @@
 use std::collections::HashMap;
 use inquire::{Confirm, Password, PasswordDisplayMode, Select, Text};
-use crate::config::{generate_secure_api_key, ConfigFile, GatewaySection, KeySection, ProviderSection};
+use crate::config::{
+    default_request_body_limit, generate_secure_api_key, ConfigFile, GatewaySection, KeySection,
+    ProviderSection,
+};
 
 pub fn run_interactive_init(output_path: &str) -> Result<(), Box<dyn std::error::Error>> {
     println!("\n========================================================");
@@ -174,6 +177,7 @@ pub fn run_interactive_init(output_path: &str) -> Result<(), Box<dyn std::error:
             flight_recorder_capacity: 200,
             api_key: api_token,
             default_strategy,
+            request_body_limit: default_request_body_limit(),
         },
         providers,
     };

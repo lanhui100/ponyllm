@@ -34,7 +34,19 @@ where
                     JsonRejection::MissingJsonContentType(_) => {
                         "Missing or invalid 'content-type: application/json' header".to_string()
                     }
-                    _ => rejection.body_text(),
+                    _ => {
+                        let text = rejection.body_text();
+                        if text.contains("length limit exceeded") {
+                            format!(
+                                "Request body length limit exceeded (HTTP payload too large). \
+                                If you are sending large context or multimodal data, please increase 'request_body_limit' \
+                                in ponyllm.toml (gateway section). Details: {}",
+                                text
+                            )
+                        } else {
+                            text
+                        }
+                    }
                 };
 
                 let is_anthropic = uri_path.ends_with("/messages") || uri_path.contains("/messages/");

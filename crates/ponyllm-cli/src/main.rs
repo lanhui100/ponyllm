@@ -29,6 +29,7 @@ fn build_gateway_config_and_pools(
     gw_config.bind_addr = bind_override.unwrap_or_else(|| config_file.gateway.bind.clone());
     gw_config.max_retries = retries_override.unwrap_or(config_file.gateway.max_retries);
     gw_config.flight_recorder_capacity = config_file.gateway.flight_recorder_capacity;
+    gw_config.request_body_limit = config_file.gateway.request_body_limit;
     gw_config.api_key = api_key_override.unwrap_or_else(|| config_file.gateway.api_key.clone());
 
     let mut pools = HashMap::new();
@@ -444,6 +445,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             println!("║    - 监听全地址:      http://{}                                     ║", gw_config.bind_addr);
             println!("║  • 全局调度策略:      {:<48} ║", strat_name);
+            println!("║  • 请求体缓冲上限:    {:<48} ║", format!("{} MB (支持1M长上下文/多模态)", gw_config.request_body_limit / (1024 * 1024)));
             println!("║  • 访问凭证 (Token):  {}                                   ║", format!("{:<30}", auth_display));
             println!("║  • 虚拟总代模型:      auto, auto:flagship, auto:economy, auto[1m]     ║");
             println!("╠════════════════════════════════════════════════════════════════════════╣");

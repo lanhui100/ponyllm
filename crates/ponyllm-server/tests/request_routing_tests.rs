@@ -612,3 +612,148 @@ async fn test_gateway_configuration_hot_reload() {
     assert_eq!(chat_json["choices"][0]["message"]["content"], "Hello from Provider B");
 }
 
+#[tokio::test]
+async fn test_large_payload_handling_with_1m_context_support() {
+    // 1. Mock upstream that echoes received payload length
+    let mock_upstream = Router::new()
+        .route(
+            "/v1/chat/completions",
+            post(|Json(req): Json<serde_json::Value>| async move {
+                let messages = req["messages"].as_array().unwrap();
+                let content_len = messages[0]["content"].as_str().unwrap().len();
+                axum::Json(json!({
+                    "id": "chatcmpl-large-context",
+                    "object": "chat.completion",
+                    "created": 1710000000,
+                    "model": "deepseek-v4-flash",
+                    "choices": [{
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": format!("Received {} bytes", content_len)
+                        },
+                        "finish_reason": "stop"
+                    }],
+                    "usage": {
+                        "prompt_tokens": 100000,
+                        "completion_tokens": 10,
+                        "total_tokens": 100010
+                    }
+                }))
+            }),
+        )
+        .layer(axum::extract::DefaultBodyLimit::max(128 * 1024 * 1024));
+
+    let upstream_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_addr = upstream_listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(upstream_listener, mock_upstream).await.unwrap();
+    });
+
+    // 2. Gateway setup with default 128MB body limit and deepseek provider
+    let pool = Arc::new(KeyPool::new("deepseek", RoutingStrategy::RoundRobin));
+    pool.add_key(ApiKeyEntry::new("ds-1", "sk-ds-key", 1, 10));
+
+    let mut config = GatewayConfig::default();
+    config.providers.insert(
+        "deepseek".to_string(),
+        ProviderConfig {
+            base_url: format!("http://{}", upstream_addr),
+            default_model: "deepseek-v4-flash".to_string(),
+            strategy: "priority".to_string(),
+            billing_mode: BillingMode::Metered,
+            input_price: 0.14,
+            cached_price: 0.014,
+            output_price: 0.28,
+            models: vec!["deepseek-v4-flash".to_string()],
+            model_specs: vec![ModelSpec {
+                name: "deepseek-v4-flash".to_string(),
+                tier: ModelTier::Flagship,
+                context_window: "1M".to_string(),
+                max_output: "32K".to_string(),
+                input_types: vec!["text".to_string()],
+                output_types: vec!["text".to_string()],
+            }],
+        },
+    );
+
+    let state = Arc::new(AppState::new(config));
+    state.register_pool("deepseek", pool);
+
+    let app = create_app(state);
+    let gateway_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let gateway_addr = gateway_listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(gateway_listener, app).await.unwrap();
+    });
+
+    // 3. Construct a 3MB payload (> 2MB default Axum limit)
+    let large_text = "A".repeat(3 * 1024 * 1024); // 3 MiB string
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://{}/v1/chat/completions", gateway_addr))
+        .json(&json!({
+            "model": "deepseek-v4-flash",
+            "messages": [{"role": "user", "content": large_text}]
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200, "Large payload >2MB must succeed through gateway");
+    let resp_json: serde_json::Value = resp.json().await.unwrap();
+    assert!(resp_json["choices"][0]["message"]["content"].as_str().unwrap().contains("Received 3145728 bytes"));
+}
+
+#[tokio::test]
+async fn test_custom_request_body_limit_rejection_with_helpful_error() {
+    let pool = Arc::new(KeyPool::new("test-p", RoutingStrategy::RoundRobin));
+    pool.add_key(ApiKeyEntry::new("k1", "sk-test", 1, 10));
+
+    let mut config = GatewayConfig::default();
+    config.request_body_limit = 16 * 1024; // 16 KB small limit
+    config.providers.insert(
+        "test-p".to_string(),
+        ProviderConfig {
+            base_url: "http://127.0.0.1:9".to_string(),
+            default_model: "test-model".to_string(),
+            strategy: "priority".to_string(),
+            billing_mode: BillingMode::Metered,
+            input_price: 0.1,
+            cached_price: 0.01,
+            output_price: 0.2,
+            models: vec!["test-model".to_string()],
+            model_specs: vec![],
+        },
+    );
+
+    let state = Arc::new(AppState::new(config));
+    state.register_pool("test-p", pool);
+
+    let app = create_app(state);
+    let gateway_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let gateway_addr = gateway_listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(gateway_listener, app).await.unwrap();
+    });
+
+    // Send a 32 KB payload (> 16 KB limit)
+    let text_32k = "B".repeat(32 * 1024);
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://{}/v1/chat/completions", gateway_addr))
+        .json(&json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": text_32k}]
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 400);
+    let err_json: serde_json::Value = resp.json().await.unwrap();
+    let err_msg = err_json["error"]["message"].as_str().unwrap();
+    assert!(err_msg.contains("Request body length limit exceeded") || err_msg.contains("length limit exceeded"));
+}
+
+

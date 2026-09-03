@@ -29,6 +29,12 @@ pub struct GatewaySection {
     pub api_key: String,
     #[serde(default)]
     pub default_strategy: GatewayRoutingStrategy,
+    #[serde(default = "default_request_body_limit")]
+    pub request_body_limit: usize,
+}
+
+pub fn default_request_body_limit() -> usize {
+    128 * 1024 * 1024 // 128MB
 }
 
 fn default_bind() -> String {
@@ -91,6 +97,7 @@ impl Default for GatewaySection {
             flight_recorder_capacity: default_capacity(),
             api_key: default_api_key(),
             default_strategy: GatewayRoutingStrategy::Economy,
+            request_body_limit: default_request_body_limit(),
         }
     }
 }

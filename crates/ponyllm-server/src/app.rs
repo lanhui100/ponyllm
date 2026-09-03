@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use axum::extract::{Request, State};
+use axum::extract::{DefaultBodyLimit, Request, State};
 use axum::http::StatusCode;
 use axum::middleware::{from_fn_with_state, Next};
 use axum::response::{IntoResponse, Response};
@@ -79,6 +79,8 @@ pub fn create_app(state: Arc<AppState>) -> Router {
         .allow_methods(Any)
         .allow_headers(Any);
 
+    let body_limit = state.config.read().request_body_limit;
+
     Router::new()
         .route("/health", get(handle_health))
         .route("/models", get(handle_list_models))
@@ -98,5 +100,6 @@ pub fn create_app(state: Arc<AppState>) -> Router {
         .layer(from_fn_with_state(state.clone(), auth_middleware))
         .layer(cors)
         .layer(TraceLayer::new_for_http())
+        .layer(DefaultBodyLimit::max(body_limit))
         .with_state(state)
 }
