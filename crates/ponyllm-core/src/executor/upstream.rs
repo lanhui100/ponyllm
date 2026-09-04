@@ -253,25 +253,17 @@ impl UpstreamExecutor {
             let key = match self.pool.select_key() {
                 Ok(k) => k,
                 Err(e) => {
-                    let kind = if attempt > 0 {
-                        last_kind
-                    } else {
-                        e.kind()
-                    };
-                    let summary = if !last_error.is_empty() {
-                        last_error.clone()
-                    } else {
-                        format!("No available key in pool: {}", e)
-                    };
-                    self.emit_both("", attempt_idx, None, kind.clone(), summary, None, attempt_start.elapsed());
+                    // First-attempt pool exhaustion surfaces structurally so
+                    // callers never string-match on the aggregated message.
+                    if attempt == 0 {
+                        self.emit_both("", attempt_idx, None, e.kind(), e.to_string(), None, attempt_start.elapsed());
+                        return Err(e);
+                    }
+                    self.emit_both("", attempt_idx, None, last_kind.clone(), last_error.clone(), None, attempt_start.elapsed());
                     return Err(CoreError::AllRetriesFailed {
                         retries: attempt,
-                        last_error: if !last_error.is_empty() {
-                            last_error
-                        } else {
-                            format!("No available key in pool: {}", e)
-                        },
-                        kind,
+                        last_error,
+                        kind: last_kind,
                     });
                 }
             };
@@ -363,25 +355,17 @@ impl UpstreamExecutor {
             let key = match self.pool.select_key() {
                 Ok(k) => k,
                 Err(e) => {
-                    let kind = if attempt > 0 {
-                        last_kind
-                    } else {
-                        e.kind()
-                    };
-                    let summary = if !last_error.is_empty() {
-                        last_error.clone()
-                    } else {
-                        format!("No available key in pool: {}", e)
-                    };
-                    self.emit_both("", attempt_idx, None, kind.clone(), summary, None, attempt_start.elapsed());
+                    // First-attempt pool exhaustion surfaces structurally so
+                    // callers never string-match on the aggregated message.
+                    if attempt == 0 {
+                        self.emit_both("", attempt_idx, None, e.kind(), e.to_string(), None, attempt_start.elapsed());
+                        return Err(e);
+                    }
+                    self.emit_both("", attempt_idx, None, last_kind.clone(), last_error.clone(), None, attempt_start.elapsed());
                     return Err(CoreError::AllRetriesFailed {
                         retries: attempt,
-                        last_error: if !last_error.is_empty() {
-                            last_error
-                        } else {
-                            format!("No available key in pool: {}", e)
-                        },
-                        kind,
+                        last_error,
+                        kind: last_kind,
                     });
                 }
             };

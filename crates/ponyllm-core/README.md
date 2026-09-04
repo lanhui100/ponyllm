@@ -8,4 +8,6 @@
 - `KeyPool`: 多 Key 账户池，支持 Priority / RoundRobin / Weighted 调度；
 - `UpstreamExecutor`: 上游执行器，支持 TTFT 前 429 自动倒换、Jitter 退避与流式透传；
 - `FlightRecorder`: 环形缓冲区故障录波，实现 Unicode 安全脱敏与 Snippet 截断保护；
-- `MetricsCollector`: 实时 QPS/Token/成功率指标采集。
+- `MetricsCollector`: 实时 QPS/Token/成功率指标采集；
+- `endpoints`: 统一 URL 规范化（`normalize_chat_completions_url`、`normalize_messages_url`、`normalize_responses_url`），消灭末尾斜杠、双重斜杠与 `/v1/v1` 拼接错误；
+- `pool::protocol`: `UpstreamProtocol` 核心枚举（`Chat`, `Anthropic`, `Responses`）。
