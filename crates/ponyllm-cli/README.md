@@ -6,8 +6,8 @@
 ## 契约与命令指南
 
 ### 1. 配置初始化与管理
-- `ponyllm init`: 极简交互式初始化向导（内置 DeepSeek 3 协议、OpenAI、Anthropic 等模板，自动锁定官方 URL，无需输入本地监听地址）；
-- `ponyllm init --non-interactive`: CI/无交互脚本环境快速生成默认配置模板；
+- `ponyllm init`: 极简交互式初始化向导（内置 DeepSeek 3 协议、OpenAI、Anthropic 等模板，自动锁定官方 URL，无需输入本地监听地址；目标文件已存在时默认拒绝覆写，按 Enter 安全退出，保护生产配置）；
+- `ponyllm init --non-interactive`: CI/无交互脚本环境快速生成默认配置模板（目标文件已存在时直接硬报错中断，严禁静默覆写）；
 - `ponyllm provider list / add / remove`: 管理模型上游提供商；
 - `ponyllm key list / add / remove / test`: 管理多 Key 账户池（自动脱敏）与在线网络连通性拨测；
 - `ponyllm model list / add / remove / set`: 管理各提供商默认主模型与附加支持模型清单。

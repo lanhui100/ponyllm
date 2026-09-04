@@ -4,7 +4,7 @@ use std::io::Write;
 use std::path::Path;
 use ponyllm_core::pool::{
     default_cached_price, default_input_price, default_output_price, BillingMode,
-    GatewayRoutingStrategy, ModelTier, PricingConfig,
+    GatewayRoutingStrategy, ModelTier, PricingConfig, UpstreamProtocol,
 };
 use ponyllm_core::telemetry::FlightRecorder;
 use serde::{Deserialize, Serialize};
@@ -123,6 +123,8 @@ pub struct ModelConfig {
     pub cached_price: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_price: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<UpstreamProtocol>,
 }
 
 pub fn default_context_window() -> String {
@@ -148,6 +150,7 @@ impl Default for ModelConfig {
             input_price: None,
             cached_price: None,
             output_price: None,
+            protocol: None,
         }
     }
 }
@@ -165,6 +168,7 @@ impl ModelConfig {
             input_price: None,
             cached_price: None,
             output_price: None,
+            protocol: None,
         }
     }
 }
@@ -189,6 +193,14 @@ pub struct ProviderSection {
     pub model_configs: Vec<ModelConfig>,
     #[serde(default)]
     pub keys: Vec<KeySection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_protocol: Option<UpstreamProtocol>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub responses_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub messages_url: Option<String>,
 }
 
 impl ProviderSection {
@@ -309,6 +321,67 @@ fn default_weight() -> u32 {
     10
 }
 
+/// Strict validation for provider add inputs, shared by `provider add` and the
+/// wizard so both reject the same malformed values before touching disk.
+pub fn validate_provider_fields(
+    base_url: &str,
+    default_model: &str,
+    strategy: &str,
+    billing_mode: &str,
+    chat_url: Option<&str>,
+    responses_url: Option<&str>,
+    messages_url: Option<&str>,
+) -> Result<(), String> {
+    let url_ok = |u: &str| {
+        let t = u.trim();
+        (t.starts_with("http://") || t.starts_with("https://"))
+            && t.len() > "https://".len()
+            && !t.contains(char::is_whitespace)
+    };
+    if !url_ok(base_url) {
+        return Err(format!(
+            "无效的 Base URL '{}': 必须以 http:// 或 https:// 开头且不含空白",
+            base_url
+        ));
+    }
+    if default_model.trim().is_empty() {
+        return Err("默认模型名称不能为空".to_string());
+    }
+    match strategy.trim().to_ascii_lowercase().as_str() {
+        "priority" | "round_robin" | "weighted" => {}
+        _ => {
+            return Err(format!(
+                "无效的调度策略 '{}': 仅支持 priority, round_robin, weighted",
+                strategy
+            ))
+        }
+    }
+    match billing_mode.trim().to_ascii_lowercase().as_str() {
+        "metered" | "plan" | "free" => {}
+        _ => {
+            return Err(format!(
+                "无效的计费模式 '{}': 仅支持 metered, plan, free",
+                billing_mode
+            ))
+        }
+    }
+    for (label, url) in [
+        ("--chat-url", chat_url),
+        ("--responses-url", responses_url),
+        ("--messages-url", messages_url),
+    ] {
+        if let Some(u) = url {
+            if !url_ok(u) {
+                return Err(format!(
+                    "无效的 {} '{}': 必须以 http:// 或 https:// 开头且不含空白",
+                    label, u
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 impl ConfigFile {
     pub fn resolve_path(path: Option<&str>) -> std::path::PathBuf {
         ponyllm_core::resolve_config_path(path.map(Path::new))
@@ -387,6 +460,10 @@ impl ConfigFile {
             models: Vec::new(),
             model_configs: Vec::new(),
             keys: Vec::new(),
+            default_protocol: None,
+            chat_url: None,
+            responses_url: None,
+            messages_url: None,
         });
         entry.base_url = base_url.to_string();
         entry.default_model = default_model.to_string();
@@ -503,22 +580,16 @@ bind = "127.0.0.1:8080"
 max_retries = 3
 flight_recorder_capacity = 200
 
-# DeepSeek Provider (OpenAI 协议: /v1/chat/completions, /v1/responses)
+# DeepSeek Provider (三协议合一: /v1/chat/completions, /v1/responses, /v1/messages)
 [providers.deepseek]
 base_url = "https://api.deepseek.com"
 default_model = "deepseek-v4-flash"
+default_protocol = "chat"
 strategy = "priority"
+# Anthropic Messages 协议走独立路径，其余协议由 base_url 派生
+messages_url = "https://api.deepseek.com/anthropic"
 keys = [
     { id = "deepseek-primary", api_key = "sk-xxxx", priority = 1, weight = 10 },
-]
-
-# DeepSeek Provider (Anthropic Messages 协议: /v1/messages)
-[providers.deepseek-anthropic]
-base_url = "https://api.deepseek.com/anthropic"
-default_model = "deepseek-v4-flash"
-strategy = "priority"
-keys = [
-    { id = "ds-ant-primary", api_key = "sk-xxxx", priority = 1, weight = 10 },
 ]
 
 # OpenAI Provider

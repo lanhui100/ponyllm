@@ -10,10 +10,10 @@
 
 ## ✨ 核心特性
 
-- 🔄 **透明双向全协议转译**：在 **OpenAI Chat Completions**、**OpenAI Responses API** 与 **Anthropic Messages** 之间实现全透明双向无损互转，完整保留思考链（Reasoning / Thinking Tokens）、多模态与工具调用（Tool Calls）。
+- 🔄 **透明双向全协议转译**：在 **OpenAI Chat Completions**、**OpenAI Responses API** 与 **Anthropic Messages** 之间实现全透明双向无损互转，完整保留思考链（Reasoning / Thinking Tokens）、多模态与工具调用（Tool Calls），内建严格角色交替合并与时序因果保序。
 - 🔑 **多 Key 账户池化与故障倒换**：支持轮询（RoundRobin）、优先级主备（Priority）与加权调度（Weighted）；在首字节（TTFT）喷出前拦截 429、402/403 配额耗尽与 5xx 异常，**毫秒级自动无感故障倒换**。
 - 🖥️ **全功能终端控制台与 TUI 看板**：
-  - **交互式向导**：`ponyllm init` 引导式交互录入网关与模型提供商配置。
+  - **交互式向导**：`ponyllm init` 引导式交互录入网关与模型提供商配置，已有配置时默认防误触保护（按 Enter 安全退出）。
   - **结构化 CRUD**：`ponyllm provider` 与 `ponyllm key` 随时在终端增删改查、在线拨测。
   - **全屏 TUI 看板**：`ponyllm tui`（或 `ponyllm top`）实时监控 QPS、吞吐与黑匣子录波。
 - 📦 **双重运行形态**：
@@ -48,17 +48,15 @@ cargo install --git https://github.com/lanhui100/ponyllm.git ponyllm-cli
 ```bash
 ponyllm init
 ```
-进入极简向导，选择模型接口模板（DeepSeek OpenAI 协议、DeepSeek Anthropic 协议、OpenAI、Anthropic、OpenRouter 等），内置模板自动锁定官方上游 Base URL，无需重复输入本地监听地址，录入 API Key 即可一键就绪。
-*(CI 或自动化脚本中可使用 `ponyllm init --non-interactive` 快速生成默认模板)*
+进入极简向导，选择模型接口模板（DeepSeek 三协议合一、OpenAI、Anthropic、OpenRouter 等），内置模板自动锁定官方上游 Base URL，无需重复输入本地监听地址，录入 API Key 即可一键就绪；已有配置文件时默认防误触覆写保护（回车安全退出）。
+*(CI 或自动化脚本中可使用 `ponyllm init --non-interactive` 快速生成默认模板，目标文件已存在时严格报错中断)*
 
 ### 2. 提供商、Key 账户池与多模型管理 (CLI CRUD)
 ```bash
 # === 1. 管理提供商 (Provider) ===
 ponyllm provider list
-# 挂载 DeepSeek 官方 OpenAI 接口 (默认模型 deepseek-v4-flash)
-ponyllm provider add deepseek --base-url https://api.deepseek.com --model deepseek-v4-flash --strategy priority
-# 挂载 DeepSeek 官方 Anthropic Messages 接口
-ponyllm provider add deepseek-anthropic --base-url https://api.deepseek.com/anthropic --model deepseek-v4-flash --strategy priority
+# 挂载 DeepSeek（三协议合一：chat/responses 走 base-url，messages 走独立路径）
+ponyllm provider add deepseek --base-url https://api.deepseek.com --model deepseek-v4-flash --strategy priority --messages-url https://api.deepseek.com/anthropic
 ponyllm provider remove my-provider
 
 # === 2. 管理模型映射与多模型追加 (Model) ===

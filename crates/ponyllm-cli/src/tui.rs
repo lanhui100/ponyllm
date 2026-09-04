@@ -1108,6 +1108,7 @@ fn handle_modal_key(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                             input_price: in_p,
                             cached_price: ca_p,
                             output_price: out_p,
+                            protocol: None,
                         };
 
                         let p_name = provider_name.clone();
@@ -1278,6 +1279,7 @@ fn handle_modal_key(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                         input_price: in_p,
                         cached_price: ca_p,
                         output_price: out_p,
+                        protocol: None,
                     };
 
                     let p_name = provider_name.clone();

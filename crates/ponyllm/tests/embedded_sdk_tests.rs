@@ -203,3 +203,86 @@ async fn test_embedded_sdk_multi_model_routing_and_listing() {
     assert!(models.iter().any(|(m, p)| m == "gpt-4o" && p == "openai"));
     assert!(models.iter().any(|(m, p)| m == "gpt-4o-mini" && p == "openai"));
 }
+
+#[tokio::test]
+async fn test_embedded_sdk_unknown_model_is_strict_error() {
+    let gateway = PonyGateway::builder()
+        .add_provider(
+            "deepseek",
+            "https://api.deepseek.com",
+            "deepseek-chat",
+            RoutingStrategy::RoundRobin,
+        )
+        .build();
+
+    let chat_req = ChatCompletionRequest {
+        model: "totally-unknown-model-xyz".to_string(),
+        messages: vec![ChatMessage::User(UserMessage {
+            content: "hi".into(),
+            name: None,
+        })],
+        ..Default::default()
+    };
+    let err = gateway.chat_completion(&chat_req).await.unwrap_err();
+    assert!(
+        err.to_string().contains("No provider configured"),
+        "unexpected error: {err}"
+    );
+}
+
+#[tokio::test]
+async fn test_embedded_sdk_base_url_trailing_slash_resolves_anthropic() {
+    let mock_upstream = Router::new().route(
+        "/v1/messages",
+        post(|Json(req): Json<serde_json::Value>| async move {
+            let model = req["model"].as_str().unwrap_or_default();
+            axum::Json(json!({
+                "id": "msg-slash-test",
+                "type": "message",
+                "role": "assistant",
+                "content": [{
+                    "type": "text",
+                    "text": format!("Anthropic Response: {}", model)
+                }],
+                "model": model,
+                "stop_reason": "end_turn",
+                "usage": {
+                    "input_tokens": 10,
+                    "output_tokens": 5
+                }
+            }))
+        }),
+    );
+
+    let upstream_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_addr = upstream_listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(upstream_listener, mock_upstream).await.unwrap();
+    });
+
+    // Provide a trailing slash in base_url ending with /messages/
+    let gateway = PonyGateway::builder()
+        .add_provider(
+            "custom-anthropic",
+            format!("http://{}/v1/messages/", upstream_addr),
+            "claude-3-5-sonnet",
+            RoutingStrategy::RoundRobin,
+        )
+        .add_key("custom-anthropic", "key-1", "sk-ant-test", 1, 10)
+        .build();
+
+    let chat_req = ChatCompletionRequest {
+        model: "claude-3-5-sonnet".to_string(),
+        messages: vec![ChatMessage::User(UserMessage {
+            content: "Hello trailing slash".into(),
+            name: None,
+        })],
+        ..Default::default()
+    };
+
+    let resp = gateway.chat_completion(&chat_req).await.unwrap();
+    assert_eq!(
+        resp.choices[0].message.content.as_deref(),
+        Some("Anthropic Response: claude-3-5-sonnet")
+    );
+}

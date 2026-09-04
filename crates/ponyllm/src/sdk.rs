@@ -2,7 +2,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use ponyllm_core::error::{CoreError, Result};
 use ponyllm_core::executor::UpstreamExecutor;
-use ponyllm_core::pool::{ApiKeyEntry, KeyPool, RoutingStrategy};
+use ponyllm_core::pool::{ApiKeyEntry, KeyPool, RoutingStrategy, UpstreamProtocol};
+use ponyllm_core::{normalize_chat_completions_url, normalize_messages_url, normalize_responses_url};
 use ponyllm_protocol::anthropic::messages::{MessageRequest, MessageResponse};
 use ponyllm_protocol::openai::chat::{ChatCompletionRequest, ChatCompletionResponse};
 use ponyllm_protocol::openai::responses::{CreateResponseRequest, ResponseObject};
@@ -15,6 +16,36 @@ pub struct ProviderInfo {
     pub default_model: String,
     pub models: Vec<String>,
     pub pool: Arc<KeyPool>,
+    pub default_protocol: Option<UpstreamProtocol>,
+}
+
+impl ProviderInfo {
+    fn native_protocol(&self) -> UpstreamProtocol {
+        if let Some(p) = self.default_protocol {
+            return p;
+        }
+        let trimmed = self.base_url.trim_end_matches('/');
+        if trimmed.ends_with("/anthropic")
+            || trimmed.contains("api.anthropic.com")
+            || trimmed.ends_with("/messages")
+        {
+            UpstreamProtocol::Anthropic
+        } else {
+            UpstreamProtocol::Chat
+        }
+    }
+
+    fn messages_url(&self) -> String {
+        normalize_messages_url(&self.base_url)
+    }
+
+    fn chat_url(&self) -> String {
+        normalize_chat_completions_url(&self.base_url)
+    }
+
+    fn responses_url(&self) -> String {
+        normalize_responses_url(&self.base_url)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -45,8 +76,14 @@ impl PonyGateway {
     }
 
     fn resolve_provider(&self, model: &str) -> Result<&ProviderInfo> {
+        // Deterministic name order so multi-provider matches never depend on
+        // HashMap iteration randomness.
+        let mut names: Vec<&String> = self.providers.keys().collect();
+        names.sort();
+
         // 1. Exact match on default_model or configured models list
-        for info in self.providers.values() {
+        for name in &names {
+            let info = &self.providers[*name];
             if info.default_model == model || info.models.iter().any(|m| m == model) {
                 return Ok(info);
             }
@@ -61,49 +98,53 @@ impl PonyGateway {
 
         // 3. Keyword / model family heuristic matching
         let lower = model.to_lowercase();
-        for (name, info) in &self.providers {
-            if lower.contains(name)
-                || (name == "openai" && (lower.starts_with("gpt") || lower.starts_with("o1") || lower.starts_with("o3")))
-                || (name == "anthropic" && lower.starts_with("claude"))
-                || (name == "deepseek" && lower.starts_with("deepseek"))
+        for name in &names {
+            let info = &self.providers[*name];
+            if lower.contains(name.as_str())
+                || (*name == "openai" && (lower.starts_with("gpt") || lower.starts_with("o1") || lower.starts_with("o3")))
+                || (*name == "anthropic" && lower.starts_with("claude"))
+                || (*name == "deepseek" && lower.starts_with("deepseek"))
             {
                 return Ok(info);
             }
         }
 
-        // 4. Fallback to first registered provider
-        self.providers
-            .values()
-            .next()
-            .ok_or_else(|| CoreError::Internal("No providers registered in PonyGateway".to_string()))
+        // 4. No random fallback: unknown models are a caller error, never
+        // silently routed to an arbitrary provider.
+        Err(CoreError::Internal(format!(
+            "No provider configured to handle model '{}'",
+            model
+        )))
     }
 
     /// In-memory Chat Completion API
     pub async fn chat_completion(&self, req: &ChatCompletionRequest) -> Result<ChatCompletionResponse> {
         let provider = self.resolve_provider(&req.model)?;
         let executor = UpstreamExecutor::new(provider.pool.clone(), self.max_retries);
-        let is_anthropic_upstream = provider.base_url.ends_with("/anthropic")
-            || provider.base_url.contains("api.anthropic.com")
-            || provider.base_url.ends_with("/messages");
 
-        if is_anthropic_upstream {
-            let ant_req = chat_to_anthropic_request(req)?;
-            let url = if provider.base_url.ends_with("/messages") {
-                provider.base_url.clone()
-            } else {
-                format!("{}/v1/messages", provider.base_url.trim_end_matches('/'))
-            };
-            let body = serde_json::to_value(&ant_req)?;
-            let resp_val = executor.execute_json_request(&url, &body).await?;
-            let ant_resp: MessageResponse = serde_json::from_value(resp_val)?;
-            let chat_resp = anthropic_to_chat_response(&ant_resp)?;
-            Ok(chat_resp)
-        } else {
-            let url = format!("{}/v1/chat/completions", provider.base_url.trim_end_matches('/'));
-            let body = serde_json::to_value(req)?;
-            let resp_val = executor.execute_json_request(&url, &body).await?;
-            let resp: ChatCompletionResponse = serde_json::from_value(resp_val)?;
-            Ok(resp)
+        match provider.native_protocol() {
+            UpstreamProtocol::Anthropic => {
+                let ant_req = chat_to_anthropic_request(req)?;
+                let body = serde_json::to_value(&ant_req)?;
+                let resp_val = executor.execute_json_request(&provider.messages_url(), &body).await?;
+                let ant_resp: MessageResponse = serde_json::from_value(resp_val)?;
+                let chat_resp = anthropic_to_chat_response(&ant_resp)?;
+                Ok(chat_resp)
+            }
+            UpstreamProtocol::Responses => {
+                let resp_req = chat_to_responses_request(req)?;
+                let body = serde_json::to_value(&resp_req)?;
+                let resp_val = executor.execute_json_request(&provider.responses_url(), &body).await?;
+                let resp_obj: ResponseObject = serde_json::from_value(resp_val)?;
+                let chat_resp = responses_to_chat_response(&resp_obj)?;
+                Ok(chat_resp)
+            }
+            UpstreamProtocol::Chat => {
+                let body = serde_json::to_value(req)?;
+                let resp_val = executor.execute_json_request(&provider.chat_url(), &body).await?;
+                let resp: ChatCompletionResponse = serde_json::from_value(resp_val)?;
+                Ok(resp)
+            }
         }
     }
 
@@ -111,28 +152,30 @@ impl PonyGateway {
     pub async fn create_message(&self, req: &MessageRequest) -> Result<MessageResponse> {
         let provider = self.resolve_provider(&req.model)?;
         let executor = UpstreamExecutor::new(provider.pool.clone(), self.max_retries);
-        let is_anthropic_upstream = provider.base_url.ends_with("/anthropic")
-            || provider.base_url.contains("api.anthropic.com")
-            || provider.base_url.ends_with("/messages");
 
-        if is_anthropic_upstream {
-            let url = if provider.base_url.ends_with("/messages") {
-                provider.base_url.clone()
-            } else {
-                format!("{}/v1/messages", provider.base_url.trim_end_matches('/'))
-            };
-            let body = serde_json::to_value(req)?;
-            let resp_val = executor.execute_json_request(&url, &body).await?;
-            let ant_resp: MessageResponse = serde_json::from_value(resp_val)?;
-            Ok(ant_resp)
-        } else {
-            let chat_req = anthropic_to_chat_request(req)?;
-            let url = format!("{}/v1/chat/completions", provider.base_url.trim_end_matches('/'));
-            let body = serde_json::to_value(&chat_req)?;
-            let resp_val = executor.execute_json_request(&url, &body).await?;
-            let chat_resp: ChatCompletionResponse = serde_json::from_value(resp_val)?;
-            let ant_resp = chat_to_anthropic_response(&chat_resp)?;
-            Ok(ant_resp)
+        match provider.native_protocol() {
+            UpstreamProtocol::Anthropic => {
+                let body = serde_json::to_value(req)?;
+                let resp_val = executor.execute_json_request(&provider.messages_url(), &body).await?;
+                let ant_resp: MessageResponse = serde_json::from_value(resp_val)?;
+                Ok(ant_resp)
+            }
+            UpstreamProtocol::Responses => {
+                let resp_req = anthropic_to_responses_request(req)?;
+                let body = serde_json::to_value(&resp_req)?;
+                let resp_val = executor.execute_json_request(&provider.responses_url(), &body).await?;
+                let resp_obj: ResponseObject = serde_json::from_value(resp_val)?;
+                let ant_resp = responses_to_anthropic_response(&resp_obj)?;
+                Ok(ant_resp)
+            }
+            UpstreamProtocol::Chat => {
+                let chat_req = anthropic_to_chat_request(req)?;
+                let body = serde_json::to_value(&chat_req)?;
+                let resp_val = executor.execute_json_request(&provider.chat_url(), &body).await?;
+                let chat_resp: ChatCompletionResponse = serde_json::from_value(resp_val)?;
+                let ant_resp = chat_to_anthropic_response(&chat_resp)?;
+                Ok(ant_resp)
+            }
         }
     }
 
@@ -141,18 +184,36 @@ impl PonyGateway {
         let provider = self.resolve_provider(&req.model)?;
         let executor = UpstreamExecutor::new(provider.pool.clone(), self.max_retries);
 
-        let url = format!("{}/v1/responses", provider.base_url.trim_end_matches('/'));
-        let body = serde_json::to_value(req)?;
-
-        let resp_val = executor.execute_json_request(&url, &body).await?;
-        let resp: ResponseObject = serde_json::from_value(resp_val)?;
-        Ok(resp)
+        match provider.native_protocol() {
+            UpstreamProtocol::Anthropic => {
+                let ant_req = responses_to_anthropic_request(req)?;
+                let body = serde_json::to_value(&ant_req)?;
+                let resp_val = executor.execute_json_request(&provider.messages_url(), &body).await?;
+                let ant_resp: MessageResponse = serde_json::from_value(resp_val)?;
+                let resp_obj = anthropic_to_responses_response(&ant_resp)?;
+                Ok(resp_obj)
+            }
+            UpstreamProtocol::Chat => {
+                let chat_req = responses_to_chat_request(req)?;
+                let body = serde_json::to_value(&chat_req)?;
+                let resp_val = executor.execute_json_request(&provider.chat_url(), &body).await?;
+                let chat_resp: ChatCompletionResponse = serde_json::from_value(resp_val)?;
+                let resp_obj = chat_to_responses_response(&chat_resp)?;
+                Ok(resp_obj)
+            }
+            UpstreamProtocol::Responses => {
+                let body = serde_json::to_value(req)?;
+                let resp_val = executor.execute_json_request(&provider.responses_url(), &body).await?;
+                let resp: ResponseObject = serde_json::from_value(resp_val)?;
+                Ok(resp)
+            }
+        }
     }
 }
 
 #[derive(Debug, Default)]
 pub struct PonyGatewayBuilder {
-    providers: HashMap<String, (String, String, RoutingStrategy)>,
+    providers: HashMap<String, (String, String, RoutingStrategy, Option<UpstreamProtocol>)>,
     models: HashMap<String, Vec<String>>,
     keys: Vec<(String, ApiKeyEntry)>,
     max_retries: usize,
@@ -166,7 +227,21 @@ impl PonyGatewayBuilder {
         default_model: impl Into<String>,
         strategy: RoutingStrategy,
     ) -> Self {
-        self.providers.insert(name.into(), (base_url.into(), default_model.into(), strategy));
+        self.providers
+            .insert(name.into(), (base_url.into(), default_model.into(), strategy, None));
+        self
+    }
+
+    /// Declare the native wire protocol for a previously added provider.
+    /// Must be called after [`Self::add_provider`]; unknown names are ignored.
+    pub fn set_provider_protocol(
+        mut self,
+        name: impl Into<String>,
+        protocol: UpstreamProtocol,
+    ) -> Self {
+        if let Some(entry) = self.providers.get_mut(&name.into()) {
+            entry.3 = Some(protocol);
+        }
         self
     }
 
@@ -200,7 +275,7 @@ impl PonyGatewayBuilder {
         let mut provider_infos = HashMap::new();
         let retries = if self.max_retries == 0 { 3 } else { self.max_retries };
 
-        for (name, (base_url, default_model, strategy)) in self.providers {
+        for (name, (base_url, default_model, strategy, default_protocol)) in self.providers {
             let pool = Arc::new(KeyPool::new(&name, strategy));
             for (p_name, key_entry) in &self.keys {
                 if *p_name == name {
@@ -221,6 +296,7 @@ impl PonyGatewayBuilder {
                     default_model,
                     models: extra_models,
                     pool,
+                    default_protocol,
                 },
             );
         }

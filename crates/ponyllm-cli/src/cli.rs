@@ -168,7 +168,7 @@ pub enum ProviderCommands {
     },
     /// Add a new provider interactively or via flags
     Add {
-        /// Provider name (e.g. openai, deepseek, deepseek-anthropic, anthropic)
+        /// Provider name (e.g. openai, deepseek, anthropic)
         name: String,
 
         /// Base URL (e.g. https://api.deepseek.com or https://api.deepseek.com/anthropic)
@@ -186,7 +186,6 @@ pub enum ProviderCommands {
         /// Billing mode: 'metered' (default) or 'plan' (periodic quota)
         #[arg(long, default_value = "metered")]
         billing_mode: String,
-
         /// Regular input price in USD per 1M tokens
         #[arg(long, default_value_t = 0.50)]
         input_price: f64,
@@ -198,6 +197,22 @@ pub enum ProviderCommands {
         /// Output generation price in USD per 1M tokens
         #[arg(long, default_value_t = 1.00)]
         output_price: f64,
+
+        /// Default native wire protocol: chat, responses, anthropic (unset = legacy URL heuristic)
+        #[arg(long)]
+        default_protocol: Option<ponyllm_core::pool::UpstreamProtocol>,
+
+        /// Per-protocol endpoint base override for OpenAI Chat (unset = derive from base URL)
+        #[arg(long)]
+        chat_url: Option<String>,
+
+        /// Per-protocol endpoint base override for OpenAI Responses
+        #[arg(long)]
+        responses_url: Option<String>,
+
+        /// Per-protocol endpoint base override for Anthropic Messages
+        #[arg(long)]
+        messages_url: Option<String>,
 
         #[arg(short, long)]
         config: Option<String>,
@@ -336,6 +351,10 @@ pub enum ModelCommands {
         /// Billing mode override: metered, plan (coding plan subscription), free (defaults to inherit provider mode)
         #[arg(short = 'b', long)]
         billing_mode: Option<String>,
+
+        /// Native wire protocol override: chat, responses, anthropic (defaults to inherit provider default)
+        #[arg(long)]
+        protocol: Option<ponyllm_core::pool::UpstreamProtocol>,
 
         #[arg(short, long)]
         config: Option<String>,

@@ -53,6 +53,7 @@ fn build_gateway_config_and_pools(
                 input_price: m.input_price,
                 cached_price: m.cached_price,
                 output_price: m.output_price,
+                protocol: m.protocol,
             })
             .collect();
         gw_config.providers.insert(
@@ -67,6 +68,10 @@ fn build_gateway_config_and_pools(
                 output_price: p_sec.output_price,
                 models: all_model_names,
                 model_specs,
+                default_protocol: p_sec.default_protocol,
+                chat_url: p_sec.chat_url.clone(),
+                responses_url: p_sec.responses_url.clone(),
+                messages_url: p_sec.messages_url.clone(),
             },
         );
 
@@ -92,6 +97,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
         Commands::Init { output, non_interactive } => {
             if non_interactive {
+                if std::path::Path::new(&output).exists() {
+                    return Err(format!("目标配置文件 '{}' 已存在，非交互模式禁止静默覆写", output).into());
+                }
                 fs::write(&output, generate_sample_config())?;
                 println!("✅ 已成功以静默模式写入默认配置至 '{}'", output);
             } else {
@@ -103,18 +111,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let resolved = resolve_path(config.as_deref());
                 let cfg = ConfigFile::load_or_default(resolved.to_str())?;
                 println!("=== 已配置的模型提供商 (共 {} 个) ===", cfg.providers.len());
-                println!("{:<14} {:<28} {:<24} {:<8} {:<10} {:<22} {:<6}", "提供商", "Base URL", "默认模型", "模式", "策略", "基准资费($/1M:入/缓/出)", "Keys");
-                println!("{}", "-".repeat(115));
+                println!("{:<14} {:<28} {:<24} {:<8} {:<10} {:<10} {:<22} {:<6}", "提供商", "Base URL", "默认模型", "模式", "策略", "原生协议", "基准资费($/1M:入/缓/出)", "Keys");
+                println!("{}", "-".repeat(125));
                 for (name, p) in &cfg.providers {
                     let mode_str = match p.billing_mode {
                         ponyllm_core::pool::BillingMode::Plan => "plan(套餐)",
                         ponyllm_core::pool::BillingMode::Metered => "metered",
                         ponyllm_core::pool::BillingMode::Free => "free(免费)",
                     };
+                    let proto_str = p.default_protocol.map(|v| v.to_string()).unwrap_or_else(|| "auto(启发式)".to_string());
                     let pricing_str = format!("{:.2}/{:.3}/{:.2}", p.input_price, p.cached_price, p.output_price);
                     println!(
-                        "{:<14} {:<28} {:<24} {:<8} {:<10} {:<22} {:<6}",
-                        name, p.base_url, p.default_model, mode_str, p.strategy, pricing_str, p.keys.len()
+                        "{:<14} {:<28} {:<24} {:<8} {:<10} {:<10} {:<22} {:<6}",
+                        name, p.base_url, p.default_model, mode_str, p.strategy, proto_str, pricing_str, p.keys.len()
                     );
                 }
             }
@@ -127,6 +136,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 input_price,
                 cached_price,
                 output_price,
+                default_protocol,
+                chat_url,
+                responses_url,
+                messages_url,
                 config,
             } => {
                 if input_price < 0.0 || input_price.is_nan() || input_price.is_infinite() {
@@ -138,6 +151,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if output_price < 0.0 || output_price.is_nan() || output_price.is_infinite() {
                     return Err(format!("输出生成单价 --output-price 必须为大于等于 0 的合法数值，输入: {}", output_price).into());
                 }
+                ponyllm_cli::config::validate_provider_fields(
+                    &base_url,
+                    &model,
+                    &strategy,
+                    &billing_mode,
+                    chat_url.as_deref(),
+                    responses_url.as_deref(),
+                    messages_url.as_deref(),
+                )
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
 
                 let resolved = resolve_path(config.as_deref());
                 let path = resolved.to_str().unwrap_or("ponyllm.toml");
@@ -145,6 +168,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .unwrap_or_default();
                 let mode = match billing_mode.trim().to_ascii_lowercase().as_str() {
                     "plan" => ponyllm_core::pool::BillingMode::Plan,
+                    "free" => ponyllm_core::pool::BillingMode::Free,
                     _ => ponyllm_core::pool::BillingMode::Metered,
                 };
                 cfg.add_provider_full(
@@ -157,6 +181,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     cached_price,
                     output_price,
                 );
+                if default_protocol.is_some() || chat_url.is_some() || responses_url.is_some() || messages_url.is_some() {
+                    if let Some(p) = cfg.providers.get_mut(&name) {
+                        p.default_protocol = default_protocol;
+                        if chat_url.is_some() {
+                            p.chat_url = chat_url.clone();
+                        }
+                        if responses_url.is_some() {
+                            p.responses_url = responses_url.clone();
+                        }
+                        if messages_url.is_some() {
+                            p.messages_url = messages_url.clone();
+                        }
+                    }
+                }
                 cfg.save_to_path(path)?;
                 println!("✅ 成功添加/更新提供商 '{}' (Base URL: {}, Model: {}, 资费: {}/{}/{})", name, base_url, model, input_price, cached_price, output_price);
                 println!("   • 配置文件: {}", resolved.display());
@@ -237,11 +275,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let resolved = resolve_path(config.as_deref());
                 let cfg = ConfigFile::load_or_default(resolved.to_str())?;
                 println!("=== 已配置的模型目录 ===");
-                println!("{:<12} {:<24} {:<6} {:<10} {:<8} {:<12} {:<24}", "提供商", "模型标识", "梯队", "模式", "上下文", "最大输出", "资费($/1M:入/缓/出)");
-                println!("{}", "-".repeat(102));
+                println!("{:<12} {:<24} {:<6} {:<10} {:<8} {:<12} {:<10} {:<24}", "提供商", "模型标识", "梯队", "模式", "上下文", "最大输出", "原生协议", "资费($/1M:入/缓/出)");
+                println!("{}", "-".repeat(114));
                 for (p_name, p) in &cfg.providers {
                     for m in p.list_all_models() {
                         let is_def = if m.name == p.default_model { " (★默认)" } else { "" };
+                        let proto_str = m.protocol.or(p.default_protocol).map(|v| v.to_string()).unwrap_or_else(|| "auto".to_string());
                         let mode_desc = match p.get_model_billing_mode(&m.name) {
                             ponyllm_core::pool::BillingMode::Plan => "Plan(套餐)",
                             ponyllm_core::pool::BillingMode::Free => "0元免费",
@@ -255,13 +294,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             format!("{:.2}/{:.3}/{:.2}(继承)", pr.input_price, pr.cached_price, pr.output_price)
                         };
                         println!(
-                            "{:<12} {:<24} {:<6} {:<10} {:<8} {:<12} {:<24}",
+                            "{:<12} {:<24} {:<6} {:<10} {:<8} {:<12} {:<10} {:<24}",
                             p_name,
                             format!("{}{}", m.name, is_def),
                             m.tier.shorthand(),
                             mode_desc,
                             m.context_window,
                             m.max_output,
+                            proto_str,
                             pricing_info,
                         );
                     }
@@ -279,6 +319,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 cached_price,
                 output_price,
                 billing_mode,
+                protocol,
                 config,
             } => {
                 let resolved = resolve_path(config.as_deref());
@@ -326,6 +367,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     input_price,
                     cached_price,
                     output_price,
+                    protocol,
                 };
                 cfg.upsert_model_config(&provider, model_cfg)
                     .map_err(|e| std::io::Error::new(std::io::ErrorKind::NotFound, e))?;

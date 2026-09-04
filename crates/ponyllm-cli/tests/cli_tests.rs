@@ -254,6 +254,7 @@ fn test_model_config_crud_and_params() {
         input_price: None,
         cached_price: None,
         output_price: None,
+        protocol: None,
     };
     cfg.upsert_model_config("ai-hub", custom_model.clone()).unwrap();
 

@@ -6,6 +6,17 @@ use crate::config::{
 };
 
 pub fn run_interactive_init(output_path: &str) -> Result<(), Box<dyn std::error::Error>> {
+    if std::path::Path::new(output_path).exists() {
+        let prompt = format!(
+            "目标配置文件 '{}' 已存在，继续初始化将覆盖该文件，是否确认？",
+            output_path
+        );
+        let confirm = Confirm::new(&prompt).with_default(false).prompt()?;
+        if !confirm {
+            println!("已取消初始化，现有配置文件未受影响。");
+            return Ok(());
+        }
+    }
     println!("\n========================================================");
     println!("  🚀 欢迎使用 ponyllm 统一网关配置初始化向导");
     println!("  请选择模型提供商接口并录入 API Key 以完成初始化");
@@ -56,8 +67,7 @@ pub fn run_interactive_init(output_path: &str) -> Result<(), Box<dyn std::error:
     loop {
         println!("\n--- 配置模型提供商 (Provider) ---");
         let provider_options = vec![
-            "DeepSeek - OpenAI 协议 (https://api.deepseek.com, 默认模型: deepseek-v4-flash)",
-            "DeepSeek - Anthropic 协议 (https://api.deepseek.com/anthropic, 默认模型: deepseek-v4-flash)",
+            "DeepSeek - 三协议合一 (https://api.deepseek.com, 默认模型: deepseek-v4-flash)",
             "OpenAI (官方接口及各大兼容中转: https://api.openai.com, 默认模型: gpt-4o)",
             "Anthropic (官方 Messages 接口: https://api.anthropic.com, 默认模型: claude-3-7-sonnet-20250219)",
             "OpenRouter (聚合网关)",
@@ -67,21 +77,19 @@ pub fn run_interactive_init(output_path: &str) -> Result<(), Box<dyn std::error:
         let selection = Select::new("选择要配置的提供商接口:", provider_options).prompt()?;
         let is_custom = selection.starts_with("Custom");
 
-        let (p_name, default_url, default_model) = if selection.contains("DeepSeek - Anthropic") {
-            ("deepseek-anthropic".to_string(), "https://api.deepseek.com/anthropic", "deepseek-v4-flash")
-        } else if selection.contains("DeepSeek") {
-            ("deepseek".to_string(), "https://api.deepseek.com", "deepseek-v4-flash")
+        let (p_name, default_url, default_model, preset_messages_url) = if selection.contains("DeepSeek") {
+            ("deepseek".to_string(), "https://api.deepseek.com", "deepseek-v4-flash", Some("https://api.deepseek.com/anthropic".to_string()))
         } else if selection.starts_with("OpenAI") {
-            ("openai".to_string(), "https://api.openai.com", "gpt-4o")
+            ("openai".to_string(), "https://api.openai.com", "gpt-4o", None)
         } else if selection.starts_with("Anthropic") {
-            ("anthropic".to_string(), "https://api.anthropic.com", "claude-3-7-sonnet-20250219")
+            ("anthropic".to_string(), "https://api.anthropic.com", "claude-3-7-sonnet-20250219", None)
         } else if selection.starts_with("OpenRouter") {
-            ("openrouter".to_string(), "https://openrouter.ai/api", "anthropic/claude-3.7-sonnet")
+            ("openrouter".to_string(), "https://openrouter.ai/api", "anthropic/claude-3.7-sonnet", None)
         } else {
             let custom_name = Text::new("  请输入自定义提供商标识名称 (英文小写):")
                 .with_default("my-provider")
                 .prompt()?;
-            (custom_name, "https://api.example.com", "default-model")
+            (custom_name, "https://api.example.com", "default-model", None)
         };
 
         let base_url = if is_custom {
@@ -104,6 +112,20 @@ pub fn run_interactive_init(output_path: &str) -> Result<(), Box<dyn std::error:
             "weighted"
         } else {
             "round_robin"
+        };
+
+        let proto_options = vec![
+            "chat (OpenAI Chat Completions: /v1/chat/completions，默认)",
+            "responses (OpenAI Responses: /v1/responses，如 opencode muse-spark)",
+            "anthropic (Anthropic Messages: /v1/messages)",
+        ];
+        let proto_sel = Select::new("  原生上游协议 (模型默认继承，可被模型单独覆盖):", proto_options).prompt()?;
+        let default_protocol = if proto_sel.starts_with("responses") {
+            Some(ponyllm_core::pool::UpstreamProtocol::Responses)
+        } else if proto_sel.starts_with("anthropic") {
+            Some(ponyllm_core::pool::UpstreamProtocol::Anthropic)
+        } else {
+            Some(ponyllm_core::pool::UpstreamProtocol::Chat)
         };
 
         let mut keys: Vec<KeySection> = Vec::new();
@@ -148,6 +170,27 @@ pub fn run_interactive_init(output_path: &str) -> Result<(), Box<dyn std::error:
             }
         }
 
+        if providers.contains_key(&p_name) {
+            let prompt = format!("提供商 '{}' 已存在，是否覆盖其配置?", p_name);
+            let overwrite = Confirm::new(&prompt).with_default(false).prompt()?;
+            if !overwrite {
+                continue;
+            }
+        }
+
+        if let Err(e) = crate::config::validate_provider_fields(
+            &base_url,
+            &model,
+            strat,
+            "metered",
+            None,
+            None,
+            preset_messages_url.as_deref(),
+        ) {
+            println!("  ❌ 配置无效: {}，请重新选择提供商", e);
+            continue;
+        }
+
         providers.insert(p_name.to_string(), ProviderSection {
             base_url,
             default_model: model,
@@ -159,6 +202,10 @@ pub fn run_interactive_init(output_path: &str) -> Result<(), Box<dyn std::error:
             models: Vec::new(),
             model_configs: Vec::new(),
             keys,
+            default_protocol,
+            chat_url: None,
+            responses_url: None,
+            messages_url: preset_messages_url,
         });
 
         let add_another_provider = Confirm::new("是否继续配置其他大模型提供商?")
