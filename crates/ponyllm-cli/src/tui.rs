@@ -58,8 +58,18 @@ pub enum Tab2Focus {
     Models,
 }
 
-pub const MODALITIES: [&str; 4] = ["文本 (text)", "图像 (image)", "视频 (video)", "音频 (audio)"];
+pub const MODALITIES: [&str; 4] = ["文 (Txt)", "图 (Img)", "视 (Vid)", "音 (Aud)"];
 pub const MODALITY_KEYS: [&str; 4] = ["text", "image", "video", "audio"];
+
+pub fn modality_key_to_short(k: &str) -> &'static str {
+    match k {
+        "text" => "文(Txt)",
+        "image" => "图(Img)",
+        "video" => "视(Vid)",
+        "audio" => "音(Aud)",
+        _ => "其",
+    }
+}
 pub const STRATEGIES: [&str; 3] = ["round_robin", "priority", "weighted"];
 pub const PROVIDER_BILLING_MODES: [&str; 3] = ["按量付费 (Metered)", "包月订阅 (Coding Plan)", "完全免费 (Free)"];
 pub const MODEL_BILLING_MODES: [&str; 4] = ["继承提供商", "按量计费 (Metered)", "包月套餐/Coding Plan (Plan)", "完全免费 (Free)"];
@@ -2003,11 +2013,11 @@ fn render_providers_and_models_tab(f: &mut Frame, area: Rect, app: &mut TuiApp) 
         let base_url = current_p.map(|p| p.base_url.as_str()).unwrap_or("-");
 
         let in_tags: Vec<Span> = m_cfg.input_types.iter().map(|t| {
-            Span::styled(format!(" [入:{}] ", t), Style::default().fg(Color::Green).bg(Color::Rgb(20, 35, 20)))
+            Span::styled(format!(" [入:{}] ", modality_key_to_short(t)), Style::default().fg(Color::Green).bg(Color::Rgb(20, 35, 20)))
         }).collect();
 
         let out_tags: Vec<Span> = m_cfg.output_types.iter().map(|t| {
-            Span::styled(format!(" [出:{}] ", t), Style::default().fg(Color::Cyan).bg(Color::Rgb(20, 30, 45)))
+            Span::styled(format!(" [出:{}] ", modality_key_to_short(t)), Style::default().fg(Color::Cyan).bg(Color::Rgb(20, 30, 45)))
         }).collect();
 
         let pricing_info = if let Some(p) = current_p {
@@ -2242,7 +2252,9 @@ fn render_telemetry_tab(f: &mut Frame, area: Rect, app: &mut TuiApp) {
 }
 
 fn safe_centered_rect(min_w: u16, min_h: u16, r: Rect) -> Rect {
-    let target_w = min_w.clamp(20, r.width.saturating_sub(2).max(20));
+    // 响应式宽度：终端较宽时自适应扩展至 75% 宽度，并保证最小 min_w，上限 102 列防过度拉伸
+    let responsive_w = (r.width * 75 / 100).max(min_w).min(102);
+    let target_w = responsive_w.clamp(20, r.width.saturating_sub(2).max(20));
     let target_h = min_h.clamp(8, r.height.saturating_sub(2).max(8));
 
     let pad_y = r.height.saturating_sub(target_h) / 2;
@@ -2260,7 +2272,7 @@ fn render_modal(f: &mut Frame, area: Rect, app: &TuiApp) {
     match &app.modal {
         Modal::None => {}
         Modal::DeleteProviderConfirm { name } => {
-            let modal_area = safe_centered_rect(54, 8, area);
+            let modal_area = safe_centered_rect(58, 8, area);
             f.render_widget(Clear, modal_area);
 
             let text = vec![
@@ -2285,7 +2297,7 @@ fn render_modal(f: &mut Frame, area: Rect, app: &TuiApp) {
             f.render_widget(p, modal_area);
         }
         Modal::DeleteModelConfirm { provider_name, model_name } => {
-            let modal_area = safe_centered_rect(54, 8, area);
+            let modal_area = safe_centered_rect(58, 8, area);
             f.render_widget(Clear, modal_area);
 
             let text = vec![
@@ -2320,7 +2332,7 @@ fn render_modal(f: &mut Frame, area: Rect, app: &TuiApp) {
             output_price,
             active_field,
         } => {
-            let modal_area = safe_centered_rect(70, 18, area);
+            let modal_area = safe_centered_rect(84, 18, area);
             f.render_widget(Clear, modal_area);
 
             let strat_options: Vec<Span> = STRATEGIES.iter().enumerate().map(|(i, &s)| {
@@ -2381,7 +2393,7 @@ fn render_modal(f: &mut Frame, area: Rect, app: &TuiApp) {
             output_price,
             active_field,
         } => {
-            let modal_area = safe_centered_rect(70, 17, area);
+            let modal_area = safe_centered_rect(84, 17, area);
             f.render_widget(Clear, modal_area);
 
             let strat_options: Vec<Span> = STRATEGIES.iter().enumerate().map(|(i, &s)| {
@@ -2445,7 +2457,7 @@ fn render_modal(f: &mut Frame, area: Rect, app: &TuiApp) {
             set_as_default,
             active_field,
         } => {
-            let modal_area = safe_centered_rect(72, 20, area);
+            let modal_area = safe_centered_rect(88, 20, area);
             f.render_widget(Clear, modal_area);
 
             let in_spans = render_modality_checkboxes(input_modalities, *active_field == 8);
@@ -2470,7 +2482,7 @@ fn render_modal(f: &mut Frame, area: Rect, app: &TuiApp) {
                 render_form_field("最大输出限制 (如 32K/64K)", max_output, *active_field == 7),
                 Line::from({
                     let mut spans = vec![
-                        Span::styled(if *active_field == 8 { "› 输入模态 (按1-4切换): " } else { "  输入模态 (按1-4切换): " },
+                        Span::styled(if *active_field == 8 { "› 输入模态 (1-4): " } else { "  输入模态 (1-4): " },
                             if *active_field == 8 { Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD) } else { Style::default().fg(Color::Gray) }),
                     ];
                     spans.extend(in_spans);
@@ -2478,7 +2490,7 @@ fn render_modal(f: &mut Frame, area: Rect, app: &TuiApp) {
                 }),
                 Line::from({
                     let mut spans = vec![
-                        Span::styled(if *active_field == 9 { "› 输出模态 (按1-4切换): " } else { "  输出模态 (按1-4切换): " },
+                        Span::styled(if *active_field == 9 { "› 输出模态 (1-4): " } else { "  输出模态 (1-4): " },
                             if *active_field == 9 { Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD) } else { Style::default().fg(Color::Gray) }),
                     ];
                     spans.extend(out_spans);
@@ -2523,7 +2535,7 @@ fn render_modal(f: &mut Frame, area: Rect, app: &TuiApp) {
             set_as_default,
             active_field,
         } => {
-            let modal_area = safe_centered_rect(72, 19, area);
+            let modal_area = safe_centered_rect(88, 19, area);
             f.render_widget(Clear, modal_area);
 
             let in_spans = render_modality_checkboxes(input_modalities, *active_field == 7);
@@ -2547,7 +2559,7 @@ fn render_modal(f: &mut Frame, area: Rect, app: &TuiApp) {
                 render_form_field("最大输出限制", max_output, *active_field == 6),
                 Line::from({
                     let mut spans = vec![
-                        Span::styled(if *active_field == 7 { "› 输入模态 (按1-4切换): " } else { "  输入模态 (按1-4切换): " },
+                        Span::styled(if *active_field == 7 { "› 输入模态 (1-4): " } else { "  输入模态 (1-4): " },
                             if *active_field == 7 { Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD) } else { Style::default().fg(Color::Gray) }),
                     ];
                     spans.extend(in_spans);
@@ -2555,7 +2567,7 @@ fn render_modal(f: &mut Frame, area: Rect, app: &TuiApp) {
                 }),
                 Line::from({
                     let mut spans = vec![
-                        Span::styled(if *active_field == 8 { "› 输出模态 (按1-4切换): " } else { "  输出模态 (按1-4切换): " },
+                        Span::styled(if *active_field == 8 { "› 输出模态 (1-4): " } else { "  输出模态 (1-4): " },
                             if *active_field == 8 { Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD) } else { Style::default().fg(Color::Gray) }),
                     ];
                     spans.extend(out_spans);
@@ -2586,7 +2598,7 @@ fn render_modal(f: &mut Frame, area: Rect, app: &TuiApp) {
             f.render_widget(p, modal_area);
         }
         Modal::DeleteKeyConfirm { provider, id } => {
-            let modal_area = safe_centered_rect(54, 8, area);
+            let modal_area = safe_centered_rect(58, 8, area);
             f.render_widget(Clear, modal_area);
 
             let text = vec![
@@ -2612,7 +2624,7 @@ fn render_modal(f: &mut Frame, area: Rect, app: &TuiApp) {
             f.render_widget(p, modal_area);
         }
         Modal::AddKey { provider_idx, id, api_key, priority, weight, active_field } => {
-            let modal_area = safe_centered_rect(64, 13, area);
+            let modal_area = safe_centered_rect(76, 13, area);
             f.render_widget(Clear, modal_area);
 
             let provider_names = app.sorted_provider_names();
@@ -2706,15 +2718,15 @@ fn render_modality_checkboxes<'a>(modalities: &[bool; 4], is_active: bool) -> Ve
     for (i, &on) in modalities.iter().enumerate() {
         let label = MODALITIES[i];
         let tag = if on {
-            format!("[x] {} ", label)
+            format!(" [x] {}:{} ", i + 1, label)
         } else {
-            format!("[ ] {} ", label)
+            format!(" [ ] {}:{} ", i + 1, label)
         };
 
         let style = if on {
             Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
         } else if is_active {
-            Style::default().fg(Color::Gray)
+            Style::default().fg(Color::Yellow)
         } else {
             Style::default().fg(Color::DarkGray)
         };
@@ -3025,5 +3037,46 @@ mod tests {
         assert_eq!(p.input_price, 0.20);
         assert_eq!(p.cached_price, 0.05);
         assert_eq!(p.output_price, 0.40);
+    }
+
+    #[test]
+    fn test_modalities_short_labels_and_compact_rendering() {
+        assert_eq!(modality_key_to_short("text"), "文(Txt)");
+        assert_eq!(modality_key_to_short("image"), "图(Img)");
+        assert_eq!(modality_key_to_short("video"), "视(Vid)");
+        assert_eq!(modality_key_to_short("audio"), "音(Aud)");
+
+        let mods = [true, false, true, false];
+        let spans = render_modality_checkboxes(&mods, true);
+        assert_eq!(spans.len(), 4);
+        assert!(spans[0].content.contains("[x] 1:文 (Txt)"));
+        assert!(spans[1].content.contains("[ ] 2:图 (Img)"));
+        assert!(spans[2].content.contains("[x] 3:视 (Vid)"));
+        assert!(spans[3].content.contains("[ ] 4:音 (Aud)"));
+
+        // 计算所有模态选项拼接的总字符宽度，确保在 65 列以内，彻底防止溢出弹窗
+        let total_chars: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+        assert!(total_chars <= 65, "Total chars {} exceeds compact budget 65", total_chars);
+    }
+
+    #[test]
+    fn test_safe_centered_rect_responsive_widening() {
+        // 1. 标准 80 列屏幕
+        let r80 = Rect { x: 0, y: 0, width: 80, height: 24 };
+        let box80 = safe_centered_rect(88, 20, r80);
+        // 80列屏幕保留至少左右边距2列，width 78
+        assert_eq!(box80.width, 78);
+        assert_eq!(box80.height, 20);
+
+        // 2. 宽屏 120 列屏幕：按 75% 响应式扩展或至少 min_w(88)
+        let r120 = Rect { x: 0, y: 0, width: 120, height: 30 };
+        let box120 = safe_centered_rect(88, 20, r120);
+        // 120 * 75% = 90 列
+        assert_eq!(box120.width, 90);
+
+        // 3. 超宽屏 160 列屏幕：上限 clamp 在 102 列防过度拉伸
+        let r160 = Rect { x: 0, y: 0, width: 160, height: 40 };
+        let box160 = safe_centered_rect(88, 20, r160);
+        assert_eq!(box160.width, 102);
     }
 }
