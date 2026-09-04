@@ -60,9 +60,13 @@ impl PonyGateway {
     }
 
     /// Return all configured model IDs across all providers: Vec<(model_id, provider_name)>
+    /// Provider iteration is name-sorted so listing order is deterministic.
     pub fn list_models(&self) -> Vec<(String, String)> {
         let mut result = Vec::new();
-        for (provider_name, info) in &self.providers {
+        let mut names: Vec<&String> = self.providers.keys().collect();
+        names.sort();
+        for provider_name in names {
+            let info = &self.providers[provider_name];
             if !info.default_model.is_empty() {
                 result.push((info.default_model.clone(), provider_name.clone()));
             }

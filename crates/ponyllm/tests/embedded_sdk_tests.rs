@@ -286,3 +286,17 @@ async fn test_embedded_sdk_base_url_trailing_slash_resolves_anthropic() {
         Some("Anthropic Response: claude-3-5-sonnet")
     );
 }
+
+#[test]
+fn test_sdk_list_models_is_deterministically_ordered() {
+    use std::collections::HashSet;
+    for _ in 0..5 {
+        let gateway = PonyGateway::builder()
+            .add_provider("zeta", "https://z.example.com", "z-model", RoutingStrategy::RoundRobin)
+            .add_provider("alpha", "https://a.example.com", "a-model", RoutingStrategy::RoundRobin)
+            .build();
+        let models: Vec<String> = gateway.list_models().into_iter().map(|(m, _)| m).collect();
+        assert_eq!(models, vec!["a-model".to_string(), "z-model".to_string()]);
+        assert_eq!(models.len(), HashSet::<&String>::from_iter(models.iter()).len());
+    }
+}

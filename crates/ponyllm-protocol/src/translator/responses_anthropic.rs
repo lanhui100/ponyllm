@@ -43,6 +43,11 @@ pub fn responses_to_anthropic_request(req: &CreateResponseRequest) -> Result<Mes
 
     match &req.input {
         ResponseInput::Text(t) => {
+            if t.trim().is_empty() {
+                return Err(crate::error::ProtocolError::Validation(
+                    "no translatable content for Anthropic Messages: input carries no text, thinking, or tool blocks".to_string(),
+                ));
+            }
             push_text(&mut messages, AnthropicRole::User, t.clone());
         }
         ResponseInput::Items(items) => {
@@ -102,10 +107,14 @@ pub fn responses_to_anthropic_request(req: &CreateResponseRequest) -> Result<Mes
                         } else {
                             AnthropicRole::User
                         };
-                        messages.push(AnthropicMessage {
-                            role,
-                            content: AnthropicContent::Blocks(blocks),
-                        });
+                        // Empty content arrays are rejected by Anthropic upstreams;
+                        // skip instead of emitting an illegal message.
+                        if !blocks.is_empty() {
+                            messages.push(AnthropicMessage {
+                                role,
+                                content: AnthropicContent::Blocks(blocks),
+                            });
+                        }
                     }
                     ResponseInputItem::FunctionCall { call_id, name, arguments } => {
                         flush_result(&mut messages, &mut pending_result);
@@ -131,6 +140,11 @@ pub fn responses_to_anthropic_request(req: &CreateResponseRequest) -> Result<Mes
             flush_use(&mut messages, &mut pending_use);
             flush_result(&mut messages, &mut pending_result);
             messages = merge_consecutive_same_role(messages);
+            if messages.is_empty() {
+                return Err(crate::error::ProtocolError::Validation(
+                    "no translatable content for Anthropic Messages: input carries no text, thinking, or tool blocks".to_string(),
+                ));
+            }
         }
     }
 

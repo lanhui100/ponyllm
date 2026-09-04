@@ -1128,3 +1128,44 @@ fn test_responses_to_anthropic_stream_fsm_empty_delta_and_dynamic_stop_reason() 
         }
     )));
 }
+
+#[test]
+fn test_refusal_only_input_fails_instead_of_empty_anthropic_message() {
+    let req = CreateResponseRequest {
+        model: "m".to_string(),
+        input: ResponseInput::Items(vec![ResponseInputItem::Message {
+            role: "user".to_string(),
+            content: vec![ResponseContentPart::Refusal {
+                refusal: "no".to_string(),
+            }],
+        }]),
+        instructions: None,
+        modalities: None,
+        tools: None,
+        tool_choice: None,
+        temperature: None,
+        top_p: None,
+        max_output_tokens: None,
+        stream: None,
+        metadata: None,
+        extra: Default::default(),
+    };
+    let err = responses_to_anthropic_request(&req).unwrap_err();
+    assert!(err.to_string().contains("no translatable content"));
+
+    let blank = CreateResponseRequest {
+        model: "m".to_string(),
+        input: ResponseInput::Text("   ".to_string()),
+        instructions: None,
+        modalities: None,
+        tools: None,
+        tool_choice: None,
+        temperature: None,
+        top_p: None,
+        max_output_tokens: None,
+        stream: None,
+        metadata: None,
+        extra: Default::default(),
+    };
+    assert!(responses_to_anthropic_request(&blank).is_err());
+}
