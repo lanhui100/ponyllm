@@ -59,6 +59,30 @@ pub enum CoreError {
     Internal(String),
 }
 
+impl GatewayErrorKind {
+    /// Stable snake_case name for event payloads and error-rate grouping.
+    /// New variants must extend this match (not Debug formatting) to keep
+    /// persisted segments comparable across versions.
+    pub fn kind_name(&self) -> &'static str {
+        match self {
+            GatewayErrorKind::RateLimitExceeded { .. } => "rate_limit_exceeded",
+            GatewayErrorKind::QuotaExhausted => "quota_exhausted",
+            GatewayErrorKind::AuthInvalid => "auth_invalid",
+            GatewayErrorKind::UpstreamUnavailable => "upstream_unavailable",
+            GatewayErrorKind::ClientBadRequest => "client_bad_request",
+            GatewayErrorKind::CapacityExhausted => "capacity_exhausted",
+            GatewayErrorKind::ModelNotFound => "model_not_found",
+            GatewayErrorKind::Internal => "internal",
+        }
+    }
+
+    /// True when this failure triggers key failover (mirrors the legacy
+    /// `record_failover` rule: every retryable attempt counts, client faults don't).
+    pub fn triggers_failover(&self) -> bool {
+        !matches!(self, GatewayErrorKind::ClientBadRequest)
+    }
+}
+
 impl CoreError {
     /// Classify any `CoreError` into a `GatewayErrorKind`.
     pub fn kind(&self) -> GatewayErrorKind {

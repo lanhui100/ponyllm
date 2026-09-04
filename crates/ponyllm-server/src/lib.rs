@@ -6,6 +6,8 @@ pub mod routes;
 pub mod app;
 pub mod streaming;
 pub mod extractors;
+pub mod frames;
+pub mod segments;
 
 pub use config::{GatewayConfig, ModelSpec, ProviderConfig};
 pub use state::AppState;

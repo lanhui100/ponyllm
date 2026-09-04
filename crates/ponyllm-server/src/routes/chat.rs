@@ -5,17 +5,20 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::IntoResponse;
 use axum::Json;
 use ponyllm_core::error::CoreError;
-use ponyllm_core::executor::UpstreamExecutor;
+use ponyllm_core::executor::{EventSinkCtx, UpstreamExecutor};
 use ponyllm_core::pool::GatewayRoutingStrategy;
-use ponyllm_core::telemetry::FlightFrame;
+use ponyllm_core::telemetry::{EventCtx, GatewayEvent, StageTimings};
 use ponyllm_protocol::anthropic::messages::MessageResponse;
 use ponyllm_protocol::openai::chat::ChatCompletionRequest;
 use ponyllm_protocol::translator::{anthropic_to_chat_response, chat_to_anthropic_request};
+use parking_lot::Mutex;
 use std::str::FromStr;
 use crate::extractors::AppJson;
 use crate::routes::models::ParsedRequestModel;
 use crate::state::{AppState, RoutedTarget};
-use crate::streaming::{anthropic_sse_to_openai_stream, passthrough_sse};
+use crate::streaming::{
+    anthropic_sse_to_openai_stream, passthrough_sse, wrap_telemetry_stream, StreamFailureContext,
+};
 
 pub async fn handle_chat_completions(
     State(state): State<Arc<AppState>>,
@@ -24,6 +27,14 @@ pub async fn handle_chat_completions(
 ) -> impl IntoResponse {
     let start_time = Instant::now();
     let request_id = format!("req_{}", uuid_simple());
+    let endpoint = "/v1/chat/completions".to_string();
+    let ctx = EventCtx {
+        request_id: request_id.clone(),
+        session_id: None,
+        endpoint: endpoint.clone(),
+        start: start_time,
+    };
+    let stages = Arc::new(Mutex::new(StageTimings::default()));
 
     // Client-side validation: empty messages are a client error, not an
     // upstream exhaustion (previously surfaced as 502 after hitting upstream).
@@ -53,6 +64,7 @@ pub async fn handle_chat_completions(
     let requested_raw_model = parsed.raw_requested_model.clone();
 
     // 3. Resolve ranked target providers for multi-provider transparent failover
+    let routing_start = Instant::now();
     let targets = match state.resolve_routed_targets(&parsed, header_strategy) {
         Ok(ts) if !ts.is_empty() => ts,
         Ok(_) => {
@@ -94,6 +106,20 @@ pub async fn handle_chat_completions(
     let mut last_error = String::new();
     let mut last_kind = ponyllm_core::error::GatewayErrorKind::Internal;
 
+    // Journey start: routing cost is the first attributable segment.
+    // (Pre-routing validation rejections stay silent, as before.)
+    let routing_ms = routing_start.elapsed().as_secs_f64() * 1000.0;
+    stages.lock().routing_ms = Some(routing_ms);
+    state.emit(
+        &ctx,
+        Some(targets[0].provider_name.clone()),
+        GatewayEvent::RouteResolved {
+            provider: targets[0].provider_name.clone(),
+            translated: targets[0].is_anthropic_upstream,
+            routing_ms,
+        },
+    );
+
     for target in targets {
         let pool = match state.get_pool(&target.provider_name) {
             Some(p) => p,
@@ -101,7 +127,6 @@ pub async fn handle_chat_completions(
         };
 
         let max_retries = state.config.read().max_retries;
-        let executor = UpstreamExecutor::new(pool, max_retries);
         let is_anthropic_upstream = target.is_anthropic_upstream;
 
         let mut target_req = req.clone();
@@ -138,33 +163,53 @@ pub async fn handle_chat_completions(
 
         let req_snippet = Some(req_val.to_string());
 
+        // Per-key retries append attempt events to the bus; metrics and
+        // frames derive from the same single-append log.
+        let sink_ctx = EventSinkCtx {
+            request_id: request_id.clone(),
+            endpoint: endpoint.clone(),
+            provider: target.provider_name.clone(),
+            start: start_time,
+            stages: stages.clone(),
+            request_snippet: req_snippet.clone(),
+        };
+        let executor = UpstreamExecutor::new(pool, max_retries)
+            .with_event_sink(sink_ctx.clone(), state.event_sink(sink_ctx));
+
         if is_streaming {
             match executor.execute_stream_request(&target_url, &req_val).await {
                 Ok(upstream_resp) => {
-                    let latency = start_time.elapsed();
-                    state.metrics.record_request("/v1/chat/completions", latency, 0, 0, true);
-                    state.flight_recorder.record(FlightFrame {
-                        request_id: request_id.clone(),
-                        endpoint: "/v1/chat/completions".to_string(),
-                        key_id: target.provider_name.clone(),
-                        raw_key: None,
-                        status_code: Some(200),
-                        latency,
-                        error: None,
-                        request_snippet: req_snippet,
-                        response_snippet: Some("[STREAM_STARTED]".to_string()),
-                    });
+                    state.emit(
+                        &ctx,
+                        Some(target.provider_name.clone()),
+                        GatewayEvent::StreamStarted {
+                            request_snippet: req_snippet.clone(),
+                        },
+                    );
 
                     // Stream the raw upstream SSE body. For an Anthropic upstream,
                     // translate Anthropic SSE events into OpenAI chat chunks.
                     let raw_stream = upstream_resp.bytes_stream();
+                    // Mid-stream failures (after this started event) are appended
+                    // by the telemetry wrapper with the same request_id.
+                    let failure_ctx = StreamFailureContext {
+                        bus: state.event_bus.clone(),
+                        ctx: ctx.clone(),
+                        provider: target.provider_name.clone(),
+                        stages: stages.clone(),
+                        request_snippet: req_snippet.clone(),
+                    };
                     let body = if is_anthropic_upstream {
-                        axum::body::Body::from_stream(anthropic_sse_to_openai_stream(
+                        let stream = anthropic_sse_to_openai_stream(
                             raw_stream,
                             &target.physical_model,
-                        ))
+                        );
+                        let monitored = wrap_telemetry_stream(stream, failure_ctx);
+                        axum::body::Body::from_stream(monitored)
                     } else {
-                        axum::body::Body::from_stream(passthrough_sse(raw_stream))
+                        let stream = passthrough_sse(raw_stream);
+                        let monitored = wrap_telemetry_stream(stream, failure_ctx);
+                        axum::body::Body::from_stream(monitored)
                     };
 
                     let mut resp = axum::response::Response::new(body);
@@ -173,6 +218,7 @@ pub async fn handle_chat_completions(
                         HeaderValue::from_static("text/event-stream"),
                     );
                     inject_routing_headers(&mut resp, &target);
+                    inject_telemetry_headers(&mut resp, &request_id, &stages);
                     return resp;
                 }
                 Err(err) => {
@@ -217,21 +263,25 @@ pub async fn handle_chat_completions(
                         obj.insert("model".to_string(), serde_json::json!(requested_raw_model));
                     }
 
-                    state.metrics.record_request("/v1/chat/completions", latency, 0, 0, true);
-                    state.flight_recorder.record(FlightFrame {
-                        request_id: request_id.clone(),
-                        endpoint: "/v1/chat/completions".to_string(),
-                        key_id: target.provider_name.clone(),
-                        raw_key: None,
-                        status_code: Some(200),
-                        latency,
-                        error: None,
-                        request_snippet: req_snippet,
-                        response_snippet: Some(final_val.to_string()),
-                    });
+                    // Token accounting stays at HEAD behavior (no usage split);
+                    // the event carries the totals for future projections.
+                    state.emit(
+                        &ctx,
+                        Some(target.provider_name.clone()),
+                        GatewayEvent::RequestCompleted {
+                            status_code: 200,
+                            latency_ms: latency.as_secs_f64() * 1000.0,
+                            prompt_tokens: 0,
+                            completion_tokens: 0,
+                            tps: None,
+                            request_snippet: req_snippet,
+                            response_snippet: Some(final_val.to_string()),
+                        },
+                    );
 
                     let mut response = (StatusCode::OK, Json(final_val)).into_response();
                     inject_routing_headers(&mut response, &target);
+                    inject_telemetry_headers(&mut response, &request_id, &stages);
                     return response;
                 }
                 Err(err) => {
@@ -246,21 +296,48 @@ pub async fn handle_chat_completions(
 
     // All candidate providers exhausted
     let latency = start_time.elapsed();
-    state.metrics.record_request("/v1/chat/completions", latency, 0, 0, false);
-    state.flight_recorder.record(FlightFrame {
-        request_id,
-        endpoint: "/v1/chat/completions".to_string(),
-        key_id: "all_providers_failed".to_string(),
-        raw_key: None,
-        status_code: Some(502),
-        latency,
-        error: Some(last_error.clone()),
-        request_snippet: None,
-        response_snippet: None,
-    });
+    state.emit(
+        &ctx,
+        None,
+        GatewayEvent::RequestFailed {
+            status_code: 502,
+            latency_ms: latency.as_secs_f64() * 1000.0,
+            error: last_error.clone(),
+            request_snippet: None,
+        },
+    );
 
     let msg = format!("All candidate upstream providers exhausted. Last error: {}", last_error);
-    crate::extractors::project_openai_error(&last_kind, &msg)
+    let mut resp = crate::extractors::project_openai_error(&last_kind, &msg);
+    inject_telemetry_headers(&mut resp, &request_id, &stages);
+    resp
+}
+
+/// Client-auditable trace headers on every response (not only errors):
+/// the request id stitches the server-side event journey, and `Server-Timing`
+/// exposes the attributable pre-stream segments so external bench harnesses
+/// can split routing vs upstream time without log access.
+pub fn inject_telemetry_headers(
+    response: &mut axum::response::Response,
+    request_id: &str,
+    stages: &Arc<Mutex<StageTimings>>,
+) {
+    if let Ok(v) = HeaderValue::from_str(request_id) {
+        response.headers_mut().insert("x-ponyllm-request-id", v);
+    }
+    let st = stages.lock();
+    let mut parts = Vec::new();
+    if let Some(r) = st.routing_ms {
+        parts.push(format!("routing;dur={:.1}", r));
+    }
+    if let Some(t) = st.upstream_ttfb_ms {
+        parts.push(format!("upstream-ttfb;dur={:.1}", t));
+    }
+    if !parts.is_empty() {
+        if let Ok(v) = HeaderValue::from_str(&parts.join(", ")) {
+            response.headers_mut().insert("server-timing", v);
+        }
+    }
 }
 
 pub fn inject_routing_headers(response: &mut axum::response::Response, target: &RoutedTarget) {

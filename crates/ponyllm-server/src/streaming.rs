@@ -18,6 +18,12 @@
 
 use bytes::Bytes;
 use futures_util::{Stream, StreamExt};
+use std::sync::Arc;
+use std::time::Instant;
+use parking_lot::Mutex;
+use ponyllm_core::telemetry::{
+    gap_percentiles, EventBus, EventCtx, GatewayEvent, StageTimings, StreamFlowSample,
+};
 use ponyllm_protocol::anthropic::messages::MessageStreamEvent;
 use ponyllm_protocol::openai::chat::ChatCompletionChunk;
 use ponyllm_protocol::translator::{
@@ -258,10 +264,253 @@ where
         .boxed()
 }
 
+/// Context for single-append stream telemetry.
+///
+/// Streaming routes emit a `StreamStarted` event when the upstream connection
+/// is established. Completion, mid-stream failures and client cancels are
+/// appended with the same `request_id`; metrics and frames derive from them.
+#[derive(Debug, Clone)]
+pub struct StreamFailureContext {
+    pub bus: Arc<EventBus>,
+    pub ctx: EventCtx,
+    pub provider: String,
+    pub stages: Arc<Mutex<StageTimings>>,
+    pub request_snippet: Option<String>,
+}
+
+/// Telemetry wrapper stream tracking TTFT on first emitted chunk and measuring TPS on completion.
+pub struct TelemetryStream<S> {
+    inner: S,
+    failure_ctx: StreamFailureContext,
+    first_token_time: Option<Instant>,
+    last_chunk_time: Option<Instant>,
+    gaps_ms: Vec<f64>,
+    max_gap_ms: f64,
+    stall_count: u64,
+    chunks_emitted: u64,
+    bytes_emitted: u64,
+    has_error: bool,
+    completed: bool,
+    last_error: Option<String>,
+}
+
+const STALL_GAP_MS: f64 = 1000.0;
+/// Emit a `StreamProgress` event every N chunks: O(1) amortized observability
+/// for long streams without per-chunk log volume.
+const PROGRESS_EVERY: u64 = 64;
+
+impl<S> TelemetryStream<S> {
+    pub fn new(inner: S, failure_ctx: StreamFailureContext) -> Self {
+        Self {
+            inner,
+            failure_ctx,
+            first_token_time: None,
+            last_chunk_time: None,
+            gaps_ms: Vec::new(),
+            max_gap_ms: 0.0,
+            stall_count: 0,
+            chunks_emitted: 0,
+            bytes_emitted: 0,
+            has_error: false,
+            completed: false,
+            last_error: None,
+        }
+    }
+
+    fn observe_chunk(&mut self, bytes: usize) {
+        let now = Instant::now();
+        if let Some(last) = self.last_chunk_time {
+            let gap = now.saturating_duration_since(last).as_secs_f64() * 1000.0;
+            self.gaps_ms.push(gap);
+            if gap > self.max_gap_ms {
+                self.max_gap_ms = gap;
+            }
+            if gap >= STALL_GAP_MS {
+                self.stall_count += 1;
+            }
+        } else {
+            self.first_token_time = Some(now);
+        }
+        self.last_chunk_time = Some(now);
+        self.chunks_emitted += 1;
+        self.bytes_emitted += bytes as u64;
+    }
+
+    fn build_flow(&self, now: Instant) -> (StreamFlowSample, Option<f64>) {
+        let start = self.failure_ctx.ctx.start;
+        let ttft_ms = self.first_token_time.map(|t| {
+            (t.saturating_duration_since(start).as_secs_f64() * 1000.0).max(1.0)
+        });
+        let ttlb_ms = now.saturating_duration_since(start).as_secs_f64() * 1000.0;
+        let tps = if let Some(ft) = self.first_token_time {
+            let gen_dur = now.saturating_duration_since(ft).as_secs_f64();
+            if gen_dur > 0.05 && self.chunks_emitted > 0 {
+                Some((self.chunks_emitted as f64 / gen_dur).max(1.0))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let (p50, p95, max) = gap_percentiles(self.gaps_ms.clone());
+        let max_gap = if self.max_gap_ms > 0.0 { Some(self.max_gap_ms) } else { max };
+        let avg_gap = if self.gaps_ms.is_empty() {
+            None
+        } else {
+            Some(self.gaps_ms.iter().sum::<f64>() / self.gaps_ms.len() as f64)
+        };
+        let sample = StreamFlowSample {
+            ttft_ms,
+            ttlb_ms,
+            chunks: self.chunks_emitted,
+            bytes: self.bytes_emitted,
+            max_gap_ms: max_gap,
+            stall_count: self.stall_count,
+            tps,
+            tpot_p50_ms: p50,
+            tpot_p95_ms: p95,
+            tpot_mean_ms: avg_gap,
+        };
+        (sample, avg_gap)
+    }
+
+    fn emit(&self, provider: Option<String>, event: GatewayEvent) {
+        let fctx = &self.failure_ctx;
+        fctx.bus.append(&fctx.ctx, provider.or(Some(fctx.provider.clone())), event);
+    }
+
+    fn finish_stages(&self, ttft_ms: Option<f64>) -> StageTimings {
+        let mut stages = self.failure_ctx.stages.lock().clone();
+        stages.downstream_ttft_ms = ttft_ms;
+        stages
+    }
+
+    fn emit_failure(&self, reason: &str, flow: Option<StreamFlowSample>, stages: StageTimings) {
+        let error = self
+            .last_error
+            .clone()
+            .unwrap_or_else(|| reason.to_string());
+        self.emit(
+            None,
+            GatewayEvent::StreamFailed {
+                error,
+                flow,
+                stages,
+                request_snippet: self.failure_ctx.request_snippet.clone(),
+            },
+        );
+    }
+}
+
+impl<S, E> Stream for TelemetryStream<S>
+where
+    S: Stream<Item = Result<Bytes, E>> + Unpin,
+    E: std::fmt::Display,
+{
+    type Item = Result<Bytes, E>;
+
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        let res = std::pin::Pin::new(&mut self.inner).poll_next(cx);
+        match res {
+            std::task::Poll::Ready(Some(Ok(item))) => {
+                let n = item.len();
+                self.observe_chunk(n);
+                if self.chunks_emitted.is_multiple_of(PROGRESS_EVERY) {
+                    self.emit(
+                        None,
+                        GatewayEvent::StreamProgress {
+                            chunks: self.chunks_emitted,
+                            bytes: self.bytes_emitted,
+                        },
+                    );
+                }
+                std::task::Poll::Ready(Some(Ok(item)))
+            }
+            std::task::Poll::Ready(Some(Err(e))) => {
+                self.has_error = true;
+                self.last_error = Some(e.to_string());
+                std::task::Poll::Ready(Some(Err(e)))
+            }
+            std::task::Poll::Ready(None) => {
+                if !self.completed {
+                    self.completed = true;
+                    let now = Instant::now();
+                    let (sample, _avg_gap) = self.build_flow(now);
+                    let stages = self.finish_stages(sample.ttft_ms);
+                    if self.has_error {
+                        self.emit_failure("stream terminated with error", Some(sample), stages);
+                    } else {
+                        self.emit(
+                            None,
+                            GatewayEvent::StreamCompleted {
+                                flow: sample,
+                                stages,
+                                request_snippet: self
+                                    .failure_ctx
+                                    .request_snippet
+                                    .clone(),
+                            },
+                        );
+                    }
+                }
+                std::task::Poll::Ready(None)
+            }
+            std::task::Poll::Pending => std::task::Poll::Pending,
+        }
+    }
+}
+
+impl<S> Drop for TelemetryStream<S> {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.completed = true;
+            let now = Instant::now();
+
+            // Record only genuine failures, not client-side cancellations:
+            // - transport error seen before drop, or
+            // - stream died before the first chunk (never reached TTFT).
+            // A client disconnect after chunks flowed is a cancel, not an error.
+            if self.has_error || self.chunks_emitted == 0 {
+                let (sample, _avg_gap) = self.build_flow(now);
+                let stages = self.finish_stages(sample.ttft_ms);
+                self.emit_failure("stream dropped before completion", Some(sample), stages);
+            } else {
+                let ttlb_ms = now
+                    .saturating_duration_since(self.failure_ctx.ctx.start)
+                    .as_secs_f64()
+                    * 1000.0;
+                self.emit(
+                    None,
+                    GatewayEvent::StreamCancelled {
+                        chunks: self.chunks_emitted,
+                        bytes: self.bytes_emitted,
+                        ttlb_ms,
+                    },
+                );
+            }
+        }
+    }
+}
+
+pub fn wrap_telemetry_stream<S, E>(
+    stream: S,
+    failure_ctx: StreamFailureContext,
+) -> impl Stream<Item = Result<Bytes, E>> + Send + 'static
+where
+    S: Stream<Item = Result<Bytes, E>> + Send + Unpin + 'static,
+    E: Send + std::fmt::Display + 'static,
+{
+    TelemetryStream::new(stream, failure_ctx)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use futures_util::StreamExt;
+    use ponyllm_core::telemetry::{FlightRecorder, GatewayEvent, MetricsCollector};
 
     fn bytes_stream(chunks: Vec<Bytes>) -> impl Stream<Item = Result<Bytes, std::io::Error>> + Send + 'static {
         futures_util::stream::iter(chunks.into_iter().map(Ok::<Bytes, std::io::Error>))
@@ -381,5 +630,56 @@ mod tests {
         let joined = out.join("");
         assert!(joined.contains("event: message_stop"), "missing synthesized message_stop: {joined}");
         assert!(joined.contains("event: message_delta"), "missing synthesized message_delta: {joined}");
+    }
+
+    #[tokio::test]
+    async fn test_telemetry_stream_records_flow_and_completion_frame() {
+        use ponyllm_core::telemetry::{
+            EventBus, EventCtx, MetricsProjection, StreamProjection,
+        };
+        use crate::frames::FrameConverter;
+
+        let metrics = Arc::new(MetricsCollector::new());
+        let recorder = Arc::new(FlightRecorder::new(10));
+        let bus = Arc::new(EventBus::new(100));
+        bus.add_projection(Arc::new(MetricsProjection::new(metrics.clone())));
+        let stream_proj = Arc::new(StreamProjection::default());
+        bus.add_projection(stream_proj.clone());
+        bus.add_projection(Arc::new(FrameConverter::new(recorder.clone())));
+        let start = Instant::now();
+        let ctx = StreamFailureContext {
+            bus: bus.clone(),
+            ctx: EventCtx::new("req-flow-1", "/v1/chat/completions", start),
+            provider: "opencode-zen".to_string(),
+            stages: Arc::new(Mutex::new(StageTimings::default())),
+            request_snippet: None,
+        };
+        let s = bytes_stream(vec![
+            Bytes::from_static(b"data: one\n\n"),
+            Bytes::from_static(b"data: two\n\n"),
+            Bytes::from_static(b"data: three\n\n"),
+        ]);
+        let monitored = wrap_telemetry_stream(s, ctx);
+        let out: Vec<Bytes> = monitored.map(|r| r.unwrap()).collect().await;
+        assert_eq!(out.len(), 3);
+        let summary = metrics.get_summary();
+        assert_eq!(summary.stream.stream_count, 1);
+        assert_eq!(summary.stream.total_chunks, 3);
+        assert!(summary.stream.avg_ttft_ms.is_some());
+        assert_eq!(stream_proj.node_for("opencode-zen").get_stream_count(), 1);
+        // trace stitches the single-append journey by request_id
+        let trace = bus.trace_for("req-flow-1");
+        assert!(trace.iter().any(|e| matches!(
+            e.event,
+            GatewayEvent::StreamCompleted { .. }
+        )));
+        let frames = recorder.get_recent_frames();
+        let done = frames.iter().find(|f| {
+            f.response_snippet.as_deref().is_some_and(|s| s.contains("[STREAM_COMPLETED"))
+        });
+        let done = done.expect("completion frame kept");
+        let flow = done.stream_flow.as_ref().expect("flow detail kept");
+        assert_eq!(flow.chunks, Some(3));
+        assert!(flow.ttft_ms.is_some());
     }
 }

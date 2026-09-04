@@ -99,6 +99,14 @@ pub fn default_request_body_limit() -> usize {
     128 * 1024 * 1024 // 128MB default for 1M context / multimodal payloads
 }
 
+fn default_event_log_retention_days() -> u64 {
+    7
+}
+
+fn default_event_log_max_bytes() -> u64 {
+    512 * 1024 * 1024 // 512MB ring of hourly JSONL segments
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GatewayConfig {
     pub bind_addr: String,
@@ -110,6 +118,14 @@ pub struct GatewayConfig {
     pub flight_recorder_capacity: usize,
     #[serde(default = "default_request_body_limit")]
     pub request_body_limit: usize,
+    /// Hourly JSONL event-log directory. `None` (default) keeps events in the
+    /// in-memory ring only; set to persist the single-append truth with rotation.
+    #[serde(default)]
+    pub event_log_dir: Option<String>,
+    #[serde(default = "default_event_log_retention_days")]
+    pub event_log_retention_days: u64,
+    #[serde(default = "default_event_log_max_bytes")]
+    pub event_log_max_bytes: u64,
 }
 
 impl Default for GatewayConfig {
@@ -122,6 +138,9 @@ impl Default for GatewayConfig {
             max_retries: 3,
             flight_recorder_capacity: 100,
             request_body_limit: default_request_body_limit(),
+            event_log_dir: None,
+            event_log_retention_days: default_event_log_retention_days(),
+            event_log_max_bytes: default_event_log_max_bytes(),
         }
     }
 }

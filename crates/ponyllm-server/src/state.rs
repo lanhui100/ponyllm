@@ -2,12 +2,17 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use parking_lot::RwLock;
 use ponyllm_core::error::{CoreError, Result};
+use ponyllm_core::executor::{EventSink, EventSinkCtx};
 use ponyllm_core::pool::{
     is_context_capacity_compatible, parse_context_capacity_tokens, EconomyScorer,
     GatewayRoutingStrategy, HotCacheTracker, KeyPool, ModelTier, NodeLatencyMetrics, SpeedScorer,
 };
-use ponyllm_core::telemetry::{FlightRecorder, MetricsCollector};
+use ponyllm_core::telemetry::{
+    EventBus, EventCtx, MetricsCollector, MetricsProjection, StreamProjection,
+};
+use ponyllm_core::telemetry::{FlightRecorder, GatewayEvent};
 use crate::config::{GatewayConfig, ProviderConfig};
+use crate::frames::FrameConverter;
 use crate::routes::models::ParsedRequestModel;
 
 #[derive(Debug, Clone)]
@@ -28,19 +33,40 @@ pub struct AppState {
     pub flight_recorder: Arc<FlightRecorder>,
     pub metrics: Arc<MetricsCollector>,
     pub hot_cache: Arc<HotCacheTracker>,
-    pub node_metrics: RwLock<HashMap<String, Arc<NodeLatencyMetrics>>>,
+    /// Single-append observability bus: the only write path for telemetry.
+    pub event_bus: Arc<EventBus>,
+    pub metrics_proj: Arc<MetricsProjection>,
+    pub stream_proj: Arc<StreamProjection>,
 }
 
 impl AppState {
     pub fn new(config: GatewayConfig) -> Self {
         let capacity = config.flight_recorder_capacity;
+        let flight_recorder = Arc::new(FlightRecorder::new(capacity));
+        let metrics = Arc::new(MetricsCollector::new());
+        let bus = Arc::new(EventBus::new(capacity));
+        let metrics_proj = Arc::new(MetricsProjection::new(metrics.clone()));
+        let stream_proj = Arc::new(StreamProjection::default());
+        bus.add_projection(metrics_proj.clone());
+        bus.add_projection(stream_proj.clone());
+        bus.add_projection(Arc::new(FrameConverter::new(flight_recorder.clone())));
+        if let Some(dir) = config.event_log_dir.clone() {
+            crate::segments::spawn_segment_drain(
+                &bus,
+                dir,
+                config.event_log_retention_days,
+                config.event_log_max_bytes,
+            );
+        }
         Self {
             config: RwLock::new(config),
             pools: RwLock::new(HashMap::new()),
-            flight_recorder: Arc::new(FlightRecorder::new(capacity)),
-            metrics: Arc::new(MetricsCollector::new()),
+            flight_recorder,
+            metrics,
             hot_cache: Arc::new(HotCacheTracker::new()),
-            node_metrics: RwLock::new(HashMap::new()),
+            event_bus: bus,
+            metrics_proj,
+            stream_proj,
         }
     }
 
@@ -75,16 +101,35 @@ impl AppState {
     }
 
     pub fn get_or_create_node_metrics(&self, provider: &str) -> Arc<NodeLatencyMetrics> {
-        let read = self.node_metrics.read();
-        if let Some(m) = read.get(provider) {
-            return m.clone();
-        }
-        drop(read);
-        let mut write = self.node_metrics.write();
-        write
-            .entry(provider.to_string())
-            .or_insert_with(|| Arc::new(NodeLatencyMetrics::default()))
-            .clone()
+        self.stream_proj.node_for(provider)
+    }
+
+    /// Build the per-request event sink wired to the bus. Every per-key retry
+    /// AND every cross-provider fallback attempt lands in the log with its own
+    /// status code, key id and upstream error body; metrics and frames derive
+    /// from the same events.
+    pub fn event_sink(&self, sink_ctx: EventSinkCtx) -> EventSink {
+        let bus = self.event_bus.clone();
+        let ctx = EventCtx {
+            request_id: sink_ctx.request_id.clone(),
+            session_id: None,
+            endpoint: sink_ctx.endpoint.clone(),
+            start: sink_ctx.start,
+        };
+        let provider = sink_ctx.provider.clone();
+        Arc::new(move |event: GatewayEvent| {
+            bus.append(&ctx, Some(provider.clone()), event);
+        })
+    }
+
+    /// Emit one event on the bus with an explicit provider.
+    pub fn emit(
+        &self,
+        ctx: &EventCtx,
+        provider: Option<String>,
+        event: GatewayEvent,
+    ) -> u64 {
+        self.event_bus.append(ctx, provider, event)
     }
 
     /// Resolve ordered list of candidate targets for multi-provider transparent failover

@@ -4,14 +4,15 @@ use axum::extract::State;
 use axum::http::{HeaderValue, StatusCode};
 use axum::response::IntoResponse;
 use axum::Json;
-use ponyllm_core::executor::UpstreamExecutor;
-use ponyllm_core::telemetry::FlightFrame;
+use ponyllm_core::executor::{EventSinkCtx, UpstreamExecutor};
+use ponyllm_core::telemetry::{EventCtx, GatewayEvent, StageTimings};
 use ponyllm_protocol::openai::responses::CreateResponseRequest;
+use parking_lot::Mutex;
 use crate::extractors::AppJson;
-use crate::routes::chat::inject_routing_headers;
+use crate::routes::chat::{inject_routing_headers, inject_telemetry_headers};
 use crate::routes::models::ParsedRequestModel;
 use crate::state::AppState;
-use crate::streaming::passthrough_sse;
+use crate::streaming::{passthrough_sse, wrap_telemetry_stream, StreamFailureContext};
 
 pub async fn handle_responses(
     State(state): State<Arc<AppState>>,
@@ -19,6 +20,14 @@ pub async fn handle_responses(
 ) -> impl IntoResponse {
     let start_time = Instant::now();
     let request_id = format!("req_{}", uuid_simple());
+    let endpoint = "/v1/responses".to_string();
+    let ctx = EventCtx {
+        request_id: request_id.clone(),
+        session_id: None,
+        endpoint: endpoint.clone(),
+        start: start_time,
+    };
+    let stages = Arc::new(Mutex::new(StageTimings::default()));
 
     // Client-side validation: empty inputs are a client error
     let is_empty_input = match &req.input {
@@ -45,6 +54,7 @@ pub async fn handle_responses(
     let parsed = ParsedRequestModel::parse(&req.model);
     let requested_raw_model = parsed.raw_requested_model.clone();
 
+    let routing_start = Instant::now();
     let (provider_name, physical_model, target) = match state.resolve_routed_target(&parsed, None) {
         Ok(t) => (t.provider_name.clone(), t.physical_model.clone(), t),
         Err(err) => {
@@ -68,6 +78,18 @@ pub async fn handle_responses(
         }
     };
 
+    let routing_ms = routing_start.elapsed().as_secs_f64() * 1000.0;
+    stages.lock().routing_ms = Some(routing_ms);
+    state.emit(
+        &ctx,
+        Some(provider_name.clone()),
+        GatewayEvent::RouteResolved {
+            provider: provider_name.clone(),
+            translated: false,
+            routing_ms,
+        },
+    );
+
     let pool = match state.get_pool(&provider_name) {
         Some(p) => p,
         None => {
@@ -82,7 +104,6 @@ pub async fn handle_responses(
     // Responses API is OpenAI-protocol only; route to the provider's
     // /v1/responses endpoint and set the physical model in the body.
     let max_retries = state.config.read().max_retries;
-    let executor = UpstreamExecutor::new(pool, max_retries);
     let target_url = normalize_responses_url(&target.base_url);
 
     req.model = physical_model.clone();
@@ -98,50 +119,65 @@ pub async fn handle_responses(
     };
 
     let req_snippet = Some(req_val.to_string());
+    let sink_ctx = EventSinkCtx {
+        request_id: request_id.clone(),
+        endpoint: endpoint.clone(),
+        provider: provider_name.clone(),
+        start: start_time,
+        stages: stages.clone(),
+        request_snippet: req_snippet.clone(),
+    };
+    let executor = UpstreamExecutor::new(pool, max_retries)
+        .with_event_sink(sink_ctx.clone(), state.event_sink(sink_ctx));
 
     // Handle streaming request: pass through upstream SSE unchanged
     if req.stream.unwrap_or(false) {
         match executor.execute_stream_request(&target_url, &req_val).await {
             Ok(upstream_resp) => {
-                let latency = start_time.elapsed();
-                state.metrics.record_request("/v1/responses", latency, 0, 0, true);
-                state.flight_recorder.record(FlightFrame {
-                    request_id,
-                    endpoint: "/v1/responses".to_string(),
-                    key_id: provider_name.clone(),
-                    raw_key: None,
-                    status_code: Some(200),
-                    latency,
-                    error: None,
-                    request_snippet: req_snippet,
-                    response_snippet: Some("[STREAM_STARTED]".to_string()),
-                });
+                state.emit(
+                    &ctx,
+                    Some(provider_name.clone()),
+                    GatewayEvent::StreamStarted {
+                        request_snippet: req_snippet.clone(),
+                    },
+                );
 
-                let body = axum::body::Body::from_stream(passthrough_sse(upstream_resp.bytes_stream()));
+                let stream = passthrough_sse(upstream_resp.bytes_stream());
+                let failure_ctx = StreamFailureContext {
+                    bus: state.event_bus.clone(),
+                    ctx: ctx.clone(),
+                    provider: provider_name.clone(),
+                    stages: stages.clone(),
+                    request_snippet: req_snippet.clone(),
+                };
+                let monitored = wrap_telemetry_stream(stream, failure_ctx);
+                let body = axum::body::Body::from_stream(monitored);
                 let mut resp = axum::response::Response::new(body);
                 resp.headers_mut().insert(
                     axum::http::header::CONTENT_TYPE,
                     HeaderValue::from_static("text/event-stream"),
                 );
                 inject_routing_headers(&mut resp, &target);
+                inject_telemetry_headers(&mut resp, &request_id, &stages);
                 return resp;
             }
             Err(err) => {
                 let latency = start_time.elapsed();
-                state.metrics.record_request("/v1/responses", latency, 0, 0, false);
-                state.flight_recorder.record(FlightFrame {
-                    request_id,
-                    endpoint: "/v1/responses".to_string(),
-                    key_id: provider_name.clone(),
-                    raw_key: None,
-                    status_code: Some(502),
-                    latency,
-                    error: Some(err.to_string()),
-                    request_snippet: req_snippet,
-                    response_snippet: None,
-                });
+                state.emit(
+                    &ctx,
+                    Some(provider_name.clone()),
+                    GatewayEvent::RequestFailed {
+                        status_code: 502,
+                        latency_ms: latency.as_secs_f64() * 1000.0,
+                        error: err.to_string(),
+                        request_snippet: req_snippet.clone(),
+                    },
+                );
 
-                return crate::extractors::project_openai_error(&err.kind(), &err.to_string());
+                let mut err_resp =
+                    crate::extractors::project_openai_error(&err.kind(), &err.to_string());
+                inject_telemetry_headers(&mut err_resp, &request_id, &stages);
+                return err_resp;
             }
         }
     }
@@ -149,18 +185,20 @@ pub async fn handle_responses(
     match executor.execute_json_request(&target_url, &req_val).await {
         Ok(mut resp_val) => {
             let latency = start_time.elapsed();
-            state.metrics.record_request("/v1/responses", latency, 0, 0, true);
-            state.flight_recorder.record(FlightFrame {
-                request_id,
-                endpoint: "/v1/responses".to_string(),
-                key_id: provider_name.clone(),
-                raw_key: None,
-                status_code: Some(200),
-                latency,
-                error: None,
-                request_snippet: req_snippet,
-                response_snippet: Some(resp_val.to_string()),
-            });
+            // Token accounting stays at HEAD behavior (no usage split).
+            state.emit(
+                &ctx,
+                Some(provider_name.clone()),
+                GatewayEvent::RequestCompleted {
+                    status_code: 200,
+                    latency_ms: latency.as_secs_f64() * 1000.0,
+                    prompt_tokens: 0,
+                    completion_tokens: 0,
+                    tps: None,
+                    request_snippet: req_snippet.clone(),
+                    response_snippet: Some(resp_val.to_string()),
+                },
+            );
 
             // Model Echo Rule: strictly echo requested model name in response body
             if let Some(obj) = resp_val.as_object_mut() {
@@ -169,24 +207,26 @@ pub async fn handle_responses(
 
             let mut response = (StatusCode::OK, Json(resp_val)).into_response();
             inject_routing_headers(&mut response, &target);
+            inject_telemetry_headers(&mut response, &request_id, &stages);
             response
         }
         Err(err) => {
             let latency = start_time.elapsed();
-            state.metrics.record_request("/v1/responses", latency, 0, 0, false);
-            state.flight_recorder.record(FlightFrame {
-                request_id,
-                endpoint: "/v1/responses".to_string(),
-                key_id: provider_name.clone(),
-                raw_key: None,
-                status_code: Some(502),
-                latency,
-                error: Some(err.to_string()),
-                request_snippet: req_snippet,
-                response_snippet: None,
-            });
+            state.emit(
+                &ctx,
+                Some(provider_name.clone()),
+                GatewayEvent::RequestFailed {
+                    status_code: 502,
+                    latency_ms: latency.as_secs_f64() * 1000.0,
+                    error: err.to_string(),
+                    request_snippet: req_snippet.clone(),
+                },
+            );
 
-            crate::extractors::project_openai_error(&err.kind(), &err.to_string())
+            let mut err_resp =
+                crate::extractors::project_openai_error(&err.kind(), &err.to_string());
+            inject_telemetry_headers(&mut err_resp, &request_id, &stages);
+            err_resp
         }
     }
 }

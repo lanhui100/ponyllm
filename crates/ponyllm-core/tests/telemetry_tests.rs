@@ -9,13 +9,16 @@ fn test_flight_recorder_record_and_sanitize() {
     recorder.record(FlightFrame {
         request_id: "req-123".to_string(),
         endpoint: "/v1/chat/completions".to_string(),
+        provider: None,
         key_id: "primary-key".to_string(),
         raw_key: Some("sk-proj-1234567890abcdef".to_string()),
+        attempt: None,
         status_code: Some(429),
         latency: Duration::from_millis(150),
         error: Some("Rate limit exceeded".to_string()),
         request_snippet: Some("{\"model\":\"gpt-4o\"}".to_string()),
         response_snippet: Some("{\"error\":\"rate_limit\"}".to_string()),
+        stream_flow: None,
     });
 
     let frames = recorder.get_recent_frames();
@@ -56,13 +59,16 @@ fn test_flight_recorder_snippet_truncation() {
     recorder.record(FlightFrame {
         request_id: "req-giant".to_string(),
         endpoint: "/v1/chat/completions".to_string(),
+        provider: None,
         key_id: "k1".to_string(),
         raw_key: None,
+        attempt: None,
         status_code: Some(200),
         latency: Duration::from_millis(50),
         error: None,
         request_snippet: Some(giant_snippet),
         response_snippet: None,
+        stream_flow: None,
     });
 
     let frames = recorder.get_recent_frames();
@@ -80,13 +86,16 @@ fn test_flight_recorder_ring_buffer_capacity() {
         recorder.record(FlightFrame {
             request_id: format!("req-{}", i),
             endpoint: "/v1/chat/completions".to_string(),
+            provider: None,
             key_id: format!("key-{}", i),
             raw_key: None,
+            attempt: None,
             status_code: Some(200),
             latency: Duration::from_millis(50),
             error: None,
             request_snippet: None,
             response_snippet: None,
+            stream_flow: None,
         });
     }
 
@@ -110,4 +119,84 @@ fn test_metrics_collector() {
     assert_eq!(summary.prompt_tokens, 80);
     assert_eq!(summary.completion_tokens, 30);
     assert_eq!(summary.total_tokens, 110);
+}
+
+#[test]
+fn test_stream_flow_aggregate_reusable() {
+    let metrics = MetricsCollector::new();
+    metrics.record_stream(&StreamFlowSample {
+        ttft_ms: Some(800.0),
+        ttlb_ms: 5000.0,
+        chunks: 100,
+        bytes: 4096,
+        max_gap_ms: Some(1200.0),
+        stall_count: 1,
+        tps: Some(20.0),
+        tpot_p50_ms: Some(40.0),
+        tpot_p95_ms: Some(300.0),
+        tpot_mean_ms: Some(45.0),
+    });
+    metrics.record_stream(&StreamFlowSample {
+        ttft_ms: Some(1000.0),
+        ttlb_ms: 6000.0,
+        chunks: 200,
+        bytes: 8192,
+        max_gap_ms: Some(800.0),
+        stall_count: 0,
+        tps: Some(30.0),
+        tpot_p50_ms: Some(30.0),
+        tpot_p95_ms: Some(200.0),
+        tpot_mean_ms: Some(35.0),
+    });
+    let summary = metrics.get_summary();
+    assert_eq!(summary.stream.stream_count, 2);
+    assert_eq!(summary.stream.total_stalls, 1);
+    assert_eq!(summary.stream.max_gap_ms, Some(1200.0));
+    assert_eq!(summary.stream.total_chunks, 300);
+    assert_eq!(summary.stream.total_bytes, 12288);
+    let avg_ttft = summary.stream.avg_ttft_ms.unwrap();
+    assert!((avg_ttft - 900.0).abs() < 1.0, "avg_ttft={}", avg_ttft);
+}
+
+#[test]
+fn test_gap_percentiles_empty_and_bursty() {
+    let (p50, p95, max) = gap_percentiles(vec![]);
+    assert_eq!((p50, p95, max), (None, None, None));
+    let (p50, p95, max) = gap_percentiles(vec![10.0, 20.0, 30.0, 40.0, 1200.0]);
+    assert_eq!(max, Some(1200.0));
+    assert!(p50.unwrap() <= p95.unwrap());
+    assert_eq!(p95, Some(1200.0));
+}
+
+#[test]
+fn test_stream_flow_detail_survives_recorder() {
+    let recorder = FlightRecorder::new(10);
+    recorder.record(FlightFrame {
+        request_id: "req-stream".to_string(),
+        endpoint: "/v1/chat/completions".to_string(),
+        provider: Some("opencode-zen".to_string()),
+        key_id: "zen".to_string(),
+        raw_key: None,
+        attempt: None,
+        status_code: Some(200),
+        latency: Duration::from_millis(5200),
+        error: None,
+        request_snippet: None,
+        response_snippet: Some("[STREAM_COMPLETED chunks=100]".to_string()),
+        stream_flow: Some(StreamFlowDetail {
+            ttft_ms: Some(900.0),
+            ttlb_ms: Some(5200.0),
+            chunks: Some(100),
+            bytes: Some(4096),
+            max_gap_ms: Some(1100.0),
+            stall_count: Some(1),
+            tps: Some(20.0),
+            tpot_p50_ms: Some(40.0),
+            tpot_p95_ms: Some(350.0),
+        }),
+    });
+    let frames = recorder.get_recent_frames();
+    let flow = frames[0].stream_flow.as_ref().expect("stream_flow kept");
+    assert_eq!(flow.stall_count, Some(1));
+    assert_eq!(flow.chunks, Some(100));
 }
