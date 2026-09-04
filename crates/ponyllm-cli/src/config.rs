@@ -102,11 +102,13 @@ impl Default for GatewaySection {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ModelConfig {
     pub name: String,
     #[serde(default)]
     pub tier: ModelTier,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub billing_mode: Option<BillingMode>,
     #[serde(default = "default_context_window")]
     pub context_window: String,
     #[serde(default = "default_max_output")]
@@ -115,13 +117,19 @@ pub struct ModelConfig {
     pub input_types: Vec<String>,
     #[serde(default = "default_modalities")]
     pub output_types: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_price: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_price: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_price: Option<f64>,
 }
 
 pub fn default_context_window() -> String {
-    "1M".to_string()
+    "128K".to_string()
 }
 pub fn default_max_output() -> String {
-    "32K".to_string()
+    "4K".to_string()
 }
 pub fn default_modalities() -> Vec<String> {
     vec!["text".to_string()]
@@ -131,11 +139,15 @@ impl Default for ModelConfig {
     fn default() -> Self {
         Self {
             name: String::new(),
-            tier: ModelTier::Flagship,
+            tier: ModelTier::Standard,
+            billing_mode: None,
             context_window: default_context_window(),
             max_output: default_max_output(),
             input_types: default_modalities(),
             output_types: default_modalities(),
+            input_price: None,
+            cached_price: None,
+            output_price: None,
         }
     }
 }
@@ -144,11 +156,15 @@ impl ModelConfig {
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
-            tier: ModelTier::Flagship,
+            tier: ModelTier::Standard,
+            billing_mode: None,
             context_window: default_context_window(),
             max_output: default_max_output(),
             input_types: default_modalities(),
             output_types: default_modalities(),
+            input_price: None,
+            cached_price: None,
+            output_price: None,
         }
     }
 }
@@ -187,6 +203,45 @@ impl ProviderSection {
     pub fn is_free(&self) -> bool {
         self.pricing().is_free()
     }
+
+    pub fn get_model_pricing(&self, model_name: &str) -> PricingConfig {
+        let default_pricing = self.pricing();
+        if let Some(cfg) = self.model_configs.iter().find(|m| m.name == model_name) {
+            let in_p = cfg.input_price.unwrap_or(default_pricing.input_price);
+            let out_p = cfg.output_price.unwrap_or(default_pricing.output_price);
+            let ca_p = if let Some(custom_cached) = cfg.cached_price {
+                custom_cached
+            } else if in_p < 1e-6 {
+                0.0
+            } else if cfg.input_price.is_some() {
+                let ratio = if default_pricing.input_price > 1e-6 {
+                    (default_pricing.cached_price / default_pricing.input_price).clamp(0.0, 1.0)
+                } else {
+                    0.5
+                };
+                (in_p * ratio).min(in_p)
+            } else {
+                default_pricing.cached_price.min(in_p)
+            };
+
+            PricingConfig {
+                input_price: in_p,
+                cached_price: ca_p,
+                output_price: out_p,
+            }
+        } else {
+            default_pricing
+        }
+    }
+
+    pub fn get_model_billing_mode(&self, model_name: &str) -> BillingMode {
+        self.model_configs
+            .iter()
+            .find(|m| m.name == model_name)
+            .and_then(|m| m.billing_mode)
+            .unwrap_or(self.billing_mode)
+    }
+
     pub fn get_model_config(&self, model_name: &str) -> ModelConfig {
         if let Some(cfg) = self.model_configs.iter().find(|m| m.name == model_name) {
             return cfg.clone();
@@ -309,15 +364,25 @@ impl ConfigFile {
         Ok(())
     }
 
-    pub fn add_provider(&mut self, name: &str, base_url: &str, default_model: &str, strategy: &str) {
+    pub fn add_provider_full(
+        &mut self,
+        name: &str,
+        base_url: &str,
+        default_model: &str,
+        strategy: &str,
+        billing_mode: BillingMode,
+        input_price: f64,
+        cached_price: f64,
+        output_price: f64,
+    ) {
         let entry = self.providers.entry(name.to_string()).or_insert_with(|| ProviderSection {
             base_url: base_url.to_string(),
             default_model: default_model.to_string(),
             strategy: strategy.to_string(),
-            billing_mode: BillingMode::Metered,
-            input_price: default_input_price(),
-            cached_price: default_cached_price(),
-            output_price: default_output_price(),
+            billing_mode: billing_mode.clone(),
+            input_price,
+            cached_price,
+            output_price,
             models: Vec::new(),
             model_configs: Vec::new(),
             keys: Vec::new(),
@@ -325,6 +390,23 @@ impl ConfigFile {
         entry.base_url = base_url.to_string();
         entry.default_model = default_model.to_string();
         entry.strategy = strategy.to_string();
+        entry.billing_mode = billing_mode;
+        entry.input_price = input_price;
+        entry.cached_price = cached_price;
+        entry.output_price = output_price;
+    }
+
+    pub fn add_provider(&mut self, name: &str, base_url: &str, default_model: &str, strategy: &str) {
+        self.add_provider_full(
+            name,
+            base_url,
+            default_model,
+            strategy,
+            BillingMode::Metered,
+            default_input_price(),
+            default_cached_price(),
+            default_output_price(),
+        );
     }
 
     pub fn update_provider(&mut self, name: &str, base_url: &str, default_model: &str, strategy: &str) -> Result<(), String> {

@@ -506,6 +506,37 @@ where
     TelemetryStream::new(stream, failure_ctx)
 }
 
+fn parse_lenient_u64(v: &serde_json::Value) -> Option<u64> {
+    v.as_u64()
+        .or_else(|| v.as_f64().map(|f| f as u64))
+        .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+}
+
+/// Extract prompt_tokens and completion_tokens from OpenAI/Anthropic JSON usage object
+pub fn extract_usage_tokens(val: &serde_json::Value) -> (u64, u64) {
+    if let Some(usage) = val.get("usage") {
+        let prompt = if let Some(p) = usage.get("prompt_tokens").and_then(parse_lenient_u64) {
+            p
+        } else {
+            // Anthropic 兼容处理：总 Prompt = input + cache_read + cache_creation
+            let input = usage.get("input_tokens").and_then(parse_lenient_u64).unwrap_or(0);
+            let cached_read = usage.get("cache_read_input_tokens").and_then(parse_lenient_u64).unwrap_or(0);
+            let cached_create = usage.get("cache_creation_input_tokens").and_then(parse_lenient_u64).unwrap_or(0);
+            input.saturating_add(cached_read).saturating_add(cached_create)
+        };
+
+        let completion = usage
+            .get("completion_tokens")
+            .or_else(|| usage.get("output_tokens"))
+            .and_then(parse_lenient_u64)
+            .unwrap_or(0);
+
+        (prompt, completion)
+    } else {
+        (0, 0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

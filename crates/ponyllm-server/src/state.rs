@@ -4,8 +4,9 @@ use parking_lot::RwLock;
 use ponyllm_core::error::{CoreError, Result};
 use ponyllm_core::executor::{EventSink, EventSinkCtx};
 use ponyllm_core::pool::{
-    is_context_capacity_compatible, parse_context_capacity_tokens, EconomyScorer,
-    GatewayRoutingStrategy, HotCacheTracker, KeyPool, ModelTier, NodeLatencyMetrics, SpeedScorer,
+    is_context_capacity_compatible, parse_context_capacity_tokens, BillingMode, EconomyScorer,
+    GatewayRoutingStrategy, HotCacheTracker, KeyPool, ModelTier, NodeLatencyMetrics, PricingConfig,
+    SpeedScorer,
 };
 use ponyllm_core::telemetry::{
     EventBus, EventCtx, MetricsCollector, MetricsProjection, StreamProjection,
@@ -24,6 +25,8 @@ pub struct RoutedTarget {
     pub strategy: GatewayRoutingStrategy,
     pub is_anthropic_upstream: bool,
     pub context_window: String,
+    pub billing_mode: BillingMode,
+    pub pricing: PricingConfig,
 }
 
 #[derive(Debug)]
@@ -104,10 +107,10 @@ impl AppState {
         self.stream_proj.node_for(provider)
     }
 
-    /// Build the per-request event sink wired to the bus. Every per-key retry
-    /// AND every cross-provider fallback attempt lands in the log with its own
-    /// status code, key id and upstream error body; metrics and frames derive
-    /// from the same events.
+    /// Build the per-request event sink wired to the bus. Replaces the legacy
+    /// attempt observer: every per-key retry AND every cross-provider fallback
+    /// attempt lands in the log with its own status code, key id and upstream
+    /// error body; metrics and frames derive from the same events.
     pub fn event_sink(&self, sink_ctx: EventSinkCtx) -> EventSink {
         let bus = self.event_bus.clone();
         let ctx = EventCtx {
@@ -138,16 +141,28 @@ impl AppState {
         parsed: &ParsedRequestModel,
         header_strategy: Option<GatewayRoutingStrategy>,
     ) -> Result<Vec<RoutedTarget>> {
+        self.resolve_routed_targets_with_prompt(parsed, header_strategy, None)
+    }
+
+    /// Resolve ordered list of candidate targets for a model request, with optional prompt for hot cache probing
+    pub fn resolve_routed_targets_with_prompt(
+        &self,
+        parsed: &ParsedRequestModel,
+        header_strategy: Option<GatewayRoutingStrategy>,
+        prompt: Option<&str>,
+    ) -> Result<Vec<RoutedTarget>> {
         let config = self.config.read();
         let strategy = parsed
             .strategy_override
             .or(header_strategy)
             .unwrap_or(config.default_strategy);
 
+        let cached_provider = prompt.and_then(|p| self.hot_cache.probe_cached_provider(p));
+
         if parsed.is_auto {
-            self.resolve_auto_targets(parsed, strategy, &config)
+            self.resolve_auto_targets(parsed, strategy, &config, cached_provider.as_deref())
         } else {
-            self.resolve_pinned_targets(parsed, strategy, &config)
+            self.resolve_pinned_targets(parsed, strategy, &config, cached_provider.as_deref())
         }
     }
 
@@ -169,6 +184,7 @@ impl AppState {
         parsed: &ParsedRequestModel,
         strategy: GatewayRoutingStrategy,
         config: &GatewayConfig,
+        cached_provider: Option<&str>,
     ) -> Result<Vec<RoutedTarget>> {
         let filter_1m = |c: &RoutedTarget| {
             if parsed.is_1m_context {
@@ -201,7 +217,7 @@ impl AppState {
                     )));
                 }
             }
-            return Ok(self.sort_candidates(candidates, strategy, config));
+            return Ok(self.sort_candidates(candidates, strategy, config, cached_provider));
         }
 
         // Default auto (no explicit tier): Try Standard -> Elevate to Flagship -> Fallback to Light
@@ -212,7 +228,7 @@ impl AppState {
             .collect();
 
         if !standard_candidates.is_empty() {
-            return Ok(self.sort_candidates(standard_candidates, strategy, config));
+            return Ok(self.sort_candidates(standard_candidates, strategy, config, cached_provider));
         }
 
         // Adaptive Tier Elevation: Elevate to Flagship if Standard has no matching (or 1M) nodes
@@ -223,7 +239,7 @@ impl AppState {
             .collect();
 
         if !flagship_candidates.is_empty() {
-            return Ok(self.sort_candidates(flagship_candidates, strategy, config));
+            return Ok(self.sort_candidates(flagship_candidates, strategy, config, cached_provider));
         }
 
         // Fallback to Light tier
@@ -234,7 +250,7 @@ impl AppState {
             .collect();
 
         if !light_candidates.is_empty() {
-            return Ok(self.sort_candidates(light_candidates, strategy, config));
+            return Ok(self.sort_candidates(light_candidates, strategy, config, cached_provider));
         }
 
         if parsed.is_1m_context {
@@ -255,6 +271,7 @@ impl AppState {
         parsed: &ParsedRequestModel,
         strategy: GatewayRoutingStrategy,
         config: &GatewayConfig,
+        cached_provider: Option<&str>,
     ) -> Result<Vec<RoutedTarget>> {
         let clean = &parsed.clean_model_name;
         let mut candidates = Vec::new();
@@ -263,6 +280,8 @@ impl AppState {
         for (p_name, p_cfg) in &config.providers {
             if p_cfg.default_model == *clean || p_cfg.models.iter().any(|m| m == clean) {
                 let spec = p_cfg.get_model_spec(clean);
+                let pricing = p_cfg.get_model_pricing(clean);
+                let billing_mode = p_cfg.get_model_billing_mode(clean);
                 let is_ant = p_cfg.base_url.contains("anthropic")
                     || (p_name.contains("anthropic") && !p_cfg.base_url.contains("v1/chat"));
                 candidates.push(RoutedTarget {
@@ -273,6 +292,8 @@ impl AppState {
                     strategy,
                     is_anthropic_upstream: is_ant,
                     context_window: spec.context_window,
+                    billing_mode,
+                    pricing,
                 });
             }
         }
@@ -282,6 +303,8 @@ impl AppState {
             if let Some((prefix, sub_model)) = clean.split_once('/') {
                 if let Some(p_cfg) = config.providers.get(prefix) {
                     let spec = p_cfg.get_model_spec(sub_model);
+                    let pricing = p_cfg.get_model_pricing(sub_model);
+                    let billing_mode = p_cfg.get_model_billing_mode(sub_model);
                     let is_ant = p_cfg.base_url.contains("anthropic");
                     candidates.push(RoutedTarget {
                         provider_name: prefix.to_string(),
@@ -291,6 +314,8 @@ impl AppState {
                         strategy,
                         is_anthropic_upstream: is_ant,
                         context_window: spec.context_window,
+                        billing_mode,
+                        pricing,
                     });
                 }
             }
@@ -306,6 +331,8 @@ impl AppState {
                     || (p_name == "deepseek" && lower.starts_with("deepseek"))
                 {
                     let spec = p_cfg.get_model_spec(clean);
+                    let pricing = p_cfg.get_model_pricing(clean);
+                    let billing_mode = p_cfg.get_model_billing_mode(clean);
                     let is_ant = p_cfg.base_url.contains("anthropic");
                     candidates.push(RoutedTarget {
                         provider_name: p_name.clone(),
@@ -315,6 +342,8 @@ impl AppState {
                         strategy,
                         is_anthropic_upstream: is_ant,
                         context_window: spec.context_window,
+                        billing_mode,
+                        pricing,
                     });
                 }
             }
@@ -342,7 +371,7 @@ impl AppState {
             }
         }
 
-        Ok(self.sort_candidates(candidates, strategy, config))
+        Ok(self.sort_candidates(candidates, strategy, config, cached_provider))
     }
 
     fn collect_tier_candidates(
@@ -354,6 +383,8 @@ impl AppState {
         let mut candidates = Vec::new();
         for (p_name, p_cfg) in &config.providers {
             let default_spec = p_cfg.get_model_spec(&p_cfg.default_model);
+            let default_pricing = p_cfg.get_model_pricing(&p_cfg.default_model);
+            let default_billing = p_cfg.get_model_billing_mode(&p_cfg.default_model);
             if default_spec.tier == tier {
                 let is_ant = p_cfg.base_url.contains("anthropic");
                 candidates.push(RoutedTarget {
@@ -364,11 +395,15 @@ impl AppState {
                     strategy,
                     is_anthropic_upstream: is_ant,
                     context_window: default_spec.context_window,
+                    billing_mode: default_billing,
+                    pricing: default_pricing,
                 });
             }
             for m in &p_cfg.models {
                 if m != &p_cfg.default_model {
                     let spec = p_cfg.get_model_spec(m);
+                    let m_pricing = p_cfg.get_model_pricing(m);
+                    let m_billing = p_cfg.get_model_billing_mode(m);
                     if spec.tier == tier {
                         let is_ant = p_cfg.base_url.contains("anthropic");
                         candidates.push(RoutedTarget {
@@ -379,6 +414,8 @@ impl AppState {
                             strategy,
                             is_anthropic_upstream: is_ant,
                             context_window: spec.context_window,
+                            billing_mode: m_billing,
+                            pricing: m_pricing,
                         });
                     }
                 }
@@ -391,19 +428,16 @@ impl AppState {
         &self,
         mut candidates: Vec<RoutedTarget>,
         strategy: GatewayRoutingStrategy,
-        config: &GatewayConfig,
+        _config: &GatewayConfig,
+        cached_provider: Option<&str>,
     ) -> Vec<RoutedTarget> {
         match strategy {
             GatewayRoutingStrategy::Economy => {
                 candidates.sort_by(|a, b| {
-                    let p_a = config.providers.get(&a.provider_name);
-                    let p_b = config.providers.get(&b.provider_name);
-                    let pricing_a = p_a.map(|p| p.pricing()).unwrap_or_default();
-                    let pricing_b = p_b.map(|p| p.pricing()).unwrap_or_default();
-                    let billing_a = p_a.map(|p| p.billing_mode.clone()).unwrap_or_default();
-                    let billing_b = p_b.map(|p| p.billing_mode.clone()).unwrap_or_default();
-                    let score_a = EconomyScorer::score_candidate(&pricing_a, billing_a, false, 100_000, 1000);
-                    let score_b = EconomyScorer::score_candidate(&pricing_b, billing_b, false, 100_000, 1000);
+                    let is_cached_a = cached_provider.map(|p| p == a.provider_name).unwrap_or(false);
+                    let is_cached_b = cached_provider.map(|p| p == b.provider_name).unwrap_or(false);
+                    let score_a = EconomyScorer::score_candidate(&a.pricing, a.billing_mode, is_cached_a, 10_000, 1000);
+                    let score_b = EconomyScorer::score_candidate(&b.pricing, b.billing_mode, is_cached_b, 10_000, 1000);
                     score_a.total_cmp(&score_b)
                 });
             }
@@ -418,14 +452,10 @@ impl AppState {
             }
             GatewayRoutingStrategy::Balanced => {
                 candidates.sort_by(|a, b| {
-                    let p_a = config.providers.get(&a.provider_name);
-                    let p_b = config.providers.get(&b.provider_name);
-                    let pricing_a = p_a.map(|p| p.pricing()).unwrap_or_default();
-                    let pricing_b = p_b.map(|p| p.pricing()).unwrap_or_default();
-                    let billing_a = p_a.map(|p| p.billing_mode.clone()).unwrap_or_default();
-                    let billing_b = p_b.map(|p| p.billing_mode.clone()).unwrap_or_default();
-                    let score_a = EconomyScorer::score_candidate(&pricing_a, billing_a, false, 100_000, 1000);
-                    let score_b = EconomyScorer::score_candidate(&pricing_b, billing_b, false, 100_000, 1000);
+                    let is_cached_a = cached_provider.map(|p| p == a.provider_name).unwrap_or(false);
+                    let is_cached_b = cached_provider.map(|p| p == b.provider_name).unwrap_or(false);
+                    let score_a = EconomyScorer::score_candidate(&a.pricing, a.billing_mode, is_cached_a, 10_000, 1000);
+                    let score_b = EconomyScorer::score_candidate(&b.pricing, b.billing_mode, is_cached_b, 10_000, 1000);
 
                     let metrics_a = self.get_or_create_node_metrics(&a.provider_name);
                     let metrics_b = self.get_or_create_node_metrics(&b.provider_name);

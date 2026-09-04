@@ -183,6 +183,22 @@ pub enum ProviderCommands {
         #[arg(short, long, default_value = "round_robin")]
         strategy: String,
 
+        /// Billing mode: 'metered' (default) or 'plan' (periodic quota)
+        #[arg(long, default_value = "metered")]
+        billing_mode: String,
+
+        /// Regular input price in USD per 1M tokens
+        #[arg(long, default_value_t = 0.50)]
+        input_price: f64,
+
+        /// Cached input price in USD per 1M tokens
+        #[arg(long, default_value_t = 0.25)]
+        cached_price: f64,
+
+        /// Output generation price in USD per 1M tokens
+        #[arg(long, default_value_t = 1.00)]
+        output_price: f64,
+
         #[arg(short, long)]
         config: Option<String>,
     },
@@ -286,11 +302,11 @@ pub enum ModelCommands {
         model: String,
 
         /// Context window size (e.g. 1M, 128K, 200K)
-        #[arg(short = 'w', long, default_value = "1M")]
+        #[arg(short = 'w', long, default_value = "128K")]
         context: String,
 
-        /// Maximum output token limit (e.g. 32K, 64K, 8K)
-        #[arg(short = 'o', long, default_value = "32K")]
+        /// Maximum output token limit (e.g. 32K, 64K, 4K)
+        #[arg(short = 'o', long, default_value = "4K")]
         max_output: String,
 
         /// Supported input modalities (comma-separated: text,image,video,audio)
@@ -300,6 +316,26 @@ pub enum ModelCommands {
         /// Supported output modalities (comma-separated: text,image,video,audio)
         #[arg(short = 'u', long, default_value = "text")]
         outputs: String,
+
+        /// Capability tier: Flagship (F), Standard (S), Light (L)
+        #[arg(short = 't', long, default_value = "Standard")]
+        tier: String,
+
+        /// Optional model-specific input price in USD per 1M tokens (overrides provider price)
+        #[arg(long)]
+        input_price: Option<f64>,
+
+        /// Optional model-specific cached input price in USD per 1M tokens (overrides provider price)
+        #[arg(long)]
+        cached_price: Option<f64>,
+
+        /// Optional model-specific output generation price in USD per 1M tokens (overrides provider price)
+        #[arg(long)]
+        output_price: Option<f64>,
+
+        /// Billing mode override: metered, plan (coding plan subscription), free (defaults to inherit provider mode)
+        #[arg(short = 'b', long)]
+        billing_mode: Option<String>,
 
         #[arg(short, long)]
         config: Option<String>,

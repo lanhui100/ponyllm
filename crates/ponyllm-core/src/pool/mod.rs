@@ -2,6 +2,7 @@ pub mod entry;
 pub mod strategy;
 pub mod pricing;
 pub mod quota;
+#[allow(clippy::module_inception)]
 pub mod pool;
 pub mod hot_cache;
 pub mod scoring;

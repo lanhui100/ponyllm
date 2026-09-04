@@ -58,10 +58,11 @@ impl PricingConfig {
 }
 
 /// Provider billing model: Metered (Pay-as-you-go) or Plan (Periodic fixed quota)
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum BillingMode {
     #[default]
     Metered,
     Plan,
+    Free,
 }

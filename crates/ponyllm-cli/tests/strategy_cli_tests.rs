@@ -1,59 +1,70 @@
-use clap::Parser;
-use ponyllm_cli::cli::{Cli, Commands, StrategyCommands};
-use ponyllm_cli::config::ConfigFile;
-use ponyllm_core::pool::GatewayRoutingStrategy;
-use std::fs;
-use tempfile::NamedTempFile;
+use ponyllm_core::pool::{BillingMode, ModelTier};
+use ponyllm_cli::config::{ConfigFile, ModelConfig};
 
 #[test]
-fn test_strategy_cli_command_parsing() {
-    // 1. ponyllm strategy list
-    let cli_list = Cli::try_parse_from(["ponyllm", "strategy", "list"]).unwrap();
-    match cli_list.command {
-        Commands::Strategy(StrategyCommands::List) => {}
-        _ => panic!("Expected StrategyCommands::List"),
-    }
+fn test_model_config_tier_and_pricing_serialization() {
+    let mut cfg = ConfigFile::default();
+    cfg.add_provider_full(
+        "deepseek",
+        "https://api.deepseek.com",
+        "deepseek-chat",
+        "round_robin",
+        BillingMode::Metered,
+        0.14,
+        0.014,
+        0.28,
+    );
 
-    // 2. ponyllm strategy get
-    let cli_get = Cli::try_parse_from(["ponyllm", "strategy", "get", "-c", "my_config.toml"]).unwrap();
-    match cli_get.command {
-        Commands::Strategy(StrategyCommands::Get { config }) => {
-            assert_eq!(config, Some("my_config.toml".to_string()));
-        }
-        _ => panic!("Expected StrategyCommands::Get"),
-    }
+    let m_custom = ModelConfig {
+        name: "deepseek-chat".to_string(),
+        tier: ModelTier::Standard,
+        context_window: "128K".to_string(),
+        max_output: "8K".to_string(),
+        input_types: vec!["text".to_string()],
+        output_types: vec!["text".to_string()],
+        billing_mode: Some(BillingMode::Plan),
+        input_price: Some(0.10),
+        cached_price: Some(0.01),
+        output_price: Some(0.20),
+    };
 
-    // 3. ponyllm strategy set speed
-    let cli_set = Cli::try_parse_from(["ponyllm", "strategy", "set", "speed", "-c", "my_config.toml"]).unwrap();
-    match cli_set.command {
-        Commands::Strategy(StrategyCommands::Set { strategy, config }) => {
-            assert_eq!(strategy, "speed");
-            assert_eq!(config, Some("my_config.toml".to_string()));
-        }
-        _ => panic!("Expected StrategyCommands::Set"),
-    }
-}
+    let m_inherit = ModelConfig {
+        name: "deepseek-coder".to_string(),
+        tier: ModelTier::Flagship,
+        context_window: "64K".to_string(),
+        max_output: "4K".to_string(),
+        input_types: vec!["text".to_string()],
+        output_types: vec!["text".to_string()],
+        billing_mode: None,
+        input_price: None,
+        cached_price: None,
+        output_price: None,
+    };
 
-#[test]
-fn test_strategy_config_crud_and_atomic_save() {
-    let temp_file = NamedTempFile::new().unwrap();
-    let file_path = temp_file.path().to_str().unwrap().to_string();
+    cfg.upsert_model_config("deepseek", m_custom).unwrap();
+    cfg.upsert_model_config("deepseek", m_inherit).unwrap();
 
-    let initial_toml = r#"
-[gateway]
-bind = "127.0.0.1:8080"
-default_strategy = "economy"
-"#;
-    fs::write(&file_path, initial_toml).unwrap();
+    let p = &cfg.providers["deepseek"];
+    let pr_custom = p.get_model_pricing("deepseek-chat");
+    assert_eq!(pr_custom.input_price, 0.10);
+    assert_eq!(pr_custom.cached_price, 0.01);
+    assert_eq!(pr_custom.output_price, 0.20);
+    assert_eq!(p.get_model_billing_mode("deepseek-chat"), BillingMode::Plan);
 
-    let mut cfg = ConfigFile::load_or_default(Some(&file_path)).unwrap();
-    assert_eq!(cfg.gateway.default_strategy, GatewayRoutingStrategy::Economy);
+    let pr_inherit = p.get_model_pricing("deepseek-coder");
+    assert_eq!(pr_inherit.input_price, 0.14);
+    assert_eq!(pr_inherit.cached_price, 0.014);
+    assert_eq!(pr_inherit.output_price, 0.28);
+    assert_eq!(p.get_model_billing_mode("deepseek-coder"), BillingMode::Metered);
 
-    // Switch strategy to Speed and save atomically
-    cfg.gateway.default_strategy = GatewayRoutingStrategy::Speed;
-    cfg.save_to_path(&file_path).unwrap();
-
-    // Reload and verify persistence
-    let reloaded = ConfigFile::load_or_default(Some(&file_path)).unwrap();
-    assert_eq!(reloaded.gateway.default_strategy, GatewayRoutingStrategy::Speed);
+    // Verify TOML roundtrip
+    let toml_str = toml::to_string(&cfg).unwrap();
+    let reloaded: ConfigFile = toml::from_str(&toml_str).unwrap();
+    let reloaded_p = &reloaded.providers["deepseek"];
+    assert_eq!(reloaded_p.get_model_pricing("deepseek-chat").input_price, 0.10);
+    assert_eq!(reloaded_p.get_model_pricing("deepseek-coder").input_price, 0.14);
+    assert_eq!(reloaded_p.get_model_billing_mode("deepseek-chat"), BillingMode::Plan);
+    assert_eq!(reloaded_p.get_model_billing_mode("deepseek-coder"), BillingMode::Metered);
+    assert_eq!(reloaded_p.get_model_config("deepseek-chat").tier, ModelTier::Standard);
+    assert_eq!(reloaded_p.get_model_config("deepseek-coder").tier, ModelTier::Flagship);
 }

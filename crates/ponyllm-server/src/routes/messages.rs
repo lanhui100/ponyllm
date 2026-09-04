@@ -21,6 +21,22 @@ use crate::streaming::{
     openai_sse_to_anthropic_stream, passthrough_sse, wrap_telemetry_stream,
     StreamFailureContext,
 };
+use ponyllm_protocol::anthropic::messages::{AnthropicSystem, AnthropicSystemBlock};
+
+fn extract_anthropic_prompt(req: &MessageRequest) -> Option<String> {
+    if let Some(sys) = &req.system {
+        match sys {
+            AnthropicSystem::Text(s) => return Some(s.clone()),
+            AnthropicSystem::Blocks(blocks) => {
+                let text = blocks.iter().map(|b| match b {
+                    AnthropicSystemBlock::Text { text, .. } => text.as_str(),
+                }).collect::<Vec<_>>().join("\n");
+                return Some(text);
+            }
+        }
+    }
+    req.messages.first().map(|m| m.content.as_plain_text())
+}
 
 pub async fn handle_messages(
     State(state): State<Arc<AppState>>,
@@ -65,9 +81,10 @@ pub async fn handle_messages(
     let parsed = ParsedRequestModel::parse(&req.model);
     let requested_raw_model = parsed.raw_requested_model.clone();
 
-    // 3. Resolve ranked target providers for multi-provider transparent failover
+    // 3. Resolve ranked target providers for multi-provider transparent failover (with hot cache probe)
+    let prompt_hint = extract_anthropic_prompt(&req);
     let routing_start = Instant::now();
-    let targets = match state.resolve_routed_targets(&parsed, header_strategy) {
+    let targets = match state.resolve_routed_targets_with_prompt(&parsed, header_strategy, prompt_hint.as_deref()) {
         Ok(ts) if !ts.is_empty() => ts,
         Ok(_) => {
             return (
@@ -107,6 +124,7 @@ pub async fn handle_messages(
     let is_streaming = req.stream.unwrap_or(false);
     let mut last_error = String::new();
     let mut last_kind = ponyllm_core::error::GatewayErrorKind::Internal;
+    let mut last_req_snippet: Option<String> = None;
 
     let routing_ms = routing_start.elapsed().as_secs_f64() * 1000.0;
     stages.lock().routing_ms = Some(routing_ms);
@@ -197,9 +215,11 @@ pub async fn handle_messages(
         };
 
         let req_snippet = serde_json::to_string(&target_req).ok();
+        last_req_snippet = req_snippet.clone();
 
-        // Per-key retries append attempt events to the bus; metrics and
-        // frames derive from the same single-append log.
+        // Every per-key retry inside the executor reports through this observer,
+        // so each failed attempt lands in the flight recorder with its own
+        // status code, key id and upstream error body.
         let sink_ctx = EventSinkCtx {
             request_id: request_id.clone(),
             endpoint: endpoint.clone(),
@@ -214,6 +234,9 @@ pub async fn handle_messages(
         if is_streaming {
             match executor.execute_stream_request(&target_url, &req_val).await {
                 Ok(upstream_resp) => {
+                    if let Some(p) = prompt_hint.as_deref() {
+                        state.hot_cache.record_dispatch(p, &target.provider_name);
+                    }
                     state.emit(
                         &ctx,
                         Some(target.provider_name.clone()),
@@ -296,16 +319,30 @@ pub async fn handle_messages(
                     // Model Echo Rule: Strictly echo requested model name in response body
                     ant_resp.model = requested_raw_model.clone();
 
-                    // Token accounting stays at HEAD behavior (no usage split).
+                    let cached_read = ant_resp.usage.cache_read_input_tokens.unwrap_or(0) as u64;
+                    let cached_create = ant_resp.usage.cache_creation_input_tokens.unwrap_or(0) as u64;
+                    let prompt_tokens = (ant_resp.usage.input_tokens as u64)
+                        .saturating_add(cached_read)
+                        .saturating_add(cached_create);
+                    let completion_tokens = ant_resp.usage.output_tokens as u64;
+                    let tps = if latency.as_secs_f64() > 0.05 && completion_tokens > 0 {
+                        Some((completion_tokens as f64 / latency.as_secs_f64()).max(1.0))
+                    } else {
+                        None
+                    };
+                    // Non-streaming requests cannot observe true TTFT; pass None to avoid polluting TTFT EWMA
+                    if let Some(p) = prompt_hint.as_deref() {
+                        state.hot_cache.record_dispatch(p, &target.provider_name);
+                    }
                     state.emit(
                         &ctx,
                         Some(target.provider_name.clone()),
                         GatewayEvent::RequestCompleted {
                             status_code: 200,
                             latency_ms: latency.as_secs_f64() * 1000.0,
-                            prompt_tokens: 0,
-                            completion_tokens: 0,
-                            tps: None,
+                            prompt_tokens,
+                            completion_tokens,
+                            tps,
                             request_snippet: req_snippet,
                             response_snippet: serde_json::to_string(&ant_resp).ok(),
                         },
@@ -335,13 +372,21 @@ pub async fn handle_messages(
             status_code: 502,
             latency_ms: latency.as_secs_f64() * 1000.0,
             error: last_error.clone(),
-            request_snippet: None,
+            request_snippet: last_req_snippet,
         },
     );
 
-    let msg = format!("All candidate upstream providers exhausted. Last error: {}", last_error);
+    // Correlate the client-visible error with the black-box frame: the
+    // request_id is embedded in the message and exposed as a header, so
+    // `ponyllm telemetry` output can be grepped for the failing request.
+    let msg = format!(
+        "All candidate upstream providers exhausted. Last error: {} (request_id: {})",
+        last_error, request_id
+    );
     let mut resp = crate::extractors::project_anthropic_error(&last_kind, &msg);
-    inject_telemetry_headers(&mut resp, &request_id, &stages);
+    if let Ok(v) = HeaderValue::from_str(&request_id) {
+        resp.headers_mut().insert("x-ponyllm-request-id", v);
+    }
     resp
 }
 

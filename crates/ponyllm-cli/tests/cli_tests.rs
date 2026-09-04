@@ -138,8 +138,8 @@ fn test_cli_provider_and_key_crud_commands_parsing() {
         Commands::Model(ModelCommands::Add { provider, model, context, max_output, .. }) => {
             assert_eq!(provider, "deepseek");
             assert_eq!(model, "deepseek-reasoner");
-            assert_eq!(context, "1M");
-            assert_eq!(max_output, "32K");
+            assert_eq!(context, "128K");
+            assert_eq!(max_output, "4K");
         }
         _ => panic!("Expected Model Add"),
     }
@@ -237,8 +237,8 @@ fn test_model_config_crud_and_params() {
     let p = &cfg.providers["ai-hub"];
     let def_cfg = p.get_model_config("default-chat");
     assert_eq!(def_cfg.name, "default-chat");
-    assert_eq!(def_cfg.context_window, "1M");
-    assert_eq!(def_cfg.max_output, "32K");
+    assert_eq!(def_cfg.context_window, "128K");
+    assert_eq!(def_cfg.max_output, "4K");
     assert_eq!(def_cfg.input_types, vec!["text".to_string()]);
     assert_eq!(def_cfg.output_types, vec!["text".to_string()]);
 
@@ -250,6 +250,10 @@ fn test_model_config_crud_and_params() {
         max_output: "64K".to_string(),
         input_types: vec!["text".to_string(), "image".to_string(), "video".to_string(), "audio".to_string()],
         output_types: vec!["text".to_string(), "audio".to_string()],
+        billing_mode: None,
+        input_price: None,
+        cached_price: None,
+        output_price: None,
     };
     cfg.upsert_model_config("ai-hub", custom_model.clone()).unwrap();
 

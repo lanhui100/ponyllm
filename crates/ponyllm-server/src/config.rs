@@ -5,7 +5,7 @@ use ponyllm_core::pool::{
 };
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ModelSpec {
     pub name: String,
     #[serde(default)]
@@ -18,6 +18,14 @@ pub struct ModelSpec {
     pub input_types: Vec<String>,
     #[serde(default = "default_modalities")]
     pub output_types: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub billing_mode: Option<BillingMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_price: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_price: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_price: Option<f64>,
 }
 
 pub fn default_context_window() -> String {
@@ -39,6 +47,10 @@ impl Default for ModelSpec {
             max_output: default_max_output(),
             input_types: default_modalities(),
             output_types: default_modalities(),
+            billing_mode: None,
+            input_price: None,
+            cached_price: None,
+            output_price: None,
         }
     }
 }
@@ -80,6 +92,45 @@ impl ProviderConfig {
         self.pricing().is_free()
     }
 
+    pub fn get_model_pricing(&self, model_name: &str) -> PricingConfig {
+        let default_pricing = self.pricing();
+        if let Some(spec) = self.model_specs.iter().find(|m| m.name == model_name) {
+            let in_p = spec.input_price.unwrap_or(default_pricing.input_price);
+            let out_p = spec.output_price.unwrap_or(default_pricing.output_price);
+            let ca_p = if let Some(custom_cached) = spec.cached_price {
+                custom_cached
+            } else if in_p < 1e-6 {
+                0.0
+            } else if spec.input_price.is_some() {
+                // 模型单独指定了 input_price，按 Provider 缓存折扣比缩放，严格保证 cached_price <= input_price
+                let ratio = if default_pricing.input_price > 1e-6 {
+                    (default_pricing.cached_price / default_pricing.input_price).clamp(0.0, 1.0)
+                } else {
+                    0.5
+                };
+                (in_p * ratio).min(in_p)
+            } else {
+                default_pricing.cached_price.min(in_p)
+            };
+
+            PricingConfig {
+                input_price: in_p,
+                cached_price: ca_p,
+                output_price: out_p,
+            }
+        } else {
+            default_pricing
+        }
+    }
+
+    pub fn get_model_billing_mode(&self, model_name: &str) -> BillingMode {
+        self.model_specs
+            .iter()
+            .find(|m| m.name == model_name)
+            .and_then(|m| m.billing_mode)
+            .unwrap_or(self.billing_mode)
+    }
+
     pub fn get_model_spec(&self, model_name: &str) -> ModelSpec {
         if let Some(spec) = self.model_specs.iter().find(|m| m.name == model_name) {
             return spec.clone();
@@ -91,6 +142,10 @@ impl ProviderConfig {
             max_output: default_max_output(),
             input_types: default_modalities(),
             output_types: default_modalities(),
+            billing_mode: None,
+            input_price: None,
+            cached_price: None,
+            output_price: None,
         }
     }
 }

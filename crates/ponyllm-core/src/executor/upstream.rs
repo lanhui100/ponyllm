@@ -113,6 +113,7 @@ impl UpstreamExecutor {
         self
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn emit_attempt(
         &self,
         key_id: &str,

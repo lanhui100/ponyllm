@@ -46,6 +46,10 @@ fn build_gateway_config_and_pools(
                 max_output: m.max_output,
                 input_types: m.input_types,
                 output_types: m.output_types,
+                billing_mode: m.billing_mode,
+                input_price: m.input_price,
+                cached_price: m.cached_price,
+                output_price: m.output_price,
             })
             .collect();
         gw_config.providers.insert(
@@ -96,23 +100,62 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let resolved = resolve_path(config.as_deref());
                 let cfg = ConfigFile::load_or_default(resolved.to_str())?;
                 println!("=== 已配置的模型提供商 (共 {} 个) ===", cfg.providers.len());
-                println!("{:<15} {:<32} {:<28} {:<12} {:<8}", "提供商名称", "Base URL", "默认模型", "调度策略", "Key 数量");
-                println!("{}", "-".repeat(95));
+                println!("{:<14} {:<28} {:<24} {:<8} {:<10} {:<22} {:<6}", "提供商", "Base URL", "默认模型", "模式", "策略", "基准资费($/1M:入/缓/出)", "Keys");
+                println!("{}", "-".repeat(115));
                 for (name, p) in &cfg.providers {
+                    let mode_str = match p.billing_mode {
+                        ponyllm_core::pool::BillingMode::Plan => "plan(套餐)",
+                        ponyllm_core::pool::BillingMode::Metered => "metered",
+                        ponyllm_core::pool::BillingMode::Free => "free(免费)",
+                    };
+                    let pricing_str = format!("{:.2}/{:.3}/{:.2}", p.input_price, p.cached_price, p.output_price);
                     println!(
-                        "{:<15} {:<32} {:<28} {:<12} {:<8}",
-                        name, p.base_url, p.default_model, p.strategy, p.keys.len()
+                        "{:<14} {:<28} {:<24} {:<8} {:<10} {:<22} {:<6}",
+                        name, p.base_url, p.default_model, mode_str, p.strategy, pricing_str, p.keys.len()
                     );
                 }
             }
-            ProviderCommands::Add { name, base_url, model, strategy, config } => {
+            ProviderCommands::Add {
+                name,
+                base_url,
+                model,
+                strategy,
+                billing_mode,
+                input_price,
+                cached_price,
+                output_price,
+                config,
+            } => {
+                if input_price < 0.0 || input_price.is_nan() || input_price.is_infinite() {
+                    return Err(format!("常规输入单价 --input-price 必须为大于等于 0 的合法数值，输入: {}", input_price).into());
+                }
+                if cached_price < 0.0 || cached_price.is_nan() || cached_price.is_infinite() {
+                    return Err(format!("缓存命中单价 --cached-price 必须为大于等于 0 的合法数值，输入: {}", cached_price).into());
+                }
+                if output_price < 0.0 || output_price.is_nan() || output_price.is_infinite() {
+                    return Err(format!("输出生成单价 --output-price 必须为大于等于 0 的合法数值，输入: {}", output_price).into());
+                }
+
                 let resolved = resolve_path(config.as_deref());
                 let path = resolved.to_str().unwrap_or("ponyllm.toml");
                 let mut cfg = ConfigFile::load_or_default(Some(path).filter(|_| resolved.exists()))
                     .unwrap_or_default();
-                cfg.add_provider(&name, &base_url, &model, &strategy);
+                let mode = match billing_mode.trim().to_ascii_lowercase().as_str() {
+                    "plan" => ponyllm_core::pool::BillingMode::Plan,
+                    _ => ponyllm_core::pool::BillingMode::Metered,
+                };
+                cfg.add_provider_full(
+                    &name,
+                    &base_url,
+                    &model,
+                    &strategy,
+                    mode,
+                    input_price,
+                    cached_price,
+                    output_price,
+                );
                 cfg.save_to_path(path)?;
-                println!("✅ 成功添加/更新提供商 '{}' (Base URL: {}, Model: {})", name, base_url, model);
+                println!("✅ 成功添加/更新提供商 '{}' (Base URL: {}, Model: {}, 资费: {}/{}/{})", name, base_url, model, input_price, cached_price, output_price);
                 println!("   • 配置文件: {}", resolved.display());
             }
             ProviderCommands::Remove { name, config } => {
@@ -191,40 +234,104 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let resolved = resolve_path(config.as_deref());
                 let cfg = ConfigFile::load_or_default(resolved.to_str())?;
                 println!("=== 已配置的模型目录 ===");
-                println!("{:<15} {:<28} {:<8} {:<10} {:<10}", "提供商", "模型标识", "梯队", "上下文上限", "输出上限");
-                println!("{}", "-".repeat(75));
+                println!("{:<12} {:<24} {:<6} {:<10} {:<8} {:<12} {:<24}", "提供商", "模型标识", "梯队", "模式", "上下文", "最大输出", "资费($/1M:入/缓/出)");
+                println!("{}", "-".repeat(102));
                 for (p_name, p) in &cfg.providers {
                     for m in p.list_all_models() {
                         let is_def = if m.name == p.default_model { " (★默认)" } else { "" };
+                        let mode_desc = match p.get_model_billing_mode(&m.name) {
+                            ponyllm_core::pool::BillingMode::Plan => "Plan(套餐)",
+                            ponyllm_core::pool::BillingMode::Free => "0元免费",
+                            ponyllm_core::pool::BillingMode::Metered => "按量计费",
+                        };
+                        let pricing_info = if m.input_price.is_some() || m.cached_price.is_some() || m.output_price.is_some() {
+                            let pr = p.get_model_pricing(&m.name);
+                            format!("★ {:.2}/{:.3}/{:.2}", pr.input_price, pr.cached_price, pr.output_price)
+                        } else {
+                            let pr = p.pricing();
+                            format!("{:.2}/{:.3}/{:.2}(继承)", pr.input_price, pr.cached_price, pr.output_price)
+                        };
                         println!(
-                            "{:<15} {:<28} {:<8} {:<10} {:<10}",
+                            "{:<12} {:<24} {:<6} {:<10} {:<8} {:<12} {:<24}",
                             p_name,
                             format!("{}{}", m.name, is_def),
                             m.tier.shorthand(),
+                            mode_desc,
                             m.context_window,
-                            m.max_output
+                            m.max_output,
+                            pricing_info,
                         );
                     }
                 }
             }
-            ModelCommands::Add { provider, model, context, max_output, inputs, outputs, config } => {
+            ModelCommands::Add {
+                provider,
+                model,
+                context,
+                max_output,
+                inputs,
+                outputs,
+                tier,
+                input_price,
+                cached_price,
+                output_price,
+                billing_mode,
+                config,
+            } => {
                 let resolved = resolve_path(config.as_deref());
                 let path = resolved.to_str().unwrap_or("ponyllm.toml");
                 let mut cfg = ConfigFile::load_or_default(Some(path))?;
                 let input_types: Vec<String> = inputs.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
                 let output_types: Vec<String> = outputs.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+                let tier_val = <ponyllm_core::pool::ModelTier as std::str::FromStr>::from_str(&tier)
+                    .map_err(|e| format!("无效的能力梯队 --tier '{}': {}。仅支持 Flagship (F), Standard (S), Light (L)", tier, e))?;
+
+                let mode_val = match billing_mode.as_deref() {
+                    Some("plan") | Some("coding_plan") | Some("coding-plan") => Some(ponyllm_core::pool::BillingMode::Plan),
+                    Some("metered") | Some("payg") => Some(ponyllm_core::pool::BillingMode::Metered),
+                    Some("free") => Some(ponyllm_core::pool::BillingMode::Free),
+                    Some(other) => {
+                        return Err(format!("无效的计费模式 --billing-mode '{}'。仅支持 metered, plan, free", other).into());
+                    }
+                    None => None,
+                };
+
+                if let Some(p) = input_price {
+                    if p < 0.0 || p.is_nan() || p.is_infinite() {
+                        return Err(format!("常规输入单价 --input-price 必须为大于等于 0 的合法数值，输入: {}", p).into());
+                    }
+                }
+                if let Some(p) = cached_price {
+                    if p < 0.0 || p.is_nan() || p.is_infinite() {
+                        return Err(format!("缓存命中单价 --cached-price 必须为大于等于 0 的合法数值，输入: {}", p).into());
+                    }
+                }
+                if let Some(p) = output_price {
+                    if p < 0.0 || p.is_nan() || p.is_infinite() {
+                        return Err(format!("输出生成单价 --output-price 必须为大于等于 0 的合法数值，输入: {}", p).into());
+                    }
+                }
+
                 let model_cfg = ponyllm_cli::config::ModelConfig {
                     name: model.clone(),
-                    tier: ponyllm_core::pool::ModelTier::Standard,
+                    tier: tier_val,
+                    billing_mode: mode_val,
                     context_window: context.clone(),
                     max_output: max_output.clone(),
                     input_types,
                     output_types,
+                    input_price,
+                    cached_price,
+                    output_price,
                 };
                 cfg.upsert_model_config(&provider, model_cfg)
                     .map_err(|e| std::io::Error::new(std::io::ErrorKind::NotFound, e))?;
                 cfg.save_to_path(path)?;
-                println!("✅ 成功向提供商 '{}' 添加模型 '{}' (上下文: {}, 输出: {})", provider, model, context, max_output);
+                let mode_label = mode_val.map(|m| format!("模式: {:?}", m)).unwrap_or_else(|| "模式: 继承提供商".to_string());
+                println!(
+                    "✅ 成功向提供商 '{}' 添加模型 '{}' [梯队: {}, {}] (上下文: {}, 输出: {})",
+                    provider, model, tier_val.shorthand(), mode_label, context, max_output
+                );
                 println!("   • 配置文件: {}", resolved.display());
             }
             ModelCommands::Remove { provider, model, config } => {

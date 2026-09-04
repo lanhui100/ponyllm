@@ -218,7 +218,7 @@ impl EconomyScorer {
         input_tokens: usize,
         expected_output_tokens: usize,
     ) -> f64 {
-        if pricing.is_free() {
+        if pricing.is_free() || billing_mode == BillingMode::Free {
             // Tier 0: Completely free (0元免费节点)
             0.0
         } else if billing_mode == BillingMode::Plan {

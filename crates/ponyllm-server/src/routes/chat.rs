@@ -17,8 +17,22 @@ use crate::extractors::AppJson;
 use crate::routes::models::ParsedRequestModel;
 use crate::state::{AppState, RoutedTarget};
 use crate::streaming::{
-    anthropic_sse_to_openai_stream, passthrough_sse, wrap_telemetry_stream, StreamFailureContext,
+    anthropic_sse_to_openai_stream, extract_usage_tokens, passthrough_sse,
+    wrap_telemetry_stream, StreamFailureContext,
 };
+
+use ponyllm_protocol::openai::chat::ChatMessage;
+
+fn extract_chat_prompt(msg: &ChatMessage) -> Option<String> {
+    match msg {
+        ChatMessage::System(m) => Some(m.content.as_plain_text()),
+        ChatMessage::User(m) => Some(m.content.as_plain_text()),
+        ChatMessage::Developer(m) => Some(m.content.as_plain_text()),
+        ChatMessage::Assistant(m) => m.content.as_ref().map(|c| c.as_plain_text()),
+        ChatMessage::Tool(m) => Some(m.content.as_plain_text()),
+        ChatMessage::Function(m) => m.content.clone(),
+    }
+}
 
 pub async fn handle_chat_completions(
     State(state): State<Arc<AppState>>,
@@ -37,7 +51,7 @@ pub async fn handle_chat_completions(
     let stages = Arc::new(Mutex::new(StageTimings::default()));
 
     // Client-side validation: empty messages are a client error, not an
-    // upstream exhaustion (previously surfaced as 502 after hitting upstream).
+    // upstream failure. Return standard 400 Bad Request immediately.
     if req.messages.is_empty() {
         return (
             StatusCode::BAD_REQUEST,
@@ -45,7 +59,7 @@ pub async fn handle_chat_completions(
                 "error": {
                     "message": "messages must not be empty",
                     "type": "invalid_request_error",
-                    "code": "invalid_messages"
+                    "code": "invalid_input"
                 }
             })),
         )
@@ -63,9 +77,10 @@ pub async fn handle_chat_completions(
     let parsed = ParsedRequestModel::parse(&req.model);
     let requested_raw_model = parsed.raw_requested_model.clone();
 
-    // 3. Resolve ranked target providers for multi-provider transparent failover
+    // 3. Resolve ranked target providers for multi-provider transparent failover (with hot cache probe)
+    let prompt_hint = req.messages.first().and_then(extract_chat_prompt);
     let routing_start = Instant::now();
-    let targets = match state.resolve_routed_targets(&parsed, header_strategy) {
+    let targets = match state.resolve_routed_targets_with_prompt(&parsed, header_strategy, prompt_hint.as_deref()) {
         Ok(ts) if !ts.is_empty() => ts,
         Ok(_) => {
             return (
@@ -105,17 +120,20 @@ pub async fn handle_chat_completions(
     let is_streaming = req.stream.unwrap_or(false);
     let mut last_error = String::new();
     let mut last_kind = ponyllm_core::error::GatewayErrorKind::Internal;
+    let mut last_req_snippet: Option<String> = None;
 
     // Journey start: routing cost is the first attributable segment.
     // (Pre-routing validation rejections stay silent, as before.)
     let routing_ms = routing_start.elapsed().as_secs_f64() * 1000.0;
     stages.lock().routing_ms = Some(routing_ms);
+    let first_provider = targets[0].provider_name.clone();
+    let first_translated = targets[0].is_anthropic_upstream;
     state.emit(
         &ctx,
-        Some(targets[0].provider_name.clone()),
+        Some(first_provider),
         GatewayEvent::RouteResolved {
             provider: targets[0].provider_name.clone(),
-            translated: targets[0].is_anthropic_upstream,
+            translated: first_translated,
             routing_ms,
         },
     );
@@ -162,9 +180,10 @@ pub async fn handle_chat_completions(
         };
 
         let req_snippet = Some(req_val.to_string());
+        last_req_snippet = req_snippet.clone();
 
-        // Per-key retries append attempt events to the bus; metrics and
-        // frames derive from the same single-append log.
+        // Every per-key retry inside the executor appends attempt events to
+        // the bus; metrics and frames derive from the same single-append log.
         let sink_ctx = EventSinkCtx {
             request_id: request_id.clone(),
             endpoint: endpoint.clone(),
@@ -179,6 +198,9 @@ pub async fn handle_chat_completions(
         if is_streaming {
             match executor.execute_stream_request(&target_url, &req_val).await {
                 Ok(upstream_resp) => {
+                    if let Some(p) = prompt_hint.as_deref() {
+                        state.hot_cache.record_dispatch(p, &target.provider_name);
+                    }
                     state.emit(
                         &ctx,
                         Some(target.provider_name.clone()),
@@ -263,17 +285,26 @@ pub async fn handle_chat_completions(
                         obj.insert("model".to_string(), serde_json::json!(requested_raw_model));
                     }
 
-                    // Token accounting stays at HEAD behavior (no usage split);
-                    // the event carries the totals for future projections.
+                    let (prompt_tokens, completion_tokens) = extract_usage_tokens(&final_val);
+                    let tps = if latency.as_secs_f64() > 0.05 && completion_tokens > 0 {
+                        Some((completion_tokens as f64 / latency.as_secs_f64()).max(1.0))
+                    } else {
+                        None
+                    };
+                    // Non-streaming requests cannot observe true TTFT; pass None to avoid polluting TTFT EWMA
+                    let tps_for_event = tps;
+                    if let Some(p) = prompt_hint.as_deref() {
+                        state.hot_cache.record_dispatch(p, &target.provider_name);
+                    }
                     state.emit(
                         &ctx,
                         Some(target.provider_name.clone()),
                         GatewayEvent::RequestCompleted {
                             status_code: 200,
                             latency_ms: latency.as_secs_f64() * 1000.0,
-                            prompt_tokens: 0,
-                            completion_tokens: 0,
-                            tps: None,
+                            prompt_tokens,
+                            completion_tokens,
+                            tps: tps_for_event,
                             request_snippet: req_snippet,
                             response_snippet: Some(final_val.to_string()),
                         },
@@ -303,13 +334,21 @@ pub async fn handle_chat_completions(
             status_code: 502,
             latency_ms: latency.as_secs_f64() * 1000.0,
             error: last_error.clone(),
-            request_snippet: None,
+            request_snippet: last_req_snippet,
         },
     );
 
-    let msg = format!("All candidate upstream providers exhausted. Last error: {}", last_error);
+    // Correlate the client-visible error with the black-box frame: the
+    // request_id is embedded in the message and exposed as a header, so
+    // `ponyllm telemetry` output can be grepped for the failing request.
+    let msg = format!(
+        "All candidate upstream providers exhausted. Last error: {} (request_id: {})",
+        last_error, request_id
+    );
     let mut resp = crate::extractors::project_openai_error(&last_kind, &msg);
-    inject_telemetry_headers(&mut resp, &request_id, &stages);
+    if let Ok(v) = HeaderValue::from_str(&request_id) {
+        resp.headers_mut().insert("x-ponyllm-request-id", v);
+    }
     resp
 }
 

@@ -126,10 +126,8 @@ pub fn parse_context_capacity_tokens(s: &str) -> usize {
     } else if clean.ends_with('K') {
         let num: f64 = clean.trim_end_matches('K').parse().unwrap_or(128.0);
         (num * 1024.0) as usize
-    } else if let Ok(val) = clean.parse::<usize>() {
-        val
     } else {
-        131072 // Default 128K
+        clean.parse::<usize>().unwrap_or(131072) // Default 128K
     }
 }
 

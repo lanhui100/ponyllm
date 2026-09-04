@@ -12,7 +12,7 @@ use crate::extractors::AppJson;
 use crate::routes::chat::{inject_routing_headers, inject_telemetry_headers};
 use crate::routes::models::ParsedRequestModel;
 use crate::state::AppState;
-use crate::streaming::{passthrough_sse, wrap_telemetry_stream, StreamFailureContext};
+use crate::streaming::{extract_usage_tokens, passthrough_sse, wrap_telemetry_stream, StreamFailureContext};
 
 pub async fn handle_responses(
     State(state): State<Arc<AppState>>,
@@ -53,10 +53,16 @@ pub async fn handle_responses(
     // model names are correctly mapped upstream.
     let parsed = ParsedRequestModel::parse(&req.model);
     let requested_raw_model = parsed.raw_requested_model.clone();
+    let prompt_hint = match &req.input {
+        ponyllm_protocol::openai::responses::ResponseInput::Text(t) => Some(t.clone()),
+        ponyllm_protocol::openai::responses::ResponseInput::Items(_) => serde_json::to_string(&req.input).ok(),
+    };
+    let prompt_ref = prompt_hint.as_deref();
 
     let routing_start = Instant::now();
-    let (provider_name, physical_model, target) = match state.resolve_routed_target(&parsed, None) {
-        Ok(t) => (t.provider_name.clone(), t.physical_model.clone(), t),
+    let targets = state.resolve_routed_targets_with_prompt(&parsed, None, prompt_ref);
+    let target = match targets.and_then(|mut ts| if ts.is_empty() { Err(ponyllm_core::error::CoreError::Internal("No routing candidates available".to_string())) } else { Ok(ts.remove(0)) }) {
+        Ok(t) => t,
         Err(err) => {
             let (status, code) = match err {
                 ponyllm_core::error::CoreError::Internal(ref msg) if msg.contains("No provider configured") => {
@@ -77,7 +83,8 @@ pub async fn handle_responses(
                 .into_response();
         }
     };
-
+    let provider_name = target.provider_name.clone();
+    let physical_model = target.physical_model.clone();
     let routing_ms = routing_start.elapsed().as_secs_f64() * 1000.0;
     stages.lock().routing_ms = Some(routing_ms);
     state.emit(
@@ -104,6 +111,7 @@ pub async fn handle_responses(
     // Responses API is OpenAI-protocol only; route to the provider's
     // /v1/responses endpoint and set the physical model in the body.
     let max_retries = state.config.read().max_retries;
+    let pool_for_executor = pool;
     let target_url = normalize_responses_url(&target.base_url);
 
     req.model = physical_model.clone();
@@ -127,13 +135,16 @@ pub async fn handle_responses(
         stages: stages.clone(),
         request_snippet: req_snippet.clone(),
     };
-    let executor = UpstreamExecutor::new(pool, max_retries)
+    let executor = UpstreamExecutor::new(pool_for_executor, max_retries)
         .with_event_sink(sink_ctx.clone(), state.event_sink(sink_ctx));
 
     // Handle streaming request: pass through upstream SSE unchanged
     if req.stream.unwrap_or(false) {
         match executor.execute_stream_request(&target_url, &req_val).await {
             Ok(upstream_resp) => {
+                if let Some(p) = prompt_ref {
+                    state.hot_cache.record_dispatch(p, &provider_name);
+                }
                 state.emit(
                     &ctx,
                     Some(provider_name.clone()),
@@ -185,16 +196,25 @@ pub async fn handle_responses(
     match executor.execute_json_request(&target_url, &req_val).await {
         Ok(mut resp_val) => {
             let latency = start_time.elapsed();
-            // Token accounting stays at HEAD behavior (no usage split).
+            let (prompt_tokens, completion_tokens) = extract_usage_tokens(&resp_val);
+            let tps = if latency.as_secs_f64() > 0.05 && completion_tokens > 0 {
+                Some((completion_tokens as f64 / latency.as_secs_f64()).max(1.0))
+            } else {
+                None
+            };
+            // Non-streaming requests cannot observe true TTFT; pass None to avoid polluting TTFT EWMA
+            if let Some(p) = prompt_ref {
+                state.hot_cache.record_dispatch(p, &provider_name);
+            }
             state.emit(
                 &ctx,
                 Some(provider_name.clone()),
                 GatewayEvent::RequestCompleted {
                     status_code: 200,
                     latency_ms: latency.as_secs_f64() * 1000.0,
-                    prompt_tokens: 0,
-                    completion_tokens: 0,
-                    tps: None,
+                    prompt_tokens,
+                    completion_tokens,
+                    tps,
                     request_snippet: req_snippet.clone(),
                     response_snippet: Some(resp_val.to_string()),
                 },
