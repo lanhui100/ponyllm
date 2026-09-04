@@ -171,6 +171,18 @@ pub enum ResponseStreamEvent {
     #[serde(rename = "response.text.delta")]
     TextDelta(ResponseTextDelta),
 
+    /// Real OpenAI wire name for text deltas (emitted by translators).
+    #[serde(rename = "response.output_text.delta")]
+    OutputTextDelta(ResponseTextDelta),
+
+    /// Real OpenAI terminal event carrying usage.
+    #[serde(rename = "response.completed")]
+    Completed { response: ResponseObject },
+
+    /// Real OpenAI failure event.
+    #[serde(rename = "response.failed")]
+    Failed { response: ResponseObject },
+
     #[serde(rename = "response.function_call_arguments.delta")]
     FunctionCallArgumentsDelta(ResponseFunctionCallDelta),
 

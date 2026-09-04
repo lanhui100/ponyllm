@@ -11,6 +11,7 @@ description = "Core protocol definitions (OpenAI Chat, OpenAI Responses, Anthrop
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+tracing = { workspace = true }
 bytes = { workspace = true, optional = true }
 
 [dev-dependencies]

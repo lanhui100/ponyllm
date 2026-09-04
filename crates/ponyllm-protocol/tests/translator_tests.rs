@@ -460,3 +460,671 @@ fn test_streaming_anthropic_to_chat_fsm() {
     assert_eq!(chunks[0].choices[0].finish_reason, Some(FinishReason::ToolCalls));
     assert_eq!(chunks[0].usage.as_ref().unwrap().completion_tokens, 35);
 }
+
+#[test]
+fn test_responses_to_anthropic_request_preserves_tools_and_reasoning() {
+    let req = CreateResponseRequest {
+        model: "m".to_string(),
+        input: ResponseInput::Items(vec![
+            ResponseInputItem::Message {
+                role: "assistant".to_string(),
+                content: vec![
+                    ResponseContentPart::Reasoning { reasoning: "plan".to_string() },
+                    ResponseContentPart::Text { text: "hi".to_string() },
+                ],
+            },
+            ResponseInputItem::FunctionCall {
+                call_id: "c1".to_string(),
+                name: "get_time".to_string(),
+                arguments: "{}".to_string(),
+            },
+            ResponseInputItem::FunctionResponse {
+                call_id: "c1".to_string(),
+                output: "noon".to_string(),
+            },
+        ]),
+        instructions: Some("sys".to_string()),
+        modalities: None,
+        tools: Some(vec![ResponseToolDefinition::Function {
+            name: "get_time".to_string(),
+            description: None,
+            parameters: None,
+            strict: None,
+        }]),
+        tool_choice: None,
+        temperature: None,
+        top_p: None,
+        max_output_tokens: Some(128),
+        stream: None,
+        metadata: None,
+        extra: Default::default(),
+    };
+    let ant = responses_to_anthropic_request(&req).unwrap();
+    assert_eq!(ant.max_tokens, 128);
+    assert!(matches!(ant.system, Some(AnthropicSystem::Text(ref s)) if s == "sys"));
+    // Consecutive same-role messages are merged: [assistant(text), assistant(tool)] -> one.
+    assert_eq!(ant.messages.len(), 2);
+    let blocks = match &ant.messages[0].content {
+        AnthropicContent::Blocks(b) => b,
+        _ => panic!("expected blocks"),
+    };
+    assert!(matches!(blocks[0], AnthropicContentBlock::Thinking { .. }));
+    assert!(blocks.iter().any(|b| matches!(b, AnthropicContentBlock::ToolUse { .. })));
+    assert_eq!(ant.tools.unwrap().len(), 1);
+    // Roles must strictly alternate for Anthropic upstreams.
+    for w in ant.messages.windows(2) {
+        assert_ne!(w[0].role, w[1].role, "roles must alternate");
+    }
+}
+
+#[test]
+fn test_concurrent_function_calls_merge_into_single_messages() {
+    let items = vec![
+        ResponseInputItem::FunctionCall {
+            call_id: "c1".to_string(),
+            name: "f1".to_string(),
+            arguments: "{}".to_string(),
+        },
+        ResponseInputItem::FunctionCall {
+            call_id: "c2".to_string(),
+            name: "f2".to_string(),
+            arguments: "{}".to_string(),
+        },
+        ResponseInputItem::FunctionResponse {
+            call_id: "c1".to_string(),
+            output: "r1".to_string(),
+        },
+        ResponseInputItem::FunctionResponse {
+            call_id: "c2".to_string(),
+            output: "r2".to_string(),
+        },
+    ];
+    let req = CreateResponseRequest {
+        model: "m".to_string(),
+        input: ResponseInput::Items(items),
+        instructions: None,
+        modalities: None,
+        tools: None,
+        tool_choice: None,
+        temperature: None,
+        top_p: None,
+        max_output_tokens: None,
+        stream: None,
+        metadata: None,
+        extra: Default::default(),
+    };
+    let ant = responses_to_anthropic_request(&req).unwrap();
+    assert_eq!(ant.messages.len(), 2);
+    assert_eq!(ant.messages[0].role, AnthropicRole::Assistant);
+    let uses = match &ant.messages[0].content {
+        AnthropicContent::Blocks(b) => b,
+        _ => panic!("expected blocks"),
+    };
+    assert_eq!(uses.len(), 2);
+    assert_eq!(ant.messages[1].role, AnthropicRole::User);
+    let results = match &ant.messages[1].content {
+        AnthropicContent::Blocks(b) => b,
+        _ => panic!("expected blocks"),
+    };
+    assert_eq!(results.len(), 2);
+
+    let chat = responses_to_chat_request(&req).unwrap();
+    let assistants: Vec<_> = chat
+        .messages
+        .iter()
+        .filter(|m| matches!(m, ChatMessage::Assistant(_)))
+        .collect();
+    assert_eq!(assistants.len(), 1);
+    if let ChatMessage::Assistant(a) = assistants[0] {
+        assert_eq!(a.tool_calls.as_ref().unwrap().len(), 2);
+    } else {
+        panic!("expected assistant");
+    }
+}
+
+#[test]
+fn test_mixed_sequence_never_breaks_anthropic_alternation() {
+    let req = CreateResponseRequest {
+        model: "m".to_string(),
+        input: ResponseInput::Items(vec![
+            ResponseInputItem::Message {
+                role: "user".to_string(),
+                content: vec![ResponseContentPart::Text { text: "q".to_string() }],
+            },
+            ResponseInputItem::FunctionCall {
+                call_id: "c1".to_string(),
+                name: "f".to_string(),
+                arguments: "{}".to_string(),
+            },
+            ResponseInputItem::FunctionResponse {
+                call_id: "c1".to_string(),
+                output: "r".to_string(),
+            },
+            ResponseInputItem::Message {
+                role: "user".to_string(),
+                content: vec![ResponseContentPart::Text { text: "follow-up".to_string() }],
+            },
+        ]),
+        instructions: None,
+        modalities: None,
+        tools: None,
+        tool_choice: None,
+        temperature: None,
+        top_p: None,
+        max_output_tokens: None,
+        stream: None,
+        metadata: None,
+        extra: Default::default(),
+    };
+    let ant = responses_to_anthropic_request(&req).unwrap();
+    assert!(!ant.messages.is_empty());
+    for w in ant.messages.windows(2) {
+        assert_ne!(w[0].role, w[1].role, "roles must alternate across mixed sequences");
+    }
+    let texts: String = ant
+        .messages
+        .iter()
+        .map(|m| m.content.as_plain_text())
+        .collect::<Vec<_>>()
+        .join("|");
+    assert!(texts.contains('q') && texts.contains("follow-up"));
+    let has_result = ant.messages.iter().any(|m| match &m.content {
+        AnthropicContent::Blocks(blocks) => blocks.iter().any(|b| matches!(
+            b,
+            AnthropicContentBlock::ToolResult { content: ToolResultContent::Text(t), .. } if t == "r"
+        )),
+        _ => false,
+    });
+    assert!(has_result, "tool result must survive merging");
+}
+
+#[test]
+fn test_anthropic_to_responses_request_roundtrip() {
+    let req = MessageRequest {
+        model: "m".to_string(),
+        messages: vec![
+            AnthropicMessage {
+                role: AnthropicRole::User,
+                content: AnthropicContent::Text("hello".to_string()),
+            },
+            AnthropicMessage {
+                role: AnthropicRole::Assistant,
+                content: AnthropicContent::Blocks(vec![
+                    AnthropicContentBlock::Thinking { thinking: "hmm".to_string(), signature: None },
+                    AnthropicContentBlock::Text { text: "world".to_string(), cache_control: None },
+                ]),
+            },
+        ],
+        max_tokens: 64,
+        system: Some(AnthropicSystem::Text("sys".to_string())),
+        metadata: None,
+        stop_sequences: None,
+        stream: None,
+        temperature: Some(0.5),
+        top_p: None,
+        top_k: None,
+        tools: None,
+        tool_choice: None,
+        thinking: None,
+        extra: Default::default(),
+    };
+    let out = anthropic_to_responses_request(&req).unwrap();
+    assert_eq!(out.instructions.as_deref(), Some("sys"));
+    assert_eq!(out.max_output_tokens, Some(64));
+    let items = match &out.input {
+        ResponseInput::Items(v) => v,
+        _ => panic!("expected items"),
+    };
+    assert_eq!(items.len(), 2);
+    let back = responses_to_anthropic_request(&out).unwrap();
+    let text = back.messages[1].content.as_plain_text();
+    assert!(text.contains("world"));
+}
+
+#[test]
+fn test_anthropic_response_to_responses_response() {
+    let resp = MessageResponse {
+        id: "msg_1".to_string(),
+        r#type: "message".to_string(),
+        role: "assistant".to_string(),
+        content: vec![
+            AnthropicContentBlock::Thinking { thinking: "plan".to_string(), signature: None },
+            AnthropicContentBlock::Text { text: "done".to_string(), cache_control: None },
+            AnthropicContentBlock::ToolUse {
+                id: "tu_1".to_string(),
+                name: "f".to_string(),
+                input: json!({"a": 1}),
+                cache_control: None,
+            },
+        ],
+        model: "m".to_string(),
+        stop_reason: Some(AnthropicStopReason::ToolUse),
+        stop_sequence: None,
+        usage: AnthropicUsage {
+            input_tokens: 10,
+            output_tokens: 5,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
+        },
+    };
+    let out = anthropic_to_responses_response(&resp).unwrap();
+    assert_eq!(out.status, "completed");
+    assert_eq!(out.output.len(), 2);
+    let msg = match &out.output[0] {
+        ResponseOutputItem::Message { content, .. } => content,
+        _ => panic!("expected message first"),
+    };
+    assert!(matches!(msg[0], ResponseContentPart::Reasoning { .. }));
+    assert!(matches!(msg[1], ResponseContentPart::Text { .. }));
+    let back = responses_to_anthropic_response(&out).unwrap();
+    assert_eq!(back.stop_reason, Some(AnthropicStopReason::ToolUse));
+    assert_eq!(back.usage.input_tokens, 10);
+    assert_eq!(back.usage.output_tokens, 5);
+}
+
+#[test]
+fn test_chat_response_to_responses_response() {
+    let resp = ChatCompletionResponse {
+        id: "chatcmpl-1".to_string(),
+        object: "chat.completion".to_string(),
+        created: 1,
+        model: "m".to_string(),
+        choices: vec![ChatChoice {
+            index: 0,
+            message: AssistantResponseChoiceMessage {
+                role: "assistant".to_string(),
+                content: Some("answer".to_string()),
+                reasoning_content: Some("why".to_string()),
+                refusal: None,
+                tool_calls: Some(vec![ToolCall {
+                    id: "call_1".to_string(),
+                    r#type: "function".to_string(),
+                    function: FunctionCall {
+                        name: "f".to_string(),
+                        arguments: "{\"x\":1}".to_string(),
+                    },
+                }]),
+            },
+            finish_reason: Some(FinishReason::ToolCalls),
+            logprobs: None,
+        }],
+        usage: Some(Usage {
+            prompt_tokens: 7,
+            completion_tokens: 3,
+            total_tokens: 10,
+            prompt_tokens_details: None,
+            completion_tokens_details: None,
+        }),
+        system_fingerprint: None,
+        service_tier: None,
+    };
+    let out = chat_to_responses_response(&resp).unwrap();
+    assert_eq!(out.status, "completed");
+    assert_eq!(out.output.len(), 2);
+    assert_eq!(out.usage.as_ref().unwrap().total_tokens, 10);
+    let back = responses_to_chat_response(&out).unwrap();
+    let msg = &back.choices[0].message;
+    assert!(msg.content.as_deref().unwrap().contains("answer"));
+    assert_eq!(msg.tool_calls.as_ref().unwrap().len(), 1);
+}
+
+#[test]
+fn test_responses_to_chat_stream_fsm() {
+    let mut fsm = ResponsesToChatFsm::new("m");
+    let created = ResponseStreamEvent::ResponseCreated {
+        response: ResponseObject {
+            id: "resp_1".to_string(),
+            object: "response".to_string(),
+            status: "in_progress".to_string(),
+            model: "m".to_string(),
+            output: vec![],
+            usage: None,
+            error: None,
+        },
+    };
+    let chunks = fsm.process_event(created).unwrap();
+    assert_eq!(chunks.len(), 1);
+    assert_eq!(chunks[0].choices[0].delta.role.as_deref(), Some("assistant"));
+
+    let text = ResponseStreamEvent::OutputTextDelta(ResponseTextDelta {
+        response_id: "resp_1".to_string(),
+        item_id: "it_0".to_string(),
+        output_index: 0,
+        content_index: 0,
+        delta: "hello".to_string(),
+    });
+    let chunks = fsm.process_event(text).unwrap();
+    assert_eq!(chunks[0].choices[0].delta.content.as_deref(), Some("hello"));
+
+    let done = ResponseStreamEvent::Completed {
+        response: ResponseObject {
+            id: "resp_1".to_string(),
+            object: "response".to_string(),
+            status: "completed".to_string(),
+            model: "m".to_string(),
+            output: vec![],
+            usage: Some(ResponseUsage { total_tokens: 9, input_tokens: 6, output_tokens: 3 }),
+            error: None,
+        },
+    };
+    let chunks = fsm.process_event(done).unwrap();
+    assert_eq!(chunks[0].choices[0].finish_reason, Some(FinishReason::Stop));
+    assert_eq!(chunks[0].usage.as_ref().unwrap().total_tokens, 9);
+}
+
+#[test]
+fn test_chat_to_responses_stream_fsm() {
+    let mut fsm = ChatToResponsesFsm::new("m");
+    let chunk = ChatCompletionChunk {
+        id: "chatcmpl-1".to_string(),
+        object: "chat.completion.chunk".to_string(),
+        created: 1,
+        model: "m".to_string(),
+        choices: vec![ChatChunkChoice {
+            index: 0,
+            delta: ChatChunkDelta {
+                role: Some("assistant".to_string()),
+                content: Some("hi".to_string()),
+                reasoning_content: None,
+                refusal: None,
+                tool_calls: None,
+            },
+            finish_reason: None,
+            logprobs: None,
+        }],
+        usage: None,
+        system_fingerprint: None,
+        service_tier: None,
+    };
+    let events = fsm.process_chunk(chunk).unwrap();
+    assert!(matches!(events[0], ResponseStreamEvent::ResponseCreated { .. }));
+    assert!(matches!(events[1], ResponseStreamEvent::OutputTextDelta(_)));
+
+    let fin = ChatCompletionChunk {
+        id: "chatcmpl-1".to_string(),
+        object: "chat.completion.chunk".to_string(),
+        created: 1,
+        model: "m".to_string(),
+        choices: vec![ChatChunkChoice {
+            index: 0,
+            delta: ChatChunkDelta::default(),
+            finish_reason: Some(FinishReason::Stop),
+            logprobs: None,
+        }],
+        usage: Some(Usage {
+            prompt_tokens: 4,
+            completion_tokens: 2,
+            total_tokens: 6,
+            prompt_tokens_details: None,
+            completion_tokens_details: None,
+        }),
+        system_fingerprint: None,
+        service_tier: None,
+    };
+    let events = fsm.process_chunk(fin).unwrap();
+    assert!(matches!(events[0], ResponseStreamEvent::Completed { .. }));
+    assert!(fsm.finish_if_open().is_none());
+}
+
+#[test]
+fn test_responses_to_anthropic_stream_fsm() {
+    let mut fsm = ResponsesToAnthropicFsm::new("m");
+    let created = ResponseStreamEvent::ResponseCreated {
+        response: ResponseObject {
+            id: "resp_9".to_string(),
+            object: "response".to_string(),
+            status: "in_progress".to_string(),
+            model: "m".to_string(),
+            output: vec![],
+            usage: None,
+            error: None,
+        },
+    };
+    let events = fsm.process_event(created).unwrap();
+    assert!(matches!(events[0], MessageStreamEvent::MessageStart { .. }));
+
+    let text = ResponseStreamEvent::TextDelta(ResponseTextDelta {
+        response_id: "resp_9".to_string(),
+        item_id: "it_0".to_string(),
+        output_index: 0,
+        content_index: 0,
+        delta: "yo".to_string(),
+    });
+    let events = fsm.process_event(text).unwrap();
+    assert!(events.iter().any(|e| matches!(
+        e,
+        MessageStreamEvent::ContentBlockDelta { delta: AnthropicDelta::TextDelta { .. }, .. }
+    )));
+
+    let done = ResponseStreamEvent::ResponseDone {
+        response: ResponseObject {
+            id: "resp_9".to_string(),
+            object: "response".to_string(),
+            status: "completed".to_string(),
+            model: "m".to_string(),
+            output: vec![],
+            usage: Some(ResponseUsage { total_tokens: 5, input_tokens: 3, output_tokens: 2 }),
+            error: None,
+        },
+    };
+    let events = fsm.process_event(done).unwrap();
+    assert!(events.iter().any(|e| matches!(e, MessageStreamEvent::MessageStop)));
+}
+
+#[test]
+fn test_anthropic_to_responses_stream_fsm() {
+    let mut fsm = AnthropicToResponsesFsm::new("m");
+    let start = MessageStreamEvent::MessageStart {
+        message: MessageResponse {
+            id: "msg_7".to_string(),
+            r#type: "message".to_string(),
+            role: "assistant".to_string(),
+            content: vec![],
+            model: "m".to_string(),
+            stop_reason: None,
+            stop_sequence: None,
+            usage: AnthropicUsage::default(),
+        },
+    };
+    let events = fsm.process_event(start).unwrap();
+    assert!(matches!(events[0], ResponseStreamEvent::ResponseCreated { .. }));
+
+    let delta = MessageStreamEvent::ContentBlockDelta {
+        index: 0,
+        delta: AnthropicDelta::TextDelta { text: "hey".to_string() },
+    };
+    let events = fsm.process_event(delta).unwrap();
+    assert!(matches!(events[0], ResponseStreamEvent::OutputTextDelta(_)));
+
+    let stop = MessageStreamEvent::MessageStop;
+    let events = fsm.process_event(stop).unwrap();
+    assert!(matches!(events[0], ResponseStreamEvent::Completed { .. }));
+    assert!(fsm.finish_if_open().is_none());
+}
+
+#[test]
+fn test_responses_to_chat_request_merges_assistant_text_and_function_call() {
+    let req = CreateResponseRequest {
+        model: "gpt-4o".to_string(),
+        input: ResponseInput::Items(vec![
+            ResponseInputItem::Message {
+                role: "assistant".to_string(),
+                content: vec![ResponseContentPart::Text {
+                    text: "I will check the weather.".to_string(),
+                }],
+            },
+            ResponseInputItem::FunctionCall {
+                call_id: "call_weather_1".to_string(),
+                name: "get_weather".to_string(),
+                arguments: "{\"city\":\"Paris\"}".to_string(),
+            },
+        ]),
+        instructions: None,
+        modalities: None,
+        tools: None,
+        tool_choice: None,
+        temperature: None,
+        top_p: None,
+        max_output_tokens: None,
+        stream: None,
+        metadata: None,
+        extra: Default::default(),
+    };
+
+    let chat_req = responses_to_chat_request(&req).unwrap();
+    assert_eq!(chat_req.messages.len(), 1, "Must merge into a single assistant message rather than consecutive assistant messages");
+    match &chat_req.messages[0] {
+        ChatMessage::Assistant(a) => {
+            assert_eq!(a.content, Some(MessageContent::Text("I will check the weather.".to_string())));
+            let calls = a.tool_calls.as_ref().expect("tool_calls must be present");
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].id, "call_weather_1");
+            assert_eq!(calls[0].function.name, "get_weather");
+        }
+        _ => panic!("Expected Assistant message"),
+    }
+}
+
+#[test]
+fn test_anthropic_to_responses_request_preserves_thinking_text_tool_order() {
+    let req = MessageRequest {
+        model: "claude-3-7-sonnet".to_string(),
+        messages: vec![AnthropicMessage {
+            role: AnthropicRole::Assistant,
+            content: AnthropicContent::Blocks(vec![
+                AnthropicContentBlock::Thinking {
+                    thinking: "Calculating optimal route".to_string(),
+                    signature: None,
+                },
+                AnthropicContentBlock::Text {
+                    text: "I am ready to invoke the routing tool:".to_string(),
+                    cache_control: None,
+                },
+                AnthropicContentBlock::ToolUse {
+                    id: "tool_nav_1".to_string(),
+                    name: "calculate_route".to_string(),
+                    input: json!({"destination": "Mars"}),
+                    cache_control: None,
+                },
+            ]),
+        }],
+        max_tokens: 1024,
+        system: None,
+        metadata: None,
+        stop_sequences: None,
+        stream: None,
+        temperature: None,
+        top_p: None,
+        top_k: None,
+        tools: None,
+        tool_choice: None,
+        thinking: None,
+        extra: Default::default(),
+    };
+
+    let resp_req = anthropic_to_responses_request(&req).unwrap();
+    match resp_req.input {
+        ResponseInput::Items(items) => {
+            assert_eq!(items.len(), 2, "Should emit 1 Message item (thinking+text) followed by 1 FunctionCall item");
+            match &items[0] {
+                ResponseInputItem::Message { role, content } => {
+                    assert_eq!(role, "assistant");
+                    assert_eq!(content.len(), 2);
+                    assert!(matches!(&content[0], ResponseContentPart::Reasoning { reasoning } if reasoning == "Calculating optimal route"));
+                    assert!(matches!(&content[1], ResponseContentPart::Text { text } if text == "I am ready to invoke the routing tool:"));
+                }
+                _ => panic!("First item must be Message containing reasoning and text"),
+            }
+            match &items[1] {
+                ResponseInputItem::FunctionCall { call_id, name, .. } => {
+                    assert_eq!(call_id, "tool_nav_1");
+                    assert_eq!(name, "calculate_route");
+                }
+                _ => panic!("Second item must be FunctionCall"),
+            }
+        }
+        _ => panic!("Expected ResponseInput::Items"),
+    }
+}
+
+#[test]
+fn test_responses_to_anthropic_stream_fsm_empty_delta_and_dynamic_stop_reason() {
+    let mut fsm = ResponsesToAnthropicFsm::new("claude-model");
+    let _ = fsm.process_event(ResponseStreamEvent::ResponseCreated {
+        response: ResponseObject {
+            id: "resp_dyn_1".to_string(),
+            object: "response".to_string(),
+            status: "in_progress".to_string(),
+            model: "claude-model".to_string(),
+            output: vec![],
+            usage: None,
+            error: None,
+        },
+    }).unwrap();
+
+    let empty_events = fsm.process_event(ResponseStreamEvent::TextDelta(ResponseTextDelta {
+        response_id: "resp_dyn_1".to_string(),
+        item_id: "it_empty".to_string(),
+        output_index: 0,
+        content_index: 0,
+        delta: "".to_string(),
+    })).unwrap();
+    assert!(empty_events.is_empty(), "Empty text delta must yield zero events");
+
+    let tool_events = fsm.process_event(ResponseStreamEvent::FunctionCallArgumentsDelta(
+        ResponseFunctionCallDelta {
+            response_id: "resp_dyn_1".to_string(),
+            item_id: "call_tool_1".to_string(),
+            output_index: 0,
+            call_id: "call_tool_1".to_string(),
+            delta: "{\"id\":1}".to_string(),
+        },
+    )).unwrap();
+    assert!(tool_events.iter().any(|e| matches!(e, MessageStreamEvent::ContentBlockStart {
+        index: 0,
+        content_block: AnthropicContentBlock::ToolUse { .. }
+    })));
+
+    let finish_events = fsm.finish_if_open().unwrap_or_default();
+    assert!(finish_events.iter().any(|e| matches!(
+        e,
+        MessageStreamEvent::MessageDelta {
+            delta: MessageDeltaBody {
+                stop_reason: Some(AnthropicStopReason::ToolUse),
+                ..
+            },
+            ..
+        }
+    )));
+
+    let mut fsm_text = ResponsesToAnthropicFsm::new("claude-model");
+    let _ = fsm_text.process_event(ResponseStreamEvent::ResponseCreated {
+        response: ResponseObject {
+            id: "resp_dyn_2".to_string(),
+            object: "response".to_string(),
+            status: "in_progress".to_string(),
+            model: "claude-model".to_string(),
+            output: vec![],
+            usage: None,
+            error: None,
+        },
+    }).unwrap();
+    let _ = fsm_text.process_event(ResponseStreamEvent::TextDelta(ResponseTextDelta {
+        response_id: "resp_dyn_2".to_string(),
+        item_id: "it_text".to_string(),
+        output_index: 0,
+        content_index: 0,
+        delta: "Hello".to_string(),
+    })).unwrap();
+    let text_finish = fsm_text.finish_if_open().unwrap_or_default();
+    assert!(text_finish.iter().any(|e| matches!(
+        e,
+        MessageStreamEvent::MessageDelta {
+            delta: MessageDeltaBody {
+                stop_reason: Some(AnthropicStopReason::EndTurn),
+                ..
+            },
+            ..
+        }
+    )));
+}

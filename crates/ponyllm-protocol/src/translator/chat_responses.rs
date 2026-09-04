@@ -2,6 +2,28 @@ use crate::error::Result;
 use crate::openai::chat::*;
 use crate::openai::responses::*;
 
+/// True when a Responses request carries any non-blank text for an upstream
+/// that cannot accept image-only input after translation drops images.
+pub fn responses_request_has_text(req: &CreateResponseRequest) -> bool {
+    if req.instructions.as_ref().is_some_and(|s| !s.trim().is_empty()) {
+        return true;
+    }
+    let items: &[ResponseInputItem] = match &req.input {
+        ResponseInput::Text(t) => return !t.trim().is_empty(),
+        ResponseInput::Items(items) => items,
+    };
+    items.iter().any(|item| match item {
+        ResponseInputItem::Message { content, .. } => content.iter().any(|c| match c {
+            ResponseContentPart::Text { text } => !text.trim().is_empty(),
+            ResponseContentPart::Thought { thought } => !thought.trim().is_empty(),
+            ResponseContentPart::Reasoning { reasoning } => !reasoning.trim().is_empty(),
+            ResponseContentPart::Refusal { .. } => false,
+        }),
+        ResponseInputItem::FunctionResponse { output, .. } => !output.trim().is_empty(),
+        ResponseInputItem::FunctionCall { .. } => false,
+    })
+}
+
 /// Convert ChatCompletionRequest to CreateResponseRequest
 pub fn chat_to_responses_request(req: &ChatCompletionRequest) -> Result<CreateResponseRequest> {
     let mut instructions = None;
@@ -16,6 +38,11 @@ pub fn chat_to_responses_request(req: &ChatCompletionRequest) -> Result<CreateRe
                 instructions = Some(dev.content.as_plain_text());
             }
             ChatMessage::User(user) => {
+                if let MessageContent::Parts(parts) = &user.content {
+                    if parts.iter().any(|p| matches!(p, ContentPart::ImageUrl { .. })) {
+                        tracing::warn!("dropping image part: Responses input items carry no image part");
+                    }
+                }
                 items.push(ResponseInputItem::Message {
                     role: "user".to_string(),
                     content: vec![ResponseContentPart::Text {
@@ -110,9 +137,29 @@ pub fn responses_to_chat_request(req: &CreateResponseRequest) -> Result<ChatComp
             }));
         }
         ResponseInput::Items(items) => {
+            let mut pending_calls: Vec<ToolCall> = Vec::new();
+            let flush_calls = |messages: &mut Vec<ChatMessage>, pending: &mut Vec<ToolCall>| {
+                if pending.is_empty() {
+                    return;
+                }
+                let calls = std::mem::take(pending);
+                if let Some(ChatMessage::Assistant(ref mut last_asst)) = messages.last_mut() {
+                    match last_asst.tool_calls.as_mut() {
+                        Some(existing) => existing.extend(calls),
+                        None => last_asst.tool_calls = Some(calls),
+                    }
+                } else {
+                    messages.push(ChatMessage::Assistant(AssistantMessage {
+                        content: None,
+                        tool_calls: Some(calls),
+                        ..Default::default()
+                    }));
+                }
+            };
             for item in items {
                 match item {
                     ResponseInputItem::Message { role, content } => {
+                        flush_calls(&mut messages, &mut pending_calls);
                         let text = content
                             .iter()
                             .filter_map(|c| match c {
@@ -138,20 +185,17 @@ pub fn responses_to_chat_request(req: &CreateResponseRequest) -> Result<ChatComp
                         name,
                         arguments,
                     } => {
-                        messages.push(ChatMessage::Assistant(AssistantMessage {
-                            content: None,
-                            tool_calls: Some(vec![ToolCall {
-                                id: call_id.clone(),
-                                r#type: "function".to_string(),
-                                function: FunctionCall {
-                                    name: name.clone(),
-                                    arguments: arguments.clone(),
-                                },
-                            }]),
-                            ..Default::default()
-                        }));
+                        pending_calls.push(ToolCall {
+                            id: call_id.clone(),
+                            r#type: "function".to_string(),
+                            function: FunctionCall {
+                                name: name.clone(),
+                                arguments: arguments.clone(),
+                            },
+                        });
                     }
                     ResponseInputItem::FunctionResponse { call_id, output } => {
+                        flush_calls(&mut messages, &mut pending_calls);
                         messages.push(ChatMessage::Tool(ToolMessage {
                             content: output.as_str().into(),
                             tool_call_id: call_id.clone(),
@@ -159,6 +203,7 @@ pub fn responses_to_chat_request(req: &CreateResponseRequest) -> Result<ChatComp
                     }
                 }
             }
+            flush_calls(&mut messages, &mut pending_calls);
         }
     }
 
@@ -209,6 +254,70 @@ pub fn responses_to_chat_request(req: &CreateResponseRequest) -> Result<ChatComp
     })
 }
 
+/// Convert ChatCompletionResponse to ResponseObject
+pub fn chat_to_responses_response(resp: &ChatCompletionResponse) -> Result<ResponseObject> {
+    let mut text_acc = String::new();
+    let mut reasoning_acc = String::new();
+    let mut output = Vec::new();
+    let mut finish_stop = true;
+
+    if let Some(choice) = resp.choices.first() {
+        if let Some(ref reasoning) = choice.message.reasoning_content {
+            reasoning_acc.push_str(reasoning);
+        }
+        if let Some(ref text) = choice.message.content {
+            text_acc.push_str(text);
+        }
+        if let Some(ref tool_calls) = choice.message.tool_calls {
+            for tc in tool_calls {
+                output.push(ResponseOutputItem::FunctionCall {
+                    id: format!("fc_{}", tc.id),
+                    status: "completed".to_string(),
+                    call_id: tc.id.clone(),
+                    name: tc.function.name.clone(),
+                    arguments: tc.function.arguments.clone(),
+                });
+            }
+        }
+        finish_stop = !matches!(choice.finish_reason, Some(FinishReason::Length));
+    }
+
+    let mut parts = Vec::new();
+    if !reasoning_acc.is_empty() {
+        parts.push(ResponseContentPart::Reasoning { reasoning: reasoning_acc });
+    }
+    if !text_acc.is_empty() {
+        parts.push(ResponseContentPart::Text { text: text_acc });
+    }
+    if !parts.is_empty() {
+        output.insert(
+            0,
+            ResponseOutputItem::Message {
+                id: format!("msg_{}", resp.id),
+                status: "completed".to_string(),
+                role: "assistant".to_string(),
+                content: parts,
+            },
+        );
+    }
+
+    let usage = resp.usage.as_ref().map(|u| ResponseUsage {
+        input_tokens: u.prompt_tokens,
+        output_tokens: u.completion_tokens,
+        total_tokens: u.total_tokens,
+    });
+
+    Ok(ResponseObject {
+        id: resp.id.clone(),
+        object: "response".to_string(),
+        status: if finish_stop { "completed".to_string() } else { "incomplete".to_string() },
+        model: resp.model.clone(),
+        output,
+        usage,
+        error: None,
+    })
+}
+
 /// Convert ResponseObject to ChatCompletionResponse
 pub fn responses_to_chat_response(resp: &ResponseObject) -> Result<ChatCompletionResponse> {
     let mut text_acc = String::new();
@@ -254,6 +363,11 @@ pub fn responses_to_chat_response(resp: &ResponseObject) -> Result<ChatCompletio
     let content = if text_acc.is_empty() { None } else { Some(text_acc) };
     let reasoning_content = if reasoning_acc.is_empty() { None } else { Some(reasoning_acc) };
     let tool_calls_opt = if tool_calls.is_empty() { None } else { Some(tool_calls) };
+    let finish_reason = if tool_calls_opt.is_some() {
+        Some(FinishReason::ToolCalls)
+    } else {
+        Some(FinishReason::Stop)
+    };
 
     let usage = resp.usage.as_ref().map(|u| Usage {
         prompt_tokens: u.input_tokens,
@@ -277,7 +391,7 @@ pub fn responses_to_chat_response(resp: &ResponseObject) -> Result<ChatCompletio
                 refusal: None,
                 tool_calls: tool_calls_opt,
             },
-            finish_reason: Some(FinishReason::Stop),
+            finish_reason,
             logprobs: None,
         }],
         usage,

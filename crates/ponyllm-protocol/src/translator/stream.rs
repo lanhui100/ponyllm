@@ -24,6 +24,7 @@ pub struct AnthropicStreamToChatFsm {
     created: u64,
     current_block: Option<CurrentAnthropicBlock>,
     tool_counter: u32,
+    done: bool,
 }
 
 impl AnthropicStreamToChatFsm {
@@ -39,11 +40,15 @@ impl AnthropicStreamToChatFsm {
             created,
             current_block: None,
             tool_counter: 0,
+            done: false,
         }
     }
 
     pub fn process_event(&mut self, event: MessageStreamEvent) -> Result<Vec<ChatCompletionChunk>> {
         let mut chunks = Vec::new();
+        if self.done {
+            return Ok(chunks);
+        }
 
         match event {
             MessageStreamEvent::MessageStart { message } => {
@@ -209,7 +214,7 @@ impl AnthropicStreamToChatFsm {
                 self.current_block = None;
             }
             MessageStreamEvent::MessageDelta { delta, usage } => {
-                let finish_reason = delta.stop_reason.map(|r| match r {
+                let finish_reason = delta.stop_reason.as_ref().map(|r| match r {
                     AnthropicStopReason::EndTurn => FinishReason::Stop,
                     AnthropicStopReason::MaxTokens => FinishReason::Length,
                     AnthropicStopReason::ToolUse => FinishReason::ToolCalls,
@@ -240,8 +245,13 @@ impl AnthropicStreamToChatFsm {
                     system_fingerprint: None,
                     service_tier: None,
                 });
+                if delta.stop_reason.is_some() {
+                    self.done = true;
+                }
             }
-            MessageStreamEvent::MessageStop => {}
+            MessageStreamEvent::MessageStop => {
+                self.done = true;
+            }
             _ => {}
         }
 
@@ -264,6 +274,7 @@ pub struct ChatStreamToAnthropicFsm {
     block_counter: u32,
     active_block: Option<ChatActiveBlock>,
     sent_start: bool,
+    done: bool,
 }
 
 impl ChatStreamToAnthropicFsm {
@@ -274,11 +285,15 @@ impl ChatStreamToAnthropicFsm {
             block_counter: 0,
             active_block: None,
             sent_start: false,
+            done: false,
         }
     }
 
     pub fn process_chunk(&mut self, chunk: ChatCompletionChunk) -> Result<Vec<MessageStreamEvent>> {
         let mut events = Vec::new();
+        if self.done {
+            return Ok(events);
+        }
 
         if !self.sent_start {
             self.message_id = chunk.id.clone();
@@ -427,10 +442,49 @@ impl ChatStreamToAnthropicFsm {
                     usage: Some(AnthropicDeltaUsage { output_tokens }),
                 });
                 events.push(MessageStreamEvent::MessageStop);
+                self.done = true;
             }
         }
 
         Ok(events)
+    }
+
+    pub fn finish_if_open(&mut self) -> Option<Vec<MessageStreamEvent>> {
+        if self.done {
+            return None;
+        }
+        self.done = true;
+        let mut events = Vec::new();
+        if !self.sent_start {
+            self.sent_start = true;
+            events.push(MessageStreamEvent::MessageStart {
+                message: MessageResponse {
+                    id: self.message_id.clone(),
+                    r#type: "message".to_string(),
+                    role: "assistant".to_string(),
+                    content: vec![],
+                    model: self.model.clone(),
+                    stop_reason: None,
+                    stop_sequence: None,
+                    usage: AnthropicUsage::default(),
+                },
+            });
+        }
+        if self.active_block.is_some() {
+            events.push(MessageStreamEvent::ContentBlockStop {
+                index: self.block_counter,
+            });
+            self.active_block = None;
+        }
+        events.push(MessageStreamEvent::MessageDelta {
+            delta: MessageDeltaBody {
+                stop_reason: Some(AnthropicStopReason::EndTurn),
+                stop_sequence: None,
+            },
+            usage: Some(AnthropicDeltaUsage { output_tokens: 0 }),
+        });
+        events.push(MessageStreamEvent::MessageStop);
+        Some(events)
     }
 }
 
