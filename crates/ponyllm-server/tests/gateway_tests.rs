@@ -1,3 +1,5 @@
+#![allow(clippy::field_reassign_with_default)]
+
 use std::sync::Arc;
 use axum::routing::post;
 use axum::{Json, Router};

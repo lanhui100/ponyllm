@@ -420,15 +420,11 @@ fn handle_key_event(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
         KeyCode::Char('r') => {
             app.status_message = "正在后台刷新遥测数据...".to_string();
         }
-        KeyCode::Left | KeyCode::Char('h') => {
-            if app.active_tab == 1 {
-                app.tab2_focus = Tab2Focus::Providers;
-            }
+        KeyCode::Left | KeyCode::Char('h') if app.active_tab == 1 => {
+            app.tab2_focus = Tab2Focus::Providers;
         }
-        KeyCode::Right | KeyCode::Char('l') => {
-            if app.active_tab == 1 {
-                app.tab2_focus = Tab2Focus::Models;
-            }
+        KeyCode::Right | KeyCode::Char('l') if app.active_tab == 1 => {
+            app.tab2_focus = Tab2Focus::Models;
         }
         KeyCode::Down | KeyCode::Char('j') => {
             match app.active_tab {
@@ -538,9 +534,8 @@ fn handle_key_event(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                 }
             }
         }
-        KeyCode::Char('e') | KeyCode::Char('E') => {
-            if app.active_tab == 1 {
-                match app.tab2_focus {
+        KeyCode::Char('e') | KeyCode::Char('E') if app.active_tab == 1 => {
+            match app.tab2_focus {
                     Tab2Focus::Providers => {
                         if let Some(p_name) = app.selected_provider_name() {
                             if let Some(p) = app.config.providers.get(&p_name) {
@@ -610,7 +605,6 @@ fn handle_key_event(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                         }
                     }
                 }
-            }
         }
         KeyCode::Char('d') | KeyCode::Char('D') => {
             if app.active_tab == 1 {
@@ -648,27 +642,25 @@ fn handle_key_event(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                 }
             }
         }
-        KeyCode::Char('s') | KeyCode::Char('S') => {
-            if app.active_tab == 1 {
-                if app.tab2_focus != Tab2Focus::Models {
-                    app.status_message = "👉 请先按 [Tab] 或 [→] 切换到右侧模型列表，再按 [s] 设为默认模型。".to_string();
-                    return;
-                }
-                if let Some(p_name) = app.selected_provider_name() {
-                    if let Some(m_cfg) = app.selected_model_config() {
-                        if let Err(e) = app.config.set_default_model(&p_name, &m_cfg.name) {
-                            app.status_message = format!("❌ 设置默认模型失败: {}", e);
-                        } else if let Err(e) = app.save_config() {
-                            app.status_message = format!("❌ 保存失败: {}", e);
-                        } else {
-                            app.status_message = format!("✅ 成功将 '{}' 设为 '{}' 的默认主模型", m_cfg.name, p_name);
-                        }
+        KeyCode::Char('s') | KeyCode::Char('S') if app.active_tab == 1 => {
+            if app.tab2_focus != Tab2Focus::Models {
+                app.status_message = "👉 请先按 [Tab] 或 [→] 切换到右侧模型列表，再按 [s] 设为默认模型。".to_string();
+                return;
+            }
+            if let Some(p_name) = app.selected_provider_name() {
+                if let Some(m_cfg) = app.selected_model_config() {
+                    if let Err(e) = app.config.set_default_model(&p_name, &m_cfg.name) {
+                        app.status_message = format!("❌ 设置默认模型失败: {}", e);
+                    } else if let Err(e) = app.save_config() {
+                        app.status_message = format!("❌ 保存失败: {}", e);
                     } else {
-                        app.status_message = "⚠️ 当前没有选中的模型。".to_string();
+                        app.status_message = format!("✅ 成功将 '{}' 设为 '{}' 的默认主模型", m_cfg.name, p_name);
                     }
                 } else {
-                    app.status_message = "⚠️ 当前没有选中的提供商。".to_string();
+                    app.status_message = "⚠️ 当前没有选中的模型。".to_string();
                 }
+            } else {
+                app.status_message = "⚠️ 当前没有选中的提供商。".to_string();
             }
         }
         _ => {}
@@ -2172,7 +2164,7 @@ fn render_telemetry_tab(f: &mut Frame, area: Rect, app: &mut TuiApp) {
         let ttft_txt = flow.and_then(|s| s.get("ttft_ms")).and_then(|v| v.as_f64().or_else(|| v.as_u64().map(|n| n as f64))).map(|n| format!("{:.0}", n)).unwrap_or_else(|| "-".to_string());
         let stall_txt = flow.and_then(|s| s.get("stall_count")).and_then(|v| v.as_u64().or_else(|| v.as_f64().map(|n| n as u64))).map(|n| n.to_string()).unwrap_or_else(|| "-".to_string());
 
-        let status_style = if status >= 200 && status < 300 {
+        let status_style = if (200..300).contains(&status) {
             Style::default().fg(Color::Green)
         } else if status == 429 {
             Style::default().fg(Color::Yellow)

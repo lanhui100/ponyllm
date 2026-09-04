@@ -1,3 +1,6 @@
+#![allow(clippy::field_reassign_with_default)]
+#![allow(clippy::format_in_format_args)]
+
 use std::collections::HashMap;
 use std::fs;
 use std::str::FromStr;
@@ -58,7 +61,7 @@ fn build_gateway_config_and_pools(
                 base_url: p_sec.base_url.clone(),
                 default_model: p_sec.default_model.clone(),
                 strategy: p_sec.strategy.clone(),
-                billing_mode: p_sec.billing_mode.clone(),
+                billing_mode: p_sec.billing_mode,
                 input_price: p_sec.input_price,
                 cached_price: p_sec.cached_price,
                 output_price: p_sec.output_price,

@@ -12,6 +12,6 @@ pub mod segments;
 pub use config::{GatewayConfig, ModelSpec, ProviderConfig};
 pub use state::AppState;
 pub use app::create_app;
-pub use extractors::{AppJson, project_anthropic_error, project_openai_error};
+pub use extractors::{AppJson, format_exhausted_message, project_anthropic_error, project_openai_error};
 
 

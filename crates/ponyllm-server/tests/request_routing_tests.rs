@@ -1,3 +1,5 @@
+#![allow(clippy::field_reassign_with_default)]
+
 use std::sync::Arc;
 use axum::routing::post;
 use axum::{Json, Router};
@@ -255,6 +257,68 @@ async fn test_model_echo_policy_and_auto_routing() {
     assert_eq!(single_auto_resp.status(), 200);
     let single_auto_json: serde_json::Value = single_auto_resp.json().await.unwrap();
     assert_eq!(single_auto_json["id"], "auto:flagship");
+}
+
+#[test]
+fn test_is_anthropic_upstream_heuristic_lock() {
+    use ponyllm_server::{AppState, GatewayConfig, ProviderConfig};
+    use ponyllm_server::routes::models::ParsedRequestModel;
+
+    let mut config = GatewayConfig::default();
+    config.providers.insert(
+        "ant-p".to_string(),
+        ProviderConfig {
+            base_url: "https://api.deepseek.com/anthropic".to_string(),
+            default_model: "m-ant".to_string(),
+            strategy: "round_robin".to_string(),
+            billing_mode: BillingMode::Metered,
+            input_price: 0.1,
+            cached_price: 0.01,
+            output_price: 0.2,
+            models: vec![],
+            model_specs: vec![],
+        },
+    );
+    config.providers.insert(
+        "chat-p".to_string(),
+        ProviderConfig {
+            base_url: "https://api.deepseek.com".to_string(),
+            default_model: "m-chat".to_string(),
+            strategy: "round_robin".to_string(),
+            billing_mode: BillingMode::Metered,
+            input_price: 0.1,
+            cached_price: 0.01,
+            output_price: 0.2,
+            models: vec![],
+            model_specs: vec![],
+        },
+    );
+    let state = AppState::new(config);
+
+    let ant = state
+        .resolve_routed_targets(&ParsedRequestModel::parse("m-ant"), None)
+        .unwrap();
+    assert_eq!(ant.len(), 1);
+    assert!(ant[0].is_anthropic_upstream);
+
+    let chat = state
+        .resolve_routed_targets(&ParsedRequestModel::parse("m-chat"), None)
+        .unwrap();
+    assert_eq!(chat.len(), 1);
+    assert!(!chat[0].is_anthropic_upstream);
+}
+
+#[test]
+fn test_exhausted_message_distinguishes_local_pool() {
+    use ponyllm_server::extractors::format_exhausted_message;
+    let local = format_exhausted_message(
+        "Request failed after 0 retries: No available key in pool: foo",
+        "req_1",
+    );
+    assert!(local.contains("Local key pool exhausted"));
+    assert!(local.contains("req_1"));
+    let upstream = format_exhausted_message("HTTP 500 from k1: boom", "req_2");
+    assert!(upstream.contains("All candidate upstream providers exhausted"));
 }
 
 #[tokio::test]

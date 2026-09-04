@@ -230,7 +230,7 @@ async fn download_asset_with_retry(
     primary_url: &str,
     user_agent: &str,
 ) -> Result<Vec<u8>, String> {
-    let candidate_urls = vec![
+    let candidate_urls = [
         primary_url.to_string(),
         format!("https://ghfast.top/{}", primary_url),
         format!("https://ghproxy.net/{}", primary_url),

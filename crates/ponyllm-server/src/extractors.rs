@@ -110,6 +110,23 @@ pub fn render_anthropic_error(
         .into_response()
 }
 
+/// Build the client-visible exhaustion message, distinguishing local pool
+/// exhaustion (no Active keys, check cooling/disabled via `ponyllm status`)
+/// from genuine upstream failures across all candidates.
+pub fn format_exhausted_message(last_error: &str, request_id: &str) -> String {
+    if last_error.contains("No available key in pool") {
+        format!(
+            "Local key pool exhausted (no Active keys, all cooling down or disabled; check `ponyllm status`). Last error: {} (request_id: {})",
+            last_error, request_id
+        )
+    } else {
+        format!(
+            "All candidate upstream providers exhausted. Last error: {} (request_id: {})",
+            last_error, request_id
+        )
+    }
+}
+
 /// Project a `GatewayErrorKind` into an OpenAI format HTTP response.
 pub fn project_openai_error(
     kind: &ponyllm_core::error::GatewayErrorKind,

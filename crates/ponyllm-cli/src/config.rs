@@ -364,6 +364,7 @@ impl ConfigFile {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn add_provider_full(
         &mut self,
         name: &str,
@@ -379,7 +380,7 @@ impl ConfigFile {
             base_url: base_url.to_string(),
             default_model: default_model.to_string(),
             strategy: strategy.to_string(),
-            billing_mode: billing_mode.clone(),
+            billing_mode,
             input_price,
             cached_price,
             output_price,
