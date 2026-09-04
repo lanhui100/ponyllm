@@ -19,6 +19,10 @@ fn make_provider(base_url: &str, default_model: &str) -> ProviderConfig {
         output_price: 1.00,
         models: vec![],
         model_specs: Vec::new(),
+        default_protocol: None,
+        chat_url: None,
+        responses_url: None,
+        messages_url: None,
     }
 }
 
@@ -46,6 +50,36 @@ async fn spawn_gateway_with_upstream(mock: Router) -> String {
         "deepseek".to_string(),
         make_provider(&format!("http://{}", upstream_addr), "deepseek-v4-flash"),
     );
+
+    let state = Arc::new(AppState::new(config));
+    state.register_pool("deepseek", pool);
+
+    let gateway_app = create_app(state);
+    let gateway_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let gateway_addr = gateway_listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(gateway_listener, gateway_app).await.unwrap();
+    });
+    format!("http://{}", gateway_addr)
+}
+
+/// Same as above but the mock upstream is Responses-native: the provider
+/// declares `responses` so the gateway routes to `/v1/responses` verbatim.
+async fn spawn_responses_gateway_with_upstream(mock: Router) -> String {
+    let upstream_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_addr = upstream_listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(upstream_listener, mock).await.unwrap();
+    });
+
+    let pool = Arc::new(KeyPool::new("deepseek", RoutingStrategy::RoundRobin));
+    pool.add_key(ApiKeyEntry::new("k1", "sk-mock-key-123456", 1, 10));
+
+    let mut provider = make_provider(&format!("http://{}", upstream_addr), "deepseek-v4-flash");
+    provider.default_protocol = Some(UpstreamProtocol::Responses);
+
+    let mut config = GatewayConfig::default();
+    config.providers.insert("deepseek".to_string(), provider);
 
     let state = Arc::new(AppState::new(config));
     state.register_pool("deepseek", pool);
@@ -151,7 +185,7 @@ async fn test_responses_virtual_model_mapped_to_physical() {
             }))
         }),
     );
-    let base = spawn_gateway_with_upstream(mock).await;
+    let base = spawn_responses_gateway_with_upstream(mock).await;
     let client = reqwest::Client::new();
 
     // Request via virtual model `auto` — gateway must map to physical model upstream.

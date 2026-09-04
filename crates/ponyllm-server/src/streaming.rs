@@ -26,8 +26,10 @@ use ponyllm_core::telemetry::{
 };
 use ponyllm_protocol::anthropic::messages::MessageStreamEvent;
 use ponyllm_protocol::openai::chat::ChatCompletionChunk;
+use ponyllm_protocol::openai::responses::ResponseStreamEvent;
 use ponyllm_protocol::translator::{
-    AnthropicStreamToChatFsm, ChatStreamToAnthropicFsm,
+    AnthropicStreamToChatFsm, AnthropicToResponsesFsm, ChatStreamToAnthropicFsm,
+    ChatToResponsesFsm, ResponsesToAnthropicFsm, ResponsesToChatFsm,
 };
 
 /// A single parsed SSE frame.
@@ -100,8 +102,15 @@ fn parse_event_lines(block: &[u8]) -> SseEvent {
     }
 }
 
+/// Maximum buffered bytes for one SSE frame. A single legitimate delta frame
+/// is at most a few KB; anything larger is a pathological upstream, and the
+/// excess is shed to bound gateway memory instead of OOMing on it.
+pub const MAX_SSE_FRAME_BYTES: usize = 64 * 1024;
+
 /// Convert a byte stream into a stream of parsed SSE frames, reassembling
-/// frames that are split across network chunks.
+/// frames that are split across network chunks. Trailing bytes at EOF that
+/// never formed a blank-line-terminated frame are discarded per SSE semantics
+/// rather than emitted as a synthetic event.
 pub fn sse_event_stream<S, E>(
     stream: S,
 ) -> impl Stream<Item = Result<SseEvent, E>>
@@ -117,18 +126,13 @@ where
                 buf = rest;
                 return Some((Ok(evt), (st, buf)));
             }
+            if buf.len() > MAX_SSE_FRAME_BYTES {
+                buf.clear();
+            }
             match st.next().await {
                 Some(Ok(bytes)) => buf.extend_from_slice(&bytes),
                 Some(Err(e)) => return Some((Err(e), (st, buf))),
-                None => {
-                    // EOF: flush any remaining partial frame as a final event
-                    if !buf.is_empty() {
-                        let evt = parse_event_lines(&buf);
-                        buf.clear();
-                        return Some((Ok(evt), (st, buf)));
-                    }
-                    return None;
-                }
+                None => return None,
             }
         }
     })
@@ -156,65 +160,322 @@ pub fn anthropic_event_to_sse_bytes(event: &MessageStreamEvent) -> Option<Bytes>
     )))
 }
 
-/// Translate an upstream **OpenAI** SSE byte stream into **Anthropic** SSE
-/// frames. Used by `/v1/messages` when the routed upstream is OpenAI-compatible.
-pub fn openai_sse_to_anthropic_stream<S, E>(
+/// Serialize a Responses `ResponseStreamEvent` as an SSE frame
+/// (`event: <type>\ndata: <json>\n\n`). Returns `None` for `Unknown`.
+pub fn responses_event_to_sse_bytes(event: &ResponseStreamEvent) -> Option<Bytes> {
+    let type_name = match event {
+        ResponseStreamEvent::ResponseCreated { .. } => "response.created",
+        ResponseStreamEvent::ResponseDone { .. } => "response.done",
+        ResponseStreamEvent::OutputItemAdded { .. } => "response.output_item.added",
+        ResponseStreamEvent::OutputItemDone { .. } => "response.output_item.done",
+        ResponseStreamEvent::ContentPartAdded { .. } => "response.content_part.added",
+        ResponseStreamEvent::ContentPartDone { .. } => "response.content_part.done",
+        ResponseStreamEvent::TextDelta(_) => "response.text.delta",
+        ResponseStreamEvent::OutputTextDelta(_) => "response.output_text.delta",
+        ResponseStreamEvent::FunctionCallArgumentsDelta(_) => {
+            "response.function_call_arguments.delta"
+        }
+        ResponseStreamEvent::Completed { .. } => "response.completed",
+        ResponseStreamEvent::Failed { .. } => "response.failed",
+        ResponseStreamEvent::Unknown => return None,
+    };
+    let data = serde_json::to_string(event).ok()?;
+    Some(Bytes::from(format!(
+        "event: {}\ndata: {}\n\n",
+        type_name, data
+    )))
+}
+
+/// Translate an upstream **Responses** SSE byte stream into **OpenAI Chat** SSE
+/// frames. Used by `/v1/chat/completions` with a Responses-native upstream.
+pub fn responses_sse_to_chat_stream<S, E>(
     stream: S,
     fallback_model: &str,
-) -> impl Stream<Item = Result<Bytes, std::convert::Infallible>>
+) -> impl Stream<Item = Result<Bytes, E>>
 where
     S: Stream<Item = Result<Bytes, E>> + Send + 'static,
     E: Send + 'static,
 {
-    let mut fsm = ChatStreamToAnthropicFsm::new(fallback_model);
-    // Track whether the FSM already emitted message_stop; if the upstream never
-    // sends a finish_reason chunk, we synthesize the terminal events at EOF so
-    // Anthropic clients never hang waiting for the message to conclude.
+    let mut fsm = ResponsesToChatFsm::new(fallback_model);
+    let translated = sse_event_stream(stream).flat_map(move |res| {
+        let mut out: Vec<Result<Bytes, E>> = Vec::new();
+        match res {
+            Ok(evt) => {
+                if let Ok(msge) = serde_json::from_str::<ResponseStreamEvent>(&evt.data) {
+                    if let Ok(chunks) = fsm.process_event(msge) {
+                        for c in chunks {
+                            if let Ok(json) = serde_json::to_string(&c) {
+                                out.push(Ok(Bytes::from(format!("data: {}\n\n", json))));
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                out.push(Err(e));
+            }
+        }
+        let iter = futures_util::stream::iter(out);
+        futures_util::stream::BoxStream::from(Box::pin(iter)
+            as std::pin::Pin<Box<dyn futures_util::Stream<Item = Result<Bytes, E>> + Send>>)
+    });
+
+    translated
+        .chain(futures_util::stream::once(async {
+            Ok::<_, E>(Bytes::from("data: [DONE]\n\n"))
+        }))
+        .boxed()
+}
+
+/// Translate an upstream **OpenAI Chat** SSE byte stream into **Responses** SSE
+/// frames. Used by `/v1/responses` with a Chat-native upstream.
+pub fn chat_sse_to_responses_stream<S, E>(
+    stream: S,
+    fallback_model: &str,
+) -> impl Stream<Item = Result<Bytes, E>>
+where
+    S: Stream<Item = Result<Bytes, E>> + Send + 'static,
+    E: Send + 'static,
+{
+    let fsm = std::sync::Arc::new(Mutex::new(ChatToResponsesFsm::new(fallback_model)));
+    let fsm_flat = fsm.clone();
     let stopped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let stopped_flag = stopped.clone();
 
     let translated = sse_event_stream(stream).flat_map(move |res| {
-        let mut out: Vec<Bytes> = Vec::new();
+        let mut out: Vec<Result<Bytes, E>> = Vec::new();
         match res {
             Ok(evt) => {
                 let data = evt.data.trim();
                 if data.is_empty() || data == "[DONE]" {
                     // terminal / heartbeat frame: nothing to forward
                 } else if let Ok(chunk) = serde_json::from_str::<ChatCompletionChunk>(data) {
-                    if let Ok(events) = fsm.process_chunk(chunk) {
+                    if let Ok(events) = fsm_flat.lock().process_chunk(chunk) {
                         for e in events {
-                            if matches!(e, MessageStreamEvent::MessageStop) {
+                            if matches!(e, ResponseStreamEvent::Completed { .. }) {
                                 stopped_flag.store(true, std::sync::atomic::Ordering::SeqCst);
                             }
-                            if let Some(b) = anthropic_event_to_sse_bytes(&e) {
-                                out.push(b);
+                            if let Some(b) = responses_event_to_sse_bytes(&e) {
+                                out.push(Ok(b));
                             }
                         }
                     }
                 }
             }
-            Err(_) => {
-                out.push(Bytes::from(
-                    "event: error\ndata: {\"type\":\"api_error\",\"message\":\"stream read error\"}\n\n",
-                ));
+            Err(e) => {
+                stopped_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                out.push(Err(e));
             }
         }
-        let iter = futures_util::stream::iter(out.into_iter().map(Ok::<_, std::convert::Infallible>));
+        let iter = futures_util::stream::iter(out);
         futures_util::stream::BoxStream::from(Box::pin(iter)
-            as std::pin::Pin<Box<dyn futures_util::Stream<Item = Result<Bytes, std::convert::Infallible>> + Send>>)
+            as std::pin::Pin<Box<dyn futures_util::Stream<Item = Result<Bytes, E>> + Send>>)
     });
 
-    // At stream end, guarantee the Anthropic conversation terminates.
     translated
         .chain(futures_util::stream::once(async move {
             let synthetic = if !stopped.load(std::sync::atomic::Ordering::SeqCst) {
-                Bytes::from(
-                    "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
-                )
+                match fsm.lock().finish_if_open().and_then(|e| responses_event_to_sse_bytes(&e)) {
+                    Some(b) => b,
+                    None => Bytes::new(),
+                }
             } else {
                 Bytes::new()
             };
-            Ok::<_, std::convert::Infallible>(synthetic)
+            Ok::<_, E>(synthetic)
+        }))
+        .boxed()
+}
+
+/// Translate an upstream **Responses** SSE byte stream into **Anthropic** SSE
+/// frames. Used by `/v1/messages` with a Responses-native upstream.
+pub fn responses_sse_to_anthropic_stream<S, E>(
+    stream: S,
+    fallback_model: &str,
+) -> impl Stream<Item = Result<Bytes, E>>
+where
+    S: Stream<Item = Result<Bytes, E>> + Send + 'static,
+    E: Send + 'static,
+{
+    let fsm = std::sync::Arc::new(Mutex::new(ResponsesToAnthropicFsm::new(fallback_model)));
+    let fsm_flat = fsm.clone();
+    let stopped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stopped_flag = stopped.clone();
+
+    let translated = sse_event_stream(stream).flat_map(move |res| {
+        let mut out: Vec<Result<Bytes, E>> = Vec::new();
+        match res {
+            Ok(evt) => {
+                if let Ok(msge) = serde_json::from_str::<ResponseStreamEvent>(&evt.data) {
+                    if let Ok(events) = fsm_flat.lock().process_event(msge) {
+                        for e in events {
+                            if matches!(e, MessageStreamEvent::MessageStop) {
+                                stopped_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                            }
+                            if let Some(b) = anthropic_event_to_sse_bytes(&e) {
+                                out.push(Ok(b));
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                stopped_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                out.push(Err(e));
+            }
+        }
+        let iter = futures_util::stream::iter(out);
+        futures_util::stream::BoxStream::from(Box::pin(iter)
+            as std::pin::Pin<Box<dyn futures_util::Stream<Item = Result<Bytes, E>> + Send>>)
+    });
+
+    translated
+        .chain(futures_util::stream::once(async move {
+            let synthetic = if !stopped.load(std::sync::atomic::Ordering::SeqCst) {
+                match fsm.lock().finish_if_open() {
+                    Some(events) => {
+                        let mut buf = Vec::new();
+                        for e in &events {
+                            if let Some(b) = anthropic_event_to_sse_bytes(e) {
+                                buf.extend_from_slice(&b);
+                            }
+                        }
+                        Bytes::from(buf)
+                    }
+                    None => Bytes::new(),
+                }
+            } else {
+                Bytes::new()
+            };
+            Ok::<_, E>(synthetic)
+        }))
+        .boxed()
+}
+
+/// Translate an upstream **Anthropic** SSE byte stream into **Responses** SSE
+/// frames. Used by `/v1/responses` with an Anthropic-native upstream.
+pub fn anthropic_sse_to_responses_stream<S, E>(
+    stream: S,
+    fallback_model: &str,
+) -> impl Stream<Item = Result<Bytes, E>>
+where
+    S: Stream<Item = Result<Bytes, E>> + Send + 'static,
+    E: Send + 'static,
+{
+    let fsm = std::sync::Arc::new(Mutex::new(AnthropicToResponsesFsm::new(fallback_model)));
+    let fsm_flat = fsm.clone();
+    let stopped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stopped_flag = stopped.clone();
+
+    let translated = sse_event_stream(stream).flat_map(move |res| {
+        let mut out: Vec<Result<Bytes, E>> = Vec::new();
+        match res {
+            Ok(evt) => {
+                if let Ok(msge) = serde_json::from_str::<MessageStreamEvent>(&evt.data) {
+                    if let Ok(events) = fsm_flat.lock().process_event(msge) {
+                        for e in events {
+                            if matches!(e, ResponseStreamEvent::Completed { .. }) {
+                                stopped_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                            }
+                            if let Some(b) = responses_event_to_sse_bytes(&e) {
+                                out.push(Ok(b));
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                stopped_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                out.push(Err(e));
+            }
+        }
+        let iter = futures_util::stream::iter(out);
+        futures_util::stream::BoxStream::from(Box::pin(iter)
+            as std::pin::Pin<Box<dyn futures_util::Stream<Item = Result<Bytes, E>> + Send>>)
+    });
+
+    translated
+        .chain(futures_util::stream::once(async move {
+            let synthetic = if !stopped.load(std::sync::atomic::Ordering::SeqCst) {
+                match fsm.lock().finish_if_open().and_then(|e| responses_event_to_sse_bytes(&e)) {
+                    Some(b) => b,
+                    None => Bytes::new(),
+                }
+            } else {
+                Bytes::new()
+            };
+            Ok::<_, E>(synthetic)
+        }))
+        .boxed()
+}
+pub fn openai_sse_to_anthropic_stream<S, E>(
+    stream: S,
+    fallback_model: &str,
+) -> impl Stream<Item = Result<Bytes, E>>
+where
+    S: Stream<Item = Result<Bytes, E>> + Send + 'static,
+    E: Send + 'static,
+{
+    let fsm = std::sync::Arc::new(Mutex::new(ChatStreamToAnthropicFsm::new(fallback_model)));
+    let fsm_flat = fsm.clone();
+    // Track whether the FSM already emitted message_stop; if the upstream never
+    // sends a finish_reason chunk, we synthesize the terminal events at EOF so
+    // Anthropic clients never hang waiting for the message to conclude.
+    // Transport errors latch `stopped` too so EOF never appends success frames.
+    let stopped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stopped_flag = stopped.clone();
+
+    let translated = sse_event_stream(stream).flat_map(move |res| {
+        let mut out: Vec<Result<Bytes, E>> = Vec::new();
+        match res {
+            Ok(evt) => {
+                let data = evt.data.trim();
+                if data.is_empty() || data == "[DONE]" {
+                    // terminal / heartbeat frame: nothing to forward
+                } else if let Ok(chunk) = serde_json::from_str::<ChatCompletionChunk>(data) {
+                    if let Ok(events) = fsm_flat.lock().process_chunk(chunk) {
+                        for e in events {
+                            if matches!(e, MessageStreamEvent::MessageStop) {
+                                stopped_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                            }
+                            if let Some(b) = anthropic_event_to_sse_bytes(&e) {
+                                out.push(Ok(b));
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                stopped_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                out.push(Err(e));
+            }
+        }
+        let iter = futures_util::stream::iter(out);
+        futures_util::stream::BoxStream::from(Box::pin(iter)
+            as std::pin::Pin<Box<dyn futures_util::Stream<Item = Result<Bytes, E>> + Send>>)
+    });
+
+    // At stream end, guarantee the Anthropic conversation terminates unless a
+    // transport error already ended it with failure.
+    translated
+        .chain(futures_util::stream::once(async move {
+            let synthetic = if !stopped.load(std::sync::atomic::Ordering::SeqCst) {
+                match fsm.lock().finish_if_open() {
+                    Some(events) => {
+                        let mut buf = Vec::new();
+                        for e in &events {
+                            if let Some(b) = anthropic_event_to_sse_bytes(e) {
+                                buf.extend_from_slice(&b);
+                            }
+                        }
+                        Bytes::from(buf)
+                    }
+                    None => Bytes::new(),
+                }
+            } else {
+                Bytes::new()
+            };
+            Ok::<_, E>(synthetic)
         }))
         .boxed()
 }
@@ -225,41 +486,39 @@ where
 pub fn anthropic_sse_to_openai_stream<S, E>(
     stream: S,
     fallback_model: &str,
-) -> impl Stream<Item = Result<Bytes, std::convert::Infallible>>
+) -> impl Stream<Item = Result<Bytes, E>>
 where
     S: Stream<Item = Result<Bytes, E>> + Send + 'static,
     E: Send + 'static,
 {
     let mut fsm = AnthropicStreamToChatFsm::new(fallback_model);
     let translated = sse_event_stream(stream).flat_map(move |res| {
-        let mut out: Vec<Bytes> = Vec::new();
+        let mut out: Vec<Result<Bytes, E>> = Vec::new();
         match res {
             Ok(evt) => {
                 if let Ok(msge) = serde_json::from_str::<MessageStreamEvent>(&evt.data) {
                     if let Ok(chunks) = fsm.process_event(msge) {
                         for c in chunks {
                             if let Ok(json) = serde_json::to_string(&c) {
-                                out.push(Bytes::from(format!("data: {}\n\n", json)));
+                                out.push(Ok(Bytes::from(format!("data: {}\n\n", json))));
                             }
                         }
                     }
                 }
             }
-            Err(_) => {
-                out.push(Bytes::from(
-                    "data: {\"error\":{\"message\":\"stream read error\",\"type\":\"upstream_error\"}}\n\n",
-                ));
+            Err(e) => {
+                out.push(Err(e));
             }
         }
-        let iter = futures_util::stream::iter(out.into_iter().map(Ok::<_, std::convert::Infallible>));
+        let iter = futures_util::stream::iter(out);
         futures_util::stream::BoxStream::from(Box::pin(iter)
-            as std::pin::Pin<Box<dyn futures_util::Stream<Item = Result<Bytes, std::convert::Infallible>> + Send>>)
+            as std::pin::Pin<Box<dyn futures_util::Stream<Item = Result<Bytes, E>> + Send>>)
     });
 
     // OpenAI streams must terminate with `data: [DONE]`.
     translated
         .chain(futures_util::stream::once(async {
-            Ok::<_, std::convert::Infallible>(Bytes::from("data: [DONE]\n\n"))
+            Ok::<_, E>(Bytes::from("data: [DONE]\n\n"))
         }))
         .boxed()
 }
@@ -548,8 +807,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_extract_event_split_across_chunks() {
-        let s = bytes_stream(vec![
+    async fn test_extract_event_split_across_chunks() {        let s = bytes_stream(vec![
             Bytes::from_static(b"data: {\"a\":1}\n"),
             Bytes::from_static(b"\ndata: {\"b\":2}\n\n"),
         ]);
@@ -598,6 +856,33 @@ mod tests {
             .await;
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].data, "line1\nline2");
+    }
+
+    #[tokio::test]
+    async fn test_eof_partial_frame_is_discarded() {
+        let s = bytes_stream(vec![Bytes::from_static(b"data: truncated-without-blank-line")]);
+        let events: Vec<SseEvent> = sse_event_stream(s)
+            .map(|r| r.unwrap())
+            .collect()
+            .await;
+        assert!(events.is_empty(), "partial EOF frame must not surface: {events:?}");
+    }
+
+    #[tokio::test]
+    async fn test_oversized_frame_is_shed_and_stream_survives() {
+        let big = vec![b'x'; MAX_SSE_FRAME_BYTES + 1024];
+        let mut first = b"data: ".to_vec();
+        first.extend_from_slice(&big);
+        let s = bytes_stream(vec![
+            Bytes::from(first),
+            Bytes::from_static(b"data: ok\n\n"),
+        ]);
+        let events: Vec<SseEvent> = sse_event_stream(s)
+            .map(|r| r.unwrap())
+            .collect()
+            .await;
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].data, "ok");
     }
 
     #[tokio::test]
@@ -712,5 +997,153 @@ mod tests {
         let flow = done.stream_flow.as_ref().expect("flow detail kept");
         assert_eq!(flow.chunks, Some(3));
         assert!(flow.ttft_ms.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_responses_to_chat_stream_wrapper() {
+        let created = format!(
+            "event: response.created\ndata: {}\n\n",
+            serde_json::json!({
+                "type": "response.created",
+                "response": {"id": "resp_1", "object": "response", "status": "in_progress", "model": "m", "output": []}
+            })
+        );
+        let delta = format!(
+            "event: response.output_text.delta\ndata: {}\n\n",
+            serde_json::json!({
+                "type": "response.output_text.delta",
+                "response_id": "resp_1", "item_id": "it_0",
+                "output_index": 0, "content_index": 0, "delta": "hello"
+            })
+        );
+        let done = format!(
+            "event: response.completed\ndata: {}\n\n",
+            serde_json::json!({
+                "type": "response.completed",
+                "response": {"id": "resp_1", "object": "response", "status": "completed", "model": "m",
+                    "output": [], "usage": {"total_tokens": 9, "input_tokens": 6, "output_tokens": 3}}
+            })
+        );
+        let s = bytes_stream(vec![Bytes::from(created), Bytes::from(delta), Bytes::from(done)]);
+        let out: Vec<String> = responses_sse_to_chat_stream(s, "m")
+            .map(|r| String::from_utf8_lossy(&r.unwrap()).to_string())
+            .collect()
+            .await;
+        let joined = out.join("");
+        assert!(joined.contains("\"content\":\"hello\""), "missing text chunk: {joined}");
+        assert!(joined.contains("\"finish_reason\":\"stop\""), "missing finish: {joined}");
+        assert!(out.last().unwrap().contains("[DONE]"), "missing [DONE]");
+    }
+
+    #[tokio::test]
+    async fn test_chat_to_responses_stream_wrapper() {
+        let chunk = serde_json::json!({
+            "id": "chatcmpl-1", "object": "chat.completion.chunk", "created": 1,
+            "model": "m",
+            "choices": [{"index": 0, "delta": {"content": "hi"}, "finish_reason": null}]
+        });
+        let fin = serde_json::json!({
+            "id": "chatcmpl-1", "object": "chat.completion.chunk", "created": 1,
+            "model": "m",
+            "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]
+        });
+        let s = bytes_stream(vec![
+            Bytes::from(format!("data: {}\n\n", chunk)),
+            Bytes::from(format!("data: {}\n\n", fin)),
+        ]);
+        let out: Vec<String> = chat_sse_to_responses_stream(s, "m")
+            .map(|r| String::from_utf8_lossy(&r.unwrap()).to_string())
+            .collect()
+            .await;
+        let joined = out.join("");
+        assert!(joined.contains("event: response.created"), "missing created: {joined}");
+        assert!(joined.contains("event: response.output_text.delta"), "missing delta: {joined}");
+        assert!(joined.contains("event: response.completed"), "missing completed: {joined}");
+    }
+
+    #[tokio::test]
+    async fn test_chat_to_responses_synthesizes_completed_at_eof() {
+        let chunk = serde_json::json!({
+            "id": "chatcmpl-9", "object": "chat.completion.chunk", "created": 1,
+            "model": "m",
+            "choices": [{"index": 0, "delta": {"content": "hi"}, "finish_reason": null}]
+        });
+        let s = bytes_stream(vec![Bytes::from(format!("data: {}\n\n", chunk))]);
+        let out: Vec<String> = chat_sse_to_responses_stream(s, "m")
+            .map(|r| String::from_utf8_lossy(&r.unwrap()).to_string())
+            .collect()
+            .await;
+        let joined = out.join("");
+        assert!(joined.contains("event: response.completed"), "missing synthesized completed: {joined}");
+    }
+
+    #[tokio::test]
+    async fn test_responses_to_anthropic_stream_wrapper() {
+        let created = format!(
+            "event: response.created\ndata: {}\n\n",
+            serde_json::json!({
+                "type": "response.created",
+                "response": {"id": "resp_2", "object": "response", "status": "in_progress", "model": "m", "output": []}
+            })
+        );
+        let delta = format!(
+            "event: response.output_text.delta\ndata: {}\n\n",
+            serde_json::json!({
+                "type": "response.output_text.delta",
+                "response_id": "resp_2", "item_id": "it_0",
+                "output_index": 0, "content_index": 0, "delta": "yo"
+            })
+        );
+        let done = format!(
+            "event: response.completed\ndata: {}\n\n",
+            serde_json::json!({
+                "type": "response.completed",
+                "response": {"id": "resp_2", "object": "response", "status": "completed", "model": "m",
+                    "output": [], "usage": {"total_tokens": 5, "input_tokens": 3, "output_tokens": 2}}
+            })
+        );
+        let s = bytes_stream(vec![Bytes::from(created), Bytes::from(delta), Bytes::from(done)]);
+        let out: Vec<String> = responses_sse_to_anthropic_stream(s, "m")
+            .map(|r| String::from_utf8_lossy(&r.unwrap()).to_string())
+            .collect()
+            .await;
+        let joined = out.join("");
+        assert!(joined.contains("event: message_start"), "missing start: {joined}");
+        assert!(joined.contains("content_block_delta"), "missing delta: {joined}");
+        assert!(joined.contains("event: message_stop"), "missing stop: {joined}");
+    }
+
+    #[tokio::test]
+    async fn test_anthropic_to_responses_stream_wrapper() {
+        let start = format!(
+            "event: message_start\ndata: {}\n\n",
+            serde_json::json!({
+                "type": "message_start",
+                "message": {"id": "msg_3", "type": "message", "role": "assistant",
+                            "content": [], "model": "m", "stop_reason": null,
+                            "stop_sequence": null, "usage": {"input_tokens": 1, "output_tokens": 0}}
+            })
+        );
+        let delta = format!(
+            "event: content_block_delta\ndata: {}\n\n",
+            serde_json::json!({
+                "type": "content_block_delta", "index": 0,
+                "delta": {"type": "text_delta", "text": "hey"}
+            })
+        );
+        let stop = "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
+        let s = bytes_stream(vec![
+            Bytes::from(start),
+            Bytes::from(delta),
+            Bytes::from_static(stop.as_bytes()),
+        ]);
+        let out: Vec<String> = anthropic_sse_to_responses_stream(s, "m")
+            .map(|r| String::from_utf8_lossy(&r.unwrap()).to_string())
+            .collect()
+            .await;
+        let joined = out.join("");
+        assert!(joined.contains("event: response.created"), "missing created: {joined}");
+        assert!(joined.contains("event: response.output_text.delta"), "missing delta: {joined}");
+        assert!(joined.contains("event: response.completed"), "missing completed: {joined}");
     }
 }

@@ -27,6 +27,7 @@ fn test_model_spec_pricing_inheritance_and_override() {
                 input_price: None,
                 cached_price: None,
                 output_price: None,
+                protocol: None,
             },
             // deepseek-reasoner has higher custom pricing with special cached price
             ModelSpec {
@@ -40,8 +41,13 @@ fn test_model_spec_pricing_inheritance_and_override() {
                 input_price: Some(0.55),
                 cached_price: Some(0.14),
                 output_price: Some(2.19),
+                protocol: None,
             },
         ],
+        default_protocol: None,
+        chat_url: None,
+        responses_url: None,
+        messages_url: None,
     };
 
     // 1. deepseek-chat should inherit provider default
@@ -90,8 +96,13 @@ fn test_economy_routing_respects_model_level_pricing() {
                 input_price: Some(2.0),
                 cached_price: Some(1.0),
                 output_price: Some(4.0),
+                protocol: None,
             }
         ],
+        default_protocol: None,
+        chat_url: None,
+        responses_url: None,
+        messages_url: None,
     };
 
     // Provider B: default is expensive (1.0), but special-model is discounted (0.3)
@@ -116,8 +127,13 @@ fn test_economy_routing_respects_model_level_pricing() {
                 input_price: Some(0.3),
                 cached_price: Some(0.05),
                 output_price: Some(0.6),
+                protocol: None,
             }
         ],
+        default_protocol: None,
+        chat_url: None,
+        responses_url: None,
+        messages_url: None,
     };
 
     providers.insert("provider_a".to_string(), p_a);
@@ -164,6 +180,7 @@ fn test_pricing_anti_inversion_and_free_model_preservation() {
                 input_price: Some(0.15),
                 cached_price: None,
                 output_price: None,
+                protocol: None,
             },
             // free-trial has input_price = 0.0; cached_price must be 0.0, output inherits or is 0
             ModelSpec {
@@ -177,8 +194,13 @@ fn test_pricing_anti_inversion_and_free_model_preservation() {
                 input_price: Some(0.0),
                 cached_price: None,
                 output_price: Some(0.0),
+                protocol: None,
             },
         ],
+        default_protocol: None,
+        chat_url: None,
+        responses_url: None,
+        messages_url: None,
     };
 
     let mini_pricing = p.get_model_pricing("mini");
@@ -229,6 +251,10 @@ fn test_hot_cache_probe_guides_economy_routing() {
         output_price: 2.00,
         models: vec!["chat".to_string()],
         model_specs: vec![],
+        default_protocol: None,
+        chat_url: None,
+        responses_url: None,
+        messages_url: None,
     };
 
     // Provider 2: Standard price $0.80, cached $0.40
@@ -242,6 +268,10 @@ fn test_hot_cache_probe_guides_economy_routing() {
         output_price: 2.00,
         models: vec!["chat".to_string()],
         model_specs: vec![],
+        default_protocol: None,
+        chat_url: None,
+        responses_url: None,
+        messages_url: None,
     };
 
     providers.insert("p1".to_string(), p1);

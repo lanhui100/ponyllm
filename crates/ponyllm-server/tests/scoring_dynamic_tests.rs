@@ -27,7 +27,12 @@ fn test_node_latency_metrics_dynamic_update_and_speed_scoring() {
             input_price: None,
             cached_price: None,
             output_price: None,
+            protocol: None,
         }],
+        default_protocol: None,
+        chat_url: None,
+        responses_url: None,
+        messages_url: None,
     };
 
     let p_slow = ProviderConfig {
@@ -50,7 +55,12 @@ fn test_node_latency_metrics_dynamic_update_and_speed_scoring() {
             input_price: None,
             cached_price: None,
             output_price: None,
+            protocol: None,
         }],
+        default_protocol: None,
+        chat_url: None,
+        responses_url: None,
+        messages_url: None,
     };
 
     providers.insert("fast_node".to_string(), p_fast);

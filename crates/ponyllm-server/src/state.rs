@@ -6,7 +6,7 @@ use ponyllm_core::executor::{EventSink, EventSinkCtx};
 use ponyllm_core::pool::{
     is_context_capacity_compatible, parse_context_capacity_tokens, BillingMode, EconomyScorer,
     GatewayRoutingStrategy, HotCacheTracker, KeyPool, ModelTier, NodeLatencyMetrics, PricingConfig,
-    SpeedScorer,
+    SpeedScorer, UpstreamProtocol,
 };
 use ponyllm_core::telemetry::{
     EventBus, EventCtx, MetricsCollector, MetricsProjection, StreamProjection,
@@ -23,10 +23,88 @@ pub struct RoutedTarget {
     pub physical_model: String,
     pub tier: ModelTier,
     pub strategy: GatewayRoutingStrategy,
-    pub is_anthropic_upstream: bool,
+    /// Effective native upstream protocol: request header > model override >
+    /// provider default > legacy URL heuristic.
+    pub upstream_protocol: UpstreamProtocol,
+    /// Configured per-protocol endpoint base, if the provider overrides it.
+    /// Routes fall back to `base_url` when `None`.
+    pub endpoint_base: Option<String>,
     pub context_window: String,
     pub billing_mode: BillingMode,
     pub pricing: PricingConfig,
+}
+
+impl RoutedTarget {
+    /// Upstream endpoint path for the resolved protocol: explicit per-protocol
+    /// base wins, otherwise the provider base with the legacy normalizers.
+    pub fn chat_completions_url(&self) -> String {
+        normalize_chat_completions_url(self.endpoint_base.as_deref().unwrap_or(&self.base_url))
+    }
+
+    pub fn responses_url(&self) -> String {
+        ponyllm_core::normalize_responses_url(
+            self.endpoint_base.as_deref().unwrap_or(&self.base_url),
+        )
+    }
+
+    pub fn messages_url(&self) -> String {
+        normalize_messages_url(self.endpoint_base.as_deref().unwrap_or(&self.base_url))
+    }
+}
+
+/// Legacy protocol guess preserved for zero-migration old configs that set
+/// neither provider `default_protocol` nor model `protocol`. Single unified
+/// heuristic for every routing branch: an `anthropic` path segment wins, else
+/// an `anthropic` provider name (outside `/v1/chat` bases) wins.
+fn infer_legacy_protocol(provider_name: &str, base_url: &str) -> UpstreamProtocol {
+    let is_ant = base_url.contains("anthropic")
+        || (provider_name.contains("anthropic") && !base_url.contains("v1/chat"));
+    if is_ant {
+        UpstreamProtocol::Anthropic
+    } else {
+        UpstreamProtocol::Chat
+    }
+}
+
+fn resolve_effective_protocol(
+    p_name: &str,
+    p_cfg: &ProviderConfig,
+    model_name: &str,
+    proto_override: Option<UpstreamProtocol>,
+        inbound: Option<UpstreamProtocol>,
+) -> (UpstreamProtocol, Option<String>) {
+    // Explicit request/model declarations always win outright.
+    if let Some(o) = proto_override {
+        return with_endpoint(p_cfg, o);
+    }
+    if let Some(m) = p_cfg.native_protocol(model_name) {
+        // Native passthrough preferred: an inbound protocol the provider
+        // natively serves (explicit endpoint override) beats the default.
+        if let Some(i) = inbound {
+            if i != m && p_cfg.endpoint_base_for(i).is_some() {
+                return with_endpoint(p_cfg, i);
+            }
+        }
+        return with_endpoint(p_cfg, m);
+    }
+    // No declarations: an inbound protocol with an explicit endpoint still
+    // signals native support and wins over the URL heuristic.
+    if let Some(i) = inbound {
+        if p_cfg.endpoint_base_for(i).is_some() {
+            return with_endpoint(p_cfg, i);
+        }
+    }
+    with_endpoint(
+        p_cfg,
+        infer_legacy_protocol(p_name, &p_cfg.base_url),
+    )
+}
+
+fn with_endpoint(p_cfg: &ProviderConfig, protocol: UpstreamProtocol) -> (UpstreamProtocol, Option<String>) {
+    let endpoint_base = p_cfg
+        .endpoint_base_for(protocol)
+        .map(|s| s.to_string());
+    (protocol, endpoint_base)
 }
 
 #[derive(Debug)]
@@ -151,6 +229,21 @@ impl AppState {
         header_strategy: Option<GatewayRoutingStrategy>,
         prompt: Option<&str>,
     ) -> Result<Vec<RoutedTarget>> {
+        self.resolve_routed_targets_with_prompt_and_protocol(parsed, header_strategy, prompt, None, None)
+    }
+
+    /// Same as above with an explicit per-request protocol override
+    /// (`x-pony-protocol` header; invalid values are ignored by the caller).
+    /// `inbound` is the entry protocol; same-native candidates win ties so
+    /// passthrough is preferred over translation without overriding strategy.
+    pub fn resolve_routed_targets_with_prompt_and_protocol(
+        &self,
+        parsed: &ParsedRequestModel,
+        header_strategy: Option<GatewayRoutingStrategy>,
+        prompt: Option<&str>,
+        proto_override: Option<UpstreamProtocol>,
+        inbound: Option<UpstreamProtocol>,
+    ) -> Result<Vec<RoutedTarget>> {
         let config = self.config.read();
         let strategy = parsed
             .strategy_override
@@ -160,9 +253,9 @@ impl AppState {
         let cached_provider = prompt.and_then(|p| self.hot_cache.probe_cached_provider(p));
 
         if parsed.is_auto {
-            self.resolve_auto_targets(parsed, strategy, &config, cached_provider.as_deref())
+            self.resolve_auto_targets(parsed, strategy, &config, cached_provider.as_deref(), proto_override, inbound)
         } else {
-            self.resolve_pinned_targets(parsed, strategy, &config, cached_provider.as_deref())
+            self.resolve_pinned_targets(parsed, strategy, &config, cached_provider.as_deref(), proto_override, inbound)
         }
     }
 
@@ -185,6 +278,8 @@ impl AppState {
         strategy: GatewayRoutingStrategy,
         config: &GatewayConfig,
         cached_provider: Option<&str>,
+        proto_override: Option<UpstreamProtocol>,
+        inbound: Option<UpstreamProtocol>,
     ) -> Result<Vec<RoutedTarget>> {
         let filter_1m = |c: &RoutedTarget| {
             if parsed.is_1m_context {
@@ -196,7 +291,7 @@ impl AppState {
 
         if let Some(explicit_tier) = parsed.explicit_tier {
             let candidates: Vec<RoutedTarget> = self
-                .collect_tier_candidates(explicit_tier, strategy, config)
+                .collect_tier_candidates(explicit_tier, strategy, config, proto_override, inbound)
                 .into_iter()
                 .filter(filter_1m)
                 .collect();
@@ -217,40 +312,40 @@ impl AppState {
                     )));
                 }
             }
-            return Ok(self.sort_candidates(candidates, strategy, config, cached_provider));
+            return Ok(self.sort_candidates(candidates, strategy, config, cached_provider, inbound));
         }
 
         // Default auto (no explicit tier): Try Standard -> Elevate to Flagship -> Fallback to Light
         let standard_candidates: Vec<RoutedTarget> = self
-            .collect_tier_candidates(ModelTier::Standard, strategy, config)
+            .collect_tier_candidates(ModelTier::Standard, strategy, config, proto_override, inbound)
             .into_iter()
             .filter(filter_1m)
             .collect();
 
         if !standard_candidates.is_empty() {
-            return Ok(self.sort_candidates(standard_candidates, strategy, config, cached_provider));
+            return Ok(self.sort_candidates(standard_candidates, strategy, config, cached_provider, inbound));
         }
 
         // Adaptive Tier Elevation: Elevate to Flagship if Standard has no matching (or 1M) nodes
         let flagship_candidates: Vec<RoutedTarget> = self
-            .collect_tier_candidates(ModelTier::Flagship, strategy, config)
+            .collect_tier_candidates(ModelTier::Flagship, strategy, config, proto_override, inbound)
             .into_iter()
             .filter(filter_1m)
             .collect();
 
         if !flagship_candidates.is_empty() {
-            return Ok(self.sort_candidates(flagship_candidates, strategy, config, cached_provider));
+            return Ok(self.sort_candidates(flagship_candidates, strategy, config, cached_provider, inbound));
         }
 
         // Fallback to Light tier
         let light_candidates: Vec<RoutedTarget> = self
-            .collect_tier_candidates(ModelTier::Light, strategy, config)
+            .collect_tier_candidates(ModelTier::Light, strategy, config, proto_override, inbound)
             .into_iter()
             .filter(filter_1m)
             .collect();
 
         if !light_candidates.is_empty() {
-            return Ok(self.sort_candidates(light_candidates, strategy, config, cached_provider));
+            return Ok(self.sort_candidates(light_candidates, strategy, config, cached_provider, inbound));
         }
 
         if parsed.is_1m_context {
@@ -272,6 +367,8 @@ impl AppState {
         strategy: GatewayRoutingStrategy,
         config: &GatewayConfig,
         cached_provider: Option<&str>,
+        proto_override: Option<UpstreamProtocol>,
+        inbound: Option<UpstreamProtocol>,
     ) -> Result<Vec<RoutedTarget>> {
         let clean = &parsed.clean_model_name;
         let mut candidates = Vec::new();
@@ -282,15 +379,16 @@ impl AppState {
                 let spec = p_cfg.get_model_spec(clean);
                 let pricing = p_cfg.get_model_pricing(clean);
                 let billing_mode = p_cfg.get_model_billing_mode(clean);
-                let is_ant = p_cfg.base_url.contains("anthropic")
-                    || (p_name.contains("anthropic") && !p_cfg.base_url.contains("v1/chat"));
+                let (protocol, endpoint_base) =
+                    resolve_effective_protocol(p_name, p_cfg, clean, proto_override, inbound);
                 candidates.push(RoutedTarget {
                     provider_name: p_name.clone(),
                     base_url: p_cfg.base_url.clone(),
                     physical_model: clean.clone(),
                     tier: spec.tier,
                     strategy,
-                    is_anthropic_upstream: is_ant,
+                    upstream_protocol: protocol,
+                    endpoint_base,
                     context_window: spec.context_window,
                     billing_mode,
                     pricing,
@@ -305,14 +403,16 @@ impl AppState {
                     let spec = p_cfg.get_model_spec(sub_model);
                     let pricing = p_cfg.get_model_pricing(sub_model);
                     let billing_mode = p_cfg.get_model_billing_mode(sub_model);
-                    let is_ant = p_cfg.base_url.contains("anthropic");
+                    let (protocol, endpoint_base) =
+                        resolve_effective_protocol(prefix, p_cfg, sub_model, proto_override, inbound);
                     candidates.push(RoutedTarget {
                         provider_name: prefix.to_string(),
                         base_url: p_cfg.base_url.clone(),
                         physical_model: sub_model.to_string(),
                         tier: spec.tier,
                         strategy,
-                        is_anthropic_upstream: is_ant,
+                        upstream_protocol: protocol,
+                        endpoint_base,
                         context_window: spec.context_window,
                         billing_mode,
                         pricing,
@@ -333,14 +433,16 @@ impl AppState {
                     let spec = p_cfg.get_model_spec(clean);
                     let pricing = p_cfg.get_model_pricing(clean);
                     let billing_mode = p_cfg.get_model_billing_mode(clean);
-                    let is_ant = p_cfg.base_url.contains("anthropic");
+                    let (protocol, endpoint_base) =
+                        resolve_effective_protocol(p_name, p_cfg, clean, proto_override, inbound);
                     candidates.push(RoutedTarget {
                         provider_name: p_name.clone(),
                         base_url: p_cfg.base_url.clone(),
                         physical_model: clean.clone(),
                         tier: spec.tier,
                         strategy,
-                        is_anthropic_upstream: is_ant,
+                        upstream_protocol: protocol,
+                        endpoint_base,
                         context_window: spec.context_window,
                         billing_mode,
                         pricing,
@@ -371,7 +473,7 @@ impl AppState {
             }
         }
 
-        Ok(self.sort_candidates(candidates, strategy, config, cached_provider))
+        Ok(self.sort_candidates(candidates, strategy, config, cached_provider, inbound))
     }
 
     fn collect_tier_candidates(
@@ -379,6 +481,8 @@ impl AppState {
         tier: ModelTier,
         strategy: GatewayRoutingStrategy,
         config: &GatewayConfig,
+        proto_override: Option<UpstreamProtocol>,
+        inbound: Option<UpstreamProtocol>,
     ) -> Vec<RoutedTarget> {
         let mut candidates = Vec::new();
         for (p_name, p_cfg) in &config.providers {
@@ -386,14 +490,15 @@ impl AppState {
             let default_pricing = p_cfg.get_model_pricing(&p_cfg.default_model);
             let default_billing = p_cfg.get_model_billing_mode(&p_cfg.default_model);
             if default_spec.tier == tier {
-                let is_ant = p_cfg.base_url.contains("anthropic");
+                let (protocol, endpoint_base) = resolve_effective_protocol(p_name, p_cfg, &p_cfg.default_model, proto_override, inbound);
                 candidates.push(RoutedTarget {
                     provider_name: p_name.clone(),
                     base_url: p_cfg.base_url.clone(),
                     physical_model: p_cfg.default_model.clone(),
                     tier,
                     strategy,
-                    is_anthropic_upstream: is_ant,
+                    upstream_protocol: protocol,
+                    endpoint_base,
                     context_window: default_spec.context_window,
                     billing_mode: default_billing,
                     pricing: default_pricing,
@@ -405,14 +510,16 @@ impl AppState {
                     let m_pricing = p_cfg.get_model_pricing(m);
                     let m_billing = p_cfg.get_model_billing_mode(m);
                     if spec.tier == tier {
-                        let is_ant = p_cfg.base_url.contains("anthropic");
+                        let (protocol, endpoint_base) =
+                            resolve_effective_protocol(p_name, p_cfg, m, proto_override, inbound);
                         candidates.push(RoutedTarget {
                             provider_name: p_name.clone(),
                             base_url: p_cfg.base_url.clone(),
                             physical_model: m.clone(),
                             tier,
                             strategy,
-                            is_anthropic_upstream: is_ant,
+                            upstream_protocol: protocol,
+                            endpoint_base,
                             context_window: spec.context_window,
                             billing_mode: m_billing,
                             pricing: m_pricing,
@@ -430,68 +537,97 @@ impl AppState {
         strategy: GatewayRoutingStrategy,
         _config: &GatewayConfig,
         cached_provider: Option<&str>,
+        inbound: Option<UpstreamProtocol>,
     ) -> Vec<RoutedTarget> {
+        // Passthrough-first tiebreak: stable native-first order BEFORE the
+        // strategy sort, so strategy stays primary and same-native wins ties.
+        if let Some(inbound) = inbound {
+            candidates.sort_by_key(|c| c.upstream_protocol != inbound);
+        }
+        // Decorate-Sort-Undecorate: snapshot every dynamic signal once per
+        // candidate so comparators stay pure functions (strict weak ordering
+        // holds even while pools and latency metrics mutate concurrently).
         match strategy {
             GatewayRoutingStrategy::Economy => {
-                candidates.sort_by(|a, b| {
-                    let is_cached_a = cached_provider.map(|p| p == a.provider_name).unwrap_or(false);
-                    let is_cached_b = cached_provider.map(|p| p == b.provider_name).unwrap_or(false);
-                    let score_a = EconomyScorer::score_candidate(&a.pricing, a.billing_mode, is_cached_a, 10_000, 1000);
-                    let score_b = EconomyScorer::score_candidate(&b.pricing, b.billing_mode, is_cached_b, 10_000, 1000);
-                    score_a.total_cmp(&score_b)
-                });
+                let mut keyed: Vec<(f64, RoutedTarget)> = candidates
+                    .into_iter()
+                    .map(|c| {
+                        let cached = cached_provider.map(|p| p == c.provider_name).unwrap_or(false);
+                        let score = EconomyScorer::score_candidate(
+                            &c.pricing,
+                            c.billing_mode,
+                            cached,
+                            10_000,
+                            1000,
+                        );
+                        (score, c)
+                    })
+                    .collect();
+                keyed.sort_by(|a, b| a.0.total_cmp(&b.0));
+                keyed.into_iter().map(|(_, c)| c).collect()
             }
             GatewayRoutingStrategy::Speed => {
-                candidates.sort_by(|a, b| {
-                    let metrics_a = self.get_or_create_node_metrics(&a.provider_name);
-                    let metrics_b = self.get_or_create_node_metrics(&b.provider_name);
-                    let lat_a = SpeedScorer::estimate_total_latency_ms(&metrics_a, 512);
-                    let lat_b = SpeedScorer::estimate_total_latency_ms(&metrics_b, 512);
-                    lat_a.total_cmp(&lat_b)
-                });
+                let mut keyed: Vec<(f64, RoutedTarget)> = candidates
+                    .into_iter()
+                    .map(|c| {
+                        let metrics = self.get_or_create_node_metrics(&c.provider_name);
+                        (SpeedScorer::estimate_total_latency_ms(&metrics, 512), c)
+                    })
+                    .collect();
+                keyed.sort_by(|a, b| a.0.total_cmp(&b.0));
+                keyed.into_iter().map(|(_, c)| c).collect()
             }
             GatewayRoutingStrategy::Balanced => {
-                candidates.sort_by(|a, b| {
-                    let is_cached_a = cached_provider.map(|p| p == a.provider_name).unwrap_or(false);
-                    let is_cached_b = cached_provider.map(|p| p == b.provider_name).unwrap_or(false);
-                    let score_a = EconomyScorer::score_candidate(&a.pricing, a.billing_mode, is_cached_a, 10_000, 1000);
-                    let score_b = EconomyScorer::score_candidate(&b.pricing, b.billing_mode, is_cached_b, 10_000, 1000);
-
-                    let metrics_a = self.get_or_create_node_metrics(&a.provider_name);
-                    let metrics_b = self.get_or_create_node_metrics(&b.provider_name);
-                    let lat_a = SpeedScorer::estimate_total_latency_ms(&metrics_a, 512);
-                    let lat_b = SpeedScorer::estimate_total_latency_ms(&metrics_b, 512);
-
-                    let combined_a = score_a + (lat_a / 1000.0) * 0.1;
-                    let combined_b = score_b + (lat_b / 1000.0) * 0.1;
-                    combined_a.total_cmp(&combined_b)
-                });
+                let mut keyed: Vec<(f64, RoutedTarget)> = candidates
+                    .into_iter()
+                    .map(|c| {
+                        let cached = cached_provider.map(|p| p == c.provider_name).unwrap_or(false);
+                        let score = EconomyScorer::score_candidate(
+                            &c.pricing,
+                            c.billing_mode,
+                            cached,
+                            10_000,
+                            1000,
+                        );
+                        let metrics = self.get_or_create_node_metrics(&c.provider_name);
+                        let lat = SpeedScorer::estimate_total_latency_ms(&metrics, 512);
+                        (score + (lat / 1000.0) * 0.1, c)
+                    })
+                    .collect();
+                keyed.sort_by(|a, b| a.0.total_cmp(&b.0));
+                keyed.into_iter().map(|(_, c)| c).collect()
             }
             GatewayRoutingStrategy::Reliable => {
-                candidates.sort_by(|a, b| {
-                    let pool_a = self.get_pool(&a.provider_name);
-                    let pool_b = self.get_pool(&b.provider_name);
-                    let active_a = pool_a.map(|p| p.active_key_count()).unwrap_or(0);
-                    let active_b = pool_b.map(|p| p.active_key_count()).unwrap_or(0);
-                    active_b.cmp(&active_a)
-                });
+                let mut keyed: Vec<(usize, RoutedTarget)> = candidates
+                    .into_iter()
+                    .map(|c| {
+                        let active = self
+                            .get_pool(&c.provider_name)
+                            .map(|p| p.active_key_count())
+                            .unwrap_or(0);
+                        (active, c)
+                    })
+                    .collect();
+                keyed.sort_by_key(|b| std::cmp::Reverse(b.0));
+                keyed.into_iter().map(|(_, c)| c).collect()
             }
         }
-        candidates
     }
 
-    /// List all exposed models: virtual auto models and physical configured models
-    pub fn list_all_models(&self) -> Vec<(String, String, Option<String>)> {
+    /// List all exposed models: virtual auto models and physical configured models.
+    /// The fourth tuple element is the effective native protocol (`chat` by
+    /// default; `auto` for virtual models whose protocol resolves per request).
+    pub fn list_all_models(&self) -> Vec<(String, String, Option<String>, String)> {
         let mut result = Vec::new();
         let mut seen = std::collections::HashSet::new();
 
         // 1. auto virtual models
-        result.push(("auto".to_string(), "ponyllm".to_string(), Some("PonyLLM Auto (智能总代·主力默认)".to_string())));
-        result.push(("auto:standard".to_string(), "ponyllm".to_string(), Some("PonyLLM Auto (智能总代·主力)".to_string())));
-        result.push(("auto:flagship".to_string(), "ponyllm".to_string(), Some("PonyLLM Auto (智能总代·旗舰)".to_string())));
-        result.push(("auto:economy".to_string(), "ponyllm".to_string(), Some("PonyLLM Auto (智能总代·省钱模式)".to_string())));
-        result.push(("auto:fastest".to_string(), "ponyllm".to_string(), Some("PonyLLM Auto (智能总代·极速模式)".to_string())));
-        result.push(("auto[1m]".to_string(), "ponyllm".to_string(), Some("PonyLLM Auto (智能总代·1M长上下文)".to_string())));
+        result.push(("auto".to_string(), "ponyllm".to_string(), Some("Auto(智能·主力默认)".to_string()), "auto".to_string()));
+        result.push(("auto:standard".to_string(), "ponyllm".to_string(), Some("Auto(智能·主力)".to_string()), "auto".to_string()));
+        result.push(("auto:flagship".to_string(), "ponyllm".to_string(), Some("Auto(智能·旗舰)".to_string()), "auto".to_string()));
+        result.push(("auto:economy".to_string(), "ponyllm".to_string(), Some("Auto(智能·省钱)".to_string()), "auto".to_string()));
+        result.push(("auto:fastest".to_string(), "ponyllm".to_string(), Some("Auto(智能·极速)".to_string()), "auto".to_string()));
+        result.push(("auto[1m]".to_string(), "ponyllm".to_string(), Some("Auto(智能·1M长上下文)".to_string()), "auto".to_string()));
 
         seen.insert("auto".to_string());
         seen.insert("auto:standard".to_string());
@@ -504,15 +640,21 @@ impl AppState {
         let config = self.config.read();
         for (provider_name, cfg) in &config.providers {
             let mut add_model_and_alias = |m: &str| {
+                let proto = cfg
+                    .native_protocol(m)
+                    .map(|p| p.to_string())
+                    .unwrap_or_else(|| {
+                        infer_legacy_protocol(provider_name, &cfg.base_url).to_string()
+                    });
                 if !seen.contains(m) {
-                    result.push((m.to_string(), provider_name.clone(), None));
+                    result.push((m.to_string(), provider_name.clone(), None, proto.clone()));
                     seen.insert(m.to_string());
                 }
                 let spec = cfg.get_model_spec(m);
                 if parse_context_capacity_tokens(&spec.context_window) >= 1048576 {
                     let alias_1m = format!("{}[1m]", m);
                     if !seen.contains(&alias_1m) {
-                        result.push((alias_1m.clone(), provider_name.clone(), Some(format!("{} (1M 长上下文)", m))));
+                        result.push((alias_1m.clone(), provider_name.clone(), Some(format!("{} (1M 长上下文)", m)), proto));
                         seen.insert(alias_1m);
                     }
                 }
@@ -543,24 +685,6 @@ impl AppState {
     }
 }
 
-pub fn normalize_chat_completions_url(base_url: &str) -> String {
-    let trimmed = base_url.trim_end_matches('/');
-    if trimmed.ends_with("/chat/completions") {
-        trimmed.to_string()
-    } else if trimmed.ends_with("/v1") {
-        format!("{}/chat/completions", trimmed)
-    } else {
-        format!("{}/v1/chat/completions", trimmed)
-    }
-}
-
-pub fn normalize_messages_url(base_url: &str) -> String {
-    let trimmed = base_url.trim_end_matches('/');
-    if trimmed.ends_with("/messages") {
-        trimmed.to_string()
-    } else if trimmed.ends_with("/v1") {
-        format!("{}/messages", trimmed)
-    } else {
-        format!("{}/v1/messages", trimmed)
-    }
-}
+pub use ponyllm_core::{
+    normalize_chat_completions_url, normalize_messages_url, normalize_responses_url,
+};

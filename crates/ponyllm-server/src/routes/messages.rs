@@ -10,7 +10,7 @@ use ponyllm_core::pool::GatewayRoutingStrategy;
 use ponyllm_core::telemetry::{EventCtx, GatewayEvent, StageTimings};
 use ponyllm_protocol::anthropic::messages::{MessageRequest, MessageResponse};
 use ponyllm_protocol::openai::chat::ChatCompletionResponse;
-use ponyllm_protocol::translator::{anthropic_to_chat_request, chat_to_anthropic_response};
+use ponyllm_protocol::translator::{anthropic_to_chat_request, anthropic_to_responses_request, chat_to_anthropic_response, responses_to_anthropic_response};
 use parking_lot::Mutex;
 use std::str::FromStr;
 use crate::extractors::AppJson;
@@ -18,8 +18,8 @@ use crate::routes::chat::{inject_routing_headers, inject_telemetry_headers};
 use crate::routes::models::ParsedRequestModel;
 use crate::state::AppState;
 use crate::streaming::{
-    openai_sse_to_anthropic_stream, passthrough_sse, wrap_telemetry_stream,
-    StreamFailureContext,
+    openai_sse_to_anthropic_stream, passthrough_sse,
+    responses_sse_to_anthropic_stream, wrap_telemetry_stream, StreamFailureContext,
 };
 use ponyllm_protocol::anthropic::messages::{AnthropicSystem, AnthropicSystemBlock};
 
@@ -84,7 +84,7 @@ pub async fn handle_messages(
     // 3. Resolve ranked target providers for multi-provider transparent failover (with hot cache probe)
     let prompt_hint = extract_anthropic_prompt(&req);
     let routing_start = Instant::now();
-    let targets = match state.resolve_routed_targets_with_prompt(&parsed, header_strategy, prompt_hint.as_deref()) {
+    let targets = match state.resolve_routed_targets_with_prompt_and_protocol(&parsed, header_strategy, prompt_hint.as_deref(), crate::extractors::parse_protocol_header(&headers), Some(ponyllm_core::pool::UpstreamProtocol::Anthropic)) {
         Ok(ts) if !ts.is_empty() => ts,
         Ok(_) => {
             return (
@@ -123,6 +123,7 @@ pub async fn handle_messages(
 
     let is_streaming = req.stream.unwrap_or(false);
     let mut last_error = String::new();
+    let mut last_pool_exhausted = false;
     let mut last_kind = ponyllm_core::error::GatewayErrorKind::Internal;
     let mut last_req_snippet: Option<String> = None;
 
@@ -133,7 +134,7 @@ pub async fn handle_messages(
         Some(targets[0].provider_name.clone()),
         GatewayEvent::RouteResolved {
             provider: targets[0].provider_name.clone(),
-            translated: !targets[0].is_anthropic_upstream,
+            translated: targets[0].upstream_protocol != ponyllm_core::pool::UpstreamProtocol::Anthropic,
             routing_ms,
         },
     );
@@ -145,13 +146,68 @@ pub async fn handle_messages(
         };
 
         let max_retries = state.config.read().max_retries;
-        let is_anthropic_upstream = target.is_anthropic_upstream;
 
         let mut target_req = req.clone();
         target_req.model = target.physical_model.clone();
 
-        let (target_url, req_val) = if is_anthropic_upstream {
-            let url = crate::state::normalize_messages_url(&target.base_url);
+        let (target_url, req_val) = match target.upstream_protocol {
+            ponyllm_core::pool::UpstreamProtocol::Responses => {
+                let url = target.responses_url();
+                let resp_req = match anthropic_to_responses_request(&target_req) {
+                    Ok(rr) => rr,
+                    Err(e) => {
+                        last_error = format!("Translation error for {}: {}", target.provider_name, e);
+                        continue;
+                    }
+                };
+                // Images cannot survive translation to Responses input items;
+                // image-only requests must fail here, not as empty upstream input.
+                let input_has_content = match &resp_req.input {
+                    ponyllm_protocol::openai::responses::ResponseInput::Text(t) => !t.trim().is_empty(),
+                    ponyllm_protocol::openai::responses::ResponseInput::Items(items) => !items.is_empty(),
+                };
+                if !input_has_content || !ponyllm_protocol::translator::responses_request_has_text(&resp_req) {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({
+                            "type": "error",
+                            "error": {
+                                "type": "invalid_request_error",
+                                "message": "Image-only requests cannot be translated to Responses upstream"
+                            }
+                        })),
+                    )
+                        .into_response();
+                }
+                let val = match serde_json::to_value(&resp_req) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        last_error = format!("Serialization error for {}: {}", target.provider_name, e);
+                        continue;
+                    }
+                };
+                (url, val)
+            }
+            ponyllm_core::pool::UpstreamProtocol::Chat => {
+                let url = target.chat_completions_url();
+                let chat_req = match anthropic_to_chat_request(&target_req) {
+                    Ok(cr) => cr,
+                    Err(e) => {
+                        last_error = format!("Translation error for {}: {}", target.provider_name, e);
+                        continue;
+                    }
+                };
+                let val = match serde_json::to_value(&chat_req) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        last_error = format!("Serialization error for {}: {}", target.provider_name, e);
+                        continue;
+                    }
+                };
+                (url, val)
+            }
+            ponyllm_core::pool::UpstreamProtocol::Anthropic => {
+                let url = target.messages_url();
             // Sanitize messages for strict Anthropic upstreams:
             // Extract any AnthropicRole::System messages into target_req.system,
             // and normalize Unknown roles to User so upstream never throws 400.
@@ -195,26 +251,12 @@ pub async fn handle_messages(
                 }
             };
             (url, val)
-        } else {
-            let url = crate::state::normalize_chat_completions_url(&target.base_url);
-            let chat_req = match anthropic_to_chat_request(&target_req) {
-                Ok(cr) => cr,
-                Err(e) => {
-                    last_error = format!("Translation error for {}: {}", target.provider_name, e);
-                    continue;
-                }
-            };
-            let val = match serde_json::to_value(&chat_req) {
-                Ok(v) => v,
-                Err(e) => {
-                    last_error = format!("Serialization error for {}: {}", target.provider_name, e);
-                    continue;
-                }
-            };
-            (url, val)
+            }
         };
 
-        let req_snippet = serde_json::to_string(&target_req).ok();
+        // Forensics snippet must be the actual upstream wire JSON, not the
+        // inbound Anthropic shape, so frames replay what was really sent.
+        let req_snippet = Some(req_val.to_string());
         last_req_snippet = req_snippet.clone();
 
         // Every per-key retry inside the executor reports through this observer,
@@ -257,17 +299,28 @@ pub async fn handle_messages(
                         stages: stages.clone(),
                         request_snippet: req_snippet.clone(),
                     };
-                    let body = if is_anthropic_upstream {
-                        let stream = passthrough_sse(raw_stream);
-                        let monitored = wrap_telemetry_stream(stream, failure_ctx);
-                        axum::body::Body::from_stream(monitored)
-                    } else {
-                        let stream = openai_sse_to_anthropic_stream(
-                            raw_stream,
-                            &target.physical_model,
-                        );
-                        let monitored = wrap_telemetry_stream(stream, failure_ctx);
-                        axum::body::Body::from_stream(monitored)
+                    let body = match target.upstream_protocol {
+                        ponyllm_core::pool::UpstreamProtocol::Anthropic => {
+                            let stream = passthrough_sse(raw_stream);
+                            let monitored = wrap_telemetry_stream(stream, failure_ctx);
+                            axum::body::Body::from_stream(monitored)
+                        }
+                        ponyllm_core::pool::UpstreamProtocol::Responses => {
+                            let stream = responses_sse_to_anthropic_stream(
+                                raw_stream,
+                                &target.physical_model,
+                            );
+                            let monitored = wrap_telemetry_stream(stream, failure_ctx);
+                            axum::body::Body::from_stream(monitored)
+                        }
+                        ponyllm_core::pool::UpstreamProtocol::Chat => {
+                            let stream = openai_sse_to_anthropic_stream(
+                                raw_stream,
+                                &target.physical_model,
+                            );
+                            let monitored = wrap_telemetry_stream(stream, failure_ctx);
+                            axum::body::Body::from_stream(monitored)
+                        }
                     };
 
                     let mut resp = axum::response::Response::new(body);
@@ -282,6 +335,7 @@ pub async fn handle_messages(
                 Err(err) => {
                     tracing::warn!("Provider '{}' stream failed ({}). Attempting fallback...", target.provider_name, err);
                     last_kind = err.kind();
+                    last_pool_exhausted = matches!(err, CoreError::NoAvailableKey(_));
                     last_error = err.to_string();
                     continue;
                 }
@@ -290,28 +344,48 @@ pub async fn handle_messages(
             match executor.execute_json_request(&target_url, &req_val).await {
                 Ok(resp_val) => {
                     let latency = start_time.elapsed();
-                    let mut ant_resp: MessageResponse = if is_anthropic_upstream {
-                        match serde_json::from_value(resp_val) {
-                            Ok(ar) => ar,
-                            Err(e) => {
-                                last_error = format!("Invalid Anthropic response from {}: {}", target.provider_name, e);
-                                continue;
+                    let mut ant_resp: MessageResponse = match target.upstream_protocol {
+                        ponyllm_core::pool::UpstreamProtocol::Responses => {
+                            let resp_obj: ponyllm_protocol::openai::responses::ResponseObject =
+                                match serde_json::from_value(resp_val) {
+                                    Ok(ro) => ro,
+                                    Err(e) => {
+                                        last_error = format!("Invalid Responses object from {}: {}", target.provider_name, e);
+                                        continue;
+                                    }
+                                };
+                            match responses_to_anthropic_response(&resp_obj) {
+                                Ok(ar) => ar,
+                                Err(e) => {
+                                    last_error = format!("Translation error: {}", e);
+                                    continue;
+                                }
                             }
                         }
-                    } else {
-                        let chat_resp: ChatCompletionResponse = match serde_json::from_value(resp_val) {
-                            Ok(cr) => cr,
-                            Err(e) => {
-                                last_error = format!("Invalid response format from {}: {}", target.provider_name, e);
-                                continue;
-                            }
-                        };
+                        ponyllm_core::pool::UpstreamProtocol::Chat => {
+                            let chat_resp: ChatCompletionResponse = match serde_json::from_value(resp_val) {
+                                Ok(cr) => cr,
+                                Err(e) => {
+                                    last_error = format!("Invalid response format from {}: {}", target.provider_name, e);
+                                    continue;
+                                }
+                            };
 
-                        match chat_to_anthropic_response(&chat_resp) {
-                            Ok(ar) => ar,
-                            Err(e) => {
-                                last_error = format!("Translation error: {}", e);
-                                continue;
+                            match chat_to_anthropic_response(&chat_resp) {
+                                Ok(ar) => ar,
+                                Err(e) => {
+                                    last_error = format!("Translation error: {}", e);
+                                    continue;
+                                }
+                            }
+                        }
+                        ponyllm_core::pool::UpstreamProtocol::Anthropic => {
+                            match serde_json::from_value(resp_val) {
+                                Ok(ar) => ar,
+                                Err(e) => {
+                                    last_error = format!("Invalid Anthropic response from {}: {}", target.provider_name, e);
+                                    continue;
+                                }
                             }
                         }
                     };
@@ -356,6 +430,7 @@ pub async fn handle_messages(
                 Err(err) => {
                     tracing::warn!("Provider '{}' json request failed ({}). Attempting fallback...", target.provider_name, err);
                     last_kind = err.kind();
+                    last_pool_exhausted = matches!(err, CoreError::NoAvailableKey(_));
                     last_error = err.to_string();
                     continue;
                 }
@@ -379,7 +454,7 @@ pub async fn handle_messages(
     // Correlate the client-visible error with the black-box frame: the
     // request_id is embedded in the message and exposed as a header, so
     // `ponyllm telemetry` output can be grepped for the failing request.
-    let msg = crate::extractors::format_exhausted_message(&last_error, &request_id);
+    let msg = crate::extractors::format_exhausted_message(&last_error, last_pool_exhausted, &request_id);
     let mut resp = crate::extractors::project_anthropic_error(&last_kind, &msg);
     if let Ok(v) = HeaderValue::from_str(&request_id) {
         resp.headers_mut().insert("x-ponyllm-request-id", v);

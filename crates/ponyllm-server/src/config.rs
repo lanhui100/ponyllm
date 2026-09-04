@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use ponyllm_core::pool::{
     default_cached_price, default_input_price, default_output_price, BillingMode,
-    GatewayRoutingStrategy, ModelTier, PricingConfig,
+    GatewayRoutingStrategy, ModelTier, PricingConfig, UpstreamProtocol,
 };
 use serde::{Deserialize, Serialize};
 
@@ -26,6 +26,9 @@ pub struct ModelSpec {
     pub cached_price: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_price: Option<f64>,
+    /// Native wire protocol of this model. `None` inherits the provider default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<UpstreamProtocol>,
 }
 
 pub fn default_context_window() -> String {
@@ -51,6 +54,7 @@ impl Default for ModelSpec {
             input_price: None,
             cached_price: None,
             output_price: None,
+            protocol: None,
         }
     }
 }
@@ -73,6 +77,17 @@ pub struct ProviderConfig {
     pub models: Vec<String>,
     #[serde(default)]
     pub model_specs: Vec<ModelSpec>,
+    /// Default native wire protocol for models of this provider.
+    /// `None` keeps the legacy URL heuristic so old configs migrate with zero changes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_protocol: Option<UpstreamProtocol>,
+    /// Per-protocol endpoint base overrides. `None` entries derive from `base_url`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub responses_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub messages_url: Option<String>,
 }
 
 fn default_strategy() -> String {
@@ -146,6 +161,28 @@ impl ProviderConfig {
             input_price: None,
             cached_price: None,
             output_price: None,
+            protocol: None,
+        }
+    }
+
+    /// Effective native protocol for a model: model override > provider default.
+    /// Returns `None` when neither is configured so callers fall back to the
+    /// legacy URL heuristic (zero-migration for old configs).
+    pub fn native_protocol(&self, model_name: &str) -> Option<UpstreamProtocol> {
+        if let Some(spec) = self.model_specs.iter().find(|m| m.name == model_name) {
+            if let Some(p) = spec.protocol {
+                return Some(p);
+            }
+        }
+        self.default_protocol
+    }
+
+    /// Configured endpoint base for a protocol, if overridden.
+    pub fn endpoint_base_for(&self, protocol: UpstreamProtocol) -> Option<&str> {
+        match protocol {
+            UpstreamProtocol::Chat => self.chat_url.as_deref(),
+            UpstreamProtocol::Responses => self.responses_url.as_deref(),
+            UpstreamProtocol::Anthropic => self.messages_url.as_deref(),
         }
     }
 }

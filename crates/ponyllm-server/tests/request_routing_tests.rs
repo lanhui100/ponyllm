@@ -126,7 +126,12 @@ async fn test_model_echo_policy_and_auto_routing() {
                 input_price: None,
                 cached_price: None,
                 output_price: None,
+                protocol: None,
             }],
+            default_protocol: None,
+            chat_url: None,
+            responses_url: None,
+            messages_url: None,
         },
     );
 
@@ -152,7 +157,12 @@ async fn test_model_echo_policy_and_auto_routing() {
                 input_price: None,
                 cached_price: None,
                 output_price: None,
+                protocol: None,
             }],
+            default_protocol: None,
+            chat_url: None,
+            responses_url: None,
+            messages_url: None,
         },
     );
 
@@ -277,6 +287,10 @@ fn test_is_anthropic_upstream_heuristic_lock() {
             output_price: 0.2,
             models: vec![],
             model_specs: vec![],
+            default_protocol: None,
+            chat_url: None,
+            responses_url: None,
+            messages_url: None,
         },
     );
     config.providers.insert(
@@ -291,6 +305,10 @@ fn test_is_anthropic_upstream_heuristic_lock() {
             output_price: 0.2,
             models: vec![],
             model_specs: vec![],
+            default_protocol: None,
+            chat_url: None,
+            responses_url: None,
+            messages_url: None,
         },
     );
     let state = AppState::new(config);
@@ -299,25 +317,245 @@ fn test_is_anthropic_upstream_heuristic_lock() {
         .resolve_routed_targets(&ParsedRequestModel::parse("m-ant"), None)
         .unwrap();
     assert_eq!(ant.len(), 1);
-    assert!(ant[0].is_anthropic_upstream);
+    assert_eq!(ant[0].upstream_protocol, UpstreamProtocol::Anthropic);
 
     let chat = state
         .resolve_routed_targets(&ParsedRequestModel::parse("m-chat"), None)
         .unwrap();
     assert_eq!(chat.len(), 1);
-    assert!(!chat[0].is_anthropic_upstream);
+    assert_eq!(chat[0].upstream_protocol, UpstreamProtocol::Chat);
+}
+
+#[test]
+fn test_protocol_resolution_priority_and_overrides() {
+    use ponyllm_server::{AppState, GatewayConfig, ProviderConfig, ModelSpec};
+    use ponyllm_server::routes::models::ParsedRequestModel;
+
+    fn provider(base: &str, model: &str, proto: Option<UpstreamProtocol>, spec_proto: Option<UpstreamProtocol>, endpoint: Option<(&str, &str)>) -> ProviderConfig {
+        let (chat_url, responses_url, messages_url) = match endpoint {
+            Some(("chat", u)) => (Some(u.to_string()), None, None),
+            Some(("responses", u)) => (None, Some(u.to_string()), None),
+            Some(("messages", u)) => (None, None, Some(u.to_string())),
+            _ => (None, None, None),
+        };
+        ProviderConfig {
+            base_url: base.to_string(),
+            default_model: model.to_string(),
+            strategy: "round_robin".to_string(),
+            billing_mode: BillingMode::Metered,
+            input_price: 0.1,
+            cached_price: 0.01,
+            output_price: 0.2,
+            models: vec![],
+            model_specs: if let Some(sp) = spec_proto {
+                vec![ModelSpec {
+                    name: model.to_string(),
+                    tier: ModelTier::Standard,
+                    context_window: "128K".to_string(),
+                    max_output: "4K".to_string(),
+                    input_types: vec!["text".to_string()],
+                    output_types: vec!["text".to_string()],
+                    billing_mode: None,
+                    input_price: None,
+                    cached_price: None,
+                    output_price: None,
+                    protocol: Some(sp),
+                }]
+            } else {
+                vec![]
+            },
+            default_protocol: proto,
+            chat_url,
+            responses_url,
+            messages_url,
+        }
+    }
+
+    let mut config = GatewayConfig::default();
+    // Explicit default beats the anthropic-URL heuristic.
+    config.providers.insert("p1".to_string(), provider("https://x.example.com/anthropic", "m1", Some(UpstreamProtocol::Chat), None, None));
+    // Model override beats provider default.
+    config.providers.insert("p2".to_string(), provider("https://y.example.com", "m2", Some(UpstreamProtocol::Chat), Some(UpstreamProtocol::Responses), None));
+    // Per-protocol endpoint override is honored for URL building.
+    config.providers.insert("p3".to_string(), provider("https://z.example.com", "m3", Some(UpstreamProtocol::Responses), None, Some(("responses", "https://resp.example.com/v1"))));
+    let state = AppState::new(config);
+
+    let t1 = state.resolve_routed_targets(&ParsedRequestModel::parse("m1"), None).unwrap();
+    assert_eq!(t1[0].upstream_protocol, UpstreamProtocol::Chat);
+    assert_eq!(t1[0].endpoint_base, None);
+
+    let t2 = state.resolve_routed_targets(&ParsedRequestModel::parse("m2"), None).unwrap();
+    assert_eq!(t2[0].upstream_protocol, UpstreamProtocol::Responses);
+
+    let t3 = state.resolve_routed_targets(&ParsedRequestModel::parse("m3"), None).unwrap();
+    assert_eq!(t3[0].upstream_protocol, UpstreamProtocol::Responses);
+    assert_eq!(t3[0].endpoint_base.as_deref(), Some("https://resp.example.com/v1"));
+    assert_eq!(t3[0].responses_url(), "https://resp.example.com/v1/responses");
+
+    // Request header override wins over everything; invalid values are ignored.
+    let t1h = state
+        .resolve_routed_targets_with_prompt_and_protocol(
+            &ParsedRequestModel::parse("m1"),
+            None,
+            None,
+            Some(UpstreamProtocol::Anthropic),
+            None,
+        )
+        .unwrap();
+    assert_eq!(t1h[0].upstream_protocol, UpstreamProtocol::Anthropic);
+
+    assert!(ponyllm_server::extractors::parse_protocol_header(&axum::http::HeaderMap::new()).is_none());
+    let mut bad = axum::http::HeaderMap::new();
+    bad.insert("x-pony-protocol", axum::http::HeaderValue::from_static("carrier-pigeon"));
+    assert!(ponyllm_server::extractors::parse_protocol_header(&bad).is_none());
+    let mut good = axum::http::HeaderMap::new();
+    good.insert("x-pony-protocol", axum::http::HeaderValue::from_static("responses"));
+    assert_eq!(
+        ponyllm_server::extractors::parse_protocol_header(&good),
+        Some(UpstreamProtocol::Responses)
+    );
+}
+
+#[test]
+fn test_models_listing_exposes_native_protocol() {
+    use ponyllm_server::{AppState, GatewayConfig, ProviderConfig};
+    let mut config = GatewayConfig::default();
+    config.providers.insert(
+        "op".to_string(),
+        ProviderConfig {
+            base_url: "https://op.example.com".to_string(),
+            default_model: "muse-spark".to_string(),
+            strategy: "round_robin".to_string(),
+            billing_mode: BillingMode::Metered,
+            input_price: 0.1,
+            cached_price: 0.01,
+            output_price: 0.2,
+            models: vec![],
+            model_specs: vec![],
+            default_protocol: Some(UpstreamProtocol::Responses),
+            chat_url: None,
+            responses_url: None,
+            messages_url: None,
+        },
+    );
+    let state = AppState::new(config);
+    let models = state.list_all_models();
+    let found = models.iter().find(|(m, _, _, _)| m == "muse-spark").expect("model listed");
+    assert_eq!(found.1, "op");
+    assert_eq!(found.3, "responses");
+}
+
+#[test]
+fn test_native_protocol_wins_ties_for_passthrough_first() {
+    use ponyllm_server::{AppState, GatewayConfig, ProviderConfig};
+    use ponyllm_server::routes::models::ParsedRequestModel;
+
+    // Two providers serve the same model at identical prices; only the native
+    // protocol differs. Same-native must rank first per inbound entry.
+    let mut config = GatewayConfig::default();
+    config.default_strategy = GatewayRoutingStrategy::Reliable;
+    for (name, proto) in [
+        ("chat-p", UpstreamProtocol::Chat),
+        ("ant-p", UpstreamProtocol::Anthropic),
+    ] {
+        config.providers.insert(
+            name.to_string(),
+            ProviderConfig {
+                base_url: format!("https://{}.example.com", name),
+                default_model: "duo".to_string(),
+                strategy: "round_robin".to_string(),
+                billing_mode: BillingMode::Metered,
+                input_price: 0.5,
+                cached_price: 0.25,
+                output_price: 1.0,
+                models: vec![],
+                model_specs: vec![],
+                default_protocol: Some(proto),
+                chat_url: None,
+                responses_url: None,
+                messages_url: None,
+            },
+        );
+    }
+    let state = AppState::new(config);
+    let parsed = ParsedRequestModel::parse("duo");
+
+    let chat_first = state
+        .resolve_routed_targets_with_prompt_and_protocol(&parsed, None, None, None, Some(UpstreamProtocol::Chat))
+        .unwrap();
+    assert_eq!(chat_first[0].provider_name, "chat-p");
+
+    let ant_first = state
+        .resolve_routed_targets_with_prompt_and_protocol(&parsed, None, None, None, Some(UpstreamProtocol::Anthropic))
+        .unwrap();
+    assert_eq!(ant_first[0].provider_name, "ant-p");
+
+    // No inbound preference: strategy order untouched (insertion order here).
+    let plain = state.resolve_routed_targets(&parsed, None).unwrap();
+    assert_eq!(plain.len(), 2);
+}
+
+#[test]
+fn test_inbound_native_endpoint_wins_over_provider_default() {
+    use ponyllm_server::{AppState, GatewayConfig, ProviderConfig};
+    use ponyllm_server::routes::models::ParsedRequestModel;
+
+    // Merged single-provider DeepSeek: default chat + messages_url override.
+    let mut config = GatewayConfig::default();
+    config.providers.insert(
+        "deepseek".to_string(),
+        ProviderConfig {
+            base_url: "https://api.deepseek.com".to_string(),
+            default_model: "deepseek-chat".to_string(),
+            strategy: "round_robin".to_string(),
+            billing_mode: BillingMode::Metered,
+            input_price: 0.1,
+            cached_price: 0.01,
+            output_price: 0.2,
+            models: vec![],
+            model_specs: vec![],
+            default_protocol: Some(UpstreamProtocol::Chat),
+            chat_url: None,
+            responses_url: None,
+            messages_url: Some("https://api.deepseek.com/anthropic".to_string()),
+        },
+    );
+    let state = AppState::new(config);
+    let parsed = ParsedRequestModel::parse("deepseek-chat");
+
+    // Native Anthropic inbound binds the messages endpoint verbatim.
+    let msg = state
+        .resolve_routed_targets_with_prompt_and_protocol(&parsed, None, None, None, Some(UpstreamProtocol::Anthropic))
+        .unwrap();
+    assert_eq!(msg[0].upstream_protocol, UpstreamProtocol::Anthropic);
+    assert_eq!(
+        msg[0].endpoint_base.as_deref(),
+        Some("https://api.deepseek.com/anthropic")
+    );
+    assert_eq!(
+        msg[0].messages_url(),
+        "https://api.deepseek.com/anthropic/v1/messages"
+    );
+
+    // Chat inbound keeps the default with base-derived URL.
+    let chat = state
+        .resolve_routed_targets_with_prompt_and_protocol(&parsed, None, None, None, Some(UpstreamProtocol::Chat))
+        .unwrap();
+    assert_eq!(chat[0].upstream_protocol, UpstreamProtocol::Chat);
+    assert_eq!(chat[0].endpoint_base, None);
 }
 
 #[test]
 fn test_exhausted_message_distinguishes_local_pool() {
     use ponyllm_server::extractors::format_exhausted_message;
     let local = format_exhausted_message(
-        "Request failed after 0 retries: No available key in pool: foo",
+        "No available key for provider 'opencode' (all keys cooling down or disabled)",
+        true,
         "req_1",
     );
     assert!(local.contains("Local key pool exhausted"));
     assert!(local.contains("req_1"));
-    let upstream = format_exhausted_message("HTTP 500 from k1: boom", "req_2");
+    let upstream = format_exhausted_message("HTTP 500 from k1: boom", false, "req_2");
     assert!(upstream.contains("All candidate upstream providers exhausted"));
 }
 
@@ -383,7 +621,12 @@ async fn test_cross_provider_transparent_failover() {
                 input_price: None,
                 cached_price: None,
                 output_price: None,
+                protocol: None,
             }],
+            default_protocol: None,
+            chat_url: None,
+            responses_url: None,
+            messages_url: None,
         },
     );
 
@@ -409,7 +652,12 @@ async fn test_cross_provider_transparent_failover() {
                 input_price: None,
                 cached_price: None,
                 output_price: None,
+                protocol: None,
             }],
+            default_protocol: None,
+            chat_url: None,
+            responses_url: None,
+            messages_url: None,
         },
     );
 
@@ -501,7 +749,12 @@ async fn test_anthropic_messages_routing_and_model_echo() {
                 input_price: None,
                 cached_price: None,
                 output_price: None,
+                protocol: None,
             }],
+            default_protocol: None,
+            chat_url: None,
+            responses_url: None,
+            messages_url: None,
         },
     );
 
@@ -598,6 +851,10 @@ async fn test_gateway_configuration_hot_reload() {
             output_price: 2.0,
             models: vec!["model-a".to_string()],
             model_specs: vec![],
+            default_protocol: None,
+            chat_url: None,
+            responses_url: None,
+            messages_url: None,
         },
     );
 
@@ -648,6 +905,10 @@ async fn test_gateway_configuration_hot_reload() {
             output_price: 0.2,
             models: vec!["model-b".to_string()],
             model_specs: vec![],
+            default_protocol: None,
+            chat_url: None,
+            responses_url: None,
+            messages_url: None,
         },
     );
 
@@ -761,7 +1022,12 @@ async fn test_large_payload_handling_with_1m_context_support() {
                 input_price: None,
                 cached_price: None,
                 output_price: None,
+                protocol: None,
             }],
+            default_protocol: None,
+            chat_url: None,
+            responses_url: None,
+            messages_url: None,
         },
     );
 
@@ -812,6 +1078,10 @@ async fn test_custom_request_body_limit_rejection_with_helpful_error() {
             output_price: 0.2,
             models: vec!["test-model".to_string()],
             model_specs: vec![],
+            default_protocol: None,
+            chat_url: None,
+            responses_url: None,
+            messages_url: None,
         },
     );
 
@@ -842,6 +1112,401 @@ async fn test_custom_request_body_limit_rejection_with_helpful_error() {
     let err_json: serde_json::Value = resp.json().await.unwrap();
     let err_msg = err_json["error"]["message"].as_str().unwrap();
     assert!(err_msg.contains("Request body length limit exceeded") || err_msg.contains("length limit exceeded"));
+}
+
+#[tokio::test]
+async fn test_responses_cross_provider_failover() {
+    let healthy_upstream = Router::new().route(
+        "/v1/responses",
+        post(|Json(req): Json<serde_json::Value>| async move {
+            let m = req["model"].as_str().unwrap_or_default().to_string();
+            axum::Json(json!({
+                "id": "resp-mock-1",
+                "object": "response",
+                "status": "completed",
+                "model": m,
+                "output": [{
+                    "type": "message",
+                    "id": "msg-1",
+                    "status": "completed",
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "Hello responses backup"}]
+                }],
+                "usage": {"total_tokens": 15, "input_tokens": 10, "output_tokens": 5}
+            }))
+        }),
+    );
+    let healthy_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let healthy_addr = healthy_listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(healthy_listener, healthy_upstream).await.unwrap();
+    });
+
+    let pool_broken = Arc::new(KeyPool::new("resp_broken", RoutingStrategy::RoundRobin));
+    pool_broken.add_key(ApiKeyEntry::new("rb-k1", "sk-broken", 1, 10));
+    let pool_backup = Arc::new(KeyPool::new("resp_backup", RoutingStrategy::RoundRobin));
+    pool_backup.add_key(ApiKeyEntry::new("rk-k1", "sk-backup", 1, 10));
+
+    let mut config = GatewayConfig::default();
+    config.max_retries = 1;
+    for (name, url, price) in [
+        ("resp_broken", "http://127.0.0.1:1".to_string(), 0.10),
+        ("resp_backup", format!("http://{}", healthy_addr), 0.20),
+    ] {
+        config.providers.insert(
+            name.to_string(),
+            ProviderConfig {
+                base_url: url,
+                default_model: "muse-spark-test".to_string(),
+                strategy: "priority".to_string(),
+                billing_mode: BillingMode::Metered,
+                input_price: price,
+                cached_price: 0.01,
+                output_price: 0.20,
+                models: vec!["muse-spark-test".to_string()],
+                model_specs: vec![],
+            // Both mocks are Responses-native; declare it so the gateway
+            // routes to /v1/responses instead of heuristic Chat.
+            default_protocol: Some(UpstreamProtocol::Responses),
+            chat_url: None,
+            responses_url: None,
+            messages_url: None,
+            },
+        );
+    }
+
+    let state = Arc::new(AppState::new(config));
+    state.register_pool("resp_broken", pool_broken);
+    state.register_pool("resp_backup", pool_backup);
+
+    let gateway_app = create_app(state);
+    let gateway_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let gateway_addr = gateway_listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(gateway_listener, gateway_app).await.unwrap();
+    });
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://{}/v1/responses", gateway_addr))
+        .json(&json!({"model": "muse-spark-test", "input": "Hello"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.headers().get("x-ponyllm-provider").unwrap().to_str().unwrap(), "resp_backup");
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["model"], "muse-spark-test");
+}
+
+fn cross_protocol_provider(base_url: String, model: &str, proto: UpstreamProtocol) -> ProviderConfig {
+    ProviderConfig {
+        base_url,
+        default_model: model.to_string(),
+        strategy: "round_robin".to_string(),
+        billing_mode: BillingMode::Metered,
+        input_price: 0.1,
+        cached_price: 0.01,
+        output_price: 0.2,
+        models: vec![model.to_string()],
+        model_specs: vec![],
+        default_protocol: Some(proto),
+        chat_url: None,
+        responses_url: None,
+        messages_url: None,
+    }
+}
+
+fn responses_mock_object(model: &str, text: &str) -> serde_json::Value {
+    json!({
+        "id": "resp-mock-1",
+        "object": "response",
+        "status": "completed",
+        "model": model,
+        "output": [{
+            "type": "message",
+            "id": "msg-1",
+            "status": "completed",
+            "role": "assistant",
+            "content": [{"type": "text", "text": text}]
+        }],
+        "usage": {"total_tokens": 15, "input_tokens": 10, "output_tokens": 5}
+    })
+}
+
+#[tokio::test]
+async fn test_chat_entry_translates_responses_native_upstream() {
+    let mock = Router::new().route(
+        "/v1/responses",
+        post(|Json(req): Json<serde_json::Value>| async move {
+            assert!(req.get("input").is_some(), "expected Responses shape, got: {}", req);
+            axum::Json(responses_mock_object(
+                req["model"].as_str().unwrap_or("m"),
+                "Hello from responses-native",
+            ))
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, mock).await.unwrap();
+    });
+
+    let pool = Arc::new(KeyPool::new("spark", RoutingStrategy::RoundRobin));
+    pool.add_key(ApiKeyEntry::new("k1", "sk-test", 1, 10));
+    let mut config = GatewayConfig::default();
+    config.providers.insert(
+        "spark".to_string(),
+        cross_protocol_provider(format!("http://{}", addr), "muse-spark", UpstreamProtocol::Responses),
+    );
+    let state = Arc::new(AppState::new(config));
+    state.register_pool("spark", pool);
+    let app = create_app(state);
+    let gw = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let gw_addr = gw.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(gw, app).await.unwrap();
+    });
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://{}/v1/chat/completions", gw_addr))
+        .json(&json!({
+            "model": "muse-spark",
+            "messages": [{"role": "user", "content": "Hi"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.headers().get("x-ponyllm-protocol").unwrap().to_str().unwrap(), "responses");
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["object"], "chat.completion");
+    assert_eq!(
+        body["choices"][0]["message"]["content"],
+        "Hello from responses-native"
+    );
+    assert_eq!(body["model"], "muse-spark");
+}
+
+#[tokio::test]
+async fn test_responses_entry_translates_chat_native_upstream() {
+    let mock = Router::new().route(
+        "/v1/chat/completions",
+        post(|Json(req): Json<serde_json::Value>| async move {
+            assert!(req.get("messages").is_some(), "expected Chat shape, got: {}", req);
+            axum::Json(json!({
+                "id": "chatcmpl-mock-1",
+                "object": "chat.completion",
+                "created": 1710000000,
+                "model": req["model"],
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "Hello from chat-native"},
+                    "finish_reason": "stop"
+                }],
+                "usage": {"prompt_tokens": 8, "completion_tokens": 4, "total_tokens": 12}
+            }))
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, mock).await.unwrap();
+    });
+
+    let pool = Arc::new(KeyPool::new("chatter", RoutingStrategy::RoundRobin));
+    pool.add_key(ApiKeyEntry::new("k1", "sk-test", 1, 10));
+    let mut config = GatewayConfig::default();
+    config.providers.insert(
+        "chatter".to_string(),
+        cross_protocol_provider(format!("http://{}", addr), "chat-model", UpstreamProtocol::Chat),
+    );
+    let state = Arc::new(AppState::new(config));
+    state.register_pool("chatter", pool);
+    let app = create_app(state);
+    let gw = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let gw_addr = gw.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(gw, app).await.unwrap();
+    });
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://{}/v1/responses", gw_addr))
+        .json(&json!({"model": "chat-model", "input": "Hi"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.headers().get("x-ponyllm-protocol").unwrap().to_str().unwrap(), "chat");
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["object"], "response");
+    assert_eq!(body["status"], "completed");
+    assert_eq!(
+        body["output"][0]["content"][0]["text"],
+        "Hello from chat-native"
+    );
+    assert_eq!(body["model"], "chat-model");
+}
+
+#[tokio::test]
+async fn test_messages_entry_translates_responses_native_upstream() {
+    let mock = Router::new().route(
+        "/v1/responses",
+        post(|Json(req): Json<serde_json::Value>| async move {
+            assert!(req.get("input").is_some(), "expected Responses shape, got: {}", req);
+            axum::Json(responses_mock_object(
+                req["model"].as_str().unwrap_or("m"),
+                "Hello anthropic client",
+            ))
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, mock).await.unwrap();
+    });
+
+    let pool = Arc::new(KeyPool::new("spark2", RoutingStrategy::RoundRobin));
+    pool.add_key(ApiKeyEntry::new("k1", "sk-test", 1, 10));
+    let mut config = GatewayConfig::default();
+    config.providers.insert(
+        "spark2".to_string(),
+        cross_protocol_provider(format!("http://{}", addr), "spark-msg", UpstreamProtocol::Responses),
+    );
+    let state = Arc::new(AppState::new(config));
+    state.register_pool("spark2", pool);
+    let app = create_app(state);
+    let gw = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let gw_addr = gw.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(gw, app).await.unwrap();
+    });
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://{}/v1/messages", gw_addr))
+        .json(&json!({
+            "model": "spark-msg",
+            "max_tokens": 64,
+            "messages": [{"role": "user", "content": "Hi"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.headers().get("x-ponyllm-protocol").unwrap().to_str().unwrap(), "responses");
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["type"], "message");
+    assert_eq!(body["content"][0]["text"], "Hello anthropic client");
+    assert_eq!(body["model"], "spark-msg");
+}
+
+#[tokio::test]
+async fn test_chat_streaming_translates_responses_native_upstream() {
+    let mock = Router::new().route(
+        "/v1/responses",
+        post(|| async move {
+            let sse = concat!(
+                "event: response.created\n",
+                "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_s1\",\"object\":\"response\",\"status\":\"in_progress\",\"model\":\"m\",\"output\":[]}}\n\n",
+                "event: response.output_text.delta\n",
+                "data: {\"type\":\"response.output_text.delta\",\"response_id\":\"resp_s1\",\"item_id\":\"it_0\",\"output_index\":0,\"content_index\":0,\"delta\":\"streamed\"}\n\n",
+                "event: response.completed\n",
+                "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_s1\",\"object\":\"response\",\"status\":\"completed\",\"model\":\"m\",\"output\":[],\"usage\":{\"total_tokens\":6,\"input_tokens\":4,\"output_tokens\":2}}}\n\n",
+            );
+            (
+                [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+                axum::body::Body::from(sse),
+            )
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, mock).await.unwrap();
+    });
+
+    let pool = Arc::new(KeyPool::new("spark3", RoutingStrategy::RoundRobin));
+    pool.add_key(ApiKeyEntry::new("k1", "sk-test", 1, 10));
+    let mut config = GatewayConfig::default();
+    config.providers.insert(
+        "spark3".to_string(),
+        cross_protocol_provider(format!("http://{}", addr), "spark-stream", UpstreamProtocol::Responses),
+    );
+    let state = Arc::new(AppState::new(config));
+    state.register_pool("spark3", pool);
+    let app = create_app(state);
+    let gw = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let gw_addr = gw.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(gw, app).await.unwrap();
+    });
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://{}/v1/chat/completions", gw_addr))
+        .json(&json!({
+            "model": "spark-stream",
+            "messages": [{"role": "user", "content": "Hi"}],
+            "stream": true
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let text = resp.text().await.unwrap();
+    assert!(text.contains("\"content\":\"streamed\""), "missing translated chunk: {text}");
+    assert!(text.contains("data: [DONE]"), "missing terminator: {text}");
+}
+
+#[tokio::test]
+async fn test_messages_image_only_translated_to_responses_rejected_with_anthropic_error() {
+    let pool = Arc::new(KeyPool::new("spark_img", RoutingStrategy::RoundRobin));
+    pool.add_key(ApiKeyEntry::new("k1", "sk-test", 1, 10));
+    let mut config = GatewayConfig::default();
+    config.providers.insert(
+        "spark_img".to_string(),
+        cross_protocol_provider("http://127.0.0.1:9999".to_string(), "spark-resp", UpstreamProtocol::Responses),
+    );
+    let state = Arc::new(AppState::new(config));
+    state.register_pool("spark_img", pool);
+    let app = create_app(state);
+    let gw = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let gw_addr = gw.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(gw, app).await.unwrap();
+    });
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://{}/v1/messages", gw_addr))
+        .json(&json!({
+            "model": "spark-resp",
+            "system": "You are a helpful assistant.",
+            "max_tokens": 100,
+            "messages": [{
+                "role": "user",
+                "content": [{
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "image/png",
+                        "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+                    }
+                }]
+            }]
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 400);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["type"], "error", "Must have top-level Anthropic error envelope");
+    assert_eq!(body["error"]["type"], "invalid_request_error");
+    assert!(body["error"]["message"].as_str().unwrap().contains("Image-only requests cannot be translated"));
 }
 
 

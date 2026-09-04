@@ -18,6 +18,10 @@ fn make_mock_provider_config(base_url: &str, default_model: &str, models: Vec<&s
         output_price: 1.00,
         models: models.into_iter().map(|s| s.to_string()).collect(),
         model_specs: Vec::new(),
+        default_protocol: None,
+        chat_url: None,
+        responses_url: None,
+        messages_url: None,
     }
 }
 

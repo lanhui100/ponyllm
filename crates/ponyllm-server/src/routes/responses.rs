@@ -4,6 +4,7 @@ use axum::extract::State;
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::IntoResponse;
 use axum::Json;
+use ponyllm_core::error::CoreError;
 use ponyllm_core::executor::{EventSinkCtx, UpstreamExecutor};
 use ponyllm_core::pool::GatewayRoutingStrategy;
 use ponyllm_core::telemetry::{EventCtx, GatewayEvent, StageTimings};
@@ -14,7 +15,7 @@ use crate::extractors::AppJson;
 use crate::routes::chat::{inject_routing_headers, inject_telemetry_headers};
 use crate::routes::models::ParsedRequestModel;
 use crate::state::AppState;
-use crate::streaming::{extract_usage_tokens, passthrough_sse, wrap_telemetry_stream, StreamFailureContext};
+use crate::streaming::{anthropic_sse_to_responses_stream, chat_sse_to_responses_stream, extract_usage_tokens, passthrough_sse, wrap_telemetry_stream, StreamFailureContext};
 
 pub async fn handle_responses(
     State(state): State<Arc<AppState>>,
@@ -68,7 +69,7 @@ pub async fn handle_responses(
         .or_else(|| headers.get("x-routing-strategy"))
         .and_then(|h| h.to_str().ok())
         .and_then(|s| GatewayRoutingStrategy::from_str(s).ok());
-    let targets = match state.resolve_routed_targets_with_prompt(&parsed, header_strategy, prompt_ref) {
+    let targets = match state.resolve_routed_targets_with_prompt_and_protocol(&parsed, header_strategy, prompt_ref, crate::extractors::parse_protocol_header(&headers), Some(ponyllm_core::pool::UpstreamProtocol::Responses)) {
         Ok(ts) if !ts.is_empty() => ts,
         Ok(_) => {
             return (
@@ -111,12 +112,13 @@ pub async fn handle_responses(
         Some(targets[0].provider_name.clone()),
         GatewayEvent::RouteResolved {
             provider: targets[0].provider_name.clone(),
-            translated: false,
+            translated: targets[0].upstream_protocol != ponyllm_core::pool::UpstreamProtocol::Responses,
             routing_ms,
         },
     );
 
     let mut last_error = String::new();
+    let mut last_pool_exhausted = false;
     let mut last_kind = ponyllm_core::error::GatewayErrorKind::Internal;
     let mut last_req_snippet: Option<String> = None;
     let is_streaming = req.stream.unwrap_or(false);
@@ -129,18 +131,56 @@ pub async fn handle_responses(
             None => continue,
         };
 
-        // Responses API is OpenAI-protocol only; route to the provider's
-        // /v1/responses endpoint and set the physical model in the body.
+        // Route to the provider endpoint matching its native protocol,
+        // translating when the inbound Responses shape differs from it.
         let max_retries = state.config.read().max_retries;
-        let target_url = normalize_responses_url(&target.base_url);
-
         let mut target_req = req.clone();
         target_req.model = physical_model.clone();
-        let req_val = match serde_json::to_value(&target_req) {
-            Ok(v) => v,
-            Err(e) => {
-                last_error = format!("Invalid JSON for {}: {}", provider_name, e);
-                continue;
+
+        let (target_url, req_val) = match target.upstream_protocol {
+            ponyllm_core::pool::UpstreamProtocol::Chat => {
+                let chat_req = match ponyllm_protocol::translator::responses_to_chat_request(&target_req) {
+                    Ok(cr) => cr,
+                    Err(e) => {
+                        last_error = format!("Translation error for {}: {}", provider_name, e);
+                        continue;
+                    }
+                };
+                let chat_val = match serde_json::to_value(&chat_req) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        last_error = format!("Serialization error for {}: {}", provider_name, e);
+                        continue;
+                    }
+                };
+                (target.chat_completions_url(), chat_val)
+            }
+            ponyllm_core::pool::UpstreamProtocol::Anthropic => {
+                let ant_req = match ponyllm_protocol::translator::responses_to_anthropic_request(&target_req) {
+                    Ok(ar) => ar,
+                    Err(e) => {
+                        last_error = format!("Translation error for {}: {}", provider_name, e);
+                        continue;
+                    }
+                };
+                let val = match serde_json::to_value(&ant_req) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        last_error = format!("Serialization error for {}: {}", target.provider_name, e);
+                        continue;
+                    }
+                };
+                (target.messages_url(), val)
+            }
+            ponyllm_core::pool::UpstreamProtocol::Responses => {
+                let val = match serde_json::to_value(&target_req) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        last_error = format!("Invalid JSON for {}: {}", provider_name, e);
+                        continue;
+                    }
+                };
+                (target.responses_url(), val)
             }
         };
 
@@ -172,7 +212,6 @@ pub async fn handle_responses(
                         },
                     );
 
-                    let stream = passthrough_sse(upstream_resp.bytes_stream());
                     let failure_ctx = StreamFailureContext {
                         bus: state.event_bus.clone(),
                         ctx: ctx.clone(),
@@ -180,8 +219,31 @@ pub async fn handle_responses(
                         stages: stages.clone(),
                         request_snippet: req_snippet.clone(),
                     };
-                    let monitored = wrap_telemetry_stream(stream, failure_ctx);
-                    let body = axum::body::Body::from_stream(monitored);
+                    // Same-protocol upstreams stream through untouched;
+                    // mismatched natives are translated into Responses events.
+                    let body = match target.upstream_protocol {
+                        ponyllm_core::pool::UpstreamProtocol::Chat => {
+                            let stream = chat_sse_to_responses_stream(
+                                upstream_resp.bytes_stream(),
+                                &target.physical_model,
+                            );
+                            let monitored = wrap_telemetry_stream(stream, failure_ctx);
+                            axum::body::Body::from_stream(monitored)
+                        }
+                        ponyllm_core::pool::UpstreamProtocol::Anthropic => {
+                            let stream = anthropic_sse_to_responses_stream(
+                                upstream_resp.bytes_stream(),
+                                &target.physical_model,
+                            );
+                            let monitored = wrap_telemetry_stream(stream, failure_ctx);
+                            axum::body::Body::from_stream(monitored)
+                        }
+                        ponyllm_core::pool::UpstreamProtocol::Responses => {
+                            let stream = passthrough_sse(upstream_resp.bytes_stream());
+                            let monitored = wrap_telemetry_stream(stream, failure_ctx);
+                            axum::body::Body::from_stream(monitored)
+                        }
+                    };
                     let mut resp = axum::response::Response::new(body);
                     resp.headers_mut().insert(
                         axum::http::header::CONTENT_TYPE,
@@ -194,6 +256,7 @@ pub async fn handle_responses(
                 Err(err) => {
                     tracing::warn!("Provider '{}' responses stream failed ({}). Attempting fallback...", provider_name, err);
                     last_kind = err.kind();
+                    last_pool_exhausted = matches!(err, CoreError::NoAvailableKey(_));
                     last_error = err.to_string();
                     continue;
                 }
@@ -201,7 +264,58 @@ pub async fn handle_responses(
         }
 
         match executor.execute_json_request(&target_url, &req_val).await {
-            Ok(mut resp_val) => {
+            Ok(resp_val) => {
+                let mut resp_val = match target.upstream_protocol {
+                    ponyllm_core::pool::UpstreamProtocol::Chat => {
+                        let chat_resp: ponyllm_protocol::openai::chat::ChatCompletionResponse =
+                            match serde_json::from_value(resp_val) {
+                                Ok(cr) => cr,
+                                Err(e) => {
+                                    last_error = format!("Invalid Chat response from {}: {}", provider_name, e);
+                                    continue;
+                                }
+                            };
+                        let resp_obj = match ponyllm_protocol::translator::chat_to_responses_response(&chat_resp) {
+                            Ok(ro) => ro,
+                            Err(e) => {
+                                last_error = format!("Translation error: {}", e);
+                                continue;
+                            }
+                        };
+                        match serde_json::to_value(&resp_obj) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                last_error = format!("Serialization error: {}", e);
+                                continue;
+                            }
+                        }
+                    }
+                    ponyllm_core::pool::UpstreamProtocol::Anthropic => {
+                        let ant_resp: ponyllm_protocol::anthropic::messages::MessageResponse =
+                            match serde_json::from_value(resp_val) {
+                                Ok(ar) => ar,
+                                Err(e) => {
+                                    last_error = format!("Invalid Anthropic response from {}: {}", provider_name, e);
+                                    continue;
+                                }
+                            };
+                        let resp_obj = match ponyllm_protocol::translator::anthropic_to_responses_response(&ant_resp) {
+                            Ok(ro) => ro,
+                            Err(e) => {
+                                last_error = format!("Translation error: {}", e);
+                                continue;
+                            }
+                        };
+                        match serde_json::to_value(&resp_obj) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                last_error = format!("Serialization error: {}", e);
+                                continue;
+                            }
+                        }
+                    }
+                    ponyllm_core::pool::UpstreamProtocol::Responses => resp_val,
+                };
                 let latency = start_time.elapsed();
                 let (prompt_tokens, completion_tokens) = extract_usage_tokens(&resp_val);
                 let tps = if latency.as_secs_f64() > 0.05 && completion_tokens > 0 {
@@ -239,6 +353,7 @@ pub async fn handle_responses(
             Err(err) => {
                 tracing::warn!("Provider '{}' responses request failed ({}). Attempting fallback...", provider_name, err);
                 last_kind = err.kind();
+                last_pool_exhausted = matches!(err, CoreError::NoAvailableKey(_));
                 last_error = err.to_string();
                 continue;
             }
@@ -257,21 +372,10 @@ pub async fn handle_responses(
         },
     );
 
-    let msg = crate::extractors::format_exhausted_message(&last_error, &request_id);
+    let msg = crate::extractors::format_exhausted_message(&last_error, last_pool_exhausted, &request_id);
     let mut err_resp = crate::extractors::project_openai_error(&last_kind, &msg);
     inject_telemetry_headers(&mut err_resp, &request_id, &stages);
     err_resp
-}
-
-fn normalize_responses_url(base_url: &str) -> String {
-    let trimmed = base_url.trim_end_matches('/');
-    if trimmed.ends_with("/v1/responses") {
-        trimmed.to_string()
-    } else if trimmed.ends_with("/v1") {
-        format!("{}/responses", trimmed)
-    } else {
-        format!("{}/v1/responses", trimmed)
-    }
 }
 
 fn uuid_simple() -> String {

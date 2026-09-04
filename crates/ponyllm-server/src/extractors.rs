@@ -110,11 +110,25 @@ pub fn render_anthropic_error(
         .into_response()
 }
 
+/// Parse the optional `x-pony-protocol` request header into an
+/// [`UpstreamProtocol`](ponyllm_core::pool::UpstreamProtocol) override.
+/// Invalid values are silently ignored (fallback to configured resolution),
+/// mirroring the existing `x-pony-strategy` header behavior.
+pub fn parse_protocol_header(headers: &axum::http::HeaderMap) -> Option<ponyllm_core::pool::UpstreamProtocol> {
+    use std::str::FromStr;
+    headers
+        .get("x-pony-protocol")
+        .and_then(|h| h.to_str().ok())
+        .and_then(|s| ponyllm_core::pool::UpstreamProtocol::from_str(s).ok())
+}
+
 /// Build the client-visible exhaustion message, distinguishing local pool
 /// exhaustion (no Active keys, check cooling/disabled via `ponyllm status`)
 /// from genuine upstream failures across all candidates.
-pub fn format_exhausted_message(last_error: &str, request_id: &str) -> String {
-    if last_error.contains("No available key in pool") {
+/// `pool_exhausted` must come from matching the terminal error variant
+/// (`CoreError::NoAvailableKey`), never from substring matching.
+pub fn format_exhausted_message(last_error: &str, pool_exhausted: bool, request_id: &str) -> String {
+    if pool_exhausted {
         format!(
             "Local key pool exhausted (no Active keys, all cooling down or disabled; check `ponyllm status`). Last error: {} (request_id: {})",
             last_error, request_id

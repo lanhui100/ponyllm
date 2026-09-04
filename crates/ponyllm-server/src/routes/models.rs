@@ -116,7 +116,7 @@ pub fn strip_1m_tag(s: &str) -> (String, bool) {
     (clean.trim().to_string(), has_1m)
 }
 
-pub fn format_model_json(model_id: &str, provider_name: &str, display_name: Option<&str>) -> serde_json::Value {
+pub fn format_model_json(model_id: &str, provider_name: &str, display_name: Option<&str>, protocol: &str) -> serde_json::Value {
     let display = display_name
         .map(|d| d.to_string())
         .unwrap_or_else(|| format!("{} ({})", model_id, provider_name));
@@ -129,6 +129,7 @@ pub fn format_model_json(model_id: &str, provider_name: &str, display_name: Opti
         "created_at": "2024-03-01T00:00:00Z",
         "owned_by": provider_name,
         "display_name": display,
+        "protocol": protocol,
         "permission": [],
         "root": model_id,
         "parent": null
@@ -142,8 +143,8 @@ pub async fn handle_list_models(
     let models = state.list_all_models();
     let data: Vec<serde_json::Value> = models
         .into_iter()
-        .map(|(model_id, provider_name, display_name)| {
-            format_model_json(&model_id, &provider_name, display_name.as_deref())
+        .map(|(model_id, provider_name, display_name, protocol)| {
+            format_model_json(&model_id, &provider_name, display_name.as_deref(), &protocol)
         })
         .collect();
 
@@ -165,10 +166,10 @@ pub async fn handle_get_model(
     Path(model_id): Path<String>,
 ) -> impl IntoResponse {
     let models = state.list_all_models();
-    if let Some((m_id, provider_name, display_name)) = models.into_iter().find(|(m, _, _)| m == &model_id) {
+    if let Some((m_id, provider_name, display_name, protocol)) = models.into_iter().find(|(m, _, _, _)| m == &model_id) {
         (
             StatusCode::OK,
-            Json(format_model_json(&m_id, &provider_name, display_name.as_deref())),
+            Json(format_model_json(&m_id, &provider_name, display_name.as_deref(), &protocol)),
         )
             .into_response()
     } else {
