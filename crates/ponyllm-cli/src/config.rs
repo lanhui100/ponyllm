@@ -4,8 +4,10 @@ use std::io::Write;
 use std::path::Path;
 use ponyllm_core::pool::{
     default_cached_price, default_input_price, default_output_price, BillingMode,
-    GatewayRoutingStrategy, ModelTier, PricingConfig, UpstreamProtocol,
+    GatewayRoutingStrategy, ModelTier, ModelThinkingSpec, PricingConfig, UpstreamProtocol,
 };
+use ponyllm_protocol::common::ReasoningEffort;
+
 use ponyllm_core::telemetry::FlightRecorder;
 use serde::{Deserialize, Serialize};
 
@@ -125,6 +127,10 @@ pub struct ModelConfig {
     pub output_price: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub protocol: Option<UpstreamProtocol>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_default: Option<ReasoningEffort>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_max: Option<ReasoningEffort>,
 }
 
 pub fn default_context_window() -> String {
@@ -151,6 +157,8 @@ impl Default for ModelConfig {
             cached_price: None,
             output_price: None,
             protocol: None,
+            thinking_default: None,
+            thinking_max: None,
         }
     }
 }
@@ -169,9 +177,19 @@ impl ModelConfig {
             cached_price: None,
             output_price: None,
             protocol: None,
+            thinking_default: None,
+            thinking_max: None,
         }
     }
+
+    pub fn thinking_spec(&self) -> ModelThinkingSpec {
+        let inferred = ModelThinkingSpec::infer_from_model_name(&self.name);
+        let default_effort = self.thinking_default.unwrap_or(inferred.default_effort);
+        let max_effort = self.thinking_max.unwrap_or(inferred.max_effort);
+        ModelThinkingSpec::new(default_effort, max_effort)
+    }
 }
+
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderSection {

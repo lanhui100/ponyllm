@@ -54,8 +54,11 @@ fn build_gateway_config_and_pools(
                 cached_price: m.cached_price,
                 output_price: m.output_price,
                 protocol: m.protocol,
+                thinking_default: m.thinking_default,
+                thinking_max: m.thinking_max,
             })
             .collect();
+
         gw_config.providers.insert(
             p_name.clone(),
             ProviderConfig {
@@ -368,7 +371,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     cached_price,
                     output_price,
                     protocol,
+                    thinking_default: None,
+                    thinking_max: None,
                 };
+
                 cfg.upsert_model_config(&provider, model_cfg)
                     .map_err(|e| std::io::Error::new(std::io::ErrorKind::NotFound, e))?;
                 cfg.save_to_path(path)?;

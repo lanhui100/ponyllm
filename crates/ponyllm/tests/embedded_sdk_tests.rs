@@ -82,6 +82,7 @@ async fn test_embedded_sdk_in_memory_call() {
         tools: None,
         tool_choice: None,
         thinking: None,
+        reasoning_effort: None,
         extra: Default::default(),
     };
 

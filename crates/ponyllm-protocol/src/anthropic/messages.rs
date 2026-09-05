@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
+use crate::common::ReasoningEffort;
 
 /// Anthropic Create Message Request (`/v1/messages`)
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -27,9 +28,46 @@ pub struct MessageRequest {
     pub tool_choice: Option<AnthropicToolChoice>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thinking: Option<ThinkingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<ReasoningEffort>,
     #[serde(flatten)]
     pub extra: HashMap<String, serde_json::Value>,
 }
+
+impl MessageRequest {
+    pub fn get_reasoning_effort(&self) -> Option<ReasoningEffort> {
+        if let Some(re) = self.reasoning_effort {
+            return Some(re);
+        }
+        if let Some(ref t) = self.thinking {
+            if let Some(eff) = t.effort {
+                return Some(eff);
+            }
+            if t.r#type.eq_ignore_ascii_case("disabled") {
+                return Some(ReasoningEffort::Off);
+            }
+            if t.r#type.eq_ignore_ascii_case("enabled") {
+                if let Some(b) = t.budget_tokens {
+                    if b <= 2048 {
+                        return Some(ReasoningEffort::Low);
+                    } else if b <= 8192 {
+                        return Some(ReasoningEffort::Medium);
+                    } else {
+                        return Some(ReasoningEffort::High);
+                    }
+                }
+                return Some(ReasoningEffort::Medium);
+            }
+        }
+        if let Some(val) = self.extra.get("reasoning_effort") {
+            if let Some(s) = val.as_str() {
+                return ReasoningEffort::from_str_loose(s);
+            }
+        }
+        None
+    }
+}
+
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
@@ -192,8 +230,12 @@ pub enum AnthropicToolChoice {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ThinkingConfig {
     pub r#type: String,
-    pub budget_tokens: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_tokens: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<ReasoningEffort>,
 }
+
 
 /// Anthropic Response
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

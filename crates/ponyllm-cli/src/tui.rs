@@ -1143,7 +1143,10 @@ fn handle_modal_key(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                             cached_price: ca_p,
                             output_price: out_p,
                             protocol: proto_val,
+                            thinking_default: None,
+                            thinking_max: None,
                         };
+
 
                         let p_name = provider_name.clone();
                         let is_def = *set_as_default;
@@ -1325,7 +1328,10 @@ fn handle_modal_key(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                         cached_price: ca_p,
                         output_price: out_p,
                         protocol: proto_val,
+                        thinking_default: None,
+                        thinking_max: None,
                     };
+
 
                     let p_name = provider_name.clone();
                     let m_name = model_name.clone();

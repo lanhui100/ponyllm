@@ -1,5 +1,12 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use crate::common::ReasoningEffort;
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ResponseReasoningConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<ReasoningEffort>,
+}
 
 /// OpenAI Responses API Create Request (`/v1/responses`)
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -24,9 +31,33 @@ pub struct CreateResponseRequest {
     pub stream: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<HashMap<String, String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<ReasoningEffort>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<ResponseReasoningConfig>,
     #[serde(flatten)]
     pub extra: HashMap<String, serde_json::Value>,
 }
+
+impl CreateResponseRequest {
+    pub fn get_reasoning_effort(&self) -> Option<ReasoningEffort> {
+        if let Some(re) = self.reasoning_effort {
+            return Some(re);
+        }
+        if let Some(ref r) = self.reasoning {
+            if let Some(eff) = r.effort {
+                return Some(eff);
+            }
+        }
+        if let Some(val) = self.extra.get("reasoning_effort") {
+            if let Some(s) = val.as_str() {
+                return ReasoningEffort::from_str_loose(s);
+            }
+        }
+        None
+    }
+}
+
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]

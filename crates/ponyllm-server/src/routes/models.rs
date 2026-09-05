@@ -4,6 +4,7 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
 use ponyllm_core::pool::{GatewayRoutingStrategy, ModelTier};
+use ponyllm_protocol::common::ReasoningEffort;
 use serde_json::json;
 use std::str::FromStr;
 use crate::state::AppState;
@@ -21,6 +22,8 @@ pub struct ParsedRequestModel {
     pub explicit_tier: Option<ModelTier>,
     /// Strategy override from model name (e.g. Economy or Speed)
     pub strategy_override: Option<GatewayRoutingStrategy>,
+    /// Thinking effort override from model name (e.g. "claude-opus-5:high" or "auto:low")
+    pub thinking_override: Option<ReasoningEffort>,
     /// Whether 1M context is requested (e.g. [1m])
     pub is_1m_context: bool,
 }
@@ -38,8 +41,9 @@ impl ParsedRequestModel {
 
         let mut strategy_override = None;
         let mut explicit_tier = None;
+        let mut thinking_override = None;
 
-        // Pop recognized strategy and tier modifiers from the right tail
+        // Pop recognized strategy, tier, and thinking modifiers from the right tail
         while parts.len() > 1 {
             let last = parts.last().unwrap();
             if let Ok(strat) = GatewayRoutingStrategy::from_str(last) {
@@ -47,6 +51,9 @@ impl ParsedRequestModel {
                 parts.pop();
             } else if let Ok(tier) = ModelTier::from_str(last) {
                 explicit_tier = Some(tier);
+                parts.pop();
+            } else if let Some(effort) = ReasoningEffort::from_str_loose(last) {
+                thinking_override = Some(effort);
                 parts.pop();
             } else {
                 break;
@@ -72,10 +79,12 @@ impl ParsedRequestModel {
             is_auto,
             explicit_tier,
             strategy_override,
+            thinking_override,
             is_1m_context,
         }
     }
 }
+
 
 /// Robust case-insensitive and whitespace-tolerant [1m] tag stripper (Unicode-safe)
 pub fn strip_1m_tag(s: &str) -> (String, bool) {

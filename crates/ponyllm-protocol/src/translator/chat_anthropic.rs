@@ -1,6 +1,6 @@
 use serde_json::json;
 use crate::anthropic::messages::*;
-use crate::common::StopCondition;
+use crate::common::{ReasoningEffort, StopCondition};
 use crate::error::Result;
 use crate::openai::chat::*;
 
@@ -158,6 +158,27 @@ pub fn chat_to_anthropic_request(req: &ChatCompletionRequest) -> Result<MessageR
         StopCondition::Multiple(vec) => vec.clone(),
     });
 
+    let (thinking, reasoning_effort) = match req.get_reasoning_effort() {
+        Some(ReasoningEffort::Off) => (
+            Some(ThinkingConfig {
+                r#type: "disabled".to_string(),
+                budget_tokens: None,
+                effort: Some(ReasoningEffort::Off),
+            }),
+            Some(ReasoningEffort::Off),
+        ),
+        Some(effort) => (
+            Some(ThinkingConfig {
+                r#type: "enabled".to_string(),
+                budget_tokens: None,
+                effort: Some(effort),
+            }),
+            Some(effort),
+        ),
+        None => (None, None),
+    };
+
+
     Ok(MessageRequest {
         model: req.model.clone(),
         messages: anthropic_messages,
@@ -171,10 +192,12 @@ pub fn chat_to_anthropic_request(req: &ChatCompletionRequest) -> Result<MessageR
         top_k: None,
         tools,
         tool_choice: None,
-        thinking: None,
+        thinking,
+        reasoning_effort,
         extra: req.extra.clone(),
     })
 }
+
 
 /// Convert Anthropic MessageRequest to OpenAI ChatCompletionRequest
 pub fn anthropic_to_chat_request(req: &MessageRequest) -> Result<ChatCompletionRequest> {
@@ -364,6 +387,8 @@ pub fn anthropic_to_chat_request(req: &MessageRequest) -> Result<ChatCompletionR
         }
     });
 
+    let reasoning_effort = req.get_reasoning_effort();
+
     Ok(ChatCompletionRequest {
         model: req.model.clone(),
         messages,
@@ -384,9 +409,11 @@ pub fn anthropic_to_chat_request(req: &MessageRequest) -> Result<ChatCompletionR
         tools,
         tool_choice: None,
         parallel_tool_calls: None,
+        reasoning_effort,
         extra: req.extra.clone(),
     })
 }
+
 
 /// Convert Anthropic MessageResponse to OpenAI ChatCompletionResponse
 pub fn anthropic_to_chat_response(resp: &MessageResponse) -> Result<ChatCompletionResponse> {

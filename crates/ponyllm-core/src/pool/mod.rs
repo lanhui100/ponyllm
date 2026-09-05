@@ -7,6 +7,7 @@ pub mod protocol;
 pub mod pool;
 pub mod hot_cache;
 pub mod scoring;
+pub mod thinking;
 
 pub use entry::*;
 pub use strategy::*;
@@ -16,3 +17,5 @@ pub use quota::*;
 pub use pool::*;
 pub use hot_cache::*;
 pub use scoring::*;
+pub use thinking::*;
+

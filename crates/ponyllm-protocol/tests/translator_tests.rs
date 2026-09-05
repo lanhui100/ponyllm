@@ -66,8 +66,10 @@ fn test_chat_to_anthropic_request() {
         }]),
         tool_choice: None,
         parallel_tool_calls: None,
+        reasoning_effort: None,
         extra: Default::default(),
     };
+
 
     let anthropic_req = chat_to_anthropic_request(&chat_req).unwrap();
     assert_eq!(anthropic_req.model, "claude-3-5-sonnet-20241022");
@@ -141,8 +143,10 @@ fn test_anthropic_to_chat_request() {
         tools: None,
         tool_choice: None,
         thinking: None,
+        reasoning_effort: None,
         extra: Default::default(),
     };
+
 
     let chat_req = anthropic_to_chat_request(&anthropic_req).unwrap();
     assert_eq!(chat_req.model, "gpt-4o");
@@ -333,8 +337,10 @@ fn test_chat_to_responses_and_back() {
         tools: None,
         tool_choice: None,
         parallel_tool_calls: None,
+        reasoning_effort: None,
         extra: Default::default(),
     };
+
 
     let resp_req = chat_to_responses_request(&chat_req).unwrap();
     assert_eq!(resp_req.model, "gpt-4o");
@@ -537,8 +543,11 @@ fn test_responses_to_anthropic_request_preserves_tools_and_reasoning() {
         max_output_tokens: Some(128),
         stream: None,
         metadata: None,
+        reasoning_effort: None,
+        reasoning: None,
         extra: Default::default(),
     };
+
     let ant = responses_to_anthropic_request(&req).unwrap();
     assert_eq!(ant.max_tokens, 128);
     assert!(matches!(ant.system, Some(AnthropicSystem::Text(ref s)) if s == "sys"));
@@ -593,8 +602,11 @@ fn test_concurrent_function_calls_merge_into_single_messages() {
         max_output_tokens: None,
         stream: None,
         metadata: None,
+        reasoning_effort: None,
+        reasoning: None,
         extra: Default::default(),
     };
+
     let ant = responses_to_anthropic_request(&req).unwrap();
     assert_eq!(ant.messages.len(), 2);
     assert_eq!(ant.messages[0].role, AnthropicRole::Assistant);
@@ -656,8 +668,11 @@ fn test_mixed_sequence_never_breaks_anthropic_alternation() {
         max_output_tokens: None,
         stream: None,
         metadata: None,
+        reasoning_effort: None,
+        reasoning: None,
         extra: Default::default(),
     };
+
     let ant = responses_to_anthropic_request(&req).unwrap();
     assert!(!ant.messages.is_empty());
     for w in ant.messages.windows(2) {
@@ -717,8 +732,10 @@ fn test_anthropic_to_responses_request_roundtrip() {
         tools: None,
         tool_choice: None,
         thinking: None,
+        reasoning_effort: None,
         extra: Default::default(),
     };
+
     let out = anthropic_to_responses_request(&req).unwrap();
     assert_eq!(out.instructions.as_deref(), Some("sys"));
     assert_eq!(out.max_output_tokens, Some(64));
@@ -1047,8 +1064,11 @@ fn test_responses_to_chat_request_merges_assistant_text_and_function_call() {
         max_output_tokens: None,
         stream: None,
         metadata: None,
+        reasoning_effort: None,
+        reasoning: None,
         extra: Default::default(),
     };
+
 
     let chat_req = responses_to_chat_request(&req).unwrap();
     assert_eq!(
@@ -1107,8 +1127,10 @@ fn test_anthropic_to_responses_request_preserves_thinking_text_tool_order() {
         tools: None,
         tool_choice: None,
         thinking: None,
+        reasoning_effort: None,
         extra: Default::default(),
     };
+
 
     let resp_req = anthropic_to_responses_request(&req).unwrap();
     match resp_req.input {
@@ -1266,6 +1288,8 @@ fn test_refusal_only_input_fails_instead_of_empty_anthropic_message() {
         max_output_tokens: None,
         stream: None,
         metadata: None,
+        reasoning_effort: None,
+        reasoning: None,
         extra: Default::default(),
     };
     let err = responses_to_anthropic_request(&req).unwrap_err();
@@ -1283,10 +1307,13 @@ fn test_refusal_only_input_fails_instead_of_empty_anthropic_message() {
         max_output_tokens: None,
         stream: None,
         metadata: None,
+        reasoning_effort: None,
+        reasoning: None,
         extra: Default::default(),
     };
     assert!(responses_to_anthropic_request(&blank).is_err());
 }
+
 
 #[test]
 fn test_responses_reasoning_output_item_and_unknown_deserialization() {
@@ -1518,4 +1545,131 @@ fn test_response_input_content_deserializes_scalar_and_parts_aliases() {
     let part_json = serde_json::to_value(&part).unwrap();
     assert_eq!(part_json.get("type").and_then(|v| v.as_str()), Some("input_text"));
 }
+
+#[test]
+fn test_reasoning_effort_parsing_and_serde() {
+    use ponyllm_protocol::common::ReasoningEffort;
+
+    // Tolerant string parsing
+    assert_eq!(ReasoningEffort::from_str_loose("off"), Some(ReasoningEffort::Off));
+    assert_eq!(ReasoningEffort::from_str_loose("none"), Some(ReasoningEffort::Off));
+    assert_eq!(ReasoningEffort::from_str_loose("low"), Some(ReasoningEffort::Low));
+    assert_eq!(ReasoningEffort::from_str_loose("minimal"), Some(ReasoningEffort::Low));
+    assert_eq!(ReasoningEffort::from_str_loose("medium"), Some(ReasoningEffort::Medium));
+    assert_eq!(ReasoningEffort::from_str_loose("standard"), Some(ReasoningEffort::Medium));
+    assert_eq!(ReasoningEffort::from_str_loose("high"), Some(ReasoningEffort::High));
+    assert_eq!(ReasoningEffort::from_str_loose("deep"), Some(ReasoningEffort::High));
+    assert_eq!(ReasoningEffort::from_str_loose("max"), Some(ReasoningEffort::High));
+
+    // Serde
+    let eff: ReasoningEffort = serde_json::from_str("\"high\"").unwrap();
+    assert_eq!(eff, ReasoningEffort::High);
+    assert_eq!(serde_json::to_string(&eff).unwrap(), "\"high\"");
+
+    // Ordering: Off < Low < Medium < High
+    assert!(ReasoningEffort::Off < ReasoningEffort::Low);
+    assert!(ReasoningEffort::Low < ReasoningEffort::Medium);
+    assert!(ReasoningEffort::Medium < ReasoningEffort::High);
+}
+
+#[test]
+fn test_chat_to_anthropic_reasoning_effort_translation() {
+    use ponyllm_protocol::common::ReasoningEffort;
+
+    // 1. High effort in chat request
+    let chat_req = ChatCompletionRequest {
+        model: "claude-opus-5".to_string(),
+        messages: vec![ChatMessage::User(UserMessage {
+            content: "Think deeply".into(),
+            name: None,
+        })],
+        reasoning_effort: Some(ReasoningEffort::High),
+        ..Default::default()
+    };
+    let ant_req = chat_to_anthropic_request(&chat_req).unwrap();
+    assert_eq!(ant_req.reasoning_effort, Some(ReasoningEffort::High));
+    let thinking = ant_req.thinking.expect("thinking config should be set");
+    assert_eq!(thinking.r#type, "enabled");
+    assert_eq!(thinking.effort, Some(ReasoningEffort::High));
+
+    // 2. Off effort in chat request
+    let chat_req_off = ChatCompletionRequest {
+        model: "claude-opus-5".to_string(),
+        messages: vec![ChatMessage::User(UserMessage {
+            content: "Quick answer".into(),
+            name: None,
+        })],
+        reasoning_effort: Some(ReasoningEffort::Off),
+        ..Default::default()
+    };
+    let ant_req_off = chat_to_anthropic_request(&chat_req_off).unwrap();
+    assert_eq!(ant_req_off.reasoning_effort, Some(ReasoningEffort::Off));
+    let thinking_off = ant_req_off.thinking.expect("thinking config should be set");
+    assert_eq!(thinking_off.r#type, "disabled");
+}
+
+#[test]
+fn test_anthropic_to_chat_reasoning_effort_translation() {
+    use ponyllm_protocol::common::ReasoningEffort;
+
+    // 1. Anthropic request with thinking effort
+    let ant_req = MessageRequest {
+        model: "o3-mini".to_string(),
+        messages: vec![AnthropicMessage {
+            role: AnthropicRole::User,
+            content: "Solve math problem".into(),
+        }],
+        max_tokens: 4096,
+        thinking: Some(ThinkingConfig {
+            r#type: "enabled".to_string(),
+            budget_tokens: None,
+            effort: Some(ReasoningEffort::High),
+        }),
+        ..Default::default()
+    };
+    let chat_req = anthropic_to_chat_request(&ant_req).unwrap();
+    assert_eq!(chat_req.reasoning_effort, Some(ReasoningEffort::High));
+
+    // 2. Anthropic request with budget_tokens fallback calculation
+    let ant_req_budget = MessageRequest {
+        model: "o3-mini".to_string(),
+        messages: vec![AnthropicMessage {
+            role: AnthropicRole::User,
+            content: "Solve math problem".into(),
+        }],
+        max_tokens: 4096,
+        thinking: Some(ThinkingConfig {
+            r#type: "enabled".to_string(),
+            budget_tokens: Some(16000),
+            effort: None,
+        }),
+        ..Default::default()
+    };
+    let chat_req_budget = anthropic_to_chat_request(&ant_req_budget).unwrap();
+    assert_eq!(chat_req_budget.reasoning_effort, Some(ReasoningEffort::High));
+}
+
+#[test]
+fn test_chat_responses_reasoning_effort_bidirectional() {
+    use ponyllm_protocol::common::ReasoningEffort;
+
+    // Chat -> Responses
+    let chat_req = ChatCompletionRequest {
+        model: "fable-5.1".to_string(),
+        messages: vec![ChatMessage::User(UserMessage {
+            content: "Prove P!=NP".into(),
+            name: None,
+        })],
+        reasoning_effort: Some(ReasoningEffort::High),
+        ..Default::default()
+    };
+    let resp_req = chat_to_responses_request(&chat_req).unwrap();
+    assert_eq!(resp_req.reasoning_effort, Some(ReasoningEffort::High));
+    assert_eq!(resp_req.reasoning.as_ref().and_then(|r| r.effort), Some(ReasoningEffort::High));
+
+    // Responses -> Chat
+    let back_chat = responses_to_chat_request(&resp_req).unwrap();
+    assert_eq!(back_chat.reasoning_effort, Some(ReasoningEffort::High));
+}
+
 

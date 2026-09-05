@@ -1,6 +1,8 @@
 use crate::anthropic::messages::*;
+use crate::common::ReasoningEffort;
 use crate::error::Result;
 use crate::openai::responses::*;
+
 use serde_json::json;
 
 /// Merge consecutive same-role messages by concatenating their blocks so the
@@ -80,13 +82,13 @@ pub fn responses_to_anthropic_request(req: &CreateResponseRequest) -> Result<Mes
                         let mut text_acc = String::new();
                         match content {
                             ResponseInputContent::Text(t) => {
-                                text_acc.push_str(&t);
+                                text_acc.push_str(t);
                             }
                             ResponseInputContent::Parts(parts) => {
                                 for part in parts {
                                     match part {
                                         ResponseContentPart::Text { text } => {
-                                            text_acc.push_str(&text);
+                                            text_acc.push_str(text);
                                         }
                                         ResponseContentPart::Thought { thought } => {
                                             blocks.push(AnthropicContentBlock::Thinking {
@@ -185,6 +187,26 @@ pub fn responses_to_anthropic_request(req: &CreateResponseRequest) -> Result<Mes
             .collect()
     });
 
+    let (thinking, reasoning_effort) = match req.get_reasoning_effort() {
+        Some(ReasoningEffort::Off) => (
+            Some(ThinkingConfig {
+                r#type: "disabled".to_string(),
+                budget_tokens: None,
+                effort: Some(ReasoningEffort::Off),
+            }),
+            Some(ReasoningEffort::Off),
+        ),
+        Some(effort) => (
+            Some(ThinkingConfig {
+                r#type: "enabled".to_string(),
+                budget_tokens: None,
+                effort: Some(effort),
+            }),
+            Some(effort),
+        ),
+        None => (None, None),
+    };
+
     Ok(MessageRequest {
         model: req.model.clone(),
         messages,
@@ -198,10 +220,12 @@ pub fn responses_to_anthropic_request(req: &CreateResponseRequest) -> Result<Mes
         top_k: None,
         tools,
         tool_choice: None,
-        thinking: None,
+        thinking,
+        reasoning_effort,
         extra: req.extra.clone(),
     })
 }
+
 
 /// Convert Anthropic Messages request to OpenAI Responses request.
 /// Assistant `Thinking` blocks become `Reasoning` parts; images are dropped
@@ -354,6 +378,11 @@ pub fn anthropic_to_responses_request(req: &MessageRequest) -> Result<CreateResp
             .collect()
     });
 
+    let reasoning_effort = req.get_reasoning_effort();
+    let reasoning = reasoning_effort.map(|eff| ResponseReasoningConfig {
+        effort: Some(eff),
+    });
+
     Ok(CreateResponseRequest {
         model: req.model.clone(),
         input,
@@ -366,9 +395,12 @@ pub fn anthropic_to_responses_request(req: &MessageRequest) -> Result<CreateResp
         max_output_tokens: Some(req.max_tokens),
         stream: req.stream,
         metadata: None,
+        reasoning_effort,
+        reasoning,
         extra: req.extra.clone(),
     })
 }
+
 
 /// Convert OpenAI Responses object to Anthropic Messages response.
 /// Reasoning parts become `Thinking` blocks; `FunctionCall` items become `ToolUse`.

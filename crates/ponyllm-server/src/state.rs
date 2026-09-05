@@ -5,9 +5,10 @@ use ponyllm_core::error::{CoreError, Result};
 use ponyllm_core::executor::{EventSink, EventSinkCtx};
 use ponyllm_core::pool::{
     is_context_capacity_compatible, parse_context_capacity_tokens, BillingMode, EconomyScorer,
-    GatewayRoutingStrategy, HotCacheTracker, KeyPool, ModelTier, NodeLatencyMetrics, PricingConfig,
+    GatewayRoutingStrategy, HotCacheTracker, KeyPool, ModelTier, ModelThinkingSpec, NodeLatencyMetrics, PricingConfig,
     SpeedScorer, UpstreamProtocol,
 };
+
 use ponyllm_core::telemetry::{
     EventBus, EventCtx, MetricsCollector, MetricsProjection, StreamProjection,
 };
@@ -32,9 +33,17 @@ pub struct RoutedTarget {
     pub context_window: String,
     pub billing_mode: BillingMode,
     pub pricing: PricingConfig,
+    pub thinking_spec: ModelThinkingSpec,
 }
 
 impl RoutedTarget {
+    pub fn resolve_thinking(&self, requested: Option<ponyllm_protocol::common::ReasoningEffort>) -> ponyllm_protocol::common::ReasoningEffort {
+        self.thinking_spec.resolve(requested)
+    }
+}
+
+impl RoutedTarget {
+
     /// Upstream endpoint path for the resolved protocol: explicit per-protocol
     /// base wins, otherwise the provider base with the legacy normalizers.
     pub fn chat_completions_url(&self) -> String {
@@ -377,6 +386,7 @@ impl AppState {
         for (p_name, p_cfg) in &config.providers {
             if p_cfg.default_model == *clean || p_cfg.models.iter().any(|m| m == clean) {
                 let spec = p_cfg.get_model_spec(clean);
+                let thinking_spec = spec.thinking_spec();
                 let pricing = p_cfg.get_model_pricing(clean);
                 let billing_mode = p_cfg.get_model_billing_mode(clean);
                 let (protocol, endpoint_base) =
@@ -392,6 +402,7 @@ impl AppState {
                     context_window: spec.context_window,
                     billing_mode,
                     pricing,
+                    thinking_spec,
                 });
             }
         }
@@ -401,6 +412,7 @@ impl AppState {
             if let Some((prefix, sub_model)) = clean.split_once('/') {
                 if let Some(p_cfg) = config.providers.get(prefix) {
                     let spec = p_cfg.get_model_spec(sub_model);
+                    let thinking_spec = spec.thinking_spec();
                     let pricing = p_cfg.get_model_pricing(sub_model);
                     let billing_mode = p_cfg.get_model_billing_mode(sub_model);
                     let (protocol, endpoint_base) =
@@ -416,6 +428,7 @@ impl AppState {
                         context_window: spec.context_window,
                         billing_mode,
                         pricing,
+                        thinking_spec,
                     });
                 }
             }
@@ -431,6 +444,7 @@ impl AppState {
                     || (p_name == "deepseek" && lower.starts_with("deepseek"))
                 {
                     let spec = p_cfg.get_model_spec(clean);
+                    let thinking_spec = spec.thinking_spec();
                     let pricing = p_cfg.get_model_pricing(clean);
                     let billing_mode = p_cfg.get_model_billing_mode(clean);
                     let (protocol, endpoint_base) =
@@ -446,10 +460,13 @@ impl AppState {
                         context_window: spec.context_window,
                         billing_mode,
                         pricing,
+                        thinking_spec,
                     });
                 }
             }
         }
+
+
 
         if candidates.is_empty() {
             return Err(CoreError::Internal(format!(
@@ -490,6 +507,7 @@ impl AppState {
             let default_pricing = p_cfg.get_model_pricing(&p_cfg.default_model);
             let default_billing = p_cfg.get_model_billing_mode(&p_cfg.default_model);
             if default_spec.tier == tier {
+                let thinking_spec = default_spec.thinking_spec();
                 let (protocol, endpoint_base) = resolve_effective_protocol(p_name, p_cfg, &p_cfg.default_model, proto_override, inbound);
                 candidates.push(RoutedTarget {
                     provider_name: p_name.clone(),
@@ -502,11 +520,13 @@ impl AppState {
                     context_window: default_spec.context_window,
                     billing_mode: default_billing,
                     pricing: default_pricing,
+                    thinking_spec,
                 });
             }
             for m in &p_cfg.models {
                 if m != &p_cfg.default_model {
                     let spec = p_cfg.get_model_spec(m);
+                    let thinking_spec = spec.thinking_spec();
                     let m_pricing = p_cfg.get_model_pricing(m);
                     let m_billing = p_cfg.get_model_billing_mode(m);
                     if spec.tier == tier {
@@ -523,10 +543,13 @@ impl AppState {
                             context_window: spec.context_window,
                             billing_mode: m_billing,
                             pricing: m_pricing,
+                            thinking_spec,
                         });
                     }
                 }
             }
+
+
         }
         candidates
     }

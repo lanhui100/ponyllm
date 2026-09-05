@@ -66,12 +66,14 @@ pub async fn handle_chat_completions(
             .into_response();
     }
 
-    // 1. Extract optional X-Pony-Strategy header
+    // 1. Extract optional X-Pony-Strategy header and X-Pony-Thinking header
     let header_strategy = headers
         .get("x-pony-strategy")
         .or_else(|| headers.get("x-routing-strategy"))
         .and_then(|h| h.to_str().ok())
         .and_then(|s| GatewayRoutingStrategy::from_str(s).ok());
+    let header_thinking = crate::extractors::parse_thinking_header(&headers);
+
 
     // 2. Parse requested model with sanitization & auto/strategy/1m extraction
     let parsed = ParsedRequestModel::parse(&req.model);
@@ -150,16 +152,40 @@ pub async fn handle_chat_completions(
         let mut target_req = req.clone();
         target_req.model = target.physical_model.clone();
 
+        let requested_thinking = header_thinking
+            .or(parsed.thinking_override)
+            .or_else(|| req.get_reasoning_effort());
+        let effective_thinking = target.resolve_thinking(requested_thinking);
+
+        if effective_thinking.is_active() {
+            target_req.reasoning_effort = Some(effective_thinking);
+        } else {
+            target_req.reasoning_effort = None;
+            target_req.extra.remove("reasoning_effort");
+            target_req.extra.remove("thinking");
+        }
+
         let (target_url, req_val) = match target.upstream_protocol {
             ponyllm_core::pool::UpstreamProtocol::Responses => {
                 let url = target.responses_url();
-                let resp_req = match chat_to_responses_request(&target_req) {
+                let mut resp_req = match chat_to_responses_request(&target_req) {
                     Ok(rr) => rr,
                     Err(e) => {
                         last_error = format!("Translation error for {}: {}", target.provider_name, e);
                         continue;
                     }
                 };
+                if effective_thinking.is_active() {
+                    resp_req.reasoning_effort = Some(effective_thinking);
+                    resp_req.reasoning = Some(ponyllm_protocol::openai::responses::ResponseReasoningConfig {
+                        effort: Some(effective_thinking),
+                    });
+                } else {
+                    resp_req.reasoning_effort = None;
+                    resp_req.reasoning = None;
+                    resp_req.extra.remove("reasoning_effort");
+                    resp_req.extra.remove("reasoning");
+                }
                 let val = match serde_json::to_value(&resp_req) {
                     Ok(v) => v,
                     Err(e) => {
@@ -171,13 +197,26 @@ pub async fn handle_chat_completions(
             }
             ponyllm_core::pool::UpstreamProtocol::Anthropic => {
                 let url = target.messages_url();
-                let ant_req = match chat_to_anthropic_request(&target_req) {
+                let mut ant_req = match chat_to_anthropic_request(&target_req) {
                     Ok(ar) => ar,
                     Err(e) => {
                         last_error = format!("Translation error for {}: {}", target.provider_name, e);
                         continue;
                     }
                 };
+                if effective_thinking.is_active() {
+                    ant_req.reasoning_effort = Some(effective_thinking);
+                    ant_req.thinking = Some(ponyllm_protocol::anthropic::messages::ThinkingConfig {
+                        r#type: "enabled".to_string(),
+                        budget_tokens: None,
+                        effort: Some(effective_thinking),
+                    });
+                } else {
+                    ant_req.thinking = None;
+                    ant_req.reasoning_effort = None;
+                    ant_req.extra.remove("thinking");
+                    ant_req.extra.remove("reasoning_effort");
+                }
                 let val = match serde_json::to_value(&ant_req) {
                     Ok(v) => v,
                     Err(e) => {
@@ -199,6 +238,7 @@ pub async fn handle_chat_completions(
                 (url, val)
             }
         };
+
 
         let req_snippet = Some(req_val.to_string());
         last_req_snippet = req_snippet.clone();

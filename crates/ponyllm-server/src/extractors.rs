@@ -122,6 +122,16 @@ pub fn parse_protocol_header(headers: &axum::http::HeaderMap) -> Option<ponyllm_
         .and_then(|s| ponyllm_core::pool::UpstreamProtocol::from_str(s).ok())
 }
 
+/// Extract optional thinking effort from `X-Pony-Thinking` or `X-Thinking-Effort` header.
+pub fn parse_thinking_header(headers: &axum::http::HeaderMap) -> Option<ponyllm_protocol::common::ReasoningEffort> {
+    headers
+        .get("x-pony-thinking")
+        .or_else(|| headers.get("x-thinking-effort"))
+        .and_then(|h| h.to_str().ok())
+        .and_then(ponyllm_protocol::common::ReasoningEffort::from_str_loose)
+}
+
+
 /// Build the client-visible exhaustion message, distinguishing local pool
 /// exhaustion (no Active keys, check cooling/disabled via `ponyllm status`)
 /// from genuine upstream failures across all candidates.

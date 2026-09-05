@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
-use crate::common::StopCondition;
+use crate::common::{ReasoningEffort, StopCondition};
 
 /// OpenAI Chat Completion Request
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -41,9 +41,26 @@ pub struct ChatCompletionRequest {
     pub tool_choice: Option<ToolChoice>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parallel_tool_calls: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<ReasoningEffort>,
     #[serde(flatten)]
     pub extra: HashMap<String, serde_json::Value>,
 }
+
+impl ChatCompletionRequest {
+    pub fn get_reasoning_effort(&self) -> Option<ReasoningEffort> {
+        if let Some(re) = self.reasoning_effort {
+            return Some(re);
+        }
+        if let Some(val) = self.extra.get("reasoning_effort") {
+            if let Some(s) = val.as_str() {
+                return ReasoningEffort::from_str_loose(s);
+            }
+        }
+        None
+    }
+}
+
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "role", rename_all = "snake_case")]

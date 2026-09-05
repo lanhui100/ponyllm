@@ -69,6 +69,7 @@ pub async fn handle_responses(
         .or_else(|| headers.get("x-routing-strategy"))
         .and_then(|h| h.to_str().ok())
         .and_then(|s| GatewayRoutingStrategy::from_str(s).ok());
+    let header_thinking = crate::extractors::parse_thinking_header(&headers);
     let targets = match state.resolve_routed_targets_with_prompt_and_protocol(&parsed, header_strategy, prompt_ref, crate::extractors::parse_protocol_header(&headers), Some(ponyllm_core::pool::UpstreamProtocol::Responses)) {
         Ok(ts) if !ts.is_empty() => ts,
         Ok(_) => {
@@ -137,15 +138,39 @@ pub async fn handle_responses(
         let mut target_req = req.clone();
         target_req.model = physical_model.clone();
 
+        let requested_thinking = header_thinking
+            .or(parsed.thinking_override)
+            .or_else(|| req.get_reasoning_effort());
+        let effective_thinking = target.resolve_thinking(requested_thinking);
+
+        if effective_thinking.is_active() {
+            target_req.reasoning_effort = Some(effective_thinking);
+            target_req.reasoning = Some(ponyllm_protocol::openai::responses::ResponseReasoningConfig {
+                effort: Some(effective_thinking),
+            });
+        } else {
+            target_req.reasoning_effort = None;
+            target_req.reasoning = None;
+            target_req.extra.remove("reasoning_effort");
+            target_req.extra.remove("reasoning");
+        }
+
         let (target_url, req_val) = match target.upstream_protocol {
             ponyllm_core::pool::UpstreamProtocol::Chat => {
-                let chat_req = match ponyllm_protocol::translator::responses_to_chat_request(&target_req) {
+                let mut chat_req = match ponyllm_protocol::translator::responses_to_chat_request(&target_req) {
                     Ok(cr) => cr,
                     Err(e) => {
                         last_error = format!("Translation error for {}: {}", provider_name, e);
                         continue;
                     }
                 };
+                if effective_thinking.is_active() {
+                    chat_req.reasoning_effort = Some(effective_thinking);
+                } else {
+                    chat_req.reasoning_effort = None;
+                    chat_req.extra.remove("reasoning_effort");
+                    chat_req.extra.remove("thinking");
+                }
                 let chat_val = match serde_json::to_value(&chat_req) {
                     Ok(v) => v,
                     Err(e) => {
@@ -156,13 +181,26 @@ pub async fn handle_responses(
                 (target.chat_completions_url(), chat_val)
             }
             ponyllm_core::pool::UpstreamProtocol::Anthropic => {
-                let ant_req = match ponyllm_protocol::translator::responses_to_anthropic_request(&target_req) {
+                let mut ant_req = match ponyllm_protocol::translator::responses_to_anthropic_request(&target_req) {
                     Ok(ar) => ar,
                     Err(e) => {
                         last_error = format!("Translation error for {}: {}", provider_name, e);
                         continue;
                     }
                 };
+                if effective_thinking.is_active() {
+                    ant_req.reasoning_effort = Some(effective_thinking);
+                    ant_req.thinking = Some(ponyllm_protocol::anthropic::messages::ThinkingConfig {
+                        r#type: "enabled".to_string(),
+                        budget_tokens: None,
+                        effort: Some(effective_thinking),
+                    });
+                } else {
+                    ant_req.reasoning_effort = None;
+                    ant_req.thinking = None;
+                    ant_req.extra.remove("thinking");
+                    ant_req.extra.remove("reasoning_effort");
+                }
                 let val = match serde_json::to_value(&ant_req) {
                     Ok(v) => v,
                     Err(e) => {

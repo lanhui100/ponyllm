@@ -27,6 +27,8 @@ fn test_model_config_tier_and_pricing_serialization() {
         cached_price: Some(0.01),
         output_price: Some(0.20),
         protocol: None,
+        thinking_default: None,
+        thinking_max: None,
     };
 
     let m_inherit = ModelConfig {
@@ -41,7 +43,10 @@ fn test_model_config_tier_and_pricing_serialization() {
         cached_price: None,
         output_price: None,
         protocol: None,
+        thinking_default: None,
+        thinking_max: None,
     };
+
 
     cfg.upsert_model_config("deepseek", m_custom).unwrap();
     cfg.upsert_model_config("deepseek", m_inherit).unwrap();

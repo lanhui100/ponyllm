@@ -23,11 +23,7 @@ fn test_model_spec_pricing_inheritance_and_override() {
                 max_output: "8K".to_string(),
                 input_types: vec!["text".to_string()],
                 output_types: vec!["text".to_string()],
-                billing_mode: None,
-                input_price: None,
-                cached_price: None,
-                output_price: None,
-                protocol: None,
+                ..Default::default()
             },
             // deepseek-reasoner has higher custom pricing with special cached price
             ModelSpec {
@@ -37,11 +33,10 @@ fn test_model_spec_pricing_inheritance_and_override() {
                 max_output: "8K".to_string(),
                 input_types: vec!["text".to_string()],
                 output_types: vec!["text".to_string()],
-                billing_mode: None,
                 input_price: Some(0.55),
                 cached_price: Some(0.14),
                 output_price: Some(2.19),
-                protocol: None,
+                ..Default::default()
             },
         ],
         default_protocol: None,
@@ -92,11 +87,10 @@ fn test_economy_routing_respects_model_level_pricing() {
                 max_output: "8K".to_string(),
                 input_types: vec!["text".to_string()],
                 output_types: vec!["text".to_string()],
-                billing_mode: None,
                 input_price: Some(2.0),
                 cached_price: Some(1.0),
                 output_price: Some(4.0),
-                protocol: None,
+                ..Default::default()
             }
         ],
         default_protocol: None,
@@ -123,11 +117,10 @@ fn test_economy_routing_respects_model_level_pricing() {
                 max_output: "8K".to_string(),
                 input_types: vec!["text".to_string()],
                 output_types: vec!["text".to_string()],
-                billing_mode: None,
                 input_price: Some(0.3),
                 cached_price: Some(0.05),
                 output_price: Some(0.6),
-                protocol: None,
+                ..Default::default()
             }
         ],
         default_protocol: None,
@@ -176,11 +169,8 @@ fn test_pricing_anti_inversion_and_free_model_preservation() {
                 max_output: "4K".to_string(),
                 input_types: vec!["text".to_string()],
                 output_types: vec!["text".to_string()],
-                billing_mode: None,
                 input_price: Some(0.15),
-                cached_price: None,
-                output_price: None,
-                protocol: None,
+                ..Default::default()
             },
             // free-trial has input_price = 0.0; cached_price must be 0.0, output inherits or is 0
             ModelSpec {
@@ -190,11 +180,9 @@ fn test_pricing_anti_inversion_and_free_model_preservation() {
                 max_output: "2K".to_string(),
                 input_types: vec!["text".to_string()],
                 output_types: vec!["text".to_string()],
-                billing_mode: None,
                 input_price: Some(0.0),
-                cached_price: None,
                 output_price: Some(0.0),
-                protocol: None,
+                ..Default::default()
             },
         ],
         default_protocol: None,

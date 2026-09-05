@@ -272,7 +272,10 @@ fn test_model_config_crud_and_params() {
         cached_price: None,
         output_price: None,
         protocol: None,
+        thinking_default: None,
+        thinking_max: None,
     };
+
     cfg.upsert_model_config("ai-hub", custom_model.clone()).unwrap();
 
     let p = &cfg.providers["ai-hub"];
@@ -554,5 +557,41 @@ fn test_gateway_auth_action_safety_rules() {
         GatewayAuthAction::Set("sk-pony-my-custom-key".to_string())
     );
 }
+
+#[test]
+fn test_model_thinking_spec_toml_and_cli() {
+    use ponyllm_cli::config::ModelConfig;
+    use ponyllm_protocol::common::ReasoningEffort;
+
+
+    // 1. Inferred from model name (o3-mini)
+    let m1 = ModelConfig::new("o3-mini");
+    let spec1 = m1.thinking_spec();
+    assert_eq!(spec1.default_effort, ReasoningEffort::Low);
+    assert_eq!(spec1.max_effort, ReasoningEffort::Medium);
+
+    // 2. Custom override via config
+    let mut m2 = ModelConfig::new("custom-reasoner");
+    m2.thinking_default = Some(ReasoningEffort::Medium);
+    m2.thinking_max = Some(ReasoningEffort::High);
+    let spec2 = m2.thinking_spec();
+    assert_eq!(spec2.default_effort, ReasoningEffort::Medium);
+    assert_eq!(spec2.max_effort, ReasoningEffort::High);
+
+    // 3. TOML serialization and deserialization
+    let toml_str = r#"
+name = "claude-opus-5"
+thinking_default = "medium"
+thinking_max = "high"
+"#;
+    let decoded: ModelConfig = toml::from_str(toml_str).unwrap();
+    assert_eq!(decoded.thinking_default, Some(ReasoningEffort::Medium));
+    assert_eq!(decoded.thinking_max, Some(ReasoningEffort::High));
+    let decoded_spec = decoded.thinking_spec();
+    assert_eq!(decoded_spec.resolve(None), ReasoningEffort::Medium);
+    assert_eq!(decoded_spec.resolve(Some(ReasoningEffort::High)), ReasoningEffort::High);
+    assert_eq!(decoded_spec.resolve(Some(ReasoningEffort::Off)), ReasoningEffort::Off);
+}
+
 
 

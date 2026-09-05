@@ -104,6 +104,11 @@ pub fn chat_to_responses_request(req: &ChatCompletionRequest) -> Result<CreateRe
             .collect()
     });
 
+    let reasoning_effort = req.get_reasoning_effort();
+    let reasoning = reasoning_effort.map(|eff| ResponseReasoningConfig {
+        effort: Some(eff),
+    });
+
     Ok(CreateResponseRequest {
         model: req.model.clone(),
         input,
@@ -116,9 +121,12 @@ pub fn chat_to_responses_request(req: &ChatCompletionRequest) -> Result<CreateRe
         max_output_tokens: req.max_completion_tokens.or(req.max_tokens),
         stream: req.stream,
         metadata: None,
+        reasoning_effort,
+        reasoning,
         extra: req.extra.clone(),
     })
 }
+
 
 /// Convert CreateResponseRequest to ChatCompletionRequest
 pub fn responses_to_chat_request(req: &CreateResponseRequest) -> Result<ChatCompletionRequest> {
@@ -225,6 +233,8 @@ pub fn responses_to_chat_request(req: &CreateResponseRequest) -> Result<ChatComp
             .collect()
     });
 
+    let reasoning_effort = req.get_reasoning_effort();
+
     Ok(ChatCompletionRequest {
         model: req.model.clone(),
         messages,
@@ -245,9 +255,11 @@ pub fn responses_to_chat_request(req: &CreateResponseRequest) -> Result<ChatComp
         tools,
         tool_choice: None,
         parallel_tool_calls: None,
+        reasoning_effort,
         extra: req.extra.clone(),
     })
 }
+
 
 /// Convert ChatCompletionResponse to ResponseObject
 pub fn chat_to_responses_response(resp: &ChatCompletionResponse) -> Result<ResponseObject> {

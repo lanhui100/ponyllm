@@ -1,8 +1,9 @@
 use std::collections::HashMap;
 use ponyllm_core::pool::{
     default_cached_price, default_input_price, default_output_price, BillingMode,
-    GatewayRoutingStrategy, ModelTier, PricingConfig, UpstreamProtocol,
+    GatewayRoutingStrategy, ModelTier, ModelThinkingSpec, PricingConfig, UpstreamProtocol,
 };
+use ponyllm_protocol::common::ReasoningEffort;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -29,6 +30,19 @@ pub struct ModelSpec {
     /// Native wire protocol of this model. `None` inherits the provider default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub protocol: Option<UpstreamProtocol>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_default: Option<ReasoningEffort>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_max: Option<ReasoningEffort>,
+}
+
+impl ModelSpec {
+    pub fn thinking_spec(&self) -> ModelThinkingSpec {
+        let inferred = ModelThinkingSpec::infer_from_model_name(&self.name);
+        let default_effort = self.thinking_default.unwrap_or(inferred.default_effort);
+        let max_effort = self.thinking_max.unwrap_or(inferred.max_effort);
+        ModelThinkingSpec::new(default_effort, max_effort)
+    }
 }
 
 pub fn default_context_window() -> String {
@@ -55,9 +69,12 @@ impl Default for ModelSpec {
             cached_price: None,
             output_price: None,
             protocol: None,
+            thinking_default: None,
+            thinking_max: None,
         }
     }
 }
+
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderConfig {
@@ -162,8 +179,11 @@ impl ProviderConfig {
             cached_price: None,
             output_price: None,
             protocol: None,
+            thinking_default: None,
+            thinking_max: None,
         }
     }
+
 
     /// Effective native protocol for a model: model override > provider default.
     /// Returns `None` when neither is configured so callers fall back to the
