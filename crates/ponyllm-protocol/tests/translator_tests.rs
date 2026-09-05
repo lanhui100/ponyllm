@@ -1378,3 +1378,24 @@ fn test_responses_output_text_and_encrypted_content_real_upstream() {
         Some("Pong! 👋 How can I help you today?")
     );
 }
+
+#[test]
+fn test_responses_stream_output_text_delta_missing_response_id() {
+    let raw_event = serde_json::json!({
+        "type": "response.output_text.delta",
+        "sequence_number": 6,
+        "output_index": 1,
+        "content_index": 0,
+        "item_id": "msg_01a06f9779c07182b08cde16ffe351bc",
+        "delta": "pong",
+        "logprobs": []
+    });
+
+    let event: ResponseStreamEvent = serde_json::from_value(raw_event)
+        .expect("should deserialize output_text.delta even when response_id is omitted");
+
+    let mut fsm = ResponsesToChatFsm::new("test-model");
+    let chunks = fsm.process_event(event).expect("fsm should process delta");
+    assert_eq!(chunks.len(), 1);
+    assert_eq!(chunks[0].choices[0].delta.content.as_deref(), Some("pong"));
+}

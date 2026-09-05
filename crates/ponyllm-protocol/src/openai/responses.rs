@@ -215,19 +215,26 @@ pub enum ResponseStreamEvent {
     Unknown,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct ResponseTextDelta {
+    #[serde(default)]
     pub response_id: String,
+    #[serde(default)]
     pub item_id: String,
+    #[serde(default)]
     pub output_index: u32,
+    #[serde(default)]
     pub content_index: u32,
     pub delta: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct ResponseFunctionCallDelta {
+    #[serde(default)]
     pub response_id: String,
+    #[serde(default)]
     pub item_id: String,
+    #[serde(default)]
     pub output_index: u32,
     pub call_id: String,
     pub delta: String,
