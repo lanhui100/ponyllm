@@ -1333,3 +1333,48 @@ fn test_responses_reasoning_output_item_and_unknown_deserialization() {
         Some("Deep thinking step 1...")
     );
 }
+
+#[test]
+fn test_responses_output_text_and_encrypted_content_real_upstream() {
+    let raw_json = serde_json::json!({
+        "id": "resp_6a9b865e03deee5ea22c4054",
+        "object": "response",
+        "created_at": 1788577374,
+        "completed_at": 1788577374,
+        "status": "completed",
+        "model": "muse-spark-1.3-contributor-free",
+        "output": [
+            {
+                "id": "rs_1",
+                "type": "reasoning",
+                "status": "completed",
+                "encrypted_content": "ciphertext_xyz",
+                "summary": []
+            },
+            {
+                "id": "msg_1",
+                "type": "message",
+                "status": "completed",
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": "Pong! 👋 How can I help you today?",
+                        "annotations": [],
+                        "logprobs": []
+                    }
+                ]
+            }
+        ]
+    });
+
+    let resp_obj: ResponseObject = serde_json::from_value(raw_json)
+        .expect("should deserialize output_text and reasoning with encrypted_content");
+    assert_eq!(resp_obj.output.len(), 2);
+
+    let chat = responses_to_chat_response(&resp_obj).expect("should convert to chat completion");
+    assert_eq!(
+        chat.choices[0].message.content.as_deref(),
+        Some("Pong! 👋 How can I help you today?")
+    );
+}

@@ -21,7 +21,7 @@ pub fn responses_request_has_text(req: &CreateResponseRequest) -> bool {
             ResponseContentPart::Text { text } => !text.trim().is_empty(),
             ResponseContentPart::Thought { thought } => !thought.trim().is_empty(),
             ResponseContentPart::Reasoning { reasoning } => !reasoning.trim().is_empty(),
-            ResponseContentPart::Refusal { .. } => false,
+            ResponseContentPart::Refusal { .. } | ResponseContentPart::Unknown => false,
         }),
         ResponseInputItem::FunctionResponse { output, .. } => !output.trim().is_empty(),
         ResponseInputItem::FunctionCall { .. } => false,
@@ -357,7 +357,7 @@ pub fn responses_to_chat_response(resp: &ResponseObject) -> Result<ChatCompletio
                         ResponseContentPart::Reasoning { reasoning } => {
                             reasoning_acc.push_str(reasoning);
                         }
-                        ResponseContentPart::Refusal { .. } => {}
+                        ResponseContentPart::Refusal { .. } | ResponseContentPart::Unknown => {}
                     }
                 }
             }

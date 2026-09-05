@@ -16,14 +16,16 @@ Status: implemented
 ## Decision
 
 1. **协议层扩充变体与兜底**：在 `crates/ponyllm-protocol/src/openai/responses.rs` 中：
-   - 为 `ResponseOutputItem` 增补 `Reasoning` 变体，支持 `reasoning`、`thought`、`summary`、`content` 多种提取方式；
-   - 增加 `#[serde(other)] Unknown` 变体，保证未来任何未知 output item 类型均可优雅跳过而不阻断主流程。
+   - 为 `ResponseOutputItem` 增补 `Reasoning` 变体，支持 `reasoning`、`thought`、`summary`、`content` 以及 `encrypted_content` 等字段；
+   - 为 `ResponseOutputItem` 增加 `#[serde(other)] Unknown` 变体，保证未来任何未知 output item 类型均可优雅跳过而不阻断主流程；
+   - 为 `ResponseContentPart::Text` 增加 `#[serde(alias = "output_text", alias = "input_text")]`，以兼容 OpenAI Responses 官方规范中 assistant 消息内容返回的 `output_text` 变体；
+   - 为 `ResponseContentPart` 增补 `#[serde(other)] Unknown` 兜底未知 part。
 2. **多协议全链路提取思维链**：
    - `chat_responses.rs`：将 Responses 中的 `Reasoning` 变体映射至 ChatCompletion 的 `reasoning_content`，并在无 message content 时将 reasoning 作为思考内容保留；
    - `responses_anthropic.rs`：将 Responses 中的 `Reasoning` 变体映射至 Anthropic 的 `thinking` 块；
    - `responses_stream.rs`：流式状态机中处理 `reasoning` 增量事件。
 3. **测试保障**：
-   - 增补反序列化测试与思考链转换单元测试，验证含有 `reasoning` 和 `Unknown` 变体的 Responses 报文可被顺利反序列化并转为带 `reasoning_content` 的 ChatCompletion。
+   - 增补反序列化测试与思考链转换单元测试，构造包含真实上游返回的 `encrypted_content`、`output_text` 等完整 payload 验证全链路顺畅。
 
 ## Alternatives considered
 

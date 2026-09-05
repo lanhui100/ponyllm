@@ -114,6 +114,8 @@ pub enum ResponseOutputItem {
         #[serde(default)]
         status: Option<String>,
         #[serde(default)]
+        encrypted_content: Option<String>,
+        #[serde(default)]
         content: Option<Vec<ResponseContentPart>>,
         #[serde(default)]
         summary: Option<Vec<ResponseContentPart>>,
@@ -125,10 +127,21 @@ pub enum ResponseOutputItem {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ResponseContentPart {
-    Text { text: String },
-    Thought { thought: String },
-    Reasoning { reasoning: String },
-    Refusal { refusal: String },
+    #[serde(alias = "output_text", alias = "input_text")]
+    Text {
+        text: String,
+    },
+    Thought {
+        thought: String,
+    },
+    Reasoning {
+        reasoning: String,
+    },
+    Refusal {
+        refusal: String,
+    },
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]

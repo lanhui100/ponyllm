@@ -95,7 +95,8 @@ pub fn responses_to_anthropic_request(req: &CreateResponseRequest) -> Result<Mes
                                         signature: None,
                                     });
                                 }
-                                ResponseContentPart::Refusal { .. } => {}
+                                ResponseContentPart::Refusal { .. }
+                                | ResponseContentPart::Unknown => {}
                             }
                         }
                         if !text_acc.is_empty() {
@@ -397,7 +398,7 @@ pub fn responses_to_anthropic_response(resp: &ResponseObject) -> Result<MessageR
                                 signature: None,
                             });
                         }
-                        ResponseContentPart::Refusal { .. } => {}
+                        ResponseContentPart::Refusal { .. } | ResponseContentPart::Unknown => {}
                     }
                 }
             }
@@ -442,7 +443,7 @@ pub fn responses_to_anthropic_response(resp: &ResponseObject) -> Result<MessageR
                                     signature: None,
                                 });
                             }
-                            ResponseContentPart::Refusal { .. } => {}
+                            ResponseContentPart::Refusal { .. } | ResponseContentPart::Unknown => {}
                         }
                     }
                 }
@@ -467,7 +468,7 @@ pub fn responses_to_anthropic_response(resp: &ResponseObject) -> Result<MessageR
                                     signature: None,
                                 });
                             }
-                            ResponseContentPart::Refusal { .. } => {}
+                            ResponseContentPart::Refusal { .. } | ResponseContentPart::Unknown => {}
                         }
                     }
                 }
