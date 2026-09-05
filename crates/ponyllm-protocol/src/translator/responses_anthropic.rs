@@ -1,7 +1,7 @@
-use serde_json::json;
 use crate::anthropic::messages::*;
 use crate::error::Result;
 use crate::openai::responses::*;
+use serde_json::json;
 
 /// Merge consecutive same-role messages by concatenating their blocks so the
 /// output always satisfies Anthropic's strict role alternation.
@@ -53,7 +53,8 @@ pub fn responses_to_anthropic_request(req: &CreateResponseRequest) -> Result<Mes
         ResponseInput::Items(items) => {
             let mut pending_use: Vec<AnthropicContentBlock> = Vec::new();
             let mut pending_result: Vec<AnthropicContentBlock> = Vec::new();
-            let flush_use = |messages: &mut Vec<AnthropicMessage>, pending: &mut Vec<AnthropicContentBlock>| {
+            let flush_use = |messages: &mut Vec<AnthropicMessage>,
+                             pending: &mut Vec<AnthropicContentBlock>| {
                 if !pending.is_empty() {
                     messages.push(AnthropicMessage {
                         role: AnthropicRole::Assistant,
@@ -61,14 +62,15 @@ pub fn responses_to_anthropic_request(req: &CreateResponseRequest) -> Result<Mes
                     });
                 }
             };
-            let flush_result = |messages: &mut Vec<AnthropicMessage>, pending: &mut Vec<AnthropicContentBlock>| {
-                if !pending.is_empty() {
-                    messages.push(AnthropicMessage {
-                        role: AnthropicRole::User,
-                        content: AnthropicContent::Blocks(std::mem::take(pending)),
-                    });
-                }
-            };
+            let flush_result =
+                |messages: &mut Vec<AnthropicMessage>, pending: &mut Vec<AnthropicContentBlock>| {
+                    if !pending.is_empty() {
+                        messages.push(AnthropicMessage {
+                            role: AnthropicRole::User,
+                            content: AnthropicContent::Blocks(std::mem::take(pending)),
+                        });
+                    }
+                };
             for item in items {
                 match item {
                     ResponseInputItem::Message { role, content } => {
@@ -116,9 +118,14 @@ pub fn responses_to_anthropic_request(req: &CreateResponseRequest) -> Result<Mes
                             });
                         }
                     }
-                    ResponseInputItem::FunctionCall { call_id, name, arguments } => {
+                    ResponseInputItem::FunctionCall {
+                        call_id,
+                        name,
+                        arguments,
+                    } => {
                         flush_result(&mut messages, &mut pending_result);
-                        let input_val = serde_json::from_str(arguments).unwrap_or_else(|_| json!({}));
+                        let input_val =
+                            serde_json::from_str(arguments).unwrap_or_else(|_| json!({}));
                         pending_use.push(AnthropicContentBlock::ToolUse {
                             id: call_id.clone(),
                             name: name.clone(),
@@ -152,14 +159,19 @@ pub fn responses_to_anthropic_request(req: &CreateResponseRequest) -> Result<Mes
         t_list
             .iter()
             .filter_map(|t| match t {
-                ResponseToolDefinition::Function { name, description, parameters, .. } => {
-                    Some(AnthropicTool {
-                        name: name.clone(),
-                        description: description.clone(),
-                        input_schema: parameters.clone().unwrap_or_else(|| json!({"type": "object"})),
-                        cache_control: None,
-                    })
-                }
+                ResponseToolDefinition::Function {
+                    name,
+                    description,
+                    parameters,
+                    ..
+                } => Some(AnthropicTool {
+                    name: name.clone(),
+                    description: description.clone(),
+                    input_schema: parameters
+                        .clone()
+                        .unwrap_or_else(|| json!({"type": "object"})),
+                    cache_control: None,
+                }),
                 _ => None,
             })
             .collect()
@@ -220,7 +232,9 @@ pub fn anthropic_to_responses_request(req: &MessageRequest) -> Result<CreateResp
                                     reasoning: thinking.clone(),
                                 });
                             }
-                            AnthropicContentBlock::ToolUse { id, name, input, .. } => {
+                            AnthropicContentBlock::ToolUse {
+                                id, name, input, ..
+                            } => {
                                 if !parts.is_empty() {
                                     items.push(ResponseInputItem::Message {
                                         role: "assistant".to_string(),
@@ -266,7 +280,12 @@ pub fn anthropic_to_responses_request(req: &MessageRequest) -> Result<CreateResp
                             AnthropicContentBlock::Text { text, .. } => {
                                 text_acc.push_str(text);
                             }
-                            AnthropicContentBlock::ToolResult { tool_use_id, content, .. } => {                                if !text_acc.is_empty() {
+                            AnthropicContentBlock::ToolResult {
+                                tool_use_id,
+                                content,
+                                ..
+                            } => {
+                                if !text_acc.is_empty() {
                                     items.push(ResponseInputItem::Message {
                                         role: "user".to_string(),
                                         content: vec![ResponseContentPart::Text {
@@ -382,7 +401,12 @@ pub fn responses_to_anthropic_response(resp: &ResponseObject) -> Result<MessageR
                     }
                 }
             }
-            ResponseOutputItem::FunctionCall { call_id, name, arguments, .. } => {
+            ResponseOutputItem::FunctionCall {
+                call_id,
+                name,
+                arguments,
+                ..
+            } => {
                 tool_count += 1;
                 let input_val = serde_json::from_str(arguments).unwrap_or_else(|_| json!({}));
                 content.push(AnthropicContentBlock::ToolUse {
@@ -392,6 +416,63 @@ pub fn responses_to_anthropic_response(resp: &ResponseObject) -> Result<MessageR
                     cache_control: None,
                 });
             }
+            ResponseOutputItem::Reasoning {
+                content: parts,
+                summary,
+                ..
+            } => {
+                if let Some(parts) = parts {
+                    for part in parts {
+                        match part {
+                            ResponseContentPart::Text { text } => {
+                                content.push(AnthropicContentBlock::Thinking {
+                                    thinking: text.clone(),
+                                    signature: None,
+                                });
+                            }
+                            ResponseContentPart::Thought { thought } => {
+                                content.push(AnthropicContentBlock::Thinking {
+                                    thinking: thought.clone(),
+                                    signature: None,
+                                });
+                            }
+                            ResponseContentPart::Reasoning { reasoning } => {
+                                content.push(AnthropicContentBlock::Thinking {
+                                    thinking: reasoning.clone(),
+                                    signature: None,
+                                });
+                            }
+                            ResponseContentPart::Refusal { .. } => {}
+                        }
+                    }
+                }
+                if let Some(parts) = summary {
+                    for part in parts {
+                        match part {
+                            ResponseContentPart::Text { text } => {
+                                content.push(AnthropicContentBlock::Thinking {
+                                    thinking: text.clone(),
+                                    signature: None,
+                                });
+                            }
+                            ResponseContentPart::Thought { thought } => {
+                                content.push(AnthropicContentBlock::Thinking {
+                                    thinking: thought.clone(),
+                                    signature: None,
+                                });
+                            }
+                            ResponseContentPart::Reasoning { reasoning } => {
+                                content.push(AnthropicContentBlock::Thinking {
+                                    thinking: reasoning.clone(),
+                                    signature: None,
+                                });
+                            }
+                            ResponseContentPart::Refusal { .. } => {}
+                        }
+                    }
+                }
+            }
+            ResponseOutputItem::Unknown => {}
         }
     }
 
@@ -442,7 +523,9 @@ pub fn anthropic_to_responses_response(resp: &MessageResponse) -> Result<Respons
             AnthropicContentBlock::Thinking { thinking, .. } => {
                 reasoning_acc.push_str(thinking);
             }
-            AnthropicContentBlock::ToolUse { id, name, input, .. } => {
+            AnthropicContentBlock::ToolUse {
+                id, name, input, ..
+            } => {
                 output.push(ResponseOutputItem::FunctionCall {
                     id: format!("fc_{}", id),
                     status: "completed".to_string(),
@@ -457,7 +540,9 @@ pub fn anthropic_to_responses_response(resp: &MessageResponse) -> Result<Respons
 
     let mut parts = Vec::new();
     if !reasoning_acc.is_empty() {
-        parts.push(ResponseContentPart::Reasoning { reasoning: reasoning_acc });
+        parts.push(ResponseContentPart::Reasoning {
+            reasoning: reasoning_acc,
+        });
     }
     if !text_acc.is_empty() {
         parts.push(ResponseContentPart::Text { text: text_acc });

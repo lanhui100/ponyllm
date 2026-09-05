@@ -74,7 +74,9 @@ fn test_chat_to_anthropic_request() {
     assert_eq!(anthropic_req.max_tokens, 1024);
     assert_eq!(
         anthropic_req.system,
-        Some(AnthropicSystem::Text("You are a helpful assistant.".to_string()))
+        Some(AnthropicSystem::Text(
+            "You are a helpful assistant.".to_string()
+        ))
     );
     assert_eq!(anthropic_req.tools.as_ref().unwrap().len(), 1);
     assert_eq!(anthropic_req.tools.as_ref().unwrap()[0].name, "calculator");
@@ -157,7 +159,10 @@ fn test_anthropic_to_chat_request() {
     // Message 2: Assistant with reasoning
     if let ChatMessage::Assistant(ref a) = chat_req.messages[2] {
         assert_eq!(a.reasoning_content.as_deref(), Some("User greeting."));
-        assert_eq!(a.content.as_ref().unwrap().as_plain_text(), "Hi there! How can I help?");
+        assert_eq!(
+            a.content.as_ref().unwrap().as_plain_text(),
+            "Hi there! How can I help?"
+        );
     } else {
         panic!("Expected Assistant message");
     }
@@ -200,11 +205,17 @@ fn test_anthropic_response_to_chat_response() {
     assert_eq!(chat_resp.id, "msg_12345");
     assert_eq!(chat_resp.model, "claude-3-5-sonnet");
     assert_eq!(chat_resp.choices.len(), 1);
-    assert_eq!(chat_resp.choices[0].finish_reason, Some(FinishReason::ToolCalls));
+    assert_eq!(
+        chat_resp.choices[0].finish_reason,
+        Some(FinishReason::ToolCalls)
+    );
 
     let msg = &chat_resp.choices[0].message;
     assert_eq!(msg.content.as_deref(), Some("Here is your answer."));
-    assert_eq!(msg.reasoning_content.as_deref(), Some("Planning the response..."));
+    assert_eq!(
+        msg.reasoning_content.as_deref(),
+        Some("Planning the response...")
+    );
     assert_eq!(msg.tool_calls.as_ref().unwrap().len(), 1);
     assert_eq!(msg.tool_calls.as_ref().unwrap()[0].function.name, "search");
     assert_eq!(
@@ -261,7 +272,10 @@ fn test_chat_response_to_anthropic_response() {
 
     let anthropic_resp = chat_to_anthropic_response(&chat_resp).unwrap();
     assert_eq!(anthropic_resp.id, "chatcmpl-999");
-    assert_eq!(anthropic_resp.stop_reason, Some(AnthropicStopReason::ToolUse));
+    assert_eq!(
+        anthropic_resp.stop_reason,
+        Some(AnthropicStopReason::ToolUse)
+    );
     assert_eq!(anthropic_resp.content.len(), 3); // Thinking, Text, ToolUse
 
     match &anthropic_resp.content[0] {
@@ -277,7 +291,9 @@ fn test_chat_response_to_anthropic_response() {
         _ => panic!("Expected text block"),
     }
     match &anthropic_resp.content[2] {
-        AnthropicContentBlock::ToolUse { id, name, input, .. } => {
+        AnthropicContentBlock::ToolUse {
+            id, name, input, ..
+        } => {
             assert_eq!(id, "call_001");
             assert_eq!(name, "do_something");
             assert_eq!(input["k"], "v");
@@ -370,7 +386,6 @@ fn test_responses_with_reasoning_to_chat_response() {
     );
 }
 
-
 #[test]
 fn test_streaming_anthropic_to_chat_fsm() {
     let mut fsm = AnthropicStreamToChatFsm::new("model-override");
@@ -395,7 +410,10 @@ fn test_streaming_anthropic_to_chat_fsm() {
     let chunks = fsm.process_event(start_event).unwrap();
     assert_eq!(chunks.len(), 1);
     assert_eq!(chunks[0].id, "msg_stream_1");
-    assert_eq!(chunks[0].choices[0].delta.role.as_deref(), Some("assistant"));
+    assert_eq!(
+        chunks[0].choices[0].delta.role.as_deref(),
+        Some("assistant")
+    );
 
     // 2. content_block_start (thinking)
     let block_thinking = MessageStreamEvent::ContentBlockStart {
@@ -417,7 +435,10 @@ fn test_streaming_anthropic_to_chat_fsm() {
     };
     let chunks = fsm.process_event(delta_thinking).unwrap();
     assert_eq!(chunks.len(), 1);
-    assert_eq!(chunks[0].choices[0].delta.reasoning_content.as_deref(), Some("Let me think..."));
+    assert_eq!(
+        chunks[0].choices[0].delta.reasoning_content.as_deref(),
+        Some("Let me think...")
+    );
 
     // 4. content_block_start (tool_use)
     let block_tool = MessageStreamEvent::ContentBlockStart {
@@ -433,7 +454,10 @@ fn test_streaming_anthropic_to_chat_fsm() {
     assert_eq!(chunks.len(), 1);
     let tool_call_delta = &chunks[0].choices[0].delta.tool_calls.as_ref().unwrap()[0];
     assert_eq!(tool_call_delta.id.as_deref(), Some("toolu_abc"));
-    assert_eq!(tool_call_delta.function.as_ref().unwrap().name.as_deref(), Some("fetch_data"));
+    assert_eq!(
+        tool_call_delta.function.as_ref().unwrap().name.as_deref(),
+        Some("fetch_data")
+    );
 
     // 5. content_block_delta (input_json_delta)
     let delta_json = MessageStreamEvent::ContentBlockDelta {
@@ -445,7 +469,15 @@ fn test_streaming_anthropic_to_chat_fsm() {
     let chunks = fsm.process_event(delta_json).unwrap();
     assert_eq!(chunks.len(), 1);
     let tool_call_delta = &chunks[0].choices[0].delta.tool_calls.as_ref().unwrap()[0];
-    assert_eq!(tool_call_delta.function.as_ref().unwrap().arguments.as_deref(), Some("{\"page\":1}"));
+    assert_eq!(
+        tool_call_delta
+            .function
+            .as_ref()
+            .unwrap()
+            .arguments
+            .as_deref(),
+        Some("{\"page\":1}")
+    );
 
     // 6. message_delta & message_stop
     let msg_delta = MessageStreamEvent::MessageDelta {
@@ -457,7 +489,10 @@ fn test_streaming_anthropic_to_chat_fsm() {
     };
     let chunks = fsm.process_event(msg_delta).unwrap();
     assert_eq!(chunks.len(), 1);
-    assert_eq!(chunks[0].choices[0].finish_reason, Some(FinishReason::ToolCalls));
+    assert_eq!(
+        chunks[0].choices[0].finish_reason,
+        Some(FinishReason::ToolCalls)
+    );
     assert_eq!(chunks[0].usage.as_ref().unwrap().completion_tokens, 35);
 }
 
@@ -469,8 +504,12 @@ fn test_responses_to_anthropic_request_preserves_tools_and_reasoning() {
             ResponseInputItem::Message {
                 role: "assistant".to_string(),
                 content: vec![
-                    ResponseContentPart::Reasoning { reasoning: "plan".to_string() },
-                    ResponseContentPart::Text { text: "hi".to_string() },
+                    ResponseContentPart::Reasoning {
+                        reasoning: "plan".to_string(),
+                    },
+                    ResponseContentPart::Text {
+                        text: "hi".to_string(),
+                    },
                 ],
             },
             ResponseInputItem::FunctionCall {
@@ -509,7 +548,9 @@ fn test_responses_to_anthropic_request_preserves_tools_and_reasoning() {
         _ => panic!("expected blocks"),
     };
     assert!(matches!(blocks[0], AnthropicContentBlock::Thinking { .. }));
-    assert!(blocks.iter().any(|b| matches!(b, AnthropicContentBlock::ToolUse { .. })));
+    assert!(blocks
+        .iter()
+        .any(|b| matches!(b, AnthropicContentBlock::ToolUse { .. })));
     assert_eq!(ant.tools.unwrap().len(), 1);
     // Roles must strictly alternate for Anthropic upstreams.
     for w in ant.messages.windows(2) {
@@ -589,7 +630,9 @@ fn test_mixed_sequence_never_breaks_anthropic_alternation() {
         input: ResponseInput::Items(vec![
             ResponseInputItem::Message {
                 role: "user".to_string(),
-                content: vec![ResponseContentPart::Text { text: "q".to_string() }],
+                content: vec![ResponseContentPart::Text {
+                    text: "q".to_string(),
+                }],
             },
             ResponseInputItem::FunctionCall {
                 call_id: "c1".to_string(),
@@ -602,7 +645,9 @@ fn test_mixed_sequence_never_breaks_anthropic_alternation() {
             },
             ResponseInputItem::Message {
                 role: "user".to_string(),
-                content: vec![ResponseContentPart::Text { text: "follow-up".to_string() }],
+                content: vec![ResponseContentPart::Text {
+                    text: "follow-up".to_string(),
+                }],
             },
         ]),
         instructions: None,
@@ -619,7 +664,10 @@ fn test_mixed_sequence_never_breaks_anthropic_alternation() {
     let ant = responses_to_anthropic_request(&req).unwrap();
     assert!(!ant.messages.is_empty());
     for w in ant.messages.windows(2) {
-        assert_ne!(w[0].role, w[1].role, "roles must alternate across mixed sequences");
+        assert_ne!(
+            w[0].role, w[1].role,
+            "roles must alternate across mixed sequences"
+        );
     }
     let texts: String = ant
         .messages
@@ -650,8 +698,14 @@ fn test_anthropic_to_responses_request_roundtrip() {
             AnthropicMessage {
                 role: AnthropicRole::Assistant,
                 content: AnthropicContent::Blocks(vec![
-                    AnthropicContentBlock::Thinking { thinking: "hmm".to_string(), signature: None },
-                    AnthropicContentBlock::Text { text: "world".to_string(), cache_control: None },
+                    AnthropicContentBlock::Thinking {
+                        thinking: "hmm".to_string(),
+                        signature: None,
+                    },
+                    AnthropicContentBlock::Text {
+                        text: "world".to_string(),
+                        cache_control: None,
+                    },
                 ]),
             },
         ],
@@ -688,8 +742,14 @@ fn test_anthropic_response_to_responses_response() {
         r#type: "message".to_string(),
         role: "assistant".to_string(),
         content: vec![
-            AnthropicContentBlock::Thinking { thinking: "plan".to_string(), signature: None },
-            AnthropicContentBlock::Text { text: "done".to_string(), cache_control: None },
+            AnthropicContentBlock::Thinking {
+                thinking: "plan".to_string(),
+                signature: None,
+            },
+            AnthropicContentBlock::Text {
+                text: "done".to_string(),
+                cache_control: None,
+            },
             AnthropicContentBlock::ToolUse {
                 id: "tu_1".to_string(),
                 name: "f".to_string(),
@@ -784,7 +844,10 @@ fn test_responses_to_chat_stream_fsm() {
     };
     let chunks = fsm.process_event(created).unwrap();
     assert_eq!(chunks.len(), 1);
-    assert_eq!(chunks[0].choices[0].delta.role.as_deref(), Some("assistant"));
+    assert_eq!(
+        chunks[0].choices[0].delta.role.as_deref(),
+        Some("assistant")
+    );
 
     let text = ResponseStreamEvent::OutputTextDelta(ResponseTextDelta {
         response_id: "resp_1".to_string(),
@@ -803,7 +866,11 @@ fn test_responses_to_chat_stream_fsm() {
             status: "completed".to_string(),
             model: "m".to_string(),
             output: vec![],
-            usage: Some(ResponseUsage { total_tokens: 9, input_tokens: 6, output_tokens: 3 }),
+            usage: Some(ResponseUsage {
+                total_tokens: 9,
+                input_tokens: 6,
+                output_tokens: 3,
+            }),
             error: None,
         },
     };
@@ -837,7 +904,10 @@ fn test_chat_to_responses_stream_fsm() {
         service_tier: None,
     };
     let events = fsm.process_chunk(chunk).unwrap();
-    assert!(matches!(events[0], ResponseStreamEvent::ResponseCreated { .. }));
+    assert!(matches!(
+        events[0],
+        ResponseStreamEvent::ResponseCreated { .. }
+    ));
     assert!(matches!(events[1], ResponseStreamEvent::OutputTextDelta(_)));
 
     let fin = ChatCompletionChunk {
@@ -893,7 +963,10 @@ fn test_responses_to_anthropic_stream_fsm() {
     let events = fsm.process_event(text).unwrap();
     assert!(events.iter().any(|e| matches!(
         e,
-        MessageStreamEvent::ContentBlockDelta { delta: AnthropicDelta::TextDelta { .. }, .. }
+        MessageStreamEvent::ContentBlockDelta {
+            delta: AnthropicDelta::TextDelta { .. },
+            ..
+        }
     )));
 
     let done = ResponseStreamEvent::ResponseDone {
@@ -903,12 +976,18 @@ fn test_responses_to_anthropic_stream_fsm() {
             status: "completed".to_string(),
             model: "m".to_string(),
             output: vec![],
-            usage: Some(ResponseUsage { total_tokens: 5, input_tokens: 3, output_tokens: 2 }),
+            usage: Some(ResponseUsage {
+                total_tokens: 5,
+                input_tokens: 3,
+                output_tokens: 2,
+            }),
             error: None,
         },
     };
     let events = fsm.process_event(done).unwrap();
-    assert!(events.iter().any(|e| matches!(e, MessageStreamEvent::MessageStop)));
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, MessageStreamEvent::MessageStop)));
 }
 
 #[test]
@@ -927,11 +1006,16 @@ fn test_anthropic_to_responses_stream_fsm() {
         },
     };
     let events = fsm.process_event(start).unwrap();
-    assert!(matches!(events[0], ResponseStreamEvent::ResponseCreated { .. }));
+    assert!(matches!(
+        events[0],
+        ResponseStreamEvent::ResponseCreated { .. }
+    ));
 
     let delta = MessageStreamEvent::ContentBlockDelta {
         index: 0,
-        delta: AnthropicDelta::TextDelta { text: "hey".to_string() },
+        delta: AnthropicDelta::TextDelta {
+            text: "hey".to_string(),
+        },
     };
     let events = fsm.process_event(delta).unwrap();
     assert!(matches!(events[0], ResponseStreamEvent::OutputTextDelta(_)));
@@ -972,10 +1056,19 @@ fn test_responses_to_chat_request_merges_assistant_text_and_function_call() {
     };
 
     let chat_req = responses_to_chat_request(&req).unwrap();
-    assert_eq!(chat_req.messages.len(), 1, "Must merge into a single assistant message rather than consecutive assistant messages");
+    assert_eq!(
+        chat_req.messages.len(),
+        1,
+        "Must merge into a single assistant message rather than consecutive assistant messages"
+    );
     match &chat_req.messages[0] {
         ChatMessage::Assistant(a) => {
-            assert_eq!(a.content, Some(MessageContent::Text("I will check the weather.".to_string())));
+            assert_eq!(
+                a.content,
+                Some(MessageContent::Text(
+                    "I will check the weather.".to_string()
+                ))
+            );
             let calls = a.tool_calls.as_ref().expect("tool_calls must be present");
             assert_eq!(calls.len(), 1);
             assert_eq!(calls[0].id, "call_weather_1");
@@ -1025,13 +1118,21 @@ fn test_anthropic_to_responses_request_preserves_thinking_text_tool_order() {
     let resp_req = anthropic_to_responses_request(&req).unwrap();
     match resp_req.input {
         ResponseInput::Items(items) => {
-            assert_eq!(items.len(), 2, "Should emit 1 Message item (thinking+text) followed by 1 FunctionCall item");
+            assert_eq!(
+                items.len(),
+                2,
+                "Should emit 1 Message item (thinking+text) followed by 1 FunctionCall item"
+            );
             match &items[0] {
                 ResponseInputItem::Message { role, content } => {
                     assert_eq!(role, "assistant");
                     assert_eq!(content.len(), 2);
-                    assert!(matches!(&content[0], ResponseContentPart::Reasoning { reasoning } if reasoning == "Calculating optimal route"));
-                    assert!(matches!(&content[1], ResponseContentPart::Text { text } if text == "I am ready to invoke the routing tool:"));
+                    assert!(
+                        matches!(&content[0], ResponseContentPart::Reasoning { reasoning } if reasoning == "Calculating optimal route")
+                    );
+                    assert!(
+                        matches!(&content[1], ResponseContentPart::Text { text } if text == "I am ready to invoke the routing tool:")
+                    );
                 }
                 _ => panic!("First item must be Message containing reasoning and text"),
             }
@@ -1050,40 +1151,52 @@ fn test_anthropic_to_responses_request_preserves_thinking_text_tool_order() {
 #[test]
 fn test_responses_to_anthropic_stream_fsm_empty_delta_and_dynamic_stop_reason() {
     let mut fsm = ResponsesToAnthropicFsm::new("claude-model");
-    let _ = fsm.process_event(ResponseStreamEvent::ResponseCreated {
-        response: ResponseObject {
-            id: "resp_dyn_1".to_string(),
-            object: "response".to_string(),
-            status: "in_progress".to_string(),
-            model: "claude-model".to_string(),
-            output: vec![],
-            usage: None,
-            error: None,
-        },
-    }).unwrap();
+    let _ = fsm
+        .process_event(ResponseStreamEvent::ResponseCreated {
+            response: ResponseObject {
+                id: "resp_dyn_1".to_string(),
+                object: "response".to_string(),
+                status: "in_progress".to_string(),
+                model: "claude-model".to_string(),
+                output: vec![],
+                usage: None,
+                error: None,
+            },
+        })
+        .unwrap();
 
-    let empty_events = fsm.process_event(ResponseStreamEvent::TextDelta(ResponseTextDelta {
-        response_id: "resp_dyn_1".to_string(),
-        item_id: "it_empty".to_string(),
-        output_index: 0,
-        content_index: 0,
-        delta: "".to_string(),
-    })).unwrap();
-    assert!(empty_events.is_empty(), "Empty text delta must yield zero events");
-
-    let tool_events = fsm.process_event(ResponseStreamEvent::FunctionCallArgumentsDelta(
-        ResponseFunctionCallDelta {
+    let empty_events = fsm
+        .process_event(ResponseStreamEvent::TextDelta(ResponseTextDelta {
             response_id: "resp_dyn_1".to_string(),
-            item_id: "call_tool_1".to_string(),
+            item_id: "it_empty".to_string(),
             output_index: 0,
-            call_id: "call_tool_1".to_string(),
-            delta: "{\"id\":1}".to_string(),
-        },
-    )).unwrap();
-    assert!(tool_events.iter().any(|e| matches!(e, MessageStreamEvent::ContentBlockStart {
-        index: 0,
-        content_block: AnthropicContentBlock::ToolUse { .. }
-    })));
+            content_index: 0,
+            delta: "".to_string(),
+        }))
+        .unwrap();
+    assert!(
+        empty_events.is_empty(),
+        "Empty text delta must yield zero events"
+    );
+
+    let tool_events = fsm
+        .process_event(ResponseStreamEvent::FunctionCallArgumentsDelta(
+            ResponseFunctionCallDelta {
+                response_id: "resp_dyn_1".to_string(),
+                item_id: "call_tool_1".to_string(),
+                output_index: 0,
+                call_id: "call_tool_1".to_string(),
+                delta: "{\"id\":1}".to_string(),
+            },
+        ))
+        .unwrap();
+    assert!(tool_events.iter().any(|e| matches!(
+        e,
+        MessageStreamEvent::ContentBlockStart {
+            index: 0,
+            content_block: AnthropicContentBlock::ToolUse { .. }
+        }
+    )));
 
     let finish_events = fsm.finish_if_open().unwrap_or_default();
     assert!(finish_events.iter().any(|e| matches!(
@@ -1098,24 +1211,28 @@ fn test_responses_to_anthropic_stream_fsm_empty_delta_and_dynamic_stop_reason() 
     )));
 
     let mut fsm_text = ResponsesToAnthropicFsm::new("claude-model");
-    let _ = fsm_text.process_event(ResponseStreamEvent::ResponseCreated {
-        response: ResponseObject {
-            id: "resp_dyn_2".to_string(),
-            object: "response".to_string(),
-            status: "in_progress".to_string(),
-            model: "claude-model".to_string(),
-            output: vec![],
-            usage: None,
-            error: None,
-        },
-    }).unwrap();
-    let _ = fsm_text.process_event(ResponseStreamEvent::TextDelta(ResponseTextDelta {
-        response_id: "resp_dyn_2".to_string(),
-        item_id: "it_text".to_string(),
-        output_index: 0,
-        content_index: 0,
-        delta: "Hello".to_string(),
-    })).unwrap();
+    let _ = fsm_text
+        .process_event(ResponseStreamEvent::ResponseCreated {
+            response: ResponseObject {
+                id: "resp_dyn_2".to_string(),
+                object: "response".to_string(),
+                status: "in_progress".to_string(),
+                model: "claude-model".to_string(),
+                output: vec![],
+                usage: None,
+                error: None,
+            },
+        })
+        .unwrap();
+    let _ = fsm_text
+        .process_event(ResponseStreamEvent::TextDelta(ResponseTextDelta {
+            response_id: "resp_dyn_2".to_string(),
+            item_id: "it_text".to_string(),
+            output_index: 0,
+            content_index: 0,
+            delta: "Hello".to_string(),
+        }))
+        .unwrap();
     let text_finish = fsm_text.finish_if_open().unwrap_or_default();
     assert!(text_finish.iter().any(|e| matches!(
         e,
@@ -1168,4 +1285,51 @@ fn test_refusal_only_input_fails_instead_of_empty_anthropic_message() {
         extra: Default::default(),
     };
     assert!(responses_to_anthropic_request(&blank).is_err());
+}
+
+#[test]
+fn test_responses_reasoning_output_item_and_unknown_deserialization() {
+    let raw_json = serde_json::json!({
+        "id": "resp_test_reasoning",
+        "object": "response",
+        "status": "completed",
+        "model": "muse-spark-1.3-contributor-free",
+        "output": [
+            {
+                "type": "reasoning",
+                "id": "rs_1",
+                "content": [
+                    { "type": "text", "text": "Deep thinking step 1..." }
+                ]
+            },
+            {
+                "type": "message",
+                "id": "msg_1",
+                "status": "completed",
+                "role": "assistant",
+                "content": [
+                    { "type": "text", "text": "Pong response." }
+                ]
+            },
+            {
+                "type": "future_unknown_item_type",
+                "id": "un_1",
+                "foo": "bar"
+            }
+        ]
+    });
+
+    let resp_obj: ResponseObject =
+        serde_json::from_value(raw_json).expect("should deserialize reasoning and unknown items");
+    assert_eq!(resp_obj.output.len(), 3);
+
+    let chat = responses_to_chat_response(&resp_obj).expect("should convert to chat completion");
+    assert_eq!(
+        chat.choices[0].message.content.as_deref(),
+        Some("Pong response.")
+    );
+    assert_eq!(
+        chat.choices[0].message.reasoning_content.as_deref(),
+        Some("Deep thinking step 1...")
+    );
 }

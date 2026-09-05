@@ -1,9 +1,9 @@
-use std::collections::HashMap;
-use std::time::{SystemTime, UNIX_EPOCH};
 use crate::anthropic::messages::*;
 use crate::error::Result;
 use crate::openai::chat::*;
 use crate::openai::responses::*;
+use std::collections::HashMap;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 fn now_secs() -> u64 {
     SystemTime::now()
@@ -110,7 +110,10 @@ impl ResponsesToChatFsm {
                         index: idx,
                         id: Some(call_id.to_string()),
                         r#type: Some("function".to_string()),
-                        function: Some(FunctionCallChunk { name, arguments: Some(String::new()) }),
+                        function: Some(FunctionCallChunk {
+                            name,
+                            arguments: Some(String::new()),
+                        }),
                     }]),
                 },
                 finish_reason: None,
@@ -122,7 +125,10 @@ impl ResponsesToChatFsm {
         }
     }
 
-    pub fn process_event(&mut self, event: ResponseStreamEvent) -> Result<Vec<ChatCompletionChunk>> {
+    pub fn process_event(
+        &mut self,
+        event: ResponseStreamEvent,
+    ) -> Result<Vec<ChatCompletionChunk>> {
         let mut chunks = Vec::new();
         if self.done {
             return Ok(chunks);
@@ -154,7 +160,12 @@ impl ResponsesToChatFsm {
                 });
             }
             ResponseStreamEvent::TextDelta(d) | ResponseStreamEvent::OutputTextDelta(d) => {
-                chunks.push(chat_text_chunk(&self.response_id, &self.model, self.created, d.delta));
+                chunks.push(chat_text_chunk(
+                    &self.response_id,
+                    &self.model,
+                    self.created,
+                    d.delta,
+                ));
             }
             ResponseStreamEvent::OutputItemAdded {
                 item: ResponseOutputItem::FunctionCall { call_id, name, .. },
@@ -330,7 +341,9 @@ impl ChatToResponsesFsm {
                 id: self.item_id.clone(),
                 status: "completed".to_string(),
                 role: "assistant".to_string(),
-                content: vec![ResponseContentPart::Text { text: self.text_acc.clone() }],
+                content: vec![ResponseContentPart::Text {
+                    text: self.text_acc.clone(),
+                }],
             });
         }
         let mut indexes: Vec<u32> = self.tool_items.keys().cloned().collect();
@@ -373,7 +386,10 @@ impl ChatToResponsesFsm {
         }
     }
 
-    pub fn process_chunk(&mut self, chunk: ChatCompletionChunk) -> Result<Vec<ResponseStreamEvent>> {
+    pub fn process_chunk(
+        &mut self,
+        chunk: ChatCompletionChunk,
+    ) -> Result<Vec<ResponseStreamEvent>> {
         let mut events = Vec::new();
         if self.done {
             return Ok(events);
@@ -397,11 +413,16 @@ impl ChatToResponsesFsm {
             if let Some(ref tool_calls) = choice.delta.tool_calls {
                 for tc in tool_calls {
                     let entry = self.tool_items.entry(tc.index).or_insert_with(|| {
-                        let call_id = tc.id.clone().unwrap_or_else(|| format!("call_{}", tc.index));
+                        let call_id = tc
+                            .id
+                            .clone()
+                            .unwrap_or_else(|| format!("call_{}", tc.index));
                         (format!("fcitem_{}", tc.index), call_id)
                     });
                     let (item_id, call_id) = entry.clone();
-                    if tc.id.is_some() || tc.function.as_ref().and_then(|f| f.name.clone()).is_some() {
+                    if tc.id.is_some()
+                        || tc.function.as_ref().and_then(|f| f.name.clone()).is_some()
+                    {
                         let name = tc
                             .function
                             .as_ref()
@@ -536,7 +557,12 @@ impl ResponsesToAnthropicFsm {
         idx
     }
 
-    fn open_tool_block(&mut self, events: &mut Vec<MessageStreamEvent>, call_id: &str, name: &str) -> u32 {
+    fn open_tool_block(
+        &mut self,
+        events: &mut Vec<MessageStreamEvent>,
+        call_id: &str,
+        name: &str,
+    ) -> u32 {
         self.ensure_started(events);
         if let Some(&idx) = self.tool_blocks.get(call_id) {
             if self.open_blocks.contains(&idx) {
@@ -575,8 +601,7 @@ impl ResponsesToAnthropicFsm {
     }
 
     fn stop_open_text_blocks(&mut self, events: &mut Vec<MessageStreamEvent>) {
-        let tool_idx: std::collections::HashSet<u32> =
-            self.tool_blocks.values().cloned().collect();
+        let tool_idx: std::collections::HashSet<u32> = self.tool_blocks.values().cloned().collect();
         let text_open: Vec<u32> = self
             .open_blocks
             .iter()
@@ -588,7 +613,12 @@ impl ResponsesToAnthropicFsm {
         }
     }
 
-    fn close_and_finish(&mut self, events: &mut Vec<MessageStreamEvent>, stop: AnthropicStopReason, output_tokens: u32) {
+    fn close_and_finish(
+        &mut self,
+        events: &mut Vec<MessageStreamEvent>,
+        stop: AnthropicStopReason,
+        output_tokens: u32,
+    ) {
         self.ensure_started(events);
         let remaining: Vec<u32> = std::mem::take(&mut self.open_blocks);
         for idx in remaining {
@@ -596,7 +626,10 @@ impl ResponsesToAnthropicFsm {
         }
         self.active_block = None;
         events.push(MessageStreamEvent::MessageDelta {
-            delta: MessageDeltaBody { stop_reason: Some(stop), stop_sequence: None },
+            delta: MessageDeltaBody {
+                stop_reason: Some(stop),
+                stop_sequence: None,
+            },
             usage: Some(AnthropicDeltaUsage { output_tokens }),
         });
         events.push(MessageStreamEvent::MessageStop);
@@ -639,6 +672,7 @@ impl ResponsesToAnthropicFsm {
                 ResponseOutputItem::Message { .. } => {
                     self.stop_open_text_blocks(&mut events);
                 }
+                _ => {}
             },
             ResponseStreamEvent::ContentPartDone { .. } => {
                 self.stop_open_text_blocks(&mut events);
@@ -647,12 +681,18 @@ impl ResponsesToAnthropicFsm {
                 let idx = self.open_tool_block(&mut events, &d.call_id.clone(), "");
                 events.push(MessageStreamEvent::ContentBlockDelta {
                     index: idx,
-                    delta: AnthropicDelta::InputJsonDelta { partial_json: d.delta },
+                    delta: AnthropicDelta::InputJsonDelta {
+                        partial_json: d.delta,
+                    },
                 });
             }
             ResponseStreamEvent::ResponseDone { response }
             | ResponseStreamEvent::Completed { response } => {
-                let output_tokens = response.usage.as_ref().map(|u| u.output_tokens).unwrap_or(0);
+                let output_tokens = response
+                    .usage
+                    .as_ref()
+                    .map(|u| u.output_tokens)
+                    .unwrap_or(0);
                 let stop = if self.saw_tool {
                     AnthropicStopReason::ToolUse
                 } else if response.status == "incomplete" {
@@ -739,14 +779,20 @@ impl AnthropicToResponsesFsm {
                 id: self.item_id.clone(),
                 status: "completed".to_string(),
                 role: "assistant".to_string(),
-                content: vec![ResponseContentPart::Text { text: self.text_acc.clone() }],
+                content: vec![ResponseContentPart::Text {
+                    text: self.text_acc.clone(),
+                }],
             });
         }
         let mut indexes: Vec<u32> = self.tool_items.keys().cloned().collect();
         indexes.sort();
         for idx in indexes {
             let (item_id, call_id) = self.tool_items[&idx].clone();
-            let args = self.tool_args.get(&idx).cloned().unwrap_or_else(|| "{}".to_string());
+            let args = self
+                .tool_args
+                .get(&idx)
+                .cloned()
+                .unwrap_or_else(|| "{}".to_string());
             let name = self.tool_names.get(&idx).cloned().unwrap_or_default();
             output.push(ResponseOutputItem::FunctionCall {
                 id: item_id,
@@ -822,10 +868,9 @@ impl AnthropicToResponsesFsm {
                 AnthropicDelta::InputJsonDelta { partial_json } => {
                     self.ensure_created(&mut events);
                     if !self.tool_items.contains_key(&index) {
-                        self.tool_items.entry(index).or_insert((
-                            format!("fcitem_{}", index),
-                            format!("call_{}", index),
-                        ));
+                        self.tool_items
+                            .entry(index)
+                            .or_insert((format!("fcitem_{}", index), format!("call_{}", index)));
                     }
                     let acc = self.tool_args.entry(index).or_default();
                     acc.push_str(&partial_json);

@@ -5,7 +5,11 @@ use crate::openai::responses::*;
 /// True when a Responses request carries any non-blank text for an upstream
 /// that cannot accept image-only input after translation drops images.
 pub fn responses_request_has_text(req: &CreateResponseRequest) -> bool {
-    if req.instructions.as_ref().is_some_and(|s| !s.trim().is_empty()) {
+    if req
+        .instructions
+        .as_ref()
+        .is_some_and(|s| !s.trim().is_empty())
+    {
         return true;
     }
     let items: &[ResponseInputItem] = match &req.input {
@@ -39,8 +43,13 @@ pub fn chat_to_responses_request(req: &ChatCompletionRequest) -> Result<CreateRe
             }
             ChatMessage::User(user) => {
                 if let MessageContent::Parts(parts) = &user.content {
-                    if parts.iter().any(|p| matches!(p, ContentPart::ImageUrl { .. })) {
-                        tracing::warn!("dropping image part: Responses input items carry no image part");
+                    if parts
+                        .iter()
+                        .any(|p| matches!(p, ContentPart::ImageUrl { .. }))
+                    {
+                        tracing::warn!(
+                            "dropping image part: Responses input items carry no image part"
+                        );
                     }
                 }
                 items.push(ResponseInputItem::Message {
@@ -51,7 +60,11 @@ pub fn chat_to_responses_request(req: &ChatCompletionRequest) -> Result<CreateRe
                 });
             }
             ChatMessage::Assistant(ast) => {
-                let text = ast.content.as_ref().map(|c| c.as_plain_text()).unwrap_or_default();
+                let text = ast
+                    .content
+                    .as_ref()
+                    .map(|c| c.as_plain_text())
+                    .unwrap_or_default();
                 items.push(ResponseInputItem::Message {
                     role: "assistant".to_string(),
                     content: vec![ResponseContentPart::Text { text }],
@@ -284,7 +297,9 @@ pub fn chat_to_responses_response(resp: &ChatCompletionResponse) -> Result<Respo
 
     let mut parts = Vec::new();
     if !reasoning_acc.is_empty() {
-        parts.push(ResponseContentPart::Reasoning { reasoning: reasoning_acc });
+        parts.push(ResponseContentPart::Reasoning {
+            reasoning: reasoning_acc,
+        });
     }
     if !text_acc.is_empty() {
         parts.push(ResponseContentPart::Text { text: text_acc });
@@ -310,7 +325,11 @@ pub fn chat_to_responses_response(resp: &ChatCompletionResponse) -> Result<Respo
     Ok(ResponseObject {
         id: resp.id.clone(),
         object: "response".to_string(),
-        status: if finish_stop { "completed".to_string() } else { "incomplete".to_string() },
+        status: if finish_stop {
+            "completed".to_string()
+        } else {
+            "incomplete".to_string()
+        },
         model: resp.model.clone(),
         output,
         usage,
@@ -357,12 +376,57 @@ pub fn responses_to_chat_response(resp: &ResponseObject) -> Result<ChatCompletio
                     },
                 });
             }
+            ResponseOutputItem::Reasoning {
+                content, summary, ..
+            } => {
+                if let Some(parts) = content {
+                    for part in parts {
+                        match part {
+                            ResponseContentPart::Text { text } => reasoning_acc.push_str(text),
+                            ResponseContentPart::Thought { thought } => {
+                                reasoning_acc.push_str(thought)
+                            }
+                            ResponseContentPart::Reasoning { reasoning } => {
+                                reasoning_acc.push_str(reasoning)
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                if let Some(parts) = summary {
+                    for part in parts {
+                        match part {
+                            ResponseContentPart::Text { text } => reasoning_acc.push_str(text),
+                            ResponseContentPart::Thought { thought } => {
+                                reasoning_acc.push_str(thought)
+                            }
+                            ResponseContentPart::Reasoning { reasoning } => {
+                                reasoning_acc.push_str(reasoning)
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            ResponseOutputItem::Unknown => {}
         }
     }
 
-    let content = if text_acc.is_empty() { None } else { Some(text_acc) };
-    let reasoning_content = if reasoning_acc.is_empty() { None } else { Some(reasoning_acc) };
-    let tool_calls_opt = if tool_calls.is_empty() { None } else { Some(tool_calls) };
+    let content = if text_acc.is_empty() {
+        None
+    } else {
+        Some(text_acc)
+    };
+    let reasoning_content = if reasoning_acc.is_empty() {
+        None
+    } else {
+        Some(reasoning_acc)
+    };
+    let tool_calls_opt = if tool_calls.is_empty() {
+        None
+    } else {
+        Some(tool_calls)
+    };
     let finish_reason = if tool_calls_opt.is_some() {
         Some(FinishReason::ToolCalls)
     } else {
@@ -399,4 +463,3 @@ pub fn responses_to_chat_response(resp: &ResponseObject) -> Result<ChatCompletio
         service_tier: None,
     })
 }
-

@@ -173,7 +173,9 @@ pub async fn stop_serve(config_path: Option<&str>) -> Result<String, String> {
         return Err(MANUAL_STOP_HINT.to_string());
     };
     if pid == std::process::id() {
-        return Err("pidfile 指向当前进程自己，拒绝自杀。请检查是否误用了同一配置文件。".to_string());
+        return Err(
+            "pidfile 指向当前进程自己，拒绝自杀。请检查是否误用了同一配置文件。".to_string(),
+        );
     }
     if !process_alive(pid) {
         let _ = std::fs::remove_file(&pidfile);
@@ -227,10 +229,7 @@ pub fn release_pidfile(resolved_config: &Path) {
 
 /// 后台拉起新的 `serve` 进程并返回其 pid。`serve_args` 为透传给 `serve` 的参数
 ///（如 `--config/--bind/--port/--api-key/--retries` 的显式覆盖）。
-pub fn spawn_detached_serve(
-    resolved_config: &Path,
-    serve_args: &[String],
-) -> Result<u32, String> {
+pub fn spawn_detached_serve(resolved_config: &Path, serve_args: &[String]) -> Result<u32, String> {
     let exe = std::env::current_exe().map_err(|e| format!("获取当前可执行文件路径失败: {}", e))?;
     let logfile = logfile_for_config(resolved_config);
     let log = std::fs::OpenOptions::new()
@@ -257,8 +256,77 @@ pub fn spawn_detached_serve(
         // 父进程退出后子进程被 init 接管继续在后台运行；
         // 生产环境建议用 systemd 托管（见 README），本命令面向开发机一键重启。
     }
-    let child = cmd.spawn().map_err(|e| format!("拉起后台 serve 失败: {}", e))?;
+    let child = cmd
+        .spawn()
+        .map_err(|e| format!("拉起后台 serve 失败: {}", e))?;
     Ok(child.id())
+}
+
+/// 读取文件末尾至多 `max_lines` 行文本（用于捕获进程崩溃时的 stderr/stdout 详情）。
+pub fn read_tail_lines(path: &Path, max_lines: usize) -> String {
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return String::new();
+    };
+    let lines: Vec<&str> = content.lines().collect();
+    if lines.is_empty() {
+        return String::new();
+    }
+    let start = lines.len().saturating_sub(max_lines);
+    lines[start..].join("\n")
+}
+
+/// 探测目标网络地址是否已被占用（尝试独占 bind 探测）。
+pub fn is_addr_in_use(bind_addr: &str) -> bool {
+    let addr = if bind_addr.starts_with(':') {
+        format!("0.0.0.0{}", bind_addr)
+    } else {
+        bind_addr.to_string()
+    };
+    match std::net::TcpListener::bind(&addr) {
+        Ok(l) => {
+            drop(l);
+            false
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => true,
+        Err(_) => false,
+    }
+}
+
+/// 等待后台新实例存活并准备就绪。若进程在探测窗内夭折，读取日志尾部报错并返回 Err。
+pub async fn wait_process_alive_and_ready(
+    pid: u32,
+    logfile: &Path,
+    timeout: Duration,
+) -> Result<(), String> {
+    let start = std::time::Instant::now();
+    let poll_interval = Duration::from_millis(100);
+    while start.elapsed() < timeout {
+        if !process_alive(pid) {
+            let tail = read_tail_lines(logfile, 15);
+            let detail = if tail.trim().is_empty() {
+                "（日志文件为空，进程未输出错误即退出）".to_string()
+            } else {
+                tail
+            };
+            return Err(format!(
+                "后台网关实例 (pid: {}) 启动后立即异常退出！\n错误日志 ({}):\n{}\n请检查目标端口是否被占用，或配置参数是否正确。",
+                pid,
+                logfile.display(),
+                detail
+            ));
+        }
+        tokio::time::sleep(poll_interval).await;
+    }
+    if !process_alive(pid) {
+        let tail = read_tail_lines(logfile, 15);
+        return Err(format!(
+            "后台网关实例 (pid: {}) 异常退出！\n错误日志 ({}):\n{}",
+            pid,
+            logfile.display(),
+            tail
+        ));
+    }
+    Ok(())
 }
 
 /// 重启：先停（无实例也继续），再以后台方式拉起，覆盖 pidfile。
@@ -271,9 +339,60 @@ pub async fn restart_serve(
     retries: Option<usize>,
 ) -> Result<String, String> {
     let resolved = crate::config::ConfigFile::resolve_path(config);
+    let cfg = crate::config::ConfigFile::load_or_default(resolved.to_str()).ok();
+    let target_bind = bind
+        .clone()
+        .or_else(|| {
+            address
+                .clone()
+                .and_then(|a| port.map(|p| format!("{}:{}", a, p)))
+        })
+        .or_else(|| cfg.as_ref().map(|c| c.gateway.bind.clone()))
+        .unwrap_or_else(|| "127.0.0.1:8080".to_string());
+
     let stop_note = match stop_serve(config).await {
         Ok(msg) => msg,
-        Err(e) if e == MANUAL_STOP_HINT => "未发现 pidfile 管理的旧实例，直接拉起新实例。".to_string(),
+        Err(e) if e == MANUAL_STOP_HINT => {
+            if is_addr_in_use(&target_bind) {
+                let (host, p_str) = target_bind.split_once(':').unwrap_or(("127.0.0.1", "8080"));
+                let probe_host = if host == "0.0.0.0" { "127.0.0.1" } else { host };
+                let probe_url = format!("http://{}:{}/health", probe_host, p_str);
+                let client = reqwest::Client::builder()
+                    .timeout(Duration::from_millis(800))
+                    .build()
+                    .ok();
+                let is_pony = if let Some(cli) = client {
+                    match cli.get(&probe_url).send().await {
+                        Ok(resp) if resp.status().is_success() => resp
+                            .json::<serde_json::Value>()
+                            .await
+                            .ok()
+                            .and_then(|j| {
+                                j.get("service")
+                                    .and_then(|s| s.as_str())
+                                    .map(|s| s == "ponyllm")
+                            })
+                            .unwrap_or(false),
+                        _ => false,
+                    }
+                } else {
+                    false
+                };
+
+                if is_pony {
+                    return Err(format!(
+                        "未找到 pidfile，且检测到目标地址 {} 已被运行中的旧版 ponyllm 实例占用！\n👉 该实例可能系旧版本（无 pidfile 机制）启动。为防止新实例端口冲突崩溃，已终止重启。\n👉 请先手动停止旧进程（如 kill 或 pkill ponyllm）后，再执行 `ponyllm restart`。",
+                        target_bind
+                    ));
+                } else {
+                    return Err(format!(
+                        "未找到 pidfile，且检测到目标地址 {} 已被占用！无法拉起新实例。\n👉 请先释放占用该端口的进程后，再执行 `ponyllm restart`。",
+                        target_bind
+                    ));
+                }
+            }
+            "未发现 pidfile 管理的旧实例，以冷启动方式拉起新实例。".to_string()
+        }
         Err(e) => return Err(e),
     };
 
@@ -307,12 +426,20 @@ pub async fn restart_serve(
     tokio::time::sleep(Duration::from_millis(500)).await;
     let pid = spawn_detached_serve(&resolved, &args)?;
     let pidfile = pidfile_for_config(&resolved);
+    let logfile = logfile_for_config(&resolved);
+
+    // 关键防欺诈机制：探测新实例是否在启动阶段夭折（例如端口冲突、配置损坏）
+    if let Err(e) = wait_process_alive_and_ready(pid, &logfile, Duration::from_millis(1500)).await {
+        let _ = std::fs::remove_file(&pidfile);
+        return Err(e);
+    }
+
     write_pidfile(&pidfile, pid)?;
     Ok(format!(
-        "旧实例：{}新实例 pid {} 已在后台拉起，日志追加至 {}。请用 `ponyllm status` 确认版本与 Key 状态。",
+        "旧实例：{}新实例 pid {} 已在后台拉起并就绪运行，日志追加至 {}。请用 `ponyllm status` 确认版本与 Key 状态。",
         stop_note,
         pid,
-        logfile_for_config(&resolved).display()
+        logfile.display()
     ))
 }
 
@@ -323,7 +450,10 @@ mod tests {
     #[test]
     fn test_pidfile_and_logfile_derive_from_config_dir() {
         let cfg = Path::new("/etc/ponyllm/ponyllm.toml");
-        assert_eq!(pidfile_for_config(cfg), PathBuf::from("/etc/ponyllm/ponyllm.pid"));
+        assert_eq!(
+            pidfile_for_config(cfg),
+            PathBuf::from("/etc/ponyllm/ponyllm.pid")
+        );
         assert_eq!(
             logfile_for_config(cfg),
             PathBuf::from("/etc/ponyllm/ponyllm-serve.log")
@@ -349,12 +479,59 @@ mod tests {
         assert!(tasklist_csv_contains_pid(csv, 4242));
         assert!(!tasklist_csv_contains_pid(csv, 424));
         assert!(!tasklist_csv_contains_pid(csv, 42420 + 1));
-        assert!(!tasklist_csv_contains_pid("INFO: No tasks are running", 4242));
+        assert!(!tasklist_csv_contains_pid(
+            "INFO: No tasks are running",
+            4242
+        ));
     }
 
     #[test]
     fn test_current_process_is_alive() {
         assert!(process_alive(std::process::id()));
         assert!(!process_alive(4194304));
+    }
+
+    #[test]
+    fn test_read_tail_lines() {
+        let tmp = tempfile::tempdir().unwrap();
+        let logfile = tmp.path().join("test.log");
+        let content = (1..=20)
+            .map(|i| format!("line {}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(&logfile, content).unwrap();
+
+        let tail = read_tail_lines(&logfile, 3);
+        assert_eq!(tail, "line 18\nline 19\nline 20");
+
+        let empty = tmp.path().join("non_exist.log");
+        assert_eq!(read_tail_lines(&empty, 5), "");
+    }
+
+    #[test]
+    fn test_is_addr_in_use() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        assert!(is_addr_in_use(&addr));
+        drop(listener);
+        assert!(!is_addr_in_use(&addr));
+    }
+
+    #[tokio::test]
+    async fn test_wait_process_alive_and_ready_aborts_on_dead_pid() {
+        let tmp = tempfile::tempdir().unwrap();
+        let logfile = tmp.path().join("crash.log");
+        std::fs::write(
+            &logfile,
+            "Error: Os { code: 98, kind: AddrInUse, message: \"Address already in use\" }",
+        )
+        .unwrap();
+
+        // 4194304 is guaranteed not alive
+        let res = wait_process_alive_and_ready(4194304, &logfile, Duration::from_millis(300)).await;
+        assert!(res.is_err());
+        let err = res.unwrap_err();
+        assert!(err.contains("4194304"));
+        assert!(err.contains("Address already in use"));
     }
 }

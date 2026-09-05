@@ -1,5 +1,5 @@
-use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// OpenAI Responses API Create Request (`/v1/responses`)
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -108,6 +108,18 @@ pub enum ResponseOutputItem {
         name: String,
         arguments: String,
     },
+    Reasoning {
+        #[serde(default)]
+        id: Option<String>,
+        #[serde(default)]
+        status: Option<String>,
+        #[serde(default)]
+        content: Option<Vec<ResponseContentPart>>,
+        #[serde(default)]
+        summary: Option<Vec<ResponseContentPart>>,
+    },
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
