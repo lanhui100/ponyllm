@@ -1260,7 +1260,7 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
 name = "ponyllm"
-version = "0.2.17"
+version = "0.2.18"
 dependencies = [
  "axum",
  "ponyllm-core",
@@ -1273,7 +1273,7 @@ dependencies = [
 
 [[package]]
 name = "ponyllm-cli"
-version = "0.2.17"
+version = "0.2.18"
 dependencies = [
  "axum",
  "clap",
@@ -1300,7 +1300,7 @@ dependencies = [
 
 [[package]]
 name = "ponyllm-core"
-version = "0.2.17"
+version = "0.2.18"
 dependencies = [
  "axum",
  "chrono",
@@ -1321,7 +1321,7 @@ dependencies = [
 
 [[package]]
 name = "ponyllm-protocol"
-version = "0.2.17"
+version = "0.2.18"
 dependencies = [
  "bytes",
  "serde",
@@ -1332,7 +1332,7 @@ dependencies = [
 
 [[package]]
 name = "ponyllm-server"
-version = "0.2.17"
+version = "0.2.18"
 dependencies = [
  "axum",
  "bytes",
