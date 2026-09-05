@@ -78,25 +78,32 @@ pub fn responses_to_anthropic_request(req: &CreateResponseRequest) -> Result<Mes
                         flush_result(&mut messages, &mut pending_result);
                         let mut blocks = Vec::new();
                         let mut text_acc = String::new();
-                        for part in content {
-                            match part {
-                                ResponseContentPart::Text { text } => {
-                                    text_acc.push_str(text);
+                        match content {
+                            ResponseInputContent::Text(t) => {
+                                text_acc.push_str(&t);
+                            }
+                            ResponseInputContent::Parts(parts) => {
+                                for part in parts {
+                                    match part {
+                                        ResponseContentPart::Text { text } => {
+                                            text_acc.push_str(&text);
+                                        }
+                                        ResponseContentPart::Thought { thought } => {
+                                            blocks.push(AnthropicContentBlock::Thinking {
+                                                thinking: thought.clone(),
+                                                signature: None,
+                                            });
+                                        }
+                                        ResponseContentPart::Reasoning { reasoning } => {
+                                            blocks.push(AnthropicContentBlock::Thinking {
+                                                thinking: reasoning.clone(),
+                                                signature: None,
+                                            });
+                                        }
+                                        ResponseContentPart::Refusal { .. }
+                                        | ResponseContentPart::Unknown => {}
+                                    }
                                 }
-                                ResponseContentPart::Thought { thought } => {
-                                    blocks.push(AnthropicContentBlock::Thinking {
-                                        thinking: thought.clone(),
-                                        signature: None,
-                                    });
-                                }
-                                ResponseContentPart::Reasoning { reasoning } => {
-                                    blocks.push(AnthropicContentBlock::Thinking {
-                                        thinking: reasoning.clone(),
-                                        signature: None,
-                                    });
-                                }
-                                ResponseContentPart::Refusal { .. }
-                                | ResponseContentPart::Unknown => {}
                             }
                         }
                         if !text_acc.is_empty() {
@@ -218,7 +225,7 @@ pub fn anthropic_to_responses_request(req: &MessageRequest) -> Result<CreateResp
                 AnthropicContent::Text(t) => {
                     items.push(ResponseInputItem::Message {
                         role: "assistant".to_string(),
-                        content: vec![ResponseContentPart::Text { text: t.clone() }],
+                        content: ResponseInputContent::Text(t.clone()),
                     });
                 }
                 AnthropicContent::Blocks(blocks) => {
@@ -239,7 +246,7 @@ pub fn anthropic_to_responses_request(req: &MessageRequest) -> Result<CreateResp
                                 if !parts.is_empty() {
                                     items.push(ResponseInputItem::Message {
                                         role: "assistant".to_string(),
-                                        content: std::mem::take(&mut parts),
+                                        content: ResponseInputContent::Parts(std::mem::take(&mut parts)),
                                     });
                                 }
                                 items.push(ResponseInputItem::FunctionCall {
@@ -255,7 +262,7 @@ pub fn anthropic_to_responses_request(req: &MessageRequest) -> Result<CreateResp
                     if !parts.is_empty() {
                         items.push(ResponseInputItem::Message {
                             role: "assistant".to_string(),
-                            content: parts,
+                            content: ResponseInputContent::Parts(parts),
                         });
                     }
                 }
@@ -271,7 +278,7 @@ pub fn anthropic_to_responses_request(req: &MessageRequest) -> Result<CreateResp
                 AnthropicContent::Text(t) => {
                     items.push(ResponseInputItem::Message {
                         role: "user".to_string(),
-                        content: vec![ResponseContentPart::Text { text: t.clone() }],
+                        content: ResponseInputContent::Text(t.clone()),
                     });
                 }
                 AnthropicContent::Blocks(blocks) => {
@@ -289,9 +296,7 @@ pub fn anthropic_to_responses_request(req: &MessageRequest) -> Result<CreateResp
                                 if !text_acc.is_empty() {
                                     items.push(ResponseInputItem::Message {
                                         role: "user".to_string(),
-                                        content: vec![ResponseContentPart::Text {
-                                            text: std::mem::take(&mut text_acc),
-                                        }],
+                                        content: ResponseInputContent::Text(std::mem::take(&mut text_acc)),
                                     });
                                 }
                                 let res_text = match content {
@@ -319,7 +324,7 @@ pub fn anthropic_to_responses_request(req: &MessageRequest) -> Result<CreateResp
                     if !text_acc.is_empty() {
                         items.push(ResponseInputItem::Message {
                             role: "user".to_string(),
-                            content: vec![ResponseContentPart::Text { text: text_acc }],
+                            content: ResponseInputContent::Text(text_acc),
                         });
                     }
                 }
@@ -329,11 +334,7 @@ pub fn anthropic_to_responses_request(req: &MessageRequest) -> Result<CreateResp
 
     let input = if items.len() == 1 {
         if let ResponseInputItem::Message { ref content, .. } = items[0] {
-            if let Some(ResponseContentPart::Text { ref text }) = content.first() {
-                ResponseInput::Text(text.clone())
-            } else {
-                ResponseInput::Items(items)
-            }
+            ResponseInput::Text(content.as_plain_text())
         } else {
             ResponseInput::Items(items)
         }

@@ -510,7 +510,8 @@ fn test_responses_to_anthropic_request_preserves_tools_and_reasoning() {
                     ResponseContentPart::Text {
                         text: "hi".to_string(),
                     },
-                ],
+                ]
+                .into(),
             },
             ResponseInputItem::FunctionCall {
                 call_id: "c1".to_string(),
@@ -630,9 +631,7 @@ fn test_mixed_sequence_never_breaks_anthropic_alternation() {
         input: ResponseInput::Items(vec![
             ResponseInputItem::Message {
                 role: "user".to_string(),
-                content: vec![ResponseContentPart::Text {
-                    text: "q".to_string(),
-                }],
+                content: "q".into(),
             },
             ResponseInputItem::FunctionCall {
                 call_id: "c1".to_string(),
@@ -645,9 +644,7 @@ fn test_mixed_sequence_never_breaks_anthropic_alternation() {
             },
             ResponseInputItem::Message {
                 role: "user".to_string(),
-                content: vec![ResponseContentPart::Text {
-                    text: "follow-up".to_string(),
-                }],
+                content: "follow-up".into(),
             },
         ]),
         instructions: None,
@@ -1033,9 +1030,7 @@ fn test_responses_to_chat_request_merges_assistant_text_and_function_call() {
         input: ResponseInput::Items(vec![
             ResponseInputItem::Message {
                 role: "assistant".to_string(),
-                content: vec![ResponseContentPart::Text {
-                    text: "I will check the weather.".to_string(),
-                }],
+                content: "I will check the weather.".into(),
             },
             ResponseInputItem::FunctionCall {
                 call_id: "call_weather_1".to_string(),
@@ -1126,13 +1121,18 @@ fn test_anthropic_to_responses_request_preserves_thinking_text_tool_order() {
             match &items[0] {
                 ResponseInputItem::Message { role, content } => {
                     assert_eq!(role, "assistant");
-                    assert_eq!(content.len(), 2);
-                    assert!(
-                        matches!(&content[0], ResponseContentPart::Reasoning { reasoning } if reasoning == "Calculating optimal route")
-                    );
-                    assert!(
-                        matches!(&content[1], ResponseContentPart::Text { text } if text == "I am ready to invoke the routing tool:")
-                    );
+                    match content {
+                        ResponseInputContent::Parts(parts) => {
+                            assert_eq!(parts.len(), 2);
+                            assert!(
+                                matches!(&parts[0], ResponseContentPart::Reasoning { reasoning } if reasoning == "Calculating optimal route")
+                            );
+                            assert!(
+                                matches!(&parts[1], ResponseContentPart::Text { text } if text == "I am ready to invoke the routing tool:")
+                            );
+                        }
+                        _ => panic!("Expected ResponseInputContent::Parts"),
+                    }
                 }
                 _ => panic!("First item must be Message containing reasoning and text"),
             }
@@ -1254,7 +1254,8 @@ fn test_refusal_only_input_fails_instead_of_empty_anthropic_message() {
             role: "user".to_string(),
             content: vec![ResponseContentPart::Refusal {
                 refusal: "no".to_string(),
-            }],
+            }]
+            .into(),
         }]),
         instructions: None,
         modalities: None,
@@ -1399,3 +1400,122 @@ fn test_responses_stream_output_text_delta_missing_response_id() {
     assert_eq!(chunks.len(), 1);
     assert_eq!(chunks[0].choices[0].delta.content.as_deref(), Some("pong"));
 }
+
+#[test]
+fn test_chat_to_responses_multi_turn_serializes_cleanly_without_text_type() {
+    let chat_req = ChatCompletionRequest {
+        model: "muse-spark-1.3-contributor-free".to_string(),
+        messages: vec![
+            ChatMessage::System(SystemMessage {
+                content: "You are an expert software engineer.".into(),
+                name: None,
+            }),
+            ChatMessage::User(UserMessage {
+                content: "ping 1".into(),
+                name: None,
+            }),
+            ChatMessage::Assistant(AssistantMessage {
+                content: Some("pong 1".into()),
+                ..Default::default()
+            }),
+            ChatMessage::User(UserMessage {
+                content: "ping 2".into(),
+                name: None,
+            }),
+        ],
+        temperature: None,
+        top_p: None,
+        n: None,
+        stream: Some(false),
+        stop: None,
+        max_tokens: Some(1024),
+        ..Default::default()
+    };
+
+    let resp_req = chat_to_responses_request(&chat_req).expect("should convert successfully");
+    assert_eq!(
+        resp_req.instructions.as_deref(),
+        Some("You are an expert software engineer.")
+    );
+
+    let serialized = serde_json::to_value(&resp_req).expect("should serialize to json");
+    let input = serialized.get("input").expect("input must be present");
+    assert!(input.is_array(), "multi-turn input must be an array");
+
+    let items = input.as_array().unwrap();
+    assert_eq!(items.len(), 3); // user, assistant, user
+
+    // Verify each message item has a scalar content string and no "type": "text"
+    for item in items {
+        assert_eq!(item.get("type").and_then(|v| v.as_str()), Some("message"));
+        assert!(
+            item.get("content").unwrap().is_string(),
+            "Message content should serialize as compact scalar string"
+        );
+    }
+
+    let json_str = serde_json::to_string(&serialized).unwrap();
+    assert!(
+        !json_str.contains(r#""type":"text""#),
+        "Must NOT contain illegal 'type':'text' which is rejected by upstream Responses API"
+    );
+}
+
+#[test]
+fn test_response_input_content_deserializes_scalar_and_parts_aliases() {
+    // 1. Scalar string
+    let json_scalar = serde_json::json!({
+        "type": "message",
+        "role": "user",
+        "content": "hello world"
+    });
+    let item: ResponseInputItem = serde_json::from_value(json_scalar).unwrap();
+    match item {
+        ResponseInputItem::Message { role, content } => {
+            assert_eq!(role, "user");
+            assert_eq!(content.as_plain_text(), "hello world");
+        }
+        _ => panic!("Expected Message item"),
+    }
+
+    // 2. input_text array
+    let json_input_text = serde_json::json!({
+        "type": "message",
+        "role": "user",
+        "content": [
+            {"type": "input_text", "text": "hello from input_text"}
+        ]
+    });
+    let item2: ResponseInputItem = serde_json::from_value(json_input_text).unwrap();
+    match item2 {
+        ResponseInputItem::Message { content, .. } => {
+            assert_eq!(content.as_plain_text(), "hello from input_text");
+        }
+        _ => panic!("Expected Message item"),
+    }
+
+    // 3. text / output_text array aliases
+    let json_alias = serde_json::json!({
+        "type": "message",
+        "role": "assistant",
+        "content": [
+            {"type": "text", "text": "first line"},
+            {"type": "output_text", "text": "second line"}
+        ]
+    });
+    let item3: ResponseInputItem = serde_json::from_value(json_alias).unwrap();
+    match item3 {
+        ResponseInputItem::Message { content, .. } => {
+            assert_eq!(content.as_plain_text(), "first line\nsecond line");
+        }
+        _ => panic!("Expected Message item"),
+    }
+
+    // 4. Verify serialization of ResponseContentPart::Text uses "input_text"
+    let part = ResponseContentPart::Text {
+        text: "out".to_string(),
+    };
+    let part_json = serde_json::to_value(&part).unwrap();
+    assert_eq!(part_json.get("type").and_then(|v| v.as_str()), Some("input_text"));
+}
+

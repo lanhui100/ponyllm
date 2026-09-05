@@ -30,6 +30,60 @@ pub struct CreateResponseRequest {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
+pub enum ResponseInputContent {
+    Text(String),
+    Parts(Vec<ResponseContentPart>),
+}
+
+impl ResponseInputContent {
+    pub fn as_plain_text(&self) -> String {
+        match self {
+            Self::Text(text) => text.clone(),
+            Self::Parts(parts) => parts
+                .iter()
+                .filter_map(|p| match p {
+                    ResponseContentPart::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+        }
+    }
+
+    pub fn is_non_empty(&self) -> bool {
+        match self {
+            Self::Text(text) => !text.trim().is_empty(),
+            Self::Parts(parts) => parts.iter().any(|p| match p {
+                ResponseContentPart::Text { text } => !text.trim().is_empty(),
+                ResponseContentPart::Thought { thought } => !thought.trim().is_empty(),
+                ResponseContentPart::Reasoning { reasoning } => !reasoning.trim().is_empty(),
+                ResponseContentPart::Refusal { refusal } => !refusal.trim().is_empty(),
+                ResponseContentPart::Unknown => false,
+            }),
+        }
+    }
+}
+
+impl From<String> for ResponseInputContent {
+    fn from(s: String) -> Self {
+        Self::Text(s)
+    }
+}
+
+impl From<&str> for ResponseInputContent {
+    fn from(s: &str) -> Self {
+        Self::Text(s.to_string())
+    }
+}
+
+impl From<Vec<ResponseContentPart>> for ResponseInputContent {
+    fn from(parts: Vec<ResponseContentPart>) -> Self {
+        Self::Parts(parts)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
 pub enum ResponseInput {
     Text(String),
     Items(Vec<ResponseInputItem>),
@@ -40,7 +94,7 @@ pub enum ResponseInput {
 pub enum ResponseInputItem {
     Message {
         role: String,
-        content: Vec<ResponseContentPart>,
+        content: ResponseInputContent,
     },
     FunctionCall {
         call_id: String,
@@ -127,7 +181,7 @@ pub enum ResponseOutputItem {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ResponseContentPart {
-    #[serde(alias = "output_text", alias = "input_text")]
+    #[serde(rename = "input_text", alias = "output_text", alias = "text")]
     Text {
         text: String,
     },

@@ -17,12 +17,7 @@ pub fn responses_request_has_text(req: &CreateResponseRequest) -> bool {
         ResponseInput::Items(items) => items,
     };
     items.iter().any(|item| match item {
-        ResponseInputItem::Message { content, .. } => content.iter().any(|c| match c {
-            ResponseContentPart::Text { text } => !text.trim().is_empty(),
-            ResponseContentPart::Thought { thought } => !thought.trim().is_empty(),
-            ResponseContentPart::Reasoning { reasoning } => !reasoning.trim().is_empty(),
-            ResponseContentPart::Refusal { .. } | ResponseContentPart::Unknown => false,
-        }),
+        ResponseInputItem::Message { content, .. } => content.is_non_empty(),
         ResponseInputItem::FunctionResponse { output, .. } => !output.trim().is_empty(),
         ResponseInputItem::FunctionCall { .. } => false,
     })
@@ -54,9 +49,7 @@ pub fn chat_to_responses_request(req: &ChatCompletionRequest) -> Result<CreateRe
                 }
                 items.push(ResponseInputItem::Message {
                     role: "user".to_string(),
-                    content: vec![ResponseContentPart::Text {
-                        text: user.content.as_plain_text(),
-                    }],
+                    content: ResponseInputContent::Text(user.content.as_plain_text()),
                 });
             }
             ChatMessage::Assistant(ast) => {
@@ -67,7 +60,7 @@ pub fn chat_to_responses_request(req: &ChatCompletionRequest) -> Result<CreateRe
                     .unwrap_or_default();
                 items.push(ResponseInputItem::Message {
                     role: "assistant".to_string(),
-                    content: vec![ResponseContentPart::Text { text }],
+                    content: ResponseInputContent::Text(text),
                 });
                 if let Some(ref tool_calls) = ast.tool_calls {
                     for tc in tool_calls {
@@ -91,11 +84,7 @@ pub fn chat_to_responses_request(req: &ChatCompletionRequest) -> Result<CreateRe
 
     let input = if items.len() == 1 {
         if let ResponseInputItem::Message { ref content, .. } = items[0] {
-            if let Some(ResponseContentPart::Text { ref text }) = content.first() {
-                ResponseInput::Text(text.clone())
-            } else {
-                ResponseInput::Items(items)
-            }
+            ResponseInput::Text(content.as_plain_text())
         } else {
             ResponseInput::Items(items)
         }
@@ -173,14 +162,7 @@ pub fn responses_to_chat_request(req: &CreateResponseRequest) -> Result<ChatComp
                 match item {
                     ResponseInputItem::Message { role, content } => {
                         flush_calls(&mut messages, &mut pending_calls);
-                        let text = content
-                            .iter()
-                            .filter_map(|c| match c {
-                                ResponseContentPart::Text { text } => Some(text.as_str()),
-                                _ => None,
-                            })
-                            .collect::<Vec<_>>()
-                            .join("");
+                        let text = content.as_plain_text();
                         if role == "assistant" {
                             messages.push(ChatMessage::Assistant(AssistantMessage {
                                 content: Some(text.into()),
