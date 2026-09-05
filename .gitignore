@@ -5,4 +5,19 @@ Thumbs.db
 *~
 # Rust 构建产物/依赖目录：
 target/
+# 运行期产物（随配置文件落盘，位置不固定）：
+ponyllm.pid
+ponyllm-serve.log
+# 覆盖率与性能画像：
+coverage/
+lcov.info
+*.profraw
+*.profdata
+# 调试符号（target 外兜底，target 本身已忽略）：
+*.pdb
+# IDE/编辑器目录：
+.idea/
+.vscode/
+*.swp
+*.swo
 

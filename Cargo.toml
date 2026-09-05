@@ -55,3 +55,10 @@ ponyllm-protocol = { path = "crates/ponyllm-protocol" }
 ponyllm-core = { path = "crates/ponyllm-core" }
 ponyllm-server = { path = "crates/ponyllm-server" }
 ponyllm = { path = "crates/ponyllm" }
+
+[profile.dev]
+debug = 1
+incremental = true
+
+[profile.test]
+debug = 1
