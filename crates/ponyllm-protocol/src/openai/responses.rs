@@ -187,10 +187,14 @@ pub enum ResponseOutputItem {
         content: Vec<ResponseContentPart>,
     },
     FunctionCall {
+        #[serde(default)]
         id: String,
+        #[serde(default)]
         status: String,
+        #[serde(default)]
         call_id: String,
         name: String,
+        #[serde(default)]
         arguments: String,
     },
     Reasoning {
@@ -248,32 +252,44 @@ pub enum ResponseStreamEvent {
 
     #[serde(rename = "response.output_item.added")]
     OutputItemAdded {
+        #[serde(default)]
         response_id: String,
+        #[serde(default)]
         output_index: u32,
         item: ResponseOutputItem,
     },
 
     #[serde(rename = "response.output_item.done")]
     OutputItemDone {
+        #[serde(default)]
         response_id: String,
+        #[serde(default)]
         output_index: u32,
         item: ResponseOutputItem,
     },
 
     #[serde(rename = "response.content_part.added")]
     ContentPartAdded {
+        #[serde(default)]
         response_id: String,
+        #[serde(default)]
         item_id: String,
+        #[serde(default)]
         output_index: u32,
+        #[serde(default)]
         content_index: u32,
         part: ResponseContentPart,
     },
 
     #[serde(rename = "response.content_part.done")]
     ContentPartDone {
+        #[serde(default)]
         response_id: String,
+        #[serde(default)]
         item_id: String,
+        #[serde(default)]
         output_index: u32,
+        #[serde(default)]
         content_index: u32,
         part: ResponseContentPart,
     },
@@ -321,6 +337,7 @@ pub struct ResponseFunctionCallDelta {
     pub item_id: String,
     #[serde(default)]
     pub output_index: u32,
+    #[serde(default)]
     pub call_id: String,
     pub delta: String,
 }

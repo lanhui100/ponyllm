@@ -65,6 +65,7 @@ pub struct ResponsesToChatFsm {
     model: String,
     created: u64,
     tool_index: HashMap<String, u32>,
+    tool_item_to_id: HashMap<String, String>,
     tool_counter: u32,
     saw_tool: bool,
     done: bool,
@@ -77,6 +78,7 @@ impl ResponsesToChatFsm {
             model: fallback_model.to_string(),
             created: now_secs(),
             tool_index: HashMap::new(),
+            tool_item_to_id: HashMap::new(),
             tool_counter: 0,
             saw_tool: false,
             done: false,
@@ -168,21 +170,41 @@ impl ResponsesToChatFsm {
                 ));
             }
             ResponseStreamEvent::OutputItemAdded {
-                item: ResponseOutputItem::FunctionCall { call_id, name, .. },
+                item: ResponseOutputItem::FunctionCall { id, call_id, name, .. },
                 ..
             } => {
-                chunks.push(self.tool_start_chunk(&call_id, Some(name)));
+                let effective_call_id = if !call_id.is_empty() {
+                    call_id
+                } else if !id.is_empty() {
+                    id.clone()
+                } else {
+                    format!("call_{}", self.tool_counter)
+                };
+                if !id.is_empty() {
+                    self.tool_item_to_id.insert(id, effective_call_id.clone());
+                }
+                chunks.push(self.tool_start_chunk(&effective_call_id, Some(name)));
             }
             ResponseStreamEvent::FunctionCallArgumentsDelta(d) => {
-                let idx = match self.tool_index.get(&d.call_id) {
+                let resolved_id = if !d.call_id.is_empty() {
+                    d.call_id.clone()
+                } else if let Some(mapped) = self.tool_item_to_id.get(&d.item_id) {
+                    mapped.clone()
+                } else if !d.item_id.is_empty() {
+                    d.item_id.clone()
+                } else {
+                    String::new()
+                };
+                let idx = match self.tool_index.get(&resolved_id) {
                     Some(i) => *i,
                     None => {
-                        let start = self.tool_start_chunk(&d.call_id.clone(), None);
-                        let i = self.tool_index[&d.call_id];
+                        let start = self.tool_start_chunk(&resolved_id, None);
+                        let i = self.tool_index[&resolved_id];
                         chunks.push(start);
                         i
                     }
                 };
+                self.saw_tool = true;
                 chunks.push(ChatCompletionChunk {
                     id: self.response_id.clone(),
                     object: "chat.completion.chunk".to_string(),
@@ -498,6 +520,7 @@ pub struct ResponsesToAnthropicFsm {
     active_block: Option<RespAnthropicBlock>,
     open_blocks: Vec<u32>,
     tool_blocks: HashMap<String, u32>,
+    tool_item_to_id: HashMap<String, String>,
     sent_start: bool,
     saw_tool: bool,
     done: bool,
@@ -512,6 +535,7 @@ impl ResponsesToAnthropicFsm {
             active_block: None,
             open_blocks: Vec::new(),
             tool_blocks: HashMap::new(),
+            tool_item_to_id: HashMap::new(),
             sent_start: false,
             saw_tool: false,
             done: false,
@@ -658,14 +682,31 @@ impl ResponsesToAnthropicFsm {
                 });
             }
             ResponseStreamEvent::OutputItemAdded {
-                item: ResponseOutputItem::FunctionCall { call_id, name, .. },
+                item: ResponseOutputItem::FunctionCall { id, call_id, name, .. },
                 ..
             } => {
-                self.open_tool_block(&mut events, &call_id, &name);
+                let effective_call_id = if !call_id.is_empty() {
+                    call_id
+                } else if !id.is_empty() {
+                    id.clone()
+                } else {
+                    format!("call_{}", self.block_counter)
+                };
+                if !id.is_empty() {
+                    self.tool_item_to_id.insert(id, effective_call_id.clone());
+                }
+                self.open_tool_block(&mut events, &effective_call_id, &name);
             }
             ResponseStreamEvent::OutputItemDone { item, .. } => match item {
-                ResponseOutputItem::FunctionCall { call_id, .. } => {
-                    if let Some(idx) = self.tool_blocks.get(&call_id).cloned() {
+                ResponseOutputItem::FunctionCall { id, call_id, .. } => {
+                    let resolved_id = if !call_id.is_empty() {
+                        call_id
+                    } else if let Some(mapped) = self.tool_item_to_id.get(&id) {
+                        mapped.clone()
+                    } else {
+                        id
+                    };
+                    if let Some(idx) = self.tool_blocks.get(&resolved_id).cloned() {
                         self.stop_block(&mut events, idx);
                     }
                 }
@@ -678,7 +719,16 @@ impl ResponsesToAnthropicFsm {
                 self.stop_open_text_blocks(&mut events);
             }
             ResponseStreamEvent::FunctionCallArgumentsDelta(d) => {
-                let idx = self.open_tool_block(&mut events, &d.call_id.clone(), "");
+                let resolved_id = if !d.call_id.is_empty() {
+                    d.call_id.clone()
+                } else if let Some(mapped) = self.tool_item_to_id.get(&d.item_id) {
+                    mapped.clone()
+                } else if !d.item_id.is_empty() {
+                    d.item_id.clone()
+                } else {
+                    String::new()
+                };
+                let idx = self.open_tool_block(&mut events, &resolved_id, "");
                 events.push(MessageStreamEvent::ContentBlockDelta {
                     index: idx,
                     delta: AnthropicDelta::InputJsonDelta {

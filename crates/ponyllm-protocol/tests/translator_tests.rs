@@ -1672,4 +1672,119 @@ fn test_chat_responses_reasoning_effort_bidirectional() {
     assert_eq!(back_chat.reasoning_effort, Some(ReasoningEffort::High));
 }
 
+#[test]
+fn test_responses_stream_function_call_delta_missing_call_id_routing() {
+    use ponyllm_protocol::openai::chat::FinishReason;
+    use ponyllm_protocol::openai::responses::ResponseStreamEvent;
+    use ponyllm_protocol::translator::ResponsesToChatFsm;
+
+    // 1. Upstream emits OutputItemAdded with id "fc_1" and call_id "call_1"
+    let added_json = serde_json::json!({
+        "type": "response.output_item.added",
+        "output_index": 2,
+        "item": {
+            "id": "fc_1",
+            "type": "function_call",
+            "status": "in_progress",
+            "name": "list_dir",
+            "call_id": "call_1",
+            "arguments": ""
+        }
+    });
+    let added_event: ResponseStreamEvent = serde_json::from_value(added_json).unwrap();
+
+    let mut fsm = ResponsesToChatFsm::new("test-model");
+    let chunks = fsm.process_event(added_event).unwrap();
+    assert_eq!(chunks.len(), 1);
+    assert_eq!(chunks[0].choices[0].delta.tool_calls.as_ref().unwrap()[0].id.as_deref(), Some("call_1"));
+    assert_eq!(chunks[0].choices[0].delta.tool_calls.as_ref().unwrap()[0].function.as_ref().unwrap().name.as_deref(), Some("list_dir"));
+
+    // 2. Real upstream emits function_call_arguments.delta with item_id but NO call_id
+    let arg_delta_json = serde_json::json!({
+        "type": "response.function_call_arguments.delta",
+        "output_index": 2,
+        "item_id": "fc_1",
+        "delta": "{\"path\":\".\"}"
+    });
+    let arg_event: ResponseStreamEvent = serde_json::from_value(arg_delta_json)
+        .expect("should deserialize even when call_id is missing");
+
+    let arg_chunks = fsm.process_event(arg_event).unwrap();
+    assert_eq!(arg_chunks.len(), 1);
+    assert_eq!(
+        arg_chunks[0].choices[0].delta.tool_calls.as_ref().unwrap()[0].index,
+        0,
+        "should map to the same tool index as fc_1"
+    );
+    assert_eq!(
+        arg_chunks[0].choices[0].delta.tool_calls.as_ref().unwrap()[0].function.as_ref().unwrap().arguments.as_deref(),
+        Some("{\"path\":\".\"}")
+    );
+
+    // 3. Completed event must produce finish_reason: ToolCalls
+    let comp_json = serde_json::json!({
+        "type": "response.completed",
+        "response": {
+            "id": "resp_1",
+            "object": "response",
+            "status": "completed",
+            "model": "muse-spark-1.3-contributor-free",
+            "output": []
+        }
+    });
+    let comp_event: ResponseStreamEvent = serde_json::from_value(comp_json).unwrap();
+    let comp_chunks = fsm.process_event(comp_event).unwrap();
+    assert_eq!(comp_chunks.len(), 1);
+    assert_eq!(comp_chunks[0].choices[0].finish_reason, Some(FinishReason::ToolCalls));
+}
+
+#[test]
+fn test_responses_to_anthropic_stream_missing_call_id_routing() {
+    use ponyllm_protocol::anthropic::messages::{AnthropicContentBlock, AnthropicDelta, MessageStreamEvent};
+    use ponyllm_protocol::openai::responses::ResponseStreamEvent;
+    use ponyllm_protocol::translator::ResponsesToAnthropicFsm;
+
+    let added_json = serde_json::json!({
+        "type": "response.output_item.added",
+        "output_index": 1,
+        "item": {
+            "id": "fc_upstream_99",
+            "type": "function_call",
+            "status": "in_progress",
+            "name": "read_file",
+            "call_id": "call_upstream_99",
+            "arguments": ""
+        }
+    });
+    let added_event: ResponseStreamEvent = serde_json::from_value(added_json).unwrap();
+
+    let mut fsm = ResponsesToAnthropicFsm::new("claude-3-5-sonnet");
+    let start_events = fsm.process_event(added_event).unwrap();
+    assert!(start_events.iter().any(|e| matches!(
+        e,
+        MessageStreamEvent::ContentBlockStart {
+            index: 0,
+            content_block: AnthropicContentBlock::ToolUse { id, .. }
+        } if id == "call_upstream_99"
+    )));
+
+    // Delta carries ONLY item_id, call_id is missing
+    let delta_json = serde_json::json!({
+        "type": "response.function_call_arguments.delta",
+        "output_index": 1,
+        "item_id": "fc_upstream_99",
+        "delta": "{\"path\":\"README.md\"}"
+    });
+    let delta_event: ResponseStreamEvent = serde_json::from_value(delta_json).unwrap();
+    let delta_events = fsm.process_event(delta_event).unwrap();
+    assert_eq!(delta_events.len(), 1);
+    match &delta_events[0] {
+        MessageStreamEvent::ContentBlockDelta { index, delta } => {
+            assert_eq!(*index, 0, "must route to the existing block 0");
+            assert!(matches!(delta, AnthropicDelta::InputJsonDelta { partial_json } if partial_json == "{\"path\":\"README.md\"}"));
+        }
+        _ => panic!("Expected ContentBlockDelta"),
+    }
+}
+
 
