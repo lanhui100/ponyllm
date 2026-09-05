@@ -622,7 +622,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             println!("╚════════════════════════════════════════════════════════════════════════╝\n");
 
-            axum::serve(listener, app).await?;
+            // 声明 pidfile 归属，供 `ponyllm stop/restart` 认领本实例。
+            if let Some(warn) = ponyllm_cli::lifecycle::claim_pidfile(&resolved_config) {
+                eprintln!("{}", warn);
+            }
+            let serve_result = axum::serve(listener, app).await;
+            ponyllm_cli::lifecycle::release_pidfile(&resolved_config);
+            serve_result?;
+        }
+        Commands::Stop { config } => {
+            match ponyllm_cli::lifecycle::stop_serve(config.as_deref()).await {
+                Ok(msg) => println!("✅{}", msg),
+                Err(e) => {
+                    eprintln!("❌ {}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
+        Commands::Restart { config, bind, address, port, api_key, retries } => {
+            match ponyllm_cli::lifecycle::restart_serve(
+                config.as_deref(),
+                bind,
+                address,
+                port,
+                api_key,
+                retries,
+            )
+            .await
+            {
+                Ok(msg) => println!("✅{}", msg),
+                Err(e) => {
+                    eprintln!("❌ {}", e);
+                    std::process::exit(1);
+                }
+            }
         }
         Commands::Status {
             config,
@@ -655,6 +688,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Commands::Upgrade { check, force, dry_run, version } => {
             ponyllm_cli::upgrade::run_upgrade(check, force, dry_run, version).await?;
+            if !check && !dry_run {
+                println!("💡 二进制已更新，正在运行的服务仍是旧代码：配置热更新管不到二进制，请执行 `ponyllm restart` 重启服务生效。");
+            }
         }
     }
 

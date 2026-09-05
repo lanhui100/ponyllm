@@ -5,6 +5,7 @@ pub mod cli;
 pub mod wizard;
 pub mod tui;
 pub mod upgrade;
+pub mod lifecycle;
 
 pub use config::*;
 pub use cli::*;

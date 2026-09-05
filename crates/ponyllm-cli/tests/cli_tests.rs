@@ -73,6 +73,23 @@ fn test_cli_commands_parsing() {
         }
         _ => panic!("Expected Tui command"),
     }
+
+    let stop_cli = Cli::try_parse_from(["ponyllm", "stop", "--config", "test.toml"]).unwrap();
+    match stop_cli.command {
+        Commands::Stop { config } => {
+            assert_eq!(config, Some("test.toml".to_string()));
+        }
+        _ => panic!("Expected Stop command"),
+    }
+
+    let restart_cli = Cli::try_parse_from(["ponyllm", "restart", "-p", "9000"]).unwrap();
+    match restart_cli.command {
+        Commands::Restart { port, config, .. } => {
+            assert_eq!(port, Some(9000));
+            assert_eq!(config, None);
+        }
+        _ => panic!("Expected Restart command"),
+    }
 }
 
 #[test]

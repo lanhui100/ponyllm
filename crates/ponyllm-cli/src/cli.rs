@@ -96,6 +96,40 @@ pub enum Commands {
         retries: Option<usize>,
     },
 
+    /// Stop the gateway process associated with the configuration file (pidfile)
+    Stop {
+        /// Path to configuration file (must match the one `serve` was started with)
+        #[arg(short, long)]
+        config: Option<String>,
+    },
+
+    /// Restart the gateway: stop the old process and launch a new one in background
+    Restart {
+        /// Path to configuration file (must match the one `serve` was started with)
+        #[arg(short, long)]
+        config: Option<String>,
+
+        /// Override bind address and port (e.g. 0.0.0.0:8080 or 127.0.0.1:8080)
+        #[arg(short = 'b', long)]
+        bind: Option<String>,
+
+        /// Override listening address / host (e.g. 0.0.0.0 or 127.0.0.1)
+        #[arg(short = 'a', long)]
+        address: Option<String>,
+
+        /// Override listening port (e.g. 8080, 9000)
+        #[arg(short = 'p', long)]
+        port: Option<u16>,
+
+        /// Override gateway access authorization API key / token
+        #[arg(long)]
+        api_key: Option<String>,
+
+        /// Override maximum retry attempts on transient failures
+        #[arg(short, long)]
+        retries: Option<usize>,
+    },
+
     /// Inspect health, gateway token, provider pools and live metrics from a running gateway
     Status {
         /// Path to configuration file

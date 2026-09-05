@@ -243,6 +243,7 @@ pub fn run_interactive_init(output_path: &str) -> Result<(), Box<dyn std::error:
     println!("║                                                                        ║");
     println!("║  快速启动与管理:                                                       ║");
     println!("║    ponyllm serve                    # 启动网关服务                     ║");
+    println!("║    ponyllm restart                 # 重启网关服务（升级后必做）       ║");
     println!("║    ponyllm strategy list            # 查看调度策略一览                 ║");
     println!("║    ponyllm strategy set speed       # 切换为极速模式                   ║");
     println!("║    ponyllm auth                     # 重新生成/查看网关 API Key        ║");

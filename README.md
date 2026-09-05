@@ -90,6 +90,8 @@ ponyllm serve --config /path/to/ponyllm.toml
 网关就绪后，默认在 `http://127.0.0.1:8080` 提供高并发统一入口。启动横幅会打印本次实际加载的配置文件绝对路径。
 
 > **配置热更新（零停机）**：`serve` 运行时持续监听配置文件，`provider/key` 增删改或手改 `ponyllm.toml` 后约 500ms 内自动生效——新增 Provider 原子挂载、已有 Provider 保留健康度指标、剔除的 Provider 正在处理的请求安全执行完。语法损坏的写入会被拒绝并告警，网关不崩溃。长文本 SSE 流式推理不受任何干扰。
+>
+> **热更新只管配置不管二进制**：`ponyllm upgrade` 换完二进制必须重启服务才生效，一键重启用 `ponyllm restart`（先停旧进程再后台拉起，日志追加至配置同目录 `ponyllm-serve.log`），只停不用拉起用 `ponyllm stop`。重启后用 `ponyllm status` 核对版本号（`/health` 上报的是**运行中**服务的版本，`ponyllm --version` 是磁盘二进制版本，两者不一致就是没重启）。
 
 ### 4. 打开全屏交互式 TUI 监控看板
 ```bash
@@ -108,6 +110,8 @@ ponyllm upgrade --check              # 检查是否有新版本
 ponyllm upgrade                      # 一键原地升级到最新 Release 版本
 ponyllm upgrade --force              # 强制重新安装当前版本
 ponyllm upgrade --version v0.2.3     # 指定升降级到特定版本
+ponyllm restart                      # 升级后必须重启服务（只换文件不换进程）
+ponyllm stop                         # 只停止服务（按配置文件认领 pidfile，不乱杀）
 ```
 
 ### 6. 网关巡检与鉴权管理
