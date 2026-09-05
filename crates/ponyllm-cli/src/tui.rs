@@ -19,7 +19,7 @@ use ratatui::{
 use serde_json::Value;
 use tokio::sync::mpsc;
 use crate::config::{ConfigFile, KeySection, ModelConfig};
-use ponyllm_core::pool::BillingMode;
+use ponyllm_core::pool::{BillingMode, UpstreamProtocol};
 
 pub struct TerminalGuard {
     pub terminal: Terminal<CrosstermBackend<io::Stdout>>,
@@ -83,10 +83,11 @@ pub enum Modal {
         default_model: String,
         strategy_idx: usize,
         billing_mode_idx: usize, // 0: Metered, 1: Plan (Coding Plan), 2: Free
+        protocol_idx: usize, // 0: 自动启发式, 1: chat, 2: responses, 3: anthropic
         input_price: String,
         cached_price: String,
         output_price: String,
-        active_field: usize, // 0: name, 1: base_url, 2: default_model, 3: strategy, 4: billing_mode, 5: input_price, 6: cached_price, 7: output_price
+        active_field: usize, // 0: name, 1: base_url, 2: default_model, 3: strategy, 4: billing_mode, 5: protocol, 6: input_price, 7: cached_price, 8: output_price
     },
     EditProvider {
         name: String, // readonly
@@ -94,10 +95,11 @@ pub enum Modal {
         default_model: String,
         strategy_idx: usize,
         billing_mode_idx: usize,
+        protocol_idx: usize, // 0: 自动启发式, 1: chat, 2: responses, 3: anthropic
         input_price: String,
         cached_price: String,
         output_price: String,
-        active_field: usize, // 0: base_url, 1: default_model, 2: strategy, 3: billing_mode, 4: input_price, 5: cached_price, 6: output_price
+        active_field: usize, // 0: base_url, 1: default_model, 2: strategy, 3: billing_mode, 4: protocol, 5: input_price, 6: cached_price, 7: output_price
     },
     DeleteProviderConfirm {
         name: String,
@@ -107,6 +109,7 @@ pub enum Modal {
         model_name: String,
         tier_idx: usize, // 0: Flagship, 1: Standard, 2: Light
         billing_mode_idx: usize, // 0: 继承提供商, 1: Metered, 2: Plan (Coding Plan), 3: Free
+        protocol_idx: usize, // 0: 继承提供商, 1: chat, 2: responses, 3: anthropic
         input_price: String,
         cached_price: String,
         output_price: String,
@@ -115,13 +118,14 @@ pub enum Modal {
         input_modalities: [bool; 4],
         output_modalities: [bool; 4],
         set_as_default: bool,
-        active_field: usize, // 0: name, 1: tier, 2: billing_mode, 3: input_price, 4: cached_price, 5: output_price, 6: context, 7: max_output, 8: inputs, 9: outputs, 10: default
+        active_field: usize, // 0: name, 1: tier, 2: billing_mode, 3: protocol, 4: input_price, 5: cached_price, 6: output_price, 7: context, 8: max_output, 9: inputs, 10: outputs, 11: default
     },
     EditModel {
         provider_name: String,
         model_name: String, // readonly
         tier_idx: usize,
         billing_mode_idx: usize, // 0: 继承提供商, 1: Metered, 2: Plan (Coding Plan), 3: Free
+        protocol_idx: usize, // 0: 继承提供商, 1: chat, 2: responses, 3: anthropic
         input_price: String,
         cached_price: String,
         output_price: String,
@@ -130,7 +134,7 @@ pub enum Modal {
         input_modalities: [bool; 4],
         output_modalities: [bool; 4],
         set_as_default: bool,
-        active_field: usize, // 0: tier, 1: billing_mode, 2: input_price, 3: cached_price, 4: output_price, 5: context, 6: max_output, 7: inputs, 8: outputs, 9: default
+        active_field: usize, // 0: tier, 1: billing_mode, 2: protocol, 3: input_price, 4: cached_price, 5: output_price, 6: context, 7: max_output, 8: inputs, 9: outputs, 10: default
     },
     DeleteModelConfirm {
         provider_name: String,
@@ -496,6 +500,7 @@ fn handle_key_event(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                             default_model: "gpt-4o".to_string(),
                             strategy_idx: 0,
                             billing_mode_idx: 0, // 按量计费
+                            protocol_idx: 0, // 自动启发式
                             input_price: "0.50".to_string(),
                             cached_price: "0.25".to_string(),
                             output_price: "1.00".to_string(),
@@ -509,6 +514,7 @@ fn handle_key_event(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                                 model_name: String::new(),
                                 tier_idx: 1, // Standard
                                 billing_mode_idx: 0, // 继承提供商
+                                protocol_idx: 0, // 继承提供商
                                 input_price: String::new(),
                                 cached_price: String::new(),
                                 output_price: String::new(),
@@ -561,6 +567,7 @@ fn handle_key_event(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                                     default_model: p.default_model.clone(),
                                     strategy_idx: strat_idx,
                                     billing_mode_idx: bm_idx,
+                                    protocol_idx: protocol_to_idx(p.default_protocol),
                                     input_price: p.input_price.to_string(),
                                     cached_price: p.cached_price.to_string(),
                                     output_price: p.output_price.to_string(),
@@ -597,6 +604,7 @@ fn handle_key_event(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                                     model_name: m_cfg.name,
                                     tier_idx: tier_to_idx(m_cfg.tier),
                                     billing_mode_idx: bm_idx,
+                                    protocol_idx: protocol_to_idx(m_cfg.protocol),
                                     input_price: m_cfg.input_price.map(|v| v.to_string()).unwrap_or_default(),
                                     cached_price: m_cfg.cached_price.map(|v| v.to_string()).unwrap_or_default(),
                                     output_price: m_cfg.output_price.map(|v| v.to_string()).unwrap_or_default(),
@@ -761,6 +769,7 @@ fn handle_modal_key(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
             default_model,
             strategy_idx,
             billing_mode_idx,
+            protocol_idx,
             input_price,
             cached_price,
             output_price,
@@ -771,11 +780,11 @@ fn handle_modal_key(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                     app.status_message = "已取消添加提供商。".to_string();
                 }
                 KeyCode::Tab | KeyCode::Down => {
-                    *active_field = (*active_field + 1) % 8;
+                    *active_field = (*active_field + 1) % 9;
                     keep_modal = true;
                 }
                 KeyCode::BackTab | KeyCode::Up => {
-                    *active_field = if *active_field == 0 { 7 } else { *active_field - 1 };
+                    *active_field = if *active_field == 0 { 8 } else { *active_field - 1 };
                     keep_modal = true;
                 }
                 KeyCode::Enter => {
@@ -815,6 +824,7 @@ fn handle_modal_key(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                         };
                         let strat = STRATEGIES[*strategy_idx];
                         let bm = idx_to_provider_billing_mode(*billing_mode_idx);
+                        let proto = idx_to_protocol(*protocol_idx);
                         let p_name = name.trim().to_string();
                         app.config.add_provider(&p_name, base_url.trim(), default_model.trim(), strat);
                         if let Some(p) = app.config.providers.get_mut(&p_name) {
@@ -822,6 +832,7 @@ fn handle_modal_key(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                             p.input_price = in_p;
                             p.cached_price = ca_p;
                             p.output_price = out_p;
+                            p.default_protocol = proto;
                         }
                         if let Err(e) = app.save_config() {
                             app.status_message = format!("❌ 保存失败: {}", e);
@@ -839,6 +850,7 @@ fn handle_modal_key(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                         2 => default_model.push(' '),
                         3 => *strategy_idx = (*strategy_idx + 1) % 3,
                         4 => *billing_mode_idx = (*billing_mode_idx + 1) % 3,
+                        5 => *protocol_idx = (*protocol_idx + 1) % 4,
                         _ => {}
                     }
                     keep_modal = true;
@@ -848,6 +860,8 @@ fn handle_modal_key(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                         *strategy_idx -= 1;
                     } else if *active_field == 4 && *billing_mode_idx > 0 {
                         *billing_mode_idx -= 1;
+                    } else if *active_field == 5 && *protocol_idx > 0 {
+                        *protocol_idx -= 1;
                     }
                     keep_modal = true;
                 }
@@ -856,6 +870,8 @@ fn handle_modal_key(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                         *strategy_idx += 1;
                     } else if *active_field == 4 && *billing_mode_idx < 2 {
                         *billing_mode_idx += 1;
+                    } else if *active_field == 5 && *protocol_idx < 3 {
+                        *protocol_idx += 1;
                     }
                     keep_modal = true;
                 }
@@ -865,14 +881,18 @@ fn handle_modal_key(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                 KeyCode::Char('1') if *active_field == 4 => { *billing_mode_idx = 0; keep_modal = true; }
                 KeyCode::Char('2') if *active_field == 4 => { *billing_mode_idx = 1; keep_modal = true; }
                 KeyCode::Char('3') if *active_field == 4 => { *billing_mode_idx = 2; keep_modal = true; }
+                KeyCode::Char('1') if *active_field == 5 => { *protocol_idx = 0; keep_modal = true; }
+                KeyCode::Char('2') if *active_field == 5 => { *protocol_idx = 1; keep_modal = true; }
+                KeyCode::Char('3') if *active_field == 5 => { *protocol_idx = 2; keep_modal = true; }
+                KeyCode::Char('4') if *active_field == 5 => { *protocol_idx = 3; keep_modal = true; }
                 KeyCode::Backspace => {
                     match *active_field {
                         0 => { name.pop(); }
                         1 => { base_url.pop(); }
                         2 => { default_model.pop(); }
-                        5 => { input_price.pop(); }
-                        6 => { cached_price.pop(); }
-                        7 => { output_price.pop(); }
+                        6 => { input_price.pop(); }
+                        7 => { cached_price.pop(); }
+                        8 => { output_price.pop(); }
                         _ => {}
                     }
                     keep_modal = true;
@@ -882,9 +902,9 @@ fn handle_modal_key(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                         0 => name.push(c),
                         1 => base_url.push(c),
                         2 => default_model.push(c),
-                        5 if c.is_ascii_digit() || c == '.' => input_price.push(c),
-                        6 if c.is_ascii_digit() || c == '.' => cached_price.push(c),
-                        7 if c.is_ascii_digit() || c == '.' => output_price.push(c),
+                        6 if c.is_ascii_digit() || c == '.' => input_price.push(c),
+                        7 if c.is_ascii_digit() || c == '.' => cached_price.push(c),
+                        8 if c.is_ascii_digit() || c == '.' => output_price.push(c),
                         _ => {}
                     }
                     keep_modal = true;
@@ -900,6 +920,7 @@ fn handle_modal_key(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
             default_model,
             strategy_idx,
             billing_mode_idx,
+            protocol_idx,
             input_price,
             cached_price,
             output_price,
@@ -910,11 +931,11 @@ fn handle_modal_key(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                     app.status_message = "已取消编辑。".to_string();
                 }
                 KeyCode::Tab | KeyCode::Down => {
-                    *active_field = (*active_field + 1) % 7;
+                    *active_field = (*active_field + 1) % 8;
                     keep_modal = true;
                 }
                 KeyCode::BackTab | KeyCode::Up => {
-                    *active_field = if *active_field == 0 { 6 } else { *active_field - 1 };
+                    *active_field = if *active_field == 0 { 7 } else { *active_field - 1 };
                     keep_modal = true;
                 }
                 KeyCode::Enter => {
@@ -951,6 +972,7 @@ fn handle_modal_key(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                         };
                         let strat = STRATEGIES[*strategy_idx];
                         let bm = idx_to_provider_billing_mode(*billing_mode_idx);
+                        let proto = idx_to_protocol(*protocol_idx);
                         let name_str = name.clone();
                         if let Err(e) = app.config.update_provider(&name_str, base_url.trim(), default_model.trim(), strat) {
                             app.status_message = format!("❌ 更新提供商失败: {}", e);
@@ -960,6 +982,7 @@ fn handle_modal_key(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                                 p.input_price = in_p;
                                 p.cached_price = ca_p;
                                 p.output_price = out_p;
+                                p.default_protocol = proto;
                             }
                             if let Err(e) = app.save_config() {
                                 app.status_message = format!("❌ 保存配置失败: {}", e);
@@ -975,6 +998,7 @@ fn handle_modal_key(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                         1 => default_model.push(' '),
                         2 => *strategy_idx = (*strategy_idx + 1) % 3,
                         3 => *billing_mode_idx = (*billing_mode_idx + 1) % 3,
+                        4 => *protocol_idx = (*protocol_idx + 1) % 4,
                         _ => {}
                     }
                     keep_modal = true;
@@ -984,6 +1008,8 @@ fn handle_modal_key(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                         *strategy_idx -= 1;
                     } else if *active_field == 3 && *billing_mode_idx > 0 {
                         *billing_mode_idx -= 1;
+                    } else if *active_field == 4 && *protocol_idx > 0 {
+                        *protocol_idx -= 1;
                     }
                     keep_modal = true;
                 }
@@ -992,6 +1018,8 @@ fn handle_modal_key(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                         *strategy_idx += 1;
                     } else if *active_field == 3 && *billing_mode_idx < 2 {
                         *billing_mode_idx += 1;
+                    } else if *active_field == 4 && *protocol_idx < 3 {
+                        *protocol_idx += 1;
                     }
                     keep_modal = true;
                 }
@@ -1001,13 +1029,17 @@ fn handle_modal_key(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                 KeyCode::Char('1') if *active_field == 3 => { *billing_mode_idx = 0; keep_modal = true; }
                 KeyCode::Char('2') if *active_field == 3 => { *billing_mode_idx = 1; keep_modal = true; }
                 KeyCode::Char('3') if *active_field == 3 => { *billing_mode_idx = 2; keep_modal = true; }
+                KeyCode::Char('1') if *active_field == 4 => { *protocol_idx = 0; keep_modal = true; }
+                KeyCode::Char('2') if *active_field == 4 => { *protocol_idx = 1; keep_modal = true; }
+                KeyCode::Char('3') if *active_field == 4 => { *protocol_idx = 2; keep_modal = true; }
+                KeyCode::Char('4') if *active_field == 4 => { *protocol_idx = 3; keep_modal = true; }
                 KeyCode::Backspace => {
                     match *active_field {
                         0 => { base_url.pop(); }
                         1 => { default_model.pop(); }
-                        4 => { input_price.pop(); }
-                        5 => { cached_price.pop(); }
-                        6 => { output_price.pop(); }
+                        5 => { input_price.pop(); }
+                        6 => { cached_price.pop(); }
+                        7 => { output_price.pop(); }
                         _ => {}
                     }
                     keep_modal = true;
@@ -1016,9 +1048,9 @@ fn handle_modal_key(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                     match *active_field {
                         0 => base_url.push(c),
                         1 => default_model.push(c),
-                        4 if c.is_ascii_digit() || c == '.' => input_price.push(c),
-                        5 if c.is_ascii_digit() || c == '.' => cached_price.push(c),
-                        6 if c.is_ascii_digit() || c == '.' => output_price.push(c),
+                        5 if c.is_ascii_digit() || c == '.' => input_price.push(c),
+                        6 if c.is_ascii_digit() || c == '.' => cached_price.push(c),
+                        7 if c.is_ascii_digit() || c == '.' => output_price.push(c),
                         _ => {}
                     }
                     keep_modal = true;
@@ -1033,6 +1065,7 @@ fn handle_modal_key(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
             model_name,
             tier_idx,
             billing_mode_idx,
+            protocol_idx,
             input_price,
             cached_price,
             output_price,
@@ -1048,11 +1081,11 @@ fn handle_modal_key(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                     app.status_message = "已取消添加模型。".to_string();
                 }
                 KeyCode::Tab | KeyCode::Down => {
-                    *active_field = (*active_field + 1) % 11;
+                    *active_field = (*active_field + 1) % 12;
                     keep_modal = true;
                 }
                 KeyCode::BackTab | KeyCode::Up => {
-                    *active_field = if *active_field == 0 { 10 } else { *active_field - 1 };
+                    *active_field = if *active_field == 0 { 11 } else { *active_field - 1 };
                     keep_modal = true;
                 }
                 KeyCode::Enter => {
@@ -1096,6 +1129,7 @@ fn handle_modal_key(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                         };
                         let tier_val = TIERS[*tier_idx];
                         let mode_val = idx_to_model_billing_mode(*billing_mode_idx);
+                        let proto_val = idx_to_protocol(*protocol_idx);
 
                         let cfg = ModelConfig {
                             name: m_name.clone(),
@@ -1108,7 +1142,7 @@ fn handle_modal_key(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                             input_price: in_p,
                             cached_price: ca_p,
                             output_price: out_p,
-                            protocol: None,
+                            protocol: proto_val,
                         };
 
                         let p_name = provider_name.clone();
@@ -1135,11 +1169,12 @@ fn handle_modal_key(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                         0 => model_name.push(' '),
                         1 => *tier_idx = (*tier_idx + 1) % 3,
                         2 => *billing_mode_idx = (*billing_mode_idx + 1) % 4,
-                        6 => context_window.push(' '),
-                        7 => max_output.push(' '),
-                        8 => input_modalities[0] = !input_modalities[0],
-                        9 => output_modalities[0] = !output_modalities[0],
-                        10 => *set_as_default = !*set_as_default,
+                        3 => *protocol_idx = (*protocol_idx + 1) % 4,
+                        7 => context_window.push(' '),
+                        8 => max_output.push(' '),
+                        9 => input_modalities[0] = !input_modalities[0],
+                        10 => output_modalities[0] = !output_modalities[0],
+                        11 => *set_as_default = !*set_as_default,
                         _ => {}
                     }
                     keep_modal = true;
@@ -1149,6 +1184,8 @@ fn handle_modal_key(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                         *tier_idx -= 1;
                     } else if *active_field == 2 && *billing_mode_idx > 0 {
                         *billing_mode_idx -= 1;
+                    } else if *active_field == 3 && *protocol_idx > 0 {
+                        *protocol_idx -= 1;
                     }
                     keep_modal = true;
                 }
@@ -1157,6 +1194,8 @@ fn handle_modal_key(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                         *tier_idx += 1;
                     } else if *active_field == 2 && *billing_mode_idx < 3 {
                         *billing_mode_idx += 1;
+                    } else if *active_field == 3 && *protocol_idx < 3 {
+                        *protocol_idx += 1;
                     }
                     keep_modal = true;
                 }
@@ -1167,22 +1206,26 @@ fn handle_modal_key(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                 KeyCode::Char('2') if *active_field == 2 => { *billing_mode_idx = 1; keep_modal = true; }
                 KeyCode::Char('3') if *active_field == 2 => { *billing_mode_idx = 2; keep_modal = true; }
                 KeyCode::Char('4') if *active_field == 2 => { *billing_mode_idx = 3; keep_modal = true; }
-                KeyCode::Char('1') if *active_field == 8 => { input_modalities[0] = !input_modalities[0]; keep_modal = true; }
-                KeyCode::Char('2') if *active_field == 8 => { input_modalities[1] = !input_modalities[1]; keep_modal = true; }
-                KeyCode::Char('3') if *active_field == 8 => { input_modalities[2] = !input_modalities[2]; keep_modal = true; }
-                KeyCode::Char('4') if *active_field == 8 => { input_modalities[3] = !input_modalities[3]; keep_modal = true; }
-                KeyCode::Char('1') if *active_field == 9 => { output_modalities[0] = !output_modalities[0]; keep_modal = true; }
-                KeyCode::Char('2') if *active_field == 9 => { output_modalities[1] = !output_modalities[1]; keep_modal = true; }
-                KeyCode::Char('3') if *active_field == 9 => { output_modalities[2] = !output_modalities[2]; keep_modal = true; }
-                KeyCode::Char('4') if *active_field == 9 => { output_modalities[3] = !output_modalities[3]; keep_modal = true; }
+                KeyCode::Char('1') if *active_field == 3 => { *protocol_idx = 0; keep_modal = true; }
+                KeyCode::Char('2') if *active_field == 3 => { *protocol_idx = 1; keep_modal = true; }
+                KeyCode::Char('3') if *active_field == 3 => { *protocol_idx = 2; keep_modal = true; }
+                KeyCode::Char('4') if *active_field == 3 => { *protocol_idx = 3; keep_modal = true; }
+                KeyCode::Char('1') if *active_field == 9 => { input_modalities[0] = !input_modalities[0]; keep_modal = true; }
+                KeyCode::Char('2') if *active_field == 9 => { input_modalities[1] = !input_modalities[1]; keep_modal = true; }
+                KeyCode::Char('3') if *active_field == 9 => { input_modalities[2] = !input_modalities[2]; keep_modal = true; }
+                KeyCode::Char('4') if *active_field == 9 => { input_modalities[3] = !input_modalities[3]; keep_modal = true; }
+                KeyCode::Char('1') if *active_field == 10 => { output_modalities[0] = !output_modalities[0]; keep_modal = true; }
+                KeyCode::Char('2') if *active_field == 10 => { output_modalities[1] = !output_modalities[1]; keep_modal = true; }
+                KeyCode::Char('3') if *active_field == 10 => { output_modalities[2] = !output_modalities[2]; keep_modal = true; }
+                KeyCode::Char('4') if *active_field == 10 => { output_modalities[3] = !output_modalities[3]; keep_modal = true; }
                 KeyCode::Backspace => {
                     match *active_field {
                         0 => { model_name.pop(); }
-                        3 => { input_price.pop(); }
-                        4 => { cached_price.pop(); }
-                        5 => { output_price.pop(); }
-                        6 => { context_window.pop(); }
-                        7 => { max_output.pop(); }
+                        4 => { input_price.pop(); }
+                        5 => { cached_price.pop(); }
+                        6 => { output_price.pop(); }
+                        7 => { context_window.pop(); }
+                        8 => { max_output.pop(); }
                         _ => {}
                     }
                     keep_modal = true;
@@ -1190,11 +1233,11 @@ fn handle_modal_key(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                 KeyCode::Char(c) => {
                     match *active_field {
                         0 => model_name.push(c),
-                        3 if c.is_ascii_digit() || c == '.' => input_price.push(c),
-                        4 if c.is_ascii_digit() || c == '.' => cached_price.push(c),
-                        5 if c.is_ascii_digit() || c == '.' => output_price.push(c),
-                        6 => context_window.push(c),
-                        7 => max_output.push(c),
+                        4 if c.is_ascii_digit() || c == '.' => input_price.push(c),
+                        5 if c.is_ascii_digit() || c == '.' => cached_price.push(c),
+                        6 if c.is_ascii_digit() || c == '.' => output_price.push(c),
+                        7 => context_window.push(c),
+                        8 => max_output.push(c),
                         _ => {}
                     }
                     keep_modal = true;
@@ -1209,6 +1252,7 @@ fn handle_modal_key(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
             model_name,
             tier_idx,
             billing_mode_idx,
+            protocol_idx,
             input_price,
             cached_price,
             output_price,
@@ -1224,49 +1268,50 @@ fn handle_modal_key(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                     app.status_message = "已取消编辑。".to_string();
                 }
                 KeyCode::Tab | KeyCode::Down => {
-                    *active_field = (*active_field + 1) % 10;
+                    *active_field = (*active_field + 1) % 11;
                     keep_modal = true;
                 }
                 KeyCode::BackTab | KeyCode::Up => {
-                    *active_field = if *active_field == 0 { 9 } else { *active_field - 1 };
+                    *active_field = if *active_field == 0 { 10 } else { *active_field - 1 };
                     keep_modal = true;
                 }
                 KeyCode::Enter => {
                     let in_types: Vec<String> = input_modalities.iter().enumerate()
-                        .filter(|(_, &on)| on)
-                        .map(|(i, _)| MODALITY_KEYS[i].to_string())
-                        .collect();
+                            .filter(|(_, &on)| on)
+                            .map(|(i, _)| MODALITY_KEYS[i].to_string())
+                            .collect();
                     let out_types: Vec<String> = output_modalities.iter().enumerate()
-                        .filter(|(_, &on)| on)
-                        .map(|(i, _)| MODALITY_KEYS[i].to_string())
-                        .collect();
+                            .filter(|(_, &on)| on)
+                            .map(|(i, _)| MODALITY_KEYS[i].to_string())
+                            .collect();
 
                     let in_p = match parse_modal_price(input_price, "常规输入单价") {
-                        Ok(v) => v,
-                        Err(e) => {
-                            app.status_message = format!("❌ {}", e);
-                            app.modal = current_modal;
-                            return;
-                        }
-                    };
+                            Ok(v) => v,
+                            Err(e) => {
+                                app.status_message = format!("❌ {}", e);
+                                app.modal = current_modal;
+                                return;
+                            }
+                        };
                     let ca_p = match parse_modal_price(cached_price, "缓存命中单价") {
-                        Ok(v) => v,
-                        Err(e) => {
-                            app.status_message = format!("❌ {}", e);
-                            app.modal = current_modal;
-                            return;
-                        }
-                    };
+                            Ok(v) => v,
+                            Err(e) => {
+                                app.status_message = format!("❌ {}", e);
+                                app.modal = current_modal;
+                                return;
+                            }
+                        };
                     let out_p = match parse_modal_price(output_price, "输出生成单价") {
-                        Ok(v) => v,
-                        Err(e) => {
-                            app.status_message = format!("❌ {}", e);
-                            app.modal = current_modal;
-                            return;
-                        }
-                    };
+                            Ok(v) => v,
+                            Err(e) => {
+                                app.status_message = format!("❌ {}", e);
+                                app.modal = current_modal;
+                                return;
+                            }
+                        };
                     let tier_val = TIERS[*tier_idx];
                     let mode_val = idx_to_model_billing_mode(*billing_mode_idx);
+                    let proto_val = idx_to_protocol(*protocol_idx);
 
                     let cfg = ModelConfig {
                         name: model_name.clone(),
@@ -1279,7 +1324,7 @@ fn handle_modal_key(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                         input_price: in_p,
                         cached_price: ca_p,
                         output_price: out_p,
-                        protocol: None,
+                        protocol: proto_val,
                     };
 
                     let p_name = provider_name.clone();
@@ -1303,11 +1348,12 @@ fn handle_modal_key(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                     match *active_field {
                         0 => *tier_idx = (*tier_idx + 1) % 3,
                         1 => *billing_mode_idx = (*billing_mode_idx + 1) % 4,
-                        5 => context_window.push(' '),
-                        6 => max_output.push(' '),
-                        7 => input_modalities[0] = !input_modalities[0],
-                        8 => output_modalities[0] = !output_modalities[0],
-                        9 => *set_as_default = !*set_as_default,
+                        2 => *protocol_idx = (*protocol_idx + 1) % 4,
+                        6 => context_window.push(' '),
+                        7 => max_output.push(' '),
+                        8 => input_modalities[0] = !input_modalities[0],
+                        9 => output_modalities[0] = !output_modalities[0],
+                        10 => *set_as_default = !*set_as_default,
                         _ => {}
                     }
                     keep_modal = true;
@@ -1317,6 +1363,8 @@ fn handle_modal_key(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                         *tier_idx -= 1;
                     } else if *active_field == 1 && *billing_mode_idx > 0 {
                         *billing_mode_idx -= 1;
+                    } else if *active_field == 2 && *protocol_idx > 0 {
+                        *protocol_idx -= 1;
                     }
                     keep_modal = true;
                 }
@@ -1325,6 +1373,8 @@ fn handle_modal_key(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                         *tier_idx += 1;
                     } else if *active_field == 1 && *billing_mode_idx < 3 {
                         *billing_mode_idx += 1;
+                    } else if *active_field == 2 && *protocol_idx < 3 {
+                        *protocol_idx += 1;
                     }
                     keep_modal = true;
                 }
@@ -1335,32 +1385,36 @@ fn handle_modal_key(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                 KeyCode::Char('2') if *active_field == 1 => { *billing_mode_idx = 1; keep_modal = true; }
                 KeyCode::Char('3') if *active_field == 1 => { *billing_mode_idx = 2; keep_modal = true; }
                 KeyCode::Char('4') if *active_field == 1 => { *billing_mode_idx = 3; keep_modal = true; }
-                KeyCode::Char('1') if *active_field == 7 => { input_modalities[0] = !input_modalities[0]; keep_modal = true; }
-                KeyCode::Char('2') if *active_field == 7 => { input_modalities[1] = !input_modalities[1]; keep_modal = true; }
-                KeyCode::Char('3') if *active_field == 7 => { input_modalities[2] = !input_modalities[2]; keep_modal = true; }
-                KeyCode::Char('4') if *active_field == 7 => { input_modalities[3] = !input_modalities[3]; keep_modal = true; }
-                KeyCode::Char('1') if *active_field == 8 => { output_modalities[0] = !output_modalities[0]; keep_modal = true; }
-                KeyCode::Char('2') if *active_field == 8 => { output_modalities[1] = !output_modalities[1]; keep_modal = true; }
-                KeyCode::Char('3') if *active_field == 8 => { output_modalities[2] = !output_modalities[2]; keep_modal = true; }
-                KeyCode::Char('4') if *active_field == 8 => { output_modalities[3] = !output_modalities[3]; keep_modal = true; }
+                KeyCode::Char('1') if *active_field == 2 => { *protocol_idx = 0; keep_modal = true; }
+                KeyCode::Char('2') if *active_field == 2 => { *protocol_idx = 1; keep_modal = true; }
+                KeyCode::Char('3') if *active_field == 2 => { *protocol_idx = 2; keep_modal = true; }
+                KeyCode::Char('4') if *active_field == 2 => { *protocol_idx = 3; keep_modal = true; }
+                KeyCode::Char('1') if *active_field == 8 => { input_modalities[0] = !input_modalities[0]; keep_modal = true; }
+                KeyCode::Char('2') if *active_field == 8 => { input_modalities[1] = !input_modalities[1]; keep_modal = true; }
+                KeyCode::Char('3') if *active_field == 8 => { input_modalities[2] = !input_modalities[2]; keep_modal = true; }
+                KeyCode::Char('4') if *active_field == 8 => { input_modalities[3] = !input_modalities[3]; keep_modal = true; }
+                KeyCode::Char('1') if *active_field == 9 => { output_modalities[0] = !output_modalities[0]; keep_modal = true; }
+                KeyCode::Char('2') if *active_field == 9 => { output_modalities[1] = !output_modalities[1]; keep_modal = true; }
+                KeyCode::Char('3') if *active_field == 9 => { output_modalities[2] = !output_modalities[2]; keep_modal = true; }
+                KeyCode::Char('4') if *active_field == 9 => { output_modalities[3] = !output_modalities[3]; keep_modal = true; }
                 KeyCode::Backspace => {
                     match *active_field {
-                        2 => { input_price.pop(); }
-                        3 => { cached_price.pop(); }
-                        4 => { output_price.pop(); }
-                        5 => { context_window.pop(); }
-                        6 => { max_output.pop(); }
+                        3 => { input_price.pop(); }
+                        4 => { cached_price.pop(); }
+                        5 => { output_price.pop(); }
+                        6 => { context_window.pop(); }
+                        7 => { max_output.pop(); }
                         _ => {}
                     }
                     keep_modal = true;
                 }
                 KeyCode::Char(c) => {
                     match *active_field {
-                        2 if c.is_ascii_digit() || c == '.' => input_price.push(c),
-                        3 if c.is_ascii_digit() || c == '.' => cached_price.push(c),
-                        4 if c.is_ascii_digit() || c == '.' => output_price.push(c),
-                        5 => context_window.push(c),
-                        6 => max_output.push(c),
+                        3 if c.is_ascii_digit() || c == '.' => input_price.push(c),
+                        4 if c.is_ascii_digit() || c == '.' => cached_price.push(c),
+                        5 if c.is_ascii_digit() || c == '.' => output_price.push(c),
+                        6 => context_window.push(c),
+                        7 => max_output.push(c),
                         _ => {}
                     }
                     keep_modal = true;
@@ -2075,7 +2129,20 @@ fn render_providers_and_models_tab(f: &mut Frame, area: Rect, app: &mut TuiApp) 
             }),
             Line::from(vec![
                 Span::styled("上游路由: ", Style::default().fg(Color::Gray)),
-                Span::styled(format!("{}/v1/chat/completions", base_url.trim_end_matches('/')), Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    {
+                        let eff = m_cfg.protocol.or_else(|| current_p.and_then(|p| p.default_protocol));
+                        match eff {
+                            Some(proto) => format!("{}/v1/{} [{}]", base_url.trim_end_matches('/'), match proto {
+                                UpstreamProtocol::Chat => "chat/completions",
+                                UpstreamProtocol::Responses => "responses",
+                                UpstreamProtocol::Anthropic => "messages",
+                            }, proto),
+                            None => format!("{}/v1/chat/completions [auto]", base_url.trim_end_matches('/')),
+                        }
+                    },
+                    Style::default().fg(Color::DarkGray)
+                ),
             ]),
         ];
 
@@ -2329,12 +2396,13 @@ fn render_modal(f: &mut Frame, area: Rect, app: &TuiApp) {
             default_model,
             strategy_idx,
             billing_mode_idx,
+            protocol_idx,
             input_price,
             cached_price,
             output_price,
             active_field,
         } => {
-            let modal_area = safe_centered_rect(84, 18, area);
+            let modal_area = safe_centered_rect(84, 19, area);
             f.render_widget(Clear, modal_area);
 
             let strat_options: Vec<Span> = STRATEGIES.iter().enumerate().map(|(i, &s)| {
@@ -2362,9 +2430,10 @@ fn render_modal(f: &mut Frame, area: Rect, app: &TuiApp) {
                     spans
                 }),
                 render_billing_mode_selector(*billing_mode_idx, *active_field == 4, false),
-                render_form_field("常规输入单价 ($/1M)", input_price, *active_field == 5),
-                render_form_field("缓存命中单价 ($/1M)", cached_price, *active_field == 6),
-                render_form_field("输出生成单价 ($/1M)", output_price, *active_field == 7),
+                render_protocol_selector(*protocol_idx, *active_field == 5, false),
+                render_form_field("常规输入单价 ($/1M)", input_price, *active_field == 6),
+                render_form_field("缓存命中单价 ($/1M)", cached_price, *active_field == 7),
+                render_form_field("输出生成单价 ($/1M)", output_price, *active_field == 8),
                 Line::from(""),
                 Line::from(vec![
                     Span::styled(" [Tab/↓/↑] ", Style::default().fg(Color::Yellow)),
@@ -2390,12 +2459,13 @@ fn render_modal(f: &mut Frame, area: Rect, app: &TuiApp) {
             default_model,
             strategy_idx,
             billing_mode_idx,
+            protocol_idx,
             input_price,
             cached_price,
             output_price,
             active_field,
         } => {
-            let modal_area = safe_centered_rect(84, 17, area);
+            let modal_area = safe_centered_rect(84, 18, area);
             f.render_widget(Clear, modal_area);
 
             let strat_options: Vec<Span> = STRATEGIES.iter().enumerate().map(|(i, &s)| {
@@ -2422,9 +2492,10 @@ fn render_modal(f: &mut Frame, area: Rect, app: &TuiApp) {
                     spans
                 }),
                 render_billing_mode_selector(*billing_mode_idx, *active_field == 3, false),
-                render_form_field("常规输入单价 ($/1M)", input_price, *active_field == 4),
-                render_form_field("缓存命中单价 ($/1M)", cached_price, *active_field == 5),
-                render_form_field("输出生成单价 ($/1M)", output_price, *active_field == 6),
+                render_protocol_selector(*protocol_idx, *active_field == 4, false),
+                render_form_field("常规输入单价 ($/1M)", input_price, *active_field == 5),
+                render_form_field("缓存命中单价 ($/1M)", cached_price, *active_field == 6),
+                render_form_field("输出生成单价 ($/1M)", output_price, *active_field == 7),
                 Line::from(""),
                 Line::from(vec![
                     Span::styled(" [Tab/↓/↑] ", Style::default().fg(Color::Yellow)),
@@ -2449,6 +2520,7 @@ fn render_modal(f: &mut Frame, area: Rect, app: &TuiApp) {
             model_name,
             tier_idx,
             billing_mode_idx,
+            protocol_idx,
             input_price,
             cached_price,
             output_price,
@@ -2459,11 +2531,11 @@ fn render_modal(f: &mut Frame, area: Rect, app: &TuiApp) {
             set_as_default,
             active_field,
         } => {
-            let modal_area = safe_centered_rect(88, 20, area);
+            let modal_area = safe_centered_rect(88, 21, area);
             f.render_widget(Clear, modal_area);
 
-            let in_spans = render_modality_checkboxes(input_modalities, *active_field == 8);
-            let out_spans = render_modality_checkboxes(output_modalities, *active_field == 9);
+            let in_spans = render_modality_checkboxes(input_modalities, *active_field == 9);
+            let out_spans = render_modality_checkboxes(output_modalities, *active_field == 10);
 
             let def_span = if *set_as_default {
                 Span::styled(" [x] 设为提供商默认主模型 ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
@@ -2477,30 +2549,31 @@ fn render_modal(f: &mut Frame, area: Rect, app: &TuiApp) {
                 render_form_field("模型标识 (Name)", model_name, *active_field == 0),
                 render_tier_selector(*tier_idx, *active_field == 1),
                 render_billing_mode_selector(*billing_mode_idx, *active_field == 2, true),
-                render_form_field("常规输入单价 ($/1M, 留空继承)", input_price, *active_field == 3),
-                render_form_field("缓存命中单价 ($/1M, 留空继承)", cached_price, *active_field == 4),
-                render_form_field("输出生成单价 ($/1M, 留空继承)", output_price, *active_field == 5),
-                render_form_field("上下文窗口 (如 1M/128K)", context_window, *active_field == 6),
-                render_form_field("最大输出限制 (如 32K/64K)", max_output, *active_field == 7),
+                render_protocol_selector(*protocol_idx, *active_field == 3, true),
+                render_form_field("常规输入单价 ($/1M, 留空继承)", input_price, *active_field == 4),
+                render_form_field("缓存命中单价 ($/1M, 留空继承)", cached_price, *active_field == 5),
+                render_form_field("输出生成单价 ($/1M, 留空继承)", output_price, *active_field == 6),
+                render_form_field("上下文窗口 (如 1M/128K)", context_window, *active_field == 7),
+                render_form_field("最大输出限制 (如 32K/64K)", max_output, *active_field == 8),
                 Line::from({
                     let mut spans = vec![
-                        Span::styled(if *active_field == 8 { "› 输入模态 (1-4): " } else { "  输入模态 (1-4): " },
-                            if *active_field == 8 { Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD) } else { Style::default().fg(Color::Gray) }),
+                        Span::styled(if *active_field == 9 { "› 输入模态 (1-4): " } else { "  输入模态 (1-4): " },
+                            if *active_field == 9 { Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD) } else { Style::default().fg(Color::Gray) }),
                     ];
                     spans.extend(in_spans);
                     spans
                 }),
                 Line::from({
                     let mut spans = vec![
-                        Span::styled(if *active_field == 9 { "› 输出模态 (1-4): " } else { "  输出模态 (1-4): " },
-                            if *active_field == 9 { Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD) } else { Style::default().fg(Color::Gray) }),
+                        Span::styled(if *active_field == 10 { "› 输出模态 (1-4): " } else { "  输出模态 (1-4): " },
+                            if *active_field == 10 { Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD) } else { Style::default().fg(Color::Gray) }),
                     ];
                     spans.extend(out_spans);
                     spans
                 }),
                 Line::from(vec![
-                    Span::styled(if *active_field == 10 { "› 默认主模型: " } else { "  默认主模型: " },
-                        if *active_field == 10 { Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD) } else { Style::default().fg(Color::Gray) }),
+                    Span::styled(if *active_field == 11 { "› 默认主模型: " } else { "  默认主模型: " },
+                        if *active_field == 11 { Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD) } else { Style::default().fg(Color::Gray) }),
                     def_span,
                 ]),
                 Line::from(""),
@@ -2527,6 +2600,7 @@ fn render_modal(f: &mut Frame, area: Rect, app: &TuiApp) {
             model_name,
             tier_idx,
             billing_mode_idx,
+            protocol_idx,
             input_price,
             cached_price,
             output_price,
@@ -2537,11 +2611,11 @@ fn render_modal(f: &mut Frame, area: Rect, app: &TuiApp) {
             set_as_default,
             active_field,
         } => {
-            let modal_area = safe_centered_rect(88, 19, area);
+            let modal_area = safe_centered_rect(88, 20, area);
             f.render_widget(Clear, modal_area);
 
-            let in_spans = render_modality_checkboxes(input_modalities, *active_field == 7);
-            let out_spans = render_modality_checkboxes(output_modalities, *active_field == 8);
+            let in_spans = render_modality_checkboxes(input_modalities, *active_field == 8);
+            let out_spans = render_modality_checkboxes(output_modalities, *active_field == 9);
 
             let def_span = if *set_as_default {
                 Span::styled(" [x] 设为提供商默认主模型 ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
@@ -2554,30 +2628,31 @@ fn render_modal(f: &mut Frame, area: Rect, app: &TuiApp) {
                 Line::from(""),
                 render_tier_selector(*tier_idx, *active_field == 0),
                 render_billing_mode_selector(*billing_mode_idx, *active_field == 1, true),
-                render_form_field("常规输入单价 ($/1M, 留空继承)", input_price, *active_field == 2),
-                render_form_field("缓存命中单价 ($/1M, 留空继承)", cached_price, *active_field == 3),
-                render_form_field("输出生成单价 ($/1M, 留空继承)", output_price, *active_field == 4),
-                render_form_field("上下文窗口", context_window, *active_field == 5),
-                render_form_field("最大输出限制", max_output, *active_field == 6),
+                render_protocol_selector(*protocol_idx, *active_field == 2, true),
+                render_form_field("常规输入单价 ($/1M, 留空继承)", input_price, *active_field == 3),
+                render_form_field("缓存命中单价 ($/1M, 留空继承)", cached_price, *active_field == 4),
+                render_form_field("输出生成单价 ($/1M, 留空继承)", output_price, *active_field == 5),
+                render_form_field("上下文窗口", context_window, *active_field == 6),
+                render_form_field("最大输出限制", max_output, *active_field == 7),
                 Line::from({
                     let mut spans = vec![
-                        Span::styled(if *active_field == 7 { "› 输入模态 (1-4): " } else { "  输入模态 (1-4): " },
-                            if *active_field == 7 { Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD) } else { Style::default().fg(Color::Gray) }),
+                        Span::styled(if *active_field == 8 { "› 输入模态 (1-4): " } else { "  输入模态 (1-4): " },
+                            if *active_field == 8 { Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD) } else { Style::default().fg(Color::Gray) }),
                     ];
                     spans.extend(in_spans);
                     spans
                 }),
                 Line::from({
                     let mut spans = vec![
-                        Span::styled(if *active_field == 8 { "› 输出模态 (1-4): " } else { "  输出模态 (1-4): " },
-                            if *active_field == 8 { Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD) } else { Style::default().fg(Color::Gray) }),
+                        Span::styled(if *active_field == 9 { "› 输出模态 (1-4): " } else { "  输出模态 (1-4): " },
+                            if *active_field == 9 { Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD) } else { Style::default().fg(Color::Gray) }),
                     ];
                     spans.extend(out_spans);
                     spans
                 }),
                 Line::from(vec![
-                    Span::styled(if *active_field == 9 { "› 默认主模型: " } else { "  默认主模型: " },
-                        if *active_field == 9 { Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD) } else { Style::default().fg(Color::Gray) }),
+                    Span::styled(if *active_field == 10 { "› 默认主模型: " } else { "  默认主模型: " },
+                        if *active_field == 10 { Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD) } else { Style::default().fg(Color::Gray) }),
                     def_span,
                 ]),
                 Line::from(""),
@@ -2802,6 +2877,24 @@ fn idx_to_model_billing_mode(idx: usize) -> Option<BillingMode> {
     }
 }
 
+fn protocol_to_idx(protocol: Option<UpstreamProtocol>) -> usize {
+    match protocol {
+        None => 0,
+        Some(UpstreamProtocol::Chat) => 1,
+        Some(UpstreamProtocol::Responses) => 2,
+        Some(UpstreamProtocol::Anthropic) => 3,
+    }
+}
+
+fn idx_to_protocol(idx: usize) -> Option<UpstreamProtocol> {
+    match idx {
+        1 => Some(UpstreamProtocol::Chat),
+        2 => Some(UpstreamProtocol::Responses),
+        3 => Some(UpstreamProtocol::Anthropic),
+        _ => None,
+    }
+}
+
 fn render_billing_mode_selector(mode_idx: usize, is_active: bool, is_model_level: bool) -> Line<'static> {
     let prefix = if is_active { "› 计费模式/是否订阅 (按1-4/空格切换): " } else { "  计费模式/是否订阅 (按1-4/空格切换): " };
     let prefix_style = if is_active {
@@ -2841,6 +2934,51 @@ fn render_billing_mode_selector(mode_idx: usize, is_active: bool, is_model_level
             make_item(1, "2:Coding Plan(包月订阅)"),
             Span::raw(" "),
             make_item(2, "3:0元免费"),
+        ])
+    }
+}
+
+fn render_protocol_selector(protocol_idx: usize, is_active: bool, is_model_level: bool) -> Line<'static> {
+    let prefix = if is_active { "› 原生协议 (按1-4/空格切换): " } else { "  原生协议 (按1-4/空格切换): " };
+    let prefix_style = if is_active {
+        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Gray)
+    };
+
+    let make_item = |idx: usize, label: &'static str| {
+        let is_sel = idx == protocol_idx;
+        if is_sel {
+            Span::styled(
+                format!(" [•] {} ", label),
+                Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD),
+            )
+        } else {
+            Span::styled(format!(" [ ] {} ", label), Style::default().fg(Color::DarkGray))
+        }
+    };
+
+    if is_model_level {
+        Line::from(vec![
+            Span::styled(prefix, prefix_style),
+            make_item(0, "1:继承"),
+            Span::raw(" "),
+            make_item(1, "2:chat"),
+            Span::raw(" "),
+            make_item(2, "3:responses"),
+            Span::raw(" "),
+            make_item(3, "4:anthropic"),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled(prefix, prefix_style),
+            make_item(0, "1:自动"),
+            Span::raw(" "),
+            make_item(1, "2:chat"),
+            Span::raw(" "),
+            make_item(2, "3:responses"),
+            Span::raw(" "),
+            make_item(3, "4:anthropic"),
         ])
     }
 }
@@ -2972,20 +3110,22 @@ mod tests {
         // 唤起 AddModel 模态框
         handle_key_event(&mut app, KeyCode::Char('a'), KeyModifiers::NONE);
         match &app.modal {
-            Modal::AddModel { tier_idx, billing_mode_idx, .. } => {
+            Modal::AddModel { tier_idx, billing_mode_idx, protocol_idx, .. } => {
                 assert_eq!(*tier_idx, 1); // 默认 Standard
                 assert_eq!(*billing_mode_idx, 0); // 默认继承提供商
+                assert_eq!(*protocol_idx, 0); // 默认继承提供商
             }
             _ => panic!("expected AddModel modal"),
         }
 
         // 模拟用户输入：
-        // 0: model_name, 1: tier, 2: billing_mode, 3: input_price, 4: cached_price, 5: output_price
+        // 0: model_name, 1: tier, 2: billing_mode, 3: protocol, 4: input_price, 5: cached_price, 6: output_price
         app.modal = Modal::AddModel {
             provider_name: "bai".to_string(),
             model_name: "bai-coder-pro".to_string(),
             tier_idx: 0, // Flagship (按数字 '1' 或空格)
             billing_mode_idx: 2, // Coding Plan (按数字 '3')
+            protocol_idx: 2, // responses
             input_price: "1.25".to_string(),
             cached_price: "0.15".to_string(),
             output_price: "2.50".to_string(),
@@ -3006,6 +3146,7 @@ mod tests {
         let m = p.get_model_config("bai-coder-pro");
         assert_eq!(m.tier, ponyllm_core::pool::ModelTier::Flagship);
         assert_eq!(m.billing_mode, Some(ponyllm_core::pool::BillingMode::Plan));
+        assert_eq!(m.protocol, Some(ponyllm_core::pool::UpstreamProtocol::Responses));
         assert_eq!(m.input_price, Some(1.25));
         assert_eq!(m.cached_price, Some(0.15));
         assert_eq!(m.output_price, Some(2.50));
@@ -3025,6 +3166,7 @@ mod tests {
             default_model: "deepseek-v3".to_string(),
             strategy_idx: 0,
             billing_mode_idx: 1, // Coding Plan
+            protocol_idx: 2, // responses
             input_price: "0.20".to_string(),
             cached_price: "0.05".to_string(),
             output_price: "0.40".to_string(),
@@ -3036,6 +3178,7 @@ mod tests {
         assert!(matches!(app.modal, Modal::None));
         let p = &app.config.providers["siliconflow"];
         assert_eq!(p.billing_mode, ponyllm_core::pool::BillingMode::Plan);
+        assert_eq!(p.default_protocol, Some(ponyllm_core::pool::UpstreamProtocol::Responses));
         assert_eq!(p.input_price, 0.20);
         assert_eq!(p.cached_price, 0.05);
         assert_eq!(p.output_price, 0.40);
