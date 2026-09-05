@@ -1787,4 +1787,93 @@ fn test_responses_to_anthropic_stream_missing_call_id_routing() {
     }
 }
 
+#[test]
+fn test_chat_to_responses_tool_message_serializes_as_function_call_output() {
+    let chat_req = ChatCompletionRequest {
+        model: "muse-spark-1.3-contributor-free".to_string(),
+        messages: vec![
+            ChatMessage::System(SystemMessage {
+                content: "You are a coding assistant.".into(),
+                name: None,
+            }),
+            ChatMessage::User(UserMessage {
+                content: "Read the file.".into(),
+                name: None,
+            }),
+            ChatMessage::Assistant(AssistantMessage {
+                content: Some("Checking file.".into()),
+                name: None,
+                refusal: None,
+                reasoning_content: None,
+                tool_calls: Some(vec![ToolCall {
+                    id: "call_123".to_string(),
+                    r#type: "function".to_string(),
+                    function: FunctionCall {
+                        name: "read_file".to_string(),
+                        arguments: "{\"path\":\"main.rs\"}".to_string(),
+                    },
+                }]),
+            }),
+            ChatMessage::Tool(ToolMessage {
+                content: "fn main() {}".into(),
+                tool_call_id: "call_123".to_string(),
+            }),
+        ],
+        ..Default::default()
+    };
+
+    let resp_req = chat_to_responses_request(&chat_req).unwrap();
+    let serialized = serde_json::to_value(&resp_req).expect("should serialize to JSON");
+
+    let items = serialized
+        .get("input")
+        .and_then(|v| v.as_array())
+        .expect("input must be an array of items");
+
+    // items: [UserMessage, AssistantMessage, FunctionCall, FunctionCallOutput]
+    assert_eq!(items.len(), 4);
+
+    let tool_output_item = &items[3];
+    assert_eq!(
+        tool_output_item.get("type").and_then(|v| v.as_str()),
+        Some("function_call_output"),
+        "OpenAI Responses API specification requires 'function_call_output' rather than 'function_response'"
+    );
+    assert_eq!(
+        tool_output_item.get("call_id").and_then(|v| v.as_str()),
+        Some("call_123")
+    );
+    assert_eq!(
+        tool_output_item.get("output").and_then(|v| v.as_str()),
+        Some("fn main() {}")
+    );
+
+    // Roundtrip test: deserialize the standard payload back into CreateResponseRequest
+    let roundtrip_req: CreateResponseRequest =
+        serde_json::from_value(serialized).expect("should deserialize standard Responses payload");
+    if let ResponseInput::Items(ref r_items) = roundtrip_req.input {
+        assert!(matches!(
+            &r_items[3],
+            ResponseInputItem::FunctionResponse { call_id, output }
+                if call_id == "call_123" && output == "fn main() {}"
+        ));
+    } else {
+        panic!("expected ResponseInput::Items");
+    }
+
+    // Backward-compatibility test: legacy payload with "function_response" must also deserialize
+    let legacy_json = serde_json::json!({
+        "type": "function_response",
+        "call_id": "call_legacy",
+        "output": "legacy_output"
+    });
+    let legacy_item: ResponseInputItem = serde_json::from_value(legacy_json)
+        .expect("should deserialize legacy 'function_response' type");
+    assert!(matches!(
+        legacy_item,
+        ResponseInputItem::FunctionResponse { call_id, output }
+            if call_id == "call_legacy" && output == "legacy_output"
+    ));
+}
+
 

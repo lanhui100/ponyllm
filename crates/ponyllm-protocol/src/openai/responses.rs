@@ -132,6 +132,7 @@ pub enum ResponseInputItem {
         name: String,
         arguments: String,
     },
+    #[serde(rename = "function_call_output", alias = "function_response")]
     FunctionResponse {
         call_id: String,
         output: String,
