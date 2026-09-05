@@ -127,6 +127,8 @@ pub struct AppState {
     pub event_bus: Arc<EventBus>,
     pub metrics_proj: Arc<MetricsProjection>,
     pub stream_proj: Arc<StreamProjection>,
+    /// Global reusable HTTP client with connection pool and TCP nodelay.
+    pub http_client: reqwest::Client,
 }
 
 impl AppState {
@@ -137,6 +139,7 @@ impl AppState {
         let bus = Arc::new(EventBus::new(capacity));
         let metrics_proj = Arc::new(MetricsProjection::new(metrics.clone()));
         let stream_proj = Arc::new(StreamProjection::default());
+        let http_client = ponyllm_core::executor::create_upstream_http_client();
         bus.add_projection(metrics_proj.clone());
         bus.add_projection(stream_proj.clone());
         bus.add_projection(Arc::new(FrameConverter::new(flight_recorder.clone())));
@@ -157,7 +160,14 @@ impl AppState {
             event_bus: bus,
             metrics_proj,
             stream_proj,
+            http_client,
         }
+    }
+
+    /// Override the HTTP client (useful for mock transports in tests).
+    pub fn with_http_client(mut self, client: reqwest::Client) -> Self {
+        self.http_client = client;
+        self
     }
 
     pub fn reload_config_with_pools(

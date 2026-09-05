@@ -13,7 +13,7 @@ use ponyllm_protocol::openai::chat::ChatCompletionResponse;
 use ponyllm_protocol::translator::{anthropic_to_chat_request, anthropic_to_responses_request, chat_to_anthropic_response, responses_to_anthropic_response};
 use parking_lot::Mutex;
 use std::str::FromStr;
-use crate::extractors::AppJson;
+use crate::extractors::{format_request_snippet, AppJson};
 use crate::routes::chat::{inject_routing_headers, inject_telemetry_headers};
 use crate::routes::models::ParsedRequestModel;
 use crate::state::AppState;
@@ -295,7 +295,7 @@ pub async fn handle_messages(
 
         // Forensics snippet must be the actual upstream wire JSON, not the
         // inbound Anthropic shape, so frames replay what was really sent.
-        let req_snippet = Some(req_val.to_string());
+        let req_snippet = Some(format_request_snippet(&req_val));
         last_req_snippet = req_snippet.clone();
 
         // Every per-key retry inside the executor reports through this observer,
@@ -309,7 +309,7 @@ pub async fn handle_messages(
             stages: stages.clone(),
             request_snippet: req_snippet.clone(),
         };
-        let executor = UpstreamExecutor::new(pool, max_retries)
+        let executor = UpstreamExecutor::with_client(pool, state.http_client.clone(), max_retries)
             .with_event_sink(sink_ctx.clone(), state.event_sink(sink_ctx));
 
         if is_streaming {

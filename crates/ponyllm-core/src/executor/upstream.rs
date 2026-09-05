@@ -75,14 +75,26 @@ impl std::fmt::Debug for UpstreamExecutor {
     }
 }
 
+/// Create an optimized, connection-pooled HTTP client for upstream LLM providers.
+/// Enables TCP nodelay, Keep-Alive probing, and idle connection reuse to minimize TTFT.
+pub fn create_upstream_http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(120))
+        .connect_timeout(Duration::from_secs(10))
+        .tcp_nodelay(true)
+        .tcp_keepalive(Duration::from_secs(60))
+        .pool_idle_timeout(Duration::from_secs(90))
+        .pool_max_idle_per_host(32)
+        .build()
+        .unwrap_or_default()
+}
+
 impl UpstreamExecutor {
     pub fn new(pool: Arc<KeyPool>, max_retries: usize) -> Self {
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(120))
-            .connect_timeout(Duration::from_secs(10))
-            .build()
-            .unwrap_or_default();
+        Self::with_client(pool, create_upstream_http_client(), max_retries)
+    }
 
+    pub fn with_client(pool: Arc<KeyPool>, client: reqwest::Client, max_retries: usize) -> Self {
         Self {
             pool,
             client,

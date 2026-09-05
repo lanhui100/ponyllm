@@ -22,8 +22,8 @@ parking_lot = { workspace = true }
 futures-util = { workspace = true }
 tokio-stream = { workspace = true }
 bytes = { workspace = true }
+reqwest = { workspace = true }
 
 [dev-dependencies]
-reqwest = { workspace = true }
 
 

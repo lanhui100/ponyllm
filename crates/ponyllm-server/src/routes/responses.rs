@@ -11,7 +11,7 @@ use ponyllm_core::telemetry::{EventCtx, GatewayEvent, StageTimings};
 use ponyllm_protocol::openai::responses::CreateResponseRequest;
 use parking_lot::Mutex;
 use std::str::FromStr;
-use crate::extractors::AppJson;
+use crate::extractors::{format_request_snippet, AppJson};
 use crate::routes::chat::{inject_routing_headers, inject_telemetry_headers};
 use crate::routes::models::ParsedRequestModel;
 use crate::state::AppState;
@@ -222,7 +222,7 @@ pub async fn handle_responses(
             }
         };
 
-        let req_snippet = Some(req_val.to_string());
+        let req_snippet = Some(format_request_snippet(&req_val));
         last_req_snippet = req_snippet.clone();
         let sink_ctx = EventSinkCtx {
             request_id: request_id.clone(),
@@ -232,7 +232,7 @@ pub async fn handle_responses(
             stages: stages.clone(),
             request_snippet: req_snippet.clone(),
         };
-        let executor = UpstreamExecutor::new(pool, max_retries)
+        let executor = UpstreamExecutor::with_client(pool, state.http_client.clone(), max_retries)
             .with_event_sink(sink_ctx.clone(), state.event_sink(sink_ctx));
 
         // Handle streaming request: pass through upstream SSE unchanged

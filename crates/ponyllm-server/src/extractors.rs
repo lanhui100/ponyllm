@@ -240,3 +240,80 @@ pub fn project_anthropic_error(
     };
     render_anthropic_error(status, err_type, message)
 }
+
+/// Maximum snippet characters captured for telemetry and flight recorder frames.
+pub const MAX_SNIPPET_CHARS: usize = 512;
+
+struct BoundedWriter {
+    buf: Vec<u8>,
+    limit: usize,
+    reached: bool,
+}
+
+impl BoundedWriter {
+    fn new(limit: usize) -> Self {
+        Self {
+            buf: Vec::with_capacity(limit + 16),
+            limit,
+            reached: false,
+        }
+    }
+}
+
+impl std::io::Write for BoundedWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if self.reached {
+            return Ok(buf.len());
+        }
+        let rem = self.limit.saturating_sub(self.buf.len());
+        if rem == 0 {
+            self.reached = true;
+            return Ok(buf.len());
+        }
+        let n = buf.len().min(rem);
+        self.buf.extend_from_slice(&buf[..n]);
+        if self.buf.len() >= self.limit {
+            self.reached = true;
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Create a bounded, lightweight snippet of a JSON value for telemetry.
+/// Avoids giant string allocations on multi-megabyte payloads.
+pub fn format_request_snippet(val: &serde_json::Value) -> String {
+    let mut writer = BoundedWriter::new(MAX_SNIPPET_CHARS);
+    let _ = serde_json::to_writer(&mut writer, val);
+    let mut s = String::from_utf8_lossy(&writer.buf).into_owned();
+    if writer.reached {
+        s.push_str("...[TRUNCATED]");
+    }
+    s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_format_request_snippet_small() {
+        let val = serde_json::json!({"model": "gpt-4o", "stream": true});
+        let snippet = format_request_snippet(&val);
+        assert!(!snippet.contains("...[TRUNCATED]"));
+        assert!(snippet.contains("gpt-4o"));
+    }
+
+    #[test]
+    fn test_format_request_snippet_large_truncated() {
+        let big_content = "a".repeat(2000);
+        let val = serde_json::json!({"model": "gpt-4o", "messages": [{"role": "user", "content": big_content}]});
+        let snippet = format_request_snippet(&val);
+        assert!(snippet.contains("...[TRUNCATED]"));
+        assert!(snippet.len() < 600);
+    }
+}
+

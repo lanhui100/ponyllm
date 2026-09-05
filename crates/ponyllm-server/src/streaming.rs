@@ -16,7 +16,7 @@
 //! `data: data: {...}` double prefixes for OpenAI streams and silently returned
 //! OpenAI `chat.completion.chunk` frames to Anthropic clients (broken event types).
 
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use futures_util::{Stream, StreamExt};
 use std::sync::Arc;
 use std::time::Instant;
@@ -55,22 +55,19 @@ where
     stream
 }
 
-/// Extract the first complete SSE event (bounded by a blank line) from `buf`.
-/// Returns `(event, remaining_bytes)` when a full frame is present.
-fn extract_event(buf: &[u8]) -> Option<(SseEvent, Vec<u8>)> {
+/// Find the byte length of the first complete SSE event (bounded by a blank line) in `buf`.
+fn find_sse_boundary(buf: &[u8]) -> Option<usize> {
     let mut i = 0;
     while i + 1 < buf.len() {
         // \n\n boundary
         if buf[i] == b'\n' && buf[i + 1] == b'\n' {
-            let (head, tail) = buf.split_at(i + 2);
-            return Some((parse_event_lines(head), tail.to_vec()));
+            return Some(i + 2);
         }
         // \r\n\r\n boundary
         if i + 3 < buf.len()
             && buf[i..i + 4] == [b'\r', b'\n', b'\r', b'\n']
         {
-            let (head, tail) = buf.split_at(i + 4);
-            return Some((parse_event_lines(head), tail.to_vec()));
+            return Some(i + 4);
         }
         i += 1;
     }
@@ -81,7 +78,8 @@ fn extract_event(buf: &[u8]) -> Option<(SseEvent, Vec<u8>)> {
 fn parse_event_lines(block: &[u8]) -> SseEvent {
     let text = String::from_utf8_lossy(block);
     let mut event = "message".to_string();
-    let mut data_lines: Vec<String> = Vec::new();
+    let mut data = String::new();
+    let mut first_data = true;
     for line in text.split('\n') {
         let line = line.strip_suffix('\r').unwrap_or(line);
         if line.starts_with(':') {
@@ -92,14 +90,17 @@ fn parse_event_lines(block: &[u8]) -> SseEvent {
         } else if let Some(v) = line.strip_prefix("data:") {
             // W3C SSE: if value starts with a single space, remove it; preserve subsequent spaces (e.g. indentation)
             let val = v.strip_prefix(' ').unwrap_or(v);
-            data_lines.push(val.to_string());
+            if first_data {
+                data.push_str(val);
+                first_data = false;
+            } else {
+                data.push('\n');
+                data.push_str(val);
+            }
         }
         // id / retry / other fields are ignored (not needed by the translators)
     }
-    SseEvent {
-        event,
-        data: data_lines.join("\n"),
-    }
+    SseEvent { event, data }
 }
 
 /// Maximum buffered bytes for one SSE frame. A single legitimate delta frame
@@ -118,12 +119,13 @@ where
     S: Stream<Item = Result<Bytes, E>> + Send + 'static,
     E: Send + 'static,
 {
-    let buffer: Vec<u8> = Vec::new();
+    let buffer = BytesMut::new();
     let inner = Box::pin(stream);
     futures_util::stream::unfold((inner, buffer), |(mut st, mut buf)| async move {
         loop {
-            if let Some((evt, rest)) = extract_event(&buf) {
-                buf = rest;
+            if let Some(len) = find_sse_boundary(&buf) {
+                let frame_block = buf.split_to(len);
+                let evt = parse_event_lines(&frame_block);
                 return Some((Ok(evt), (st, buf)));
             }
             if buf.len() > MAX_SSE_FRAME_BYTES {
@@ -833,6 +835,21 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].event, "message_start");
         assert_eq!(events[0].data, "{\"x\":1}");
+    }
+
+    #[tokio::test]
+    async fn test_multiple_events_in_single_chunk() {
+        let chunk = Bytes::from_static(b"data: first\n\ndata: second\n\nevent: custom\ndata: third\n\n");
+        let s = bytes_stream(vec![chunk]);
+        let events: Vec<SseEvent> = sse_event_stream(s)
+            .map(|r| r.unwrap())
+            .collect()
+            .await;
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[0].data, "first");
+        assert_eq!(events[1].data, "second");
+        assert_eq!(events[2].event, "custom");
+        assert_eq!(events[2].data, "third");
     }
 
     #[tokio::test]

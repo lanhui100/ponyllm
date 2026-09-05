@@ -52,6 +52,7 @@ impl ProviderInfo {
 pub struct PonyGateway {
     pub providers: HashMap<String, ProviderInfo>,
     pub max_retries: usize,
+    pub http_client: reqwest::Client,
 }
 
 impl PonyGateway {
@@ -124,7 +125,7 @@ impl PonyGateway {
     /// In-memory Chat Completion API
     pub async fn chat_completion(&self, req: &ChatCompletionRequest) -> Result<ChatCompletionResponse> {
         let provider = self.resolve_provider(&req.model)?;
-        let executor = UpstreamExecutor::new(provider.pool.clone(), self.max_retries);
+        let executor = UpstreamExecutor::with_client(provider.pool.clone(), self.http_client.clone(), self.max_retries);
 
         match provider.native_protocol() {
             UpstreamProtocol::Anthropic => {
@@ -155,7 +156,7 @@ impl PonyGateway {
     /// In-memory Anthropic Messages API (with transparent bidirectional translation)
     pub async fn create_message(&self, req: &MessageRequest) -> Result<MessageResponse> {
         let provider = self.resolve_provider(&req.model)?;
-        let executor = UpstreamExecutor::new(provider.pool.clone(), self.max_retries);
+        let executor = UpstreamExecutor::with_client(provider.pool.clone(), self.http_client.clone(), self.max_retries);
 
         match provider.native_protocol() {
             UpstreamProtocol::Anthropic => {
@@ -186,7 +187,7 @@ impl PonyGateway {
     /// In-memory OpenAI Responses API
     pub async fn create_response(&self, req: &CreateResponseRequest) -> Result<ResponseObject> {
         let provider = self.resolve_provider(&req.model)?;
-        let executor = UpstreamExecutor::new(provider.pool.clone(), self.max_retries);
+        let executor = UpstreamExecutor::with_client(provider.pool.clone(), self.http_client.clone(), self.max_retries);
 
         match provider.native_protocol() {
             UpstreamProtocol::Anthropic => {
@@ -308,6 +309,7 @@ impl PonyGatewayBuilder {
         PonyGateway {
             providers: provider_infos,
             max_retries: retries,
+            http_client: ponyllm_core::executor::create_upstream_http_client(),
         }
     }
 }

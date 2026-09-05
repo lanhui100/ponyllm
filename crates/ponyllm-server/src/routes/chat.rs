@@ -13,7 +13,7 @@ use ponyllm_protocol::openai::chat::ChatCompletionRequest;
 use ponyllm_protocol::translator::{anthropic_to_chat_response, chat_to_anthropic_request, chat_to_responses_request, responses_to_chat_response};
 use parking_lot::Mutex;
 use std::str::FromStr;
-use crate::extractors::AppJson;
+use crate::extractors::{format_request_snippet, AppJson};
 use crate::routes::models::ParsedRequestModel;
 use crate::state::{AppState, RoutedTarget};
 use crate::streaming::{
@@ -240,7 +240,7 @@ pub async fn handle_chat_completions(
         };
 
 
-        let req_snippet = Some(req_val.to_string());
+        let req_snippet = Some(format_request_snippet(&req_val));
         last_req_snippet = req_snippet.clone();
 
         // Every per-key retry inside the executor appends attempt events to
@@ -253,7 +253,7 @@ pub async fn handle_chat_completions(
             stages: stages.clone(),
             request_snippet: req_snippet.clone(),
         };
-        let executor = UpstreamExecutor::new(pool, max_retries)
+        let executor = UpstreamExecutor::with_client(pool, state.http_client.clone(), max_retries)
             .with_event_sink(sink_ctx.clone(), state.event_sink(sink_ctx));
 
         if is_streaming {
