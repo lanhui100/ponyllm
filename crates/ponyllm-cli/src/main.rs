@@ -865,22 +865,24 @@ async fn handle_gateway_status(
         _ => None,
     };
 
-    let token_display = if active_key.is_empty() || active_key.eq_ignore_ascii_case("none") {
-        "免鉴权 (开放模式)".to_string()
-    } else {
-        active_key.clone()
+    let has_key = !active_key.is_empty() && !active_key.eq_ignore_ascii_case("none");
+
+    let use_color = std::env::var_os("NO_COLOR").is_none()
+        && std::io::IsTerminal::is_terminal(&std::io::stdout());
+    let paint = |code: &str, text: &str| {
+        if use_color {
+            format!("\x1b[{code}m{text}\x1b[0m")
+        } else {
+            text.to_string()
+        }
     };
 
     let strat_name = match cfg.gateway.default_strategy {
-        GatewayRoutingStrategy::Economy => "省钱优先 (0元免费 > Plan套餐 > 缓存命中 > 按量低价)",
-        GatewayRoutingStrategy::Speed => "极速优先 (实测 TTFT + t/s 最优)",
-        GatewayRoutingStrategy::Reliable => "稳定优先 (高可用保障与429避让)",
-        GatewayRoutingStrategy::Balanced => "综合平衡 (成本与响应速度均衡)",
+        GatewayRoutingStrategy::Economy => "省钱优先",
+        GatewayRoutingStrategy::Speed => "速度优先",
+        GatewayRoutingStrategy::Reliable => "稳定优先",
+        GatewayRoutingStrategy::Balanced => "均衡",
     };
-
-    println!("\n╔════════════════════════════════════════════════════════════════════════╗");
-    println!("║              📊 ponyllm AI Gateway 服务运行全景看板                    ║");
-    println!("╠════════════════════════════════════════════════════════════════════════╣");
 
     if is_online {
         let version = health_json
@@ -888,66 +890,88 @@ async fn handle_gateway_status(
             .and_then(|v| v.get("version"))
             .and_then(|v| v.as_str())
             .unwrap_or(env!("CARGO_PKG_VERSION"));
-        println!("║  • 服务健康状态:      🟢 在线运行中 (v{}){:>28} ║", version, "");
+        println!("状态：{}", paint("32", &format!("运行中 {version}")));
     } else {
-        println!("║  • 服务健康状态:      🔴 离线 (未连接到网关服务){:>25} ║", "");
+        println!("状态：{}", paint("31", "未运行"));
     }
 
-    println!("║  • 探测服务基址:      {:<48} ║", base_url);
-    println!("║  • 配置文件路径:      {:<48} ║", resolved.display());
-    println!("║  • 全局调度策略:      {:<48} ║", strat_name);
-    let openai_base = format!("{}/v1", base_url);
-    let anthropic_base = base_url.clone();
-    let token_val = if token_display.starts_with("免鉴权") { "none" } else { &token_display };
-    println!("║  • 网关访问凭证 (Gateway Token):                                       ║");
-    println!("║    - 当前生效 Token:  {:<48} ║", token_display);
-    println!("║    - OpenAI SDK:      export OPENAI_API_KEY={:<26} ║", token_val);
-    println!("║                       export OPENAI_API_BASE={:<25} ║", openai_base);
-    println!("║    - Anthropic SDK:   export ANTHROPIC_API_KEY={:<23} ║", token_val);
-    println!("║                       export ANTHROPIC_BASE_URL={:<22} ║", anthropic_base);
-    println!("╠════════════════════════════════════════════════════════════════════════╣");
-    println!("║  • 挂载模型提供商与密钥池 (Upstream Providers & Keys):                 ║");
+    println!("地址：{}", base_url);
+    println!("配置：{}", resolved.display());
+    println!("策略：{}", strat_name);
 
-    if cfg.providers.is_empty() {
-        println!("║    (未配置任何上游提供商，请运行 'ponyllm provider add' 添加)          ║");
+    println!();
+    println!("连接");
+    if has_key {
+        println!("  密钥：{}", active_key);
     } else {
-        for (p_name, p_sec) in &cfg.providers {
-            let key_count = p_sec.keys.len();
-            let key_status = if key_count == 0 {
-                "⚠️ 无可用 Key (池空)".to_string()
+        println!("  密钥：未设置，不用填也能连");
+    }
+    println!("  OpenAI 地址：{}/v1", base_url);
+    println!("  Anthropic 地址：{}", base_url);
+
+    println!();
+    if cfg.providers.is_empty() {
+        println!("提供商");
+        println!("  还没有添加提供商，执行 ponyllm provider add 添加");
+    } else {
+        println!("提供商 {} 个", cfg.providers.len());
+        let mut ordered: Vec<(&String, _)> = cfg.providers.iter().collect();
+        ordered.sort_by(|a, b| a.0.cmp(b.0));
+        for (p_name, p_sec) in ordered {
+            if p_sec.keys.is_empty() {
+                println!(
+                    "  {}：默认模型{}，还没有密钥，暂时不能用",
+                    p_name, p_sec.default_model
+                );
+            } else if p_sec.keys.len() == 1 {
+                println!(
+                    "  {}：默认模型{}，有 1 个密钥",
+                    p_name, p_sec.default_model
+                );
             } else {
-                format!("{} 个上游 Key 就绪", key_count)
-            };
-            let def_model = &p_sec.default_model;
-            let line_desc = format!("{:<10} | {:<16} | 默认模型: {}", p_name, key_status, def_model);
-            println!("║    • {:<66} ║", line_desc);
+                println!(
+                    "  {}：默认模型{}，有 {} 个密钥",
+                    p_name,
+                    p_sec.default_model,
+                    p_sec.keys.len()
+                );
+            }
         }
     }
 
     if let Some(m) = metrics_json {
         let total_req = m.get("total_requests").and_then(|v| v.as_u64()).unwrap_or(0);
-        let succ_req = m.get("successful_requests").and_then(|v| v.as_u64()).unwrap_or(0);
+        let succ_req = m
+            .get("successful_requests")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
         let fail_req = m.get("failed_requests").and_then(|v| v.as_u64()).unwrap_or(0);
         let total_tokens = m.get("total_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-        let succ_rate = if total_req > 0 {
-            format!("{:.1}%", (succ_req as f64 / total_req as f64) * 100.0)
-        } else {
-            "100.0%".to_string()
-        };
 
-        println!("╠════════════════════════════════════════════════════════════════════════╣");
-        println!("║  • 网关实时遥测指标 (Live Telemetry Metrics):                          ║");
-        println!("║    - 总处理请求数:    {:<12} 成功率:       {:<15} ║", total_req, succ_rate);
-        println!("║    - 成功 / 失败:     {:<12} 消耗 Tokens:  {:<15} ║", format!("{}/{}", succ_req, fail_req), total_tokens);
+        println!();
+        println!("用量");
+        if total_req == 0 {
+            println!("  还没有请求");
+        } else if fail_req == 0 {
+            println!(
+                "  共 {} 次请求，都成功了，共用 {} Tokens",
+                total_req, total_tokens
+            );
+        } else {
+            println!(
+                "  共 {} 次请求，成功 {} 次，失败 {} 次，共用 {} Tokens",
+                total_req, succ_req, fail_req, total_tokens
+            );
+        }
     } else if is_online {
-        println!("╠════════════════════════════════════════════════════════════════════════╣");
-        println!("║  • 网关实时遥测指标:  ⚠️ 无法获取指标 (可能鉴权 Token 不匹配)         ║");
+        println!();
+        println!("用量");
+        println!("  暂时看不到用量，检查密钥是否正确");
     }
 
-    println!("╚════════════════════════════════════════════════════════════════════════╝\n");
-
     if !is_online {
-        println!("👉 排错提示: 网关服务当前未启动。请运行 'ponyllm serve' 启动服务，或使用 '-g <URL>' 探测指定网关。\n");
+        println!();
+        println!("服务没有运行，先执行 ponyllm serve 启动。");
     }
 
     Ok(())
