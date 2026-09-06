@@ -1876,4 +1876,45 @@ fn test_chat_to_responses_tool_message_serializes_as_function_call_output() {
     ));
 }
 
+#[test]
+fn test_responses_stream_incomplete_maps_to_finish_reason_length() {
+    let incomplete_event_json = serde_json::json!({
+        "type": "response.incomplete",
+        "response": {
+            "id": "resp_trunc",
+            "object": "response",
+            "status": "incomplete",
+            "model": "muse-spark-1.3-contributor-free",
+            "output": []
+        }
+    });
+    let event: ResponseStreamEvent = serde_json::from_value(incomplete_event_json)
+        .expect("should deserialize response.incomplete event");
+
+    let mut fsm = ResponsesToChatFsm::new("test-model");
+    let chunks = fsm.process_event(event).expect("should process incomplete event");
+    assert_eq!(chunks.len(), 1);
+    assert_eq!(chunks[0].choices[0].finish_reason, Some(FinishReason::Length));
+}
+
+#[test]
+fn test_response_object_tolerates_missing_and_null_fields() {
+    // Upstream may omit output, object, or usage fields in terminal frame
+    let loose_json = serde_json::json!({
+        "type": "response.completed",
+        "response": {
+            "id": "resp_loose",
+            "status": "completed",
+            "model": "muse-spark-1.3-contributor-free"
+        }
+    });
+    let event: ResponseStreamEvent = serde_json::from_value(loose_json)
+        .expect("should deserialize response.completed even when output, object, or usage are missing");
+    let mut fsm = ResponsesToChatFsm::new("test-model");
+    let chunks = fsm.process_event(event).expect("should process completed");
+    assert_eq!(chunks.len(), 1);
+    assert_eq!(chunks[0].choices[0].finish_reason, Some(FinishReason::Stop));
+}
+
+
 

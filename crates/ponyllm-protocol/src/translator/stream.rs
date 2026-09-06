@@ -257,7 +257,34 @@ impl AnthropicStreamToChatFsm {
 
         Ok(chunks)
     }
+
+    pub fn finish_if_open(&mut self) -> Option<ChatCompletionChunk> {
+        if self.done {
+            return None;
+        }
+        self.done = true;
+        Some(ChatCompletionChunk {
+            id: self.response_id.clone(),
+            object: "chat.completion.chunk".to_string(),
+            created: self.created,
+            model: self.model.clone(),
+            choices: vec![ChatChunkChoice {
+                index: 0,
+                delta: ChatChunkDelta::default(),
+                finish_reason: Some(if self.tool_counter > 0 {
+                    FinishReason::ToolCalls
+                } else {
+                    FinishReason::Stop
+                }),
+                logprobs: None,
+            }],
+            usage: None,
+            system_fingerprint: None,
+            service_tier: None,
+        })
+    }
 }
+
 
 #[derive(Debug, Clone, PartialEq)]
 enum ChatActiveBlock {

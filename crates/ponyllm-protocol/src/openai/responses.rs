@@ -159,16 +159,21 @@ pub enum ResponseToolDefinition {
     CodeInterpreter,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct ResponseObject {
+    #[serde(default)]
     pub id: String,
+    #[serde(default)]
     pub object: String,
+    #[serde(default)]
     pub status: String,
+    #[serde(default)]
     pub model: String,
+    #[serde(default)]
     pub output: Vec<ResponseOutputItem>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<ResponseUsage>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<ResponseError>,
 }
 
@@ -182,9 +187,13 @@ pub struct ResponseError {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ResponseOutputItem {
     Message {
+        #[serde(default)]
         id: String,
+        #[serde(default)]
         status: String,
+        #[serde(default)]
         role: String,
+        #[serde(default)]
         content: Vec<ResponseContentPart>,
     },
     FunctionCall {
@@ -194,6 +203,7 @@ pub enum ResponseOutputItem {
         status: String,
         #[serde(default)]
         call_id: String,
+        #[serde(default)]
         name: String,
         #[serde(default)]
         arguments: String,
@@ -236,8 +246,11 @@ pub enum ResponseContentPart {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct ResponseUsage {
+    #[serde(default)]
     pub total_tokens: u32,
+    #[serde(default)]
     pub input_tokens: u32,
+    #[serde(default)]
     pub output_tokens: u32,
 }
 
@@ -306,6 +319,10 @@ pub enum ResponseStreamEvent {
     #[serde(rename = "response.completed")]
     Completed { response: ResponseObject },
 
+    /// Real OpenAI incomplete/truncated event.
+    #[serde(rename = "response.incomplete")]
+    Incomplete { response: ResponseObject },
+
     /// Real OpenAI failure event.
     #[serde(rename = "response.failed")]
     Failed { response: ResponseObject },
@@ -316,6 +333,7 @@ pub enum ResponseStreamEvent {
     #[serde(other)]
     Unknown,
 }
+
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct ResponseTextDelta {

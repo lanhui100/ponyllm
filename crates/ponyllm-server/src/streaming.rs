@@ -178,6 +178,7 @@ pub fn responses_event_to_sse_bytes(event: &ResponseStreamEvent) -> Option<Bytes
             "response.function_call_arguments.delta"
         }
         ResponseStreamEvent::Completed { .. } => "response.completed",
+        ResponseStreamEvent::Incomplete { .. } => "response.incomplete",
         ResponseStreamEvent::Failed { .. } => "response.failed",
         ResponseStreamEvent::Unknown => return None,
     };
@@ -198,14 +199,24 @@ where
     S: Stream<Item = Result<Bytes, E>> + Send + 'static,
     E: Send + 'static,
 {
-    let mut fsm = ResponsesToChatFsm::new(fallback_model);
+    let fsm = std::sync::Arc::new(Mutex::new(ResponsesToChatFsm::new(fallback_model)));
+    let fsm_flat = fsm.clone();
+    let stopped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stopped_flag = stopped.clone();
+
     let translated = sse_event_stream(stream).flat_map(move |res| {
         let mut out: Vec<Result<Bytes, E>> = Vec::new();
         match res {
             Ok(evt) => {
-                if let Ok(msge) = serde_json::from_str::<ResponseStreamEvent>(&evt.data) {
-                    if let Ok(chunks) = fsm.process_event(msge) {
+                let data = evt.data.trim();
+                if data.is_empty() || data == "[DONE]" {
+                    // terminal / heartbeat frame: nothing to forward
+                } else if let Ok(msge) = serde_json::from_str::<ResponseStreamEvent>(data) {
+                    if let Ok(chunks) = fsm_flat.lock().process_event(msge) {
                         for c in chunks {
+                            if c.choices.iter().any(|ch| ch.finish_reason.is_some()) {
+                                stopped_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                            }
                             if let Ok(json) = serde_json::to_string(&c) {
                                 out.push(Ok(Bytes::from(format!("data: {}\n\n", json))));
                             }
@@ -214,6 +225,7 @@ where
                 }
             }
             Err(e) => {
+                stopped_flag.store(true, std::sync::atomic::Ordering::SeqCst);
                 out.push(Err(e));
             }
         }
@@ -223,8 +235,17 @@ where
     });
 
     translated
-        .chain(futures_util::stream::once(async {
-            Ok::<_, E>(Bytes::from("data: [DONE]\n\n"))
+        .chain(futures_util::stream::once(async move {
+            let mut buf = Vec::new();
+            if !stopped.load(std::sync::atomic::Ordering::SeqCst) {
+                if let Some(chunk) = fsm.lock().finish_if_open() {
+                    if let Ok(json) = serde_json::to_string(&chunk) {
+                        buf.extend_from_slice(format!("data: {}\n\n", json).as_bytes());
+                    }
+                }
+            }
+            buf.extend_from_slice(b"data: [DONE]\n\n");
+            Ok::<_, E>(Bytes::from(buf))
         }))
         .boxed()
 }
@@ -254,7 +275,11 @@ where
                 } else if let Ok(chunk) = serde_json::from_str::<ChatCompletionChunk>(data) {
                     if let Ok(events) = fsm_flat.lock().process_chunk(chunk) {
                         for e in events {
-                            if matches!(e, ResponseStreamEvent::Completed { .. }) {
+                            if matches!(
+                                e,
+                                ResponseStreamEvent::Completed { .. }
+                                    | ResponseStreamEvent::Incomplete { .. }
+                            ) {
                                 stopped_flag.store(true, std::sync::atomic::Ordering::SeqCst);
                             }
                             if let Some(b) = responses_event_to_sse_bytes(&e) {
@@ -376,7 +401,11 @@ where
                 if let Ok(msge) = serde_json::from_str::<MessageStreamEvent>(&evt.data) {
                     if let Ok(events) = fsm_flat.lock().process_event(msge) {
                         for e in events {
-                            if matches!(e, ResponseStreamEvent::Completed { .. }) {
+                            if matches!(
+                                e,
+                                ResponseStreamEvent::Completed { .. }
+                                    | ResponseStreamEvent::Incomplete { .. }
+                            ) {
                                 stopped_flag.store(true, std::sync::atomic::Ordering::SeqCst);
                             }
                             if let Some(b) = responses_event_to_sse_bytes(&e) {
@@ -493,14 +522,24 @@ where
     S: Stream<Item = Result<Bytes, E>> + Send + 'static,
     E: Send + 'static,
 {
-    let mut fsm = AnthropicStreamToChatFsm::new(fallback_model);
+    let fsm = std::sync::Arc::new(Mutex::new(AnthropicStreamToChatFsm::new(fallback_model)));
+    let fsm_flat = fsm.clone();
+    let stopped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stopped_flag = stopped.clone();
+
     let translated = sse_event_stream(stream).flat_map(move |res| {
         let mut out: Vec<Result<Bytes, E>> = Vec::new();
         match res {
             Ok(evt) => {
-                if let Ok(msge) = serde_json::from_str::<MessageStreamEvent>(&evt.data) {
-                    if let Ok(chunks) = fsm.process_event(msge) {
+                let data = evt.data.trim();
+                if data.is_empty() || data == "[DONE]" {
+                    // terminal / heartbeat frame: nothing to forward
+                } else if let Ok(msge) = serde_json::from_str::<MessageStreamEvent>(data) {
+                    if let Ok(chunks) = fsm_flat.lock().process_event(msge) {
                         for c in chunks {
+                            if c.choices.iter().any(|ch| ch.finish_reason.is_some()) {
+                                stopped_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                            }
                             if let Ok(json) = serde_json::to_string(&c) {
                                 out.push(Ok(Bytes::from(format!("data: {}\n\n", json))));
                             }
@@ -509,6 +548,7 @@ where
                 }
             }
             Err(e) => {
+                stopped_flag.store(true, std::sync::atomic::Ordering::SeqCst);
                 out.push(Err(e));
             }
         }
@@ -519,8 +559,17 @@ where
 
     // OpenAI streams must terminate with `data: [DONE]`.
     translated
-        .chain(futures_util::stream::once(async {
-            Ok::<_, E>(Bytes::from("data: [DONE]\n\n"))
+        .chain(futures_util::stream::once(async move {
+            let mut buf = Vec::new();
+            if !stopped.load(std::sync::atomic::Ordering::SeqCst) {
+                if let Some(chunk) = fsm.lock().finish_if_open() {
+                    if let Ok(json) = serde_json::to_string(&chunk) {
+                        buf.extend_from_slice(format!("data: {}\n\n", json).as_bytes());
+                    }
+                }
+            }
+            buf.extend_from_slice(b"data: [DONE]\n\n");
+            Ok::<_, E>(Bytes::from(buf))
         }))
         .boxed()
 }
@@ -1163,4 +1212,70 @@ mod tests {
         assert!(joined.contains("event: response.output_text.delta"), "missing delta: {joined}");
         assert!(joined.contains("event: response.completed"), "missing completed: {joined}");
     }
+
+    #[tokio::test]
+    async fn test_responses_to_chat_synthesizes_finish_at_eof_when_upstream_omits_done() {
+        let created = format!(
+            "event: response.created\ndata: {}\n\n",
+            serde_json::json!({
+                "type": "response.created",
+                "response": {"id": "resp_eof", "object": "response", "status": "in_progress", "model": "m", "output": []}
+            })
+        );
+        let delta = format!(
+            "event: response.output_text.delta\ndata: {}\n\n",
+            serde_json::json!({
+                "type": "response.output_text.delta",
+                "response_id": "resp_eof", "item_id": "it_eof",
+                "output_index": 0, "content_index": 0, "delta": "world"
+            })
+        );
+        // Upstream closes stream here without sending response.completed or response.done!
+        let s = bytes_stream(vec![Bytes::from(created), Bytes::from(delta)]);
+        let out: Vec<String> = responses_sse_to_chat_stream(s, "m")
+            .map(|r| String::from_utf8_lossy(&r.unwrap()).to_string())
+            .collect()
+            .await;
+        let joined = out.join("");
+        assert!(joined.contains("\"content\":\"world\""), "missing content: {joined}");
+        assert!(
+            joined.contains("\"finish_reason\":\"stop\""),
+            "must synthesize finish_reason:stop at EOF so clients never fail with 'Stream ended without finish_reason': {joined}"
+        );
+        assert!(out.last().unwrap().contains("[DONE]"), "missing [DONE]: {out:?}");
+    }
+
+    #[tokio::test]
+    async fn test_anthropic_to_openai_synthesizes_finish_at_eof_when_upstream_omits_stop() {
+        let start = format!(
+            "event: message_start\ndata: {}\n\n",
+            serde_json::json!({
+                "type": "message_start",
+                "message": {"id": "msg_eof", "type": "message", "role": "assistant",
+                            "content": [], "model": "m", "stop_reason": null,
+                            "stop_sequence": null, "usage": {"input_tokens": 1, "output_tokens": 0}}
+            })
+        );
+        let delta = format!(
+            "event: content_block_delta\ndata: {}\n\n",
+            serde_json::json!({
+                "type": "content_block_delta", "index": 0,
+                "delta": {"type": "text_delta", "text": "streaming content"}
+            })
+        );
+        // Upstream abruptly ends without message_delta(stop_reason) or message_stop!
+        let s = bytes_stream(vec![Bytes::from(start), Bytes::from(delta)]);
+        let out: Vec<String> = anthropic_sse_to_openai_stream(s, "m")
+            .map(|r| String::from_utf8_lossy(&r.unwrap()).to_string())
+            .collect()
+            .await;
+        let joined = out.join("");
+        assert!(joined.contains("\"content\":\"streaming content\""), "missing content: {joined}");
+        assert!(
+            joined.contains("\"finish_reason\":\"stop\""),
+            "must synthesize finish_reason:stop at EOF for anthropic->openai: {joined}"
+        );
+        assert!(out.last().unwrap().contains("[DONE]"), "missing [DONE]: {out:?}");
+    }
 }
+

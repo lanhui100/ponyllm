@@ -245,6 +245,13 @@ impl ResponsesToChatFsm {
                     prompt_tokens_details: None,
                     completion_tokens_details: None,
                 });
+                let finish_reason = if response.status == "incomplete" {
+                    FinishReason::Length
+                } else if self.saw_tool {
+                    FinishReason::ToolCalls
+                } else {
+                    FinishReason::Stop
+                };
                 chunks.push(ChatCompletionChunk {
                     id: response.id.clone(),
                     object: "chat.completion.chunk".to_string(),
@@ -253,11 +260,33 @@ impl ResponsesToChatFsm {
                     choices: vec![ChatChunkChoice {
                         index: 0,
                         delta: ChatChunkDelta::default(),
-                        finish_reason: Some(if self.saw_tool {
-                            FinishReason::ToolCalls
-                        } else {
-                            FinishReason::Stop
-                        }),
+                        finish_reason: Some(finish_reason),
+                        logprobs: None,
+                    }],
+                    usage,
+                    system_fingerprint: None,
+                    service_tier: None,
+                });
+                self.done = true;
+            }
+            ResponseStreamEvent::Incomplete { response } => {
+                self.model = response.model.clone();
+                let usage = response.usage.as_ref().map(|u| Usage {
+                    prompt_tokens: u.input_tokens,
+                    completion_tokens: u.output_tokens,
+                    total_tokens: u.total_tokens,
+                    prompt_tokens_details: None,
+                    completion_tokens_details: None,
+                });
+                chunks.push(ChatCompletionChunk {
+                    id: response.id.clone(),
+                    object: "chat.completion.chunk".to_string(),
+                    created: self.created,
+                    model: self.model.clone(),
+                    choices: vec![ChatChunkChoice {
+                        index: 0,
+                        delta: ChatChunkDelta::default(),
+                        finish_reason: Some(FinishReason::Length),
                         logprobs: None,
                     }],
                     usage,
@@ -737,7 +766,8 @@ impl ResponsesToAnthropicFsm {
                 });
             }
             ResponseStreamEvent::ResponseDone { response }
-            | ResponseStreamEvent::Completed { response } => {
+            | ResponseStreamEvent::Completed { response }
+            | ResponseStreamEvent::Incomplete { response } => {
                 let output_tokens = response
                     .usage
                     .as_ref()
