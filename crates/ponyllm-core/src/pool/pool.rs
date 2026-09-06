@@ -37,10 +37,15 @@ impl KeyPool {
 
     /// Select the next active, healthy key according to configured routing strategy
     pub fn select_key(&self) -> Result<Arc<ApiKeyEntry>> {
+        self.select_key_excluding(&[])
+    }
+
+    /// Select the next active, healthy key excluding already attempted keys in current request
+    pub fn select_key_excluding(&self, excluded_key_ids: &[String]) -> Result<Arc<ApiKeyEntry>> {
         let keys = self.keys.read();
         let active_keys: Vec<Arc<ApiKeyEntry>> = keys
             .iter()
-            .filter(|k| k.current_state() == KeyState::Active)
+            .filter(|k| k.current_state() == KeyState::Active && !excluded_key_ids.iter().any(|ex| ex == &k.id))
             .cloned()
             .collect();
 

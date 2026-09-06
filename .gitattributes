@@ -1,0 +1,5 @@
+# 多 agent 并行：任务板与 Dashboard 文本合并取并集，不抛冲突。
+# 合并后仍以 check-tasks 门禁为准（列态一致/幽灵 ID 照常拦截）；
+# Current Status 三行只链卡 ID、不写 prose，见 manage-tasks skill 步骤 6。
+.agents/tasks/web-console/01_TASK_BOARD.md merge=union
+.agents/tasks/web-console/00_DASHBOARD.md merge=union

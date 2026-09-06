@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# commit-msg —— task/ 分支提交信息须含对应 WEB-XX（原子提交可追溯）。
+# 生效方式：core.hooksPath=.meta/gates（仓库配一次，所有 worktree 与新克隆继承，
+# git 只看 hooksPath 目录，不看 .git/hooks ——勿再往 .git/hooks 手工 cp）。
+# 逻辑唯一源：同目录 commit-msg-task-id.sh（本文件只做分发，不复制逻辑）。
+set -u
+exec "$(dirname "$0")/commit-msg-task-id.sh" "$@"

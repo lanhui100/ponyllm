@@ -1,0 +1,2 @@
+# keep: 04_ARCHIVED 为终态卡归档区（完工与归档同提交，git mv 目标）。
+# 门禁只扫描 *.md；备查行认归档文件 + review，见 manage-tasks skill 步骤 4。

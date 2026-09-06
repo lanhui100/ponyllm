@@ -265,7 +265,7 @@ impl UpstreamExecutor {
             let attempt_start = Instant::now();
             let attempt_idx = attempt as u32;
             let select_start = Instant::now();
-            let key = match self.pool.select_key() {
+            let key = match self.pool.select_key_excluding(&attempted_keys) {
                 Ok(k) => k,
                 Err(e) => {
                     // First-attempt pool exhaustion surfaces structurally so
@@ -373,7 +373,7 @@ impl UpstreamExecutor {
             let attempt_start = Instant::now();
             let attempt_idx = attempt as u32;
             let select_start = Instant::now();
-            let key = match self.pool.select_key() {
+            let key = match self.pool.select_key_excluding(&attempted_keys) {
                 Ok(k) => k,
                 Err(e) => {
                     // First-attempt pool exhaustion surfaces structurally so
