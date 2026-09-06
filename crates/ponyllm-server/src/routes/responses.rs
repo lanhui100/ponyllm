@@ -232,7 +232,7 @@ pub async fn handle_responses(
             stages: stages.clone(),
             request_snippet: req_snippet.clone(),
         };
-        let executor = UpstreamExecutor::with_client(pool, state.http_client.clone(), max_retries)
+        let executor = UpstreamExecutor::with_client(pool.clone(), state.http_client.clone(), max_retries)
             .with_event_sink(sink_ctx.clone(), state.event_sink(sink_ctx));
 
         // Handle streaming request: pass through upstream SSE unchanged
@@ -294,7 +294,7 @@ pub async fn handle_responses(
                 Err(err) => {
                     tracing::warn!("Provider '{}' responses stream failed ({}). Attempting fallback...", provider_name, err);
                     last_kind = err.kind();
-                    last_pool_exhausted = matches!(err, CoreError::NoAvailableKey(_));
+                    last_pool_exhausted = matches!(err, CoreError::NoAvailableKey(_)) || pool.active_key_count() == 0;
                     last_error = err.to_string();
                     continue;
                 }
@@ -391,7 +391,7 @@ pub async fn handle_responses(
             Err(err) => {
                 tracing::warn!("Provider '{}' responses request failed ({}). Attempting fallback...", provider_name, err);
                 last_kind = err.kind();
-                last_pool_exhausted = matches!(err, CoreError::NoAvailableKey(_));
+                last_pool_exhausted = matches!(err, CoreError::NoAvailableKey(_)) || pool.active_key_count() == 0;
                 last_error = err.to_string();
                 continue;
             }

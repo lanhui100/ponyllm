@@ -80,3 +80,20 @@ fn test_all_keys_exhausted() {
     let res = pool.select_key();
     assert!(res.is_err());
 }
+
+#[test]
+fn test_rate_limit_default_cooldown_duration() {
+    let entry = ApiKeyEntry::new("k1", "sk-1", 1, 10);
+    // 429 with no retry_after from upstream (e.g. SenseNova)
+    entry.record_failure(PoolErrorType::RateLimit { retry_after: None });
+
+    assert_eq!(entry.current_state(), KeyState::CoolingDown);
+    let cd_until = entry.stats.cooldown_until.read().unwrap();
+    // Default cooldown should be at least 15 seconds to respect LLM per-minute windows
+    let remaining = cd_until.saturating_duration_since(std::time::Instant::now());
+    assert!(
+        remaining >= std::time::Duration::from_secs(15),
+        "Expected cooldown >= 15s for LLM rate limits, got {:?}",
+        remaining
+    );
+}

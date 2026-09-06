@@ -257,8 +257,11 @@ impl UpstreamExecutor {
     pub async fn execute_json_request(&self, url: &str, body: &Value) -> Result<Value> {
         let mut last_error = String::new();
         let mut last_kind = GatewayErrorKind::Internal;
+        let mut attempted_keys = Vec::new();
 
-        for attempt in 0..self.max_retries.max(1) {
+        let max_attempts = self.max_retries.max(self.pool.total_key_count()).max(1);
+
+        for attempt in 0..max_attempts {
             let attempt_start = Instant::now();
             let attempt_idx = attempt as u32;
             let select_start = Instant::now();
@@ -274,12 +277,14 @@ impl UpstreamExecutor {
                     self.emit_both("", attempt_idx, None, last_kind.clone(), last_error.clone(), None, attempt_start.elapsed());
                     return Err(CoreError::AllRetriesFailed {
                         retries: attempt,
+                        attempted_keys,
                         last_error,
                         kind: last_kind,
                     });
                 }
             };
 
+            attempted_keys.push(key.id.clone());
             self.emit_key_selected(&key.id, select_start.elapsed());
 
             let headers = match self.build_headers(&key) {
@@ -349,7 +354,8 @@ impl UpstreamExecutor {
         }
 
         Err(CoreError::AllRetriesFailed {
-            retries: self.max_retries,
+            retries: max_attempts,
+            attempted_keys,
             last_error,
             kind: last_kind,
         })
@@ -359,8 +365,11 @@ impl UpstreamExecutor {
     pub async fn execute_stream_request(&self, url: &str, body: &Value) -> Result<reqwest::Response> {
         let mut last_error = String::new();
         let mut last_kind = GatewayErrorKind::Internal;
+        let mut attempted_keys = Vec::new();
 
-        for attempt in 0..self.max_retries.max(1) {
+        let max_attempts = self.max_retries.max(self.pool.total_key_count()).max(1);
+
+        for attempt in 0..max_attempts {
             let attempt_start = Instant::now();
             let attempt_idx = attempt as u32;
             let select_start = Instant::now();
@@ -376,12 +385,14 @@ impl UpstreamExecutor {
                     self.emit_both("", attempt_idx, None, last_kind.clone(), last_error.clone(), None, attempt_start.elapsed());
                     return Err(CoreError::AllRetriesFailed {
                         retries: attempt,
+                        attempted_keys,
                         last_error,
                         kind: last_kind,
                     });
                 }
             };
 
+            attempted_keys.push(key.id.clone());
             self.emit_key_selected(&key.id, select_start.elapsed());
 
             let headers = match self.build_headers(&key) {
@@ -448,7 +459,8 @@ impl UpstreamExecutor {
         }
 
         Err(CoreError::AllRetriesFailed {
-            retries: self.max_retries,
+            retries: max_attempts,
+            attempted_keys,
             last_error,
             kind: last_kind,
         })

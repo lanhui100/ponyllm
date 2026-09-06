@@ -110,8 +110,9 @@ impl ApiKeyEntry {
         match err_type {
             PoolErrorType::RateLimit { retry_after } => {
                 let duration = retry_after.unwrap_or_else(|| {
-                    // Exponential backoff with light jitter (base 2s * 2^(consecutive - 1) + jitter)
-                    let base_secs = (2u64.saturating_pow((consecutive as u32).saturating_sub(1))).min(60);
+                    // Exponential backoff with light jitter (base 20s * 2^(consecutive - 1) + jitter, capped at 120s)
+                    let base_multiplier = 2u64.saturating_pow((consecutive as u32).saturating_sub(1));
+                    let base_secs = (20u64.saturating_mul(base_multiplier)).min(120);
                     let jitter_millis = (consecutive as u64 * 37) % 500;
                     Duration::from_millis(base_secs * 1000 + jitter_millis)
                 });

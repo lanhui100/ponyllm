@@ -8,6 +8,15 @@ bash .agents/skills/write-adr/verify-note.sh
 echo "=== [pre-commit 2/3] ADR negative regression specs check ==="
 bash .meta/gates/pre-commit.spec.sh
 
+echo "=== [pre-commit task-scope] Task system gate (only when tasks/notes staged) ==="
+# 任务域门禁：仅当暂存区命中 .agents/tasks/ 或 .agents/notes/ 才跑——
+# 纯代码提交不受任务树状态影响（多 worktree 并行时各树任务态本就不同步）；
+# 任务触及提交必须让任务树全绿；全量兜底在 CI。
+staged_tasks=$(git diff --cached --name-only --diff-filter=ACM 2>/dev/null | grep -E '^\.agents/(tasks|notes)/' || true)
+if [ -n "$staged_tasks" ]; then
+  bash .meta/gates/check-tasks.sh
+fi
+
 echo "=== [pre-commit 3/3] Fast syntax & workspace compilation check ==="
 cargo check --workspace
 

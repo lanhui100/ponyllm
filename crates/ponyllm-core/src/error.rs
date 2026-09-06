@@ -36,9 +36,10 @@ pub enum CoreError {
     #[error("No available key for provider '{0}' (all keys cooling down or disabled)")]
     NoAvailableKey(String),
 
-    #[error("Request failed after {retries} retries: {last_error}")]
+    #[error("Request failed after {retries} attempts across keys {attempted_keys:?}: {last_error}")]
     AllRetriesFailed {
         retries: usize,
+        attempted_keys: Vec<String>,
         last_error: String,
         kind: GatewayErrorKind,
     },
