@@ -1003,17 +1003,17 @@ async fn handle_gateway_status(
         for (p_name, p_sec) in ordered {
             if p_sec.keys.is_empty() {
                 println!(
-                    "  {}：默认模型{}，还没有密钥，暂时不能用",
+                    "  {}：默认模型 {}，还没有密钥，暂时不能用",
                     p_name, p_sec.default_model
                 );
             } else if p_sec.keys.len() == 1 {
                 println!(
-                    "  {}：默认模型{}，有 1 个密钥",
+                    "  {}：默认模型 {}，有 1 个密钥",
                     p_name, p_sec.default_model
                 );
             } else {
                 println!(
-                    "  {}：默认模型{}，有 {} 个密钥",
+                    "  {}：默认模型 {}，有 {} 个密钥",
                     p_name,
                     p_sec.default_model,
                     p_sec.keys.len()
