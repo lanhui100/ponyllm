@@ -34,6 +34,10 @@ pub struct ModelSpec {
     pub thinking_default: Option<ReasoningEffort>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking_max: Option<ReasoningEffort>,
+    /// Optional outbound HTTP proxy override for this model (e.g. "http://127.0.0.1:8899", "direct", or "none").
+    /// `None` inherits the provider default proxy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy: Option<String>,
 }
 
 impl ModelSpec {
@@ -71,6 +75,7 @@ impl Default for ModelSpec {
             protocol: None,
             thinking_default: None,
             thinking_max: None,
+            proxy: None,
         }
     }
 }
@@ -205,9 +210,45 @@ impl ProviderConfig {
             protocol: None,
             thinking_default: None,
             thinking_max: None,
+            proxy: None,
         }
     }
 
+    /// Resolves the effective proxy configuration for a model under this provider.
+    ///
+    /// - If the model specifies `proxy`:
+    ///   - `"direct"`, `"none"`, or empty => `EffectiveProxy::Direct` (forces direct connection).
+    ///   - custom URL => `EffectiveProxy::Custom(url)`.
+    /// - If the model specifies `None` (inherit):
+    ///   - If provider specifies `proxy`:
+    ///     - `"direct"`, `"none"`, or empty => `EffectiveProxy::Direct`.
+    ///     - custom URL => `EffectiveProxy::Custom(url)`.
+    ///   - Otherwise => `EffectiveProxy::InheritGateway`.
+    pub fn effective_proxy_for_model(&self, model_name: &str) -> EffectiveProxy<'_> {
+        if let Some(spec) = self.model_specs.iter().find(|m| m.name == model_name) {
+            if let Some(ref p) = spec.proxy {
+                let trimmed = p.trim();
+                if trimmed.eq_ignore_ascii_case("direct")
+                    || trimmed.eq_ignore_ascii_case("none")
+                    || trimmed.is_empty()
+                {
+                    return EffectiveProxy::Direct;
+                }
+                return EffectiveProxy::Custom(trimmed);
+            }
+        }
+        if let Some(ref p) = self.proxy {
+            let trimmed = p.trim();
+            if trimmed.eq_ignore_ascii_case("direct")
+                || trimmed.eq_ignore_ascii_case("none")
+                || trimmed.is_empty()
+            {
+                return EffectiveProxy::Direct;
+            }
+            return EffectiveProxy::Custom(trimmed);
+        }
+        EffectiveProxy::InheritGateway
+    }
 
     /// Effective native protocol for a model: model override > provider default.
     /// Returns `None` when neither is configured so callers fall back to the
@@ -229,6 +270,13 @@ impl ProviderConfig {
             UpstreamProtocol::Anthropic => self.messages_url.as_deref(),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EffectiveProxy<'a> {
+    InheritGateway,
+    Direct,
+    Custom(&'a str),
 }
 
 pub fn default_request_body_limit() -> usize {

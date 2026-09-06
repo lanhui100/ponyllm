@@ -253,7 +253,7 @@ pub async fn handle_chat_completions(
             stages: stages.clone(),
             request_snippet: req_snippet.clone(),
         };
-        let http_client = state.http_client_for_provider(&target.provider_name);
+        let http_client = state.http_client_for_target(&target.provider_name, &target.physical_model);
         let executor = UpstreamExecutor::with_client(pool.clone(), http_client, max_retries)
             .with_event_sink(sink_ctx.clone(), state.event_sink(sink_ctx));
 

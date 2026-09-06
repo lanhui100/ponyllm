@@ -29,6 +29,7 @@ fn test_model_config_tier_and_pricing_serialization() {
         protocol: None,
         thinking_default: None,
         thinking_max: None,
+        proxy: None,
     };
 
     let m_inherit = ModelConfig {
@@ -45,6 +46,7 @@ fn test_model_config_tier_and_pricing_serialization() {
         protocol: None,
         thinking_default: None,
         thinking_max: None,
+        proxy: None,
     };
 
 

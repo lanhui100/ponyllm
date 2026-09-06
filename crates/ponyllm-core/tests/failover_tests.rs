@@ -272,3 +272,46 @@ fn test_create_upstream_http_client_options() {
     let _ = sys_proxy_client;
 }
 
+#[test]
+fn test_detect_system_proxy() {
+    use ponyllm_core::executor::detect_system_proxy;
+
+    let keys = [
+        "HTTPS_PROXY",
+        "https_proxy",
+        "HTTP_PROXY",
+        "http_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+    ];
+    let saved: Vec<(&str, Option<String>)> = keys.iter().map(|&k| (k, std::env::var(k).ok())).collect();
+
+    // Clear ambient env vars
+    for &k in &keys {
+        std::env::remove_var(k);
+    }
+
+    // Test with environment variable override
+    std::env::set_var("HTTPS_PROXY", "http://127.0.0.1:9099");
+    let detected = detect_system_proxy();
+    assert_eq!(detected.as_deref(), Some("http://127.0.0.1:9099"));
+    std::env::remove_var("HTTPS_PROXY");
+
+    // Test port listening probe
+    let listener = std::net::TcpListener::bind("127.0.0.1:8899");
+    if let Ok(_l) = listener {
+        // When 8899 is bound and no env vars set
+        let detected = detect_system_proxy();
+        assert_eq!(detected.as_deref(), Some("http://127.0.0.1:8899"));
+    }
+
+    // Restore environment
+    for (k, val) in saved {
+        if let Some(v) = val {
+            std::env::set_var(k, v);
+        } else {
+            std::env::remove_var(k);
+        }
+    }
+}
+

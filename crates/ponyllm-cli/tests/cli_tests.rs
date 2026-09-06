@@ -274,6 +274,7 @@ fn test_model_config_crud_and_params() {
         protocol: None,
         thinking_default: None,
         thinking_max: None,
+        proxy: None,
     };
 
     cfg.upsert_model_config("ai-hub", custom_model.clone()).unwrap();

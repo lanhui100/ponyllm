@@ -117,6 +117,85 @@ pub fn create_upstream_http_client_with_options(
     builder.build().unwrap_or_default()
 }
 
+/// Detects system proxy settings dynamically without hardcoding ports.
+///
+/// Priority order:
+/// 1. Environment variables (`HTTPS_PROXY`, `https_proxy`, `HTTP_PROXY`, `http_proxy`, `ALL_PROXY`, `all_proxy`)
+/// 2. User proxy environment file (`~/.pony/proxy.env`)
+/// 3. Local active proxy ports probe (`127.0.0.1` on common ports: 8899, 7890, 10808, 10809, 8080)
+pub fn detect_system_proxy() -> Option<String> {
+    // 1. Environment variables
+    for key in [
+        "HTTPS_PROXY",
+        "https_proxy",
+        "HTTP_PROXY",
+        "http_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+    ] {
+        if let Ok(val) = std::env::var(key) {
+            let trimmed = val.trim();
+            if !trimmed.is_empty() {
+                return Some(normalize_proxy_url(trimmed));
+            }
+        }
+    }
+
+    // 2. ~/.pony/proxy.env
+    if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
+        let env_file = std::path::Path::new(&home).join(".pony").join("proxy.env");
+        if env_file.is_file() {
+            if let Ok(content) = std::fs::read_to_string(&env_file) {
+                for line in content.lines() {
+                    let line = line.trim();
+                    if line.starts_with('#') || line.is_empty() {
+                        continue;
+                    }
+                    let stripped = line.strip_prefix("export ").unwrap_or(line).trim();
+                    for prefix in [
+                        "https_proxy=",
+                        "HTTPS_PROXY=",
+                        "http_proxy=",
+                        "HTTP_PROXY=",
+                        "all_proxy=",
+                        "ALL_PROXY=",
+                    ] {
+                        if let Some(val) = stripped.strip_prefix(prefix) {
+                            let clean = val.trim().trim_matches('\'').trim_matches('"').trim();
+                            if !clean.is_empty() {
+                                return Some(normalize_proxy_url(clean));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. Probing common local proxy ports with fast timeout (30ms)
+    const COMMON_LOCAL_PORTS: &[u16] = &[8899, 7890, 10808, 10809, 8080];
+    for &port in COMMON_LOCAL_PORTS {
+        let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+        if std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(30)).is_ok() {
+            return Some(format!("http://127.0.0.1:{}", port));
+        }
+    }
+
+    None
+}
+
+fn normalize_proxy_url(url: &str) -> String {
+    let trimmed = url.trim();
+    if trimmed.starts_with("http://")
+        || trimmed.starts_with("https://")
+        || trimmed.starts_with("socks5://")
+    {
+        trimmed.to_string()
+    } else {
+        format!("http://{}", trimmed)
+    }
+}
+
 
 impl UpstreamExecutor {
     pub fn new(pool: Arc<KeyPool>, max_retries: usize) -> Self {

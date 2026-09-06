@@ -140,6 +140,9 @@ pub struct ModelConfig {
     pub thinking_default: Option<ReasoningEffort>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking_max: Option<ReasoningEffort>,
+    /// Optional outbound HTTP proxy override for this model (e.g. "http://127.0.0.1:8899", "direct", or "none").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy: Option<String>,
 }
 
 pub fn default_context_window() -> String {
@@ -168,6 +171,7 @@ impl Default for ModelConfig {
             protocol: None,
             thinking_default: None,
             thinking_max: None,
+            proxy: None,
         }
     }
 }
@@ -188,6 +192,7 @@ impl ModelConfig {
             protocol: None,
             thinking_default: None,
             thinking_max: None,
+            proxy: None,
         }
     }
 

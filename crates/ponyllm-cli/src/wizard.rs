@@ -128,6 +128,35 @@ pub fn run_interactive_init(output_path: &str) -> Result<(), Box<dyn std::error:
             Some(ponyllm_core::pool::UpstreamProtocol::Chat)
         };
 
+        let configure_proxy = Confirm::new("  是否为此提供商配置网络代理 (Proxy)? (默认 N/直连)")
+            .with_default(false)
+            .prompt()?;
+
+        let provider_proxy = if configure_proxy {
+            let detected = ponyllm_core::detect_system_proxy();
+            let prompt_default = detected.as_deref().unwrap_or("http://127.0.0.1:7890");
+            let help_msg = if let Some(ref d) = detected {
+                format!("已动态探测到可用系统代理: {}", d)
+            } else {
+                "未探测到活动代理，请输入代理服务器地址".to_string()
+            };
+            let input = Text::new("  代理服务器地址 (Proxy URL):")
+                .with_default(prompt_default)
+                .with_help_message(&help_msg)
+                .prompt()?;
+            let trimmed = input.trim();
+            if trimmed.is_empty()
+                || trimmed.eq_ignore_ascii_case("direct")
+                || trimmed.eq_ignore_ascii_case("none")
+            {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        } else {
+            None
+        };
+
         let mut keys: Vec<KeySection> = Vec::new();
 
         loop {
@@ -206,7 +235,7 @@ pub fn run_interactive_init(output_path: &str) -> Result<(), Box<dyn std::error:
             chat_url: None,
             responses_url: None,
             messages_url: preset_messages_url,
-            proxy: None,
+            proxy: provider_proxy,
         });
 
         let add_another_provider = Confirm::new("是否继续配置其他大模型提供商?")

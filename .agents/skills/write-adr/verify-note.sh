@@ -30,6 +30,7 @@
 # 以 maturity-ladder §5 判据真源为准并回改两者。
 # ============================================================
 set -u
+export PATH="/usr/bin:/bin:$PATH"
 
 NOTES_DIR=".agents/notes"
 LIFECYCLES="proposed implemented rejected archived"

@@ -248,6 +248,10 @@ pub enum ProviderCommands {
         #[arg(long)]
         messages_url: Option<String>,
 
+        /// Outbound HTTP proxy (URL, 'auto' to detect system proxy, 'none' to force direct)
+        #[arg(long)]
+        proxy: Option<String>,
+
         #[arg(short, long)]
         config: Option<String>,
     },
@@ -389,6 +393,10 @@ pub enum ModelCommands {
         /// Native wire protocol override: chat, responses, anthropic (defaults to inherit provider default)
         #[arg(long)]
         protocol: Option<ponyllm_core::pool::UpstreamProtocol>,
+
+        /// Optional proxy override: URL, 'auto' to detect system proxy, 'direct'/'none' to force direct, or omit to inherit provider
+        #[arg(long)]
+        proxy: Option<String>,
 
         #[arg(short, long)]
         config: Option<String>,

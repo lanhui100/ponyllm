@@ -129,8 +129,10 @@ pub struct AppState {
     pub stream_proj: Arc<StreamProjection>,
     /// Global reusable HTTP client with connection pool and TCP nodelay.
     pub http_client: reqwest::Client,
-    /// Dedicated HTTP clients per provider when custom proxy is configured.
-    provider_clients: RwLock<HashMap<String, reqwest::Client>>,
+    /// Dedicated direct client for models/providers explicitly overriding to direct.
+    direct_client: reqwest::Client,
+    /// Shared HTTP clients per explicit proxy URL (connection pooling reuse across models & providers).
+    proxy_clients: RwLock<HashMap<String, reqwest::Client>>,
 }
 
 impl AppState {
@@ -141,18 +143,45 @@ impl AppState {
         let bus = Arc::new(EventBus::new(capacity));
         let metrics_proj = Arc::new(MetricsProjection::new(metrics.clone()));
         let stream_proj = Arc::new(StreamProjection::default());
+        let direct_client = ponyllm_core::executor::create_upstream_http_client_with_options(
+            None,
+            false,
+        );
         let http_client = ponyllm_core::executor::create_upstream_http_client_with_options(
             config.proxy.as_deref(),
             config.use_system_proxy,
         );
-        let mut provider_clients = HashMap::new();
-        for (name, p_cfg) in &config.providers {
+        let mut proxy_clients = HashMap::new();
+        for (_, p_cfg) in &config.providers {
             if let Some(proxy) = &p_cfg.proxy {
-                let client = ponyllm_core::executor::create_upstream_http_client_with_options(
-                    Some(proxy),
-                    config.use_system_proxy,
-                );
-                provider_clients.insert(name.clone(), client);
+                let trimmed = proxy.trim();
+                if !trimmed.is_empty()
+                    && !trimmed.eq_ignore_ascii_case("direct")
+                    && !trimmed.eq_ignore_ascii_case("none")
+                {
+                    proxy_clients.entry(trimmed.to_string()).or_insert_with(|| {
+                        ponyllm_core::executor::create_upstream_http_client_with_options(
+                            Some(trimmed),
+                            config.use_system_proxy,
+                        )
+                    });
+                }
+            }
+            for m_spec in &p_cfg.model_specs {
+                if let Some(proxy) = &m_spec.proxy {
+                    let trimmed = proxy.trim();
+                    if !trimmed.is_empty()
+                        && !trimmed.eq_ignore_ascii_case("direct")
+                        && !trimmed.eq_ignore_ascii_case("none")
+                    {
+                        proxy_clients.entry(trimmed.to_string()).or_insert_with(|| {
+                            ponyllm_core::executor::create_upstream_http_client_with_options(
+                                Some(trimmed),
+                                config.use_system_proxy,
+                            )
+                        });
+                    }
+                }
             }
         }
 
@@ -177,25 +206,59 @@ impl AppState {
             metrics_proj,
             stream_proj,
             http_client,
-            provider_clients: RwLock::new(provider_clients),
+            direct_client,
+            proxy_clients: RwLock::new(proxy_clients),
         }
     }
 
     /// Override the HTTP client (useful for mock transports in tests).
     pub fn with_http_client(mut self, client: reqwest::Client) -> Self {
+        self.direct_client = client.clone();
         self.http_client = client;
         self
     }
 
-    /// Return the HTTP client for the given provider.
-    /// If the provider has an explicit `proxy` configured, its dedicated client is used.
-    /// Otherwise, falls back to the default gateway client.
-    pub fn http_client_for_provider(&self, provider_name: &str) -> reqwest::Client {
-        self.provider_clients
-            .read()
+    /// Return the HTTP client for the given provider and model target.
+    ///
+    /// Respects model-level proxy override > provider-level proxy > gateway default.
+    /// Connections are pooled and reused across targets pointing to the same proxy endpoint.
+    pub fn http_client_for_target(&self, provider_name: &str, model_name: &str) -> reqwest::Client {
+        let cfg = self.config.read();
+        let effective = cfg
+            .providers
             .get(provider_name)
-            .cloned()
-            .unwrap_or_else(|| self.http_client.clone())
+            .map(|p| p.effective_proxy_for_model(model_name))
+            .unwrap_or(crate::config::EffectiveProxy::InheritGateway);
+
+        match effective {
+            crate::config::EffectiveProxy::InheritGateway => self.http_client.clone(),
+            crate::config::EffectiveProxy::Direct => self.direct_client.clone(),
+            crate::config::EffectiveProxy::Custom(url) => {
+                self.get_or_create_proxy_client(url, cfg.use_system_proxy)
+            }
+        }
+    }
+
+    /// Helper for retrieving or lazily building a connection pool client for a proxy endpoint.
+    fn get_or_create_proxy_client(&self, url: &str, use_system_proxy: bool) -> reqwest::Client {
+        if let Some(client) = self.proxy_clients.read().get(url) {
+            return client.clone();
+        }
+        let mut write = self.proxy_clients.write();
+        if let Some(client) = write.get(url) {
+            return client.clone();
+        }
+        let client = ponyllm_core::executor::create_upstream_http_client_with_options(
+            Some(url),
+            use_system_proxy,
+        );
+        write.insert(url.to_string(), client.clone());
+        client
+    }
+
+    /// Return the HTTP client for the given provider (inherits provider default proxy).
+    pub fn http_client_for_provider(&self, provider_name: &str) -> reqwest::Client {
+        self.http_client_for_target(provider_name, "")
     }
 
     pub fn reload_config_with_pools(
@@ -212,15 +275,38 @@ impl AppState {
 
         pools_guard.retain(|name, _| new_config.providers.contains_key(name));
 
-        let mut prov_clients_guard = self.provider_clients.write();
-        prov_clients_guard.clear();
-        for (name, p_cfg) in &new_config.providers {
+        let mut proxy_clients_guard = self.proxy_clients.write();
+        proxy_clients_guard.clear();
+        for (_, p_cfg) in &new_config.providers {
             if let Some(proxy) = &p_cfg.proxy {
-                let client = ponyllm_core::executor::create_upstream_http_client_with_options(
-                    Some(proxy),
-                    new_config.use_system_proxy,
-                );
-                prov_clients_guard.insert(name.clone(), client);
+                let trimmed = proxy.trim();
+                if !trimmed.is_empty()
+                    && !trimmed.eq_ignore_ascii_case("direct")
+                    && !trimmed.eq_ignore_ascii_case("none")
+                {
+                    proxy_clients_guard.entry(trimmed.to_string()).or_insert_with(|| {
+                        ponyllm_core::executor::create_upstream_http_client_with_options(
+                            Some(trimmed),
+                            new_config.use_system_proxy,
+                        )
+                    });
+                }
+            }
+            for m_spec in &p_cfg.model_specs {
+                if let Some(proxy) = &m_spec.proxy {
+                    let trimmed = proxy.trim();
+                    if !trimmed.is_empty()
+                        && !trimmed.eq_ignore_ascii_case("direct")
+                        && !trimmed.eq_ignore_ascii_case("none")
+                    {
+                        proxy_clients_guard.entry(trimmed.to_string()).or_insert_with(|| {
+                            ponyllm_core::executor::create_upstream_http_client_with_options(
+                                Some(trimmed),
+                                new_config.use_system_proxy,
+                            )
+                        });
+                    }
+                }
             }
         }
 

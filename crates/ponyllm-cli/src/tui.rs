@@ -1145,6 +1145,7 @@ fn handle_modal_key(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                             protocol: proto_val,
                             thinking_default: None,
                             thinking_max: None,
+                            proxy: None,
                         };
 
 
@@ -1330,6 +1331,7 @@ fn handle_modal_key(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                         protocol: proto_val,
                         thinking_default: None,
                         thinking_max: None,
+                        proxy: None,
                     };
 
 

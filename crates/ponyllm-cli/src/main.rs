@@ -58,6 +58,7 @@ fn build_gateway_config_and_pools(
                 protocol: m.protocol,
                 thinking_default: m.thinking_default,
                 thinking_max: m.thinking_max,
+                proxy: m.proxy,
             })
             .collect();
 
@@ -117,8 +118,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let resolved = resolve_path(config.as_deref());
                 let cfg = ConfigFile::load_or_default(resolved.to_str())?;
                 println!("=== 已配置的模型提供商 (共 {} 个) ===", cfg.providers.len());
-                println!("{:<14} {:<28} {:<24} {:<8} {:<10} {:<10} {:<22} {:<6}", "提供商", "Base URL", "默认模型", "模式", "策略", "原生协议", "基准资费($/1M:入/缓/出)", "Keys");
-                println!("{}", "-".repeat(125));
+                println!("{:<14} {:<28} {:<22} {:<8} {:<10} {:<10} {:<22} {:<18} {:<6}", "提供商", "Base URL", "默认模型", "模式", "策略", "原生协议", "基准资费($/1M:入/缓/出)", "代理(Proxy)", "Keys");
+                println!("{}", "-".repeat(145));
                 for (name, p) in &cfg.providers {
                     let mode_str = match p.billing_mode {
                         ponyllm_core::pool::BillingMode::Plan => "plan(套餐)",
@@ -127,9 +128,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     };
                     let proto_str = p.default_protocol.map(|v| v.to_string()).unwrap_or_else(|| "auto(启发式)".to_string());
                     let pricing_str = format!("{:.2}/{:.3}/{:.2}", p.input_price, p.cached_price, p.output_price);
+                    let proxy_str = p.proxy.as_deref().unwrap_or("-");
                     println!(
-                        "{:<14} {:<28} {:<24} {:<8} {:<10} {:<10} {:<22} {:<6}",
-                        name, p.base_url, p.default_model, mode_str, p.strategy, proto_str, pricing_str, p.keys.len()
+                        "{:<14} {:<28} {:<22} {:<8} {:<10} {:<10} {:<22} {:<18} {:<6}",
+                        name, p.base_url, p.default_model, mode_str, p.strategy, proto_str, pricing_str, proxy_str, p.keys.len()
                     );
                 }
             }
@@ -146,6 +148,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 chat_url,
                 responses_url,
                 messages_url,
+                proxy,
                 config,
             } => {
                 if input_price < 0.0 || input_price.is_nan() || input_price.is_infinite() {
@@ -168,6 +171,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 )
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
 
+                let resolved_proxy = match proxy.as_deref() {
+                    Some("auto") => {
+                        let detected = ponyllm_core::detect_system_proxy();
+                        if let Some(ref d) = detected {
+                            println!("🔍 已自动探测到系统代理: {}", d);
+                        } else {
+                            println!("⚠️ 未探测到系统活动代理，保持直连");
+                        }
+                        detected
+                    }
+                    Some("none") | Some("direct") => None,
+                    Some(u) => {
+                        let trimmed = u.trim();
+                        if trimmed.is_empty() {
+                            None
+                        } else {
+                            Some(trimmed.to_string())
+                        }
+                    }
+                    None => None,
+                };
+
                 let resolved = resolve_path(config.as_deref());
                 let path = resolved.to_str().unwrap_or("ponyllm.toml");
                 let mut cfg = ConfigFile::load_or_default(Some(path).filter(|_| resolved.exists()))
@@ -187,7 +212,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     cached_price,
                     output_price,
                 );
-                if default_protocol.is_some() || chat_url.is_some() || responses_url.is_some() || messages_url.is_some() {
+                if default_protocol.is_some() || chat_url.is_some() || responses_url.is_some() || messages_url.is_some() || resolved_proxy.is_some() {
                     if let Some(p) = cfg.providers.get_mut(&name) {
                         p.default_protocol = default_protocol;
                         if chat_url.is_some() {
@@ -199,10 +224,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if messages_url.is_some() {
                             p.messages_url = messages_url.clone();
                         }
+                        if resolved_proxy.is_some() {
+                            p.proxy = resolved_proxy.clone();
+                        }
                     }
                 }
                 cfg.save_to_path(path)?;
-                println!("✅ 成功添加/更新提供商 '{}' (Base URL: {}, Model: {}, 资费: {}/{}/{})", name, base_url, model, input_price, cached_price, output_price);
+                let proxy_info = resolved_proxy.map(|p| format!(", 代理: {}", p)).unwrap_or_default();
+                println!("✅ 成功添加/更新提供商 '{}' (Base URL: {}, Model: {}, 资费: {}/{}/{}{})", name, base_url, model, input_price, cached_price, output_price, proxy_info);
                 println!("   • 配置文件: {}", resolved.display());
             }
             ProviderCommands::Remove { name, config } => {
@@ -281,8 +310,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let resolved = resolve_path(config.as_deref());
                 let cfg = ConfigFile::load_or_default(resolved.to_str())?;
                 println!("=== 已配置的模型目录 ===");
-                println!("{:<12} {:<24} {:<6} {:<10} {:<8} {:<12} {:<10} {:<24}", "提供商", "模型标识", "梯队", "模式", "上下文", "最大输出", "原生协议", "资费($/1M:入/缓/出)");
-                println!("{}", "-".repeat(114));
+                println!("{:<12} {:<24} {:<6} {:<10} {:<8} {:<10} {:<10} {:<24} {:<20}", "提供商", "模型标识", "梯队", "模式", "上下文", "最大输出", "原生协议", "资费($/1M:入/缓/出)", "网络代理(Proxy)");
+                println!("{}", "-".repeat(138));
                 for (p_name, p) in &cfg.providers {
                     for m in p.list_all_models() {
                         let is_def = if m.name == p.default_model { " (★默认)" } else { "" };
@@ -299,8 +328,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let pr = p.pricing();
                             format!("{:.2}/{:.3}/{:.2}(继承)", pr.input_price, pr.cached_price, pr.output_price)
                         };
+                        let proxy_desc = if let Some(ref pxy) = m.proxy {
+                            if pxy.eq_ignore_ascii_case("direct") || pxy.eq_ignore_ascii_case("none") {
+                                "★ 强制直连".to_string()
+                            } else {
+                                format!("★ {}", pxy)
+                            }
+                        } else if let Some(ref pxy) = p.proxy {
+                            format!("{}(继承)", pxy)
+                        } else {
+                            "- (直连)".to_string()
+                        };
                         println!(
-                            "{:<12} {:<24} {:<6} {:<10} {:<8} {:<12} {:<10} {:<24}",
+                            "{:<12} {:<24} {:<6} {:<10} {:<8} {:<10} {:<10} {:<24} {:<20}",
                             p_name,
                             format!("{}{}", m.name, is_def),
                             m.tier.shorthand(),
@@ -309,6 +349,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             m.max_output,
                             proto_str,
                             pricing_info,
+                            proxy_desc,
                         );
                     }
                 }
@@ -326,6 +367,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 output_price,
                 billing_mode,
                 protocol,
+                proxy,
                 config,
             } => {
                 let resolved = resolve_path(config.as_deref());
@@ -342,6 +384,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Some("free") => Some(ponyllm_core::pool::BillingMode::Free),
                     Some(other) => {
                         return Err(format!("无效的计费模式 --billing-mode '{}'。仅支持 metered, plan, free", other).into());
+                    }
+                    None => None,
+                };
+
+                let model_proxy = match proxy.as_deref() {
+                    Some("auto") => {
+                        let detected = ponyllm_core::detect_system_proxy();
+                        if let Some(ref d) = detected {
+                            println!("🔍 已自动探测到系统代理: {}", d);
+                        } else {
+                            println!("⚠️ 未探测到系统活动代理，保持继承/直连");
+                        }
+                        detected
+                    }
+                    Some("direct") | Some("none") => Some("direct".to_string()),
+                    Some(u) => {
+                        let trimmed = u.trim();
+                        if trimmed.is_empty() {
+                            None
+                        } else {
+                            Some(trimmed.to_string())
+                        }
                     }
                     None => None,
                 };
@@ -376,15 +440,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     protocol,
                     thinking_default: None,
                     thinking_max: None,
+                    proxy: model_proxy.clone(),
                 };
 
                 cfg.upsert_model_config(&provider, model_cfg)
                     .map_err(|e| std::io::Error::new(std::io::ErrorKind::NotFound, e))?;
                 cfg.save_to_path(path)?;
                 let mode_label = mode_val.map(|m| format!("模式: {:?}", m)).unwrap_or_else(|| "模式: 继承提供商".to_string());
+                let proxy_label = match model_proxy.as_deref() {
+                    Some("direct") | Some("none") => ", 代理: 强制直连".to_string(),
+                    Some(p) => format!(", 代理: {}", p),
+                    None => "".to_string(),
+                };
                 println!(
-                    "✅ 成功向提供商 '{}' 添加模型 '{}' [梯队: {}, {}] (上下文: {}, 输出: {})",
-                    provider, model, tier_val.shorthand(), mode_label, context, max_output
+                    "✅ 成功向提供商 '{}' 添加模型 '{}' [梯队: {}, {}] (上下文: {}, 输出: {}{})",
+                    provider, model, tier_val.shorthand(), mode_label, context, max_output, proxy_label
                 );
                 println!("   • 配置文件: {}", resolved.display());
             }
