@@ -33,6 +33,13 @@ pub struct GatewaySection {
     pub default_strategy: GatewayRoutingStrategy,
     #[serde(default = "default_request_body_limit")]
     pub request_body_limit: usize,
+    /// Optional default outbound HTTP proxy for upstream providers (e.g. "http://127.0.0.1:8899").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy: Option<String>,
+    /// Whether to inherit system environment proxies (`http_proxy`/`https_proxy`).
+    /// Defaults to `false` to isolate gateway from host terminal proxy pollution.
+    #[serde(default)]
+    pub use_system_proxy: bool,
 }
 
 pub fn default_request_body_limit() -> usize {
@@ -100,6 +107,8 @@ impl Default for GatewaySection {
             api_key: default_api_key(),
             default_strategy: GatewayRoutingStrategy::Economy,
             request_body_limit: default_request_body_limit(),
+            proxy: None,
+            use_system_proxy: false,
         }
     }
 }
@@ -219,6 +228,9 @@ pub struct ProviderSection {
     pub responses_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub messages_url: Option<String>,
+    /// Optional explicit outbound HTTP proxy for this provider (e.g. "http://127.0.0.1:8899").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy: Option<String>,
 }
 
 impl ProviderSection {
@@ -482,6 +494,7 @@ impl ConfigFile {
             chat_url: None,
             responses_url: None,
             messages_url: None,
+            proxy: None,
         });
         entry.base_url = base_url.to_string();
         entry.default_model = default_model.to_string();

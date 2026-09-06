@@ -128,6 +128,7 @@ async fn test_model_echo_policy_and_auto_routing() {
             chat_url: None,
             responses_url: None,
             messages_url: None,
+            proxy: None,
         },
     );
 
@@ -155,6 +156,7 @@ async fn test_model_echo_policy_and_auto_routing() {
             chat_url: None,
             responses_url: None,
             messages_url: None,
+            proxy: None,
         },
     );
 
@@ -283,6 +285,7 @@ fn test_is_anthropic_upstream_heuristic_lock() {
             chat_url: None,
             responses_url: None,
             messages_url: None,
+            proxy: None,
         },
     );
     config.providers.insert(
@@ -301,6 +304,7 @@ fn test_is_anthropic_upstream_heuristic_lock() {
             chat_url: None,
             responses_url: None,
             messages_url: None,
+            proxy: None,
         },
     );
     let state = AppState::new(config);
@@ -357,6 +361,7 @@ fn test_protocol_resolution_priority_and_overrides() {
             chat_url,
             responses_url,
             messages_url,
+            proxy: None,
         }
     }
 
@@ -425,6 +430,7 @@ fn test_models_listing_exposes_native_protocol() {
             chat_url: None,
             responses_url: None,
             messages_url: None,
+            proxy: None,
         },
     );
     let state = AppState::new(config);
@@ -463,6 +469,7 @@ fn test_native_protocol_wins_ties_for_passthrough_first() {
                 chat_url: None,
                 responses_url: None,
                 messages_url: None,
+            proxy: None,
             },
         );
     }
@@ -507,6 +514,7 @@ fn test_inbound_native_endpoint_wins_over_provider_default() {
             chat_url: None,
             responses_url: None,
             messages_url: Some("https://api.deepseek.com/anthropic".to_string()),
+            proxy: None,
         },
     );
     let state = AppState::new(config);
@@ -612,6 +620,7 @@ async fn test_cross_provider_transparent_failover() {
             chat_url: None,
             responses_url: None,
             messages_url: None,
+            proxy: None,
         },
     );
 
@@ -639,6 +648,7 @@ async fn test_cross_provider_transparent_failover() {
             chat_url: None,
             responses_url: None,
             messages_url: None,
+            proxy: None,
         },
     );
 
@@ -732,6 +742,7 @@ async fn test_anthropic_messages_routing_and_model_echo() {
             chat_url: None,
             responses_url: None,
             messages_url: None,
+            proxy: None,
         },
     );
 
@@ -832,6 +843,7 @@ async fn test_gateway_configuration_hot_reload() {
             chat_url: None,
             responses_url: None,
             messages_url: None,
+            proxy: None,
         },
     );
 
@@ -886,6 +898,7 @@ async fn test_gateway_configuration_hot_reload() {
             chat_url: None,
             responses_url: None,
             messages_url: None,
+            proxy: None,
         },
     );
 
@@ -1001,6 +1014,7 @@ async fn test_large_payload_handling_with_1m_context_support() {
             chat_url: None,
             responses_url: None,
             messages_url: None,
+            proxy: None,
         },
     );
 
@@ -1055,6 +1069,7 @@ async fn test_custom_request_body_limit_rejection_with_helpful_error() {
             chat_url: None,
             responses_url: None,
             messages_url: None,
+            proxy: None,
         },
     );
 
@@ -1144,6 +1159,7 @@ async fn test_responses_cross_provider_failover() {
             chat_url: None,
             responses_url: None,
             messages_url: None,
+            proxy: None,
             },
         );
     }
@@ -1187,6 +1203,7 @@ fn cross_protocol_provider(base_url: String, model: &str, proto: UpstreamProtoco
         chat_url: None,
         responses_url: None,
         messages_url: None,
+        proxy: None,
     }
 }
 
@@ -1480,6 +1497,44 @@ async fn test_messages_image_only_translated_to_responses_rejected_with_anthropi
     assert_eq!(body["type"], "error", "Must have top-level Anthropic error envelope");
     assert_eq!(body["error"]["type"], "invalid_request_error");
     assert!(body["error"]["message"].as_str().unwrap().contains("Image-only requests cannot be translated"));
+}
+
+#[tokio::test]
+async fn test_provider_proxy_routing_and_isolation() {
+    use ponyllm_core::executor::create_upstream_http_client_with_options;
+
+    // Direct provider client ignores env proxies
+    let client_direct = create_upstream_http_client_with_options(None, false);
+    let _ = client_direct;
+
+    // Custom proxy client builds cleanly
+    let client_proxy = create_upstream_http_client_with_options(Some("http://127.0.0.1:8899"), false);
+    let _ = client_proxy;
+
+    let mut config = GatewayConfig::default();
+    config.providers.insert(
+        "proxied_prov".to_string(),
+        ProviderConfig {
+            base_url: "https://example.com".to_string(),
+            default_model: "mock".to_string(),
+            proxy: Some("http://127.0.0.1:8899".to_string()),
+            ..Default::default()
+        },
+    );
+    config.providers.insert(
+        "direct_prov".to_string(),
+        ProviderConfig {
+            base_url: "https://example.com".to_string(),
+            default_model: "mock".to_string(),
+            proxy: None,
+            ..Default::default()
+        },
+    );
+
+    let state = AppState::new(config);
+    // Verified: http_client_for_provider returns distinct clients
+    let _c1 = state.http_client_for_provider("proxied_prov");
+    let _c2 = state.http_client_for_provider("direct_prov");
 }
 
 

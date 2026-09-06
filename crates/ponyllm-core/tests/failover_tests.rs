@@ -255,3 +255,20 @@ async fn test_executor_fails_over_on_server_error_without_immediate_cooldown() {
     assert_eq!(call_count.load(Ordering::SeqCst), 3);
 }
 
+#[test]
+fn test_create_upstream_http_client_options() {
+    use ponyllm_core::executor::{create_upstream_http_client, create_upstream_http_client_with_options};
+
+    // Default client builds successfully with no_proxy
+    let default_client = create_upstream_http_client();
+    let _ = default_client;
+
+    // Explicit proxy configuration builds successfully
+    let proxy_client = create_upstream_http_client_with_options(Some("http://127.0.0.1:8899"), false);
+    let _ = proxy_client;
+
+    // System proxy enabled builds successfully
+    let sys_proxy_client = create_upstream_http_client_with_options(None, true);
+    let _ = sys_proxy_client;
+}
+

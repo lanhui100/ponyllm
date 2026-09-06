@@ -77,17 +77,46 @@ impl std::fmt::Debug for UpstreamExecutor {
 
 /// Create an optimized, connection-pooled HTTP client for upstream LLM providers.
 /// Enables TCP nodelay, Keep-Alive probing, and idle connection reuse to minimize TTFT.
+/// By default, disables system environment proxies (`http_proxy`/`https_proxy`) to isolate
+/// the gateway from ambient terminal proxy environments.
 pub fn create_upstream_http_client() -> reqwest::Client {
-    reqwest::Client::builder()
+    create_upstream_http_client_with_options(None, false)
+}
+
+/// Create an upstream HTTP client with optional explicit proxy URL and system proxy inheritance flag.
+pub fn create_upstream_http_client_with_options(
+    proxy_url: Option<&str>,
+    use_system_proxy: bool,
+) -> reqwest::Client {
+    let mut builder = reqwest::Client::builder()
         .timeout(Duration::from_secs(120))
         .connect_timeout(Duration::from_secs(10))
         .tcp_nodelay(true)
         .tcp_keepalive(Duration::from_secs(60))
         .pool_idle_timeout(Duration::from_secs(90))
-        .pool_max_idle_per_host(32)
-        .build()
-        .unwrap_or_default()
+        .pool_max_idle_per_host(32);
+
+    if !use_system_proxy {
+        builder = builder.no_proxy();
+    }
+
+    if let Some(proxy_str) = proxy_url {
+        let trimmed = proxy_str.trim();
+        if !trimmed.is_empty() {
+            match reqwest::Proxy::all(trimmed) {
+                Ok(proxy) => {
+                    builder = builder.proxy(proxy);
+                }
+                Err(e) => {
+                    tracing::warn!(proxy = trimmed, error = %e, "Failed to parse upstream proxy URL, skipping");
+                }
+            }
+        }
+    }
+
+    builder.build().unwrap_or_default()
 }
+
 
 impl UpstreamExecutor {
     pub fn new(pool: Arc<KeyPool>, max_retries: usize) -> Self {

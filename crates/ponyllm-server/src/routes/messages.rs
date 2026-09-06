@@ -309,7 +309,8 @@ pub async fn handle_messages(
             stages: stages.clone(),
             request_snippet: req_snippet.clone(),
         };
-        let executor = UpstreamExecutor::with_client(pool.clone(), state.http_client.clone(), max_retries)
+        let http_client = state.http_client_for_provider(&target.provider_name);
+        let executor = UpstreamExecutor::with_client(pool.clone(), http_client, max_retries)
             .with_event_sink(sink_ctx.clone(), state.event_sink(sink_ctx));
 
         if is_streaming {

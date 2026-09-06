@@ -206,6 +206,7 @@ pub fn run_interactive_init(output_path: &str) -> Result<(), Box<dyn std::error:
             chat_url: None,
             responses_url: None,
             messages_url: preset_messages_url,
+            proxy: None,
         });
 
         let add_another_provider = Confirm::new("是否继续配置其他大模型提供商?")
@@ -225,6 +226,8 @@ pub fn run_interactive_init(output_path: &str) -> Result<(), Box<dyn std::error:
             api_key: api_token,
             default_strategy,
             request_body_limit: default_request_body_limit(),
+            proxy: None,
+            use_system_proxy: false,
         },
         providers,
     };

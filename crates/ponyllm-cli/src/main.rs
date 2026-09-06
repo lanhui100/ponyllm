@@ -34,6 +34,8 @@ fn build_gateway_config_and_pools(
     gw_config.flight_recorder_capacity = config_file.gateway.flight_recorder_capacity;
     gw_config.request_body_limit = config_file.gateway.request_body_limit;
     gw_config.api_key = api_key_override.unwrap_or_else(|| config_file.gateway.api_key.clone());
+    gw_config.proxy = config_file.gateway.proxy.clone();
+    gw_config.use_system_proxy = config_file.gateway.use_system_proxy;
 
     let mut pools = HashMap::new();
 
@@ -75,6 +77,7 @@ fn build_gateway_config_and_pools(
                 chat_url: p_sec.chat_url.clone(),
                 responses_url: p_sec.responses_url.clone(),
                 messages_url: p_sec.messages_url.clone(),
+                proxy: p_sec.proxy.clone(),
             },
         );
 

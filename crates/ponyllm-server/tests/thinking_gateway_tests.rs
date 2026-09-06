@@ -75,6 +75,7 @@ async fn test_thinking_scrubbing_for_non_reasoning_models() {
             chat_url: None,
             responses_url: None,
             messages_url: None,
+            proxy: None,
         },
     );
 
@@ -219,6 +220,7 @@ async fn test_thinking_forwarding_and_clamping_for_reasoning_models() {
             chat_url: None,
             responses_url: None,
             messages_url: None,
+            proxy: None,
         },
     );
 
@@ -342,6 +344,7 @@ async fn test_cross_protocol_thinking_translation() {
             chat_url: None,
             responses_url: None,
             messages_url: None,
+            proxy: None,
         },
     );
 
@@ -446,6 +449,7 @@ async fn test_thinking_precedence_header_wins() {
             chat_url: None,
             responses_url: None,
             messages_url: None,
+            proxy: None,
         },
     );
 

@@ -105,10 +105,34 @@ pub struct ProviderConfig {
     pub responses_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub messages_url: Option<String>,
+    /// Optional explicit outbound HTTP proxy for this provider (e.g. "http://127.0.0.1:8899").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy: Option<String>,
 }
 
 fn default_strategy() -> String {
     "round_robin".to_string()
+}
+
+impl Default for ProviderConfig {
+    fn default() -> Self {
+        Self {
+            base_url: String::new(),
+            default_model: String::new(),
+            strategy: default_strategy(),
+            billing_mode: BillingMode::default(),
+            input_price: default_input_price(),
+            cached_price: default_cached_price(),
+            output_price: default_output_price(),
+            models: Vec::new(),
+            model_specs: Vec::new(),
+            default_protocol: None,
+            chat_url: None,
+            responses_url: None,
+            messages_url: None,
+            proxy: None,
+        }
+    }
 }
 
 impl ProviderConfig {
@@ -238,6 +262,13 @@ pub struct GatewayConfig {
     pub event_log_retention_days: u64,
     #[serde(default = "default_event_log_max_bytes")]
     pub event_log_max_bytes: u64,
+    /// Optional default outbound HTTP proxy for upstream providers (e.g. "http://127.0.0.1:8899").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy: Option<String>,
+    /// Whether to inherit system environment proxies (`http_proxy`/`https_proxy`).
+    /// Defaults to `false` to isolate gateway from host terminal proxy pollution.
+    #[serde(default)]
+    pub use_system_proxy: bool,
 }
 
 impl Default for GatewayConfig {
@@ -253,6 +284,8 @@ impl Default for GatewayConfig {
             event_log_dir: None,
             event_log_retention_days: default_event_log_retention_days(),
             event_log_max_bytes: default_event_log_max_bytes(),
+            proxy: None,
+            use_system_proxy: false,
         }
     }
 }

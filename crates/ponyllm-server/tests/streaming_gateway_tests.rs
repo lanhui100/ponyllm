@@ -23,6 +23,7 @@ fn make_provider(base_url: &str, default_model: &str) -> ProviderConfig {
         chat_url: None,
         responses_url: None,
         messages_url: None,
+        proxy: None,
     }
 }
 

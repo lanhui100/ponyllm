@@ -129,6 +129,8 @@ pub struct AppState {
     pub stream_proj: Arc<StreamProjection>,
     /// Global reusable HTTP client with connection pool and TCP nodelay.
     pub http_client: reqwest::Client,
+    /// Dedicated HTTP clients per provider when custom proxy is configured.
+    provider_clients: RwLock<HashMap<String, reqwest::Client>>,
 }
 
 impl AppState {
@@ -139,7 +141,21 @@ impl AppState {
         let bus = Arc::new(EventBus::new(capacity));
         let metrics_proj = Arc::new(MetricsProjection::new(metrics.clone()));
         let stream_proj = Arc::new(StreamProjection::default());
-        let http_client = ponyllm_core::executor::create_upstream_http_client();
+        let http_client = ponyllm_core::executor::create_upstream_http_client_with_options(
+            config.proxy.as_deref(),
+            config.use_system_proxy,
+        );
+        let mut provider_clients = HashMap::new();
+        for (name, p_cfg) in &config.providers {
+            if let Some(proxy) = &p_cfg.proxy {
+                let client = ponyllm_core::executor::create_upstream_http_client_with_options(
+                    Some(proxy),
+                    config.use_system_proxy,
+                );
+                provider_clients.insert(name.clone(), client);
+            }
+        }
+
         bus.add_projection(metrics_proj.clone());
         bus.add_projection(stream_proj.clone());
         bus.add_projection(Arc::new(FrameConverter::new(flight_recorder.clone())));
@@ -161,6 +177,7 @@ impl AppState {
             metrics_proj,
             stream_proj,
             http_client,
+            provider_clients: RwLock::new(provider_clients),
         }
     }
 
@@ -168,6 +185,17 @@ impl AppState {
     pub fn with_http_client(mut self, client: reqwest::Client) -> Self {
         self.http_client = client;
         self
+    }
+
+    /// Return the HTTP client for the given provider.
+    /// If the provider has an explicit `proxy` configured, its dedicated client is used.
+    /// Otherwise, falls back to the default gateway client.
+    pub fn http_client_for_provider(&self, provider_name: &str) -> reqwest::Client {
+        self.provider_clients
+            .read()
+            .get(provider_name)
+            .cloned()
+            .unwrap_or_else(|| self.http_client.clone())
     }
 
     pub fn reload_config_with_pools(
@@ -183,6 +211,18 @@ impl AppState {
         }
 
         pools_guard.retain(|name, _| new_config.providers.contains_key(name));
+
+        let mut prov_clients_guard = self.provider_clients.write();
+        prov_clients_guard.clear();
+        for (name, p_cfg) in &new_config.providers {
+            if let Some(proxy) = &p_cfg.proxy {
+                let client = ponyllm_core::executor::create_upstream_http_client_with_options(
+                    Some(proxy),
+                    new_config.use_system_proxy,
+                );
+                prov_clients_guard.insert(name.clone(), client);
+            }
+        }
 
         tracing::info!(
             "Gateway configuration reloaded. Active providers: {:?}",

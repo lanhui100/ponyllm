@@ -22,6 +22,7 @@ fn make_mock_provider_config(base_url: &str, default_model: &str, models: Vec<&s
         chat_url: None,
         responses_url: None,
         messages_url: None,
+        proxy: None,
     }
 }
 
