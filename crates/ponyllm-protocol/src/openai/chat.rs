@@ -59,6 +59,39 @@ impl ChatCompletionRequest {
         }
         None
     }
+
+    pub fn required_modalities(&self) -> Vec<&'static str> {
+        let mut mods = Vec::new();
+        for msg in &self.messages {
+            let content = match msg {
+                ChatMessage::User(m) => Some(&m.content),
+                ChatMessage::System(m) => Some(&m.content),
+                ChatMessage::Developer(m) => Some(&m.content),
+                ChatMessage::Tool(m) => Some(&m.content),
+                ChatMessage::Assistant(m) => m.content.as_ref(),
+                ChatMessage::Function(_) => None,
+            };
+            if let Some(MessageContent::Parts(parts)) = content {
+                for p in parts {
+                    match p {
+                        ContentPart::ImageUrl { .. } => mods.push("image"),
+                        ContentPart::InputAudio { .. } => mods.push("audio"),
+                        ContentPart::VideoUrl { .. } => mods.push("video"),
+                        ContentPart::File { .. } => mods.push("file"),
+                        ContentPart::Text { .. } => mods.push("text"),
+                    }
+                }
+            } else {
+                mods.push("text");
+            }
+        }
+        mods.sort_unstable();
+        mods.dedup();
+        if mods.is_empty() {
+            mods.push("text");
+        }
+        mods
+    }
 }
 
 
@@ -159,6 +192,10 @@ pub enum ContentPart {
     Text { text: String },
     ImageUrl { image_url: ImageUrlObject },
     InputAudio { input_audio: InputAudioObject },
+    #[serde(rename = "video_url")]
+    VideoUrl { video_url: VideoUrlObject },
+    #[serde(rename = "file", alias = "input_file")]
+    File { file: InputFileObject },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -172,6 +209,21 @@ pub struct ImageUrlObject {
 pub struct InputAudioObject {
     pub data: String,
     pub format: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VideoUrlObject {
+    pub url: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct InputFileObject {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub filename: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

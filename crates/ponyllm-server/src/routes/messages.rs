@@ -85,8 +85,16 @@ pub async fn handle_messages(
 
     // 3. Resolve ranked target providers for multi-provider transparent failover (with hot cache probe)
     let prompt_hint = extract_anthropic_prompt(&req);
+    let required_modalities = req.required_modalities();
     let routing_start = Instant::now();
-    let targets = match state.resolve_routed_targets_with_prompt_and_protocol(&parsed, header_strategy, prompt_hint.as_deref(), crate::extractors::parse_protocol_header(&headers), Some(ponyllm_core::pool::UpstreamProtocol::Anthropic)) {
+    let targets = match state.resolve_routed_targets_full(
+        &parsed,
+        header_strategy,
+        prompt_hint.as_deref(),
+        crate::extractors::parse_protocol_header(&headers),
+        Some(ponyllm_core::pool::UpstreamProtocol::Anthropic),
+        &required_modalities,
+    ) {
         Ok(ts) if !ts.is_empty() => ts,
         Ok(_) => {
             return (
@@ -103,6 +111,7 @@ pub async fn handle_messages(
         }
         Err(err) => {
             let (status, err_type) = match err {
+                CoreError::UnsupportedModality { .. } => (StatusCode::BAD_REQUEST, "invalid_request_error"),
                 CoreError::CapacityExhausted { .. } => (StatusCode::TOO_MANY_REQUESTS, "overloaded_error"),
                 CoreError::Internal(ref msg) if msg.contains("No provider configured") => {
                     (StatusCode::NOT_FOUND, "not_found_error")
@@ -122,6 +131,27 @@ pub async fn handle_messages(
                 .into_response();
         }
     };
+
+    if !parsed.is_auto {
+        for modality in &required_modalities {
+            if !targets.iter().any(|t| t.supports_modality(modality)) {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "type": "error",
+                        "error": {
+                            "type": "invalid_request_error",
+                            "message": format!(
+                                "Model '{}' does not support modality '{}'. Supported input modalities: {:?}",
+                                targets[0].physical_model, modality, targets[0].input_types
+                            )
+                        }
+                    })),
+                )
+                    .into_response();
+            }
+        }
+    }
 
     let is_streaming = req.stream.unwrap_or(false);
     let mut last_error = String::new();
@@ -192,20 +222,18 @@ pub async fn handle_messages(
                     resp_req.extra.remove("reasoning_effort");
                     resp_req.extra.remove("reasoning");
                 }
-                // Images cannot survive translation to Responses input items;
-                // image-only requests must fail here, not as empty upstream input.
                 let input_has_content = match &resp_req.input {
                     ponyllm_protocol::openai::responses::ResponseInput::Text(t) => !t.trim().is_empty(),
                     ponyllm_protocol::openai::responses::ResponseInput::Items(items) => !items.is_empty(),
                 };
-                if !input_has_content || !ponyllm_protocol::translator::responses_request_has_text(&resp_req) {
+                if !input_has_content {
                     return (
                         StatusCode::BAD_REQUEST,
                         Json(serde_json::json!({
                             "type": "error",
                             "error": {
                                 "type": "invalid_request_error",
-                                "message": "Image-only requests cannot be translated to Responses upstream"
+                                "message": "Request input must not be empty"
                             }
                         })),
                     )

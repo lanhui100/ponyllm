@@ -56,6 +56,12 @@ pub enum CoreError {
         message: String,
     },
 
+    #[error("Unsupported modality: required '{required_modality}', {message}")]
+    UnsupportedModality {
+        required_modality: String,
+        message: String,
+    },
+
     #[error("Internal core error: {0}")]
     Internal(String),
 }
@@ -90,6 +96,7 @@ impl CoreError {
         match self {
             CoreError::AllRetriesFailed { kind, .. } => kind.clone(),
             CoreError::CapacityExhausted { .. } => GatewayErrorKind::CapacityExhausted,
+            CoreError::UnsupportedModality { .. } => GatewayErrorKind::ClientBadRequest,
             CoreError::NoAvailableKey(_) => GatewayErrorKind::RateLimitExceeded { retry_after: None },
             CoreError::UpstreamStatusError { status, .. } => {
                 let code = status.as_u16();

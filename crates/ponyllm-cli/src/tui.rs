@@ -58,7 +58,7 @@ pub enum Tab2Focus {
     Models,
 }
 
-pub const MODALITIES: [&str; 4] = ["文 (Txt)", "图 (Img)", "视 (Vid)", "音 (Aud)"];
+pub const MODALITIES: [&str; 4] = ["文Txt", "图Img", "视Vid", "音Aud"];
 pub const MODALITY_KEYS: [&str; 4] = ["text", "image", "video", "audio"];
 
 pub fn modality_key_to_short(k: &str) -> &'static str {
@@ -501,9 +501,9 @@ fn handle_key_event(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                             strategy_idx: 0,
                             billing_mode_idx: 0, // 按量计费
                             protocol_idx: 0, // 自动启发式
-                            input_price: "0.50".to_string(),
-                            cached_price: "0.25".to_string(),
-                            output_price: "1.00".to_string(),
+                            input_price: "0".to_string(),
+                            cached_price: "0".to_string(),
+                            output_price: "0".to_string(),
                             active_field: 0,
                         };
                     }
@@ -515,11 +515,11 @@ fn handle_key_event(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                                 tier_idx: 1, // Standard
                                 billing_mode_idx: 0, // 继承提供商
                                 protocol_idx: 0, // 继承提供商
-                                input_price: String::new(),
-                                cached_price: String::new(),
-                                output_price: String::new(),
-                                context_window: "128K".to_string(),
-                                max_output: "4K".to_string(),
+                                input_price: "0".to_string(),
+                                cached_price: "0".to_string(),
+                                output_price: "0".to_string(),
+                                context_window: "1M".to_string(),
+                                max_output: "32K".to_string(),
                                 input_modalities: [true, false, false, false],
                                 output_modalities: [true, false, false, false],
                                 set_as_default: false,
@@ -605,9 +605,9 @@ fn handle_key_event(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                                     tier_idx: tier_to_idx(m_cfg.tier),
                                     billing_mode_idx: bm_idx,
                                     protocol_idx: protocol_to_idx(m_cfg.protocol),
-                                    input_price: m_cfg.input_price.map(|v| v.to_string()).unwrap_or_default(),
-                                    cached_price: m_cfg.cached_price.map(|v| v.to_string()).unwrap_or_default(),
-                                    output_price: m_cfg.output_price.map(|v| v.to_string()).unwrap_or_default(),
+                                    input_price: m_cfg.input_price.map(|v| v.to_string()).unwrap_or_else(|| "0".to_string()),
+                                    cached_price: m_cfg.cached_price.map(|v| v.to_string()).unwrap_or_else(|| "0".to_string()),
+                                    output_price: m_cfg.output_price.map(|v| v.to_string()).unwrap_or_else(|| "0".to_string()),
                                     context_window: m_cfg.context_window,
                                     max_output: m_cfg.max_output,
                                     input_modalities: in_mods,
@@ -799,7 +799,7 @@ fn handle_modal_key(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                         keep_modal = true;
                     } else {
                         let in_p = match parse_modal_price(input_price, "常规输入单价") {
-                            Ok(v) => v.unwrap_or(0.50),
+                            Ok(v) => v.unwrap_or(0.0),
                             Err(e) => {
                                 app.status_message = format!("❌ {}", e);
                                 app.modal = current_modal;
@@ -807,7 +807,7 @@ fn handle_modal_key(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                             }
                         };
                         let ca_p = match parse_modal_price(cached_price, "缓存命中单价") {
-                            Ok(v) => v.unwrap_or(0.25),
+                            Ok(v) => v.unwrap_or(0.0),
                             Err(e) => {
                                 app.status_message = format!("❌ {}", e);
                                 app.modal = current_modal;
@@ -815,7 +815,7 @@ fn handle_modal_key(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                             }
                         };
                         let out_p = match parse_modal_price(output_price, "输出生成单价") {
-                            Ok(v) => v.unwrap_or(1.00),
+                            Ok(v) => v.unwrap_or(0.0),
                             Err(e) => {
                                 app.status_message = format!("❌ {}", e);
                                 app.modal = current_modal;
@@ -947,7 +947,7 @@ fn handle_modal_key(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                         keep_modal = true;
                     } else {
                         let in_p = match parse_modal_price(input_price, "常规输入单价") {
-                            Ok(v) => v.unwrap_or(0.50),
+                            Ok(v) => v.unwrap_or(0.0),
                             Err(e) => {
                                 app.status_message = format!("❌ {}", e);
                                 app.modal = current_modal;
@@ -955,7 +955,7 @@ fn handle_modal_key(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                             }
                         };
                         let ca_p = match parse_modal_price(cached_price, "缓存命中单价") {
-                            Ok(v) => v.unwrap_or(0.25),
+                            Ok(v) => v.unwrap_or(0.0),
                             Err(e) => {
                                 app.status_message = format!("❌ {}", e);
                                 app.modal = current_modal;
@@ -963,7 +963,7 @@ fn handle_modal_key(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                             }
                         };
                         let out_p = match parse_modal_price(output_price, "输出生成单价") {
-                            Ok(v) => v.unwrap_or(1.00),
+                            Ok(v) => v.unwrap_or(0.0),
                             Err(e) => {
                                 app.status_message = format!("❌ {}", e);
                                 app.modal = current_modal;
@@ -1103,24 +1103,24 @@ fn handle_modal_key(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                             .collect();
 
                         let m_name = model_name.trim().to_string();
-                        let in_p = match parse_modal_price(input_price, "常规输入单价") {
-                            Ok(v) => v,
+                        let in_p = match parse_modal_price(input_price, "输入单价") {
+                            Ok(v) => v.or(Some(0.0)),
                             Err(e) => {
                                 app.status_message = format!("❌ {}", e);
                                 app.modal = current_modal;
                                 return;
                             }
                         };
-                        let ca_p = match parse_modal_price(cached_price, "缓存命中单价") {
-                            Ok(v) => v,
+                        let ca_p = match parse_modal_price(cached_price, "缓存单价") {
+                            Ok(v) => v.or(Some(0.0)),
                             Err(e) => {
                                 app.status_message = format!("❌ {}", e);
                                 app.modal = current_modal;
                                 return;
                             }
                         };
-                        let out_p = match parse_modal_price(output_price, "输出生成单价") {
-                            Ok(v) => v,
+                        let out_p = match parse_modal_price(output_price, "输出单价") {
+                            Ok(v) => v.or(Some(0.0)),
                             Err(e) => {
                                 app.status_message = format!("❌ {}", e);
                                 app.modal = current_modal;
@@ -1134,8 +1134,8 @@ fn handle_modal_key(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                         let cfg = ModelConfig {
                             name: m_name.clone(),
                             tier: tier_val,
-                            context_window: if context_window.trim().is_empty() { "128K".to_string() } else { context_window.trim().to_string() },
-                            max_output: if max_output.trim().is_empty() { "4K".to_string() } else { max_output.trim().to_string() },
+                            context_window: if context_window.trim().is_empty() { "1M".to_string() } else { context_window.trim().to_string() },
+                            max_output: if max_output.trim().is_empty() { "32K".to_string() } else { max_output.trim().to_string() },
                             input_types: if in_types.is_empty() { vec!["text".to_string()] } else { in_types },
                             output_types: if out_types.is_empty() { vec!["text".to_string()] } else { out_types },
                             billing_mode: mode_val,
@@ -1289,24 +1289,24 @@ fn handle_modal_key(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                             .map(|(i, _)| MODALITY_KEYS[i].to_string())
                             .collect();
 
-                    let in_p = match parse_modal_price(input_price, "常规输入单价") {
-                            Ok(v) => v,
+                    let in_p = match parse_modal_price(input_price, "输入单价") {
+                            Ok(v) => v.or(Some(0.0)),
                             Err(e) => {
                                 app.status_message = format!("❌ {}", e);
                                 app.modal = current_modal;
                                 return;
                             }
                         };
-                    let ca_p = match parse_modal_price(cached_price, "缓存命中单价") {
-                            Ok(v) => v,
+                    let ca_p = match parse_modal_price(cached_price, "缓存单价") {
+                            Ok(v) => v.or(Some(0.0)),
                             Err(e) => {
                                 app.status_message = format!("❌ {}", e);
                                 app.modal = current_modal;
                                 return;
                             }
                         };
-                    let out_p = match parse_modal_price(output_price, "输出生成单价") {
-                            Ok(v) => v,
+                    let out_p = match parse_modal_price(output_price, "输出单价") {
+                            Ok(v) => v.or(Some(0.0)),
                             Err(e) => {
                                 app.status_message = format!("❌ {}", e);
                                 app.modal = current_modal;
@@ -1320,8 +1320,8 @@ fn handle_modal_key(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                     let cfg = ModelConfig {
                         name: model_name.clone(),
                         tier: tier_val,
-                        context_window: if context_window.trim().is_empty() { "128K".to_string() } else { context_window.trim().to_string() },
-                        max_output: if max_output.trim().is_empty() { "4K".to_string() } else { max_output.trim().to_string() },
+                        context_window: if context_window.trim().is_empty() { "1M".to_string() } else { context_window.trim().to_string() },
+                        max_output: if max_output.trim().is_empty() { "32K".to_string() } else { max_output.trim().to_string() },
                         input_types: if in_types.is_empty() { vec!["text".to_string()] } else { in_types },
                         output_types: if out_types.is_empty() { vec!["text".to_string()] } else { out_types },
                         billing_mode: mode_val,
@@ -2410,7 +2410,7 @@ fn render_modal(f: &mut Frame, area: Rect, app: &TuiApp) {
             output_price,
             active_field,
         } => {
-            let modal_area = safe_centered_rect(84, 19, area);
+            let modal_area = safe_centered_rect(72, 19, area);
             f.render_widget(Clear, modal_area);
 
             let strat_options: Vec<Span> = STRATEGIES.iter().enumerate().map(|(i, &s)| {
@@ -2458,7 +2458,7 @@ fn render_modal(f: &mut Frame, area: Rect, app: &TuiApp) {
                 .border_type(BorderType::Plain)
                 .border_style(Style::default().fg(Color::Cyan))
                 .title(" 新建提供商 ");
-            let p = Paragraph::new(lines).block(block);
+            let p = Paragraph::new(lines).block(block).wrap(Wrap { trim: true });
             f.render_widget(p, modal_area);
         }
         Modal::EditProvider {
@@ -2473,7 +2473,7 @@ fn render_modal(f: &mut Frame, area: Rect, app: &TuiApp) {
             output_price,
             active_field,
         } => {
-            let modal_area = safe_centered_rect(84, 18, area);
+            let modal_area = safe_centered_rect(72, 18, area);
             f.render_widget(Clear, modal_area);
 
             let strat_options: Vec<Span> = STRATEGIES.iter().enumerate().map(|(i, &s)| {
@@ -2520,7 +2520,7 @@ fn render_modal(f: &mut Frame, area: Rect, app: &TuiApp) {
                 .border_type(BorderType::Plain)
                 .border_style(Style::default().fg(Color::Cyan))
                 .title(" 编辑提供商 ");
-            let p = Paragraph::new(lines).block(block);
+            let p = Paragraph::new(lines).block(block).wrap(Wrap { trim: true });
             f.render_widget(p, modal_area);
         }
         Modal::AddModel {
@@ -2539,33 +2539,33 @@ fn render_modal(f: &mut Frame, area: Rect, app: &TuiApp) {
             set_as_default,
             active_field,
         } => {
-            let modal_area = safe_centered_rect(88, 21, area);
+            let modal_area = safe_centered_rect(76, 22, area);
             f.render_widget(Clear, modal_area);
 
             let in_spans = render_modality_checkboxes(input_modalities, *active_field == 9);
             let out_spans = render_modality_checkboxes(output_modalities, *active_field == 10);
 
             let def_span = if *set_as_default {
-                Span::styled(" [x] 设为提供商默认主模型 ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+                Span::styled(" [x] 设为默认主模型 ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
             } else {
-                Span::styled(" [ ] 设为提供商默认主模型 (按空格切换) ", Style::default().fg(Color::Gray))
+                Span::styled(" [ ] 设为默认 (空格切换) ", Style::default().fg(Color::Gray))
             };
 
             let lines = vec![
-                Line::from(Span::styled(format!("添加模型参数 ── 所属: {}", provider_name), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))),
+                Line::from(Span::styled(format!("添加模型 ── 所属: {}", provider_name), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))),
                 Line::from(""),
-                render_form_field("模型标识 (Name)", model_name, *active_field == 0),
+                render_form_field("模型标识", model_name, *active_field == 0),
                 render_tier_selector(*tier_idx, *active_field == 1),
                 render_billing_mode_selector(*billing_mode_idx, *active_field == 2, true),
                 render_protocol_selector(*protocol_idx, *active_field == 3, true),
-                render_form_field("常规输入单价 ($/1M, 留空继承)", input_price, *active_field == 4),
-                render_form_field("缓存命中单价 ($/1M, 留空继承)", cached_price, *active_field == 5),
-                render_form_field("输出生成单价 ($/1M, 留空继承)", output_price, *active_field == 6),
-                render_form_field("上下文窗口 (如 1M/128K)", context_window, *active_field == 7),
-                render_form_field("最大输出限制 (如 32K/64K)", max_output, *active_field == 8),
+                render_form_field("输入单价 ($/1M,默认0)", input_price, *active_field == 4),
+                render_form_field("缓存单价 ($/1M,默认0)", cached_price, *active_field == 5),
+                render_form_field("输出单价 ($/1M,默认0)", output_price, *active_field == 6),
+                render_form_field("上下文 (默认1M)", context_window, *active_field == 7),
+                render_form_field("最大输出 (默认32K)", max_output, *active_field == 8),
                 Line::from({
                     let mut spans = vec![
-                        Span::styled(if *active_field == 9 { "› 输入模态 (1-4): " } else { "  输入模态 (1-4): " },
+                        Span::styled(if *active_field == 9 { "› 输入: " } else { "  输入: " },
                             if *active_field == 9 { Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD) } else { Style::default().fg(Color::Gray) }),
                     ];
                     spans.extend(in_spans);
@@ -2573,7 +2573,7 @@ fn render_modal(f: &mut Frame, area: Rect, app: &TuiApp) {
                 }),
                 Line::from({
                     let mut spans = vec![
-                        Span::styled(if *active_field == 10 { "› 输出模态 (1-4): " } else { "  输出模态 (1-4): " },
+                        Span::styled(if *active_field == 10 { "› 输出: " } else { "  输出: " },
                             if *active_field == 10 { Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD) } else { Style::default().fg(Color::Gray) }),
                     ];
                     spans.extend(out_spans);
@@ -2586,10 +2586,12 @@ fn render_modal(f: &mut Frame, area: Rect, app: &TuiApp) {
                 ]),
                 Line::from(""),
                 Line::from(vec![
-                    Span::styled(" [Tab/↓/↑] ", Style::default().fg(Color::Yellow)),
+                    Span::styled(" [Tab] ", Style::default().fg(Color::Yellow)),
                     Span::raw("切字段  "),
+                    Span::styled(" [1-4/空格] ", Style::default().fg(Color::Yellow)),
+                    Span::raw("切换选项  "),
                     Span::styled(" [Enter] ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-                    Span::raw("确认添加  "),
+                    Span::raw("添加  "),
                     Span::styled(" [Esc] ", Style::default().fg(Color::Gray)),
                     Span::raw("取消"),
                 ]),
@@ -2600,7 +2602,7 @@ fn render_modal(f: &mut Frame, area: Rect, app: &TuiApp) {
                 .border_type(BorderType::Plain)
                 .border_style(Style::default().fg(Color::Yellow))
                 .title(" 添加模型配置 ");
-            let p = Paragraph::new(lines).block(block);
+            let p = Paragraph::new(lines).block(block).wrap(Wrap { trim: true });
             f.render_widget(p, modal_area);
         }
         Modal::EditModel {
@@ -2619,32 +2621,32 @@ fn render_modal(f: &mut Frame, area: Rect, app: &TuiApp) {
             set_as_default,
             active_field,
         } => {
-            let modal_area = safe_centered_rect(88, 20, area);
+            let modal_area = safe_centered_rect(76, 21, area);
             f.render_widget(Clear, modal_area);
 
             let in_spans = render_modality_checkboxes(input_modalities, *active_field == 8);
             let out_spans = render_modality_checkboxes(output_modalities, *active_field == 9);
 
             let def_span = if *set_as_default {
-                Span::styled(" [x] 设为提供商默认主模型 ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+                Span::styled(" [x] 设为默认主模型 ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
             } else {
-                Span::styled(" [ ] 设为提供商默认主模型 (按空格切换) ", Style::default().fg(Color::Gray))
+                Span::styled(" [ ] 设为默认 (空格切换) ", Style::default().fg(Color::Gray))
             };
 
             let lines = vec![
-                Line::from(Span::styled(format!("编辑模型参数: {} ({})", model_name, provider_name), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))),
+                Line::from(Span::styled(format!("编辑模型: {} ({})", model_name, provider_name), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))),
                 Line::from(""),
                 render_tier_selector(*tier_idx, *active_field == 0),
                 render_billing_mode_selector(*billing_mode_idx, *active_field == 1, true),
                 render_protocol_selector(*protocol_idx, *active_field == 2, true),
-                render_form_field("常规输入单价 ($/1M, 留空继承)", input_price, *active_field == 3),
-                render_form_field("缓存命中单价 ($/1M, 留空继承)", cached_price, *active_field == 4),
-                render_form_field("输出生成单价 ($/1M, 留空继承)", output_price, *active_field == 5),
-                render_form_field("上下文窗口", context_window, *active_field == 6),
-                render_form_field("最大输出限制", max_output, *active_field == 7),
+                render_form_field("输入单价 ($/1M,默认0)", input_price, *active_field == 3),
+                render_form_field("缓存单价 ($/1M,默认0)", cached_price, *active_field == 4),
+                render_form_field("输出单价 ($/1M,默认0)", output_price, *active_field == 5),
+                render_form_field("上下文 (默认1M)", context_window, *active_field == 6),
+                render_form_field("最大输出 (默认32K)", max_output, *active_field == 7),
                 Line::from({
                     let mut spans = vec![
-                        Span::styled(if *active_field == 8 { "› 输入模态 (1-4): " } else { "  输入模态 (1-4): " },
+                        Span::styled(if *active_field == 8 { "› 输入: " } else { "  输入: " },
                             if *active_field == 8 { Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD) } else { Style::default().fg(Color::Gray) }),
                     ];
                     spans.extend(in_spans);
@@ -2652,7 +2654,7 @@ fn render_modal(f: &mut Frame, area: Rect, app: &TuiApp) {
                 }),
                 Line::from({
                     let mut spans = vec![
-                        Span::styled(if *active_field == 9 { "› 输出模态 (1-4): " } else { "  输出模态 (1-4): " },
+                        Span::styled(if *active_field == 9 { "› 输出: " } else { "  输出: " },
                             if *active_field == 9 { Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD) } else { Style::default().fg(Color::Gray) }),
                     ];
                     spans.extend(out_spans);
@@ -2665,10 +2667,12 @@ fn render_modal(f: &mut Frame, area: Rect, app: &TuiApp) {
                 ]),
                 Line::from(""),
                 Line::from(vec![
-                    Span::styled(" [Tab/↓/↑] ", Style::default().fg(Color::Yellow)),
+                    Span::styled(" [Tab] ", Style::default().fg(Color::Yellow)),
                     Span::raw("切字段  "),
+                    Span::styled(" [1-4/空格] ", Style::default().fg(Color::Yellow)),
+                    Span::raw("切换选项  "),
                     Span::styled(" [Enter] ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-                    Span::raw("保存修改  "),
+                    Span::raw("保存  "),
                     Span::styled(" [Esc] ", Style::default().fg(Color::Gray)),
                     Span::raw("取消"),
                 ]),
@@ -2679,7 +2683,7 @@ fn render_modal(f: &mut Frame, area: Rect, app: &TuiApp) {
                 .border_type(BorderType::Plain)
                 .border_style(Style::default().fg(Color::Yellow))
                 .title(" 编辑模型配置 ");
-            let p = Paragraph::new(lines).block(block);
+            let p = Paragraph::new(lines).block(block).wrap(Wrap { trim: true });
             f.render_widget(p, modal_area);
         }
         Modal::DeleteKeyConfirm { provider, id } => {
@@ -2709,7 +2713,7 @@ fn render_modal(f: &mut Frame, area: Rect, app: &TuiApp) {
             f.render_widget(p, modal_area);
         }
         Modal::AddKey { provider_idx, id, api_key, priority, weight, active_field } => {
-            let modal_area = safe_centered_rect(76, 13, area);
+            let modal_area = safe_centered_rect(68, 13, area);
             f.render_widget(Clear, modal_area);
 
             let provider_names = app.sorted_provider_names();
@@ -2754,7 +2758,7 @@ fn render_modal(f: &mut Frame, area: Rect, app: &TuiApp) {
                 .border_type(BorderType::Plain)
                 .border_style(Style::default().fg(Color::Cyan))
                 .title(" 添加 Key ");
-            let p = Paragraph::new(lines).block(block);
+            let p = Paragraph::new(lines).block(block).wrap(Wrap { trim: true });
             f.render_widget(p, modal_area);
         }
     }
@@ -2803,9 +2807,9 @@ fn render_modality_checkboxes<'a>(modalities: &[bool; 4], is_active: bool) -> Ve
     for (i, &on) in modalities.iter().enumerate() {
         let label = MODALITIES[i];
         let tag = if on {
-            format!(" [x] {}:{} ", i + 1, label)
+            format!(" [x]{}:{} ", i + 1, label)
         } else {
-            format!(" [ ] {}:{} ", i + 1, label)
+            format!(" [ ]{}:{} ", i + 1, label)
         };
 
         let style = if on {
@@ -2822,7 +2826,7 @@ fn render_modality_checkboxes<'a>(modalities: &[bool; 4], is_active: bool) -> Ve
 }
 
 fn render_tier_selector(tier_idx: usize, is_active: bool) -> Line<'static> {
-    let prefix = if is_active { "› 能力梯队 (按1-3/空格切换): " } else { "  能力梯队 (按1-3/空格切换): " };
+    let prefix = if is_active { "› 梯队: " } else { "  梯队: " };
     let prefix_style = if is_active {
         Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
     } else {
@@ -2843,11 +2847,11 @@ fn render_tier_selector(tier_idx: usize, is_active: bool) -> Line<'static> {
 
     Line::from(vec![
         Span::styled(prefix, prefix_style),
-        make_item(0, "1:Flagship"),
+        make_item(0, "1:F旗舰"),
         Span::raw(" "),
-        make_item(1, "2:Standard"),
+        make_item(1, "2:S标准"),
         Span::raw(" "),
-        make_item(2, "3:Light"),
+        make_item(2, "3:L轻量"),
     ])
 }
 
@@ -2904,7 +2908,7 @@ fn idx_to_protocol(idx: usize) -> Option<UpstreamProtocol> {
 }
 
 fn render_billing_mode_selector(mode_idx: usize, is_active: bool, is_model_level: bool) -> Line<'static> {
-    let prefix = if is_active { "› 计费模式/是否订阅 (按1-4/空格切换): " } else { "  计费模式/是否订阅 (按1-4/空格切换): " };
+    let prefix = if is_active { "› 计费: " } else { "  计费: " };
     let prefix_style = if is_active {
         Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
     } else {
@@ -2930,24 +2934,24 @@ fn render_billing_mode_selector(mode_idx: usize, is_active: bool, is_model_level
             Span::raw(" "),
             make_item(1, "2:按量"),
             Span::raw(" "),
-            make_item(2, "3:Coding Plan订阅"),
+            make_item(2, "3:订阅"),
             Span::raw(" "),
             make_item(3, "4:免费"),
         ])
     } else {
         Line::from(vec![
             Span::styled(prefix, prefix_style),
-            make_item(0, "1:按量(Metered)"),
+            make_item(0, "1:按量"),
             Span::raw(" "),
-            make_item(1, "2:Coding Plan(包月订阅)"),
+            make_item(1, "2:订阅"),
             Span::raw(" "),
-            make_item(2, "3:0元免费"),
+            make_item(2, "3:免费"),
         ])
     }
 }
 
 fn render_protocol_selector(protocol_idx: usize, is_active: bool, is_model_level: bool) -> Line<'static> {
-    let prefix = if is_active { "› 原生协议 (按1-4/空格切换): " } else { "  原生协议 (按1-4/空格切换): " };
+    let prefix = if is_active { "› 协议: " } else { "  协议: " };
     let prefix_style = if is_active {
         Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
     } else {
@@ -2973,9 +2977,9 @@ fn render_protocol_selector(protocol_idx: usize, is_active: bool, is_model_level
             Span::raw(" "),
             make_item(1, "2:chat"),
             Span::raw(" "),
-            make_item(2, "3:responses"),
+            make_item(2, "3:resp"),
             Span::raw(" "),
-            make_item(3, "4:anthropic"),
+            make_item(3, "4:anth"),
         ])
     } else {
         Line::from(vec![
@@ -2984,9 +2988,9 @@ fn render_protocol_selector(protocol_idx: usize, is_active: bool, is_model_level
             Span::raw(" "),
             make_item(1, "2:chat"),
             Span::raw(" "),
-            make_item(2, "3:responses"),
+            make_item(2, "3:resp"),
             Span::raw(" "),
-            make_item(3, "4:anthropic"),
+            make_item(3, "4:anth"),
         ])
     }
 }
@@ -3202,10 +3206,10 @@ mod tests {
         let mods = [true, false, true, false];
         let spans = render_modality_checkboxes(&mods, true);
         assert_eq!(spans.len(), 4);
-        assert!(spans[0].content.contains("[x] 1:文 (Txt)"));
-        assert!(spans[1].content.contains("[ ] 2:图 (Img)"));
-        assert!(spans[2].content.contains("[x] 3:视 (Vid)"));
-        assert!(spans[3].content.contains("[ ] 4:音 (Aud)"));
+        assert!(spans[0].content.contains("[x]1:文Txt"));
+        assert!(spans[1].content.contains("[ ]2:图Img"));
+        assert!(spans[2].content.contains("[x]3:视Vid"));
+        assert!(spans[3].content.contains("[ ]4:音Aud"));
 
         // 计算所有模态选项拼接的总字符宽度，确保在 65 列以内，彻底防止溢出弹窗
         let total_chars: usize = spans.iter().map(|s| s.content.chars().count()).sum();

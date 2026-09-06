@@ -56,14 +56,83 @@ impl CreateResponseRequest {
         }
         None
     }
+
+    pub fn required_modalities(&self) -> Vec<&'static str> {
+        let mut mods = Vec::new();
+        match &self.input {
+            ResponseInput::Text(_) => mods.push("text"),
+            ResponseInput::Items(items) => {
+                for item in items {
+                    if let ResponseInputItem::Message { content, .. } = item {
+                        match content {
+                            ResponseInputContent::Text(_) => mods.push("text"),
+                            ResponseInputContent::Parts(parts) => {
+                                for p in parts {
+                                    match p {
+                                        ResponseContentPart::InputImage { .. } => mods.push("image"),
+                                        ResponseContentPart::InputAudio { .. } => mods.push("audio"),
+                                        ResponseContentPart::InputVideo { .. } => mods.push("video"),
+                                        ResponseContentPart::InputFile { .. } => mods.push("file"),
+                                        ResponseContentPart::Text { .. } => mods.push("text"),
+                                        _ => {}
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        mods.sort_unstable();
+        mods.dedup();
+        if mods.is_empty() {
+            mods.push("text");
+        }
+        mods
+    }
 }
 
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(untagged)]
 pub enum ResponseInputContent {
     Text(String),
     Parts(Vec<ResponseContentPart>),
+}
+
+impl<'de> Deserialize<'de> for ResponseInputContent {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum RawItem {
+            Part(ResponseContentPart),
+            Str(String),
+        }
+
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum ContentHelper {
+            Text(String),
+            Array(Vec<RawItem>),
+        }
+
+        match ContentHelper::deserialize(deserializer)? {
+            ContentHelper::Text(s) => Ok(ResponseInputContent::Text(s)),
+            ContentHelper::Array(raw_items) => {
+                let parts: Vec<ResponseContentPart> = raw_items
+                    .into_iter()
+                    .map(|item| match item {
+                        RawItem::Part(p) => p,
+                        RawItem::Str(s) => ResponseContentPart::Text { text: s },
+                    })
+                    .collect();
+                Ok(ResponseInputContent::Parts(parts))
+            }
+        }
+    }
 }
 
 impl ResponseInputContent {
@@ -86,6 +155,10 @@ impl ResponseInputContent {
             Self::Text(text) => !text.trim().is_empty(),
             Self::Parts(parts) => parts.iter().any(|p| match p {
                 ResponseContentPart::Text { text } => !text.trim().is_empty(),
+                ResponseContentPart::InputImage { .. } => true,
+                ResponseContentPart::InputAudio { .. } => true,
+                ResponseContentPart::InputVideo { .. } => true,
+                ResponseContentPart::InputFile { .. } => true,
                 ResponseContentPart::Thought { thought } => !thought.trim().is_empty(),
                 ResponseContentPart::Reasoning { reasoning } => !reasoning.trim().is_empty(),
                 ResponseContentPart::Refusal { refusal } => !refusal.trim().is_empty(),
@@ -120,7 +193,7 @@ pub enum ResponseInput {
     Items(Vec<ResponseInputItem>),
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ResponseInputItem {
     Message {
@@ -137,6 +210,52 @@ pub enum ResponseInputItem {
         call_id: String,
         output: String,
     },
+}
+
+impl<'de> Deserialize<'de> for ResponseInputItem {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde_json::Value;
+        let mut val = Value::deserialize(deserializer)?;
+        if let Value::Object(ref mut map) = val {
+            if !map.contains_key("type") {
+                if map.contains_key("role") && map.contains_key("content") {
+                    map.insert("type".to_string(), Value::String("message".to_string()));
+                } else if map.contains_key("call_id") && map.contains_key("output") {
+                    map.insert("type".to_string(), Value::String("function_call_output".to_string()));
+                } else if map.contains_key("call_id") && map.contains_key("name") {
+                    map.insert("type".to_string(), Value::String("function_call".to_string()));
+                }
+            }
+        }
+        #[derive(Deserialize)]
+        #[serde(tag = "type", rename_all = "snake_case")]
+        enum StandardItem {
+            Message {
+                role: String,
+                content: ResponseInputContent,
+            },
+            FunctionCall {
+                call_id: String,
+                name: String,
+                arguments: String,
+            },
+            #[serde(rename = "function_call_output", alias = "function_response")]
+            FunctionResponse {
+                call_id: String,
+                output: String,
+            },
+        }
+
+        match serde_json::from_value::<StandardItem>(val) {
+            Ok(StandardItem::Message { role, content }) => Ok(ResponseInputItem::Message { role, content }),
+            Ok(StandardItem::FunctionCall { call_id, name, arguments }) => Ok(ResponseInputItem::FunctionCall { call_id, name, arguments }),
+            Ok(StandardItem::FunctionResponse { call_id, output }) => Ok(ResponseInputItem::FunctionResponse { call_id, output }),
+            Err(e) => Err(serde::de::Error::custom(format!("Invalid response input item: {}", e))),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -224,12 +343,61 @@ pub enum ResponseOutputItem {
     Unknown,
 }
 
+fn deserialize_image_url_field<'de, D>(deserializer: D) -> std::result::Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Helper {
+        Str(String),
+        Obj { url: String },
+    }
+    match Helper::deserialize(deserializer)? {
+        Helper::Str(s) => Ok(s),
+        Helper::Obj { url } => Ok(url),
+    }
+}
+
+pub fn default_audio_format() -> String {
+    "wav".to_string()
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ResponseContentPart {
     #[serde(rename = "input_text", alias = "output_text", alias = "text")]
     Text {
         text: String,
+    },
+    #[serde(rename = "input_image", alias = "image_url", alias = "image")]
+    InputImage {
+        #[serde(deserialize_with = "deserialize_image_url_field")]
+        image_url: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        file_id: Option<String>,
+    },
+    #[serde(rename = "input_audio", alias = "audio")]
+    InputAudio {
+        #[serde(alias = "audio", alias = "data")]
+        data: String,
+        #[serde(default = "default_audio_format")]
+        format: String,
+    },
+    #[serde(rename = "input_video", alias = "video_url", alias = "video")]
+    InputVideo {
+        video_url: String,
+    },
+    #[serde(rename = "input_file", alias = "file")]
+    InputFile {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        file_url: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        file_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        filename: Option<String>,
     },
     Thought {
         thought: String,

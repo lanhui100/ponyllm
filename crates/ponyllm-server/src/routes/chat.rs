@@ -81,8 +81,16 @@ pub async fn handle_chat_completions(
 
     // 3. Resolve ranked target providers for multi-provider transparent failover (with hot cache probe)
     let prompt_hint = req.messages.first().and_then(extract_chat_prompt);
+    let required_modalities = req.required_modalities();
     let routing_start = Instant::now();
-    let targets = match state.resolve_routed_targets_with_prompt_and_protocol(&parsed, header_strategy, prompt_hint.as_deref(), crate::extractors::parse_protocol_header(&headers), Some(ponyllm_core::pool::UpstreamProtocol::Chat)) {
+    let targets = match state.resolve_routed_targets_full(
+        &parsed,
+        header_strategy,
+        prompt_hint.as_deref(),
+        crate::extractors::parse_protocol_header(&headers),
+        Some(ponyllm_core::pool::UpstreamProtocol::Chat),
+        &required_modalities,
+    ) {
         Ok(ts) if !ts.is_empty() => ts,
         Ok(_) => {
             return (
@@ -99,6 +107,7 @@ pub async fn handle_chat_completions(
         }
         Err(err) => {
             let (status, code) = match err {
+                CoreError::UnsupportedModality { .. } => (StatusCode::BAD_REQUEST, "unsupported_modality"),
                 CoreError::CapacityExhausted { .. } => (StatusCode::TOO_MANY_REQUESTS, "capacity_exhausted"),
                 CoreError::Internal(ref msg) if msg.contains("No provider configured") => {
                     (StatusCode::NOT_FOUND, "model_not_found")
@@ -118,6 +127,27 @@ pub async fn handle_chat_completions(
                 .into_response();
         }
     };
+
+    if !parsed.is_auto {
+        for modality in &required_modalities {
+            if !targets.iter().any(|t| t.supports_modality(modality)) {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "error": {
+                            "message": format!(
+                                "Model '{}' does not support modality '{}'. Supported input modalities: {:?}",
+                                targets[0].physical_model, modality, targets[0].input_types
+                            ),
+                            "type": "invalid_request_error",
+                            "code": "unsupported_modality"
+                        }
+                    })),
+                )
+                    .into_response();
+            }
+        }
+    }
 
     let is_streaming = req.stream.unwrap_or(false);
     let mut last_error = String::new();

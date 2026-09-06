@@ -957,6 +957,11 @@ async fn handle_gateway_status(
         GatewayRoutingStrategy::Balanced => "均衡",
     };
 
+    let divider = paint("90", "──────────────────────────────────────────────────");
+
+    println!("{}", divider);
+    println!("【服务状态】");
+    println!("{}", divider);
     if is_online {
         let version = health_json
             .as_ref()
@@ -973,7 +978,9 @@ async fn handle_gateway_status(
     println!("策略：{}", strat_name);
 
     println!();
-    println!("连接");
+    println!("{}", divider);
+    println!("【连接】");
+    println!("{}", divider);
     if has_key {
         println!("  密钥：{}", active_key);
     } else {
@@ -983,11 +990,14 @@ async fn handle_gateway_status(
     println!("  Anthropic 地址：{}", base_url);
 
     println!();
+    println!("{}", divider);
     if cfg.providers.is_empty() {
-        println!("提供商");
+        println!("【提供商】");
+        println!("{}", divider);
         println!("  还没有添加提供商，执行 ponyllm provider add 添加");
     } else {
-        println!("提供商 {} 个", cfg.providers.len());
+        println!("【提供商 {} 个】", cfg.providers.len());
+        println!("{}", divider);
         let mut ordered: Vec<(&String, _)> = cfg.providers.iter().collect();
         ordered.sort_by(|a, b| a.0.cmp(b.0));
         for (p_name, p_sec) in ordered {
@@ -1022,7 +1032,9 @@ async fn handle_gateway_status(
         let total_tokens = m.get("total_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
 
         println!();
-        println!("用量");
+        println!("{}", divider);
+        println!("【用量】");
+        println!("{}", divider);
         if total_req == 0 {
             println!("  还没有请求");
         } else if fail_req == 0 {
@@ -1038,12 +1050,17 @@ async fn handle_gateway_status(
         }
     } else if is_online {
         println!();
-        println!("用量");
+        println!("{}", divider);
+        println!("【用量】");
+        println!("{}", divider);
         println!("  暂时看不到用量，检查密钥是否正确");
     }
 
     if !is_online {
         println!();
+        println!("{}", divider);
+        println!("【提示】");
+        println!("{}", divider);
         println!("服务没有运行，先执行 ponyllm serve 启动。");
     }
 

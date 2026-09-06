@@ -355,11 +355,11 @@ pub enum ModelCommands {
         model: String,
 
         /// Context window size (e.g. 1M, 128K, 200K)
-        #[arg(short = 'w', long, default_value = "128K")]
+        #[arg(short = 'w', long, default_value = "1M")]
         context: String,
 
         /// Maximum output token limit (e.g. 32K, 64K, 4K)
-        #[arg(short = 'o', long, default_value = "4K")]
+        #[arg(short = 'o', long, default_value = "32K")]
         max_output: String,
 
         /// Supported input modalities (comma-separated: text,image,video,audio)

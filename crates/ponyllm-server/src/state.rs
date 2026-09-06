@@ -34,11 +34,23 @@ pub struct RoutedTarget {
     pub billing_mode: BillingMode,
     pub pricing: PricingConfig,
     pub thinking_spec: ModelThinkingSpec,
+    pub input_types: Vec<String>,
 }
 
 impl RoutedTarget {
     pub fn resolve_thinking(&self, requested: Option<ponyllm_protocol::common::ReasoningEffort>) -> ponyllm_protocol::common::ReasoningEffort {
         self.thinking_spec.resolve(requested)
+    }
+
+    pub fn supports_modality(&self, modality: &str) -> bool {
+        if modality.eq_ignore_ascii_case("text") {
+            return true;
+        }
+        self.input_types.iter().any(|t| t.eq_ignore_ascii_case(modality))
+    }
+
+    pub fn supports_modalities(&self, modalities: &[&str]) -> bool {
+        modalities.iter().all(|m| self.supports_modality(m))
     }
 }
 
@@ -389,6 +401,19 @@ impl AppState {
         proto_override: Option<UpstreamProtocol>,
         inbound: Option<UpstreamProtocol>,
     ) -> Result<Vec<RoutedTarget>> {
+        self.resolve_routed_targets_full(parsed, header_strategy, prompt, proto_override, inbound, &[])
+    }
+
+    /// Full routed targets resolution with modality requirements filtering
+    pub fn resolve_routed_targets_full(
+        &self,
+        parsed: &ParsedRequestModel,
+        header_strategy: Option<GatewayRoutingStrategy>,
+        prompt: Option<&str>,
+        proto_override: Option<UpstreamProtocol>,
+        inbound: Option<UpstreamProtocol>,
+        required_modalities: &[&str],
+    ) -> Result<Vec<RoutedTarget>> {
         let config = self.config.read();
         let strategy = parsed
             .strategy_override
@@ -398,9 +423,24 @@ impl AppState {
         let cached_provider = prompt.and_then(|p| self.hot_cache.probe_cached_provider(p));
 
         if parsed.is_auto {
-            self.resolve_auto_targets(parsed, strategy, &config, cached_provider.as_deref(), proto_override, inbound)
+            self.resolve_auto_targets(
+                parsed,
+                strategy,
+                &config,
+                cached_provider.as_deref(),
+                proto_override,
+                inbound,
+                required_modalities,
+            )
         } else {
-            self.resolve_pinned_targets(parsed, strategy, &config, cached_provider.as_deref(), proto_override, inbound)
+            self.resolve_pinned_targets(
+                parsed,
+                strategy,
+                &config,
+                cached_provider.as_deref(),
+                proto_override,
+                inbound,
+            )
         }
     }
 
@@ -425,24 +465,35 @@ impl AppState {
         cached_provider: Option<&str>,
         proto_override: Option<UpstreamProtocol>,
         inbound: Option<UpstreamProtocol>,
+        required_modalities: &[&str],
     ) -> Result<Vec<RoutedTarget>> {
-        let filter_1m = |c: &RoutedTarget| {
-            if parsed.is_1m_context {
-                is_context_capacity_compatible("1M", &c.context_window)
-            } else {
-                true
+        let filter_compat = |c: &RoutedTarget| {
+            if parsed.is_1m_context && !is_context_capacity_compatible("1M", &c.context_window) {
+                return false;
             }
+            if !required_modalities.is_empty() && !c.supports_modalities(required_modalities) {
+                return false;
+            }
+            true
         };
 
         if let Some(explicit_tier) = parsed.explicit_tier {
             let candidates: Vec<RoutedTarget> = self
                 .collect_tier_candidates(explicit_tier, strategy, config, proto_override, inbound)
                 .into_iter()
-                .filter(filter_1m)
+                .filter(filter_compat)
                 .collect();
 
             if candidates.is_empty() {
-                if parsed.is_1m_context {
+                if !required_modalities.is_empty() {
+                    return Err(CoreError::UnsupportedModality {
+                        required_modality: required_modalities.join(", "),
+                        message: format!(
+                            "No model candidate in tier '{:?}' supports required modalities {:?}",
+                            explicit_tier, required_modalities
+                        ),
+                    });
+                } else if parsed.is_1m_context {
                     return Err(CoreError::CapacityExhausted {
                         required_context: "1M".to_string(),
                         message: format!(
@@ -464,18 +515,18 @@ impl AppState {
         let standard_candidates: Vec<RoutedTarget> = self
             .collect_tier_candidates(ModelTier::Standard, strategy, config, proto_override, inbound)
             .into_iter()
-            .filter(filter_1m)
+            .filter(filter_compat)
             .collect();
 
         if !standard_candidates.is_empty() {
             return Ok(self.sort_candidates(standard_candidates, strategy, config, cached_provider, inbound));
         }
 
-        // Adaptive Tier Elevation: Elevate to Flagship if Standard has no matching (or 1M) nodes
+        // Adaptive Tier Elevation: Elevate to Flagship if Standard has no matching (or 1M or modality) nodes
         let flagship_candidates: Vec<RoutedTarget> = self
             .collect_tier_candidates(ModelTier::Flagship, strategy, config, proto_override, inbound)
             .into_iter()
-            .filter(filter_1m)
+            .filter(filter_compat)
             .collect();
 
         if !flagship_candidates.is_empty() {
@@ -486,14 +537,22 @@ impl AppState {
         let light_candidates: Vec<RoutedTarget> = self
             .collect_tier_candidates(ModelTier::Light, strategy, config, proto_override, inbound)
             .into_iter()
-            .filter(filter_1m)
+            .filter(filter_compat)
             .collect();
 
         if !light_candidates.is_empty() {
             return Ok(self.sort_candidates(light_candidates, strategy, config, cached_provider, inbound));
         }
 
-        if parsed.is_1m_context {
+        if !required_modalities.is_empty() {
+            Err(CoreError::UnsupportedModality {
+                required_modality: required_modalities.join(", "),
+                message: format!(
+                    "No model candidate across any tier supports required modalities {:?}",
+                    required_modalities
+                ),
+            })
+        } else if parsed.is_1m_context {
             Err(CoreError::CapacityExhausted {
                 required_context: "1M".to_string(),
                 message: "No model candidate across any tier meets 1M context requirement"
@@ -539,6 +598,7 @@ impl AppState {
                     billing_mode,
                     pricing,
                     thinking_spec,
+                    input_types: spec.input_types,
                 });
             }
         }
@@ -565,6 +625,7 @@ impl AppState {
                         billing_mode,
                         pricing,
                         thinking_spec,
+                        input_types: spec.input_types,
                     });
                 }
             }
@@ -597,6 +658,7 @@ impl AppState {
                         billing_mode,
                         pricing,
                         thinking_spec,
+                        input_types: spec.input_types,
                     });
                 }
             }
@@ -657,6 +719,7 @@ impl AppState {
                     billing_mode: default_billing,
                     pricing: default_pricing,
                     thinking_spec,
+                    input_types: default_spec.input_types,
                 });
             }
             for m in &p_cfg.models {
@@ -680,6 +743,7 @@ impl AppState {
                             billing_mode: m_billing,
                             pricing: m_pricing,
                             thinking_spec,
+                            input_types: spec.input_types,
                         });
                     }
                 }

@@ -66,6 +66,31 @@ impl MessageRequest {
         }
         None
     }
+
+    pub fn required_modalities(&self) -> Vec<&'static str> {
+        let mut mods = Vec::new();
+        for msg in &self.messages {
+            match &msg.content {
+                AnthropicContent::Text(_) => mods.push("text"),
+                AnthropicContent::Blocks(blocks) => {
+                    for b in blocks {
+                        match b {
+                            AnthropicContentBlock::Image { .. } => mods.push("image"),
+                            AnthropicContentBlock::Document { .. } => mods.push("file"),
+                            AnthropicContentBlock::Text { .. } => mods.push("text"),
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+        mods.sort_unstable();
+        mods.dedup();
+        if mods.is_empty() {
+            mods.push("text");
+        }
+        mods
+    }
 }
 
 
@@ -148,6 +173,11 @@ pub enum AnthropicContentBlock {
         #[serde(skip_serializing_if = "Option::is_none")]
         cache_control: Option<CacheControl>,
     },
+    Document {
+        source: AnthropicDocumentSource,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControl>,
+    },
     ToolUse {
         id: String,
         name: String,
@@ -175,6 +205,13 @@ pub enum AnthropicContentBlock {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AnthropicImageSource {
+    pub r#type: String,
+    pub media_type: String,
+    pub data: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AnthropicDocumentSource {
     pub r#type: String,
     pub media_type: String,
     pub data: String,

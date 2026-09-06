@@ -52,6 +52,44 @@ pub fn chat_to_anthropic_request(req: &ChatCompletionRequest) -> Result<MessageR
                                     });
                                 }
                                 ContentPart::InputAudio { .. } => {}
+                                ContentPart::VideoUrl { video_url } => {
+                                    blocks.push(AnthropicContentBlock::Text {
+                                        text: format!("[Video: {}]", video_url.url),
+                                        cache_control: None,
+                                    });
+                                }
+                                ContentPart::File { file } => {
+                                    if let Some(ref url) = file.file_url {
+                                        if url.starts_with("data:") {
+                                            let rest = &url["data:".len()..];
+                                            if let Some((mime, b64)) = rest.split_once(";base64,") {
+                                                blocks.push(AnthropicContentBlock::Document {
+                                                    source: AnthropicDocumentSource {
+                                                        r#type: "base64".to_string(),
+                                                        media_type: mime.to_string(),
+                                                        data: b64.to_string(),
+                                                    },
+                                                    cache_control: None,
+                                                });
+                                            } else {
+                                                blocks.push(AnthropicContentBlock::Text {
+                                                    text: format!("[Document: {}]", url),
+                                                    cache_control: None,
+                                                });
+                                            }
+                                        } else {
+                                            blocks.push(AnthropicContentBlock::Text {
+                                                text: format!("[Document: {}]", url),
+                                                cache_control: None,
+                                            });
+                                        }
+                                    } else if let Some(ref fid) = file.file_id {
+                                        blocks.push(AnthropicContentBlock::Text {
+                                            text: format!("[File ID: {}]", fid),
+                                            cache_control: None,
+                                        });
+                                    }
+                                }
                             }
                         }
                         AnthropicContent::Blocks(blocks)
@@ -246,6 +284,20 @@ pub fn anthropic_to_chat_request(req: &MessageRequest) -> Result<ChatCompletionR
                                     image_url: ImageUrlObject {
                                         url,
                                         detail: None,
+                                    },
+                                });
+                            }
+                            AnthropicContentBlock::Document { source, .. } => {
+                                let url = if source.r#type == "base64" && !source.data.starts_with("data:") {
+                                    format!("data:{};base64,{}", source.media_type, source.data)
+                                } else {
+                                    source.data.clone()
+                                };
+                                user_parts.push(ContentPart::File {
+                                    file: InputFileObject {
+                                        file_url: Some(url),
+                                        file_id: None,
+                                        filename: None,
                                     },
                                 });
                             }

@@ -37,19 +37,48 @@ pub fn chat_to_responses_request(req: &ChatCompletionRequest) -> Result<CreateRe
                 instructions = Some(dev.content.as_plain_text());
             }
             ChatMessage::User(user) => {
-                if let MessageContent::Parts(parts) = &user.content {
-                    if parts
-                        .iter()
-                        .any(|p| matches!(p, ContentPart::ImageUrl { .. }))
-                    {
-                        tracing::warn!(
-                            "dropping image part: Responses input items carry no image part"
-                        );
+                let content = match &user.content {
+                    MessageContent::Text(t) => ResponseInputContent::Text(t.clone()),
+                    MessageContent::Parts(parts) => {
+                        let mut resp_parts = Vec::new();
+                        for part in parts {
+                            match part {
+                                ContentPart::Text { text } => {
+                                    resp_parts.push(ResponseContentPart::Text { text: text.clone() });
+                                }
+                                ContentPart::ImageUrl { image_url } => {
+                                    resp_parts.push(ResponseContentPart::InputImage {
+                                        image_url: image_url.url.clone(),
+                                        detail: image_url.detail.clone(),
+                                        file_id: None,
+                                    });
+                                }
+                                ContentPart::InputAudio { input_audio } => {
+                                    resp_parts.push(ResponseContentPart::InputAudio {
+                                        data: input_audio.data.clone(),
+                                        format: input_audio.format.clone(),
+                                    });
+                                }
+                                ContentPart::VideoUrl { video_url } => {
+                                    resp_parts.push(ResponseContentPart::InputVideo {
+                                        video_url: video_url.url.clone(),
+                                    });
+                                }
+                                ContentPart::File { file } => {
+                                    resp_parts.push(ResponseContentPart::InputFile {
+                                        file_url: file.file_url.clone(),
+                                        file_id: file.file_id.clone(),
+                                        filename: file.filename.clone(),
+                                    });
+                                }
+                            }
+                        }
+                        ResponseInputContent::Parts(resp_parts)
                     }
-                }
+                };
                 items.push(ResponseInputItem::Message {
                     role: "user".to_string(),
-                    content: ResponseInputContent::Text(user.content.as_plain_text()),
+                    content,
                 });
             }
             ChatMessage::Assistant(ast) => {
@@ -84,7 +113,10 @@ pub fn chat_to_responses_request(req: &ChatCompletionRequest) -> Result<CreateRe
 
     let input = if items.len() == 1 {
         if let ResponseInputItem::Message { ref content, .. } = items[0] {
-            ResponseInput::Text(content.as_plain_text())
+            match content {
+                ResponseInputContent::Text(t) => ResponseInput::Text(t.clone()),
+                _ => ResponseInput::Items(items),
+            }
         } else {
             ResponseInput::Items(items)
         }
@@ -170,15 +202,70 @@ pub fn responses_to_chat_request(req: &CreateResponseRequest) -> Result<ChatComp
                 match item {
                     ResponseInputItem::Message { role, content } => {
                         flush_calls(&mut messages, &mut pending_calls);
-                        let text = content.as_plain_text();
+                        let chat_content = match content {
+                            ResponseInputContent::Text(t) => MessageContent::Text(t.clone()),
+                            ResponseInputContent::Parts(parts) => {
+                                let mut chat_parts = Vec::new();
+                                for part in parts {
+                                    match part {
+                                        ResponseContentPart::Text { text } => {
+                                            chat_parts.push(ContentPart::Text { text: text.clone() });
+                                        }
+                                        ResponseContentPart::InputImage { image_url, detail, .. } => {
+                                            chat_parts.push(ContentPart::ImageUrl {
+                                                image_url: ImageUrlObject {
+                                                    url: image_url.clone(),
+                                                    detail: detail.clone(),
+                                                },
+                                            });
+                                        }
+                                        ResponseContentPart::InputAudio { data, format } => {
+                                            chat_parts.push(ContentPart::InputAudio {
+                                                input_audio: InputAudioObject {
+                                                    data: data.clone(),
+                                                    format: format.clone(),
+                                                },
+                                            });
+                                        }
+                                        ResponseContentPart::InputVideo { video_url } => {
+                                            chat_parts.push(ContentPart::VideoUrl {
+                                                video_url: VideoUrlObject {
+                                                    url: video_url.clone(),
+                                                },
+                                            });
+                                        }
+                                        ResponseContentPart::InputFile { file_url, file_id, filename } => {
+                                            chat_parts.push(ContentPart::File {
+                                                file: InputFileObject {
+                                                    file_url: file_url.clone(),
+                                                    file_id: file_id.clone(),
+                                                    filename: filename.clone(),
+                                                },
+                                            });
+                                        }
+                                        ResponseContentPart::Thought { thought } => {
+                                            chat_parts.push(ContentPart::Text { text: format!("<thought>{}</thought>", thought) });
+                                        }
+                                        ResponseContentPart::Reasoning { reasoning } => {
+                                            chat_parts.push(ContentPart::Text { text: format!("<thought>{}</thought>", reasoning) });
+                                        }
+                                        ResponseContentPart::Refusal { refusal } => {
+                                            chat_parts.push(ContentPart::Text { text: refusal.clone() });
+                                        }
+                                        ResponseContentPart::Unknown => {}
+                                    }
+                                }
+                                MessageContent::Parts(chat_parts)
+                            }
+                        };
                         if role == "assistant" {
                             messages.push(ChatMessage::Assistant(AssistantMessage {
-                                content: Some(text.into()),
+                                content: Some(chat_content),
                                 ..Default::default()
                             }));
                         } else {
                             messages.push(ChatMessage::User(UserMessage {
-                                content: text.into(),
+                                content: chat_content,
                                 name: None,
                             }));
                         }
@@ -351,7 +438,12 @@ pub fn responses_to_chat_response(resp: &ResponseObject) -> Result<ChatCompletio
                         ResponseContentPart::Reasoning { reasoning } => {
                             reasoning_acc.push_str(reasoning);
                         }
-                        ResponseContentPart::Refusal { .. } | ResponseContentPart::Unknown => {}
+                        ResponseContentPart::Refusal { .. }
+                        | ResponseContentPart::InputImage { .. }
+                        | ResponseContentPart::InputAudio { .. }
+                        | ResponseContentPart::InputVideo { .. }
+                        | ResponseContentPart::InputFile { .. }
+                        | ResponseContentPart::Unknown => {}
                     }
                 }
             }

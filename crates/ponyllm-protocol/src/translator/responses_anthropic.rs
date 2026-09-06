@@ -90,6 +90,78 @@ pub fn responses_to_anthropic_request(req: &CreateResponseRequest) -> Result<Mes
                                         ResponseContentPart::Text { text } => {
                                             text_acc.push_str(text);
                                         }
+                                        ResponseContentPart::InputImage { image_url, .. } => {
+                                            if !text_acc.is_empty() {
+                                                blocks.push(AnthropicContentBlock::Text {
+                                                    text: std::mem::take(&mut text_acc),
+                                                    cache_control: None,
+                                                });
+                                            }
+                                            let (media_type, data, src_type) = if image_url.starts_with("data:") {
+                                                let rest = &image_url["data:".len()..];
+                                                if let Some((mime, b64)) = rest.split_once(";base64,") {
+                                                    (mime.to_string(), b64.to_string(), "base64".to_string())
+                                                } else {
+                                                    ("image/jpeg".to_string(), image_url.clone(), "url".to_string())
+                                                }
+                                            } else {
+                                                ("image/jpeg".to_string(), image_url.clone(), "url".to_string())
+                                            };
+                                            blocks.push(AnthropicContentBlock::Image {
+                                                source: AnthropicImageSource {
+                                                    r#type: src_type,
+                                                    media_type,
+                                                    data,
+                                                },
+                                                cache_control: None,
+                                            });
+                                        }
+                                        ResponseContentPart::InputFile { file_url, .. } => {
+                                            if let Some(ref url) = file_url {
+                                                if !text_acc.is_empty() {
+                                                    blocks.push(AnthropicContentBlock::Text {
+                                                        text: std::mem::take(&mut text_acc),
+                                                        cache_control: None,
+                                                    });
+                                                }
+                                                if url.starts_with("data:") {
+                                                    let rest = &url["data:".len()..];
+                                                    if let Some((mime, b64)) = rest.split_once(";base64,") {
+                                                        blocks.push(AnthropicContentBlock::Document {
+                                                            source: AnthropicDocumentSource {
+                                                                r#type: "base64".to_string(),
+                                                                media_type: mime.to_string(),
+                                                                data: b64.to_string(),
+                                                            },
+                                                            cache_control: None,
+                                                        });
+                                                    } else {
+                                                        blocks.push(AnthropicContentBlock::Text {
+                                                            text: format!("[Document: {}]", url),
+                                                            cache_control: None,
+                                                        });
+                                                    }
+                                                } else {
+                                                    blocks.push(AnthropicContentBlock::Text {
+                                                        text: format!("[Document: {}]", url),
+                                                        cache_control: None,
+                                                    });
+                                                }
+                                            }
+                                        }
+                                        ResponseContentPart::InputVideo { video_url } => {
+                                            if !text_acc.is_empty() {
+                                                blocks.push(AnthropicContentBlock::Text {
+                                                    text: std::mem::take(&mut text_acc),
+                                                    cache_control: None,
+                                                });
+                                            }
+                                            blocks.push(AnthropicContentBlock::Text {
+                                                text: format!("[Video: {}]", video_url),
+                                                cache_control: None,
+                                            });
+                                        }
+                                        ResponseContentPart::InputAudio { .. } => {}
                                         ResponseContentPart::Thought { thought } => {
                                             blocks.push(AnthropicContentBlock::Thinking {
                                                 thinking: thought.clone(),
@@ -306,21 +378,45 @@ pub fn anthropic_to_responses_request(req: &MessageRequest) -> Result<CreateResp
                     });
                 }
                 AnthropicContent::Blocks(blocks) => {
-                    let mut text_acc = String::new();
+                    let mut parts = Vec::new();
                     for block in blocks {
                         match block {
                             AnthropicContentBlock::Text { text, .. } => {
-                                text_acc.push_str(text);
+                                parts.push(ResponseContentPart::Text { text: text.clone() });
+                            }
+                            AnthropicContentBlock::Image { source, .. } => {
+                                let url = if source.r#type == "base64" && !source.data.starts_with("data:") {
+                                    format!("data:{};base64,{}", source.media_type, source.data)
+                                } else {
+                                    source.data.clone()
+                                };
+                                parts.push(ResponseContentPart::InputImage {
+                                    image_url: url,
+                                    detail: None,
+                                    file_id: None,
+                                });
+                            }
+                            AnthropicContentBlock::Document { source, .. } => {
+                                let url = if source.r#type == "base64" && !source.data.starts_with("data:") {
+                                    format!("data:{};base64,{}", source.media_type, source.data)
+                                } else {
+                                    source.data.clone()
+                                };
+                                parts.push(ResponseContentPart::InputFile {
+                                    file_url: Some(url),
+                                    file_id: None,
+                                    filename: None,
+                                });
                             }
                             AnthropicContentBlock::ToolResult {
                                 tool_use_id,
                                 content,
                                 ..
                             } => {
-                                if !text_acc.is_empty() {
+                                if !parts.is_empty() {
                                     items.push(ResponseInputItem::Message {
                                         role: "user".to_string(),
-                                        content: ResponseInputContent::Text(std::mem::take(&mut text_acc)),
+                                        content: ResponseInputContent::Parts(std::mem::take(&mut parts)),
                                     });
                                 }
                                 let res_text = match content {
@@ -339,16 +435,13 @@ pub fn anthropic_to_responses_request(req: &MessageRequest) -> Result<CreateResp
                                     output: res_text,
                                 });
                             }
-                            AnthropicContentBlock::Image { .. } => {
-                                tracing::warn!("dropping image block: Responses input items carry no image part");
-                            }
                             _ => {}
                         }
                     }
-                    if !text_acc.is_empty() {
+                    if !parts.is_empty() {
                         items.push(ResponseInputItem::Message {
                             role: "user".to_string(),
-                            content: ResponseInputContent::Text(text_acc),
+                            content: ResponseInputContent::Parts(parts),
                         });
                     }
                 }
@@ -358,7 +451,10 @@ pub fn anthropic_to_responses_request(req: &MessageRequest) -> Result<CreateResp
 
     let input = if items.len() == 1 {
         if let ResponseInputItem::Message { ref content, .. } = items[0] {
-            ResponseInput::Text(content.as_plain_text())
+            match content {
+                ResponseInputContent::Text(t) => ResponseInput::Text(t.clone()),
+                _ => ResponseInput::Items(items),
+            }
         } else {
             ResponseInput::Items(items)
         }
@@ -431,7 +527,47 @@ pub fn responses_to_anthropic_response(resp: &ResponseObject) -> Result<MessageR
                                 signature: None,
                             });
                         }
-                        ResponseContentPart::Refusal { .. } | ResponseContentPart::Unknown => {}
+                        ResponseContentPart::InputImage { image_url, .. } => {
+                            let (media_type, data, src_type) = if image_url.starts_with("data:") {
+                                let rest = &image_url["data:".len()..];
+                                if let Some((mime, b64)) = rest.split_once(";base64,") {
+                                    (mime.to_string(), b64.to_string(), "base64".to_string())
+                                } else {
+                                    ("image/jpeg".to_string(), image_url.clone(), "url".to_string())
+                                }
+                            } else {
+                                ("image/jpeg".to_string(), image_url.clone(), "url".to_string())
+                            };
+                            content.push(AnthropicContentBlock::Image {
+                                source: AnthropicImageSource {
+                                    r#type: src_type,
+                                    media_type,
+                                    data,
+                                },
+                                cache_control: None,
+                            });
+                        }
+                        ResponseContentPart::InputFile { file_url, .. } => {
+                            if let Some(ref url) = file_url {
+                                if url.starts_with("data:") {
+                                    let rest = &url["data:".len()..];
+                                    if let Some((mime, b64)) = rest.split_once(";base64,") {
+                                        content.push(AnthropicContentBlock::Document {
+                                            source: AnthropicDocumentSource {
+                                                r#type: "base64".to_string(),
+                                                media_type: mime.to_string(),
+                                                data: b64.to_string(),
+                                            },
+                                            cache_control: None,
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                        ResponseContentPart::Refusal { .. }
+                        | ResponseContentPart::InputAudio { .. }
+                        | ResponseContentPart::InputVideo { .. }
+                        | ResponseContentPart::Unknown => {}
                     }
                 }
             }
@@ -476,7 +612,12 @@ pub fn responses_to_anthropic_response(resp: &ResponseObject) -> Result<MessageR
                                     signature: None,
                                 });
                             }
-                            ResponseContentPart::Refusal { .. } | ResponseContentPart::Unknown => {}
+                            ResponseContentPart::Refusal { .. }
+                            | ResponseContentPart::InputImage { .. }
+                            | ResponseContentPart::InputAudio { .. }
+                            | ResponseContentPart::InputVideo { .. }
+                            | ResponseContentPart::InputFile { .. }
+                            | ResponseContentPart::Unknown => {}
                         }
                     }
                 }
@@ -501,7 +642,12 @@ pub fn responses_to_anthropic_response(resp: &ResponseObject) -> Result<MessageR
                                     signature: None,
                                 });
                             }
-                            ResponseContentPart::Refusal { .. } | ResponseContentPart::Unknown => {}
+                            ResponseContentPart::Refusal { .. }
+                            | ResponseContentPart::InputImage { .. }
+                            | ResponseContentPart::InputAudio { .. }
+                            | ResponseContentPart::InputVideo { .. }
+                            | ResponseContentPart::InputFile { .. }
+                            | ResponseContentPart::Unknown => {}
                         }
                     }
                 }

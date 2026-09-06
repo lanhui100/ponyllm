@@ -1496,7 +1496,7 @@ async fn test_messages_image_only_translated_to_responses_rejected_with_anthropi
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["type"], "error", "Must have top-level Anthropic error envelope");
     assert_eq!(body["error"]["type"], "invalid_request_error");
-    assert!(body["error"]["message"].as_str().unwrap().contains("Image-only requests cannot be translated"));
+    assert!(body["error"]["message"].as_str().unwrap().contains("does not support modality 'image'"));
 }
 
 #[tokio::test]

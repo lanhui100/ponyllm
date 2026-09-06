@@ -50,10 +50,10 @@ impl ModelSpec {
 }
 
 pub fn default_context_window() -> String {
-    "128K".to_string()
+    "1M".to_string()
 }
 pub fn default_max_output() -> String {
-    "4K".to_string()
+    "32K".to_string()
 }
 pub fn default_modalities() -> Vec<String> {
     vec!["text".to_string()]

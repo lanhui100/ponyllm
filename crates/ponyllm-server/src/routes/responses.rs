@@ -70,7 +70,15 @@ pub async fn handle_responses(
         .and_then(|h| h.to_str().ok())
         .and_then(|s| GatewayRoutingStrategy::from_str(s).ok());
     let header_thinking = crate::extractors::parse_thinking_header(&headers);
-    let targets = match state.resolve_routed_targets_with_prompt_and_protocol(&parsed, header_strategy, prompt_ref, crate::extractors::parse_protocol_header(&headers), Some(ponyllm_core::pool::UpstreamProtocol::Responses)) {
+    let required_modalities = req.required_modalities();
+    let targets = match state.resolve_routed_targets_full(
+        &parsed,
+        header_strategy,
+        prompt_ref,
+        crate::extractors::parse_protocol_header(&headers),
+        Some(ponyllm_core::pool::UpstreamProtocol::Responses),
+        &required_modalities,
+    ) {
         Ok(ts) if !ts.is_empty() => ts,
         Ok(_) => {
             return (
@@ -87,6 +95,7 @@ pub async fn handle_responses(
         }
         Err(err) => {
             let (status, code) = match err {
+                ponyllm_core::error::CoreError::UnsupportedModality { .. } => (StatusCode::BAD_REQUEST, "unsupported_modality"),
                 ponyllm_core::error::CoreError::CapacityExhausted { .. } => (StatusCode::TOO_MANY_REQUESTS, "capacity_exhausted"),
                 ponyllm_core::error::CoreError::Internal(ref msg) if msg.contains("No provider configured") => {
                     (StatusCode::NOT_FOUND, "model_not_found")
@@ -97,7 +106,7 @@ pub async fn handle_responses(
                 status,
                 Json(serde_json::json!({
                     "error": {
-                        "message": format!("No upstream provider found for model '{}'", req.model),
+                        "message": err.to_string(),
                         "type": "invalid_request_error",
                         "code": code
                     }
@@ -106,6 +115,27 @@ pub async fn handle_responses(
                 .into_response();
         }
     };
+
+    if !parsed.is_auto {
+        for modality in &required_modalities {
+            if !targets.iter().any(|t| t.supports_modality(modality)) {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "error": {
+                            "message": format!(
+                                "Model '{}' does not support modality '{}'. Supported input modalities: {:?}",
+                                targets[0].physical_model, modality, targets[0].input_types
+                            ),
+                            "type": "invalid_request_error",
+                            "code": "unsupported_modality"
+                        }
+                    })),
+                )
+                    .into_response();
+            }
+        }
+    }
     let routing_ms = routing_start.elapsed().as_secs_f64() * 1000.0;
     stages.lock().routing_ms = Some(routing_ms);
     state.emit(
