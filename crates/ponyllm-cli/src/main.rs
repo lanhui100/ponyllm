@@ -103,6 +103,292 @@ fn build_gateway_config_and_pools(
     (gw_config, pools)
 }
 
+struct ServerOptions {
+    config: Option<String>,
+    bind: Option<String>,
+    address: Option<String>,
+    port: Option<u16>,
+    api_key: Option<String>,
+    retries: Option<usize>,
+    no_web: bool,
+    web_dist_dir: Option<String>,
+    is_web_focused: bool,
+    open_browser: bool,
+}
+
+fn open_in_browser(url: &str) {
+    #[cfg(target_os = "linux")]
+    {
+        let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("open").arg(url).spawn();
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let _ = std::process::Command::new("cmd").args(["/C", "start", url]).spawn();
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    {
+        let _ = url;
+    }
+}
+
+async fn run_server(opts: ServerOptions) -> Result<(), Box<dyn std::error::Error>> {
+    tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "ponyllm_server=info,tower_http=debug".into()),
+        )
+        .with(tracing_subscriber::fmt::layer())
+        .try_init()
+        .ok();
+
+    let resolved_config = resolve_path(opts.config.as_deref());
+    let mut config_file = ConfigFile::load_or_default(resolved_config.to_str())?;
+
+    let final_bind = if let Some(b) = opts.bind {
+        b
+    } else if let (Some(addr), Some(p)) = (opts.address.as_deref(), opts.port) {
+        format!("{}:{}", addr, p)
+    } else if let Some(addr) = opts.address {
+        format!("{}:8080", addr)
+    } else if let Some(p) = opts.port {
+        format!("127.0.0.1:{}", p)
+    } else {
+        config_file.gateway.bind.clone()
+    };
+
+    let mut newly_generated_key = None;
+    let final_api_key = if let Some(ak) = opts.api_key {
+        ak
+    } else if !config_file.gateway.api_key.is_empty() {
+        config_file.gateway.api_key.clone()
+    } else {
+        let secure_key = generate_secure_api_key();
+        config_file.gateway.api_key = secure_key.clone();
+        let save_dest = resolved_config.to_str().unwrap_or("ponyllm.toml");
+        let _ = config_file.save_to_path(save_dest);
+        newly_generated_key = Some(secure_key.clone());
+        secure_key
+    };
+
+    let (gw_config, pools) = build_gateway_config_and_pools(
+        &config_file,
+        Some(final_bind.clone()),
+        opts.retries,
+        Some(final_api_key),
+        // `--no-web` is a process-level switch: hot reload must not flip it
+        // back on when the config file still says `web_enabled = true`.
+        opts.no_web.then_some(false),
+        opts.web_dist_dir.clone(),
+    );
+
+    let state = Arc::new(
+        AppState::new(gw_config.clone()).with_config_store(Arc::new(
+            ponyllm_server::admin_store::FileConfigStore::new(
+                resolved_config.to_str().unwrap_or("ponyllm.toml"),
+            ),
+        )),
+    );
+    for (p_name, pool) in pools {
+        state.register_pool(&p_name, pool);
+    }
+
+    // Spawn background config watcher for zero-downtime hot reload
+    let watcher_path = resolved_config.clone();
+    let watcher_state = state.clone();
+    let watcher_bind = final_bind.clone();
+    let watcher_retries = opts.retries;
+    // Web hosting is restart-only (the axum router is built once in
+    // create_app): pin the process-level CLI switches so a config-file
+    // edit can never silently flip them mid-flight; a file-side
+    // `web_enabled`/`web_dist_dir` change takes effect on restart.
+    // Only pin when the CLI flag was explicitly given (P2-1).
+    let watcher_web_enabled = opts.no_web.then_some(false);
+    let watcher_web_dist_dir = opts.web_dist_dir.clone();
+    tokio::spawn(async move {
+        let mut last_modified = std::fs::metadata(&watcher_path)
+            .and_then(|m| m.modified())
+            .ok();
+
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+            let current_modified = std::fs::metadata(&watcher_path)
+                .and_then(|m| m.modified())
+                .ok();
+
+            if current_modified.is_some() && current_modified != last_modified {
+                last_modified = current_modified;
+                tokio::time::sleep(tokio::time::Duration::from_millis(250)).await;
+
+                if let Ok(content) = std::fs::read_to_string(&watcher_path) {
+                    if let Ok(new_cfg_file) = toml::from_str::<ConfigFile>(&content) {
+                        let (new_gw_cfg, new_pools) = build_gateway_config_and_pools(
+                            &new_cfg_file,
+                            Some(watcher_bind.clone()),
+                            watcher_retries,
+                            None,
+                            // Pin the process-level switch across hot reloads.
+                            watcher_web_enabled,
+                            watcher_web_dist_dir.clone(),
+                        );
+                        watcher_state.reload_config_with_pools(new_gw_cfg, new_pools);
+                        println!(
+                            "\n🔄 [配置热更新] 检测到 '{}' 发生物理变更，网关已完成零停机平滑热重载！",
+                            watcher_path.display()
+                        );
+                    } else {
+                        eprintln!(
+                            "⚠️ [配置热更新] '{}' 语法解析失败，跳过本次重载以保持服务稳定",
+                            watcher_path.display()
+                        );
+                    }
+                }
+            }
+        }
+    });
+
+    let app = create_app(state);
+    let listener = tokio::net::TcpListener::bind(&gw_config.bind_addr).await?;
+
+    let (host, p_str) = gw_config
+        .bind_addr
+        .split_once(':')
+        .unwrap_or(("127.0.0.1", "8080"));
+
+    let is_all_interfaces = host == "0.0.0.0";
+    let probe_host = if is_all_interfaces { "127.0.0.1" } else { host };
+    let web_url = format!("http://{}:{}/app/", probe_host, p_str);
+
+    let auth_display = if gw_config.api_key.is_empty() || gw_config.api_key.eq_ignore_ascii_case("none") {
+        "免鉴权 (开放模式)".to_string()
+    } else {
+        gw_config.api_key.clone()
+    };
+
+    if let Some(gen_k) = &newly_generated_key {
+        println!("\n💡 [自动生成访问凭证] 检测到未配置 API Key，已自动生成并保存高熵秘钥: {}", gen_k);
+    }
+
+    let strat_name = match gw_config.default_strategy {
+        GatewayRoutingStrategy::Economy => "省钱优先 (0元免费 > Plan套餐 > 缓存命中 > 按量低价)",
+        GatewayRoutingStrategy::Speed => "极速优先 (实测 TTFT + t/s 最优)",
+        GatewayRoutingStrategy::Reliable => "稳定优先 (高可用保障与429避让)",
+        GatewayRoutingStrategy::Balanced => "综合平衡 (成本与响应速度均衡)",
+    };
+
+    // WEB-01 P1-3: web mount state is ops-visible (absolute dist path +
+    // enabled/dist-hit status) so a CWD-dependent miss is diagnosable.
+    let dist_abs = std::path::Path::new(&gw_config.web_dist_dir)
+        .canonicalize()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| format!("{} (缺失)", gw_config.web_dist_dir));
+    let hit = std::path::Path::new(&gw_config.web_dist_dir)
+        .join("index.html")
+        .is_file();
+    let web_state = if !gw_config.web_enabled {
+        format!("已关闭 (--no-web) | {}", dist_abs)
+    } else if hit {
+        format!("已托管 /app/* | {}", dist_abs)
+    } else {
+        format!("目录缺失仅告警 | {}", dist_abs)
+    };
+    tracing::info!(web_enabled = gw_config.web_enabled, web_dist_dir = %dist_abs, dist_hit = hit, "web console mount state");
+
+    if opts.is_web_focused {
+        println!("\n╔════════════════════════════════════════════════════════════════════════╗");
+        println!("║              🌐 ponyllm Web 控制台服务已就绪                           ║");
+        println!("╠════════════════════════════════════════════════════════════════════════╣");
+        println!("║  👉 控制台入口:       {:<48} ║", web_url);
+        println!("║  🔑 访问凭证 (Token): {:<48} ║", auth_display);
+        println!("╠════════════════════════════════════════════════════════════════════════╣");
+        println!("║  • 监听地址:          {:<48} ║", gw_config.bind_addr);
+        println!("║  • API 接入点:        {:<48} ║", format!("http://{}:{}/v1", probe_host, p_str));
+        println!("║  • 全局调度策略:      {:<48} ║", strat_name);
+        println!("║  • 配置文件路径:      {:<48} ║", resolved_config.display());
+        println!("║  • Web 托管状态:      {:<48} ║", web_state.chars().take(44).collect::<String>());
+        println!("╠════════════════════════════════════════════════════════════════════════╣");
+        println!("║  • 已挂载模型提供商 (Providers & Pricing):                             ║");
+        for (p_name, p_sec) in &config_file.providers {
+            let pricing_tag = if p_sec.is_free() {
+                "0元免费".to_string()
+            } else if p_sec.billing_mode == ponyllm_core::pool::BillingMode::Plan {
+                "Plan套餐".to_string()
+            } else {
+                format!("入${:.2}/缓${:.3}/出${:.2}", p_sec.input_price, p_sec.cached_price, p_sec.output_price)
+            };
+            let all_models = p_sec.list_all_models();
+            let m_names: Vec<String> = all_models.into_iter().map(|m| {
+                if m.name == p_sec.default_model {
+                    format!("{} (★默认,{})", m.name, m.tier.shorthand())
+                } else {
+                    format!("{}({})", m.name, m.tier.shorthand())
+                }
+            }).collect();
+            println!("║    - {:<10} [{:<8}]: {}", p_name, pricing_tag, m_names.join(", "));
+        }
+        println!("╚════════════════════════════════════════════════════════════════════════╝\n");
+    } else {
+        println!("\n╔════════════════════════════════════════════════════════════════════════╗");
+        println!("║              🚀 ponyllm AI Gateway 服务已就绪                          ║");
+        println!("╠════════════════════════════════════════════════════════════════════════╣");
+        println!("║  • 配置文件路径:      {:<48} ║", resolved_config.display());
+        println!("║  • 本地接入 Base URL:                                                  ║");
+        if is_all_interfaces {
+            println!("║    - OpenAI 客户端:   http://127.0.0.1:{}/v1 (局域网: http://0.0.0.0:{}/v1)║", p_str, p_str);
+            println!("║    - Anthropic 客户端: http://127.0.0.1:{}    (局域网: http://0.0.0.0:{})   ║", p_str, p_str);
+        } else {
+            println!("║    - OpenAI 客户端:   http://{}:{}/v1                             ║", host, p_str);
+            println!("║    - Anthropic 客户端: http://{}:{}                                ║", host, p_str);
+        }
+        println!("║    - 监听全地址:      http://{}                                     ║", gw_config.bind_addr);
+        println!("║  • 全局调度策略:      {:<48} ║", strat_name);
+        println!("║  • 请求体缓冲上限:    {:<48} ║", format!("{} MB (支持1M长上下文/多模态)", gw_config.request_body_limit / (1024 * 1024)));
+        println!("║  • 访问凭证 (Token):  {}                                   ║", format!("{:<30}", auth_display));
+        println!("║  • 虚拟总代模型:      auto, auto:flagship, auto:economy, auto[1m]     ║");
+        println!("║  • Web 控制台:        {:<48} ║", web_state.chars().take(44).collect::<String>());
+        println!("╠════════════════════════════════════════════════════════════════════════╣");
+        println!("║  • 已挂载模型提供商 (Providers & Pricing):                             ║");
+        for (p_name, p_sec) in &config_file.providers {
+            let pricing_tag = if p_sec.is_free() {
+                "0元免费".to_string()
+            } else if p_sec.billing_mode == ponyllm_core::pool::BillingMode::Plan {
+                "Plan套餐".to_string()
+            } else {
+                format!("入${:.2}/缓${:.3}/出${:.2}", p_sec.input_price, p_sec.cached_price, p_sec.output_price)
+            };
+            let all_models = p_sec.list_all_models();
+            let m_names: Vec<String> = all_models.into_iter().map(|m| {
+                if m.name == p_sec.default_model {
+                    format!("{} (★默认,{})", m.name, m.tier.shorthand())
+                } else {
+                    format!("{}({})", m.name, m.tier.shorthand())
+                }
+            }).collect();
+            println!("║    - {:<10} [{:<8}]: {}", p_name, pricing_tag, m_names.join(", "));
+        }
+        println!("╚════════════════════════════════════════════════════════════════════════╝\n");
+    }
+
+    if opts.open_browser {
+        println!("🚀 正在自动在默认浏览器中打开 Web 控制台: {}", web_url);
+        open_in_browser(&web_url);
+    }
+
+    // 声明 pidfile 归属，供 `ponyllm stop/restart` 认领本实例。
+    if let Some(warn) = ponyllm_cli::lifecycle::claim_pidfile(&resolved_config) {
+        eprintln!("{}", warn);
+    }
+    let serve_result = axum::serve(listener, app).await;
+    ponyllm_cli::lifecycle::release_pidfile(&resolved_config);
+    serve_result?;
+
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
@@ -550,212 +836,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             no_web,
             web_dist_dir,
         } => {
-            tracing_subscriber::registry()
-                .with(
-                    tracing_subscriber::EnvFilter::try_from_default_env()
-                        .unwrap_or_else(|_| "ponyllm_server=info,tower_http=debug".into()),
-                )
-                .with(tracing_subscriber::fmt::layer())
-                .init();
-
-            let resolved_config = resolve_path(config.as_deref());
-            let mut config_file = ConfigFile::load_or_default(resolved_config.to_str())?;
-
-            let final_bind = if let Some(b) = bind {
-                b
-            } else if let (Some(addr), Some(p)) = (address.as_deref(), port) {
-                format!("{}:{}", addr, p)
-            } else if let Some(addr) = address {
-                format!("{}:8080", addr)
-            } else if let Some(p) = port {
-                format!("127.0.0.1:{}", p)
-            } else {
-                config_file.gateway.bind.clone()
-            };
-
-            let mut newly_generated_key = None;
-            let final_api_key = if let Some(ak) = api_key {
-                ak
-            } else if !config_file.gateway.api_key.is_empty() {
-                config_file.gateway.api_key.clone()
-            } else {
-                let secure_key = generate_secure_api_key();
-                config_file.gateway.api_key = secure_key.clone();
-                let save_dest = resolved_config.to_str().unwrap_or("ponyllm.toml");
-                let _ = config_file.save_to_path(save_dest);
-                newly_generated_key = Some(secure_key.clone());
-                secure_key
-            };
-
-            let (gw_config, pools) = build_gateway_config_and_pools(
-                &config_file,
-                Some(final_bind.clone()),
+            run_server(ServerOptions {
+                config,
+                bind,
+                address,
+                port,
+                api_key,
                 retries,
-                Some(final_api_key),
-                // `--no-web` is a process-level switch: hot reload must not flip it
-                // back on when the config file still says `web_enabled = true`.
-                no_web.then_some(false),
-                web_dist_dir.clone(),
-            );
-
-            let state = Arc::new(
-                AppState::new(gw_config.clone()).with_config_store(Arc::new(
-                    ponyllm_server::admin_store::FileConfigStore::new(
-                        resolved_config.to_str().unwrap_or("ponyllm.toml"),
-                    ),
-                )),
-            );
-            for (p_name, pool) in pools {
-                state.register_pool(&p_name, pool);
-            }
-
-            // Spawn background config watcher for zero-downtime hot reload
-            let watcher_path = resolved_config.clone();
-            let watcher_state = state.clone();
-            let watcher_bind = final_bind.clone();
-            let watcher_retries = retries;
-            // Web hosting is restart-only (the axum router is built once in
-            // create_app): pin the process-level CLI switches so a config-file
-            // edit can never silently flip them mid-flight; a file-side
-            // `web_enabled`/`web_dist_dir` change takes effect on restart.
-            // Only pin when the CLI flag was explicitly given (P2-1).
-            let watcher_web_enabled = no_web.then_some(false);
-            let watcher_web_dist_dir = web_dist_dir.clone();
-            tokio::spawn(async move {
-                let mut last_modified = std::fs::metadata(&watcher_path)
-                    .and_then(|m| m.modified())
-                    .ok();
-
-                loop {
-                    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-
-                    let current_modified = std::fs::metadata(&watcher_path)
-                        .and_then(|m| m.modified())
-                        .ok();
-
-                    if current_modified.is_some() && current_modified != last_modified {
-                        last_modified = current_modified;
-                        tokio::time::sleep(tokio::time::Duration::from_millis(250)).await;
-
-                        if let Ok(content) = std::fs::read_to_string(&watcher_path) {
-                            if let Ok(new_cfg_file) = toml::from_str::<ConfigFile>(&content) {
-                                let (new_gw_cfg, new_pools) = build_gateway_config_and_pools(
-                                    &new_cfg_file,
-                                    Some(watcher_bind.clone()),
-                                    watcher_retries,
-                                    None,
-                                    // Pin the process-level switch across hot reloads.
-                                    watcher_web_enabled,
-                                    watcher_web_dist_dir.clone(),
-                                );
-                                watcher_state.reload_config_with_pools(new_gw_cfg, new_pools);
-                                println!(
-                                    "\n🔄 [配置热更新] 检测到 '{}' 发生物理变更，网关已完成零停机平滑热重载！",
-                                    watcher_path.display()
-                                );
-                            } else {
-                                eprintln!(
-                                    "⚠️ [配置热更新] '{}' 语法解析失败，跳过本次重载以保持服务稳定",
-                                    watcher_path.display()
-                                );
-                            }
-                        }
-                    }
-                }
-            });
-
-            let app = create_app(state);
-            let listener = tokio::net::TcpListener::bind(&gw_config.bind_addr).await?;
-
-            let (host, p_str) = gw_config
-                .bind_addr
-                .split_once(':')
-                .unwrap_or(("127.0.0.1", "8080"));
-
-            let is_all_interfaces = host == "0.0.0.0";
-            let auth_display = if gw_config.api_key.is_empty() || gw_config.api_key.eq_ignore_ascii_case("none") {
-                "免鉴权 (开放模式)".to_string()
-            } else {
-                gw_config.api_key.clone()
-            };
-
-            if let Some(gen_k) = &newly_generated_key {
-                println!("\n💡 [自动生成访问凭证] 检测到未配置 API Key，已自动生成并保存高熵秘钥: {}", gen_k);
-            }
-
-            let strat_name = match gw_config.default_strategy {
-                GatewayRoutingStrategy::Economy => "省钱优先 (0元免费 > Plan套餐 > 缓存命中 > 按量低价)",
-                GatewayRoutingStrategy::Speed => "极速优先 (实测 TTFT + t/s 最优)",
-                GatewayRoutingStrategy::Reliable => "稳定优先 (高可用保障与429避让)",
-                GatewayRoutingStrategy::Balanced => "综合平衡 (成本与响应速度均衡)",
-            };
-
-            println!("\n╔════════════════════════════════════════════════════════════════════════╗");
-            println!("║              🚀 ponyllm AI Gateway 服务已就绪                          ║");
-            println!("╠════════════════════════════════════════════════════════════════════════╣");
-            println!("║  • 配置文件路径:      {:<48} ║", resolved_config.display());
-            println!("║  • 本地接入 Base URL:                                                  ║");
-            if is_all_interfaces {
-                println!("║    - OpenAI 客户端:   http://127.0.0.1:{}/v1 (局域网: http://0.0.0.0:{}/v1)║", p_str, p_str);
-                println!("║    - Anthropic 客户端: http://127.0.0.1:{}    (局域网: http://0.0.0.0:{})   ║", p_str, p_str);
-            } else {
-                println!("║    - OpenAI 客户端:   http://{}:{}/v1                             ║", host, p_str);
-                println!("║    - Anthropic 客户端: http://{}:{}                                ║", host, p_str);
-            }
-            println!("║    - 监听全地址:      http://{}                                     ║", gw_config.bind_addr);
-            println!("║  • 全局调度策略:      {:<48} ║", strat_name);
-            println!("║  • 请求体缓冲上限:    {:<48} ║", format!("{} MB (支持1M长上下文/多模态)", gw_config.request_body_limit / (1024 * 1024)));
-            println!("║  • 访问凭证 (Token):  {}                                   ║", format!("{:<30}", auth_display));
-            println!("║  • 虚拟总代模型:      auto, auto:flagship, auto:economy, auto[1m]     ║");
-            // WEB-01 P1-3: web mount state is ops-visible (absolute dist path +
-            // enabled/dist-hit status) so a CWD-dependent miss is diagnosable.
-            {
-                let dist_abs = std::path::Path::new(&gw_config.web_dist_dir)
-                    .canonicalize()
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_else(|_| format!("{} (缺失)", gw_config.web_dist_dir));
-                let hit = std::path::Path::new(&gw_config.web_dist_dir)
-                    .join("index.html")
-                    .is_file();
-                let web_state = if !gw_config.web_enabled {
-                    format!("已关闭 (--no-web) | {}", dist_abs)
-                } else if hit {
-                    format!("已托管 /app/* | {}", dist_abs)
-                } else {
-                    format!("目录缺失仅告警 | {}", dist_abs)
-                };
-                println!("║  • Web 控制台:        {:<48} ║", web_state.chars().take(44).collect::<String>());
-                tracing::info!(web_enabled = gw_config.web_enabled, web_dist_dir = %dist_abs, dist_hit = hit, "web console mount state");
-            }
-            println!("╠════════════════════════════════════════════════════════════════════════╣");
-            println!("║  • 已挂载模型提供商 (Providers & Pricing):                             ║");
-            for (p_name, p_sec) in &config_file.providers {
-                let pricing_tag = if p_sec.is_free() {
-                    "0元免费".to_string()
-                } else if p_sec.billing_mode == ponyllm_core::pool::BillingMode::Plan {
-                    "Plan套餐".to_string()
-                } else {
-                    format!("入${:.2}/缓${:.3}/出${:.2}", p_sec.input_price, p_sec.cached_price, p_sec.output_price)
-                };
-                let all_models = p_sec.list_all_models();
-                let m_names: Vec<String> = all_models.into_iter().map(|m| {
-                    if m.name == p_sec.default_model {
-                        format!("{} (★默认,{})", m.name, m.tier.shorthand())
-                    } else {
-                        format!("{}({})", m.name, m.tier.shorthand())
-                    }
-                }).collect();
-                println!("║    - {:<10} [{:<8}]: {}", p_name, pricing_tag, m_names.join(", "));
-            }
-            println!("╚════════════════════════════════════════════════════════════════════════╝\n");
-
-            // 声明 pidfile 归属，供 `ponyllm stop/restart` 认领本实例。
-            if let Some(warn) = ponyllm_cli::lifecycle::claim_pidfile(&resolved_config) {
-                eprintln!("{}", warn);
-            }
-            let serve_result = axum::serve(listener, app).await;
-            ponyllm_cli::lifecycle::release_pidfile(&resolved_config);
-            serve_result?;
+                no_web,
+                web_dist_dir,
+                is_web_focused: false,
+                open_browser: false,
+            })
+            .await?;
+        }
+        Commands::Web {
+            config,
+            port,
+            address,
+            bind,
+            api_key,
+            web_dist_dir,
+            open,
+        } => {
+            run_server(ServerOptions {
+                config,
+                bind,
+                address: Some(address),
+                port: Some(port),
+                api_key,
+                retries: None,
+                no_web: false,
+                web_dist_dir,
+                is_web_focused: true,
+                open_browser: open,
+            })
+            .await?;
         }
         Commands::Stop { config } => {
             match ponyllm_cli::lifecycle::stop_serve(config.as_deref()).await {

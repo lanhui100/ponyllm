@@ -105,6 +105,38 @@ pub enum Commands {
         web_dist_dir: Option<String>,
     },
 
+    /// Start gateway service with Web Console focused (default port: 18080)
+    #[command(alias = "ui", alias = "console")]
+    Web {
+        /// Path to configuration file
+        #[arg(short, long)]
+        config: Option<String>,
+
+        /// Override listening port (default: 18080, non-standard high port to avoid conflicts)
+        #[arg(short = 'p', long, default_value_t = 18080)]
+        port: u16,
+
+        /// Override listening address / host (default: 127.0.0.1)
+        #[arg(short = 'a', long, default_value = "127.0.0.1")]
+        address: String,
+
+        /// Override bind address and port directly (e.g. 127.0.0.1:18080)
+        #[arg(short = 'b', long)]
+        bind: Option<String>,
+
+        /// Override gateway access authorization API key / token
+        #[arg(long)]
+        api_key: Option<String>,
+
+        /// Override web console dist directory (default `web/dist`)
+        #[arg(long)]
+        web_dist_dir: Option<String>,
+
+        /// Automatically open web console in default browser
+        #[arg(long)]
+        open: bool,
+    },
+
     /// Stop the gateway process associated with the configuration file (pidfile)
     Stop {
         /// Path to configuration file (must match the one `serve` was started with)
@@ -440,4 +472,46 @@ pub enum ModelCommands {
         #[arg(short, long)]
         config: Option<String>,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_web_subcommand_defaults() {
+        let cli = Cli::parse_from(["ponyllm", "web"]);
+        match cli.command {
+            Commands::Web { port, address, open, .. } => {
+                assert_eq!(port, 18080);
+                assert_eq!(address, "127.0.0.1");
+                assert!(!open);
+            }
+            _ => panic!("expected Commands::Web"),
+        }
+    }
+
+    #[test]
+    fn test_web_subcommand_custom_port() {
+        let cli = Cli::parse_from(["ponyllm", "web", "--port", "19090", "-a", "0.0.0.0"]);
+        match cli.command {
+            Commands::Web { port, address, .. } => {
+                assert_eq!(port, 19090);
+                assert_eq!(address, "0.0.0.0");
+            }
+            _ => panic!("expected Commands::Web"),
+        }
+    }
+
+    #[test]
+    fn test_web_subcommand_aliases_and_open() {
+        let cli = Cli::parse_from(["ponyllm", "ui", "-p", "9999", "--open"]);
+        match cli.command {
+            Commands::Web { port, open, .. } => {
+                assert_eq!(port, 9999);
+                assert!(open);
+            }
+            _ => panic!("expected Commands::Web"),
+        }
+    }
 }

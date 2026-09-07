@@ -90,6 +90,25 @@ fn test_cli_commands_parsing() {
         }
         _ => panic!("Expected Restart command"),
     }
+
+    let web_cli = Cli::try_parse_from(["ponyllm", "web"]).unwrap();
+    match web_cli.command {
+        Commands::Web { port, address, open, .. } => {
+            assert_eq!(port, 18080);
+            assert_eq!(address, "127.0.0.1");
+            assert!(!open);
+        }
+        _ => panic!("Expected Web command"),
+    }
+
+    let web_custom = Cli::try_parse_from(["ponyllm", "web", "-p", "18099", "--open"]).unwrap();
+    match web_custom.command {
+        Commands::Web { port, open, .. } => {
+            assert_eq!(port, 18099);
+            assert!(open);
+        }
+        _ => panic!("Expected Web command"),
+    }
 }
 
 #[test]
@@ -594,5 +613,48 @@ thinking_max = "high"
     assert_eq!(decoded_spec.resolve(Some(ReasoningEffort::Off)), ReasoningEffort::Off);
 }
 
+#[tokio::test]
+async fn test_web_subcommand_full_launch_lifecycle() {
+    let port = 18987;
+    let dir = tempfile::tempdir().unwrap();
+    let cfg_path = dir.path().join("ponyllm.toml");
+    std::fs::write(&cfg_path, "[gateway]\napi_key = \"\"\n").unwrap();
 
+    let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_ponyllm"))
+        .args([
+            "web",
+            "--config",
+            cfg_path.to_str().unwrap(),
+            "--port",
+            &port.to_string(),
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("Failed to spawn ponyllm web");
 
+    let client = reqwest::Client::new();
+    let health_url = format!("http://127.0.0.1:{}/health", port);
+    let app_url = format!("http://127.0.0.1:{}/app/", port);
+    let mut ready = false;
+    for _ in 0..50 {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        if let Ok(resp) = client.get(&health_url).send().await {
+            if resp.status().is_success() {
+                ready = true;
+                break;
+            }
+        }
+    }
+    assert!(ready, "Server failed to start on port {}", port);
+
+    let app_resp = client.get(&app_url).send().await.expect("Failed to reach /app/");
+    assert!(
+        app_resp.status().is_success() || app_resp.status() == reqwest::StatusCode::SERVICE_UNAVAILABLE,
+        "unexpected status: {}",
+        app_resp.status()
+    );
+
+    let _ = cmd.kill();
+    let _ = cmd.wait();
+}
