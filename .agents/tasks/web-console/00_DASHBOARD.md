@@ -4,7 +4,7 @@
 - Name: web-console
 - Owner: 待定
 - Current Stage: M1 脚手架
-- Updated At: 2026-09-06
+- Updated At: 2026-09-07
 
 ## Goals
 1. TUI/CLI 能力 Web 化，8 页可测

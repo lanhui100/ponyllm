@@ -8,7 +8,7 @@ Vite 8 新构建链、Oxlint 替代 ESLint、serve 内嵌 dist 三事无统一�
 
 ## Proposal
 
-将锁定 `oxlint --deny-warnings` 加 `oxfmt --check` 为秒级门禁，`vue-tsc` 为类型门禁，Playwright 覆盖 connect→dashboard→recorder 主链路，Lighthouse 阈值 90。`serve` 内嵌 `web/dist` 并 SPA fallback 到 `/app/*`，缺 dist 时 serve 不崩仅告警。
+将锁定 `oxlint --deny-warnings` 为秒级门禁（oxfmt 本卡弃用：从门禁删除，避免双轨脱节），`vue-tsc` 为类型门禁，三命令（lint/typecheck/test）在任务卡、`web/package.json` scripts、CI web job、pre-push 同字。Playwright 主链路 3 用例（connect→dashboard→recorder）归 WEB-02，不在 WEB-01；WEB-01 守卫测试用 vitest（Windows 免浏览器下载）。Lighthouse 阈值 90 移出 M1（空壳测 90 无意义，实页优化专项另卡）。`serve` 内嵌 `web/dist` 并 SPA fallback 到 `/app/*`（Vite `base: '/app/'` 锁定），缺 dist 时 serve 不崩仅告警（固定文案 `[web] web/dist 缺失` + `/app/*` 定态 503 + 退出码 0），`--no-web` 可关闭。
 
 ## Alternatives considered
 
@@ -18,9 +18,10 @@ Vite 8 新构建链、Oxlint 替代 ESLint、serve 内嵌 dist 三事无统一�
 
 ## Acceptance criteria
 
-- `pnpm --dir web lint` 与 `pnpm --dir web typecheck` 双绿，CI 与 pre-push 同命令。
-- Playwright 主链路 3 用例全绿，Lighthouse 报告归档至 review。
-- 无 dist 启动 `serve` 仍可转发，告警文案可用 review 演示。
+- `pnpm --dir web lint`、`pnpm --dir web typecheck`、`pnpm --dir web test` 三绿，CI web job 与 pre-push 同命令。
+- serve 托管集成测试 `cargo test -p ponyllm-server --test web_hosting` 全绿（有/无 dist 各一条 curl 断言 + `/v1/models` 不被吞断言）。
+- 无 dist 启动 `serve` 退出码 0 仍可转发，固定告警文案 `[web] web/dist 缺失` 可 grep。
+- Playwright 主链路 3 用例归 WEB-02；Lighthouse 90 移出 M1 另卡。
 
 ## Risks
 

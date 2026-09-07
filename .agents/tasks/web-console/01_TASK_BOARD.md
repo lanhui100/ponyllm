@@ -5,10 +5,10 @@
 - WEB-03 Admin API契约
 
 ## Ready
-- WEB-01 脚手架与Shell
+- 无
 
 ## In Progress
-- 无（上限2）
+- WEB-01 脚手架与Shell
 
 ## Review
 - 无（上限3）

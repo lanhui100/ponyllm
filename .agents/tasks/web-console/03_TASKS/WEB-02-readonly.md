@@ -22,6 +22,7 @@
 1. metrics 1.5s 轮询与 SSE 双链路可降级。
 2. 录波脱敏单测绿，全 Key 为 `sk-***`。
 3. DOWN 置灰加重试可用 review 演示。
+4. Playwright 主链路 3 用例（connect→dashboard→recorder）全绿（自 WEB-01 延后承接，CI web job 同命令）。
 
 ## Current Progress
 - 待 WEB-01。
