@@ -1,9 +1,9 @@
 import { defineConfig } from 'vite';
 import vue from '@vitejs/plugin-vue';
 
-// WEB-01: base locked to '/app/' (serve mounts web/dist under /app/*, ADR-ia-and-stack).
+// Web console hosted at root '/' (and backwards compatible with '/app/').
 export default defineConfig({
-  base: '/app/',
+  base: '/',
   plugins: [vue()],
   server: {
     port: 5173,

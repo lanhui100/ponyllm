@@ -135,9 +135,10 @@ pub fn create_app(state: Arc<AppState>) -> Router {
 fn build_web_router(web_enabled: bool, web_dist_dir: &str) -> Router<Arc<AppState>> {
     if !web_enabled {
         return Router::new()
-            .route("/app", get(web_disabled))
-            .route("/app/", get(web_disabled))
-            .route("/app/{*path}", get(web_disabled));
+            .route("/", axum::routing::get(web_disabled))
+            .route("/app", axum::routing::get(web_disabled))
+            .route("/app/", axum::routing::get(web_disabled))
+            .route("/app/{*path}", axum::routing::get(web_disabled));
     }
     let dist = std::path::Path::new(web_dist_dir);
     let index = dist.join("index.html");
@@ -145,17 +146,28 @@ fn build_web_router(web_enabled: bool, web_dist_dir: &str) -> Router<Arc<AppStat
         tracing::warn!("{}", WEB_DIST_MISSING_WARN);
         eprintln!("{}", WEB_DIST_MISSING_WARN);
         return Router::new()
-            .route("/app", get(web_unavailable))
-            .route("/app/", get(web_unavailable))
-            .route("/app/{*path}", get(web_unavailable));
+            .route("/", axum::routing::get(web_unavailable))
+            .route("/app", axum::routing::get(web_unavailable))
+            .route("/app/", axum::routing::get(web_unavailable))
+            .route("/app/{*path}", axum::routing::get(web_unavailable));
     }
     let serve = ServeDir::new(web_dist_dir)
         .append_index_html_on_directories(false)
-        .fallback(ServeFile::new(index));
-    // NOTE: no explicit `/app` route: `nest_service("/app", ..)` owns the
-    // prefix (axum panics on duplicate registration). Bare-prefix behavior is
-    // asserted in web_hosting_tests (documents the ServeDir+fallback truth).
-    Router::new().nest_service("/app", serve)
+        .fallback(ServeFile::new(index.clone()));
+
+    let assets_dir = dist.join("assets");
+    let mut router = Router::new()
+        .route("/", axum::routing::get_service(ServeFile::new(index.clone())))
+        .route("/connect", axum::routing::get_service(ServeFile::new(index.clone())))
+        .route("/dashboard", axum::routing::get_service(ServeFile::new(index.clone())))
+        .route("/recorder", axum::routing::get_service(ServeFile::new(index.clone())))
+        .route("/governance", axum::routing::get_service(ServeFile::new(index.clone())))
+        .nest_service("/app", serve);
+
+    if assets_dir.is_dir() {
+        router = router.nest_service("/assets", ServeDir::new(assets_dir));
+    }
+    router
 }
 
 async fn web_disabled() -> impl IntoResponse {

@@ -151,3 +151,19 @@ describe('header + storage contract (WEB-01 acceptance 6)', () => {
     delete w.__PONY_BASE__;
   });
 });
+
+describe('URL token direct authorization', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+  });
+
+  it('router navigation with ?token= extracts token and cleans query', async () => {
+    const session = useSessionStore();
+    expect(session.token).toBe('');
+    await router.push('/?token=my-secret-token');
+    expect(session.token).toBe('my-secret-token');
+    expect(router.currentRoute.value.path).toBe('/dashboard');
+    expect(router.currentRoute.value.query.token).toBeUndefined();
+  });
+});
+

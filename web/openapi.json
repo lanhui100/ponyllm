@@ -10,7 +10,7 @@
       "name": "MIT OR Apache-2.0",
       "identifier": "MIT OR Apache-2.0"
     },
-    "version": "0.2.26"
+    "version": "0.2.27"
   },
   "paths": {
     "/api/admin/auth/rotate": {
@@ -133,6 +133,25 @@
       }
     },
     "/api/admin/models": {
+      "get": {
+        "tags": [],
+        "operationId": "handle_admin_models",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ModelView"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
       "post": {
         "tags": [],
         "operationId": "handle_admin_create_model",

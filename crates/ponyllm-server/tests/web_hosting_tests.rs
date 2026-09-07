@@ -65,6 +65,18 @@ async fn web_hosting_serves_spa_and_keeps_api_priority() {
     let body = deep.text().await.unwrap();
     assert!(body.contains("pony console"));
 
+    // Root direct access (http://127.0.0.1:port/) serves index.html directly.
+    for root_path in ["/", "/dashboard", "/connect", "/recorder", "/governance"] {
+        let resp = client
+            .get(format!("http://{}{}", addr, root_path))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200, "Path {} failed to return 200", root_path);
+        let r_body = resp.text().await.unwrap();
+        assert!(r_body.contains("pony console"));
+    }
+
     // Real asset keeps its content-type.
     let asset = client
         .get(format!("http://{}/app/app.js", addr))

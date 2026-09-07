@@ -101,8 +101,8 @@ async function handleCreateKey(payload: any) {
       <!-- 顶部标题与概要信息 -->
       <div class="header-row">
         <div>
-          <h1 class="page-title">资源配置治理中心</h1>
-          <p class="page-desc">动态管理服务商、模型字典、密钥池与全局分流策略</p>
+          <h1 class="page-title">模型管理中心</h1>
+          <p class="page-desc">动态管理模型、服务商、密钥池与全局分流策略</p>
         </div>
 
         <div class="header-stats">

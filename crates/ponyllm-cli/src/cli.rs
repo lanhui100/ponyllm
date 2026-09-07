@@ -132,8 +132,12 @@ pub enum Commands {
         #[arg(long)]
         web_dist_dir: Option<String>,
 
-        /// Automatically open web console in default browser
+        /// Do not automatically open web console in default browser
         #[arg(long)]
+        no_open: bool,
+
+        /// Automatically open web console in default browser (kept for backwards compatibility)
+        #[arg(long, conflicts_with = "no_open", hide = true)]
         open: bool,
     },
 
@@ -482,10 +486,10 @@ mod tests {
     fn test_web_subcommand_defaults() {
         let cli = Cli::parse_from(["ponyllm", "web"]);
         match cli.command {
-            Commands::Web { port, address, open, .. } => {
+            Commands::Web { port, address, no_open, .. } => {
                 assert_eq!(port, 18080);
                 assert_eq!(address, "127.0.0.1");
-                assert!(!open);
+                assert!(!no_open);
             }
             _ => panic!("expected Commands::Web"),
         }

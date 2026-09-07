@@ -12,12 +12,18 @@ const routes: RouteRecordRaw[] = [
   { path: '/dashboard', component: () => import('./views/DashboardView.vue'), meta: { requiresAuth: true } },
   { path: '/recorder', component: () => import('./views/RecorderView.vue'), meta: { requiresAuth: true } },
   { path: '/governance', component: () => import('./views/GovernanceView.vue'), meta: { requiresAuth: true } },
+  // Backward compatibility routes for legacy /app/* prefix
+  { path: '/app', redirect: '/dashboard' },
+  { path: '/app/dashboard', redirect: '/dashboard' },
+  { path: '/app/recorder', redirect: '/recorder' },
+  { path: '/app/governance', redirect: '/governance' },
+  { path: '/app/connect', redirect: '/connect' },
   { path: '/:pathMatch(.*)*', component: NotFound },
 ];
 
 export const router = createRouter({
-  // Served under /app/* (vite base '/app/'): history base must match.
-  history: createWebHistory('/app/'),
+  // Root path hosting (with backwards-compatible redirect for /app/*)
+  history: createWebHistory('/'),
   routes,
 });
 
@@ -73,6 +79,22 @@ export async function probeOpenMode(): Promise<boolean> {
 
 router.beforeEach(async (to) => {
   const session = useSessionStore();
+
+  // 检查 URL 是否携带 token 或 key 参数实现直接授权直达
+  const rawToken = (to.query.token || to.query.key) as string | undefined;
+  if (rawToken && typeof rawToken === 'string' && rawToken.trim() !== '') {
+    session.login(rawToken.trim());
+    const nextQuery = { ...to.query };
+    delete nextQuery.token;
+    delete nextQuery.key;
+    const targetPath = to.path === '/connect' || to.path === '/' || to.path === '/app' ? '/dashboard' : to.path;
+    return {
+      path: targetPath,
+      query: nextQuery,
+      replace: true,
+    };
+  }
+
   // Single-sourced on route meta (P1-2): adding a page with
   // `meta: { requiresAuth: true }` is automatically guarded; forgetting the
   // meta is the only way to bypass, and it is visible in the route table.

@@ -641,6 +641,29 @@ pub async fn handle_admin_provider_models(
     Json(views).into_response()
 }
 
+#[utoipa::path(get, path = "/api/admin/models", responses((status = 200, body = [ModelView])))]
+pub async fn handle_admin_models(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let cfg = state.config.read();
+    let mut views: Vec<ModelView> = Vec::new();
+    let mut providers_sorted: Vec<_> = cfg.providers.values().collect();
+    providers_sorted.sort_by_key(|p| &p.base_url);
+    for p in providers_sorted {
+        for m in &p.model_specs {
+            let spec = m.thinking_spec();
+            let effective_default = spec.resolve(None);
+            views.push(ModelView {
+                name: m.name.clone(),
+                tier: format!("{:?}", m.tier),
+                context_window: m.context_window.clone(),
+                protocol: m.protocol.as_ref().map(|proto| format!("{proto:?}")),
+                thinking_default: format!("{effective_default:?}"),
+                thinking_max: format!("{:?}", spec.max_effort),
+            });
+        }
+    }
+    Json(views).into_response()
+}
+
 #[utoipa::path(post, path = "/api/admin/models", request_body = CreateModelPayload, responses((status = 201, body = ModelView)))]
 pub async fn handle_admin_create_model(
     State(state): State<Arc<AppState>>,
@@ -1446,6 +1469,7 @@ pub async fn handle_admin_auth_rotate(State(state): State<Arc<AppState>>) -> imp
         handle_admin_create_provider,
         handle_admin_delete_provider,
         handle_admin_provider_models,
+        handle_admin_models,
         handle_admin_create_model,
         handle_admin_update_model,
         handle_admin_delete_model,
@@ -1495,7 +1519,7 @@ pub fn admin_routes() -> axum::Router<Arc<AppState>> {
         )
         .route(
             "/api/admin/models",
-            post(handle_admin_create_model),
+            get(handle_admin_models).post(handle_admin_create_model),
         )
         .route(
             "/api/admin/models/{name}",

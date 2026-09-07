@@ -261,7 +261,13 @@ async fn run_server(opts: ServerOptions) -> Result<(), Box<dyn std::error::Error
 
     let is_all_interfaces = host == "0.0.0.0";
     let probe_host = if is_all_interfaces { "127.0.0.1" } else { host };
-    let web_url = format!("http://{}:{}/app/", probe_host, p_str);
+    let has_token = !gw_config.api_key.is_empty() && !gw_config.api_key.eq_ignore_ascii_case("none");
+    let web_base_url = format!("http://{}:{}/", probe_host, p_str);
+    let web_direct_url = if has_token {
+        format!("http://{}:{}/?token={}", probe_host, p_str, gw_config.api_key)
+    } else {
+        web_base_url.clone()
+    };
 
     let auth_display = if gw_config.api_key.is_empty() || gw_config.api_key.eq_ignore_ascii_case("none") {
         "免鉴权 (开放模式)".to_string()
@@ -292,7 +298,7 @@ async fn run_server(opts: ServerOptions) -> Result<(), Box<dyn std::error::Error
     let web_state = if !gw_config.web_enabled {
         format!("已关闭 (--no-web) | {}", dist_abs)
     } else if hit {
-        format!("已托管 /app/* | {}", dist_abs)
+        format!("已托管 /* + /app/* | {}", dist_abs)
     } else {
         format!("目录缺失仅告警 | {}", dist_abs)
     };
@@ -302,9 +308,8 @@ async fn run_server(opts: ServerOptions) -> Result<(), Box<dyn std::error::Error
         println!("\n╔════════════════════════════════════════════════════════════════════════╗");
         println!("║              🌐 ponyllm Web 控制台服务已就绪                           ║");
         println!("╠════════════════════════════════════════════════════════════════════════╣");
-        println!("║  👉 控制台入口:       {:<48} ║", web_url);
-        println!("║  🔑 访问凭证 (Token): {:<48} ║", auth_display);
-        println!("╠════════════════════════════════════════════════════════════════════════╣");
+        println!("║  • 控制台根路径:      {:<48} ║", web_base_url);
+        println!("║  • 访问凭证 (Token):  {:<48} ║", auth_display);
         println!("║  • 监听地址:          {:<48} ║", gw_config.bind_addr);
         println!("║  • API 接入点:        {:<48} ║", format!("http://{}:{}/v1", probe_host, p_str));
         println!("║  • 全局调度策略:      {:<48} ║", strat_name);
@@ -330,7 +335,14 @@ async fn run_server(opts: ServerOptions) -> Result<(), Box<dyn std::error::Error
             }).collect();
             println!("║    - {:<10} [{:<8}]: {}", p_name, pricing_tag, m_names.join(", "));
         }
-        println!("╚════════════════════════════════════════════════════════════════════════╝\n");
+        println!("╚════════════════════════════════════════════════════════════════════════╝");
+        if has_token {
+            println!("\n👉 控制台免密授权直达链接 (Ctrl+点击直接在浏览器打开):");
+            println!("   \x1b[4;36m{}\x1b[0m\n", web_direct_url);
+        } else {
+            println!("\n👉 控制台直达链接 (Ctrl+点击直接在浏览器打开):");
+            println!("   \x1b[4;36m{}\x1b[0m\n", web_base_url);
+        }
     } else {
         println!("\n╔════════════════════════════════════════════════════════════════════════╗");
         println!("║              🚀 ponyllm AI Gateway 服务已就绪                          ║");
@@ -374,8 +386,8 @@ async fn run_server(opts: ServerOptions) -> Result<(), Box<dyn std::error::Error
     }
 
     if opts.open_browser {
-        println!("🚀 正在自动在默认浏览器中打开 Web 控制台: {}", web_url);
-        open_in_browser(&web_url);
+        println!("🚀 正在自动在默认浏览器中打开 Web 控制台: {}", web_direct_url);
+        open_in_browser(&web_direct_url);
     }
 
     // 声明 pidfile 归属，供 `ponyllm stop/restart` 认领本实例。
@@ -857,7 +869,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             bind,
             api_key,
             web_dist_dir,
-            open,
+            no_open,
+            open: _,
         } => {
             run_server(ServerOptions {
                 config,
@@ -869,7 +882,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 no_web: false,
                 web_dist_dir,
                 is_web_focused: true,
-                open_browser: open,
+                open_browser: !no_open,
             })
             .await?;
         }

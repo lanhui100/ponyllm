@@ -51,6 +51,10 @@ pub fn resolve_config_path_from(explicit: Option<&Path>, cwd: Option<&Path>) -> 
         if dot.is_file() {
             return dot;
         }
+        let plain = user_home.join("ponyllm.toml");
+        if plain.is_file() {
+            return plain;
+        }
     }
 
     // 5. Default fallback to CWD / "ponyllm.toml"

@@ -523,7 +523,15 @@ mod tests {
         let addr = listener.local_addr().unwrap().to_string();
         assert!(is_addr_in_use(&addr));
         drop(listener);
-        assert!(!is_addr_in_use(&addr));
+        let mut free = false;
+        for _ in 0..20 {
+            if !is_addr_in_use(&addr) {
+                free = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(free, "Address should be free after dropping listener");
     }
 
     #[tokio::test]

@@ -18,13 +18,13 @@ function handleLogout() {
       <span class="brand">PonyLLM Console</span>
       <nav class="nav-links">
         <router-link to="/dashboard" :class="{ active: route.path === '/dashboard' }">
-          可观测大盘
+          Dashboard
         </router-link>
         <router-link to="/recorder" :class="{ active: route.path === '/recorder' }">
-          黑匣子录波
+          可观测性
         </router-link>
         <router-link to="/governance" :class="{ active: route.path === '/governance' }">
-          配置治理
+          模型管理
         </router-link>
       </nav>
     </div>

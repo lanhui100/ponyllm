@@ -93,19 +93,28 @@ fn test_cli_commands_parsing() {
 
     let web_cli = Cli::try_parse_from(["ponyllm", "web"]).unwrap();
     match web_cli.command {
-        Commands::Web { port, address, open, .. } => {
+        Commands::Web { port, address, no_open, .. } => {
             assert_eq!(port, 18080);
             assert_eq!(address, "127.0.0.1");
-            assert!(!open);
+            assert!(!no_open);
         }
         _ => panic!("Expected Web command"),
     }
 
     let web_custom = Cli::try_parse_from(["ponyllm", "web", "-p", "18099", "--open"]).unwrap();
     match web_custom.command {
-        Commands::Web { port, open, .. } => {
+        Commands::Web { port, open, no_open, .. } => {
             assert_eq!(port, 18099);
             assert!(open);
+            assert!(!no_open);
+        }
+        _ => panic!("Expected Web command"),
+    }
+
+    let web_no_open = Cli::try_parse_from(["ponyllm", "web", "--no-open"]).unwrap();
+    match web_no_open.command {
+        Commands::Web { no_open, .. } => {
+            assert!(no_open);
         }
         _ => panic!("Expected Web command"),
     }

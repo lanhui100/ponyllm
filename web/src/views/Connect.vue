@@ -28,6 +28,12 @@ const router = useRouter();
 const session = useSessionStore();
 
 onMounted(async () => {
+  const qToken = (route.query.token || route.query.key) as string | undefined;
+  if (qToken && typeof qToken === 'string' && qToken.trim() !== '') {
+    input.value = qToken.trim();
+    await submit();
+    return;
+  }
   openMode.value = await probeOpenMode().catch(() => false);
 });
 
