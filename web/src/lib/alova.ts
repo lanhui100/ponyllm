@@ -30,6 +30,30 @@ export function isUnauthorized(error: unknown): boolean {
   return error instanceof UnauthorizedError;
 }
 
+export class PreconditionFailedError extends Error {
+  readonly status = 412;
+  constructor(message = 'precondition_failed') {
+    super(message);
+    this.name = 'PreconditionFailedError';
+  }
+}
+
+export function isPreconditionFailed(error: unknown): boolean {
+  return error instanceof PreconditionFailedError;
+}
+
+export class AdminWriteDisabledError extends Error {
+  readonly status = 404;
+  constructor(message = 'admin_write_disabled') {
+    super(message);
+    this.name = 'AdminWriteDisabledError';
+  }
+}
+
+export function isAdminWriteDisabled(error: unknown): boolean {
+  return error instanceof AdminWriteDisabledError;
+}
+
 // 401 single-flight callback: set by the router so alova never imports vue-router
 // (no cycle). First 401 claims it; later concurrent 401s are dropped.
 let onFirstUnauthorized: (() => void) | null = null;
@@ -65,10 +89,20 @@ export const alova = createAlova({
     Object.assign(method.config.headers ??= {}, authHeaders(session.token));
   },
   responded: {
-    onSuccess(response: globalThis.Response, _method: Method) {
+    async onSuccess(response: globalThis.Response, _method: Method) {
       if (response.status === 401) {
         handleUnauthorizedResponse();
         throw new UnauthorizedError();
+      }
+      if (response.status === 412) {
+        throw new PreconditionFailedError();
+      }
+      if (!response.ok) {
+        const errJson = await response.json().catch(() => ({}));
+        if (response.status === 404 && errJson?.error?.code === 'admin_write_disabled') {
+          throw new AdminWriteDisabledError();
+        }
+        throw new Error(errJson?.error?.message || `HTTP ${response.status}`);
       }
       // JSON-only success bodies in the M1 shell (documented assumption;
       // stream/non-JSON endpoints get their own alova instance in WEB-02+).

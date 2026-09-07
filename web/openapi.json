@@ -716,9 +716,13 @@
           "keys_active",
           "strategy",
           "hot_reload_ms",
+          "admin_write_enabled",
           "config_version"
         ],
         "properties": {
+          "admin_write_enabled": {
+            "type": "boolean"
+          },
           "auth_mode": {
             "type": "string"
           },
@@ -840,9 +844,13 @@
           "uptime_seconds",
           "bind",
           "web_enabled",
+          "admin_write_enabled",
           "config_version"
         ],
         "properties": {
+          "admin_write_enabled": {
+            "type": "boolean"
+          },
           "bind": {
             "type": "string"
           },

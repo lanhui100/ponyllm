@@ -25,6 +25,7 @@ describe('WEB-02 End-to-End User Flow (Connect -> Dashboard -> Recorder)', () =>
         { path: '/connect', component: ConnectView },
         { path: '/dashboard', component: DashboardView },
         { path: '/recorder', component: RecorderView },
+        { path: '/governance', component: { template: '<div>gov</div>' } },
       ],
     });
     container = document.createElement('div');

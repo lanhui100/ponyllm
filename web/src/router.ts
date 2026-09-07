@@ -11,6 +11,7 @@ const routes: RouteRecordRaw[] = [
   { path: '/connect', component: ConnectView },
   { path: '/dashboard', component: () => import('./views/DashboardView.vue'), meta: { requiresAuth: true } },
   { path: '/recorder', component: () => import('./views/RecorderView.vue'), meta: { requiresAuth: true } },
+  { path: '/governance', component: () => import('./views/GovernanceView.vue'), meta: { requiresAuth: true } },
   { path: '/:pathMatch(.*)*', component: NotFound },
 ];
 

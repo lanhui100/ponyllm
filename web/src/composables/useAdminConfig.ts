@@ -1,0 +1,231 @@
+import { ref, computed, onMounted, getCurrentInstance } from 'vue';
+import { adminApi } from '../lib/adminApi';
+import { isPreconditionFailed } from '../lib/alova';
+import type {
+  OverviewView,
+  ServiceStatusView,
+  ProviderView,
+  ModelView,
+  KeyView,
+  KeyTestView,
+  CreateProviderPayload,
+  CreateModelPayload,
+  UpdateModelPayload,
+  CreateKeyPayload,
+  CreateKeyResponse,
+} from '../types/admin';
+
+export interface UseAdminConfigOptions {
+  autoFetch?: boolean;
+}
+
+export function useAdminConfig(options: UseAdminConfigOptions = {}) {
+  const { autoFetch = true } = options;
+
+  const overview = ref<OverviewView | null>(null);
+  const serviceStatus = ref<ServiceStatusView | null>(null);
+  const providers = ref<ProviderView[]>([]);
+  const models = ref<ModelView[]>([]);
+  const keys = ref<KeyView[]>([]);
+  const strategy = ref<string>('economy');
+  const configVersion = ref<number>(0);
+  const loading = ref<boolean>(false);
+  const error = ref<string | null>(null);
+
+  const conflictDetected = ref<boolean>(false);
+  const createdKeyResult = ref<CreateKeyResponse | null>(null);
+  const keyTestResults = ref<Record<string, KeyTestView>>({});
+  const testingKeyIds = ref<Set<string>>(new Set());
+  const batchTesting = ref<{ running: boolean; current: number; total: number }>({
+    running: false,
+    current: 0,
+    total: 0,
+  });
+
+  const adminWriteEnabled = computed(() => {
+    if (overview.value !== null) {
+      return overview.value.admin_write_enabled;
+    }
+    if (serviceStatus.value !== null) {
+      return serviceStatus.value.admin_write_enabled;
+    }
+    return false;
+  });
+
+  async function fetchAll(): Promise<void> {
+    loading.value = true;
+    error.value = null;
+    try {
+      const [ov, pv, mv, kv, st] = await Promise.all([
+        adminApi.getOverview().send(),
+        adminApi.getProviders().send(),
+        adminApi.getModels().send(),
+        adminApi.getKeys().send(),
+        adminApi.getStrategy().send(),
+      ]);
+
+      overview.value = ov;
+      providers.value = pv;
+      models.value = mv;
+      keys.value = kv;
+      strategy.value = st.strategy;
+      configVersion.value = ov.config_version;
+    } catch (err: unknown) {
+      error.value = err instanceof Error ? err.message : String(err);
+      throw err;
+    } finally {
+      loading.value = false;
+    }
+  }
+
+  async function runWithConflictCheck<T>(fn: () => Promise<T>): Promise<T> {
+    try {
+      return await fn();
+    } catch (err: unknown) {
+      if (isPreconditionFailed(err)) {
+        conflictDetected.value = true;
+      }
+      throw err;
+    }
+  }
+
+  async function saveProvider(payload: CreateProviderPayload): Promise<ProviderView> {
+    return runWithConflictCheck(async () => {
+      const res = await adminApi.createProvider(payload, configVersion.value).send();
+      await fetchAll();
+      return res;
+    });
+  }
+
+  async function removeProvider(name: string): Promise<void> {
+    return runWithConflictCheck(async () => {
+      await adminApi.deleteProvider(name, configVersion.value).send();
+      await fetchAll();
+    });
+  }
+
+  async function saveModel(payload: CreateModelPayload): Promise<ModelView> {
+    return runWithConflictCheck(async () => {
+      const res = await adminApi.createModel(payload, configVersion.value).send();
+      await fetchAll();
+      return res;
+    });
+  }
+
+  async function editModel(name: string, payload: UpdateModelPayload): Promise<ModelView> {
+    return runWithConflictCheck(async () => {
+      const res = await adminApi.updateModel(name, payload, configVersion.value).send();
+      await fetchAll();
+      return res;
+    });
+  }
+
+  async function removeModel(name: string): Promise<void> {
+    return runWithConflictCheck(async () => {
+      await adminApi.deleteModel(name, configVersion.value).send();
+      await fetchAll();
+    });
+  }
+
+  async function addKey(payload: CreateKeyPayload): Promise<CreateKeyResponse> {
+    return runWithConflictCheck(async () => {
+      const res = await adminApi.createKey(payload, configVersion.value).send();
+      createdKeyResult.value = res;
+      configVersion.value = res.config_version;
+      const refreshedKeys = await adminApi.getKeys().send();
+      keys.value = refreshedKeys;
+      return res;
+    });
+  }
+
+  async function removeKey(id: string): Promise<void> {
+    return runWithConflictCheck(async () => {
+      await adminApi.deleteKey(id, configVersion.value).send();
+      await fetchAll();
+    });
+  }
+
+  async function testSingleKey(id: string): Promise<KeyTestView> {
+    testingKeyIds.value.add(id);
+    try {
+      const res = await adminApi.testKey(id).send();
+      keyTestResults.value[id] = res;
+      return res;
+    } finally {
+      testingKeyIds.value.delete(id);
+    }
+  }
+
+  async function batchTestAllKeys(): Promise<void> {
+    const list = keys.value;
+    if (list.length === 0) return;
+
+    batchTesting.value = {
+      running: true,
+      current: 0,
+      total: list.length,
+    };
+
+    try {
+      for (const k of list) {
+        await testSingleKey(k.id);
+        batchTesting.value.current += 1;
+      }
+    } finally {
+      batchTesting.value.running = false;
+    }
+  }
+
+  async function saveStrategy(newStrategy: string): Promise<void> {
+    return runWithConflictCheck(async () => {
+      const res = await adminApi.updateStrategy({ strategy: newStrategy }, configVersion.value).send();
+      strategy.value = res.strategy;
+      configVersion.value = res.config_version;
+    });
+  }
+
+  function clearConflict(): void {
+    conflictDetected.value = false;
+  }
+
+  function clearCreatedKeyResult(): void {
+    createdKeyResult.value = null;
+  }
+
+  if (autoFetch && getCurrentInstance()) {
+    onMounted(() => {
+      void fetchAll().catch(() => {});
+    });
+  }
+
+  return {
+    overview,
+    serviceStatus,
+    providers,
+    models,
+    keys,
+    strategy,
+    configVersion,
+    loading,
+    error,
+    adminWriteEnabled,
+    conflictDetected,
+    createdKeyResult,
+    keyTestResults,
+    testingKeyIds,
+    batchTesting,
+    fetchAll,
+    saveProvider,
+    removeProvider,
+    saveModel,
+    editModel,
+    removeModel,
+    addKey,
+    removeKey,
+    testSingleKey,
+    batchTestAllKeys,
+    saveStrategy,
+    clearConflict,
+    clearCreatedKeyResult,
+  };
+}

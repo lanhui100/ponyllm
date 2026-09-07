@@ -40,6 +40,7 @@ pub struct OverviewView {
     pub keys_active: usize,
     pub strategy: String,
     pub hot_reload_ms: u64,
+    pub admin_write_enabled: bool,
     pub config_version: u64,
 }
 
@@ -92,6 +93,7 @@ pub struct ServiceStatusView {
     pub uptime_seconds: u64,
     pub bind: String,
     pub web_enabled: bool,
+    pub admin_write_enabled: bool,
     pub config_version: u64,
 }
 
@@ -424,6 +426,7 @@ pub async fn handle_admin_overview(State(state): State<Arc<AppState>>) -> impl I
         keys_active,
         strategy: cfg.default_strategy.to_string(),
         hot_reload_ms: HOT_RELOAD_MS,
+        admin_write_enabled: cfg.admin_write_enabled,
         config_version: file.config_version,
     })
     .into_response()
@@ -1393,6 +1396,7 @@ pub async fn handle_admin_service_status(State(state): State<Arc<AppState>>) -> 
         uptime_seconds: Instant::now().duration_since(state.started_at).as_secs(),
         bind: bind_of(&state),
         web_enabled: cfg.web_enabled,
+        admin_write_enabled: cfg.admin_write_enabled,
         config_version: file.config_version,
     })
     .into_response()

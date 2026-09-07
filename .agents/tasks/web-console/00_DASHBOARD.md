@@ -3,7 +3,7 @@
 ## Project Info
 - Name: web-console
 - Owner: codex-orchestrator
-- Current Stage: M4 Admin 写路径与治理
+- Current Stage: M5 Web 资源治理与配置管理
 - Updated At: 2026-09-07
 
 ## Goals
@@ -14,7 +14,7 @@
 ## Current Status
 - Most critical task: 无（当前阶段全量任务均已交付归档）
 - Biggest blocker: 无
-- Next smallest action: 分支合入 main 并开启后续阶段任务
+- Next smallest action: 分支合入 main 并更新 Merge 注记
 
 ## Task Overview
 | ID | Title | Status | Priority | Owner | Next Step |

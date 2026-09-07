@@ -23,6 +23,9 @@ function handleLogout() {
         <router-link to="/recorder" :class="{ active: route.path === '/recorder' }">
           黑匣子录波
         </router-link>
+        <router-link to="/governance" :class="{ active: route.path === '/governance' }">
+          配置治理
+        </router-link>
       </nav>
     </div>
 
