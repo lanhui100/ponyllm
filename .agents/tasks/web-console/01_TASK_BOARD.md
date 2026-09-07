@@ -2,13 +2,12 @@
 
 ## Backlog
 - WEB-02 只读大盘与录波
-- WEB-03 Admin API契约
 
 ## Ready
 - 无
 
 ## In Progress
-- 无（上限2）
+- WEB-03 Admin API契约
 
 ## Review
 - 无（上限3）

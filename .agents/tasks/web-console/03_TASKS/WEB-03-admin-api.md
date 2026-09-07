@@ -2,11 +2,12 @@
 
 ## Basic Info
 - ID: WEB-03
-- Status: Backlog
+- Status: In Progress
 - Priority: P0
-- Owner: 待定
+- Owner: codex-orchestrator
 - Created At: 2026-09-06
-- Updated At: 2026-09-06
+- Updated At: 2026-09-07
+- Branch: task/WEB-03-admin-api
 - Estimated Effort: 1周
 - Blocker: 无（阻塞 WEB-04）
 - Unblock Condition: 无
