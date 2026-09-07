@@ -8,6 +8,7 @@
 - Created At: 2026-09-06
 - Updated At: 2026-09-07
 - Branch: task/WEB-02-readonly
+- Merge: 03a2cd0956f58446f35fa9c9619ecad918df5210
 - Estimated Effort: 1周
 - Blocker: 无
 - Unblock Condition: 无（前置 M1 脚手架与 M3 契约均已完成）
