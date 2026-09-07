@@ -3,7 +3,7 @@
 ## Project Info
 - Name: web-console
 - Owner: codex-orchestrator
-- Current Stage: M3 契约（WEB-01 Done）
+- Current Stage: M3 契约
 - Updated At: 2026-09-07
 
 ## Goals
@@ -27,4 +27,4 @@
 - 备查只在 Board Done/Dropped 区（≤5 条，超窗删最旧行）；本面板不链归档 ID，只链 Active。
 
 ## Resume Hint
-- 下次打开：本文件→`01_TASK_BOARD.md`→`03_TASKS/WEB-01-scaffold.md`→跑 WEB-01 Next Action。
+- 下次打开：本文件→`01_TASK_BOARD.md`→`03_TASKS/WEB-03-admin-api.md`→跑 WEB-03 Next Action（双路审核后认领开工）。
