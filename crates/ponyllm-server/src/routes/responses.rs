@@ -168,6 +168,16 @@ pub async fn handle_responses(
         let mut target_req = req.clone();
         target_req.model = physical_model.clone();
 
+        // Clamp max_output_tokens against model's declared max_output
+        {
+            let model_max = ponyllm_core::pool::parse_context_capacity_tokens(&target.max_output);
+            if model_max > 0 {
+                if let Some(ref mut mt) = target_req.max_output_tokens {
+                    *mt = (*mt).min(model_max as u32);
+                }
+            }
+        }
+
         let requested_thinking = header_thinking
             .or(parsed.thinking_override)
             .or_else(|| req.get_reasoning_effort());

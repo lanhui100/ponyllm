@@ -35,6 +35,7 @@ pub struct RoutedTarget {
     pub pricing: PricingConfig,
     pub thinking_spec: ModelThinkingSpec,
     pub input_types: Vec<String>,
+    pub max_output: String,
 }
 
 impl RoutedTarget {
@@ -599,6 +600,7 @@ impl AppState {
                     pricing,
                     thinking_spec,
                     input_types: spec.input_types,
+                    max_output: spec.max_output,
                 });
             }
         }
@@ -626,6 +628,7 @@ impl AppState {
                         pricing,
                         thinking_spec,
                         input_types: spec.input_types,
+                        max_output: spec.max_output,
                     });
                 }
             }
@@ -659,6 +662,7 @@ impl AppState {
                         pricing,
                         thinking_spec,
                         input_types: spec.input_types,
+                        max_output: spec.max_output,
                     });
                 }
             }
@@ -720,6 +724,7 @@ impl AppState {
                     pricing: default_pricing,
                     thinking_spec,
                     input_types: default_spec.input_types,
+                    max_output: default_spec.max_output,
                 });
             }
             for m in &p_cfg.models {
@@ -744,6 +749,7 @@ impl AppState {
                             pricing: m_pricing,
                             thinking_spec,
                             input_types: spec.input_types,
+                            max_output: spec.max_output,
                         });
                     }
                 }

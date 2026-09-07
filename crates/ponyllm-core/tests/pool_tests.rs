@@ -89,11 +89,53 @@ fn test_rate_limit_default_cooldown_duration() {
 
     assert_eq!(entry.current_state(), KeyState::CoolingDown);
     let cd_until = entry.stats.cooldown_until.read().unwrap();
-    // Default cooldown should be at least 15 seconds to respect LLM per-minute windows
+    // Default cooldown should be ~3s (base) + jitter, cooperating with downstream retry curves
     let remaining = cd_until.saturating_duration_since(std::time::Instant::now());
     assert!(
-        remaining >= std::time::Duration::from_secs(15),
-        "Expected cooldown >= 15s for LLM rate limits, got {:?}",
+        remaining >= std::time::Duration::from_secs(2) && remaining <= std::time::Duration::from_secs(4),
+        "Expected cooldown ~3s for first 429 (cooperate with downstream 1.5-3s retry), got {:?}",
         remaining
     );
 }
+
+#[test]
+fn test_rate_limit_exponential_backoff_progression() {
+    let entry = ApiKeyEntry::new("k1", "sk-1", 1, 10);
+
+    // First 429: ~3s
+    entry.record_failure(PoolErrorType::RateLimit { retry_after: None });
+    let cd1 = entry.stats.cooldown_until.read().unwrap();
+    let r1 = cd1.saturating_duration_since(std::time::Instant::now());
+    assert!(r1 >= Duration::from_secs(2) && r1 <= Duration::from_secs(4),
+        "1st 429: expected ~3s, got {:?}", r1);
+
+    // Second 429: ~6s
+    entry.record_failure(PoolErrorType::RateLimit { retry_after: None });
+    let cd2 = entry.stats.cooldown_until.read().unwrap();
+    let r2 = cd2.saturating_duration_since(std::time::Instant::now());
+    assert!(r2 >= Duration::from_secs(5) && r2 <= Duration::from_secs(7),
+        "2nd 429: expected ~6s, got {:?}", r2);
+
+    // Third 429: ~12s
+    entry.record_failure(PoolErrorType::RateLimit { retry_after: None });
+    let cd3 = entry.stats.cooldown_until.read().unwrap();
+    let r3 = cd3.saturating_duration_since(std::time::Instant::now());
+    assert!(r3 >= Duration::from_secs(11) && r3 <= Duration::from_secs(13),
+        "3rd 429: expected ~12s, got {:?}", r3);
+}
+
+#[test]
+fn test_rate_limit_cooldown_capped_at_60s() {
+    let entry = ApiKeyEntry::new("k1", "sk-1", 1, 10);
+
+    // Simulate 10 consecutive 429s — should cap at 60s, never exceed
+    for _ in 0..10 {
+        entry.record_failure(PoolErrorType::RateLimit { retry_after: None });
+    }
+
+    let cd = entry.stats.cooldown_until.read().unwrap();
+    let remaining = cd.saturating_duration_since(std::time::Instant::now());
+    assert!(remaining <= Duration::from_secs(61),
+        "Cooldown should cap at 60s, got {:?}", remaining);
+}
+

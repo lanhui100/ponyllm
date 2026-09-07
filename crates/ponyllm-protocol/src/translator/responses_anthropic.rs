@@ -282,7 +282,7 @@ pub fn responses_to_anthropic_request(req: &CreateResponseRequest) -> Result<Mes
     Ok(MessageRequest {
         model: req.model.clone(),
         messages,
-        max_tokens: req.max_output_tokens.unwrap_or(4096),
+        max_tokens: req.max_output_tokens.unwrap_or(16384),
         system: req.instructions.clone().map(AnthropicSystem::Text),
         metadata: None,
         stop_sequences: None,

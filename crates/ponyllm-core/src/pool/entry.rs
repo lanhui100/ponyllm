@@ -110,10 +110,16 @@ impl ApiKeyEntry {
         match err_type {
             PoolErrorType::RateLimit { retry_after } => {
                 let duration = retry_after.unwrap_or_else(|| {
-                    // Exponential backoff with light jitter (base 20s * 2^(consecutive - 1) + jitter, capped at 120s)
+                    // Exponential backoff: 3s × 2^(consecutive-1) + jitter, capped at 60s.
+                    // Progression: 3s → 6s → 12s → 24s → 48s → 60s (cap).
+                    // Short initial cooldown cooperates with downstream tools' retry
+                    // curves (e.g. Claude Code 1.5s → 3s → 6s) — the first retry at
+                    // ~1.5–3s will find the key still cooling, the second at ~3–6s hits
+                    // the unlock window.
                     let base_multiplier = 2u64.saturating_pow((consecutive as u32).saturating_sub(1));
-                    let base_secs = (20u64.saturating_mul(base_multiplier)).min(120);
-                    let jitter_millis = (consecutive as u64 * 37) % 500;
+                    let base_secs = (3u64.saturating_mul(base_multiplier)).min(60);
+                    // Deterministic jitter spread across keys (0–499 ms) to avoid thundering herd
+                    let jitter_millis = (consecutive as u64 * 37 + 13) % 500;
                     Duration::from_millis(base_secs * 1000 + jitter_millis)
                 });
                 *self.stats.cooldown_until.write() = Some(Instant::now() + duration);
@@ -126,8 +132,11 @@ impl ApiKeyEntry {
             }
             PoolErrorType::ServerError | PoolErrorType::NetworkError => {
                 if consecutive >= 3 {
-                    // Temporarily cooldown for 10s after 3 consecutive failures
-                    *self.stats.cooldown_until.write() = Some(Instant::now() + Duration::from_secs(10));
+                    // Progressive cooldown: 1s × 2^(consecutive-3), capped at 30s.
+                    // Starts only after 3 consecutive failures to avoid penalizing transient blips.
+                    let exp = (consecutive as u32).saturating_sub(3);
+                    let secs = (1u64.saturating_mul(2u64.saturating_pow(exp))).min(30);
+                    *self.stats.cooldown_until.write() = Some(Instant::now() + Duration::from_secs(secs));
                 }
             }
         }

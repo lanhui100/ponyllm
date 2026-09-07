@@ -189,7 +189,7 @@ pub fn chat_to_anthropic_request(req: &ChatCompletionRequest) -> Result<MessageR
     let max_tokens = req
         .max_completion_tokens
         .or(req.max_tokens)
-        .unwrap_or(4096);
+        .unwrap_or(16384);
 
     let stop_sequences = req.stop.as_ref().map(|s| match s {
         StopCondition::Single(st) => vec![st.clone()],
