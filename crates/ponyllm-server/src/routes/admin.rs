@@ -78,6 +78,11 @@ pub struct StrategyView {
     pub config_version: u64,
 }
 
+#[derive(Debug, serde::Deserialize, ToSchema)]
+pub struct PutStrategyPayload {
+    pub strategy: String,
+}
+
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ServiceStatusView {
     pub uptime_seconds: u64,
@@ -113,9 +118,10 @@ fn load_store_config(state: &AppState) -> Result<ConfigFile, axum::response::Res
             .into_response()
     })?;
     store.load().map_err(|e| {
+        tracing::error!(%e, "config store load failed");
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": {"message": format!("config store load failed: {e}"), "code": "admin_store_load_failed"}})),
+            Json(json!({"error": {"message": "config store load failed", "code": "admin_store_load_failed"}})),
         )
             .into_response()
     })
@@ -131,9 +137,10 @@ fn save_store_config(state: &AppState, cfg: &mut ConfigFile) -> Result<u64, axum
     })?;
     cfg.config_version += 1;
     store.save(cfg).map_err(|e| {
+        tracing::error!(%e, "config store save failed");
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": {"message": format!("config store save failed: {e}"), "code": "admin_store_save_failed"}})),
+            Json(json!({"error": {"message": "config store save failed", "code": "admin_store_save_failed"}})),
         )
             .into_response()
     })?;
@@ -292,7 +299,7 @@ pub async fn handle_admin_get_strategy(State(state): State<Arc<AppState>>) -> im
     .into_response()
 }
 
-#[utoipa::path(put, path = "/api/admin/strategy", request_body = serde_json::Value, responses((status = 200, body = StrategyView)))]
+#[utoipa::path(put, path = "/api/admin/strategy", request_body = PutStrategyPayload, responses((status = 200, body = StrategyView)))]
 pub async fn handle_admin_put_strategy(
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
@@ -403,6 +410,7 @@ pub async fn handle_admin_auth_rotate(State(state): State<Arc<AppState>>) -> imp
         ModelView,
         KeyView,
         StrategyView,
+        PutStrategyPayload,
         ServiceStatusView,
         RotateView
     ))

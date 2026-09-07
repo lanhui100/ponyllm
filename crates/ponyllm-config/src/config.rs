@@ -469,9 +469,10 @@ impl ConfigFile {
             fs::create_dir_all(parent)?;
         }
         let temp_file_name = format!(
-            ".{}.tmp.{}",
+            ".{}.tmp.{}.{}",
             target_path.file_name().and_then(|f| f.to_str()).unwrap_or("ponyllm"),
-            std::process::id()
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
         );
         let temp_path = parent.join(temp_file_name);
 

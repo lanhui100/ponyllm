@@ -1,0 +1,433 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "ponyllm-server",
+    "description": "Axum HTTP and SSE gateway service for ponyllm",
+    "contact": {
+      "name": "ponyllm team"
+    },
+    "license": {
+      "name": "MIT OR Apache-2.0",
+      "identifier": "MIT OR Apache-2.0"
+    },
+    "version": "0.2.26"
+  },
+  "paths": {
+    "/api/admin/auth/rotate": {
+      "post": {
+        "tags": [],
+        "operationId": "handle_admin_auth_rotate",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RotateView"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/keys": {
+      "get": {
+        "tags": [],
+        "operationId": "handle_admin_keys",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/KeyView"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/overview": {
+      "get": {
+        "tags": [],
+        "operationId": "handle_admin_overview",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OverviewView"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/providers": {
+      "get": {
+        "tags": [],
+        "operationId": "handle_admin_providers",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ProviderView"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/providers/{name}/models": {
+      "get": {
+        "tags": [],
+        "operationId": "handle_admin_provider_models",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ModelView"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/service/status": {
+      "get": {
+        "tags": [],
+        "operationId": "handle_admin_service_status",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServiceStatusView"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/strategy": {
+      "get": {
+        "tags": [],
+        "operationId": "handle_admin_get_strategy",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StrategyView"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [],
+        "operationId": "handle_admin_put_strategy",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PutStrategyPayload"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StrategyView"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "KeyView": {
+        "type": "object",
+        "required": [
+          "provider",
+          "id",
+          "masked_key",
+          "priority",
+          "weight",
+          "state"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "masked_key": {
+            "type": "string"
+          },
+          "priority": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "provider": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string"
+          },
+          "weight": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          }
+        }
+      },
+      "ModelView": {
+        "type": "object",
+        "required": [
+          "name",
+          "tier",
+          "context_window",
+          "thinking_default",
+          "thinking_max"
+        ],
+        "properties": {
+          "context_window": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "protocol": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "thinking_default": {
+            "type": "string"
+          },
+          "thinking_max": {
+            "type": "string"
+          },
+          "tier": {
+            "type": "string"
+          }
+        }
+      },
+      "OverviewView": {
+        "type": "object",
+        "required": [
+          "version",
+          "bind",
+          "auth_mode",
+          "providers",
+          "keys",
+          "keys_active",
+          "strategy",
+          "hot_reload_ms",
+          "config_version"
+        ],
+        "properties": {
+          "auth_mode": {
+            "type": "string"
+          },
+          "bind": {
+            "type": "string"
+          },
+          "config_version": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "hot_reload_ms": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "keys": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "keys_active": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "providers": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "strategy": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          }
+        }
+      },
+      "ProviderView": {
+        "type": "object",
+        "required": [
+          "name",
+          "base_url",
+          "default_model",
+          "strategy",
+          "billing_mode",
+          "input_price",
+          "cached_price",
+          "output_price",
+          "models"
+        ],
+        "properties": {
+          "base_url": {
+            "type": "string"
+          },
+          "billing_mode": {
+            "type": "string"
+          },
+          "cached_price": {
+            "type": "number",
+            "format": "double"
+          },
+          "default_model": {
+            "type": "string"
+          },
+          "input_price": {
+            "type": "number",
+            "format": "double"
+          },
+          "models": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "name": {
+            "type": "string"
+          },
+          "output_price": {
+            "type": "number",
+            "format": "double"
+          },
+          "strategy": {
+            "type": "string"
+          }
+        }
+      },
+      "PutStrategyPayload": {
+        "type": "object",
+        "required": [
+          "strategy"
+        ],
+        "properties": {
+          "strategy": {
+            "type": "string"
+          }
+        }
+      },
+      "RotateView": {
+        "type": "object",
+        "required": [
+          "new_token",
+          "rotated_at",
+          "config_version"
+        ],
+        "properties": {
+          "config_version": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "new_token": {
+            "type": "string"
+          },
+          "rotated_at": {
+            "type": "string"
+          }
+        }
+      },
+      "ServiceStatusView": {
+        "type": "object",
+        "required": [
+          "uptime_seconds",
+          "bind",
+          "web_enabled",
+          "config_version"
+        ],
+        "properties": {
+          "bind": {
+            "type": "string"
+          },
+          "config_version": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "uptime_seconds": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "web_enabled": {
+            "type": "boolean"
+          }
+        }
+      },
+      "StrategyView": {
+        "type": "object",
+        "required": [
+          "strategy",
+          "config_version"
+        ],
+        "properties": {
+          "config_version": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "strategy": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}
