@@ -44,6 +44,10 @@ pub struct GatewaySection {
     /// Defaults to `true`; `--no-web` CLI flag forces `false` (WEB-01).
     #[serde(default = "default_web_enabled")]
     pub web_enabled: bool,
+    /// Directory served as the web console SPA. Relative to the serve working
+    /// directory; absolute paths preferred for services (WEB-01).
+    #[serde(default = "default_web_dist_dir")]
+    pub web_dist_dir: String,
 }
 
 pub fn default_request_body_limit() -> usize {
@@ -61,6 +65,9 @@ fn default_capacity() -> usize {
 }
 fn default_web_enabled() -> bool {
     true
+}
+fn default_web_dist_dir() -> String {
+    "web/dist".to_string()
 }
 pub fn generate_secure_api_key() -> String {
     let raw = uuid::Uuid::new_v4().simple().to_string();
@@ -117,6 +124,7 @@ impl Default for GatewaySection {
             proxy: None,
             use_system_proxy: false,
             web_enabled: true,
+            web_dist_dir: default_web_dist_dir(),
         }
     }
 }

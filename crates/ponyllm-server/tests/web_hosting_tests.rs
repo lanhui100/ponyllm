@@ -101,6 +101,19 @@ async fn web_hosting_serves_spa_and_keeps_api_priority() {
         .await
         .unwrap();
     assert_eq!(escape.status(), 404);
+
+    // Bare prefix paths serve the SPA entry (ServeDir maps the empty remainder
+    // to the directory; append_index(false) 404s and the fallback serves index).
+    for path in ["/app", "/app/"] {
+        let resp = client
+            .get(format!("http://{}{}", addr, path))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200, "path: {path}");
+        let text = resp.text().await.unwrap();
+        assert!(text.contains("pony console"), "path: {path}");
+    }
 }
 
 #[tokio::test]
@@ -114,7 +127,7 @@ async fn web_hosting_missing_dist_is_deterministic_503() {
     .await;
     let client = reqwest::Client::new();
 
-    for path in ["/app", "/app/dashboard"] {
+    for path in ["/app", "/app/", "/app/dashboard"] {
         let resp = client
             .get(format!("http://{}{}", addr, path))
             .send()
@@ -145,7 +158,7 @@ async fn web_hosting_no_web_flag_disables_mount() {
     let addr = spawn_gateway(test_config_with_web(false, "web/dist")).await;
     let client = reqwest::Client::new();
 
-    for path in ["/app", "/app/dashboard"] {
+    for path in ["/app", "/app/", "/app/dashboard"] {
         let resp = client
             .get(format!("http://{}{}", addr, path))
             .send()
@@ -162,4 +175,57 @@ async fn web_hosting_no_web_flag_disables_mount() {
         .await
         .unwrap();
     assert_eq!(health.status(), 200);
+}
+
+/// Secured mode (api_key set): static `/app/*` serves WITHOUT any token while
+/// auth-covered API routes reject tokenless callers with 401. This is the core
+/// "static bypasses auth, API does not" property (reviewer-A missing test 1).
+#[tokio::test]
+async fn web_hosting_secured_static_bypass_but_api_guarded() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_fake_dist(tmp.path());
+    let mut config = test_config_with_web(true, tmp.path().to_str().unwrap());
+    config.api_key = "sk-pony-secured-test".to_string();
+    let addr = spawn_gateway(config).await;
+    let client = reqwest::Client::new();
+
+    // Static: no token, 200.
+    let page = client
+        .get(format!("http://{}/app/dashboard", addr))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(page.status(), 200);
+    let asset = client
+        .get(format!("http://{}/app/app.js", addr))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(asset.status(), 200);
+
+    // API: no token => 401 with machine code; wrong token => 401; right token => 200.
+    let anon = client
+        .get(format!("http://{}/v1/models", addr))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(anon.status(), 401);
+    let anon_body: serde_json::Value = anon.json().await.unwrap();
+    assert_eq!(anon_body["error"]["code"], "invalid_api_key");
+
+    let wrong = client
+        .get(format!("http://{}/v1/models", addr))
+        .header("Authorization", "Bearer wrong")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(wrong.status(), 401);
+
+    let authed = client
+        .get(format!("http://{}/v1/models", addr))
+        .header("Authorization", "Bearer sk-pony-secured-test")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(authed.status(), 200);
 }

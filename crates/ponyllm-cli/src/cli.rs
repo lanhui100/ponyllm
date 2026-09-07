@@ -98,6 +98,11 @@ pub enum Commands {
         /// Disable web console hosting (`/app/*`); gateway forwarding unaffected
         #[arg(long)]
         no_web: bool,
+
+        /// Override web console dist directory (default `web/dist`, relative to
+        /// the serve working directory; absolute paths preferred for services)
+        #[arg(long)]
+        web_dist_dir: Option<String>,
     },
 
     /// Stop the gateway process associated with the configuration file (pidfile)
@@ -136,6 +141,10 @@ pub enum Commands {
         /// Disable web console hosting (`/app/*`); gateway forwarding unaffected
         #[arg(long)]
         no_web: bool,
+
+        /// Override web console dist directory (default `web/dist`)
+        #[arg(long)]
+        web_dist_dir: Option<String>,
     },
 
     /// Inspect health, gateway token, provider pools and live metrics from a running gateway

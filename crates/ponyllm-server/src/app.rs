@@ -120,10 +120,10 @@ pub fn create_app(state: Arc<AppState>) -> Router {
         .with_state(state)
 }
 
-/// Web console hosting (`/app/*`): mounted WITHOUT `auth_middleware` so static
+/// Web console hosting (`/app` prefix): mounted WITHOUT `auth_middleware` so static
 /// assets (`.js`/`.css`) never require a Bearer token (WEB-01 P0-3).
-/// API routes take precedence by construction (`api.merge(web)` merges API first,
-/// and the web router only matches `/app` + `/app/*`).
+/// API routes are safe by path disjointness (the web router only matches `/app`
+/// + `/app/*`; axum panics on true conflicts, so a silent swallow is impossible).
 /// - dist present  → `ServeDir` serves assets; missing files fall back to
 ///   `index.html` with 200 (canonical SPA pattern; fallback only fires for
 ///   GET/HEAD by ServeDir default, so POST/PUT/DELETE never get HTML).
@@ -135,6 +135,7 @@ fn build_web_router(web_enabled: bool, web_dist_dir: &str) -> Router<Arc<AppStat
     if !web_enabled {
         return Router::new()
             .route("/app", get(web_disabled))
+            .route("/app/", get(web_disabled))
             .route("/app/{*path}", get(web_disabled));
     }
     let dist = std::path::Path::new(web_dist_dir);
@@ -144,11 +145,15 @@ fn build_web_router(web_enabled: bool, web_dist_dir: &str) -> Router<Arc<AppStat
         eprintln!("{}", WEB_DIST_MISSING_WARN);
         return Router::new()
             .route("/app", get(web_unavailable))
+            .route("/app/", get(web_unavailable))
             .route("/app/{*path}", get(web_unavailable));
     }
     let serve = ServeDir::new(web_dist_dir)
         .append_index_html_on_directories(false)
         .fallback(ServeFile::new(index));
+    // NOTE: no explicit `/app` route: `nest_service("/app", ..)` owns the
+    // prefix (axum panics on duplicate registration). Bare-prefix behavior is
+    // asserted in web_hosting_tests (documents the ServeDir+fallback truth).
     Router::new().nest_service("/app", serve)
 }
 

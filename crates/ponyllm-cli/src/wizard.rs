@@ -258,6 +258,7 @@ pub fn run_interactive_init(output_path: &str) -> Result<(), Box<dyn std::error:
             proxy: None,
             use_system_proxy: false,
             web_enabled: true,
+            web_dist_dir: "web/dist".to_string(),
         },
         providers,
     };

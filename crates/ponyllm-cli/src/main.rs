@@ -27,6 +27,7 @@ fn build_gateway_config_and_pools(
     retries_override: Option<usize>,
     api_key_override: Option<String>,
     web_enabled_override: Option<bool>,
+    web_dist_dir_override: Option<String>,
 ) -> (GatewayConfig, HashMap<String, Arc<KeyPool>>) {
     let mut gw_config = GatewayConfig::default();
     gw_config.default_strategy = config_file.gateway.default_strategy;
@@ -36,6 +37,8 @@ fn build_gateway_config_and_pools(
     gw_config.request_body_limit = config_file.gateway.request_body_limit;
     gw_config.api_key = api_key_override.unwrap_or_else(|| config_file.gateway.api_key.clone());
     gw_config.web_enabled = web_enabled_override.unwrap_or(config_file.gateway.web_enabled);
+    gw_config.web_dist_dir = web_dist_dir_override
+        .unwrap_or_else(|| config_file.gateway.web_dist_dir.clone());
     gw_config.proxy = config_file.gateway.proxy.clone();
     gw_config.use_system_proxy = config_file.gateway.use_system_proxy;
 
@@ -544,6 +547,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             api_key,
             retries,
             no_web,
+            web_dist_dir,
         } => {
             tracing_subscriber::registry()
                 .with(
@@ -590,6 +594,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // `--no-web` is a process-level switch: hot reload must not flip it
                 // back on when the config file still says `web_enabled = true`.
                 no_web.then_some(false),
+                web_dist_dir.clone(),
             );
 
             let state = Arc::new(AppState::new(gw_config.clone()));
@@ -602,7 +607,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let watcher_state = state.clone();
             let watcher_bind = final_bind.clone();
             let watcher_retries = retries;
-            let watcher_web_enabled = gw_config.web_enabled;
+            // Web hosting is restart-only (the axum router is built once in
+            // create_app): pin the process-level CLI switches so a config-file
+            // edit can never silently flip them mid-flight; a file-side
+            // `web_enabled`/`web_dist_dir` change takes effect on restart.
+            // Only pin when the CLI flag was explicitly given (P2-1).
+            let watcher_web_enabled = no_web.then_some(false);
+            let watcher_web_dist_dir = web_dist_dir.clone();
             tokio::spawn(async move {
                 let mut last_modified = std::fs::metadata(&watcher_path)
                     .and_then(|m| m.modified())
@@ -627,7 +638,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     watcher_retries,
                                     None,
                                     // Pin the process-level switch across hot reloads.
-                                    Some(watcher_web_enabled),
+                                    watcher_web_enabled,
+                                    watcher_web_dist_dir.clone(),
                                 );
                                 watcher_state.reload_config_with_pools(new_gw_cfg, new_pools);
                                 println!(
@@ -688,6 +700,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("║  • 请求体缓冲上限:    {:<48} ║", format!("{} MB (支持1M长上下文/多模态)", gw_config.request_body_limit / (1024 * 1024)));
             println!("║  • 访问凭证 (Token):  {}                                   ║", format!("{:<30}", auth_display));
             println!("║  • 虚拟总代模型:      auto, auto:flagship, auto:economy, auto[1m]     ║");
+            // WEB-01 P1-3: web mount state is ops-visible (absolute dist path +
+            // enabled/dist-hit status) so a CWD-dependent miss is diagnosable.
+            {
+                let dist_abs = std::path::Path::new(&gw_config.web_dist_dir)
+                    .canonicalize()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|_| format!("{} (缺失)", gw_config.web_dist_dir));
+                let hit = std::path::Path::new(&gw_config.web_dist_dir)
+                    .join("index.html")
+                    .is_file();
+                let web_state = if !gw_config.web_enabled {
+                    format!("已关闭 (--no-web) | {}", dist_abs)
+                } else if hit {
+                    format!("已托管 /app/* | {}", dist_abs)
+                } else {
+                    format!("目录缺失仅告警 | {}", dist_abs)
+                };
+                println!("║  • Web 控制台:        {:<48} ║", web_state.chars().take(44).collect::<String>());
+                tracing::info!(web_enabled = gw_config.web_enabled, web_dist_dir = %dist_abs, dist_hit = hit, "web console mount state");
+            }
             println!("╠════════════════════════════════════════════════════════════════════════╣");
             println!("║  • 已挂载模型提供商 (Providers & Pricing):                             ║");
             for (p_name, p_sec) in &config_file.providers {
@@ -727,7 +759,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
-        Commands::Restart { config, bind, address, port, api_key, retries, no_web } => {
+        Commands::Restart { config, bind, address, port, api_key, retries, no_web, web_dist_dir } => {
             match ponyllm_cli::lifecycle::restart_serve(
                 config.as_deref(),
                 bind,
@@ -736,6 +768,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 api_key,
                 retries,
                 no_web,
+                web_dist_dir,
             )
             .await
             {

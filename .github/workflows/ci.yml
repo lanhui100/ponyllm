@@ -42,3 +42,38 @@ jobs:
 
       - name: Run all workspace unit and integration tests
         run: cargo test --workspace
+
+  web:
+    name: Web console gates
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      - name: Install web dependencies (frozen)
+        run: pnpm --dir web install --frozen-lockfile
+
+      - name: Web lint (same command as local)
+        run: pnpm --dir web lint
+
+      - name: Web typecheck (same command as local)
+        run: pnpm --dir web typecheck
+
+      - name: Web unit tests (same command as local)
+        run: pnpm --dir web test
+
+      - name: Web production build (catches base/asset breakage)
+        run: pnpm --dir web build
