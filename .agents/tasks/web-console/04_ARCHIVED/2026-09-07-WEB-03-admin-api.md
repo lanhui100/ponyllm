@@ -8,6 +8,7 @@
 - Created At: 2026-09-06
 - Updated At: 2026-09-07
 - Branch: task/WEB-03-admin-api
+- Merge: 76335b2810c60c7c5fc3cb0d728f9f7b512c4d1c
 - Estimated Effort: 0.5周
 - Blocker: 无（阻塞 WEB-04）
 - Unblock Condition: 无
