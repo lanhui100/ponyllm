@@ -8,7 +8,28 @@ Status: proposed
 
 ## Proposal
 
-将在 Axum 补同源 `/api/admin/*` 路由组，复用现有 `auth_middleware` 与配置热更新通道：`overview` 聚合、`providers/models/keys` 全套 CRUD、`keys/test` 在线拨测、`strategy` 读写、`auth` 轮转、`service/status` 运维信息。models CRUD 原样透传 `thinking_default/thinking_max`（Off/Low/Medium/High，不另起标尺，由网关 `ModelThinkingSpec` 解释），`overview/models` 回显 effective 天花板。输出 `openapi.json` 供 orval 生成 TS 类型，静态托管 `web/dist` 于 `/app/*`。工具接入注册表为纯前端数据，不进本契约。
+将在 Axum 补同源 `/api/admin/*` 路由组，复用现有 `auth_middleware`（进 api 组，受鉴权覆盖）。写能力经**新共享 crate `ponyllm-config`** 落地：`ConfigFile/ProviderSection/KeySection/GatewaySection` 自 `ponyllm-cli` 迁入（领域方法随迁，cli `pub use` re-export 保持 TUI/wizard 零改动），server 经 `AppState.config_store: Option<Arc<dyn ConfigStore>>` 注入（trait 只包文件 IO：load + save 原子写；SDK 路径 `None` → 写端点 503 `admin_store_unavailable`，不破坏伞库）。
+
+**端点表（本卡冻结 8 个；CUD 与拨测移 WEB-06）**：
+
+| # | Method | Path | 请求 | 响应 | 错误码 |
+|---|---|---|---|---|---|
+| 1 | GET | `/api/admin/overview` | — | 版本+bind+providers/keys/active 计数+strategy+hot_reload_ms(500)+config_version | 401 |
+| 2 | GET | `/api/admin/providers` | — | ProviderView[]（脱敏：无 key 字段） | 401 |
+| 3 | GET | `/api/admin/providers/{name}/models` | — | ModelView[]（含 effective thinking 天花板） | 401,404 |
+| 4 | GET | `/api/admin/keys` | — | KeyView[]（`id/priority/weight/state`+api_key 脱敏 `sk-***尾4位`） | 401 |
+| 5 | GET | `/api/admin/strategy` | — | 当前 GatewayRoutingStrategy | 401 |
+| 6 | PUT | `/api/admin/strategy` | `{strategy}` | 更新后 strategy | 401,400 |
+| 7 | GET | `/api/admin/service/status` | — | uptime+bind(脱端口精度)+web_enabled；**不回显 config/web_dist 绝对路径** | 401 |
+| 8 | POST | `/api/admin/auth/rotate` | — | `{new_token,rotated_at}`（**响应体一次性明文**，此后不可再取） | 401,409(空key),503(store不可用) |
+
+keys/test 拨测与 providers/models/keys 的 CUD（POST/PUT/DELETE）**移 WEB-06**（治理债密集区：写前备份/版本号 If-Match/写队列/灰度开关全落那张卡）；本卡读端点 + auth 轮转 + strategy PUT 零治理债。`openapi.json` 用 **utoipa 注解生成**（手写必漂移），提交至 `web/openapi.json`。
+
+写路径同步语义：**admin 写 toml 后主动重建对应 provider 的 KeyPool 并 reload**（`pools.write().insert(name, new_pool)`，不等 watcher 的 ≤750ms 窗口，测试可断言"删除立即生效"）；KeyPool 无 remove 不改——整体重建替换。热更新 500ms 声明仅在 overview 响应字段（`hot_reload_ms: 500`）——它声明的是 watcher 通道对**外部文件编辑**的生效节奏，admin 写走主动 reload 不经 watcher。
+
+auth 轮转语义：**只影响新请求**（auth_middleware 每请求读 config RwLock，新 token 即刻生效；in-flight SSE 连接已过鉴权层不中断，前端无需重连风暴）；响应含 `rotated_at`。空 key（开放模式）时 rotate 返回 409（开放模式无凭证可轮转）。
+
+工具接入注册表为纯前端数据，不进本契约。models CRUD 的 thinking 透传与 effective 天花板回显**本卡只读实现**（models list 回显 `ModelThinkingSpec` effective 结果），CUD 移 WEB-06。
 
 ## Alternatives considered
 
@@ -18,11 +39,13 @@ Status: proposed
 
 ## Acceptance criteria
 
-- `cargo test -p ponyllm-server admin_contract` 全绿，12 端点 smoke 经 `curl` 可复现。
-- `openapi.json` 提交至 `web/openapi.json`，orval 生成类型零手改。
-- 热更新 500ms 生效声明在 `overview` 字段可查，长 SSE 不中断靠 review 演示。
+- `cargo test -p ponyllm-server --test admin_contract_tests` 全绿（target 名精确，防 filter 假绿）：8 端点矩阵 × secured/免鉴双模式 + openapi 与路由表一致性断言 + keys list 脱敏断言（响应无明文 `sk-` 前缀，仅尾 4 位）+ 空 key rotate 409 + SDK 路径（store=None）写端点 503 + config_version serde default 兼容。
+- `web/openapi.json` 由 utoipa 注解生成并提交（schema 可校验）；orval 消费与"零手改"验收归首个前端消费卡（WEB-02/04），本卡不验。
+- 热更新 500ms 声明在 `overview` 响应字段（`hot_reload_ms`）可查；admin 写走主动 reload 不依赖 watcher（测试断言写后立即可见）。
+- `service/status` 与 `overview` 不回显 config 文件与 web_dist 绝对路径（单测断言）。
 
 ## Risks
 
-- Admin 写与文件监听竞态，需经配置写队列串行化，另卡验证。
-- Token 轮转并发导致旧页面 401，需前端统一过期踢回 `/connect`。
+- Admin 写与文件监听竞态：本卡写端点主动 reload 已消除 admin 写路径的竞态；watcher 对**外部编辑**的 mtime 轮询保持现状（写前备份/版本号校验/写队列/灰度开关整体移 WEB-06，含 CUD）。
+- Token 轮转并发导致旧页面 401：前端 single-flight 已落地（WEB-01）；轮转只影响新请求（in-flight SSE 不中断），ADR 已写明语义。
+- `ponyllm-config` 新 crate 迁移动 CLI/TUI/wizard 的 import 面：re-export 兼容层保证零改动；编译即验证。

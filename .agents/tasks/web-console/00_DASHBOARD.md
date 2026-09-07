@@ -20,7 +20,8 @@
 | ID | Title | Status | Priority | Owner | Next Step |
 |---|---|---|---|---|---|
 | WEB-02 | 只读大盘与录波 | Backlog | P0 | 待定 | 等 WEB-03 后接 metrics/recorder |
-| WEB-03 | Admin API契约 | In Progress | P0 | codex-orchestrator | ADR 双路审核 |
+| WEB-03 | Admin API契约 | In Progress | P0 | codex-orchestrator | ADR security 审核收尾 → 实现 |
+| WEB-06 | Admin写路径与治理 | Backlog | P0 | 待定 | 等 WEB-03，CUD+拨测+治理债 |
 
 ## Archive Rule
 - 完工与归档同提交：`git mv 03_TASKS/WEB-XX-*.md 04_ARCHIVED/<date>-WEB-XX-*.md`（卡 Status 保持 Done/Dropped），本表消行。

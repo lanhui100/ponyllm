@@ -2,6 +2,7 @@
 
 ## Backlog
 - WEB-02 只读大盘与录波
+- WEB-06 Admin写路径与治理
 
 ## Ready
 - 无
