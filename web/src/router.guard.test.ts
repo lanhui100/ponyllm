@@ -12,15 +12,19 @@ describe('guard decision (WEB-01 acceptance 3)', () => {
     stopAllPolling();
   });
 
-  it('exposes /connect, /dashboard and a 404 catch-all', () => {
+  it('exposes /connect, /dashboard, /recorder and a 404 catch-all', () => {
     const paths = router.getRoutes().map((r) => r.path);
     expect(paths).toContain('/connect');
     expect(paths).toContain('/dashboard');
+    expect(paths).toContain('/recorder');
   });
 
   it('no token + authed gateway => redirect /connect with back-link', async () => {
     const verdict = await decideRoute('/dashboard', '/dashboard', true, false, async () => false);
     expect(verdict).toEqual({ path: '/connect', query: { redirect: '/dashboard' } });
+
+    const recorderVerdict = await decideRoute('/recorder', '/recorder', true, false, async () => false);
+    expect(recorderVerdict).toEqual({ path: '/connect', query: { redirect: '/recorder' } });
   });
 
   it('/connect is self-permitting (no redirect loop)', async () => {

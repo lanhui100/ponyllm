@@ -3,15 +3,14 @@ import type { RouteRecordRaw } from 'vue-router';
 import { useSessionStore } from './stores/session';
 import { setUnauthorizedHandler } from './lib/alova';
 import ConnectView from './views/Connect.vue';
-import DashboardStub from './views/DashboardStub.vue';
 import NotFound from './views/NotFound.vue';
 
-// WEB-01: minimal 3-route table. The 8-route full map is a target state
-// (ADR-ia-and-stack); the remaining 5 routes land incrementally with WEB-02/04.
+// WEB-02: Dashboard and Recorder views with dynamic chunk splitting
 const routes: RouteRecordRaw[] = [
   { path: '/', redirect: '/dashboard' },
   { path: '/connect', component: ConnectView },
-  { path: '/dashboard', component: DashboardStub, meta: { requiresAuth: true } },
+  { path: '/dashboard', component: () => import('./views/DashboardView.vue'), meta: { requiresAuth: true } },
+  { path: '/recorder', component: () => import('./views/RecorderView.vue'), meta: { requiresAuth: true } },
   { path: '/:pathMatch(.*)*', component: NotFound },
 ];
 
