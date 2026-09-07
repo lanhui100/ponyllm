@@ -8,6 +8,7 @@
 - Created At: 2026-09-07
 - Updated At: 2026-09-07
 - Branch: task/WEB-06-admin-write
+- Merge: 3931abd32b0dd8c3d3aca4617bd97a08bb8a72b8
 - Estimated Effort: 1周
 - Blocker: 无
 - Unblock Condition: 无（前置契约已完成）
