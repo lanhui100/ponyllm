@@ -53,6 +53,14 @@ pub struct GatewaySection {
     /// directory; absolute paths preferred for services (WEB-01).
     #[serde(default = "default_web_dist_dir")]
     pub web_dist_dir: String,
+    /// Whether admin write operations (CUD and dial-test) are enabled (WEB-06).
+    /// Defaults to `false` for security; must be explicitly enabled.
+    #[serde(default = "default_admin_write_enabled")]
+    pub admin_write_enabled: bool,
+}
+
+fn default_admin_write_enabled() -> bool {
+    false
 }
 
 pub fn default_request_body_limit() -> usize {
@@ -130,6 +138,7 @@ impl Default for GatewaySection {
             use_system_proxy: false,
             web_enabled: true,
             web_dist_dir: default_web_dist_dir(),
+            admin_write_enabled: false,
         }
     }
 }
@@ -468,6 +477,13 @@ impl ConfigFile {
         if !parent.as_os_str().is_empty() && !parent.exists() {
             fs::create_dir_all(parent)?;
         }
+
+        // Write-before-backup (WEB-06): if target exists, backup to <path>.bak
+        if target_path.exists() {
+            let backup_path = target_path.with_extension("toml.bak");
+            let _ = fs::copy(target_path, backup_path);
+        }
+
         let temp_file_name = format!(
             ".{}.tmp.{}.{}",
             target_path.file_name().and_then(|f| f.to_str()).unwrap_or("ponyllm"),

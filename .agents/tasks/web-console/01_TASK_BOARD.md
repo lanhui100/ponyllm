@@ -1,7 +1,7 @@
 # Web Console 任务板
 
 ## Backlog
-- WEB-06 Admin写路径与治理
+- 无
 
 ## Ready
 - 无
@@ -19,6 +19,7 @@
 - WEB-01 脚手架与Shell
 - WEB-03 Admin API契约
 - WEB-02 只读大盘与录波
+- WEB-06 Admin写路径与治理
 
 ## Dropped
 - 无

@@ -41,6 +41,7 @@ fn build_gateway_config_and_pools(
         .unwrap_or_else(|| config_file.gateway.web_dist_dir.clone());
     gw_config.proxy = config_file.gateway.proxy.clone();
     gw_config.use_system_proxy = config_file.gateway.use_system_proxy;
+    gw_config.admin_write_enabled = config_file.gateway.admin_write_enabled;
 
     let mut pools = HashMap::new();
 

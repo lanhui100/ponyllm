@@ -334,6 +334,10 @@ pub struct GatewayConfig {
     /// (relative to the serve working directory). Missing dir only warns (WEB-01).
     #[serde(default = "default_web_dist_dir")]
     pub web_dist_dir: String,
+    /// Whether admin write operations (CUD and dial-test) are enabled (WEB-06).
+    /// Defaults to `false` for security; must be explicitly enabled.
+    #[serde(default)]
+    pub admin_write_enabled: bool,
 }
 
 impl Default for GatewayConfig {
@@ -353,6 +357,7 @@ impl Default for GatewayConfig {
             use_system_proxy: false,
             web_enabled: true,
             web_dist_dir: default_web_dist_dir(),
+            admin_write_enabled: false,
         }
     }
 }

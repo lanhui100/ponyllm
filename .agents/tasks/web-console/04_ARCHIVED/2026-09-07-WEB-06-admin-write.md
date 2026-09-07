@@ -2,15 +2,16 @@
 
 ## Basic Info
 - ID: WEB-06
-- Status: Backlog
+- Status: Done
 - Priority: P0
-- Owner: 待定
+- Owner: codex-orchestrator
 - Created At: 2026-09-07
 - Updated At: 2026-09-07
+- Branch: task/WEB-06-admin-write
 - Estimated Effort: 1周
 - Blocker: 无
 - Unblock Condition: 无（前置契约已完成）
-- Review Round: 未开始（architect 裁决自 WEB-03 分期拆出）
+- Review Round: 双路通过 (Pass)
 
 ## Goal
 承接 WEB-03 分期拆出的写路径全链：providers/models/keys CUD（POST/PUT/DELETE）+ keys/test 拨测 + 治理债四项（写前备份 toml.bak、版本号 If-Match 校验、写队列串行化+审计日志、admin_write_enabled 灰度开关默认 off）。
@@ -27,16 +28,17 @@
 4. 新增 Key 明文仅创建响应一次性回显。
 
 ## Current Progress
-- 占位卡（2026-09-07 architect 裁决拆出），WEB-03 完工后启动。
+- 已完成写前备份、If-Match 乐观并发校验、写队列串行化、灰度开关控制、Provider/Model/Key CUD 与拨测端点，TDD 8项集成测试全绿，OpenAPI 契约已生成提交。
 
 ## Next Action
-- 对本卡跑双路 ADR 审核（治理债四项逐条验收设计）。
+- 合入 main 分支并补齐 Merge SHA。
 
 ## Resume Hint
-- 打开本卡 + Related Files ADR 的端点表 CUD 行对齐范围，跑双路 ADR 审核后认领开工。
+- 读 04_ARCHIVED/2026-09-07-WEB-06-admin-write.md 确认交付物与合入状态。
 
 ## Review Summary
-- 未开始。
+- 架构与安全双路审核通过，见 02_REVIEWS/WEB-06.md。
 
 ## Related Files
+- ADR: `.agents/notes/implemented/architecture/2026-09-07-web-admin-write-path-governance.md`
 - ADR: `.agents/notes/implemented/architecture/2026-09-06-web-admin-api-contract.md`

@@ -12,18 +12,17 @@
 3. Admin 契约冻结后闭环治理
 
 ## Current Status
-- Most critical task: WEB-06 Admin写路径与治理（M4 待开工）
+- Most critical task: 无（当前阶段全量任务均已交付归档）
 - Biggest blocker: 无
-- Next smallest action: 需求澄清并认领开工 WEB-06
+- Next smallest action: 分支合入 main 并开启后续阶段任务
 
 ## Task Overview
 | ID | Title | Status | Priority | Owner | Next Step |
 |---|---|---|---|---|---|
-| WEB-06 | Admin写路径与治理 | Backlog | P0 | 待定 | 等写路径需求澄清，CUD+拨测+治理债 |
 
 ## Archive Rule
 - 完工与归档同提交：`git mv 03_TASKS/WEB-XX-*.md 04_ARCHIVED/<date>-WEB-XX-*.md`（卡 Status 保持 Done/Dropped），本表消行。
 - 备查只在 Board Done/Dropped 区（≤5 条，超窗删最旧行）；本面板不链归档 ID，只链 Active。
 
 ## Resume Hint
-- 下次打开：本文件→`01_TASK_BOARD.md`→`03_TASKS/WEB-06-admin-write.md`→跑 WEB-06 Next Action。
+- 下次打开：本文件→`01_TASK_BOARD.md`→确认合入或开启新阶段任务。

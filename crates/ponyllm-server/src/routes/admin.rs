@@ -1,24 +1,28 @@
-//! Admin API (WEB-03): 8 read-side + auth-rotate endpoints under `/api/admin/*`,
+//! Admin API (WEB-03, WEB-06): Read and write management endpoints under `/api/admin/*`,
 //! guarded by the shared `auth_middleware` (routes merged into the api group).
 //!
-//! Contract (ADR 2026-09-06-web-admin-api-contract): keys are masked with the
-//! same `sanitize_key` used by telemetry (never full key material), absolute
-//! config paths are never echoed, auth rotate answers `Cache-Control: no-store`
-//! and only affects new requests, every successful save bumps `config_version`.
-//! CUD endpoints and keys/test dial-test live in WEB-06.
+//! Contract (ADR 2026-09-06-web-admin-api-contract, ADR 2026-09-07-web-admin-write-path-governance):
+//! - Masked keys on read; plaintext Key / Auth token returned ONCE in creation response with Cache-Control: no-store
+//! - If-Match optimistic concurrency control on CUD endpoints (412 on mismatch)
+//! - Write serialization through `state.admin_write_lock`
+//! - `admin_write_enabled` gate (returns 404 when disabled)
+//! - Write-before-backup to `.bak`
+//! - Key dial-test with 3s hard timeout and desensitized logging
 
 use std::sync::Arc;
 use std::time::Instant;
 
-use axum::extract::{Path, State};
-use axum::http::{header, HeaderValue, StatusCode};
+use axum::extract::{Path, Query, State};
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::IntoResponse;
 use axum::Json;
-use ponyllm_config::ConfigFile;
-use serde::Serialize;
+use ponyllm_config::{ConfigFile, KeySection, ModelConfig, ProviderSection};
+use ponyllm_core::pool::{ApiKeyEntry, BillingMode, KeyPool, ModelTier, UpstreamProtocol};
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use utoipa::ToSchema;
 
+use crate::config::{ModelSpec, ProviderConfig};
 use crate::state::AppState;
 
 const HOT_RELOAD_MS: u64 = 500;
@@ -78,7 +82,7 @@ pub struct StrategyView {
     pub config_version: u64,
 }
 
-#[derive(Debug, serde::Deserialize, ToSchema)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct PutStrategyPayload {
     pub strategy: String,
 }
@@ -96,6 +100,132 @@ pub struct RotateView {
     pub new_token: String,
     pub rotated_at: String,
     pub config_version: u64,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct CreateProviderPayload {
+    pub name: String,
+    pub base_url: String,
+    #[serde(default = "default_model_str")]
+    pub default_model: String,
+    #[serde(default = "default_strategy_str")]
+    pub strategy: String,
+    #[serde(default = "default_billing_mode_str")]
+    pub billing_mode: String,
+    #[serde(default)]
+    pub input_price: f64,
+    #[serde(default)]
+    pub cached_price: f64,
+    #[serde(default)]
+    pub output_price: f64,
+    #[serde(default)]
+    pub default_protocol: Option<String>,
+    #[serde(default)]
+    pub chat_url: Option<String>,
+    #[serde(default)]
+    pub responses_url: Option<String>,
+    #[serde(default)]
+    pub messages_url: Option<String>,
+    #[serde(default)]
+    pub proxy: Option<String>,
+}
+
+fn default_model_str() -> String {
+    "default".to_string()
+}
+fn default_strategy_str() -> String {
+    "round_robin".to_string()
+}
+fn default_billing_mode_str() -> String {
+    "metered".to_string()
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct CreateModelPayload {
+    pub provider: String,
+    pub name: String,
+    #[serde(default)]
+    pub tier: Option<String>,
+    #[serde(default)]
+    pub context_window: Option<String>,
+    #[serde(default)]
+    pub max_output: Option<String>,
+    #[serde(default)]
+    pub protocol: Option<String>,
+    #[serde(default)]
+    pub thinking_default: Option<String>,
+    #[serde(default)]
+    pub thinking_max: Option<String>,
+    #[serde(default)]
+    pub proxy: Option<String>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct UpdateModelPayload {
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub tier: Option<String>,
+    #[serde(default)]
+    pub context_window: Option<String>,
+    #[serde(default)]
+    pub max_output: Option<String>,
+    #[serde(default)]
+    pub protocol: Option<String>,
+    #[serde(default)]
+    pub thinking_default: Option<String>,
+    #[serde(default)]
+    pub thinking_max: Option<String>,
+    #[serde(default)]
+    pub proxy: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DeleteModelQuery {
+    pub provider: Option<String>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct CreateKeyPayload {
+    pub provider: String,
+    pub id: String,
+    pub api_key: String,
+    #[serde(default = "default_key_priority")]
+    pub priority: u32,
+    #[serde(default = "default_key_weight")]
+    pub weight: u32,
+}
+
+fn default_key_priority() -> u32 {
+    1
+}
+fn default_key_weight() -> u32 {
+    10
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct CreateKeyResponse {
+    pub provider: String,
+    pub id: String,
+    pub api_key: String,
+    pub priority: u32,
+    pub weight: u32,
+    pub state: String,
+    pub config_version: u64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DeleteKeyQuery {
+    pub provider: Option<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct KeyTestView {
+    pub success: bool,
+    pub latency_ms: u64,
+    pub http_status: Option<u16>,
+    pub error_code: Option<String>,
+    pub message: String,
 }
 
 // ---------- helpers ----------
@@ -147,6 +277,74 @@ fn save_store_config(state: &AppState, cfg: &mut ConfigFile) -> Result<u64, axum
     Ok(cfg.config_version)
 }
 
+fn check_admin_write_enabled(state: &AppState) -> Result<(), axum::response::Response> {
+    if !state.config.read().admin_write_enabled {
+        tracing::warn!("admin write operation rejected: admin_write_enabled is false");
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "error": {
+                    "message": "admin write operations are disabled",
+                    "code": "admin_write_disabled"
+                }
+            })),
+        )
+            .into_response());
+    }
+    Ok(())
+}
+
+fn check_if_match(
+    headers: &HeaderMap,
+    current_version: u64,
+) -> Result<(), axum::response::Response> {
+    let if_match_val = headers
+        .get(header::IF_MATCH)
+        .and_then(|h| h.to_str().ok());
+
+    let Some(raw) = if_match_val else {
+        return Err((
+            StatusCode::PRECONDITION_FAILED,
+            Json(json!({
+                "error": {
+                    "message": "missing If-Match header",
+                    "code": "precondition_failed"
+                }
+            })),
+        )
+            .into_response());
+    };
+
+    let trimmed = raw.trim().trim_matches('"');
+    if trimmed == "*" {
+        return Ok(());
+    }
+
+    match trimmed.parse::<u64>() {
+        Ok(v) if v == current_version => Ok(()),
+        _ => {
+            tracing::warn!(
+                current_version,
+                if_match = %raw,
+                "precondition failed: If-Match version conflict"
+            );
+            Err((
+                StatusCode::PRECONDITION_FAILED,
+                Json(json!({
+                    "error": {
+                        "message": format!(
+                            "config version conflict: current is {}, If-Match specified {}",
+                            current_version, raw
+                        ),
+                        "code": "precondition_failed"
+                    }
+                })),
+            )
+                .into_response())
+        }
+    }
+}
+
 fn key_state_name(state: ponyllm_core::pool::KeyState) -> &'static str {
     use ponyllm_core::pool::KeyState::*;
     match state {
@@ -158,6 +356,42 @@ fn key_state_name(state: ponyllm_core::pool::KeyState) -> &'static str {
 
 fn bind_of(state: &AppState) -> String {
     state.config.read().bind_addr.clone()
+}
+
+fn parse_protocol_opt(s: &str) -> Option<UpstreamProtocol> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "chat" | "openai" => Some(UpstreamProtocol::Chat),
+        "anthropic" => Some(UpstreamProtocol::Anthropic),
+        "responses" => Some(UpstreamProtocol::Responses),
+        _ => None,
+    }
+}
+
+fn parse_tier(s: &str) -> ModelTier {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "light" | "l" => ModelTier::Light,
+        "standard" | "s" => ModelTier::Standard,
+        "flagship" | "f" => ModelTier::Flagship,
+        _ => ModelTier::Standard,
+    }
+}
+
+fn parse_effort_opt(s: &str) -> Option<ponyllm_protocol::common::ReasoningEffort> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "off" | "none" => Some(ponyllm_protocol::common::ReasoningEffort::Off),
+        "low" => Some(ponyllm_protocol::common::ReasoningEffort::Low),
+        "medium" => Some(ponyllm_protocol::common::ReasoningEffort::Medium),
+        "high" => Some(ponyllm_protocol::common::ReasoningEffort::High),
+        _ => None,
+    }
+}
+
+fn parse_pool_strategy(s: &str) -> ponyllm_core::pool::RoutingStrategy {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "priority" => ponyllm_core::pool::RoutingStrategy::Priority,
+        "weighted_round_robin" | "weighted" => ponyllm_core::pool::RoutingStrategy::WeightedRoundRobin,
+        _ => ponyllm_core::pool::RoutingStrategy::RoundRobin,
+    }
 }
 
 // ---------- handlers ----------
@@ -217,6 +451,161 @@ pub async fn handle_admin_providers(State(state): State<Arc<AppState>>) -> impl 
     Json(views)
 }
 
+#[utoipa::path(post, path = "/api/admin/providers", request_body = CreateProviderPayload, responses((status = 201, body = ProviderView)))]
+pub async fn handle_admin_create_provider(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(payload): Json<CreateProviderPayload>,
+) -> impl IntoResponse {
+    if let Err(resp) = check_admin_write_enabled(&state) {
+        return resp;
+    }
+    let _lock = state.admin_write_lock.lock().await;
+    let mut file = match load_store_config(&state) {
+        Ok(f) => f,
+        Err(resp) => return resp,
+    };
+    if let Err(resp) = check_if_match(&headers, file.config_version) {
+        return resp;
+    }
+
+    let name = payload.name.trim().to_string();
+    if name.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": {"message": "provider name cannot be empty", "code": "invalid_provider_name"}})),
+        )
+            .into_response();
+    }
+    if file.providers.contains_key(&name) {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({"error": {"message": format!("provider '{name}' already exists"), "code": "provider_already_exists"}})),
+        )
+            .into_response();
+    }
+
+    let default_model = if payload.default_model.trim().is_empty() {
+        "default".to_string()
+    } else {
+        payload.default_model.trim().to_string()
+    };
+    let strategy = if payload.strategy.trim().is_empty() {
+        "round_robin".to_string()
+    } else {
+        payload.strategy.trim().to_string()
+    };
+    let billing = match payload.billing_mode.to_ascii_lowercase().as_str() {
+        "free" => BillingMode::Free,
+        _ => BillingMode::Metered,
+    };
+    let default_proto = payload.default_protocol.as_deref().and_then(parse_protocol_opt);
+
+    let p_sec = ProviderSection {
+        base_url: payload.base_url.clone(),
+        default_model: default_model.clone(),
+        strategy: strategy.clone(),
+        billing_mode: billing,
+        input_price: payload.input_price,
+        cached_price: payload.cached_price,
+        output_price: payload.output_price,
+        models: vec![default_model.clone()],
+        model_configs: vec![],
+        keys: vec![],
+        default_protocol: default_proto,
+        chat_url: payload.chat_url.clone(),
+        responses_url: payload.responses_url.clone(),
+        messages_url: payload.messages_url.clone(),
+        proxy: payload.proxy.clone(),
+    };
+    file.providers.insert(name.clone(), p_sec);
+
+    if let Err(resp) = save_store_config(&state, &mut file) {
+        return resp;
+    }
+
+    let p_cfg = ProviderConfig {
+        base_url: payload.base_url.clone(),
+        default_model: default_model.clone(),
+        strategy: strategy.clone(),
+        billing_mode: billing,
+        input_price: payload.input_price,
+        cached_price: payload.cached_price,
+        output_price: payload.output_price,
+        models: vec![default_model.clone()],
+        model_specs: vec![],
+        default_protocol: default_proto,
+        chat_url: payload.chat_url,
+        responses_url: payload.responses_url,
+        messages_url: payload.messages_url,
+        proxy: payload.proxy,
+    };
+    state.config.write().providers.insert(name.clone(), p_cfg);
+
+    let core_strat = parse_pool_strategy(&strategy);
+    state
+        .pools
+        .write()
+        .insert(name.clone(), Arc::new(KeyPool::new(&name, core_strat)));
+
+    tracing::info!(provider = %name, "admin created provider");
+
+    (
+        StatusCode::CREATED,
+        Json(ProviderView {
+            name,
+            base_url: payload.base_url,
+            default_model,
+            strategy,
+            billing_mode: format!("{billing:?}"),
+            input_price: payload.input_price,
+            cached_price: payload.cached_price,
+            output_price: payload.output_price,
+            models: 0,
+        }),
+    )
+        .into_response()
+}
+
+#[utoipa::path(delete, path = "/api/admin/providers/{name}", params(("name" = String, Path)), responses((status = 200, body = serde_json::Value)))]
+pub async fn handle_admin_delete_provider(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(resp) = check_admin_write_enabled(&state) {
+        return resp;
+    }
+    let _lock = state.admin_write_lock.lock().await;
+    let mut file = match load_store_config(&state) {
+        Ok(f) => f,
+        Err(resp) => return resp,
+    };
+    if let Err(resp) = check_if_match(&headers, file.config_version) {
+        return resp;
+    }
+
+    if file.providers.remove(&name).is_none() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": {"message": format!("provider '{name}' not found"), "code": "provider_not_found"}})),
+        )
+            .into_response();
+    }
+
+    let new_ver = match save_store_config(&state, &mut file) {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
+
+    state.config.write().providers.remove(&name);
+    state.pools.write().remove(&name);
+
+    tracing::info!(provider = %name, "admin deleted provider");
+
+    Json(json!({"deleted": name, "config_version": new_ver})).into_response()
+}
+
 #[utoipa::path(get, path = "/api/admin/providers/{name}/models", params(("name" = String, Path)), responses((status = 200, body = [ModelView])))]
 pub async fn handle_admin_provider_models(
     State(state): State<Arc<AppState>>,
@@ -249,13 +638,344 @@ pub async fn handle_admin_provider_models(
     Json(views).into_response()
 }
 
+#[utoipa::path(post, path = "/api/admin/models", request_body = CreateModelPayload, responses((status = 201, body = ModelView)))]
+pub async fn handle_admin_create_model(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(payload): Json<CreateModelPayload>,
+) -> impl IntoResponse {
+    if let Err(resp) = check_admin_write_enabled(&state) {
+        return resp;
+    }
+    let _lock = state.admin_write_lock.lock().await;
+    let mut file = match load_store_config(&state) {
+        Ok(f) => f,
+        Err(resp) => return resp,
+    };
+    if let Err(resp) = check_if_match(&headers, file.config_version) {
+        return resp;
+    }
+
+    let Some(p_sec) = file.providers.get_mut(&payload.provider) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": {"message": format!("provider '{}' not found", payload.provider), "code": "provider_not_found"}})),
+        )
+            .into_response();
+    };
+
+    let model_name = payload.name.trim().to_string();
+    if model_name.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": {"message": "model name cannot be empty", "code": "invalid_model_name"}})),
+        )
+            .into_response();
+    }
+    if p_sec.models.iter().any(|m| m == &model_name)
+        || p_sec.model_configs.iter().any(|m| m.name == model_name)
+    {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({"error": {"message": format!("model '{model_name}' already exists in provider '{}'", payload.provider), "code": "model_already_exists"}})),
+        )
+            .into_response();
+    }
+
+    let tier = payload.tier.as_deref().map(parse_tier).unwrap_or(ModelTier::Standard);
+    let proto = payload.protocol.as_deref().and_then(parse_protocol_opt);
+    let think_def = payload.thinking_default.as_deref().and_then(parse_effort_opt);
+    let think_max = payload.thinking_max.as_deref().and_then(parse_effort_opt);
+    let ctx_win = payload.context_window.unwrap_or_else(|| "128K".to_string());
+    let max_out = payload.max_output.unwrap_or_else(|| "16K".to_string());
+
+    let m_cfg = ModelConfig {
+        name: model_name.clone(),
+        tier,
+        billing_mode: None,
+        context_window: ctx_win.clone(),
+        max_output: max_out.clone(),
+        input_types: vec!["text".to_string()],
+        output_types: vec!["text".to_string()],
+        input_price: None,
+        cached_price: None,
+        output_price: None,
+        protocol: proto,
+        thinking_default: think_def,
+        thinking_max: think_max,
+        proxy: payload.proxy.clone(),
+    };
+
+    p_sec.models.push(model_name.clone());
+    p_sec.model_configs.push(m_cfg);
+
+    if let Err(resp) = save_store_config(&state, &mut file) {
+        return resp;
+    }
+
+    let m_spec = ModelSpec {
+        name: model_name.clone(),
+        tier,
+        context_window: ctx_win.clone(),
+        max_output: max_out,
+        input_types: vec!["text".to_string()],
+        output_types: vec!["text".to_string()],
+        billing_mode: None,
+        input_price: None,
+        cached_price: None,
+        output_price: None,
+        protocol: proto,
+        thinking_default: think_def,
+        thinking_max: think_max,
+        proxy: payload.proxy,
+    };
+
+    let spec_obj = m_spec.thinking_spec();
+    let effective_def = spec_obj.resolve(None);
+
+    if let Some(p_cfg) = state.config.write().providers.get_mut(&payload.provider) {
+        if !p_cfg.models.contains(&model_name) {
+            p_cfg.models.push(model_name.clone());
+        }
+        p_cfg.model_specs.retain(|m| m.name != model_name);
+        p_cfg.model_specs.push(m_spec);
+    }
+
+    tracing::info!(provider = %payload.provider, model = %model_name, "admin created model");
+
+    (
+        StatusCode::CREATED,
+        Json(ModelView {
+            name: model_name,
+            tier: format!("{tier:?}"),
+            context_window: ctx_win,
+            protocol: proto.map(|p| format!("{p:?}")),
+            thinking_default: format!("{effective_def:?}"),
+            thinking_max: format!("{:?}", spec_obj.max_effort),
+        }),
+    )
+        .into_response()
+}
+
+#[utoipa::path(put, path = "/api/admin/models/{name}", params(("name" = String, Path)), request_body = UpdateModelPayload, responses((status = 200, body = ModelView)))]
+pub async fn handle_admin_update_model(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    headers: HeaderMap,
+    Json(payload): Json<UpdateModelPayload>,
+) -> impl IntoResponse {
+    if let Err(resp) = check_admin_write_enabled(&state) {
+        return resp;
+    }
+    let _lock = state.admin_write_lock.lock().await;
+    let mut file = match load_store_config(&state) {
+        Ok(f) => f,
+        Err(resp) => return resp,
+    };
+    if let Err(resp) = check_if_match(&headers, file.config_version) {
+        return resp;
+    }
+
+    // Find provider containing this model
+    let target_provider_name = if let Some(ref p) = payload.provider {
+        if file.providers.contains_key(p) {
+            p.clone()
+        } else {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": {"message": format!("provider '{p}' not found"), "code": "provider_not_found"}})),
+            )
+                .into_response();
+        }
+    } else {
+        let found = file.providers.iter().find(|(_, p_sec)| {
+            p_sec.models.iter().any(|m| m == &name)
+                || p_sec.model_configs.iter().any(|m| m.name == name)
+        });
+        match found {
+            Some((p_name, _)) => p_name.clone(),
+            None => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(json!({"error": {"message": format!("model '{name}' not found"), "code": "model_not_found"}})),
+                )
+                    .into_response();
+            }
+        }
+    };
+
+    let p_sec = file.providers.get_mut(&target_provider_name).unwrap();
+
+    let mut existing_config = p_sec
+        .model_configs
+        .iter()
+        .find(|m| m.name == name)
+        .cloned()
+        .unwrap_or_else(|| ModelConfig {
+            name: name.clone(),
+            tier: ModelTier::Standard,
+            billing_mode: None,
+            context_window: "128K".to_string(),
+            max_output: "16K".to_string(),
+            input_types: vec!["text".to_string()],
+            output_types: vec!["text".to_string()],
+            input_price: None,
+            cached_price: None,
+            output_price: None,
+            protocol: None,
+            thinking_default: None,
+            thinking_max: None,
+            proxy: None,
+        });
+
+    if let Some(ref t) = payload.tier {
+        existing_config.tier = parse_tier(t);
+    }
+    if let Some(ref cw) = payload.context_window {
+        existing_config.context_window = cw.clone();
+    }
+    if let Some(ref mo) = payload.max_output {
+        existing_config.max_output = mo.clone();
+    }
+    if let Some(ref proto) = payload.protocol {
+        existing_config.protocol = parse_protocol_opt(proto);
+    }
+    if let Some(ref td) = payload.thinking_default {
+        existing_config.thinking_default = parse_effort_opt(td);
+    }
+    if let Some(ref tm) = payload.thinking_max {
+        existing_config.thinking_max = parse_effort_opt(tm);
+    }
+    if payload.proxy.is_some() {
+        existing_config.proxy = payload.proxy.clone();
+    }
+
+    p_sec.model_configs.retain(|m| m.name != name);
+    p_sec.model_configs.push(existing_config.clone());
+    if !p_sec.models.contains(&name) {
+        p_sec.models.push(name.clone());
+    }
+
+    if let Err(resp) = save_store_config(&state, &mut file) {
+        return resp;
+    }
+
+    let m_spec = ModelSpec {
+        name: name.clone(),
+        tier: existing_config.tier,
+        context_window: existing_config.context_window.clone(),
+        max_output: existing_config.max_output.clone(),
+        input_types: existing_config.input_types.clone(),
+        output_types: existing_config.output_types.clone(),
+        billing_mode: existing_config.billing_mode,
+        input_price: existing_config.input_price,
+        cached_price: existing_config.cached_price,
+        output_price: existing_config.output_price,
+        protocol: existing_config.protocol,
+        thinking_default: existing_config.thinking_default,
+        thinking_max: existing_config.thinking_max,
+        proxy: existing_config.proxy.clone(),
+    };
+
+    let spec_obj = m_spec.thinking_spec();
+    let effective_def = spec_obj.resolve(None);
+
+    if let Some(p_cfg) = state.config.write().providers.get_mut(&target_provider_name) {
+        if !p_cfg.models.contains(&name) {
+            p_cfg.models.push(name.clone());
+        }
+        p_cfg.model_specs.retain(|m| m.name != name);
+        p_cfg.model_specs.push(m_spec);
+    }
+
+    tracing::info!(provider = %target_provider_name, model = %name, "admin updated model");
+
+    Json(ModelView {
+        name,
+        tier: format!("{:?}", existing_config.tier),
+        context_window: existing_config.context_window,
+        protocol: existing_config.protocol.map(|p| format!("{p:?}")),
+        thinking_default: format!("{effective_def:?}"),
+        thinking_max: format!("{:?}", spec_obj.max_effort),
+    })
+    .into_response()
+}
+
+#[utoipa::path(delete, path = "/api/admin/models/{name}", params(("name" = String, Path)), responses((status = 200, body = serde_json::Value)))]
+pub async fn handle_admin_delete_model(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Query(query): Query<DeleteModelQuery>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(resp) = check_admin_write_enabled(&state) {
+        return resp;
+    }
+    let _lock = state.admin_write_lock.lock().await;
+    let mut file = match load_store_config(&state) {
+        Ok(f) => f,
+        Err(resp) => return resp,
+    };
+    if let Err(resp) = check_if_match(&headers, file.config_version) {
+        return resp;
+    }
+
+    let target_provider_name = if let Some(ref p) = query.provider {
+        if file.providers.contains_key(p) {
+            p.clone()
+        } else {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": {"message": format!("provider '{p}' not found"), "code": "provider_not_found"}})),
+            )
+                .into_response();
+        }
+    } else {
+        let found = file.providers.iter().find(|(_, p_sec)| {
+            p_sec.models.iter().any(|m| m == &name)
+                || p_sec.model_configs.iter().any(|m| m.name == name)
+        });
+        match found {
+            Some((p_name, _)) => p_name.clone(),
+            None => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(json!({"error": {"message": format!("model '{name}' not found"), "code": "model_not_found"}})),
+                )
+                    .into_response();
+            }
+        }
+    };
+
+    let p_sec = file.providers.get_mut(&target_provider_name).unwrap();
+    p_sec.models.retain(|m| m != &name);
+    p_sec.model_configs.retain(|m| m.name != name);
+
+    let new_ver = match save_store_config(&state, &mut file) {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
+
+    if let Some(p_cfg) = state.config.write().providers.get_mut(&target_provider_name) {
+        p_cfg.models.retain(|m| m != &name);
+        p_cfg.model_specs.retain(|m| m.name != name);
+    }
+
+    tracing::info!(provider = %target_provider_name, model = %name, "admin deleted model");
+
+    Json(json!({
+        "deleted": name,
+        "provider": target_provider_name,
+        "config_version": new_ver
+    }))
+    .into_response()
+}
+
 #[utoipa::path(get, path = "/api/admin/keys", responses((status = 200, body = [KeyView])))]
 pub async fn handle_admin_keys(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    // One file snapshot for masking (handler-side sanitize; list_keys() itself
-    // never returns key material).
     let file = match load_store_config(&state) {
         Ok(f) => f,
-        Err(resp) => return resp.into_response(),
+        Err(resp) => return resp,
     };
     let mut views: Vec<KeyView> = Vec::new();
     let pools = state.pools.read();
@@ -285,6 +1005,308 @@ pub async fn handle_admin_keys(State(state): State<Arc<AppState>>) -> impl IntoR
     Json(views).into_response()
 }
 
+#[utoipa::path(post, path = "/api/admin/keys", request_body = CreateKeyPayload, responses((status = 201, body = CreateKeyResponse)))]
+pub async fn handle_admin_create_key(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(payload): Json<CreateKeyPayload>,
+) -> impl IntoResponse {
+    if let Err(resp) = check_admin_write_enabled(&state) {
+        return resp;
+    }
+    let _lock = state.admin_write_lock.lock().await;
+    let mut file = match load_store_config(&state) {
+        Ok(f) => f,
+        Err(resp) => return resp,
+    };
+    if let Err(resp) = check_if_match(&headers, file.config_version) {
+        return resp;
+    }
+
+    let Some(p_sec) = file.providers.get_mut(&payload.provider) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": {"message": format!("provider '{}' not found", payload.provider), "code": "provider_not_found"}})),
+        )
+            .into_response();
+    };
+
+    let key_id = payload.id.trim().to_string();
+    if key_id.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": {"message": "key id cannot be empty", "code": "invalid_key_id"}})),
+        )
+            .into_response();
+    }
+    if p_sec.keys.iter().any(|k| k.id == key_id) {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({"error": {"message": format!("key '{key_id}' already exists in provider '{}'", payload.provider), "code": "key_already_exists"}})),
+        )
+            .into_response();
+    }
+
+    p_sec.keys.push(KeySection {
+        id: key_id.clone(),
+        api_key: payload.api_key.clone(),
+        priority: payload.priority,
+        weight: payload.weight,
+    });
+
+    let new_ver = match save_store_config(&state, &mut file) {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
+
+    if let Some(pool) = state.pools.read().get(&payload.provider) {
+        pool.add_key(ApiKeyEntry::new(
+            &key_id,
+            &payload.api_key,
+            payload.priority,
+            payload.weight,
+        ));
+    }
+
+    tracing::info!(provider = %payload.provider, key_id = %key_id, "admin created key");
+
+    let mut resp = (
+        StatusCode::CREATED,
+        Json(CreateKeyResponse {
+            provider: payload.provider,
+            id: key_id,
+            api_key: payload.api_key,
+            priority: payload.priority,
+            weight: payload.weight,
+            state: "active".to_string(),
+            config_version: new_ver,
+        }),
+    )
+        .into_response();
+
+    resp.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store"),
+    );
+    resp.headers_mut().insert(
+        header::PRAGMA,
+        HeaderValue::from_static("no-cache"),
+    );
+    resp
+}
+
+#[utoipa::path(delete, path = "/api/admin/keys/{id}", params(("id" = String, Path)), responses((status = 200, body = serde_json::Value)))]
+pub async fn handle_admin_delete_key(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(query): Query<DeleteKeyQuery>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(resp) = check_admin_write_enabled(&state) {
+        return resp;
+    }
+    let _lock = state.admin_write_lock.lock().await;
+    let mut file = match load_store_config(&state) {
+        Ok(f) => f,
+        Err(resp) => return resp,
+    };
+    if let Err(resp) = check_if_match(&headers, file.config_version) {
+        return resp;
+    }
+
+    let target_provider_name = if let Some(ref p) = query.provider {
+        if file.providers.contains_key(p) {
+            p.clone()
+        } else {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": {"message": format!("provider '{p}' not found"), "code": "provider_not_found"}})),
+            )
+                .into_response();
+        }
+    } else {
+        let found = file
+            .providers
+            .iter()
+            .find(|(_, p_sec)| p_sec.keys.iter().any(|k| k.id == id));
+        match found {
+            Some((p_name, _)) => p_name.clone(),
+            None => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(json!({"error": {"message": format!("key '{id}' not found"), "code": "key_not_found"}})),
+                )
+                    .into_response();
+            }
+        }
+    };
+
+    let (strat, remaining_keys) = {
+        let p_sec = file.providers.get_mut(&target_provider_name).unwrap();
+        p_sec.keys.retain(|k| k.id != id);
+        (parse_pool_strategy(&p_sec.strategy), p_sec.keys.clone())
+    };
+
+    let new_ver = match save_store_config(&state, &mut file) {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
+
+    // Hot-rebuild KeyPool with remaining keys
+    let new_pool = Arc::new(KeyPool::new(&target_provider_name, strat));
+    for k in &remaining_keys {
+        new_pool.add_key(ApiKeyEntry::new(&k.id, &k.api_key, k.priority, k.weight));
+    }
+    state
+        .pools
+        .write()
+        .insert(target_provider_name.clone(), new_pool);
+
+    tracing::info!(provider = %target_provider_name, key_id = %id, "admin deleted key");
+
+    Json(json!({
+        "deleted": id,
+        "provider": target_provider_name,
+        "config_version": new_ver
+    }))
+    .into_response()
+}
+
+#[utoipa::path(post, path = "/api/admin/keys/{id}/test", params(("id" = String, Path)), responses((status = 200, body = KeyTestView)))]
+pub async fn handle_admin_test_key(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    if let Err(resp) = check_admin_write_enabled(&state) {
+        return resp;
+    }
+    let file = match load_store_config(&state) {
+        Ok(f) => f,
+        Err(resp) => return resp,
+    };
+
+    let found = file
+        .providers
+        .iter()
+        .find_map(|(p_name, p_sec)| {
+            p_sec
+                .keys
+                .iter()
+                .find(|k| k.id == id)
+                .map(|k| (p_name.clone(), p_sec.clone(), k.clone()))
+        });
+
+    let Some((p_name, p_sec, key_sec)) = found else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": {"message": format!("key '{id}' not found"), "code": "key_not_found"}})),
+        )
+            .into_response();
+    };
+
+    let base_url = p_sec.base_url.clone();
+    let raw_key = key_sec.api_key.clone();
+    let is_anthropic = p_sec
+        .default_protocol
+        .as_ref()
+        .map(|p| matches!(p, UpstreamProtocol::Anthropic))
+        .unwrap_or(false)
+        || base_url.contains("anthropic");
+
+    let probe_url = if let Some(ref chat) = p_sec.chat_url {
+        chat.clone()
+    } else {
+        format!("{}/models", base_url.trim_end_matches('/'))
+    };
+
+    let start = Instant::now();
+    let mut req = state
+        .http_client
+        .get(&probe_url)
+        .timeout(std::time::Duration::from_secs(3))
+        .header(header::USER_AGENT, "ponyllm-dialtest/0.1");
+
+    if is_anthropic {
+        req = req
+            .header("x-api-key", &raw_key)
+            .header("anthropic-version", "2023-06-01");
+    } else {
+        req = req.header(header::AUTHORIZATION, format!("Bearer {}", raw_key));
+    }
+
+    let result = req.send().await;
+    let elapsed = start.elapsed();
+    let latency_ms = elapsed.as_millis() as u64;
+
+    let test_view = match result {
+        Ok(resp) => {
+            let status = resp.status();
+            if status.is_success() {
+                KeyTestView {
+                    success: true,
+                    latency_ms,
+                    http_status: Some(status.as_u16()),
+                    error_code: None,
+                    message: "probe ok".to_string(),
+                }
+            } else if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+                KeyTestView {
+                    success: false,
+                    latency_ms,
+                    http_status: Some(status.as_u16()),
+                    error_code: Some("unauthorized".to_string()),
+                    message: "upstream authentication failed".to_string(),
+                }
+            } else if status == StatusCode::TOO_MANY_REQUESTS {
+                KeyTestView {
+                    success: false,
+                    latency_ms,
+                    http_status: Some(status.as_u16()),
+                    error_code: Some("rate_limited".to_string()),
+                    message: "upstream rate limit exceeded".to_string(),
+                }
+            } else {
+                KeyTestView {
+                    success: false,
+                    latency_ms,
+                    http_status: Some(status.as_u16()),
+                    error_code: Some("upstream_error".to_string()),
+                    message: format!("upstream returned HTTP {}", status.as_u16()),
+                }
+            }
+        }
+        Err(e) => {
+            if e.is_timeout() {
+                KeyTestView {
+                    success: false,
+                    latency_ms: latency_ms.max(3000),
+                    http_status: None,
+                    error_code: Some("timeout".to_string()),
+                    message: "dial test timed out after 3s".to_string(),
+                }
+            } else {
+                KeyTestView {
+                    success: false,
+                    latency_ms,
+                    http_status: None,
+                    error_code: Some("connect_error".to_string()),
+                    message: "upstream connection error".to_string(),
+                }
+            }
+        }
+    };
+
+    tracing::info!(
+        key_id = %id,
+        provider = %p_name,
+        success = test_view.success,
+        latency_ms = test_view.latency_ms,
+        "key dial-test executed"
+    );
+
+    Json(test_view).into_response()
+}
+
 #[utoipa::path(get, path = "/api/admin/strategy", responses((status = 200, body = StrategyView)))]
 pub async fn handle_admin_get_strategy(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let cfg = state.config.read();
@@ -302,8 +1324,10 @@ pub async fn handle_admin_get_strategy(State(state): State<Arc<AppState>>) -> im
 #[utoipa::path(put, path = "/api/admin/strategy", request_body = PutStrategyPayload, responses((status = 200, body = StrategyView)))]
 pub async fn handle_admin_put_strategy(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
+    let _lock = state.admin_write_lock.lock().await;
     let Some(strategy_str) = body.get("strategy").and_then(|v| v.as_str()) else {
         return (
             StatusCode::BAD_REQUEST,
@@ -322,12 +1346,34 @@ pub async fn handle_admin_put_strategy(
         Ok(f) => f,
         Err(resp) => return resp,
     };
+
+    // If caller provided If-Match, enforce optimistic lock
+    if let Some(raw) = headers.get(header::IF_MATCH).and_then(|v| v.to_str().ok()) {
+        let trimmed = raw.trim().trim_matches('"');
+        if trimmed != "*" {
+            match trimmed.parse::<u64>() {
+                Ok(v) if v == file.config_version => {}
+                _ => {
+                    return (
+                        StatusCode::PRECONDITION_FAILED,
+                        Json(json!({
+                            "error": {
+                                "message": format!("config version conflict: current is {}, If-Match specified {}", file.config_version, raw),
+                                "code": "precondition_failed"
+                            }
+                        })),
+                    )
+                        .into_response();
+                }
+            }
+        }
+    }
+
     file.gateway.default_strategy = new_strategy;
     let new_version = match save_store_config(&state, &mut file) {
         Ok(v) => v,
         Err(resp) => return resp,
     };
-    // In-memory reload (admin write takes effect immediately, no watcher wait).
     state.config.write().default_strategy = new_strategy;
     Json(StrategyView {
         strategy: new_strategy.to_string(),
@@ -340,7 +1386,7 @@ pub async fn handle_admin_put_strategy(
 pub async fn handle_admin_service_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let file = match load_store_config(&state) {
         Ok(f) => f,
-        Err(resp) => return resp.into_response(),
+        Err(resp) => return resp,
     };
     let cfg = state.config.read();
     Json(ServiceStatusView {
@@ -354,7 +1400,6 @@ pub async fn handle_admin_service_status(State(state): State<Arc<AppState>>) -> 
 
 #[utoipa::path(post, path = "/api/admin/auth/rotate", responses((status = 200, body = RotateView)))]
 pub async fn handle_admin_auth_rotate(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    // Open mode has no credential to rotate (security P1: fail closed).
     if auth_mode(&state) == "open" {
         return (
             StatusCode::CONFLICT,
@@ -362,6 +1407,7 @@ pub async fn handle_admin_auth_rotate(State(state): State<Arc<AppState>>) -> imp
         )
             .into_response();
     }
+    let _lock = state.admin_write_lock.lock().await;
     let mut file = match load_store_config(&state) {
         Ok(f) => f,
         Err(resp) => return resp,
@@ -372,12 +1418,8 @@ pub async fn handle_admin_auth_rotate(State(state): State<Arc<AppState>>) -> imp
         Ok(v) => v,
         Err(resp) => return resp,
     };
-    // Immediate in-memory effect: auth_middleware reads config per request, so
-    // NEW requests validate against the new token; in-flight SSE connections
-    // already passed the auth layer and are not interrupted.
     state.config.write().api_key = new_token.clone();
     let rotated_at = chrono::Utc::now().to_rfc3339();
-    // One-time plaintext token response — never cached anywhere.
     let mut resp = Json(RotateView { new_token, rotated_at, config_version: new_version }).into_response();
     resp.headers_mut().insert(
         header::CACHE_CONTROL,
@@ -397,8 +1439,16 @@ pub async fn handle_admin_auth_rotate(State(state): State<Arc<AppState>>) -> imp
     paths(
         handle_admin_overview,
         handle_admin_providers,
+        handle_admin_create_provider,
+        handle_admin_delete_provider,
         handle_admin_provider_models,
+        handle_admin_create_model,
+        handle_admin_update_model,
+        handle_admin_delete_model,
         handle_admin_keys,
+        handle_admin_create_key,
+        handle_admin_delete_key,
+        handle_admin_test_key,
         handle_admin_get_strategy,
         handle_admin_put_strategy,
         handle_admin_service_status,
@@ -407,8 +1457,14 @@ pub async fn handle_admin_auth_rotate(State(state): State<Arc<AppState>>) -> imp
     components(schemas(
         OverviewView,
         ProviderView,
+        CreateProviderPayload,
         ModelView,
+        CreateModelPayload,
+        UpdateModelPayload,
         KeyView,
+        CreateKeyPayload,
+        CreateKeyResponse,
+        KeyTestView,
         StrategyView,
         PutStrategyPayload,
         ServiceStatusView,
@@ -418,13 +1474,45 @@ pub async fn handle_admin_auth_rotate(State(state): State<Arc<AppState>>) -> imp
 pub struct AdminApiDoc;
 
 pub fn admin_routes() -> axum::Router<Arc<AppState>> {
-    use axum::routing::{get, post};
+    use axum::routing::{delete, get, post, put};
     axum::Router::new()
         .route("/api/admin/overview", get(handle_admin_overview))
-        .route("/api/admin/providers", get(handle_admin_providers))
-        .route("/api/admin/providers/{name}/models", get(handle_admin_provider_models))
-        .route("/api/admin/keys", get(handle_admin_keys))
-        .route("/api/admin/strategy", get(handle_admin_get_strategy).put(handle_admin_put_strategy))
+        .route(
+            "/api/admin/providers",
+            get(handle_admin_providers).post(handle_admin_create_provider),
+        )
+        .route(
+            "/api/admin/providers/{name}",
+            delete(handle_admin_delete_provider),
+        )
+        .route(
+            "/api/admin/providers/{name}/models",
+            get(handle_admin_provider_models),
+        )
+        .route(
+            "/api/admin/models",
+            post(handle_admin_create_model),
+        )
+        .route(
+            "/api/admin/models/{name}",
+            put(handle_admin_update_model).delete(handle_admin_delete_model),
+        )
+        .route(
+            "/api/admin/keys",
+            get(handle_admin_keys).post(handle_admin_create_key),
+        )
+        .route(
+            "/api/admin/keys/{id}",
+            delete(handle_admin_delete_key),
+        )
+        .route(
+            "/api/admin/keys/{id}/test",
+            post(handle_admin_test_key),
+        )
+        .route(
+            "/api/admin/strategy",
+            get(handle_admin_get_strategy).put(handle_admin_put_strategy),
+        )
         .route("/api/admin/service/status", get(handle_admin_service_status))
         .route("/api/admin/auth/rotate", post(handle_admin_auth_rotate))
 }

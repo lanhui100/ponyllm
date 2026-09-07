@@ -50,6 +50,176 @@
             }
           }
         }
+      },
+      "post": {
+        "tags": [],
+        "operationId": "handle_admin_create_key",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateKeyPayload"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreateKeyResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/keys/{id}": {
+      "delete": {
+        "tags": [],
+        "operationId": "handle_admin_delete_key",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/keys/{id}/test": {
+      "post": {
+        "tags": [],
+        "operationId": "handle_admin_test_key",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KeyTestView"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/models": {
+      "post": {
+        "tags": [],
+        "operationId": "handle_admin_create_model",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateModelPayload"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelView"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/models/{name}": {
+      "put": {
+        "tags": [],
+        "operationId": "handle_admin_update_model",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateModelPayload"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelView"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [],
+        "operationId": "handle_admin_delete_model",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
       }
     },
     "/api/admin/overview": {
@@ -85,6 +255,58 @@
                     "$ref": "#/components/schemas/ProviderView"
                   }
                 }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [],
+        "operationId": "handle_admin_create_provider",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateProviderPayload"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProviderView"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/providers/{name}": {
+      "delete": {
+        "tags": [],
+        "operationId": "handle_admin_delete_provider",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {}
               }
             }
           }
@@ -187,6 +409,234 @@
   },
   "components": {
     "schemas": {
+      "CreateKeyPayload": {
+        "type": "object",
+        "required": [
+          "provider",
+          "id",
+          "api_key"
+        ],
+        "properties": {
+          "api_key": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "priority": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "provider": {
+            "type": "string"
+          },
+          "weight": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          }
+        }
+      },
+      "CreateKeyResponse": {
+        "type": "object",
+        "required": [
+          "provider",
+          "id",
+          "api_key",
+          "priority",
+          "weight",
+          "state",
+          "config_version"
+        ],
+        "properties": {
+          "api_key": {
+            "type": "string"
+          },
+          "config_version": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "id": {
+            "type": "string"
+          },
+          "priority": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "provider": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string"
+          },
+          "weight": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          }
+        }
+      },
+      "CreateModelPayload": {
+        "type": "object",
+        "required": [
+          "provider",
+          "name"
+        ],
+        "properties": {
+          "context_window": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "max_output": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "protocol": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "provider": {
+            "type": "string"
+          },
+          "proxy": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "thinking_default": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "thinking_max": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tier": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "CreateProviderPayload": {
+        "type": "object",
+        "required": [
+          "name",
+          "base_url"
+        ],
+        "properties": {
+          "base_url": {
+            "type": "string"
+          },
+          "billing_mode": {
+            "type": "string"
+          },
+          "cached_price": {
+            "type": "number",
+            "format": "double"
+          },
+          "chat_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "default_model": {
+            "type": "string"
+          },
+          "default_protocol": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "input_price": {
+            "type": "number",
+            "format": "double"
+          },
+          "messages_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "output_price": {
+            "type": "number",
+            "format": "double"
+          },
+          "proxy": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "responses_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "strategy": {
+            "type": "string"
+          }
+        }
+      },
+      "KeyTestView": {
+        "type": "object",
+        "required": [
+          "success",
+          "latency_ms",
+          "message"
+        ],
+        "properties": {
+          "error_code": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "http_status": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "minimum": 0
+          },
+          "latency_ms": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "message": {
+            "type": "string"
+          },
+          "success": {
+            "type": "boolean"
+          }
+        }
+      },
       "KeyView": {
         "type": "object",
         "required": [
@@ -425,6 +875,59 @@
           },
           "strategy": {
             "type": "string"
+          }
+        }
+      },
+      "UpdateModelPayload": {
+        "type": "object",
+        "properties": {
+          "context_window": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "max_output": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "protocol": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "provider": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "proxy": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "thinking_default": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "thinking_max": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tier": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       }

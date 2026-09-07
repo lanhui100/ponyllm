@@ -152,6 +152,8 @@ pub struct AppState {
     pub config_store: Option<std::sync::Arc<dyn crate::admin_store::ConfigStore>>,
     /// Process start instant for admin service/status uptime (WEB-03).
     pub started_at: std::time::Instant,
+    /// Write queue lock serializing admin config mutations (WEB-06).
+    pub admin_write_lock: tokio::sync::Mutex<()>,
 }
 
 impl std::fmt::Debug for dyn crate::admin_store::ConfigStore {
@@ -235,6 +237,7 @@ impl AppState {
             proxy_clients: RwLock::new(proxy_clients),
             config_store: None,
             started_at: std::time::Instant::now(),
+            admin_write_lock: tokio::sync::Mutex::new(()),
         }
     }
 
