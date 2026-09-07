@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use parking_lot::Mutex;
-use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
+use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE, USER_AGENT};
 use serde_json::Value;
 use crate::error::{CoreError, GatewayErrorKind, Result};
 use crate::pool::{ApiKeyEntry, KeyPool, PoolErrorType};
@@ -62,6 +62,15 @@ pub struct UpstreamExecutor {
     observer: Option<AttemptObserver>,
     sink_ctx: Option<EventSinkCtx>,
     sink: Option<EventSink>,
+    /// Session id forwarded as `x-opencode-session` (+ affinity aliases).
+    /// Resolved once per gateway request so every key retry shares it.
+    session_id: String,
+    /// Client label forwarded as `x-opencode-client`.
+    client_label: String,
+    /// Zen scope gate (see [`is_opencode_zen_target`]): only zen targets
+    /// get the session headers. Defaults to off so non-zen upstreams keep
+    /// byte-identical wire headers to before.
+    opencode_zen: bool,
 }
 
 impl std::fmt::Debug for UpstreamExecutor {
@@ -73,6 +82,76 @@ impl std::fmt::Debug for UpstreamExecutor {
             .field("has_observer", &self.observer.is_some())
             .finish()
     }
+}
+
+/// Gateway-owned User-Agent advertised to upstreams (not a generic SDK name).
+/// OpenCode Go requires callers to identify with their own agent string for
+/// abuse monitoring; the reqwest default would be flagged as generic.
+pub fn ponyllm_user_agent() -> String {
+    format!("ponyllm/{}", env!("CARGO_PKG_VERSION"))
+}
+
+/// Downstream session headers accepted as the upstream `x-opencode-session`
+/// source, in priority order. `opencode` itself sends `x-opencode-session`
+/// for opencode providers and `x-session-affinity`/`X-Session-Id` otherwise;
+/// `x-pony-session` lets non-opencode coding tools pin a stable conversation.
+pub const SESSION_HEADER_PRIORITY: &[&str] = &[
+    "x-opencode-session",
+    "x-pony-session",
+    "x-session-affinity",
+    "x-session-id",
+];
+
+/// Generate a gateway-side session id used when the downstream client sent
+/// none. Passes the upstream `MissingSessionID` gate; per-conversation
+/// stability still requires the downstream to send one of
+/// [`SESSION_HEADER_PRIORITY`].
+pub fn new_upstream_session_id() -> String {
+    format!("ponyllm-{}", uuid::Uuid::new_v4().simple())
+}
+
+fn clean_session_value(value: &HeaderValue) -> Option<String> {
+    let trimmed = value.to_str().ok()?.trim();
+    if trimmed.is_empty() || trimmed.len() > 256 {
+        return None;
+    }
+    Some(trimmed.to_string())
+}
+
+/// Resolve the upstream session id: first valid downstream session header,
+/// else a freshly generated gateway-side id.
+pub fn resolve_upstream_session(downstream: &HeaderMap) -> String {
+    for name in SESSION_HEADER_PRIORITY {
+        if let Some(value) = downstream.get(*name).and_then(clean_session_value) {
+            return value;
+        }
+    }
+    new_upstream_session_id()
+}
+
+/// Resolve the upstream client label: downstream `x-opencode-client` when
+/// present, else the gateway's own name.
+pub fn resolve_upstream_client(downstream: &HeaderMap) -> String {
+    downstream
+        .get("x-opencode-client")
+        .and_then(clean_session_value)
+        .unwrap_or_else(|| "ponyllm".to_string())
+}
+
+/// Scope gate: only opencode **zen** endpoints receive the session-header
+/// treatment. Go endpoints tolerate off-client use under a different
+/// contract, and every other upstream must never see opencode-specific
+/// headers. Either signal matches: an `opencode*` provider name (covers
+/// direct `https://opencode.ai/zen/v1` configs) or an `opencode` URL
+/// segment (covers `.../opencode/zen/v1` forward proxies); a `/go/`
+/// path segment always opts out.
+pub fn is_opencode_zen_target(provider_name: &str, target_url: &str) -> bool {
+    let provider = provider_name.to_ascii_lowercase();
+    let url = target_url.to_ascii_lowercase();
+    if !(provider.starts_with("opencode") || url.contains("opencode")) {
+        return false;
+    }
+    !url.contains("/go/")
 }
 
 /// Create an optimized, connection-pooled HTTP client for upstream LLM providers.
@@ -211,7 +290,31 @@ impl UpstreamExecutor {
             observer: None,
             sink_ctx: None,
             sink: None,
+            // Defense in depth: even callers that never saw downstream
+            // headers still satisfy the upstream MissingSessionID gate
+            // once they opt into the zen scope below.
+            session_id: new_upstream_session_id(),
+            client_label: "ponyllm".to_string(),
+            opencode_zen: false,
         }
+    }
+
+    /// Opt into the opencode zen session treatment for this executor.
+    /// Routes compute the flag with [`is_opencode_zen_target`] from the
+    /// resolved provider + target URL; everything else stays untouched.
+    pub fn with_opencode_zen(mut self, enabled: bool) -> Self {
+        self.opencode_zen = enabled;
+        self
+    }
+
+    /// Adopt downstream session identity for upstream routing/caching.
+    /// Extracts `x-opencode-session` (or affinity aliases) once, so every
+    /// per-key retry inside this executor reuses the same session instead of
+    /// churning one id per attempt.
+    pub fn with_downstream_headers(mut self, downstream: &HeaderMap) -> Self {
+        self.session_id = resolve_upstream_session(downstream);
+        self.client_label = resolve_upstream_client(downstream);
+        self
     }
 
     /// Attach an opt-in event sink. Emits `KeySelected`, `UpstreamHeaders`
@@ -357,6 +460,25 @@ impl UpstreamExecutor {
         let x_api_val = HeaderValue::from_str(clean_key)
             .map_err(|e| CoreError::Internal(format!("Invalid characters in API key for '{}': {}", key.id, e)))?;
         headers.insert("x-api-key", x_api_val);
+
+        // OpenCode zen routing gate: `x-opencode-session` is mandatory
+        // (MissingSessionID 400 otherwise). Aliases cover the native
+        // session headers other coding agents send. Scoped to zen only;
+        // every other upstream keeps its historical wire headers.
+        if self.opencode_zen {
+            let session_val = HeaderValue::from_str(&self.session_id)
+                .map_err(|e| CoreError::Internal(format!("Invalid session id: {}", e)))?;
+            headers.insert("x-opencode-session", session_val.clone());
+            headers.insert("x-session-affinity", session_val.clone());
+            headers.insert("x-session-id", session_val);
+            let client_val = HeaderValue::from_str(&self.client_label)
+                .map_err(|e| CoreError::Internal(format!("Invalid client label: {}", e)))?;
+            headers.insert("x-opencode-client", client_val);
+            // Own agent string, never a generic SDK default.
+            let ua_val = HeaderValue::from_str(&ponyllm_user_agent())
+                .map_err(|e| CoreError::Internal(format!("Invalid user agent: {}", e)))?;
+            headers.insert(USER_AGENT, ua_val);
+        }
 
         Ok(headers)
     }
@@ -572,5 +694,128 @@ impl UpstreamExecutor {
             last_error,
             kind: last_kind,
         })
+    }
+}
+
+#[cfg(test)]
+mod session_header_tests {
+    use super::*;
+    use crate::pool::{KeyPool, RoutingStrategy};
+
+    fn downstream(pairs: &[(&str, &str)]) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        for (k, v) in pairs {
+            headers.insert(
+                reqwest::header::HeaderName::from_bytes(k.as_bytes()).unwrap(),
+                HeaderValue::from_str(v).unwrap(),
+            );
+        }
+        headers
+    }
+
+    #[test]
+    fn prefers_opencode_session_over_aliases() {
+        let headers = downstream(&[
+            ("x-session-affinity", "aff-1"),
+            ("x-opencode-session", "ses-1"),
+        ]);
+        assert_eq!(resolve_upstream_session(&headers), "ses-1");
+    }
+
+    #[test]
+    fn falls_back_through_alias_priority() {
+        let headers = downstream(&[("x-session-id", "sid-1")]);
+        assert_eq!(resolve_upstream_session(&headers), "sid-1");
+        let headers = downstream(&[("x-pony-session", "pony-ses-1")]);
+        assert_eq!(resolve_upstream_session(&headers), "pony-ses-1");
+    }
+
+    #[test]
+    fn generates_prefixed_id_when_missing_or_blank() {
+        let empty = HeaderMap::new();
+        let generated = resolve_upstream_session(&empty);
+        assert!(generated.starts_with("ponyllm-"), "got {}", generated);
+        let blank = downstream(&[("x-opencode-session", "   ")]);
+        assert!(resolve_upstream_session(&blank).starts_with("ponyllm-"));
+        assert_ne!(
+            resolve_upstream_session(&empty),
+            resolve_upstream_session(&empty)
+        );
+    }
+
+    #[test]
+    fn zen_scope_gating() {
+        // Direct zen base.
+        assert!(is_opencode_zen_target(
+            "opencode-official",
+            "https://opencode.ai/zen/v1/responses"
+        ));
+        // Forward-proxy zen base under a non-opencode provider name.
+        assert!(is_opencode_zen_target(
+            "pony-proxy",
+            "https://access.ponyjob.top/pony_abc/opencode/zen/v1/responses"
+        ));
+        // Go endpoints opt out even for opencode providers.
+        assert!(!is_opencode_zen_target(
+            "opencode-go",
+            "https://opencode.ai/zen/go/v1/responses"
+        ));
+        // Unrelated upstreams never match.
+        assert!(!is_opencode_zen_target(
+            "sense",
+            "https://token.sensenova.cn/v1/chat/completions"
+        ));
+        assert!(!is_opencode_zen_target("bai", "https://example.com/v1"));
+        // Matching is case-insensitive.
+        assert!(is_opencode_zen_target(
+            "OpenCode-Zen",
+            "https://opencode.ai/ZEN/v1/responses"
+        ));
+    }
+
+    #[test]
+    fn build_headers_carries_session_and_own_ua_for_zen() {
+        let pool = Arc::new(KeyPool::new("test", RoutingStrategy::RoundRobin));
+        let key = ApiKeyEntry::new("k1", "sk-test", 1, 10);
+        let executor = UpstreamExecutor::new(pool, 1)
+            .with_downstream_headers(&downstream(&[("x-opencode-session", "ses-keep")]))
+            .with_opencode_zen(true);
+        let headers = executor.build_headers(&key).unwrap();
+        assert_eq!(headers.get("x-opencode-session").unwrap(), "ses-keep");
+        assert_eq!(headers.get("x-session-affinity").unwrap(), "ses-keep");
+        assert_eq!(headers.get("x-session-id").unwrap(), "ses-keep");
+        assert_eq!(headers.get("x-opencode-client").unwrap(), "ponyllm");
+        assert_eq!(
+            headers.get(USER_AGENT).unwrap().to_str().unwrap(),
+            ponyllm_user_agent()
+        );
+
+        let pool = Arc::new(KeyPool::new("test", RoutingStrategy::RoundRobin));
+        let fallback = UpstreamExecutor::new(pool, 1).with_opencode_zen(true);
+        let headers = fallback.build_headers(&key).unwrap();
+        let session = headers
+            .get("x-opencode-session")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(session.starts_with("ponyllm-"), "got {}", session);
+    }
+
+    #[test]
+    fn build_headers_untouched_outside_zen_scope() {
+        let pool = Arc::new(KeyPool::new("test", RoutingStrategy::RoundRobin));
+        let key = ApiKeyEntry::new("k1", "sk-test", 1, 10);
+        // Default executor: no session headers at all (historical wire shape).
+        let plain = UpstreamExecutor::new(pool, 1)
+            .with_downstream_headers(&downstream(&[("x-opencode-session", "ses-keep")]));
+        let headers = plain.build_headers(&key).unwrap();
+        assert!(headers.get("x-opencode-session").is_none());
+        assert!(headers.get("x-session-affinity").is_none());
+        assert!(headers.get("x-session-id").is_none());
+        assert!(headers.get("x-opencode-client").is_none());
+        assert!(headers.get(USER_AGENT).is_none());
+        // Auth headers still present.
+        assert!(headers.get(AUTHORIZATION).is_some());
+        assert!(headers.get("x-api-key").is_some());
     }
 }

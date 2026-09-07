@@ -5,7 +5,7 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::IntoResponse;
 use axum::Json;
 use ponyllm_core::error::CoreError;
-use ponyllm_core::executor::{EventSinkCtx, UpstreamExecutor};
+use ponyllm_core::executor::{is_opencode_zen_target, EventSinkCtx, UpstreamExecutor};
 use ponyllm_core::pool::GatewayRoutingStrategy;
 use ponyllm_core::telemetry::{EventCtx, GatewayEvent, StageTimings};
 use ponyllm_protocol::anthropic::messages::{MessageRequest, MessageResponse};
@@ -348,6 +348,8 @@ pub async fn handle_messages(
         };
         let http_client = state.http_client_for_target(&target.provider_name, &target.physical_model);
         let executor = UpstreamExecutor::with_client(pool.clone(), http_client, max_retries)
+            .with_downstream_headers(&headers)
+            .with_opencode_zen(is_opencode_zen_target(&target.provider_name, &target_url))
             .with_event_sink(sink_ctx.clone(), state.event_sink(sink_ctx));
 
         if is_streaming {
