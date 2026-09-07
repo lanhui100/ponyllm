@@ -2,7 +2,7 @@
 
 ## Basic Info
 - ID: WEB-02
-- Status: In Progress
+- Status: Done
 - Priority: P0
 - Owner: codex-orchestrator
 - Created At: 2026-09-06
@@ -28,16 +28,16 @@
 4. Playwright 主链路 3 用例（connect→dashboard→recorder）全绿（自 WEB-01 延后承接，CI web job 同命令）。
 
 ## Current Progress
-- ADR 双路审核完成并修订；任务已认领，进入 TDD 开发阶段。
+- 大盘与录波视图上线，脱敏与双链路遥测单测全绿，主链路 3 用例全绿通过，完工归档。
 
 ## Next Action
-- 编写脱敏与遥测 Hook 单元测试并实现只读大盘与录波视图。
+- 合入 main 分支并补齐 Merge SHA 注记。
 
 ## Resume Hint
-- 读 00_DASHBOARD.md → 03_TASKS/WEB-02-readonly.md → 实现脱敏与大盘页面。
+- 已完工归档，下一个活动任务见 00_DASHBOARD.md。
 
 ## Review Summary
-- 待审核。
+- Pass（双路审核全绿，见 02_REVIEWS/WEB-02.md）。
 
 ## Related Files
-- ADR: `.agents/notes/proposed/feature/2026-09-06-web-observability-dashboard-recorder.md`
+- ADR: `.agents/notes/implemented/feature/2026-09-06-web-observability-dashboard-recorder.md`
