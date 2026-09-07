@@ -95,6 +95,12 @@ impl KeyPool {
     /// Record an error on a key
     pub fn record_error(&self, key_id: &str, error: PoolErrorType) {
         let keys = self.keys.read();
+        if keys.len() == 1 && matches!(error, PoolErrorType::RateLimit { .. }) {
+            if let Some(entry) = keys.iter().find(|k| k.id == key_id) {
+                entry.record_transient_failure();
+            }
+            return;
+        }
         if let Some(entry) = keys.iter().find(|k| k.id == key_id) {
             entry.record_failure(error);
         }
@@ -104,6 +110,12 @@ impl KeyPool {
     pub fn active_key_count(&self) -> usize {
         let keys = self.keys.read();
         keys.iter().filter(|k| k.current_state() == KeyState::Active).count()
+    }
+
+    /// Earliest unlock across cooling keys, for honest Retry-After.
+    pub fn earliest_unlock(&self) -> Option<std::time::Duration> {
+        let keys = self.keys.read();
+        keys.iter().filter_map(|k| k.cooldown_remaining()).min()
     }
 
     /// Total keys in pool

@@ -101,6 +101,25 @@ impl ApiKeyEntry {
         self.stats.consecutive_failures.store(0, Ordering::SeqCst);
     }
 
+    /// Remaining cooldown, if still cooling.
+    pub fn cooldown_remaining(&self) -> Option<Duration> {
+        let guard = self.stats.cooldown_until.read();
+        let until = (*guard)?;
+        let now = Instant::now();
+        if now < until {
+            Some(until - now)
+        } else {
+            None
+        }
+    }
+
+    /// Count a transient 429 without cooling, for singleton pools that
+    /// always passthrough upstream instead of local isolation.
+    pub fn record_transient_failure(&self) {
+        self.stats.total_requests.fetch_add(1, Ordering::Relaxed);
+        self.stats.failed_requests.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// Record a failed request and transition state accordingly
     pub fn record_failure(&self, err_type: PoolErrorType) {
         self.stats.total_requests.fetch_add(1, Ordering::Relaxed);

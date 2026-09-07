@@ -151,6 +151,7 @@ pub async fn handle_responses(
     let mut last_error = String::new();
     let mut last_pool_exhausted = false;
     let mut last_kind = ponyllm_core::error::GatewayErrorKind::Internal;
+    let mut last_retry_after: Option<u64> = None;
     let mut last_req_snippet: Option<String> = None;
     let is_streaming = req.stream.unwrap_or(false);
 
@@ -335,7 +336,8 @@ pub async fn handle_responses(
                 Err(err) => {
                     tracing::warn!("Provider '{}' responses stream failed ({}). Attempting fallback...", provider_name, err);
                     last_kind = err.kind();
-                    last_pool_exhausted = matches!(err, CoreError::NoAvailableKey(_)) || pool.active_key_count() == 0;
+                    last_pool_exhausted = matches!(err, CoreError::NoAvailableKey(_));
+                    last_retry_after = crate::extractors::retry_after_secs(&last_kind, pool.earliest_unlock());
                     last_error = err.to_string();
                     continue;
                 }
@@ -432,7 +434,8 @@ pub async fn handle_responses(
             Err(err) => {
                 tracing::warn!("Provider '{}' responses request failed ({}). Attempting fallback...", provider_name, err);
                 last_kind = err.kind();
-                last_pool_exhausted = matches!(err, CoreError::NoAvailableKey(_)) || pool.active_key_count() == 0;
+                last_pool_exhausted = matches!(err, CoreError::NoAvailableKey(_));
+                last_retry_after = crate::extractors::retry_after_secs(&last_kind, pool.earliest_unlock());
                 last_error = err.to_string();
                 continue;
             }
@@ -453,6 +456,11 @@ pub async fn handle_responses(
 
     let msg = crate::extractors::format_exhausted_message(&last_error, last_pool_exhausted, &request_id);
     let mut err_resp = crate::extractors::project_openai_error(&last_kind, &msg);
+    if let Some(secs) = last_retry_after {
+        if let Ok(v) = HeaderValue::from_str(&secs.to_string()) {
+            err_resp.headers_mut().insert("retry-after", v);
+        }
+    }
     inject_telemetry_headers(&mut err_resp, &request_id, &stages);
     err_resp
 }

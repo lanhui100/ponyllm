@@ -140,15 +140,28 @@ pub fn parse_thinking_header(headers: &axum::http::HeaderMap) -> Option<ponyllm_
 pub fn format_exhausted_message(last_error: &str, pool_exhausted: bool, request_id: &str) -> String {
     if pool_exhausted {
         format!(
-            "Local key pool exhausted (no Active keys, all cooling down or disabled; check `ponyllm status`). Last error: {} (request_id: {})",
+            "Local key pool exhausted (gateway-side cooling, no upstream attempt in this request; no Active keys, check `ponyllm status`). Last error: {} (request_id: {})",
             last_error, request_id
         )
     } else {
         format!(
-            "All candidate upstream providers exhausted. Last error: {} (request_id: {})",
+            "All candidate upstream providers exhausted (upstream-side failure, gateway did attempt upstream). Last error: {} (request_id: {})",
             last_error, request_id
         )
     }
+}
+
+/// Prefer upstream Retry-After, else earliest pool unlock ceiled to seconds.
+pub fn retry_after_secs(
+    kind: &ponyllm_core::error::GatewayErrorKind,
+    pool_unlock: Option<std::time::Duration>,
+) -> Option<u64> {
+    use ponyllm_core::error::GatewayErrorKind;
+    if let GatewayErrorKind::RateLimitExceeded { retry_after: Some(d) } = kind {
+        let s = d.as_secs().max(1).min(60);
+        return Some(s);
+    }
+    pool_unlock.map(|d| d.as_secs().saturating_add(1).clamp(1, 60))
 }
 
 /// Project a `GatewayErrorKind` into an OpenAI format HTTP response.
