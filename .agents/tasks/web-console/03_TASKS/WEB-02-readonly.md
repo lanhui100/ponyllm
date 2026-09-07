@@ -8,8 +8,8 @@
 - Created At: 2026-09-06
 - Updated At: 2026-09-06
 - Estimated Effort: 1周
-- Blocker: WEB-01
-- Unblock Condition: WEB-01 Done
+- Blocker: 无
+- Unblock Condition: 无（前置 M1 脚手架与 M3 契约均已完成）
 
 ## Goal
 只用已有读接口上线 Dashboard 与 Recorder。
@@ -25,13 +25,13 @@
 4. Playwright 主链路 3 用例（connect→dashboard→recorder）全绿（自 WEB-01 延后承接，CI web job 同命令）。
 
 ## Current Progress
-- 待 WEB-01。
+- 前置 WEB-01 脚手架与 WEB-03 契约均已完成，待认领开工。
 
 ## Next Action
-- WEB-01 Done 后将本卡置 Ready。
+- 对 Related Files ADR 跑双路审核后认领开工。
 
 ## Resume Hint
-- 先对 Related Files ADR 验收，再开工。
+- 先对 Related Files ADR 双路审核，再开工。
 
 ## Review Summary
 - 待审核。
