@@ -1,14 +1,13 @@
 # Web Console 任务板
 
 ## Backlog
-- WEB-02 只读大盘与录波
 - WEB-06 Admin写路径与治理
 
 ## Ready
 - 无
 
 ## In Progress
-- 无
+- WEB-02 只读大盘与录波
 
 ## Review
 - 无（上限3）

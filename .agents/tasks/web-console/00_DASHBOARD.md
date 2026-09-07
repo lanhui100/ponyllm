@@ -12,14 +12,14 @@
 3. Admin 契约冻结后闭环治理
 
 ## Current Status
-- Most critical task: WEB-02 只读大盘与录波（M2 待认领）
+- Most critical task: WEB-02 只读大盘与录波（M2 进行中）
 - Biggest blocker: 无
-- Next smallest action: 认领 WEB-02 启动只读大盘建设
+- Next smallest action: 编写脱敏与遥测 Hook 单元测试并实现大盘视图
 
 ## Task Overview
 | ID | Title | Status | Priority | Owner | Next Step |
 |---|---|---|---|---|---|
-| WEB-02 | 只读大盘与录波 | Backlog | P0 | 待定 | 认领开工（只读大盘与录波） |
+| WEB-02 | 只读大盘与录波 | In Progress | P0 | codex-orchestrator | 交付 Dashboard/Recorder 页面与 E2E |
 | WEB-06 | Admin写路径与治理 | Backlog | P0 | 待定 | 等写路径需求澄清，CUD+拨测+治理债 |
 
 ## Archive Rule
