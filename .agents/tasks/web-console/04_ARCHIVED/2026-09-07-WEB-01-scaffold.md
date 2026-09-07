@@ -8,6 +8,7 @@
 - Created At: 2026-09-06
 - Updated At: 2026-09-07
 - Branch: task/WEB-01-scaffold
+- Merge: dd4fb10c953752b40df5bda97c0d91a061ee2055
 - Estimated Effort: 1周
 - Blocker: 无
 - Unblock Condition: 无
