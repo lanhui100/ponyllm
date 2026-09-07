@@ -8,6 +8,7 @@
 - Created At: 2026-09-07
 - Updated At: 2026-09-07
 - Branch: task/WEB-04-resource-governance
+- Merge: 57de3b8114407b469e3a6ef4e08c6a084fbefd88
 - Estimated Effort: 3天
 - Blocker: 无
 - Unblock Condition: 无
