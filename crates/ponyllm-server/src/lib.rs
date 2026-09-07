@@ -8,6 +8,7 @@ pub mod streaming;
 pub mod extractors;
 pub mod frames;
 pub mod segments;
+pub mod admin_store;
 
 pub use config::{EffectiveProxy, GatewayConfig, ModelSpec, ProviderConfig};
 pub use state::AppState;

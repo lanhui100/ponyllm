@@ -35,6 +35,15 @@ impl KeyPool {
         keys.iter().find(|k| k.id == key_id).map(|k| k.current_state())
     }
 
+    /// Snapshot of all keys for admin observability (WEB-03): id/priority/weight
+    /// plus effective state. Read-only; never exposes the raw key material.
+    pub fn list_keys(&self) -> Vec<(String, u32, u32, KeyState)> {
+        let keys = self.keys.read();
+        keys.iter()
+            .map(|k| (k.id.clone(), k.priority, k.weight, k.current_state()))
+            .collect()
+    }
+
     /// Select the next active, healthy key according to configured routing strategy
     pub fn select_key(&self) -> Result<Arc<ApiKeyEntry>> {
         self.select_key_excluding(&[])

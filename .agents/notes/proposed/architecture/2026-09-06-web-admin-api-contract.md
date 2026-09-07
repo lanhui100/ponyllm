@@ -14,14 +14,14 @@ Status: proposed
 
 | # | Method | Path | 请求 | 响应 | 错误码 |
 |---|---|---|---|---|---|
-| 1 | GET | `/api/admin/overview` | — | 版本+bind+providers/keys/active 计数+strategy+hot_reload_ms(500)+config_version | 401 |
+| 1 | GET | `/api/admin/overview` | — | 版本+bind(host:port完整回显,0.0.0.0原样)+auth_mode(open\|secured)+providers/keys/active 计数+strategy+hot_reload_ms(500)+config_version | 401 |
 | 2 | GET | `/api/admin/providers` | — | ProviderView[]（脱敏：无 key 字段） | 401 |
 | 3 | GET | `/api/admin/providers/{name}/models` | — | ModelView[]（含 effective thinking 天花板） | 401,404 |
-| 4 | GET | `/api/admin/keys` | — | KeyView[]（`id/priority/weight/state`+api_key 脱敏 `sk-***尾4位`） | 401 |
+| 4 | GET | `/api/admin/keys` | — | KeyView[]（`id/priority/weight/state`+api_key 按 telemetry `sanitize_key` 同源掩码：sk- 前缀→`sk-***尾4`，非 sk-→`前3***尾4`，≤8字符→`****`） | 401 |
 | 5 | GET | `/api/admin/strategy` | — | 当前 GatewayRoutingStrategy | 401 |
-| 6 | PUT | `/api/admin/strategy` | `{strategy}` | 更新后 strategy | 401,400 |
-| 7 | GET | `/api/admin/service/status` | — | uptime+bind(脱端口精度)+web_enabled；**不回显 config/web_dist 绝对路径** | 401 |
-| 8 | POST | `/api/admin/auth/rotate` | — | `{new_token,rotated_at}`（**响应体一次性明文**，此后不可再取） | 401,409(空key),503(store不可用) |
+| 6 | PUT | `/api/admin/strategy` | `{strategy}` | 更新后 strategy + `config_version`（**每次 ConfigStore.save 成功即 config_version+=1**，WEB-06 If-Match 地基；已知竞态窗：load→save 间外部编辑被覆盖，WEB-06 写队列收口） | 401,400 |
+| 7 | GET | `/api/admin/service/status` | — | uptime+bind(与 overview 同口径完整回显)+web_enabled；**不回显 config/web_dist 绝对路径** | 401 |
+| 8 | POST | `/api/admin/auth/rotate` | — | `{new_token,rotated_at}`（**响应体一次性明文 + `Cache-Control: no-store` + `Pragma: no-cache`**，此后不可再取） | 401,409(空key),503(store不可用) |
 
 keys/test 拨测与 providers/models/keys 的 CUD（POST/PUT/DELETE）**移 WEB-06**（治理债密集区：写前备份/版本号 If-Match/写队列/灰度开关全落那张卡）；本卡读端点 + auth 轮转 + strategy PUT 零治理债。`openapi.json` 用 **utoipa 注解生成**（手写必漂移），提交至 `web/openapi.json`。
 

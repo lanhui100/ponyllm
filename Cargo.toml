@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/ponyllm-protocol",
     "crates/ponyllm-core",
+    "crates/ponyllm-config",
     "crates/ponyllm-server",
     "crates/ponyllm-cli",
     "crates/ponyllm",
@@ -36,6 +37,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "str
 axum = { version = "0.8", features = ["tokio", "http2"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "trace", "fs"] }
+utoipa = "5"
 eventsource-stream = "0.2"
 
 # Observability & CLI & TUI
@@ -53,6 +55,7 @@ uuid = { version = "1.13", features = ["v4", "serde"] }
 # Internal workspace crates
 ponyllm-protocol = { path = "crates/ponyllm-protocol" }
 ponyllm-core = { path = "crates/ponyllm-core" }
+ponyllm-config = { path = "crates/ponyllm-config" }
 ponyllm-server = { path = "crates/ponyllm-server" }
 ponyllm = { path = "crates/ponyllm" }
 

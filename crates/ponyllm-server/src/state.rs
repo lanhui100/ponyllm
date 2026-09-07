@@ -146,6 +146,18 @@ pub struct AppState {
     direct_client: reqwest::Client,
     /// Shared HTTP clients per explicit proxy URL (connection pooling reuse across models & providers).
     proxy_clients: RwLock<HashMap<String, reqwest::Client>>,
+    /// Admin API persistence boundary (WEB-03): `None` for SDK/embedded builds
+    /// (write endpoints answer 503 admin_store_unavailable). Hand-written Debug
+    /// because the trait object is not Debug.
+    pub config_store: Option<std::sync::Arc<dyn crate::admin_store::ConfigStore>>,
+    /// Process start instant for admin service/status uptime (WEB-03).
+    pub started_at: std::time::Instant,
+}
+
+impl std::fmt::Debug for dyn crate::admin_store::ConfigStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ConfigStore")
+    }
 }
 
 impl AppState {
@@ -221,6 +233,8 @@ impl AppState {
             http_client,
             direct_client,
             proxy_clients: RwLock::new(proxy_clients),
+            config_store: None,
+            started_at: std::time::Instant::now(),
         }
     }
 
@@ -228,6 +242,16 @@ impl AppState {
     pub fn with_http_client(mut self, client: reqwest::Client) -> Self {
         self.direct_client = client.clone();
         self.http_client = client;
+        self
+    }
+
+    /// Attach the admin config persistence boundary (WEB-03). Builder style so
+    /// the CLI serve path can enable it while SDK builds stay `None`.
+    pub fn with_config_store(
+        mut self,
+        store: std::sync::Arc<dyn crate::admin_store::ConfigStore>,
+    ) -> Self {
+        self.config_store = Some(store);
         self
     }
 

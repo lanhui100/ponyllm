@@ -261,6 +261,7 @@ pub fn run_interactive_init(output_path: &str) -> Result<(), Box<dyn std::error:
             web_dist_dir: "web/dist".to_string(),
         },
         providers,
+        config_version: 0,
     };
 
     config.save_to_path(output_path)?;

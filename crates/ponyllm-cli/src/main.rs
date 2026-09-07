@@ -597,7 +597,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 web_dist_dir.clone(),
             );
 
-            let state = Arc::new(AppState::new(gw_config.clone()));
+            let state = Arc::new(
+                AppState::new(gw_config.clone()).with_config_store(Arc::new(
+                    ponyllm_server::admin_store::FileConfigStore::new(
+                        resolved_config.to_str().unwrap_or("ponyllm.toml"),
+                    ),
+                )),
+            );
             for (p_name, pool) in pools {
                 state.register_pool(&p_name, pool);
             }
