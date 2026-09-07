@@ -7,9 +7,14 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde_json::json;
 use tower_http::cors::{Any, CorsLayer};
+use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
 use crate::routes::*;
 use crate::state::AppState;
+
+/// Fixed warning emitted when the web console `dist` directory is missing.
+/// WEB-01 acceptance greps this exact string (stderr + log).
+pub const WEB_DIST_MISSING_WARN: &str = "[web] web/dist 缺失，Web 控制台未托管（网关转发不受影响）；用 `--no-web` 可显式关闭";
 
 async fn auth_middleware(
     State(state): State<Arc<AppState>>,
@@ -81,7 +86,8 @@ pub fn create_app(state: Arc<AppState>) -> Router {
 
     let body_limit = state.config.read().request_body_limit;
 
-    Router::new()
+    // API routes: guarded by auth_middleware (Bearer / x-api-key, /health exempt).
+    let api = Router::new()
         .route("/health", get(handle_health))
         .route("/models", get(handle_list_models))
         .route("/models/{model_id}", get(handle_get_model))
@@ -99,9 +105,63 @@ pub fn create_app(state: Arc<AppState>) -> Router {
         .route("/v1/telemetry/metrics", get(handle_get_metrics))
         .route("/telemetry/stream", get(handle_get_stream))
         .route("/v1/telemetry/stream", get(handle_get_stream))
-        .layer(from_fn_with_state(state.clone(), auth_middleware))
+        .layer(from_fn_with_state(state.clone(), auth_middleware));
+
+    let (web_enabled, web_dist_dir) = {
+        let cfg = state.config.read();
+        (cfg.web_enabled, cfg.web_dist_dir.clone())
+    };
+    let web = build_web_router(web_enabled, &web_dist_dir);
+
+    api.merge(web)
         .layer(cors)
         .layer(TraceLayer::new_for_http())
         .layer(DefaultBodyLimit::max(body_limit))
         .with_state(state)
+}
+
+/// Web console hosting (`/app/*`): mounted WITHOUT `auth_middleware` so static
+/// assets (`.js`/`.css`) never require a Bearer token (WEB-01 P0-3).
+/// API routes take precedence by construction (`api.merge(web)` merges API first,
+/// and the web router only matches `/app` + `/app/*`).
+/// - dist present  → `ServeDir` serves assets; missing files fall back to
+///   `index.html` with 200 (canonical SPA pattern; fallback only fires for
+///   GET/HEAD by ServeDir default, so POST/PUT/DELETE never get HTML).
+///   `..` escapes are contained by ServeDir (404, asserted in tests).
+/// - dist missing   → fixed warn + `/app` + `/app/*` deterministic 503 JSON (never
+///   HTML, so Alova never parses an error page as data); gateway forwarding
+///   unaffected.
+fn build_web_router(web_enabled: bool, web_dist_dir: &str) -> Router<Arc<AppState>> {
+    if !web_enabled {
+        return Router::new()
+            .route("/app", get(web_disabled))
+            .route("/app/{*path}", get(web_disabled));
+    }
+    let dist = std::path::Path::new(web_dist_dir);
+    let index = dist.join("index.html");
+    if !index.is_file() {
+        tracing::warn!("{}", WEB_DIST_MISSING_WARN);
+        eprintln!("{}", WEB_DIST_MISSING_WARN);
+        return Router::new()
+            .route("/app", get(web_unavailable))
+            .route("/app/{*path}", get(web_unavailable));
+    }
+    let serve = ServeDir::new(web_dist_dir)
+        .append_index_html_on_directories(false)
+        .fallback(ServeFile::new(index));
+    Router::new().nest_service("/app", serve)
+}
+
+async fn web_disabled() -> impl IntoResponse {
+    (
+        StatusCode::NOT_FOUND,
+        Json(json!({"error": {"message": "web console disabled (--no-web)", "code": "web_disabled"}})),
+    )
+}
+
+async fn web_unavailable() -> impl IntoResponse {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({"error": {"message": "web/dist 缺失，Web 控制台不可用", "code": "web_dist_missing"}})),
+    )
 }

@@ -94,6 +94,10 @@ pub enum Commands {
         /// Override maximum retry attempts on transient failures
         #[arg(short, long)]
         retries: Option<usize>,
+
+        /// Disable web console hosting (`/app/*`); gateway forwarding unaffected
+        #[arg(long)]
+        no_web: bool,
     },
 
     /// Stop the gateway process associated with the configuration file (pidfile)
@@ -128,6 +132,10 @@ pub enum Commands {
         /// Override maximum retry attempts on transient failures
         #[arg(short, long)]
         retries: Option<usize>,
+
+        /// Disable web console hosting (`/app/*`); gateway forwarding unaffected
+        #[arg(long)]
+        no_web: bool,
     },
 
     /// Inspect health, gateway token, provider pools and live metrics from a running gateway

@@ -14,7 +14,7 @@ TUI 四面板与 CLI 全量能力尚无浏览器入口，多网关切换与新�
 
 运行时配置：Alova baseURL 运行时可配（不写死 `VITE_*` 构建时变量），同源默认相对路径；dev 双端口（vite :5173 → serve）走 vite proxy。
 
-首版由 `serve` 同源托管 `dist/` 于 `/app/*`（Vite `base: '/app/'` 锁定二选一已拍板 `/app/*`）：API 路由优先于静态 fallback；fallback 仅 GET + `Accept: text/html`；静态挂载约束在 dist 内；无 dist 时退出码 0 + 固定 warn 文案 + `/app/*` 定态 503；`serve` 支持 `--no-web` 关闭托管；web 构建失败不阻断 `cargo test --workspace`。Rust 交付物与测试归 WEB-01（边界修订：托管 owner 明确给 WEB-01，不许“占位”无验收）。
+首版由 `serve` 同源托管 `dist/` 于 `/app/*`（Vite `base: '/app/'` 锁定二选一已拍板 `/app/*`）：API 路由优先于静态（`api.merge(web)` 合并顺序 + web 路由仅匹配 `/app` 前缀）；缺文件回退 `index.html` 用 `ServeFile` 标准件（fallback 只对 GET/HEAD 生效是 ServeDir 默认，非 GET 永不拿 HTML）；`..` 逃逸由 ServeDir 收敛为 404（测试断言）；无 dist 时退出码 0 + 固定 warn 文案 + `/app` 与 `/app/*` 定态 503；`serve` 支持 `--no-web` 关闭托管；web 构建失败不阻断 `cargo test --workspace`。Rust 交付物与测试归 WEB-01（边界修订：托管 owner 明确给 WEB-01，不许“占位”无验收）。
 
 ## Alternatives considered
 
@@ -27,7 +27,7 @@ TUI 四面板与 CLI 全量能力尚无浏览器入口，多网关切换与新�
 - `web/src/router.ts` 含 3 路由表（`/connect` + `/dashboard` stub + `404`）与守卫：未登录访保护路由跳 `/connect`，`/connect` 自放行，免鉴探活直放。8 路由全表为目标态，不在本卡验收。
 - `pnpm --dir web lint`（oxlint --deny-warnings）与 `pnpm --dir web typecheck`（vue-tsc）双退出码 0，CI web job 同命令；`web/src/router.guard.test.ts`（vitest ≥5 用例：跳 `/connect`、自放行、401 只跳一次 + 停轮询 + toast 一次、复位后可再跳、免鉴直放）全绿；存储禁令 `grep -rE 'localStorage|sessionStorage|indexedDB|document\.cookie' web/src` 零命中 + 发头 vitest 断言（仅 Bearer + trim + 无 x-api-key），命令见任务卡 WEB-01。零 review 验收项。
 - Alova 实例含 token 中间件（唯一 `Authorization: Bearer` 头 + trim）与 401 single-flight 过期处理；metrics 轮询 1.5s 演示归 WEB-02，本卡不验数据链路。
-- `serve` 托管契约：有 dist 时 `/app/dashboard` 直刷 200 且不吞 `/v1/models`；无 dist 时退出码 0、可转发、固定告警文案；`cargo test -p ponyllm-server --test web_hosting` 全绿。
+- `serve` 托管契约：有 dist 时 `/app/dashboard` 直刷 200 且不吞 `/v1/models`；无 dist 时退出码 0、可转发、固定告警文案；`cargo test -p ponyllm-server --test web_hosting_tests` 全绿。
 - orval 生成目录契约：`web/src/generated/**` 为 oxlint/vue-tsc 豁免区，WEB-03 只许增量加文件不许改既有 lint/构建配置（文件级清单，替代口头“不碰”约束）；`web/openapi.json` 为后端交付的只读契约快照，前端只消费不改。
 
 ## Risks

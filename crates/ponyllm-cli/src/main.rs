@@ -26,6 +26,7 @@ fn build_gateway_config_and_pools(
     bind_override: Option<String>,
     retries_override: Option<usize>,
     api_key_override: Option<String>,
+    web_enabled_override: Option<bool>,
 ) -> (GatewayConfig, HashMap<String, Arc<KeyPool>>) {
     let mut gw_config = GatewayConfig::default();
     gw_config.default_strategy = config_file.gateway.default_strategy;
@@ -34,6 +35,7 @@ fn build_gateway_config_and_pools(
     gw_config.flight_recorder_capacity = config_file.gateway.flight_recorder_capacity;
     gw_config.request_body_limit = config_file.gateway.request_body_limit;
     gw_config.api_key = api_key_override.unwrap_or_else(|| config_file.gateway.api_key.clone());
+    gw_config.web_enabled = web_enabled_override.unwrap_or(config_file.gateway.web_enabled);
     gw_config.proxy = config_file.gateway.proxy.clone();
     gw_config.use_system_proxy = config_file.gateway.use_system_proxy;
 
@@ -541,6 +543,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             port,
             api_key,
             retries,
+            no_web,
         } => {
             tracing_subscriber::registry()
                 .with(
@@ -584,6 +587,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Some(final_bind.clone()),
                 retries,
                 Some(final_api_key),
+                // `--no-web` is a process-level switch: hot reload must not flip it
+                // back on when the config file still says `web_enabled = true`.
+                no_web.then_some(false),
             );
 
             let state = Arc::new(AppState::new(gw_config.clone()));
@@ -596,6 +602,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let watcher_state = state.clone();
             let watcher_bind = final_bind.clone();
             let watcher_retries = retries;
+            let watcher_web_enabled = gw_config.web_enabled;
             tokio::spawn(async move {
                 let mut last_modified = std::fs::metadata(&watcher_path)
                     .and_then(|m| m.modified())
@@ -619,6 +626,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     Some(watcher_bind.clone()),
                                     watcher_retries,
                                     None,
+                                    // Pin the process-level switch across hot reloads.
+                                    Some(watcher_web_enabled),
                                 );
                                 watcher_state.reload_config_with_pools(new_gw_cfg, new_pools);
                                 println!(
@@ -718,7 +727,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
-        Commands::Restart { config, bind, address, port, api_key, retries } => {
+        Commands::Restart { config, bind, address, port, api_key, retries, no_web } => {
             match ponyllm_cli::lifecycle::restart_serve(
                 config.as_deref(),
                 bind,
@@ -726,6 +735,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 port,
                 api_key,
                 retries,
+                no_web,
             )
             .await
             {

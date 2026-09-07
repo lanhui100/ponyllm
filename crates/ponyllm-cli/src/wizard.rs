@@ -257,6 +257,7 @@ pub fn run_interactive_init(output_path: &str) -> Result<(), Box<dyn std::error:
             request_body_limit: default_request_body_limit(),
             proxy: None,
             use_system_proxy: false,
+            web_enabled: true,
         },
         providers,
     };

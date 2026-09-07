@@ -40,6 +40,10 @@ pub struct GatewaySection {
     /// Defaults to `false` to isolate gateway from host terminal proxy pollution.
     #[serde(default)]
     pub use_system_proxy: bool,
+    /// Whether `serve` mounts the web console (`web/dist`) under `/app/*`.
+    /// Defaults to `true`; `--no-web` CLI flag forces `false` (WEB-01).
+    #[serde(default = "default_web_enabled")]
+    pub web_enabled: bool,
 }
 
 pub fn default_request_body_limit() -> usize {
@@ -54,6 +58,9 @@ fn default_retries() -> usize {
 }
 fn default_capacity() -> usize {
     200
+}
+fn default_web_enabled() -> bool {
+    true
 }
 pub fn generate_secure_api_key() -> String {
     let raw = uuid::Uuid::new_v4().simple().to_string();
@@ -109,6 +116,7 @@ impl Default for GatewaySection {
             request_body_limit: default_request_body_limit(),
             proxy: None,
             use_system_proxy: false,
+            web_enabled: true,
         }
     }
 }

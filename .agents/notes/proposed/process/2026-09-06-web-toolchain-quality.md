@@ -19,7 +19,7 @@ Vite 8 新构建链、Oxlint 替代 ESLint、serve 内嵌 dist 三事无统一�
 ## Acceptance criteria
 
 - `pnpm --dir web lint`、`pnpm --dir web typecheck`、`pnpm --dir web test` 三绿，CI web job 与 pre-push 同命令。
-- serve 托管集成测试 `cargo test -p ponyllm-server --test web_hosting` 全绿（有/无 dist 各一条 curl 断言 + `/v1/models` 不被吞断言）。
+- serve 托管集成测试 `cargo test -p ponyllm-server --test web_hosting_tests` 全绿（有/无 dist 各一条 curl 断言 + `/v1/models` 不被吞断言）。
 - 无 dist 启动 `serve` 退出码 0 仍可转发，固定告警文案 `[web] web/dist 缺失` 可 grep。
 - Playwright 主链路 3 用例归 WEB-02；Lighthouse 90 移出 M1 另卡。
 

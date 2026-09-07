@@ -337,6 +337,7 @@ pub async fn restart_serve(
     port: Option<u16>,
     api_key: Option<String>,
     retries: Option<usize>,
+    no_web: bool,
 ) -> Result<String, String> {
     let resolved = crate::config::ConfigFile::resolve_path(config);
     let cfg = crate::config::ConfigFile::load_or_default(resolved.to_str()).ok();
@@ -420,6 +421,9 @@ pub async fn restart_serve(
     if let Some(r) = retries {
         args.push("--retries".to_string());
         args.push(r.to_string());
+    }
+    if no_web {
+        args.push("--no-web".to_string());
     }
 
     // 小睡一拍让出端口，避免旧进程尚在释放监听时新进程绑定失败。

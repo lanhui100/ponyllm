@@ -34,16 +34,18 @@
 1. `pnpm --dir web lint`（oxlint --deny-warnings）退出码 0，CI web job 同命令绿。
 2. `pnpm --dir web typecheck`（vue-tsc）退出码 0；`pnpm-lock.yaml` 已提交，版本 pin 可复现。
 3. `pnpm --dir web test`（vitest 守卫单测 ≥5 用例）全绿：无 token 访保护路由跳 `/connect`；`/connect` 自放行；401 回调只跳转一次 + 停轮询 + toast 一次；登出/登录后 single-flight 标志复位（第二会话 401 可再跳）；免鉴模式（带错 token 调 `GET /v1/models` 不 401）直放。
-4. `cargo test -p ponyllm-server --test web_hosting` 全绿：有 dist 时 `/app/dashboard` 直刷 200 且 `/v1/models` 不被吞；无 dist 时 `/app/*` 定态 503（固定 `code`）且网关路由不受影响。
+4. `cargo test -p ponyllm-server --test web_hosting_tests` 全绿：有 dist 时 `/app/dashboard` 直刷 200 且 `/v1/models` 不被吞；无 dist 时 `/app/*` 定态 503（固定 `code`）且网关路由不受影响。
 5. 无 dist 启动 `serve` 退出码 0、可转发，stderr/日志含固定告警文案（`[web] web/dist 缺失`），`--no-web` 可关闭托管。
 6. 存储禁令 + 发头断言双命令绿：`grep -rE 'localStorage|sessionStorage|indexedDB|document\.cookie' web/src` 零命中（禁一切持久化）；vitest 断言发出头仅含 `Authorization: Bearer <trimmed>` 且无 `x-api-key`（含前后空格 token 用例）。零 review 项。
 
 ## Current Progress
-- 双路首轮评审 FAIL（2026-09-07）：5+5 项 P0 已收敛为本卡修订；分支已建，待复审通过后实现。
-- 事实锚点：`auth_middleware` 存在（空 key/`none` 全放行），`admin.rs` 与 dist 托管逻辑缺失，`tower-http 0.6.11` 含 `fs/ServeDir`。
+- 双路终审 PASS（2026-09-07），认领提交 `69c0e7e` 已落（不推）。
+- Rust 托管实现完成（2026-09-07）：`GatewayConfig.web_enabled/web_dist_dir` + `app.rs` web/API 分离合并（`/app` 免鉴，`ServeFile` fallback）+ `web_hosting_tests.rs` 3 测试绿 + `--no-web`（serve/restart 透传，热更新 pin 住开关）+ wizard/config 补字段。
+- 实机验证（2026-09-07，`ponyllm serve --port 18082` 无 dist）：`/app/dashboard` → 503 `web_dist_missing`；`/health` → 200；固定文案 `[web] web/dist 缺失` stderr + 日志双通道可 grep；`--no-web` 待前端联调时复验。
+- 待：前端脚手架（package.json/vite/router/alova/session/vitest）+ CI web job + 双码审 + 完工归档。
 
 ## Next Action
-- 修订两 ADR → 双路复审（delta）→ 通过后先 Rust 托管 + 测试，再前端脚手架 + 测试，最后 CI job。
+- 建 `web/` 前端脚手架并跑 `pnpm --dir web lint|typecheck|test` 三绿。
 
 ## Resume Hint
 - 先跑 Next Action；复审结论见双路 reviewer 回复，需 rationale 见 Related Files ADR。
@@ -52,6 +54,7 @@
 - 首轮 FAIL（architect + security，2026-09-07）：token 存放未定义、401 踢回竞态、免鉴语义冲突、任务边界错位、三处“靠 review”违宪、双门禁分裂、serve 托管无交付物、8 路由与 M1 矛盾、workspace/lockfile 基线缺失。全部采纳 → 本卡改写为 6 条命令式验收 + Rust 托管交付物并入；唯一偏离：守卫测试用 vitest 而非 Playwright（Windows 免浏览器下载，Playwright 主链路归 WEB-02，理由已记）。
 - delta 复审（architect 有条件通过，2026-09-07）：C1 WEB-02 承接 Playwright（本轮已加验收 4）+ C2 验收 6 改 grep 双零命中（本轮已改）。
 - delta-2（security 仍 FAIL → 逐条封，2026-09-07）：P0-2 single-flight 复位 + 停轮询/toast 断言进验收 3（≥5 用例）；P0-3 点名 `GET /v1/models` + 明文禁 `/health`；P0-5 验收 6 改机查双命令、删 review 项；P0-1 ban 名扩大到一切持久化。
+- 终审双 PASS（2026-09-07）：security（3 条件逐条满足）+ architect（C1+C2 落地）。认领提交 `69c0e7e` 已落（不推）。开工实现。
 
 ## Related Files
 - ADR: `.agents/notes/proposed/architecture/2026-09-06-web-console-ia-and-stack.md`

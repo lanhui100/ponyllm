@@ -291,6 +291,14 @@ fn default_event_log_max_bytes() -> u64 {
     512 * 1024 * 1024 // 512MB ring of hourly JSONL segments
 }
 
+fn default_true() -> bool {
+    true
+}
+
+fn default_web_dist_dir() -> String {
+    "web/dist".to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GatewayConfig {
     pub bind_addr: String,
@@ -317,6 +325,15 @@ pub struct GatewayConfig {
     /// Defaults to `false` to isolate gateway from host terminal proxy pollution.
     #[serde(default)]
     pub use_system_proxy: bool,
+    /// Whether `serve` mounts the web console (`web/dist`) under `/app/*`.
+    /// Defaults to `true`; `--no-web` (or `web_enabled = false`) disables hosting
+    /// while the gateway forwarding chain keeps running (WEB-01).
+    #[serde(default = "default_true")]
+    pub web_enabled: bool,
+    /// Directory served as the web console SPA. Defaults to `web/dist`
+    /// (relative to the serve working directory). Missing dir only warns (WEB-01).
+    #[serde(default = "default_web_dist_dir")]
+    pub web_dist_dir: String,
 }
 
 impl Default for GatewayConfig {
@@ -334,6 +351,8 @@ impl Default for GatewayConfig {
             event_log_max_bytes: default_event_log_max_bytes(),
             proxy: None,
             use_system_proxy: false,
+            web_enabled: true,
+            web_dist_dir: default_web_dist_dir(),
         }
     }
 }
