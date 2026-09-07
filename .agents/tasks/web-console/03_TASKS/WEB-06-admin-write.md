@@ -8,8 +8,8 @@
 - Created At: 2026-09-07
 - Updated At: 2026-09-07
 - Estimated Effort: 1周
-- Blocker: WEB-03
-- Unblock Condition: WEB-03 Done
+- Blocker: 无
+- Unblock Condition: 无（前置契约已完成）
 - Review Round: 未开始（architect 裁决自 WEB-03 分期拆出）
 
 ## Goal
@@ -30,13 +30,13 @@
 - 占位卡（2026-09-07 architect 裁决拆出），WEB-03 完工后启动。
 
 ## Next Action
-- WEB-03 Done 后对本卡跑双路 ADR 审核（治理债四项逐条验收设计）。
+- 对本卡跑双路 ADR 审核（治理债四项逐条验收设计）。
 
 ## Resume Hint
-- WEB-03 完工后：打开本卡 + Related Files ADR 的端点表 CUD 行对齐范围，跑双路 ADR 审核后认领开工。
+- 打开本卡 + Related Files ADR 的端点表 CUD 行对齐范围，跑双路 ADR 审核后认领开工。
 
 ## Review Summary
 - 未开始。
 
 ## Related Files
-- ADR: `.agents/notes/proposed/architecture/2026-09-06-web-admin-api-contract.md`
+- ADR: `.agents/notes/implemented/architecture/2026-09-06-web-admin-api-contract.md`

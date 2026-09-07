@@ -8,7 +8,7 @@
 - 无
 
 ## In Progress
-- WEB-03 Admin API契约
+- 无
 
 ## Review
 - 无（上限3）
@@ -18,6 +18,7 @@
 
 ## Done（归档备查：只放已归档卡，≤5 条，超窗删最旧行）
 - WEB-01 脚手架与Shell
+- WEB-03 Admin API契约
 
 ## Dropped
 - 无

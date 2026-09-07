@@ -1,14 +1,14 @@
 # Agent Note: Web控制台Admin API契约
 
-Status: proposed
+Status: implemented
 
 ## Problem
 
 浏览器无文件权限，直写 `ponyllm.toml` 不可能。现有网关仅有 telemetry 读接口，Provider/Model/Key/Strategy/Auth 全是 CLI 直改文件，Web 写操作无后端可调。
 
-## Proposal
+## Decision
 
-将在 Axum 补同源 `/api/admin/*` 路由组，复用现有 `auth_middleware`（进 api 组，受鉴权覆盖）。写能力经**新共享 crate `ponyllm-config`** 落地：`ConfigFile/ProviderSection/KeySection/GatewaySection` 自 `ponyllm-cli` 迁入（领域方法随迁，cli `pub use` re-export 保持 TUI/wizard 零改动），server 经 `AppState.config_store: Option<Arc<dyn ConfigStore>>` 注入（trait 只包文件 IO：load + save 原子写；SDK 路径 `None` → 写端点 503 `admin_store_unavailable`，不破坏伞库）。
+在 Axum 补同源 `/api/admin/*` 路由组，复用现有 `auth_middleware`（进 api 组，受鉴权覆盖）。写能力经**新共享 crate `ponyllm-config`** 落地：`ConfigFile/ProviderSection/KeySection/GatewaySection` 自 `ponyllm-cli` 迁入（领域方法随迁，cli `pub use` re-export 保持 TUI/wizard 零改动），server 经 `AppState.config_store: Option<Arc<dyn ConfigStore>>` 注入（trait 只包文件 IO：load + save 原子写；SDK 路径 `None` → 写端点 503 `admin_store_unavailable`，不破坏伞库）。
 
 **端点表（本卡冻结 8 个；CUD 与拨测移 WEB-06）**：
 
@@ -37,15 +37,9 @@ auth 轮转语义：**只影响新请求**（auth_middleware 每请求读 config
 - **Web 直写配置文件经文件共享：否定。无原子性，与热更新监听竞态，且泄露 config 路径。**
 - **复用现有 `/v1/*` 转发口做管理：否定。污染转发语义，鉴权与审计需隔离。**
 
-## Acceptance criteria
+## Consequences
 
-- `cargo test -p ponyllm-server --test admin_contract_tests` 全绿（target 名精确，防 filter 假绿）：8 端点矩阵 × secured/免鉴双模式 + openapi 与路由表一致性断言 + keys list 脱敏断言（响应无明文 `sk-` 前缀，仅尾 4 位）+ 空 key rotate 409 + SDK 路径（store=None）写端点 503 + config_version serde default 兼容。
-- `web/openapi.json` 由 utoipa 注解生成并提交（schema 可校验）；orval 消费与"零手改"验收归首个前端消费卡（WEB-02/04），本卡不验。
-- 热更新 500ms 声明在 `overview` 响应字段（`hot_reload_ms`）可查；admin 写走主动 reload 不依赖 watcher（测试断言写后立即可见）。
-- `service/status` 与 `overview` 不回显 config 文件与 web_dist 绝对路径（单测断言）。
-
-## Risks
-
-- Admin 写与文件监听竞态：本卡写端点主动 reload 已消除 admin 写路径的竞态；watcher 对**外部编辑**的 mtime 轮询保持现状（写前备份/版本号校验/写队列/灰度开关整体移 WEB-06，含 CUD）。
-- Token 轮转并发导致旧页面 401：前端 single-flight 已落地（WEB-01）；轮转只影响新请求（in-flight SSE 不中断），ADR 已写明语义。
-- `ponyllm-config` 新 crate 迁移动 CLI/TUI/wizard 的 import 面：re-export 兼容层保证零改动；编译即验证。
+- 8 端点契约与 utoipa 生成的 `web/openapi.json` 成为 Admin 契约事实标准，由 `crates/ponyllm-server/tests/admin_contract_tests.rs` 锁定。
+- 绝不回显配置文件与 web_dist 绝对路径；密钥脱敏与遥测同源使用 `FlightRecorder::sanitize_key`。
+- token 轮转响应强制 `Cache-Control: no-store` 与 `Pragma: no-cache`，新请求即刻生效且不中断现有长连接。
+- 写前备份、版本号 If-Match 校验、写队列与灰度开关等写路径治理债整体收拢至 WEB-06。

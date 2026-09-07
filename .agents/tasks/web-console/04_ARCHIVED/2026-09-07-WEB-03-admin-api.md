@@ -2,7 +2,7 @@
 
 ## Basic Info
 - ID: WEB-03
-- Status: In Progress
+- Status: Done
 - Priority: P0
 - Owner: codex-orchestrator
 - Created At: 2026-09-06
@@ -11,7 +11,7 @@
 - Estimated Effort: 0.5周
 - Blocker: 无（阻塞 WEB-04）
 - Unblock Condition: 无
-- Review Round: architect 有条件通过（A2′方案+8端点分期），security 审核中
+- Review Round: 双路通过（Correctness Pass + Security Conditional Pass 并已闭环修复）
 
 ## Goal
 冻结 Admin API 读侧 8 端点契约（overview/providers list/models list/keys list 脱敏/strategy GET+PUT/service status/auth rotate）并输出 utoipa 生成 openapi.json；写能力经 `ponyllm-config` 共享 crate + `ConfigStore` 可选注入落地。CUD 与 keys/test 拨测移 WEB-06。
@@ -29,16 +29,16 @@
 3. `overview.hot_reload_ms` = 500 可查；admin 写主动 reload（测试断言写后立即可见）；service/status 与 overview 不回显绝对路径（单测断言）。
 
 ## Current Progress
-- 契约在 ADR，未进代码。
+- 8 端点契约全覆盖，utoipa 生成 web/openapi.json，admin_contract_tests 10/10 全绿，全工作区回归通过。
 
 ## Next Action
-- 按 ADR 先写 `admin_contract` 单测再补路由。
+- 完工归档并合入 main。
 
 ## Resume Hint
-- 先对 Related Files ADR 的端点表，再写单测。
+- 见 Related Files ADR。
 
 ## Review Summary
-- 待审核。
+- 双路码审通过（正确性 Pass，安全 Conditional Pass 并闭环修复临时文件并发踩踏与错误信息脱敏），详见 02_REVIEWS/WEB-03.md。
 
 ## Related Files
-- ADR: `.agents/notes/proposed/architecture/2026-09-06-web-admin-api-contract.md`
+- ADR: `.agents/notes/implemented/architecture/2026-09-06-web-admin-api-contract.md`
