@@ -10,7 +10,8 @@ use ponyllm_core::pool::{
 };
 
 use ponyllm_core::telemetry::{
-    EventBus, EventCtx, MetricsCollector, MetricsProjection, StreamProjection,
+    ConnectivitySampler, EventBus, EventCtx, MetricsCollector, MetricsProjection,
+    StreamProjection, TimeseriesProjection,
 };
 use ponyllm_core::telemetry::{FlightRecorder, GatewayEvent};
 use crate::config::{GatewayConfig, ProviderConfig};
@@ -140,6 +141,8 @@ pub struct AppState {
     pub event_bus: Arc<EventBus>,
     pub metrics_proj: Arc<MetricsProjection>,
     pub stream_proj: Arc<StreamProjection>,
+    pub connectivity_sampler: Arc<ConnectivitySampler>,
+    pub timeseries_proj: Arc<TimeseriesProjection>,
     /// Global reusable HTTP client with connection pool and TCP nodelay.
     pub http_client: reqwest::Client,
     /// Dedicated direct client for models/providers explicitly overriding to direct.
@@ -212,8 +215,13 @@ impl AppState {
             }
         }
 
+        let connectivity_sampler = Arc::new(ConnectivitySampler::default());
+        let timeseries_proj = Arc::new(TimeseriesProjection::default());
+
         bus.add_projection(metrics_proj.clone());
         bus.add_projection(stream_proj.clone());
+        bus.add_projection(timeseries_proj.clone());
+        bus.add_projection(connectivity_sampler.clone());
         bus.add_projection(Arc::new(FrameConverter::new(flight_recorder.clone())));
         if let Some(dir) = config.event_log_dir.clone() {
             crate::segments::spawn_segment_drain(
@@ -232,6 +240,8 @@ impl AppState {
             event_bus: bus,
             metrics_proj,
             stream_proj,
+            connectivity_sampler,
+            timeseries_proj,
             http_client,
             direct_client,
             proxy_clients: RwLock::new(proxy_clients),
@@ -379,6 +389,7 @@ impl AppState {
         let ctx = EventCtx {
             request_id: sink_ctx.request_id.clone(),
             session_id: None,
+            model: None,
             endpoint: sink_ctx.endpoint.clone(),
             start: sink_ctx.start,
         };

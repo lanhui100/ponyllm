@@ -56,11 +56,14 @@ export interface ProviderFlowSnapshot {
   avg_tps?: number;
   error_count: number;
   status: 'healthy' | 'degraded' | 'unhealthy';
+  uptime_bars?: ConnectivityBarSeries;
+  total_tokens?: number;
 }
 
 export interface StreamTelemetrySnapshot {
   global: StreamFlowSummary;
   providers: Record<string, ProviderFlowSnapshot>;
+  gateway_uptime_bars?: ConnectivityBarSeries;
   dropped: number;
 }
 
@@ -68,3 +71,41 @@ export interface HealthStatus {
   status: 'ok' | 'down' | 'degraded';
   version?: string;
 }
+
+export type ConnectivityStatus = 'ok' | 'degraded' | 'down' | 'empty';
+
+export interface ConnectivitySlot {
+  timestamp_ms: number;
+  latency_ms?: number;
+  status: ConnectivityStatus;
+}
+
+export interface ConnectivityBarSeries {
+  slots: ConnectivitySlot[];
+  latest_latency_ms?: number;
+}
+
+export interface MetricBucket {
+  timestamp_ms: number;
+  qps: number;
+  token_throughput: number;
+  total_tokens: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  avg_latency_ms: number;
+  error_rate: number;
+  total_requests: number;
+  failed_requests: number;
+  tokens_by_provider: Record<string, number>;
+  tokens_by_model: Record<string, number>;
+}
+
+export interface TimeseriesHistoryResponse {
+  range: string;
+  points: MetricBucket[];
+  total_requests: number;
+  total_tokens: number;
+  provider_tokens: Record<string, number>;
+  model_tokens: Record<string, number>;
+}
+

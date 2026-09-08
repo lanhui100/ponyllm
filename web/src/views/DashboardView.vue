@@ -14,6 +14,10 @@ const {
   history,
   transport,
   isDown,
+  selectedRange,
+  historyData,
+  gatewayUptimeBars,
+  setRange,
   retry,
 } = useTelemetry();
 
@@ -30,7 +34,7 @@ const latestPoint = computed(() => {
       <div class="header-row">
         <div>
           <h1 class="page-title">系统可观测大盘</h1>
-          <p class="page-desc">实时遥测流与网关核心性能指标</p>
+          <p class="page-desc">实时遥测流、上游节点连通性微柱与多周期指标分析</p>
         </div>
       </div>
 
@@ -38,6 +42,7 @@ const latestPoint = computed(() => {
         :health="health"
         :transport="transport"
         :is-down="isDown"
+        :uptime-bars="gatewayUptimeBars"
         @retry="retry"
       />
 
@@ -48,10 +53,16 @@ const latestPoint = computed(() => {
 
       <TrendCharts
         :history="history"
+        :history-data="historyData"
+        :range="selectedRange"
+        @update:range="setRange"
       />
 
       <ProviderMatrix
         :providers="stream?.providers"
+        :range="selectedRange"
+        :provider-tokens="historyData?.provider_tokens"
+        @update:range="setRange"
       />
     </main>
   </div>
@@ -77,18 +88,19 @@ const latestPoint = computed(() => {
 }
 
 .header-row {
-  margin-bottom: 20px;
+  margin-bottom: 24px;
 }
 
 .page-title {
-  font-size: 20px;
+  font-size: 24px;
   font-weight: 700;
   color: #0f172a;
-  margin: 0 0 4px 0;
+  margin: 0 0 6px 0;
+  letter-spacing: -0.02em;
 }
 
 .page-desc {
-  font-size: 13px;
+  font-size: 14px;
   color: #64748b;
   margin: 0;
 }

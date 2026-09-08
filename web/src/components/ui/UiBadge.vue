@@ -28,7 +28,7 @@ const variantClass = computed(() => {
       return 'bg-transparent text-slate-600 border border-slate-200';
     case 'default':
     default:
-      return 'bg-indigo-50/90 text-indigo-700';
+      return 'bg-orange-50/90 text-orange-700';
   }
 });
 </script>

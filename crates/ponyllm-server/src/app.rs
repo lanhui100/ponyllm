@@ -105,6 +105,8 @@ pub fn create_app(state: Arc<AppState>) -> Router {
         .route("/v1/telemetry/metrics", get(handle_get_metrics))
         .route("/telemetry/stream", get(handle_get_stream))
         .route("/v1/telemetry/stream", get(handle_get_stream))
+        .route("/telemetry/history", get(handle_get_history))
+        .route("/v1/telemetry/history", get(handle_get_history))
         .merge(admin_routes())
         .layer(from_fn_with_state(state.clone(), auth_middleware));
 

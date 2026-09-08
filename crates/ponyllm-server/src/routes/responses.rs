@@ -28,6 +28,7 @@ pub async fn handle_responses(
     let ctx = EventCtx {
         request_id: request_id.clone(),
         session_id: None,
+        model: Some(req.model.clone()),
         endpoint: endpoint.clone(),
         start: start_time,
     };

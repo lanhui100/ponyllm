@@ -48,7 +48,7 @@ const totalRequests = computed(() => {
     <div class="borderless-card p-5 hover:shadow-md transition-all duration-200">
       <div class="flex items-center justify-between text-xs text-slate-500 mb-2.5">
         <span class="font-semibold text-slate-600">当前 QPS</span>
-        <div class="w-7 h-7 rounded-lg bg-indigo-50 text-indigo-600 flex items-center justify-center">
+        <div class="w-7 h-7 rounded-lg bg-orange-50 text-orange-600 flex items-center justify-center">
           <Icons name="activity" size="15" />
         </div>
       </div>
@@ -64,7 +64,7 @@ const totalRequests = computed(() => {
     <div class="borderless-card p-5 hover:shadow-md transition-all duration-200">
       <div class="flex items-center justify-between text-xs text-slate-500 mb-2.5">
         <span class="font-semibold text-slate-600">Token 吞吐量</span>
-        <div class="w-7 h-7 rounded-lg bg-purple-50 text-purple-600 flex items-center justify-center">
+        <div class="w-7 h-7 rounded-lg bg-sky-50 text-sky-700 flex items-center justify-center">
           <Icons name="sparkles" size="15" />
         </div>
       </div>
@@ -85,10 +85,10 @@ const totalRequests = computed(() => {
           <Icons name="zap" size="15" />
         </div>
       </div>
-      <div class="text-3xl font-bold tracking-tight text-slate-900 mb-1 flex items-baseline gap-2 truncate font-mono">
+      <div class="text-3xl font-bold tracking-tight text-slate-900 mb-1 flex flex-wrap items-baseline gap-1.5 font-mono">
         <span>{{ ttft }}</span>
         <span class="text-slate-300 font-light text-base">/</span>
-        <span class="text-lg text-slate-600 font-medium">{{ avgTps }}</span>
+        <span class="text-lg text-slate-600 font-medium whitespace-nowrap">{{ avgTps }}</span>
       </div>
       <div class="text-xs text-slate-400 font-medium">
         平均 TTFT / TPS

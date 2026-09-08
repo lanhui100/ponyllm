@@ -34,7 +34,7 @@ const variantClasses = computed(() => {
       return 'bg-slate-100 text-slate-700 hover:bg-slate-200/70';
     case 'default':
     default:
-      return 'bg-indigo-600 text-white hover:bg-indigo-700 shadow-2xs active:scale-[0.98]';
+      return 'bg-orange-500 text-white hover:bg-orange-600 shadow-2xs active:scale-[0.98]';
   }
 });
 
@@ -57,7 +57,7 @@ const sizeClasses = computed(() => {
   <button
     :type="type"
     :disabled="disabled"
-    class="inline-flex items-center justify-center font-medium transition-all duration-150 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed select-none focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/30"
+    class="inline-flex items-center justify-center font-medium transition-all duration-150 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed select-none focus:outline-none focus-visible:ring-2 focus-visible:ring-orange-500/30"
     :class="[variantClasses, sizeClasses, props.class]"
     @click="emit('click', $event)"
   >

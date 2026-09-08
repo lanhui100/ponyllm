@@ -112,6 +112,8 @@ pub struct EventEnvelope {
     pub session_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     pub endpoint: String,
     pub wall_ms: u64,
     pub elapsed_ms: f64,
@@ -124,6 +126,7 @@ pub struct EventEnvelope {
 pub struct EventCtx {
     pub request_id: String,
     pub session_id: Option<String>,
+    pub model: Option<String>,
     pub endpoint: String,
     pub start: Instant,
 }
@@ -137,6 +140,7 @@ impl EventCtx {
         Self {
             request_id: request_id.into(),
             session_id: None,
+            model: None,
             endpoint: endpoint.into(),
             start,
         }
@@ -220,6 +224,7 @@ impl EventBus {
             request_id: ctx.request_id.clone(),
             session_id: ctx.session_id.clone(),
             provider,
+            model: ctx.model.clone(),
             endpoint: ctx.endpoint.clone(),
             wall_ms,
             elapsed_ms: ctx.elapsed_ms(),
@@ -243,6 +248,7 @@ impl EventBus {
                     request_id: String::new(),
                     session_id: None,
                     provider: None,
+                    model: None,
                     endpoint: String::new(),
                     wall_ms: wall_ms_now(),
                     elapsed_ms: 0.0,

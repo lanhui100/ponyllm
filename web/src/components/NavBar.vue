@@ -19,7 +19,7 @@ function handleLogout() {
   <header class="h-14 bg-white/90 backdrop-blur-md sticky top-0 z-40 px-4 sm:px-8 flex items-center justify-between border-b border-slate-200/60 shadow-2xs">
     <div class="flex items-center gap-8">
       <div class="flex items-center gap-2.5">
-        <div class="w-8 h-8 rounded-xl bg-indigo-600 text-white flex items-center justify-center font-bold text-sm shadow-2xs">
+        <div class="w-8 h-8 rounded-xl bg-orange-500 text-white flex items-center justify-center font-bold text-sm shadow-2xs">
           P
         </div>
         <span class="font-bold text-base tracking-tight text-slate-900">PonyLLM</span>
@@ -29,21 +29,21 @@ function handleLogout() {
         <router-link
           to="/dashboard"
           class="px-3.5 py-1.5 rounded-lg transition-colors text-slate-600 hover:text-slate-900 hover:bg-slate-100/70"
-          :class="{ '!text-indigo-600 !bg-indigo-50/90 font-semibold': route.path === '/dashboard' }"
+          :class="{ '!text-orange-600 !bg-orange-50/90 font-semibold': route.path === '/dashboard' }"
         >
           Dashboard
         </router-link>
         <router-link
           to="/recorder"
           class="px-3.5 py-1.5 rounded-lg transition-colors text-slate-600 hover:text-slate-900 hover:bg-slate-100/70"
-          :class="{ '!text-indigo-600 !bg-indigo-50/90 font-semibold': route.path === '/recorder' }"
+          :class="{ '!text-orange-600 !bg-orange-50/90 font-semibold': route.path === '/recorder' }"
         >
           可观测性
         </router-link>
         <router-link
           to="/governance"
           class="px-3.5 py-1.5 rounded-lg transition-colors text-slate-600 hover:text-slate-900 hover:bg-slate-100/70"
-          :class="{ '!text-indigo-600 !bg-indigo-50/90 font-semibold': route.path === '/governance' }"
+          :class="{ '!text-orange-600 !bg-orange-50/90 font-semibold': route.path === '/governance' }"
         >
           模型管理
         </router-link>

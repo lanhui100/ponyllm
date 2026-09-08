@@ -148,6 +148,7 @@ fn test_stream_projection_per_provider() {
             request_id: ctx.request_id.clone(),
             session_id: None,
             provider,
+            model: None,
             endpoint: ctx.endpoint.clone(),
             wall_ms: 1,
             elapsed_ms: 1.0,

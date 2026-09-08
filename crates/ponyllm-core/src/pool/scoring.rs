@@ -196,7 +196,7 @@ impl NodeLatencyMetrics {
 }
 
 /// Per-provider stream flow snapshot for telemetry endpoint and TUI reuse.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct ProviderFlowSnapshot {
     pub ttft_ms: f64,
     pub tps: f64,

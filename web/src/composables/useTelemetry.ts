@@ -1,10 +1,13 @@
-import { ref, getCurrentInstance, onMounted, onUnmounted } from 'vue';
+import { ref, computed, getCurrentInstance, onMounted, onUnmounted } from 'vue';
 import { onStopPolling } from '../router';
 import { useSessionStore } from '../stores/session';
 import type {
+  ConnectivityBarSeries,
+  ConnectivitySlot,
   HealthStatus,
   MetricsSummary,
   StreamTelemetrySnapshot,
+  TimeseriesHistoryResponse,
 } from '../types/telemetry';
 
 export interface TelemetryPoint {
@@ -36,11 +39,16 @@ export function useTelemetry(options: UseTelemetryOptions = {}) {
   const history = ref<TelemetryPoint[]>([]);
   const transport = ref<'sse' | 'polling' | 'offline'>('polling');
   const isDown = ref(false);
+  const selectedRange = ref<'24h' | '7d' | '30d'>('24h');
+  const historyData = ref<TimeseriesHistoryResponse | null>(null);
+  const gatewaySlots = ref<ConnectivitySlot[]>([]);
+  const latestGatewayLatency = ref<number | undefined>(undefined);
   const lastReqCount = ref<number | null>(null);
   const lastTokenCount = ref<number | null>(null);
   const lastTickTime = ref<number>(Date.now());
 
   let pollTimer: ReturnType<typeof setInterval> | null = null;
+  let historyTimer: ReturnType<typeof setInterval> | null = null;
   let sseSource: EventSource | null = null;
   let unregisterStop: (() => void) | null = null;
 
@@ -101,23 +109,56 @@ export function useTelemetry(options: UseTelemetryOptions = {}) {
     }
   }
 
+  async function fetchHistory(range?: '24h' | '7d' | '30d') {
+    const targetRange = range || selectedRange.value;
+    try {
+      const headers = getAuthHeaders();
+      const res = await fetch(getFullUrl(`/v1/telemetry/history?range=${targetRange}`), { headers });
+      if (res.ok) {
+        historyData.value = (await res.json()) as TimeseriesHistoryResponse;
+      }
+    } catch {
+      // Best-effort history fetch
+    }
+  }
+
+  async function setRange(r: '24h' | '7d' | '30d') {
+    selectedRange.value = r;
+    await fetchHistory(r);
+  }
+
   async function fetchSnapshot() {
     try {
       const headers = getAuthHeaders();
+      const t0 = Date.now();
       const [hRes, mRes, sRes] = await Promise.allSettled([
         fetch(getFullUrl('/health'), { headers }),
         fetch(getFullUrl('/v1/telemetry/metrics'), { headers }),
         fetch(getFullUrl('/v1/telemetry/stream'), { headers }),
       ]);
+      const rtt = Math.max(1, Date.now() - t0);
 
       if (hRes.status === 'fulfilled' && hRes.value.ok) {
         const hData = (await hRes.value.json()) as HealthStatus;
         health.value = hData.status === 'ok' ? 'ok' : 'degraded';
         isDown.value = false;
+        latestGatewayLatency.value = rtt;
+        gatewaySlots.value.push({
+          timestamp_ms: Date.now(),
+          latency_ms: rtt,
+          status: rtt < 300 ? 'ok' : rtt < 1000 ? 'degraded' : 'down',
+        });
+        if (gatewaySlots.value.length > 40) gatewaySlots.value.shift();
       } else {
         health.value = 'down';
         isDown.value = true;
         transport.value = 'offline';
+        gatewaySlots.value.push({
+          timestamp_ms: Date.now(),
+          latency_ms: undefined,
+          status: 'down',
+        });
+        if (gatewaySlots.value.length > 40) gatewaySlots.value.shift();
         return;
       }
 
@@ -135,6 +176,12 @@ export function useTelemetry(options: UseTelemetryOptions = {}) {
       health.value = 'down';
       isDown.value = true;
       transport.value = 'offline';
+      gatewaySlots.value.push({
+        timestamp_ms: Date.now(),
+        latency_ms: undefined,
+        status: 'down',
+      });
+      if (gatewaySlots.value.length > 40) gatewaySlots.value.shift();
     }
   }
 
@@ -149,6 +196,24 @@ export function useTelemetry(options: UseTelemetryOptions = {}) {
     }, pollingInterval);
   }
 
+  function startHistoryTimer() {
+    stopHistoryTimer();
+    // Low frequency: 60s periodic history aggregation refresh
+    historyTimer = setInterval(() => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+        return;
+      }
+      void fetchHistory();
+    }, 60000);
+  }
+
+  function stopHistoryTimer() {
+    if (historyTimer) {
+      clearInterval(historyTimer);
+      historyTimer = null;
+    }
+  }
+
   function stopPolling() {
     if (pollTimer) {
       clearInterval(pollTimer);
@@ -157,6 +222,9 @@ export function useTelemetry(options: UseTelemetryOptions = {}) {
   }
 
   async function start() {
+    void fetchHistory();
+    startHistoryTimer();
+
     if (typeof EventSource === 'undefined') {
       await fetchSnapshot();
       startPollingTimer();
@@ -199,6 +267,7 @@ export function useTelemetry(options: UseTelemetryOptions = {}) {
 
   function stop() {
     stopPolling();
+    stopHistoryTimer();
     if (sseSource) {
       sseSource.close();
       sseSource = null;
@@ -228,6 +297,16 @@ export function useTelemetry(options: UseTelemetryOptions = {}) {
     });
   }
 
+  const gatewayUptimeBars = computed<ConnectivityBarSeries>(() => {
+    if (stream.value?.gateway_uptime_bars?.slots && stream.value.gateway_uptime_bars.slots.length > 0) {
+      return stream.value.gateway_uptime_bars;
+    }
+    return {
+      slots: gatewaySlots.value,
+      latest_latency_ms: latestGatewayLatency.value,
+    };
+  });
+
   return {
     health,
     metrics,
@@ -235,8 +314,14 @@ export function useTelemetry(options: UseTelemetryOptions = {}) {
     history,
     transport,
     isDown,
+    selectedRange,
+    historyData,
+    gatewayUptimeBars,
+    fetchHistory,
+    setRange,
     start,
     stop,
     retry,
   };
 }
+

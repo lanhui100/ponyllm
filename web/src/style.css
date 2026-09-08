@@ -8,23 +8,23 @@
     --card-foreground: 224 25% 12%;
     --popover: 0 0% 100%;
     --popover-foreground: 224 25% 12%;
-    /* 电光鸢尾紫 (Iris Violet) 主题色 */
-    --primary: 243 75% 59%;
+    /* 暖橙色 (Warm Solar Orange) 主色 + 板岩青 (Deep Slate Cyan) 辅色 */
+    --primary: 24 95% 53%;
     --primary-foreground: 0 0% 100%;
-    --secondary: 220 14% 94%;
-    --secondary-foreground: 224 25% 20%;
+    --secondary: 198 25% 93%;
+    --secondary-foreground: 198 45% 20%;
     --muted: 220 14% 94%;
     --muted-foreground: 220 10% 46%;
-    --accent: 243 75% 96%;
-    --accent-foreground: 243 75% 50%;
+    --accent: 24 95% 96%;
+    --accent-foreground: 24 95% 42%;
     --destructive: 350 89% 60%;
     --destructive-foreground: 0 0% 100%;
     --border: 220 13% 91%;
     --input: 220 13% 91%;
-    --ring: 243 75% 59%;
+    --ring: 24 95% 53%;
     --radius: 0.625rem;
 
-    /* Surface 无边框分层体系 (风格2) */
+    /* Surface 无边框分层体系 */
     --surface-canvas: #f8f9fa;
     --surface-card: #ffffff;
     --surface-inset: #f1f3f5;
@@ -35,8 +35,8 @@
     background-color: #f8f9fa;
     color: #1a1f2c;
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans SC", sans-serif;
-    font-size: 14px;
-    line-height: 1.55;
+    font-size: 15px;
+    line-height: 1.6;
     margin: 0;
     padding: 0;
     -webkit-font-smoothing: antialiased;

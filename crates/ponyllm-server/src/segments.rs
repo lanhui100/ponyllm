@@ -242,6 +242,7 @@ mod tests {
             request_id: req.to_string(),
             session_id: None,
             provider: Some("p".to_string()),
+            model: None,
             endpoint: "/v1/chat/completions".to_string(),
             wall_ms,
             elapsed_ms: 1.0,
