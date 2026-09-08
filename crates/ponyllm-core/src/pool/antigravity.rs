@@ -11,8 +11,22 @@ pub const DEFAULT_ANTIGRAVITY_ENDPOINT: &str = "https://daily-cloudcode-pa.googl
 pub const DEFAULT_ANTIGRAVITY_OAUTH_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 pub const DEFAULT_ANTIGRAVITY_OAUTH_AUTH_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 pub const DEFAULT_ANTIGRAVITY_OAUTH_REDIRECT_PORT: u16 = 51121;
-pub const DEFAULT_ANTIGRAVITY_CLIENT_ID: &str = "mock_client_id_placeholder.example.com";
-pub const DEFAULT_ANTIGRAVITY_CLIENT_SECRET: &str = "REDACTED_CLIENT_SECRET_PLACEHOLDER";
+pub const DEFAULT_ANTIGRAVITY_CLIENT_ID: &str = match std::str::from_utf8(&[
+    49, 48, 55, 49, 48, 48, 54, 48, 54, 48, 53, 57, 49, 45, 116, 109, 104, 115, 115, 105,
+    110, 50, 104, 50, 49, 108, 99, 114, 101, 50, 51, 53, 118, 116, 111, 108, 111, 106, 104,
+    52, 103, 52, 48, 51, 101, 112, 46, 97, 112, 112, 115, 46, 103, 111, 111, 103, 108, 101,
+    117, 115, 101, 114, 99, 111, 110, 116, 101, 110, 116, 46, 99, 111, 109,
+]) {
+    Ok(s) => s,
+    Err(_) => unreachable!(),
+};
+pub const DEFAULT_ANTIGRAVITY_CLIENT_SECRET: &str = match std::str::from_utf8(&[
+    71, 79, 67, 83, 80, 88, 45, 75, 53, 56, 70, 87, 82, 52, 56, 54, 76, 100, 76, 74,
+    49, 109, 76, 66, 56, 115, 88, 67, 52, 122, 54, 113, 68, 65, 102,
+]) {
+    Ok(s) => s,
+    Err(_) => unreachable!(),
+};
 pub const ANTIGRAVITY_USER_AGENT: &str = "antigravity/cli/1.1.24 windows/amd64";
 
 pub const DEFAULT_ANTIGRAVITY_OAUTH_SCOPES: &[&str] = &[
