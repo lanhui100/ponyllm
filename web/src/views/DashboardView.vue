@@ -24,6 +24,18 @@ const {
 const latestPoint = computed(() => {
   return history.value[history.value.length - 1];
 });
+
+const speed24h = computed<number | undefined>(() => {
+  const points = historyData.value?.points;
+  if (points && points.length > 0) {
+    const totalTps = points.reduce((acc: number, b) => acc + (b.token_throughput ?? 0), 0);
+    return Number((totalTps / points.length).toFixed(1));
+  }
+  if (metrics.value?.stream?.avg_tps !== undefined && metrics.value.stream.avg_tps !== null) {
+    return Number(metrics.value.stream.avg_tps.toFixed(1));
+  }
+  return 0;
+});
 </script>
 
 <template>
@@ -43,6 +55,7 @@ const latestPoint = computed(() => {
         :transport="transport"
         :is-down="isDown"
         :uptime-bars="gatewayUptimeBars"
+        :speed-24h="speed24h"
         @retry="retry"
       />
 

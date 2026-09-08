@@ -70,6 +70,8 @@ describe('Modern Minimalist UI/UX System-Wide E2E Verification Suite (WEB-07)', 
       context_window: '128k',
       thinking_default: 'Off',
       thinking_max: 'High',
+      input_types: ['text', 'image'],
+      output_types: ['text'],
     },
     {
       name: 'o3-mini',
@@ -202,16 +204,21 @@ describe('Modern Minimalist UI/UX System-Wide E2E Verification Suite (WEB-07)', 
     editModelBtn.click();
     await nextTick();
 
-    // 1. 验证模型分级 (Tier) 按钮选项组
+    // 1. 验证模型分级 (Tier) 按钮选项组使用暖黄色底色 (200 色阶)
+    const tierButtons = container.querySelector('[data-testid="model-tier-buttons"]') as HTMLElement;
+    expect(tierButtons.className).toContain('bg-amber-200');
     const tierLargeBtn = container.querySelector('[data-testid="tier-btn-large"]') as HTMLButtonElement;
     expect(tierLargeBtn).not.toBeNull();
     tierLargeBtn.click();
     await nextTick();
 
-    // 2. 验证上下文窗口快捷按钮组
-    const context32kBtn = container.querySelector('[data-testid="context-btn-32k"]') as HTMLButtonElement;
-    expect(context32kBtn).not.toBeNull();
-    context32kBtn.click();
+    // 2. 验证上下文窗口快捷按钮组 (仅保留 256K, 512K, 1M)
+    expect(container.querySelector('[data-testid="context-btn-8k"]')).toBeNull();
+    expect(container.querySelector('[data-testid="context-btn-32k"]')).toBeNull();
+    expect(container.querySelector('[data-testid="context-btn-128k"]')).toBeNull();
+    const context256kBtn = container.querySelector('[data-testid="context-btn-256k"]') as HTMLButtonElement;
+    expect(context256kBtn).not.toBeNull();
+    context256kBtn.click();
     await nextTick();
 
     // 3. 验证思考强度单项按钮选项器 (彻底淘汰最大上限)
@@ -222,19 +229,35 @@ describe('Modern Minimalist UI/UX System-Wide E2E Verification Suite (WEB-07)', 
     thinkingBtnLow.click();
     await nextTick();
 
-    // 4. 验证多模态纯图标按钮组
-    const modalityVideoBtn = container.querySelector('[data-testid="modality-btn-video"]') as HTMLButtonElement;
-    expect(modalityVideoBtn).not.toBeNull();
-    modalityVideoBtn.click();
+    // 4. 验证输入输出模态纯图标按钮组 (拆分为独立输入与输出)
+    const inModalityVideoBtn = container.querySelector('[data-testid="input-modality-btn-video"]') as HTMLButtonElement;
+    expect(inModalityVideoBtn).not.toBeNull();
+    inModalityVideoBtn.click();
     await nextTick();
 
-    // 5. 验证高级折叠按钮存在且初始折叠
+    const outModalityAudioBtn = container.querySelector('[data-testid="output-modality-btn-audio"]') as HTMLButtonElement;
+    expect(outModalityAudioBtn).not.toBeNull();
+    outModalityAudioBtn.click();
+    await nextTick();
+
+    // 5. 验证高级折叠按钮存在且初始折叠，展开后验证 3 种协议选项与专属 base_url
     const toggleAdvancedBtn = container.querySelector('[data-testid="toggle-advanced-btn"]') as HTMLButtonElement;
     expect(toggleAdvancedBtn).not.toBeNull();
     expect(toggleAdvancedBtn.textContent).toContain('高级');
+    toggleAdvancedBtn.click();
+    await nextTick();
 
-    const submitModelBtn = container.querySelector('[data-testid="submit-model-btn"]') as HTMLButtonElement;
+    const protoChatBtn = container.querySelector('[data-testid="model-proto-chat"]') as HTMLButtonElement;
+    const protoMessagesBtn = container.querySelector('[data-testid="model-proto-messages"]') as HTMLButtonElement;
+    const protoResponsesBtn = container.querySelector('[data-testid="model-proto-responses"]') as HTMLButtonElement;
+    expect(protoChatBtn).not.toBeNull();
+    expect(protoMessagesBtn).not.toBeNull();
+    expect(protoResponsesBtn).not.toBeNull();
+    expect(container.querySelector('[data-testid="model-base-url-input"]')).not.toBeNull();
+
+    const submitModelBtn = container.querySelector('[data-testid="update-model-btn"]') as HTMLButtonElement;
     expect(submitModelBtn).not.toBeNull();
+    expect(submitModelBtn.textContent?.trim()).toBe('更新');
     submitModelBtn.click();
 
     await nextTick();
@@ -245,9 +268,11 @@ describe('Modern Minimalist UI/UX System-Wide E2E Verification Suite (WEB-07)', 
       'gpt-4o',
       expect.objectContaining({
         tier: 'Large',
-        context_window: '32k',
+        context_window: '256k',
         thinking_default: 'Low',
         thinking_max: 'High',
+        input_types: expect.arrayContaining(['text', 'image', 'video']),
+        output_types: expect.arrayContaining(['text', 'audio']),
       }),
       20
     );
@@ -414,22 +439,28 @@ describe('Modern Minimalist UI/UX System-Wide E2E Verification Suite (WEB-07)', 
     thinkingMediumBtn.click();
     await nextTick();
 
-    // 验证多模态纯图标按钮组并点击音频
-    const modalityMicBtn = container.querySelector('[data-testid="modality-btn-audio"]') as HTMLButtonElement;
-    expect(modalityMicBtn).not.toBeNull();
-    modalityMicBtn.click();
+    // 验证多模态纯图标按钮组并点击音频 (输入模态)
+    const inputAudioBtn = container.querySelector('[data-testid="input-modality-btn-audio"]') as HTMLButtonElement;
+    expect(inputAudioBtn).not.toBeNull();
+    inputAudioBtn.click();
     await nextTick();
 
-    // 验证高级折叠按钮并展开
+    // 验证高级折叠按钮并展开，选中协议
     const toggleAdvBtn = container.querySelector('[data-testid="toggle-advanced-btn"]') as HTMLButtonElement;
     expect(toggleAdvBtn).not.toBeNull();
     expect(toggleAdvBtn.textContent).toContain('高级');
     toggleAdvBtn.click();
     await nextTick();
 
-    // 提交保存
+    const protoChatBtn = container.querySelector('[data-testid="model-proto-chat"]') as HTMLButtonElement;
+    expect(protoChatBtn).not.toBeNull();
+    protoChatBtn.click();
+    await nextTick();
+
+    // 提交保存 (新建态按钮为 '保存模型')
     const submitBtn = container.querySelector('[data-testid="submit-model-btn"]') as HTMLButtonElement;
     expect(submitBtn).not.toBeNull();
+    expect(submitBtn.textContent?.trim()).toBe('保存模型');
     submitBtn.click();
     await nextTick();
     await new Promise((r) => setTimeout(r, 20));
@@ -440,6 +471,9 @@ describe('Modern Minimalist UI/UX System-Wide E2E Verification Suite (WEB-07)', 
         tier: 'Fast',
         context_window: '1m',
         thinking_default: 'Medium',
+        input_types: expect.arrayContaining(['text', 'image', 'audio']),
+        output_types: ['text'],
+        protocol: 'chat',
       }),
       20
     );

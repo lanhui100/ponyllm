@@ -9,9 +9,24 @@ use crate::error::{CoreError, Result};
 
 pub const DEFAULT_ANTIGRAVITY_ENDPOINT: &str = "https://daily-cloudcode-pa.googleapis.com";
 pub const DEFAULT_ANTIGRAVITY_OAUTH_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
+pub const DEFAULT_ANTIGRAVITY_OAUTH_AUTH_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
+pub const DEFAULT_ANTIGRAVITY_OAUTH_REDIRECT_PORT: u16 = 51121;
 pub const DEFAULT_ANTIGRAVITY_CLIENT_ID: &str = "mock_client_id_placeholder.example.com";
 pub const DEFAULT_ANTIGRAVITY_CLIENT_SECRET: &str = "REDACTED_CLIENT_SECRET_PLACEHOLDER";
 pub const ANTIGRAVITY_USER_AGENT: &str = "antigravity/cli/1.1.24 windows/amd64";
+
+pub const DEFAULT_ANTIGRAVITY_OAUTH_SCOPES: &[&str] = &[
+    "https://www.googleapis.com/auth/cloud-platform",
+    "https://www.googleapis.com/auth/userinfo.email",
+    "openid",
+];
+
+/// Result of a successful OAuth authorization code exchange
+#[derive(Debug, Clone)]
+pub struct AntigravityAuthResult {
+    pub credential: AntigravityCredential,
+    pub email: Option<String>,
+}
 
 /// Antigravity persistent OAuth credentials (stored in config / disk)
 #[derive(Clone, Serialize, Deserialize)]
@@ -282,9 +297,11 @@ impl AntigravityTokenManager {
             ("grant_type", "refresh_token"),
         ];
 
+        let token_url = std::env::var("ANTIGRAVITY_OAUTH_TOKEN_URL_OVERRIDE")
+            .unwrap_or_else(|_| DEFAULT_ANTIGRAVITY_OAUTH_TOKEN_URL.to_string());
         let req = self
             .client
-            .post(DEFAULT_ANTIGRAVITY_OAUTH_TOKEN_URL)
+            .post(&token_url)
             .header(reqwest::header::USER_AGENT, ANTIGRAVITY_USER_AGENT)
             .header("x-goog-api-client", "gl-node/22.14.0 gdcl/1.1.24")
             .header(reqwest::header::ACCEPT, "application/json")
@@ -445,6 +462,236 @@ impl AntigravityTokenManager {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Google OAuth2 Authorization & Credential Exchange Helpers (Web / CLI shared)
+// ---------------------------------------------------------------------------
+
+fn url_encode_component(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for byte in input.bytes() {
+        match byte {
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char);
+            }
+            _ => {
+                out.push_str(&format!("%{:02X}", byte));
+            }
+        }
+    }
+    out
+}
+
+fn url_decode_component(input: &str) -> String {
+    let mut bytes = Vec::with_capacity(input.len());
+    let mut chars = input.bytes();
+    while let Some(b) = chars.next() {
+        if b == b'%' {
+            let h1 = chars.next();
+            let h2 = chars.next();
+            if let (Some(c1), Some(c2)) = (h1, h2) {
+                if let Ok(val) = u8::from_str_radix(std::str::from_utf8(&[c1, c2]).unwrap_or(""), 16) {
+                    bytes.push(val);
+                    continue;
+                }
+                bytes.push(b'%');
+                bytes.push(c1);
+                bytes.push(c2);
+            } else {
+                bytes.push(b'%');
+            }
+        } else if b == b'+' {
+            bytes.push(b' ');
+        } else {
+            bytes.push(b);
+        }
+    }
+    String::from_utf8_lossy(&bytes).to_string()
+}
+
+/// Construct Google OAuth2 authorization URL for Antigravity with offline refresh access.
+pub fn build_authorization_url(redirect_uri: &str, state: &str) -> String {
+    let scopes = DEFAULT_ANTIGRAVITY_OAUTH_SCOPES.join(" ");
+    format!(
+        "{}?client_id={}&redirect_uri={}&response_type=code&scope={}&access_type=offline&prompt=consent%20select_account&state={}",
+        DEFAULT_ANTIGRAVITY_OAUTH_AUTH_URL,
+        url_encode_component(DEFAULT_ANTIGRAVITY_CLIENT_ID),
+        url_encode_component(redirect_uri),
+        url_encode_component(&scopes),
+        url_encode_component(state),
+    )
+}
+
+/// Parse OAuth authorization code from either a full redirected URL
+/// (e.g. `http://localhost:51121/oauth2callback?code=4/0A...&scope=...`)
+/// or a raw/trimmed code string pasted into the terminal.
+pub fn parse_code_from_input(input: &str) -> Option<String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    // Check if input contains `code=`
+    if let Some(pos) = trimmed.find("code=") {
+        let after_code = &trimmed[pos + 5..];
+        let end = after_code
+            .find(|c: char| c == '&' || c == '#' || c.is_whitespace())
+            .unwrap_or(after_code.len());
+        let raw_code = &after_code[..end];
+        let decoded = url_decode_component(raw_code).trim().to_string();
+        if !decoded.is_empty() {
+            return Some(decoded);
+        }
+    }
+
+    // If no `code=` parameter and not a full URL with query/fragment, treat as raw code
+    if !trimmed.contains("://") && !trimmed.contains('?') && !trimmed.contains('&') {
+        let decoded = url_decode_component(trimmed);
+        if !decoded.is_empty() {
+            return Some(decoded);
+        }
+    }
+
+    None
+}
+
+fn base64url_decode(input: &str) -> Option<Vec<u8>> {
+    let mut s = input.replace('-', "+").replace('_', "/");
+    while s.len() % 4 != 0 {
+        s.push('=');
+    }
+    let mut out = Vec::new();
+    let mut buf = 0u32;
+    let mut bits = 0;
+    for b in s.bytes() {
+        if b == b'=' {
+            break;
+        }
+        let val = match b {
+            b'A'..=b'Z' => b - b'A',
+            b'a'..=b'z' => b - b'a' + 26,
+            b'0'..=b'9' => b - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            _ => continue,
+        } as u32;
+        buf = (buf << 6) | val;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((buf >> bits) as u8);
+        }
+    }
+    Some(out)
+}
+
+/// Safely extract the Google account email from an unverified JWT `id_token` payload.
+pub fn extract_email_from_id_token(id_token: &str) -> Option<String> {
+    let parts: Vec<&str> = id_token.split('.').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    let payload_bytes = base64url_decode(parts[1])?;
+    let val: serde_json::Value = serde_json::from_slice(&payload_bytes).ok()?;
+    val.get("email")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Exchange an OAuth authorization code for Antigravity credentials using the default endpoint.
+pub async fn exchange_code_for_credential(
+    client: &reqwest::Client,
+    code: &str,
+    redirect_uri: &str,
+) -> Result<AntigravityAuthResult> {
+    let token_url = std::env::var("ANTIGRAVITY_OAUTH_TOKEN_URL_OVERRIDE")
+        .unwrap_or_else(|_| DEFAULT_ANTIGRAVITY_OAUTH_TOKEN_URL.to_string());
+    exchange_code_for_credential_custom(client, code, redirect_uri, &token_url).await
+}
+
+/// Exchange an OAuth authorization code for Antigravity credentials with a custom token URL (supports tests & mock servers).
+pub async fn exchange_code_for_credential_custom(
+    client: &reqwest::Client,
+    code: &str,
+    redirect_uri: &str,
+    token_url: &str,
+) -> Result<AntigravityAuthResult> {
+    let form = [
+        ("code", code),
+        ("client_id", DEFAULT_ANTIGRAVITY_CLIENT_ID),
+        ("client_secret", DEFAULT_ANTIGRAVITY_CLIENT_SECRET),
+        ("redirect_uri", redirect_uri),
+        ("grant_type", "authorization_code"),
+    ];
+
+    let resp = client
+        .post(token_url)
+        .header(reqwest::header::USER_AGENT, ANTIGRAVITY_USER_AGENT)
+        .form(&form)
+        .send()
+        .await
+        .map_err(|e| CoreError::Internal(format!("OAuth code exchange network error: {}", e)))?;
+
+    let status = resp.status();
+    let body_text = resp
+        .text()
+        .await
+        .unwrap_or_else(|_| "(failed to read response text)".to_string());
+
+    if !status.is_success() {
+        return Err(CoreError::Internal(format!(
+            "OAuth code exchange rejected ({}): {}",
+            status, body_text
+        )));
+    }
+
+    let json_val: serde_json::Value = serde_json::from_str(&body_text)
+        .map_err(|e| CoreError::Internal(format!("Failed to parse OAuth exchange response JSON: {}", e)))?;
+
+    let refresh_token = json_val
+        .get("refresh_token")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            CoreError::Internal(
+                "OAuth exchange succeeded but response did not contain a refresh_token".to_string(),
+            )
+        })?
+        .to_string();
+
+    let access_token = json_val
+        .get("access_token")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+
+    let expiry = json_val
+        .get("expires_in")
+        .and_then(|v| v.as_u64())
+        .map(|sec| Utc::now() + chrono::Duration::seconds(sec as i64));
+
+    let email = json_val
+        .get("id_token")
+        .and_then(|v| v.as_str())
+        .and_then(extract_email_from_id_token);
+
+    let cred = AntigravityCredential {
+        access_token,
+        refresh_token,
+        client_id: DEFAULT_ANTIGRAVITY_CLIENT_ID.to_string(),
+        client_secret: DEFAULT_ANTIGRAVITY_CLIENT_SECRET.to_string(),
+        project_id: "aicode-consumers".to_string(),
+        expiry,
+    };
+
+    Ok(AntigravityAuthResult {
+        credential: cred,
+        email,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -558,5 +805,100 @@ mod tests {
 
         let lock_guard = mgr.refresh_lock.lock().await;
         assert!(lock_guard.is_none(), "Singleflight slot must be None after cancellation");
+    }
+
+    #[test]
+    fn test_build_authorization_url() {
+        let url = build_authorization_url("http://localhost:51121/oauth2callback", "nonce-state-123");
+        assert!(url.starts_with(DEFAULT_ANTIGRAVITY_OAUTH_AUTH_URL));
+        assert!(url.contains(&format!("client_id={}", DEFAULT_ANTIGRAVITY_CLIENT_ID)));
+        assert!(url.contains("access_type=offline"));
+        assert!(url.contains("prompt=consent%20select_account"));
+        assert!(url.contains("state=nonce-state-123"));
+        assert!(url.contains("response_type=code"));
+        assert!(url.contains("http%3A%2F%2Flocalhost%3A51121%2Foauth2callback"));
+    }
+
+    #[test]
+    fn test_parse_code_from_input() {
+        // 1. Full URL with code, scope, state
+        let input1 = "http://localhost:51121/oauth2callback?code=4%2F0AY0e-dummy_code&scope=openid&state=123";
+        assert_eq!(parse_code_from_input(input1), Some("4/0AY0e-dummy_code".to_string()));
+
+        // 2. 127.0.0.1 redirect URL
+        let input2 = "http://127.0.0.1:51121/?state=123&code=4/0B9988_code";
+        assert_eq!(parse_code_from_input(input2), Some("4/0B9988_code".to_string()));
+
+        // 3. Raw code pasted directly with whitespace
+        let input3 = "   4/0AY0e-raw_code_pasted   ";
+        assert_eq!(parse_code_from_input(input3), Some("4/0AY0e-raw_code_pasted".to_string()));
+
+        // 4. code= format
+        let input4 = "code=4/0AY_direct";
+        assert_eq!(parse_code_from_input(input4), Some("4/0AY_direct".to_string()));
+
+        // 5. Empty or garbage
+        assert_eq!(parse_code_from_input(""), None);
+        assert_eq!(parse_code_from_input("   "), None);
+    }
+
+    #[test]
+    fn test_extract_email_from_id_token() {
+        // Header: {"alg":"RS256"} -> base64url "eyJhbGciOiJSUzI1NiJ9"
+        let header = "eyJhbGciOiJSUzI1NiJ9";
+        // Payload: {"email":"dev.engineer@gmail.com","sub":"1001"}
+        // JSON: {"email":"dev.engineer@gmail.com","sub":"1001"}
+        // Base64URL: eyJlbWFpbCI6ImRldi5lbmdpbmVlckBnbWFpbC5jb20iLCJzdWIiOiIxMDAxIn0
+        let payload = "eyJlbWFpbCI6ImRldi5lbmdpbmVlckBnbWFpbC5jb20iLCJzdWIiOiIxMDAxIn0";
+        let sig = "dummy_signature";
+        let jwt = format!("{}.{}.{}", header, payload, sig);
+
+        let email = extract_email_from_id_token(&jwt);
+        assert_eq!(email, Some("dev.engineer@gmail.com".to_string()));
+
+        // Invalid formats
+        assert_eq!(extract_email_from_id_token("not-a-jwt"), None);
+        assert_eq!(extract_email_from_id_token("a.b"), None);
+    }
+
+    #[tokio::test]
+    async fn test_exchange_code_for_credential_custom() {
+        use axum::{routing::post, Json, Router};
+        use serde_json::json;
+
+        let app = Router::new().route(
+            "/token",
+            post(|axum::Form(params): axum::Form<std::collections::HashMap<String, String>>| async move {
+                assert_eq!(params.get("code").map(|s| s.as_str()), Some("valid-code-42"));
+                assert_eq!(params.get("grant_type").map(|s| s.as_str()), Some("authorization_code"));
+                Json(json!({
+                    "access_token": "ya29.test_access",
+                    "refresh_token": "1//0test_refresh",
+                    "expires_in": 3600,
+                    "id_token": "eyJhbGciOiJSUzI1NiJ9.eyJlbWFpbCI6InVzZXJAZXhhbXBsZS5jb20iLCJzdWIiOiIxIn0.sig"
+                }))
+            }),
+        );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let client = reqwest::Client::new();
+        let token_url = format!("http://{}/token", addr);
+        let result = exchange_code_for_credential_custom(
+            &client,
+            "valid-code-42",
+            "http://localhost:51121/oauth2callback",
+            &token_url,
+        )
+        .await
+        .expect("exchange should succeed");
+
+        assert_eq!(result.credential.refresh_token, "1//0test_refresh");
+        assert_eq!(result.credential.access_token, Some("ya29.test_access".to_string()));
+        assert_eq!(result.email, Some("user@example.com".to_string()));
     }
 }

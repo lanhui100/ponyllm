@@ -1537,4 +1537,42 @@ async fn test_provider_proxy_routing_and_isolation() {
     let _c2 = state.http_client_for_provider("direct_prov");
 }
 
+#[tokio::test]
+async fn test_model_specific_base_url_routing() {
+    let mut config = GatewayConfig::default();
+    let mut prov = ProviderConfig {
+        base_url: "https://provider.example.com/v1".to_string(),
+        default_model: "default-model".to_string(),
+        models: vec!["default-model".to_string(), "custom-node".to_string()],
+        ..Default::default()
+    };
+    prov.model_specs.push(ModelSpec {
+        name: "custom-node".to_string(),
+        base_url: Some("https://model-node.example.com/v1".to_string()),
+        ..Default::default()
+    });
+    config.providers.insert("prov1".to_string(), prov);
+
+    let state = AppState::new(config);
+
+    // 1. Model with custom base_url routes directly to model's base_url
+    let candidates = state
+        .resolve_routed_targets(&ParsedRequestModel::parse("custom-node"), None)
+        .expect("should resolve candidates for custom-node");
+    assert!(!candidates.is_empty());
+    let target = &candidates[0];
+    assert_eq!(target.base_url, "https://model-node.example.com/v1");
+    assert_eq!(target.endpoint_base.as_deref(), Some("https://model-node.example.com/v1"));
+    assert_eq!(target.chat_completions_url(), "https://model-node.example.com/v1/chat/completions");
+
+    // 2. Default model without custom base_url falls back to provider base_url
+    let default_candidates = state
+        .resolve_routed_targets(&ParsedRequestModel::parse("default-model"), None)
+        .expect("should resolve candidates for default-model");
+    let def_target = &default_candidates[0];
+    assert_eq!(def_target.base_url, "https://provider.example.com/v1");
+    assert_eq!(def_target.chat_completions_url(), "https://provider.example.com/v1/chat/completions");
+}
+
+
 

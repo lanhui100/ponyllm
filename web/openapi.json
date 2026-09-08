@@ -575,11 +575,26 @@
           "name"
         ],
         "properties": {
+          "base_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "context_window": {
             "type": [
               "string",
               "null"
             ]
+          },
+          "input_types": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            }
           },
           "max_output": {
             "type": [
@@ -589,6 +604,15 @@
           },
           "name": {
             "type": "string"
+          },
+          "output_types": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            }
           },
           "protocol": {
             "type": [
@@ -781,11 +805,29 @@
           "thinking_max"
         ],
         "properties": {
+          "base_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "context_window": {
             "type": "string"
           },
+          "input_types": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
           "name": {
             "type": "string"
+          },
+          "output_types": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
           },
           "protocol": {
             "type": [
@@ -1015,17 +1057,41 @@
       "UpdateModelPayload": {
         "type": "object",
         "properties": {
+          "base_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "context_window": {
             "type": [
               "string",
               "null"
             ]
           },
+          "input_types": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
           "max_output": {
             "type": [
               "string",
               "null"
             ]
+          },
+          "output_types": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            }
           },
           "protocol": {
             "type": [

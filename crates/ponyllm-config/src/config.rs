@@ -166,6 +166,9 @@ pub struct ModelConfig {
     pub output_price: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub protocol: Option<UpstreamProtocol>,
+    /// Optional custom base_url override for this model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking_default: Option<ReasoningEffort>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -199,6 +202,7 @@ impl Default for ModelConfig {
             cached_price: None,
             output_price: None,
             protocol: None,
+            base_url: None,
             thinking_default: None,
             thinking_max: None,
             proxy: None,
@@ -220,6 +224,7 @@ impl ModelConfig {
             cached_price: None,
             output_price: None,
             protocol: None,
+            base_url: None,
             thinking_default: None,
             thinking_max: None,
             proxy: None,

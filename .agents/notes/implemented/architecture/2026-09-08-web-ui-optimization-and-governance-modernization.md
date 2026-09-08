@@ -1,6 +1,6 @@
 # Agent Note: Web 端 UI 深度优化与模型治理重构
 
-Status: proposed
+Status: implemented
 
 ## Problem
 

@@ -77,6 +77,7 @@ export type ConnectivityStatus = 'ok' | 'degraded' | 'down' | 'empty';
 export interface ConnectivitySlot {
   timestamp_ms: number;
   latency_ms?: number;
+  tps?: number;
   status: ConnectivityStatus;
 }
 

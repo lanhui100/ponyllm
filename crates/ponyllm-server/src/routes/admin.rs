@@ -67,7 +67,13 @@ pub struct ModelView {
     pub name: String,
     pub tier: String,
     pub context_window: String,
+    #[serde(default)]
+    pub input_types: Vec<String>,
+    #[serde(default)]
+    pub output_types: Vec<String>,
     pub protocol: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
     pub thinking_default: String,
     pub thinking_max: String,
 }
@@ -178,7 +184,13 @@ pub struct CreateModelPayload {
     #[serde(default)]
     pub max_output: Option<String>,
     #[serde(default)]
+    pub input_types: Option<Vec<String>>,
+    #[serde(default)]
+    pub output_types: Option<Vec<String>>,
+    #[serde(default)]
     pub protocol: Option<String>,
+    #[serde(default)]
+    pub base_url: Option<String>,
     #[serde(default)]
     pub thinking_default: Option<String>,
     #[serde(default)]
@@ -198,7 +210,13 @@ pub struct UpdateModelPayload {
     #[serde(default)]
     pub max_output: Option<String>,
     #[serde(default)]
+    pub input_types: Option<Vec<String>>,
+    #[serde(default)]
+    pub output_types: Option<Vec<String>>,
+    #[serde(default)]
     pub protocol: Option<String>,
+    #[serde(default)]
+    pub base_url: Option<String>,
     #[serde(default)]
     pub thinking_default: Option<String>,
     #[serde(default)]
@@ -834,7 +852,15 @@ pub async fn handle_admin_provider_models(
                 name: m.name.clone(),
                 tier: format!("{:?}", m.tier),
                 context_window: m.context_window.clone(),
-                protocol: m.protocol.as_ref().map(|p| format!("{p:?}")),
+                input_types: m.input_types.clone(),
+                output_types: m.output_types.clone(),
+                protocol: m.protocol.as_ref().map(|p| match p {
+                    UpstreamProtocol::Chat => "chat".to_string(),
+                    UpstreamProtocol::Responses => "responses".to_string(),
+                    UpstreamProtocol::Anthropic => "messages".to_string(),
+                    UpstreamProtocol::Antigravity => "antigravity".to_string(),
+                }),
+                base_url: m.base_url.clone(),
                 thinking_default: format!("{effective_default:?}"),
                 thinking_max: format!("{:?}", spec.max_effort),
             }
@@ -858,7 +884,15 @@ pub async fn handle_admin_models(State(state): State<Arc<AppState>>) -> impl Int
                 name: m.name.clone(),
                 tier: format!("{:?}", m.tier),
                 context_window: m.context_window.clone(),
-                protocol: m.protocol.as_ref().map(|proto| format!("{proto:?}")),
+                input_types: m.input_types.clone(),
+                output_types: m.output_types.clone(),
+                protocol: m.protocol.as_ref().map(|proto| match proto {
+                    UpstreamProtocol::Chat => "chat".to_string(),
+                    UpstreamProtocol::Responses => "responses".to_string(),
+                    UpstreamProtocol::Anthropic => "messages".to_string(),
+                    UpstreamProtocol::Antigravity => "antigravity".to_string(),
+                }),
+                base_url: m.base_url.clone(),
                 thinking_default: format!("{effective_default:?}"),
                 thinking_max: format!("{:?}", spec.max_effort),
             });
@@ -918,18 +952,34 @@ pub async fn handle_admin_create_model(
     let ctx_win = payload.context_window.unwrap_or_else(|| "128K".to_string());
     let max_out = payload.max_output.unwrap_or_else(|| "16K".to_string());
 
+    let input_types = payload
+        .input_types
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| vec!["text".to_string()]);
+    let output_types = payload
+        .output_types
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| vec!["text".to_string()]);
+    let base_url = payload
+        .base_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+
     let m_cfg = ModelConfig {
         name: model_name.clone(),
         tier,
         billing_mode: None,
         context_window: ctx_win.clone(),
         max_output: max_out.clone(),
-        input_types: vec!["text".to_string()],
-        output_types: vec!["text".to_string()],
+        input_types: input_types.clone(),
+        output_types: output_types.clone(),
         input_price: None,
         cached_price: None,
         output_price: None,
         protocol: proto,
+        base_url: base_url.clone(),
         thinking_default: think_def,
         thinking_max: think_max,
         proxy: payload.proxy.clone(),
@@ -947,13 +997,14 @@ pub async fn handle_admin_create_model(
         tier,
         context_window: ctx_win.clone(),
         max_output: max_out,
-        input_types: vec!["text".to_string()],
-        output_types: vec!["text".to_string()],
+        input_types: input_types.clone(),
+        output_types: output_types.clone(),
         billing_mode: None,
         input_price: None,
         cached_price: None,
         output_price: None,
         protocol: proto,
+        base_url: base_url.clone(),
         thinking_default: think_def,
         thinking_max: think_max,
         proxy: payload.proxy,
@@ -979,7 +1030,15 @@ pub async fn handle_admin_create_model(
             name: model_name,
             tier: format!("{tier:?}"),
             context_window: ctx_win,
-            protocol: proto.map(|p| format!("{p:?}")),
+            input_types,
+            output_types,
+            protocol: proto.map(|p| match p {
+                UpstreamProtocol::Chat => "chat".to_string(),
+                UpstreamProtocol::Responses => "responses".to_string(),
+                UpstreamProtocol::Anthropic => "messages".to_string(),
+                UpstreamProtocol::Antigravity => "antigravity".to_string(),
+            }),
+            base_url,
             thinking_default: format!("{effective_def:?}"),
             thinking_max: format!("{:?}", spec_obj.max_effort),
         }),
@@ -1053,6 +1112,7 @@ pub async fn handle_admin_update_model(
             cached_price: None,
             output_price: None,
             protocol: None,
+            base_url: None,
             thinking_default: None,
             thinking_max: None,
             proxy: None,
@@ -1067,8 +1127,21 @@ pub async fn handle_admin_update_model(
     if let Some(ref mo) = payload.max_output {
         existing_config.max_output = mo.clone();
     }
+    if let Some(ref it) = payload.input_types {
+        existing_config.input_types = it.clone();
+    }
+    if let Some(ref ot) = payload.output_types {
+        existing_config.output_types = ot.clone();
+    }
     if let Some(ref proto) = payload.protocol {
         existing_config.protocol = parse_protocol_opt(proto);
+    }
+    if let Some(ref b_url) = payload.base_url {
+        existing_config.base_url = if b_url.trim().is_empty() {
+            None
+        } else {
+            Some(b_url.trim().to_string())
+        };
     }
     if let Some(ref td) = payload.thinking_default {
         existing_config.thinking_default = parse_effort_opt(td);
@@ -1102,6 +1175,7 @@ pub async fn handle_admin_update_model(
         cached_price: existing_config.cached_price,
         output_price: existing_config.output_price,
         protocol: existing_config.protocol,
+        base_url: existing_config.base_url.clone(),
         thinking_default: existing_config.thinking_default,
         thinking_max: existing_config.thinking_max,
         proxy: existing_config.proxy.clone(),
@@ -1125,7 +1199,15 @@ pub async fn handle_admin_update_model(
         name,
         tier: format!("{:?}", existing_config.tier),
         context_window: existing_config.context_window,
-        protocol: existing_config.protocol.map(|p| format!("{p:?}")),
+        input_types: existing_config.input_types,
+        output_types: existing_config.output_types,
+        protocol: existing_config.protocol.map(|p| match p {
+            UpstreamProtocol::Chat => "chat".to_string(),
+            UpstreamProtocol::Responses => "responses".to_string(),
+            UpstreamProtocol::Anthropic => "messages".to_string(),
+            UpstreamProtocol::Antigravity => "antigravity".to_string(),
+        }),
+        base_url: existing_config.base_url,
         thinking_default: format!("{effective_def:?}"),
         thinking_max: format!("{:?}", spec_obj.max_effort),
     })

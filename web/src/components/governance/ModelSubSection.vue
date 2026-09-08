@@ -30,7 +30,13 @@ const MODEL_TIERS = [
   { value: 'Fast', label: '轻量 (Light)' },
 ] as const;
 
-const CONTEXT_PRESETS = ['8k', '32k', '128k', '1m'] as const;
+const CONTEXT_PRESETS = ['256k', '512k', '1m'] as const;
+
+const PROTOCOL_OPTIONS = [
+  { value: 'chat', label: 'OpenAI Chat' },
+  { value: 'messages', label: 'Anthropic Messages' },
+  { value: 'responses', label: 'OpenAI Responses' },
+] as const;
 
 const MODALITIES = [
   { id: 'text', icon: 'file-text' as const, label: '文本' },
@@ -49,24 +55,65 @@ const isCustomContext = ref(false);
 const form = ref({
   name: '',
   tier: 'Smart',
-  context_window: '128k',
+  context_window: '256k',
   thinking_default: 'Off',
-  modalities: ['text', 'image'] as string[],
+  input_types: ['text', 'image'] as string[],
+  output_types: ['text'] as string[],
   protocol: '',
+  base_url: '',
   input_price: 0,
   cached_price: 0,
   output_price: 0,
 });
+
+function normalizeProtocol(proto?: string | null): string {
+  if (!proto) return '';
+  const lower = proto.toLowerCase();
+  if (lower === 'anthropic' || lower === 'claude' || lower === 'messages') return 'messages';
+  if (lower === 'chat' || lower === 'openai') return 'chat';
+  if (lower === 'responses') return 'responses';
+  return proto;
+}
+
+function selectProtocol(p: string) {
+  if (form.value.protocol === p) {
+    form.value.protocol = '';
+  } else {
+    form.value.protocol = p;
+  }
+}
+
+function getModalityIcon(mod: string): 'file-text' | 'image' | 'video' | 'mic' | 'sparkles' {
+  switch (mod) {
+    case 'text': return 'file-text';
+    case 'image': return 'image';
+    case 'video': return 'video';
+    case 'audio': return 'mic';
+    default: return 'sparkles';
+  }
+}
+
+function getModalityName(mod: string): string {
+  switch (mod.toLowerCase()) {
+    case 'text': return '文本';
+    case 'image': return '图像';
+    case 'video': return '视频';
+    case 'audio': return '音频';
+    default: return mod;
+  }
+}
 
 function openAddInline() {
   editingModelName.value = null;
   form.value = {
     name: '',
     tier: 'Smart',
-    context_window: '128k',
+    context_window: '256k',
     thinking_default: 'Off',
-    modalities: ['text', 'image'],
+    input_types: ['text', 'image'],
+    output_types: ['text'],
     protocol: '',
+    base_url: '',
     input_price: 0,
     cached_price: 0,
     output_price: 0,
@@ -82,7 +129,7 @@ function openEditInline(model: ModelView) {
   isAdding.value = false;
   isExpanded.value = true;
   editingModelName.value = model.name;
-  const cw = model.context_window || '128k';
+  const cw = model.context_window || '256k';
   const isPreset = (CONTEXT_PRESETS as readonly string[]).includes(cw.toLowerCase());
   isCustomContext.value = !isPreset;
 
@@ -91,14 +138,16 @@ function openEditInline(model: ModelView) {
     tier: model.tier || 'Smart',
     context_window: cw,
     thinking_default: model.thinking_default || 'Off',
-    modalities: ['text', 'image'],
-    protocol: model.protocol || '',
+    input_types: model.input_types && model.input_types.length > 0 ? [...model.input_types] : ['text'],
+    output_types: model.output_types && model.output_types.length > 0 ? [...model.output_types] : ['text'],
+    protocol: normalizeProtocol(model.protocol),
+    base_url: model.base_url || '',
     input_price: 0,
     cached_price: 0,
     output_price: 0,
   };
   formError.value = null;
-  showAdvanced.value = Boolean(model.protocol);
+  showAdvanced.value = Boolean(model.protocol || model.base_url);
 }
 
 function cancelForm() {
@@ -116,14 +165,25 @@ function selectCustomContext() {
   isCustomContext.value = true;
 }
 
-function toggleModality(mod: string) {
-  const idx = form.value.modalities.indexOf(mod);
+function toggleInputModality(mod: string) {
+  const idx = form.value.input_types.indexOf(mod);
   if (idx >= 0) {
-    if (form.value.modalities.length > 1) {
-      form.value.modalities.splice(idx, 1);
+    if (form.value.input_types.length > 1) {
+      form.value.input_types.splice(idx, 1);
     }
   } else {
-    form.value.modalities.push(mod);
+    form.value.input_types.push(mod);
+  }
+}
+
+function toggleOutputModality(mod: string) {
+  const idx = form.value.output_types.indexOf(mod);
+  if (idx >= 0) {
+    if (form.value.output_types.length > 1) {
+      form.value.output_types.splice(idx, 1);
+    }
+  } else {
+    form.value.output_types.push(mod);
   }
 }
 
@@ -143,7 +203,10 @@ async function handleSubmit() {
       context_window: form.value.context_window,
       thinking_default: form.value.thinking_default,
       thinking_max: form.value.thinking_default === 'Off' ? 'Off' : 'High',
-      protocol: form.value.protocol ? form.value.protocol.trim() : null,
+      input_types: form.value.input_types,
+      output_types: form.value.output_types,
+      protocol: form.value.protocol ? form.value.protocol.trim() : '',
+      base_url: form.value.base_url ? form.value.base_url.trim() : '',
     };
 
     if (editingModelName.value) {
@@ -257,11 +320,11 @@ function getTierBadgeVariant(tier?: string) {
             />
           </div>
 
-          <!-- 模型分级 (Tier) 按钮选项组 -->
+          <!-- 模型分级 (Tier) 按钮选项组 (暖黄色底色 200 色阶) -->
           <div>
             <label class="block text-slate-600 font-medium mb-1.5 text-xs">模型分级 (Tier)</label>
             <div
-              class="grid grid-cols-3 gap-1.5 p-1 bg-slate-200/60 rounded-lg select-none"
+              class="grid grid-cols-3 gap-1.5 p-1 bg-amber-200/90 rounded-lg select-none border border-amber-300/50"
               data-testid="model-tier-buttons"
             >
               <button
@@ -272,8 +335,8 @@ function getTierBadgeVariant(tier?: string) {
                 class="py-1.5 px-2 rounded-md text-xs font-medium transition-all cursor-pointer text-center"
                 :class="[
                   form.tier === t.value
-                    ? 'bg-white text-indigo-700 shadow-2xs font-semibold'
-                    : 'text-slate-600 hover:text-slate-900 hover:bg-white/40'
+                    ? 'bg-white text-amber-950 shadow-xs font-semibold'
+                    : 'text-amber-900/80 hover:text-amber-950 hover:bg-amber-300/60'
                 ]"
                 @click="form.tier = t.value"
               >
@@ -282,7 +345,7 @@ function getTierBadgeVariant(tier?: string) {
             </div>
           </div>
 
-          <!-- 上下文窗口 (Context Window) 按钮选项组 -->
+          <!-- 上下文窗口 (Context Window) 按钮选项组 (仅保留 256K, 512K, 1M) -->
           <div>
             <label class="block text-slate-600 font-medium mb-1.5 text-xs">上下文窗口 (Context Window)</label>
             <div
@@ -296,7 +359,7 @@ function getTierBadgeVariant(tier?: string) {
                 :data-testid="`context-btn-${p}`"
                 class="flex-1 py-1.5 px-2 rounded-md text-xs font-medium transition-all cursor-pointer text-center"
                 :class="[
-                  !isCustomContext && form.context_window === p
+                  !isCustomContext && form.context_window?.toLowerCase() === p.toLowerCase()
                     ? 'bg-white text-indigo-700 shadow-2xs font-semibold'
                     : 'text-slate-600 hover:text-slate-900 hover:bg-white/40'
                 ]"
@@ -335,34 +398,66 @@ function getTierBadgeVariant(tier?: string) {
             v-model:default-effort="form.thinking_default"
           />
 
-          <!-- 输入输出多模态类型 (仅纯图标语义按钮) -->
-          <div>
-            <label class="block text-slate-600 font-medium mb-1.5 text-xs flex items-center gap-1.5">
-              <span>支持模态类型</span>
-              <UiTooltip content="点击纯图标切换该模型支持的输入/输出模态能力">
-                <Icons name="info" size="12" class="text-slate-400 cursor-pointer" />
-              </UiTooltip>
-            </label>
-            <div class="flex items-center gap-2" data-testid="model-modalities-group">
-              <UiTooltip
-                v-for="m in MODALITIES"
-                :key="m.id"
-                :content="`支持${m.label}输入/输出 (点击切换)`"
-              >
-                <button
-                  type="button"
-                  :data-testid="`modality-btn-${m.id}`"
-                  class="h-9 w-9 rounded-lg flex items-center justify-center transition-all cursor-pointer"
-                  :class="[
-                    form.modalities.includes(m.id)
-                      ? 'bg-indigo-50 text-indigo-600 ring-1 ring-indigo-200 shadow-2xs'
-                      : 'bg-slate-100 text-slate-400 hover:text-slate-600 hover:bg-slate-200/60'
-                  ]"
-                  @click="toggleModality(m.id)"
+          <!-- 支持模态类型拆解：输入模态与输出模态独立选择器 -->
+          <div class="space-y-2.5 p-2.5 bg-white/70 rounded-lg border border-slate-200/70" data-testid="model-modalities-section">
+            <div>
+              <label class="block text-slate-600 font-medium mb-1.5 text-xs flex items-center gap-1.5">
+                <span>输入模态 (Input)</span>
+                <UiTooltip content="该模型支持接收的输入模态能力 (点击纯图标切换)">
+                  <Icons name="info" size="12" class="text-slate-400 cursor-pointer" />
+                </UiTooltip>
+              </label>
+              <div class="flex items-center gap-2" data-testid="model-input-modalities">
+                <UiTooltip
+                  v-for="m in MODALITIES"
+                  :key="`in-${m.id}`"
+                  :content="`输入支持: ${m.label} (点击切换)`"
                 >
-                  <Icons :name="m.icon" size="16" />
-                </button>
-              </UiTooltip>
+                  <button
+                    type="button"
+                    :data-testid="`input-modality-btn-${m.id}`"
+                    class="h-8 w-8 rounded-lg flex items-center justify-center transition-all cursor-pointer"
+                    :class="[
+                      form.input_types.includes(m.id)
+                        ? 'bg-indigo-50 text-indigo-600 ring-1 ring-indigo-300 shadow-2xs'
+                        : 'bg-slate-100 text-slate-400 hover:text-slate-600 hover:bg-slate-200/60'
+                    ]"
+                    @click="toggleInputModality(m.id)"
+                  >
+                    <Icons :name="m.icon" size="15" />
+                  </button>
+                </UiTooltip>
+              </div>
+            </div>
+
+            <div>
+              <label class="block text-slate-600 font-medium mb-1.5 text-xs flex items-center gap-1.5">
+                <span>输出模态 (Output)</span>
+                <UiTooltip content="该模型能够生成的输出模态能力 (点击纯图标切换)">
+                  <Icons name="info" size="12" class="text-slate-400 cursor-pointer" />
+                </UiTooltip>
+              </label>
+              <div class="flex items-center gap-2" data-testid="model-output-modalities">
+                <UiTooltip
+                  v-for="m in MODALITIES"
+                  :key="`out-${m.id}`"
+                  :content="`输出支持: ${m.label} (点击切换)`"
+                >
+                  <button
+                    type="button"
+                    :data-testid="`output-modality-btn-${m.id}`"
+                    class="h-8 w-8 rounded-lg flex items-center justify-center transition-all cursor-pointer"
+                    :class="[
+                      form.output_types.includes(m.id)
+                        ? 'bg-emerald-50 text-emerald-600 ring-1 ring-emerald-300 shadow-2xs'
+                        : 'bg-slate-100 text-slate-400 hover:text-slate-600 hover:bg-slate-200/60'
+                    ]"
+                    @click="toggleOutputModality(m.id)"
+                  >
+                    <Icons :name="m.icon" size="15" />
+                  </button>
+                </UiTooltip>
+              </div>
             </div>
           </div>
 
@@ -379,50 +474,39 @@ function getTierBadgeVariant(tier?: string) {
             </button>
 
             <UiCollapsible :open="showAdvanced">
-              <div class="p-3 bg-slate-100/70 rounded-lg space-y-2.5 mt-1.5">
+              <div class="p-3 bg-slate-100/70 rounded-lg space-y-3 mt-1.5">
+                <!-- 3 种底层协议选项 -->
                 <div>
-                  <label class="block text-slate-500 font-medium mb-1 text-3xs">计费单价参考 (USD / 1M Tokens)</label>
-                  <div class="grid grid-cols-3 gap-2">
-                    <div>
-                      <span class="block text-slate-400 text-3xs mb-0.5">输入</span>
-                      <input
-                        v-model.number="form.input_price"
-                        type="number"
-                        step="0.001"
-                        placeholder="0.00"
-                        class="w-full bg-white border border-slate-200 rounded px-2 py-1 text-xs text-slate-800"
-                      />
-                    </div>
-                    <div>
-                      <span class="block text-slate-400 text-3xs mb-0.5">缓存</span>
-                      <input
-                        v-model.number="form.cached_price"
-                        type="number"
-                        step="0.001"
-                        placeholder="0.00"
-                        class="w-full bg-white border border-slate-200 rounded px-2 py-1 text-xs text-slate-800"
-                      />
-                    </div>
-                    <div>
-                      <span class="block text-slate-400 text-3xs mb-0.5">输出</span>
-                      <input
-                        v-model.number="form.output_price"
-                        type="number"
-                        step="0.001"
-                        placeholder="0.00"
-                        class="w-full bg-white border border-slate-200 rounded px-2 py-1 text-xs text-slate-800"
-                      />
-                    </div>
+                  <label class="block text-slate-600 font-medium mb-1.5 text-xs">底层协议覆盖 (选填)</label>
+                  <div class="flex flex-wrap gap-1.5" data-testid="model-protocol-options">
+                    <button
+                      v-for="opt in PROTOCOL_OPTIONS"
+                      :key="opt.value"
+                      type="button"
+                      :data-testid="`model-proto-${opt.value}`"
+                      class="px-2.5 py-1 rounded-md text-xs font-medium transition-all cursor-pointer border"
+                      :class="[
+                        form.protocol === opt.value
+                          ? 'bg-indigo-600 text-white border-indigo-600 shadow-2xs font-semibold'
+                          : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300'
+                      ]"
+                      @click="selectProtocol(opt.value)"
+                    >
+                      {{ opt.label }}
+                    </button>
                   </div>
+                  <p class="text-3xs text-slate-400 mt-1">未选中时继承服务商默认协议；点击已选协议可取消选择。</p>
                 </div>
 
+                <!-- 专属 base_url 输入框 -->
                 <div>
-                  <label class="block text-slate-500 font-medium mb-1 text-3xs">底层协议覆盖 (选填)</label>
+                  <label class="block text-slate-600 font-medium mb-1 text-xs">模型专属 Base URL (选填)</label>
                   <input
-                    v-model="form.protocol"
+                    v-model="form.base_url"
                     type="text"
-                    placeholder="如: openai 或 anthropic"
-                    class="w-full bg-white border border-slate-200 rounded px-2.5 py-1 text-xs text-slate-800"
+                    placeholder="例如: https://api.openai.com/v1 或留空继承服务商配置"
+                    class="w-full bg-white border border-slate-200/80 rounded-lg px-2.5 py-1.5 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
+                    data-testid="model-base-url-input"
                   />
                 </div>
               </div>
@@ -467,25 +551,42 @@ function getTierBadgeVariant(tier?: string) {
             </UiBadge>
             <span class="text-slate-400 text-xs font-mono">{{ m.context_window }}</span>
 
-            <!-- 多模态简明纯图标常显指示 -->
-            <div class="hidden sm:flex items-center gap-1 text-slate-400">
-              <UiTooltip content="支持文本模态">
-                <Icons name="file-text" size="12" class="text-slate-500" />
-              </UiTooltip>
-              <UiTooltip content="支持图像理解">
-                <Icons name="image" size="12" class="text-slate-500" />
-              </UiTooltip>
+            <!-- 多模态简明纯图标常显指示 (输入与输出分开) -->
+            <div class="hidden sm:flex items-center gap-1.5 text-slate-400" data-testid="model-row-modalities">
+              <span class="text-3xs text-slate-400 font-mono">入:</span>
+              <span v-for="t in (m.input_types && m.input_types.length > 0 ? m.input_types : ['text'])" :key="`row-in-${t}`" class="inline-flex items-center">
+                <UiTooltip :content="`输入支持: ${getModalityName(t)}`">
+                  <Icons :name="getModalityIcon(t)" size="12" class="text-slate-500" />
+                </UiTooltip>
+              </span>
+              <span class="text-slate-300 text-3xs">/</span>
+              <span class="text-3xs text-slate-400 font-mono">出:</span>
+              <span v-for="t in (m.output_types && m.output_types.length > 0 ? m.output_types : ['text'])" :key="`row-out-${t}`" class="inline-flex items-center">
+                <UiTooltip :content="`输出支持: ${getModalityName(t)}`">
+                  <Icons :name="getModalityIcon(t)" size="12" class="text-emerald-600" />
+                </UiTooltip>
+              </span>
             </div>
+
+            <!-- 底层协议标签 (若有定制) -->
+            <UiBadge
+              v-if="m.protocol"
+              variant="secondary"
+              class="hidden md:inline-flex items-center text-3xs font-mono font-normal"
+              :title="m.base_url ? `协议: ${m.protocol} · Base URL: ${m.base_url}` : `协议: ${m.protocol}`"
+            >
+              {{ m.protocol }}
+            </UiBadge>
 
             <!-- 思考强度简明标记 (当非 Off 时展示微标) -->
             <UiTooltip
               v-if="m.thinking_default && m.thinking_default !== 'Off'"
               :content="`思考强度预设: ${m.thinking_default}`"
             >
-              <span class="inline-flex items-center gap-1 text-xs text-indigo-600 bg-indigo-50/90 px-2 py-0.5 rounded-full font-medium cursor-help">
+              <UiBadge variant="purple" class="inline-flex items-center gap-1 cursor-help">
                 <Icons name="brain" size="11" />
                 {{ m.thinking_default }}
-              </span>
+              </UiBadge>
             </UiTooltip>
           </div>
 
@@ -539,11 +640,11 @@ function getTierBadgeVariant(tier?: string) {
             </div>
 
             <form class="space-y-3" @submit.prevent="handleSubmit">
-              <!-- 模型分级 (Tier) 按钮选项组 -->
+              <!-- 模型分级 (Tier) 按钮选项组 (暖黄色底色 200 色阶) -->
               <div>
                 <label class="block text-slate-600 font-medium mb-1.5 text-xs">模型分级 (Tier)</label>
                 <div
-                  class="grid grid-cols-3 gap-1.5 p-1 bg-slate-100 rounded-lg select-none"
+                  class="grid grid-cols-3 gap-1.5 p-1 bg-amber-200/90 rounded-lg select-none border border-amber-300/50"
                   data-testid="model-tier-buttons"
                 >
                   <button
@@ -554,8 +655,8 @@ function getTierBadgeVariant(tier?: string) {
                     class="py-1.5 px-2 rounded-md text-xs font-medium transition-all cursor-pointer text-center"
                     :class="[
                       form.tier === t.value
-                        ? 'bg-white text-indigo-700 shadow-2xs font-semibold'
-                        : 'text-slate-600 hover:text-slate-900 hover:bg-white/40'
+                        ? 'bg-white text-amber-950 shadow-xs font-semibold'
+                        : 'text-amber-900/80 hover:text-amber-950 hover:bg-amber-300/60'
                     ]"
                     @click="form.tier = t.value"
                   >
@@ -564,7 +665,7 @@ function getTierBadgeVariant(tier?: string) {
                 </div>
               </div>
 
-              <!-- 上下文窗口 (Context Window) 按钮选项组 -->
+              <!-- 上下文窗口 (Context Window) 按钮选项组 (仅保留 256K, 512K, 1M) -->
               <div>
                 <label class="block text-slate-600 font-medium mb-1.5 text-xs">上下文窗口 (Context Window)</label>
                 <div
@@ -578,7 +679,7 @@ function getTierBadgeVariant(tier?: string) {
                     :data-testid="`context-btn-${p}`"
                     class="flex-1 py-1.5 px-2 rounded-md text-xs font-medium transition-all cursor-pointer text-center"
                     :class="[
-                      !isCustomContext && form.context_window === p
+                      !isCustomContext && form.context_window?.toLowerCase() === p.toLowerCase()
                         ? 'bg-white text-indigo-700 shadow-2xs font-semibold'
                         : 'text-slate-600 hover:text-slate-900 hover:bg-white/40'
                     ]"
@@ -617,34 +718,66 @@ function getTierBadgeVariant(tier?: string) {
                 v-model:default-effort="form.thinking_default"
               />
 
-              <!-- 输入输出多模态类型 (仅纯图标语义按钮) -->
-              <div>
-                <label class="block text-slate-600 font-medium mb-1.5 text-xs flex items-center gap-1.5">
-                  <span>支持模态类型</span>
-                  <UiTooltip content="点击纯图标切换该模型支持的输入/输出模态能力">
-                    <Icons name="info" size="12" class="text-slate-400 cursor-pointer" />
-                  </UiTooltip>
-                </label>
-                <div class="flex items-center gap-2" data-testid="model-modalities-group">
-                  <UiTooltip
-                    v-for="m in MODALITIES"
-                    :key="m.id"
-                    :content="`支持${m.label}输入/输出 (点击切换)`"
-                  >
-                    <button
-                      type="button"
-                      :data-testid="`modality-btn-${m.id}`"
-                      class="h-9 w-9 rounded-lg flex items-center justify-center transition-all cursor-pointer"
-                      :class="[
-                        form.modalities.includes(m.id)
-                          ? 'bg-indigo-50 text-indigo-600 ring-1 ring-indigo-200 shadow-2xs'
-                          : 'bg-slate-100 text-slate-400 hover:text-slate-600 hover:bg-slate-200/60'
-                      ]"
-                      @click="toggleModality(m.id)"
+              <!-- 支持模态类型拆解：输入模态与输出模态独立选择器 -->
+              <div class="space-y-2.5 p-2.5 bg-slate-50/80 rounded-lg border border-slate-200/60" data-testid="model-modalities-section">
+                <div>
+                  <label class="block text-slate-600 font-medium mb-1.5 text-xs flex items-center gap-1.5">
+                    <span>输入模态 (Input)</span>
+                    <UiTooltip content="该模型支持接收的输入模态能力 (点击纯图标切换)">
+                      <Icons name="info" size="12" class="text-slate-400 cursor-pointer" />
+                    </UiTooltip>
+                  </label>
+                  <div class="flex items-center gap-2" data-testid="model-input-modalities">
+                    <UiTooltip
+                      v-for="m in MODALITIES"
+                      :key="`in-${m.id}`"
+                      :content="`输入支持: ${m.label} (点击切换)`"
                     >
-                      <Icons :name="m.icon" size="16" />
-                    </button>
-                  </UiTooltip>
+                      <button
+                        type="button"
+                        :data-testid="`input-modality-btn-${m.id}`"
+                        class="h-8 w-8 rounded-lg flex items-center justify-center transition-all cursor-pointer"
+                        :class="[
+                          form.input_types.includes(m.id)
+                            ? 'bg-indigo-50 text-indigo-600 ring-1 ring-indigo-300 shadow-2xs'
+                            : 'bg-slate-100 text-slate-400 hover:text-slate-600 hover:bg-slate-200/60'
+                        ]"
+                        @click="toggleInputModality(m.id)"
+                      >
+                        <Icons :name="m.icon" size="15" />
+                      </button>
+                    </UiTooltip>
+                  </div>
+                </div>
+
+                <div>
+                  <label class="block text-slate-600 font-medium mb-1.5 text-xs flex items-center gap-1.5">
+                    <span>输出模态 (Output)</span>
+                    <UiTooltip content="该模型能够生成的输出模态能力 (点击纯图标切换)">
+                      <Icons name="info" size="12" class="text-slate-400 cursor-pointer" />
+                    </UiTooltip>
+                  </label>
+                  <div class="flex items-center gap-2" data-testid="model-output-modalities">
+                    <UiTooltip
+                      v-for="m in MODALITIES"
+                      :key="`out-${m.id}`"
+                      :content="`输出支持: ${m.label} (点击切换)`"
+                    >
+                      <button
+                        type="button"
+                        :data-testid="`output-modality-btn-${m.id}`"
+                        class="h-8 w-8 rounded-lg flex items-center justify-center transition-all cursor-pointer"
+                        :class="[
+                          form.output_types.includes(m.id)
+                            ? 'bg-emerald-50 text-emerald-600 ring-1 ring-emerald-300 shadow-2xs'
+                            : 'bg-slate-100 text-slate-400 hover:text-slate-600 hover:bg-slate-200/60'
+                        ]"
+                        @click="toggleOutputModality(m.id)"
+                      >
+                        <Icons :name="m.icon" size="15" />
+                      </button>
+                    </UiTooltip>
+                  </div>
                 </div>
               </div>
 
@@ -661,50 +794,39 @@ function getTierBadgeVariant(tier?: string) {
                 </button>
 
                 <UiCollapsible :open="showAdvanced">
-                  <div class="p-3 bg-slate-100/70 rounded-lg space-y-2.5 mt-1.5">
+                  <div class="p-3 bg-slate-100/70 rounded-lg space-y-3 mt-1.5">
+                    <!-- 3 种底层协议选项 -->
                     <div>
-                      <label class="block text-slate-500 font-medium mb-1 text-3xs">计费单价参考 (USD / 1M Tokens)</label>
-                      <div class="grid grid-cols-3 gap-2">
-                        <div>
-                          <span class="block text-slate-400 text-3xs mb-0.5">输入</span>
-                          <input
-                            v-model.number="form.input_price"
-                            type="number"
-                            step="0.001"
-                            placeholder="0.00"
-                            class="w-full bg-white border border-slate-200 rounded px-2 py-1 text-xs text-slate-800"
-                          />
-                        </div>
-                        <div>
-                          <span class="block text-slate-400 text-3xs mb-0.5">缓存</span>
-                          <input
-                            v-model.number="form.cached_price"
-                            type="number"
-                            step="0.001"
-                            placeholder="0.00"
-                            class="w-full bg-white border border-slate-200 rounded px-2 py-1 text-xs text-slate-800"
-                          />
-                        </div>
-                        <div>
-                          <span class="block text-slate-400 text-3xs mb-0.5">输出</span>
-                          <input
-                            v-model.number="form.output_price"
-                            type="number"
-                            step="0.001"
-                            placeholder="0.00"
-                            class="w-full bg-white border border-slate-200 rounded px-2 py-1 text-xs text-slate-800"
-                          />
-                        </div>
+                      <label class="block text-slate-600 font-medium mb-1.5 text-xs">底层协议覆盖 (选填)</label>
+                      <div class="flex flex-wrap gap-1.5" data-testid="model-protocol-options">
+                        <button
+                          v-for="opt in PROTOCOL_OPTIONS"
+                          :key="opt.value"
+                          type="button"
+                          :data-testid="`model-proto-${opt.value}`"
+                          class="px-2.5 py-1 rounded-md text-xs font-medium transition-all cursor-pointer border"
+                          :class="[
+                            form.protocol === opt.value
+                              ? 'bg-indigo-600 text-white border-indigo-600 shadow-2xs font-semibold'
+                              : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300'
+                          ]"
+                          @click="selectProtocol(opt.value)"
+                        >
+                          {{ opt.label }}
+                        </button>
                       </div>
+                      <p class="text-3xs text-slate-400 mt-1">未选中时继承服务商默认协议；点击已选协议可取消选择。</p>
                     </div>
 
+                    <!-- 专属 base_url 输入框 -->
                     <div>
-                      <label class="block text-slate-500 font-medium mb-1 text-3xs">底层协议覆盖 (选填)</label>
+                      <label class="block text-slate-600 font-medium mb-1 text-xs">模型专属 Base URL (选填)</label>
                       <input
-                        v-model="form.protocol"
+                        v-model="form.base_url"
                         type="text"
-                        placeholder="如: openai 或 anthropic"
-                        class="w-full bg-white border border-slate-200 rounded px-2.5 py-1 text-xs text-slate-800"
+                        placeholder="例如: https://api.openai.com/v1 或留空继承服务商配置"
+                        class="w-full bg-white border border-slate-200/80 rounded-lg px-2.5 py-1.5 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
+                        data-testid="model-base-url-input"
                       />
                     </div>
                   </div>
@@ -719,9 +841,9 @@ function getTierBadgeVariant(tier?: string) {
                   type="submit"
                   size="sm"
                   :disabled="submitting"
-                  data-testid="submit-model-btn"
+                  data-testid="update-model-btn"
                 >
-                  {{ submitting ? '保存中...' : '更新模型' }}
+                  {{ submitting ? '保存中...' : '更新' }}
                 </UiButton>
               </div>
             </form>

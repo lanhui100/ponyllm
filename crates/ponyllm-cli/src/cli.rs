@@ -390,6 +390,37 @@ pub enum KeyCommands {
         #[arg(short, long)]
         rotate: bool,
     },
+    /// Interactively authorize and add an upstream account (e.g. Antigravity 'agy') via OAuth2
+    #[command(alias = "auth-agy", alias = "agy-auth")]
+    Auth {
+        /// Target provider identifier ('agy' or 'antigravity')
+        #[arg(default_value = "agy")]
+        provider: String,
+
+        /// Optional key identifier / label (defaults to Google account email)
+        #[arg(value_name = "ID")]
+        id: Option<String>,
+
+        /// Key priority (1 = highest, fallback to 2, 3...)
+        #[arg(short = 'P', long, default_value_t = 1)]
+        priority: u32,
+
+        /// Weight for weighted round-robin
+        #[arg(short = 'W', long, default_value_t = 10)]
+        weight: u32,
+
+        /// Local callback redirect port (default: 51121)
+        #[arg(long, default_value_t = ponyllm_core::pool::DEFAULT_ANTIGRAVITY_OAUTH_REDIRECT_PORT)]
+        port: u16,
+
+        /// Do not attempt to open browser automatically
+        #[arg(long)]
+        no_browser: bool,
+
+        /// Path to configuration file
+        #[arg(short, long)]
+        config: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]

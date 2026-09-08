@@ -34,9 +34,12 @@ export interface ModelView {
   name: string;
   tier: string;
   context_window: string;
+  input_types?: string[];
+  output_types?: string[];
   thinking_default: string;
   thinking_max: string;
   protocol?: string | null;
+  base_url?: string | null;
 }
 
 export interface KeyView {
@@ -102,7 +105,10 @@ export interface CreateModelPayload {
   tier?: string | null;
   context_window?: string | null;
   max_output?: string | null;
+  input_types?: string[] | null;
+  output_types?: string[] | null;
   protocol?: string | null;
+  base_url?: string | null;
   proxy?: string | null;
   thinking_default?: string | null;
   thinking_max?: string | null;
@@ -113,7 +119,10 @@ export interface UpdateModelPayload {
   tier?: string | null;
   context_window?: string | null;
   max_output?: string | null;
+  input_types?: string[] | null;
+  output_types?: string[] | null;
   protocol?: string | null;
+  base_url?: string | null;
   proxy?: string | null;
   thinking_default?: string | null;
   thinking_max?: string | null;

@@ -76,4 +76,47 @@ describe('UptimeBars Component', () => {
     expect(latencyLabel?.className).toContain('text-slate-400');
     app.unmount();
   });
+
+  it('renders exactly 6 bars when slotCount is 6, displaying call metrics in tooltip and 24h speed in t/s', async () => {
+    const slots: ConnectivitySlot[] = [
+      { timestamp_ms: 1000, latency_ms: 80, tps: 45.5, status: 'ok' },
+      { timestamp_ms: 2000, latency_ms: 110, tps: 52.0, status: 'ok' },
+      { timestamp_ms: 3000, latency_ms: 320, tps: 28.3, status: 'degraded' },
+      { timestamp_ms: 4000, latency_ms: 95, tps: 60.1, status: 'ok' },
+      { timestamp_ms: 5000, latency_ms: 1500, tps: 0, status: 'down' },
+      { timestamp_ms: 6000, latency_ms: 90, tps: 58.4, status: 'ok' },
+    ];
+
+    const app = createApp({
+      render: () => h(UptimeBars, {
+        slots,
+        slotCount: 6,
+        latestLatencyMs: 90,
+        speed24h: 48.6,
+      }),
+    });
+    app.mount(container);
+    await nextTick();
+
+    // Exactly 6 bars
+    const bars = container.querySelectorAll('[data-testid="uptime-bar"]');
+    expect(bars.length).toBe(6);
+
+    // Verify 6-bar width is wider (w-2 rounded-[2px])
+    expect(bars[0].className).toContain('w-2');
+
+    // Tooltip includes status, latency, and speed in t/s
+    const firstBarTitle = bars[0].getAttribute('title') || '';
+    expect(firstBarTitle).toContain('80.0 ms');
+    expect(firstBarTitle).toContain('45.5 t/s');
+    expect(firstBarTitle).toContain('响应及时');
+
+    // 24h speed badge in t/s is present
+    const speedBadge = container.querySelector('[data-testid="speed-24h"]');
+    expect(speedBadge).not.toBeNull();
+    expect(speedBadge?.textContent).toContain('24h');
+    expect(speedBadge?.textContent).toContain('48.6 t/s');
+
+    app.unmount();
+  });
 });

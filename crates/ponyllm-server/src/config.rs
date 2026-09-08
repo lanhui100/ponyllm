@@ -30,6 +30,9 @@ pub struct ModelSpec {
     /// Native wire protocol of this model. `None` inherits the provider default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub protocol: Option<UpstreamProtocol>,
+    /// Optional custom base_url override for this model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking_default: Option<ReasoningEffort>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -73,6 +76,7 @@ impl Default for ModelSpec {
             cached_price: None,
             output_price: None,
             protocol: None,
+            base_url: None,
             thinking_default: None,
             thinking_max: None,
             proxy: None,
@@ -208,6 +212,7 @@ impl ProviderConfig {
             cached_price: None,
             output_price: None,
             protocol: None,
+            base_url: None,
             thinking_default: None,
             thinking_max: None,
             proxy: None,

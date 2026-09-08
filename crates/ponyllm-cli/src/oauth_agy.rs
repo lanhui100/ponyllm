@@ -1,0 +1,340 @@
+use std::collections::HashMap;
+use std::sync::Arc;
+use ponyllm_core::pool::{
+    build_authorization_url, exchange_code_for_credential, parse_code_from_input,
+    AntigravityTokenManager, DEFAULT_ANTIGRAVITY_ENDPOINT, DEFAULT_ANTIGRAVITY_OAUTH_REDIRECT_PORT,
+    UpstreamProtocol,
+};
+use ponyllm_config::{ConfigFile, KeySection, ProviderSection};
+
+/// Check if the CLI is running inside an SSH session or in a headless environment.
+pub fn is_ssh_or_headless() -> bool {
+    if std::env::var("SSH_CLIENT").is_ok()
+        || std::env::var("SSH_CONNECTION").is_ok()
+        || std::env::var("SSH_TTY").is_ok()
+    {
+        return true;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if std::env::var("DISPLAY").is_err() && std::env::var("WAYLAND_DISPLAY").is_err() {
+            return true;
+        }
+    }
+    false
+}
+
+/// Attempt to open URL in system default browser
+pub fn open_in_browser(url: &str) {
+    #[cfg(target_os = "linux")]
+    {
+        let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("open").arg(url).spawn();
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let _ = std::process::Command::new("cmd").args(["/C", "start", url]).spawn();
+    }
+}
+
+async fn bind_available_loopback(preferred_port: u16) -> std::io::Result<(tokio::net::TcpListener, u16)> {
+    for p in preferred_port..preferred_port + 10 {
+        if let Ok(listener) = tokio::net::TcpListener::bind(format!("127.0.0.1:{}", p)).await {
+            return Ok((listener, p));
+        }
+    }
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let port = listener.local_addr()?.port();
+    Ok((listener, port))
+}
+
+async fn read_stdin_line() -> std::io::Result<String> {
+    use std::io::IsTerminal;
+    if !std::io::stdin().is_terminal()
+        || std::env::var("PONYLLM_NON_INTERACTIVE").is_ok()
+        || std::env::var("PONYLLM_DISABLE_STDIN").is_ok()
+    {
+        return futures_util::future::pending::<std::io::Result<String>>().await;
+    }
+    use tokio::io::AsyncBufReadExt;
+    let mut reader = tokio::io::BufReader::new(tokio::io::stdin());
+    loop {
+        let mut line = String::new();
+        let n = reader.read_line(&mut line).await?;
+        if n == 0 {
+            futures_util::future::pending::<()>().await;
+        }
+        let trimmed = line.trim();
+        if !trimmed.is_empty() {
+            return Ok(line);
+        }
+    }
+}
+
+/// Main interactive handler for `ponyllm key auth agy [ID]`
+pub async fn handle_key_auth_agy(
+    provider_arg: &str,
+    id_arg: Option<&str>,
+    priority: u32,
+    weight: u32,
+    preferred_port: u16,
+    no_browser: bool,
+    config_path: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let (target_provider, custom_id) = match provider_arg.to_lowercase().as_str() {
+        "agy" | "antigravity" => ("antigravity".to_string(), id_arg.map(str::to_string)),
+        other => ("antigravity".to_string(), Some(other.to_string())),
+    };
+
+    let resolved = ConfigFile::resolve_path(config_path);
+    let path_str = resolved.to_str().unwrap_or("ponyllm.toml");
+
+    let mut cfg = ConfigFile::load_or_default(Some(path_str).filter(|_| resolved.exists()))
+        .unwrap_or_default();
+
+    let (listener, bound_port) = bind_available_loopback(
+        if preferred_port > 0 { preferred_port } else { DEFAULT_ANTIGRAVITY_OAUTH_REDIRECT_PORT },
+    )
+    .await?;
+
+    let redirect_uri = format!("http://localhost:{}/oauth2callback", bound_port);
+    let state = uuid::Uuid::new_v4().to_string();
+    let auth_url = build_authorization_url(&redirect_uri, &state);
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(1);
+    let tx_shared = Arc::new(tokio::sync::Mutex::new(Some(tx)));
+    let tx_route = tx_shared.clone();
+
+    let app = axum::Router::new().route(
+        "/oauth2callback",
+        axum::routing::get(move |axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>| {
+            let tx_inner = tx_route.clone();
+            async move {
+                if let Some(code) = params.get("code") {
+                    let mut guard = tx_inner.lock().await;
+                    if let Some(sender) = guard.take() {
+                        let _ = sender.send(code.clone()).await;
+                    }
+                    axum::response::Html(r#"<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Antigravity 授权成功</title></head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; text-align: center; padding: 60px 20px; background-color: #0f172a; color: #f8fafc;">
+  <div style="max-width: 480px; margin: 0 auto; background: #1e293b; border-radius: 12px; padding: 32px; box-shadow: 0 10px 25px rgba(0,0,0,0.5); border: 1px solid #334155;">
+    <h1 style="color: #22c55e; font-size: 28px; margin-bottom: 12px;">✅ 授权成功</h1>
+    <p style="font-size: 16px; color: #94a3b8; line-height: 1.6;">已成功捕获 Google Antigravity 访问凭证。<br>您可以关闭此网页，并返回终端继续查看配额与配置。</p>
+  </div>
+</body>
+</html>"#.to_string())
+                } else {
+                    let err = params.get("error").map(|s| s.as_str()).unwrap_or("unknown_error");
+                    axum::response::Html(format!(r#"<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Antigravity 授权失败</title></head>
+<body style="font-family: sans-serif; text-align: center; padding: 60px 20px; background: #0f172a; color: #f8fafc;">
+  <div style="max-width: 480px; margin: 0 auto; background: #1e293b; border-radius: 12px; padding: 32px; border: 1px solid #ef4444;">
+    <h1 style="color: #ef4444; font-size: 26px;">❌ 授权失败</h1>
+    <p style="color: #94a3b8;">Google 授权异常: {}</p>
+  </div>
+</body>
+</html>"#, err))
+                }
+            }
+        }),
+    );
+
+    let server_handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    let headless = no_browser || is_ssh_or_headless();
+
+    println!();
+    println!("╔════════════════════════════════════════════════════════════════════════════╗");
+    println!("║       Antigravity (agy) 账户授权与凭证获取向导 (Google OAuth2)             ║");
+    println!("╚════════════════════════════════════════════════════════════════════════════╝");
+    println!("  • 提供商: {}", target_provider);
+    println!("  • 回调地址: {}", redirect_uri);
+    println!();
+
+    if headless {
+        println!("ℹ️  检测到当前处于 SSH / 远程无桌面环境或指定了 --no-browser。");
+        println!("   请在您本地浏览器的地址栏中打开以下授权链接：");
+        println!();
+        println!("👉 \x1b[36m{}\x1b[0m", auth_url);
+        println!();
+        println!("💡 操作说明：");
+        println!("   1. 在网页中选择需要加入连接池的 Google 账户并点击【允许】；");
+        println!("   2. 完成授权后，浏览器可能会显示“无法访问此网站 / 连接被拒绝”");
+        println!("      （这是正常现象，因为页面重定向到了本地环回端口）；");
+        println!("   3. 请直接将浏览器地址栏中的【完整重定向 URL】或其中的【code 参数】");
+        println!("      复制并粘贴在下方提示符中。");
+        println!("────────────────────────────────────────────────────────────────────────────");
+    } else {
+        println!("🚀 正在尝试唤起系统默认浏览器进行 Google 授权...");
+        open_in_browser(&auth_url);
+        println!("   若浏览器未自动弹出，请手动复制以下链接并在浏览器中打开：");
+        println!("👉 \x1b[36m{}\x1b[0m", auth_url);
+        println!("────────────────────────────────────────────────────────────────────────────");
+    }
+
+    print!("等待授权回调中 (按 Ctrl+C 可取消)...\n请输入重定向 URL 或 Code: ");
+    std::io::Write::flush(&mut std::io::stdout())?;
+
+    let captured_code = tokio::select! {
+        Some(code) = rx.recv() => {
+            println!("\n✅ 已通过本地回调端口成功截获授权码！");
+            code
+        }
+        line_res = read_stdin_line() => {
+            match line_res {
+                Ok(text) => {
+                    if let Some(code) = parse_code_from_input(&text) {
+                        println!("\n✅ 已从终端输入中成功解析授权码！");
+                        code
+                    } else {
+                        server_handle.abort();
+                        return Err("未能从输入中提取出有效的 OAuth Code，请确认输入是否完整。".into());
+                    }
+                }
+                Err(e) => {
+                    server_handle.abort();
+                    return Err(format!("读取终端输入失败: {}", e).into());
+                }
+            }
+        }
+        _ = tokio::time::sleep(std::time::Duration::from_secs(300)) => {
+            server_handle.abort();
+            return Err("授权等待超时 (5分钟)，流程已终止。".into());
+        }
+    };
+
+    server_handle.abort();
+
+    println!("⏳ 正在向 Google OAuth 端点兑换长期凭证...");
+    let effective_proxy = cfg.providers.get(&target_provider)
+        .and_then(|p| p.proxy.as_deref())
+        .or(cfg.gateway.proxy.as_deref());
+
+    let http_client = ponyllm_core::executor::create_upstream_http_client_with_options(
+        effective_proxy,
+        cfg.gateway.use_system_proxy,
+    );
+
+    let auth_res = exchange_code_for_credential(
+        &http_client,
+        &captured_code,
+        &redirect_uri,
+    )
+    .await?;
+
+    let final_id = if let Some(custom) = custom_id {
+        custom
+    } else if let Some(ref email) = auth_res.email {
+        format!("ag-{}", email)
+    } else {
+        format!("ag-account-{}", &uuid::Uuid::new_v4().to_string()[..6])
+    };
+
+    let provider_base_url = {
+        let p_sec = cfg.providers.entry(target_provider.clone()).or_insert_with(|| {
+            ProviderSection {
+                base_url: DEFAULT_ANTIGRAVITY_ENDPOINT.to_string(),
+                default_model: "claude-sonnet-4-6".to_string(),
+                strategy: "round_robin".to_string(),
+                billing_mode: ponyllm_core::pool::BillingMode::Metered,
+                input_price: 0.0,
+                cached_price: 0.0,
+                output_price: 0.0,
+                models: vec![
+                    "claude-sonnet-4-6".to_string(),
+                    "claude-opus-4-6".to_string(),
+                    "gemini-2.5-flash".to_string(),
+                    "gemini-2.5-pro".to_string(),
+                ],
+                default_protocol: Some(UpstreamProtocol::Antigravity),
+                chat_url: None,
+                responses_url: None,
+                messages_url: None,
+                proxy: None,
+                keys: vec![],
+                model_configs: vec![],
+            }
+        });
+
+        if let Some(existing_key) = p_sec.keys.iter_mut().find(|k| k.id == final_id) {
+            existing_key.api_key = auth_res.credential.refresh_token.clone();
+            existing_key.priority = priority;
+            existing_key.weight = weight;
+            println!("🔄 已更新现有 Key '{}' 的凭证", final_id);
+        } else {
+            p_sec.keys.push(KeySection {
+                id: final_id.clone(),
+                api_key: auth_res.credential.refresh_token.clone(),
+                priority,
+                weight,
+            });
+            println!("➕ 已新增 Key '{}' 至服务商 '{}'", final_id, target_provider);
+        }
+        p_sec.base_url.clone()
+    };
+
+    cfg.save_to_path(path_str)?;
+
+    println!("✅ 授权凭证已安全写入配置文件: {}", resolved.display());
+    if let Some(ref email) = auth_res.email {
+        println!("   • 关联 Google 账户: {}", email);
+    }
+    println!("   • 优先级: {}, 权重: {}", priority, weight);
+
+    println!();
+    println!("🔍 正在抓取新账户 '{}' 的 Antigravity 模型配额与重置时间...", final_id);
+    let mgr = AntigravityTokenManager::new(&final_id, auth_res.credential, http_client);
+    let quota_res = tokio::time::timeout(
+        std::time::Duration::from_secs(4),
+        mgr.fetch_quota(Some(&provider_base_url)),
+    )
+    .await;
+
+    match quota_res {
+        Ok(Ok(snapshot)) => {
+            println!("✅ 配额探活成功 (获取到 {} 个模型可用配额)", snapshot.models.len());
+            println!("      {:<28} {:<12} {:<24} {:<16}", "模型", "剩余额度", "恢复时间(北京时间)", "距离恢复");
+            println!("      {}", "-".repeat(82));
+            let mut models: Vec<_> = snapshot.models.values().collect();
+            models.sort_by_key(|m| &m.model_id);
+            for m in models {
+                let pct = format!("{:.1}%", m.remaining_fraction * 100.0);
+                let (beijing_time, remaining_desc) = match m.reset_time {
+                    Some(utc_dt) => {
+                        let bj_dt = utc_dt + chrono::Duration::hours(8);
+                        let now = chrono::Utc::now();
+                        let diff = if utc_dt > now {
+                            let dur = utc_dt - now;
+                            let hours = dur.num_hours();
+                            let mins = dur.num_minutes() % 60;
+                            format!("{}小时{}分后", hours, mins)
+                        } else {
+                            "已就绪".to_string()
+                        };
+                        (bj_dt.format("%Y-%m-%d %H:%M:%S").to_string(), diff)
+                    }
+                    None => ("N/A".to_string(), "N/A".to_string()),
+                };
+                println!("      {:<28} {:<12} {:<24} {:<16}", m.model_id, pct, beijing_time, remaining_desc);
+            }
+        }
+        Ok(Err(e)) => {
+            println!("⚠️ 账号凭证已保存，但配额抓取暂未返回: {}", e);
+        }
+        Err(_) => {
+            println!("⚠️ 账号凭证已保存，配额抓取探活超时（可稍后执行 ponyllm key test 查看）。");
+        }
+    }
+
+    println!();
+    println!("🎉 Antigravity 账户授权并接入完成！");
+    Ok(())
+}

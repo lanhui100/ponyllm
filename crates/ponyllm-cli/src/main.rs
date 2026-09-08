@@ -65,6 +65,7 @@ fn build_gateway_config_and_pools(
                 cached_price: m.cached_price,
                 output_price: m.output_price,
                 protocol: m.protocol,
+                base_url: m.base_url,
                 thinking_default: m.thinking_default,
                 thinking_max: m.thinking_max,
                 proxy: m.proxy,
@@ -626,6 +627,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             KeyCommands::Gateway { config, key, rotate } => {
                 handle_manage_gateway_auth(config.as_deref(), key, rotate)?;
             }
+            KeyCommands::Auth {
+                provider,
+                id,
+                priority,
+                weight,
+                port,
+                no_browser,
+                config,
+            } => {
+                ponyllm_cli::oauth_agy::handle_key_auth_agy(
+                    &provider,
+                    id.as_deref(),
+                    priority,
+                    weight,
+                    port,
+                    no_browser,
+                    config.as_deref(),
+                )
+                .await
+                .map_err(|e| -> Box<dyn std::error::Error> { e })?;
+            }
         },
         Commands::Model(cmd) => match cmd {
             ModelCommands::List { config } => {
@@ -760,6 +782,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     cached_price,
                     output_price,
                     protocol,
+                    base_url: None,
                     thinking_default: None,
                     thinking_max: None,
                     proxy: model_proxy.clone(),

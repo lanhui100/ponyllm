@@ -99,39 +99,45 @@ fn resolve_effective_protocol(
     p_cfg: &ProviderConfig,
     model_name: &str,
     proto_override: Option<UpstreamProtocol>,
-        inbound: Option<UpstreamProtocol>,
+    inbound: Option<UpstreamProtocol>,
 ) -> (UpstreamProtocol, Option<String>) {
     // Explicit request/model declarations always win outright.
     if let Some(o) = proto_override {
-        return with_endpoint(p_cfg, o);
+        return with_endpoint(p_cfg, model_name, o);
     }
     if let Some(m) = p_cfg.native_protocol(model_name) {
         // Native passthrough preferred: an inbound protocol the provider
         // natively serves (explicit endpoint override) beats the default.
         if let Some(i) = inbound {
             if i != m && p_cfg.endpoint_base_for(i).is_some() {
-                return with_endpoint(p_cfg, i);
+                return with_endpoint(p_cfg, model_name, i);
             }
         }
-        return with_endpoint(p_cfg, m);
+        return with_endpoint(p_cfg, model_name, m);
     }
     // No declarations: an inbound protocol with an explicit endpoint still
     // signals native support and wins over the URL heuristic.
     if let Some(i) = inbound {
         if p_cfg.endpoint_base_for(i).is_some() {
-            return with_endpoint(p_cfg, i);
+            return with_endpoint(p_cfg, model_name, i);
         }
     }
     with_endpoint(
         p_cfg,
+        model_name,
         infer_legacy_protocol(p_name, &p_cfg.base_url),
     )
 }
 
-fn with_endpoint(p_cfg: &ProviderConfig, protocol: UpstreamProtocol) -> (UpstreamProtocol, Option<String>) {
-    let endpoint_base = p_cfg
-        .endpoint_base_for(protocol)
-        .map(|s| s.to_string());
+fn with_endpoint(
+    p_cfg: &ProviderConfig,
+    model_name: &str,
+    protocol: UpstreamProtocol,
+) -> (UpstreamProtocol, Option<String>) {
+    let spec = p_cfg.get_model_spec(model_name);
+    let endpoint_base = spec
+        .base_url
+        .or_else(|| p_cfg.endpoint_base_for(protocol).map(|s| s.to_string()));
     (protocol, endpoint_base)
 }
 
@@ -656,7 +662,7 @@ impl AppState {
                     resolve_effective_protocol(p_name, p_cfg, clean, proto_override, inbound);
                 candidates.push(RoutedTarget {
                     provider_name: p_name.clone(),
-                    base_url: p_cfg.base_url.clone(),
+                    base_url: spec.base_url.clone().unwrap_or_else(|| p_cfg.base_url.clone()),
                     physical_model: clean.clone(),
                     tier: spec.tier,
                     strategy,
@@ -684,7 +690,7 @@ impl AppState {
                         resolve_effective_protocol(prefix, p_cfg, sub_model, proto_override, inbound);
                     candidates.push(RoutedTarget {
                         provider_name: prefix.to_string(),
-                        base_url: p_cfg.base_url.clone(),
+                        base_url: spec.base_url.clone().unwrap_or_else(|| p_cfg.base_url.clone()),
                         physical_model: sub_model.to_string(),
                         tier: spec.tier,
                         strategy,
@@ -718,7 +724,7 @@ impl AppState {
                         resolve_effective_protocol(p_name, p_cfg, clean, proto_override, inbound);
                     candidates.push(RoutedTarget {
                         provider_name: p_name.clone(),
-                        base_url: p_cfg.base_url.clone(),
+                        base_url: spec.base_url.clone().unwrap_or_else(|| p_cfg.base_url.clone()),
                         physical_model: clean.clone(),
                         tier: spec.tier,
                         strategy,
@@ -780,7 +786,7 @@ impl AppState {
                 let (protocol, endpoint_base) = resolve_effective_protocol(p_name, p_cfg, &p_cfg.default_model, proto_override, inbound);
                 candidates.push(RoutedTarget {
                     provider_name: p_name.clone(),
-                    base_url: p_cfg.base_url.clone(),
+                    base_url: default_spec.base_url.clone().unwrap_or_else(|| p_cfg.base_url.clone()),
                     physical_model: p_cfg.default_model.clone(),
                     tier,
                     strategy,
@@ -805,7 +811,7 @@ impl AppState {
                             resolve_effective_protocol(p_name, p_cfg, m, proto_override, inbound);
                         candidates.push(RoutedTarget {
                             provider_name: p_name.clone(),
-                            base_url: p_cfg.base_url.clone(),
+                            base_url: spec.base_url.clone().unwrap_or_else(|| p_cfg.base_url.clone()),
                             physical_model: m.clone(),
                             tier,
                             strategy,

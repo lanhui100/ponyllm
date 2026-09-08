@@ -300,6 +300,7 @@ fn test_model_config_crud_and_params() {
         cached_price: None,
         output_price: None,
         protocol: None,
+        base_url: None,
         thinking_default: None,
         thinking_max: None,
         proxy: None,
@@ -666,4 +667,141 @@ async fn test_web_subcommand_full_launch_lifecycle() {
 
     let _ = cmd.kill();
     let _ = cmd.wait();
+}
+
+#[test]
+fn test_key_auth_agy_cli_parsing() {
+    // 1. `ponyllm key auth agy`
+    let cli1 = Cli::try_parse_from(["ponyllm", "key", "auth", "agy"]).unwrap();
+    match cli1.command {
+        Commands::Key(KeyCommands::Auth { provider, id, priority, weight, port, no_browser, .. }) => {
+            assert_eq!(provider, "agy");
+            assert_eq!(id, None);
+            assert_eq!(priority, 1);
+            assert_eq!(weight, 10);
+            assert_eq!(port, 51121);
+            assert!(!no_browser);
+        }
+        _ => panic!("Expected Key Auth command"),
+    }
+
+    // 2. `ponyllm key auth agy account-main`
+    let cli2 = Cli::try_parse_from([
+        "ponyllm", "key", "auth", "agy", "account-main", "-P", "2", "-W", "20", "--no-browser", "--port", "51130"
+    ]).unwrap();
+    match cli2.command {
+        Commands::Key(KeyCommands::Auth { provider, id, priority, weight, port, no_browser, .. }) => {
+            assert_eq!(provider, "agy");
+            assert_eq!(id, Some("account-main".to_string()));
+            assert_eq!(priority, 2);
+            assert_eq!(weight, 20);
+            assert_eq!(port, 51130);
+            assert!(no_browser);
+        }
+        _ => panic!("Expected Key Auth command"),
+    }
+
+    // 3. Alias: `ponyllm key auth-agy my-account`
+    let cli3 = Cli::try_parse_from(["ponyllm", "key", "auth-agy", "my-account"]).unwrap();
+    match cli3.command {
+        Commands::Key(KeyCommands::Auth { provider, id, .. }) => {
+            // When using alias `auth-agy`, the first positional goes into `provider`
+            // and `id` is None, which our handler normalizes.
+            assert_eq!(provider, "my-account");
+            assert_eq!(id, None);
+        }
+        _ => panic!("Expected Key Auth command via alias"),
+    }
+}
+
+#[tokio::test]
+async fn test_handle_key_auth_agy_full_flow() {
+    use axum::{routing::post, Json, Router};
+    use serde_json::json;
+
+    // 1. Start mock Google OAuth server
+    let oauth_app = Router::new().route(
+        "/token",
+        post(|axum::Form(params): axum::Form<std::collections::HashMap<String, String>>| async move {
+            assert_eq!(params.get("code").map(|s| s.as_str()), Some("mock-code-success"));
+            Json(json!({
+                "access_token": "ya29.mock-access",
+                "refresh_token": "1//0mock-refresh-token-e2e",
+                "expires_in": 3600,
+                "id_token": "eyJhbGciOiJSUzI1NiJ9.eyJlbWFpbCI6ImFneS5kZXZlbG9wZXJAZ21haWwuY29tIiwic3ViIjoiOTk5In0.sig"
+            }))
+        }),
+    );
+
+    let oauth_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let oauth_port = oauth_listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        axum::serve(oauth_listener, oauth_app).await.unwrap();
+    });
+
+    std::env::set_var(
+        "ANTIGRAVITY_OAUTH_TOKEN_URL_OVERRIDE",
+        format!("http://127.0.0.1:{}/token", oauth_port),
+    );
+    std::env::set_var("PONYLLM_NON_INTERACTIVE", "1");
+
+    // 2. Setup temp config file
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg_path = tmp.path().join("ponyllm.toml");
+    std::fs::write(&cfg_path, "[gateway]\nbind = \"127.0.0.1:8080\"\n").unwrap();
+
+    let callback_port = 51188;
+    let cfg_str = cfg_path.to_str().unwrap().to_string();
+
+    // 3. Trigger handle_key_auth_agy in background
+    let auth_task = tokio::spawn(async move {
+        ponyllm_cli::oauth_agy::handle_key_auth_agy(
+            "agy",
+            Some("my-ag-custom-account"),
+            1,
+            15,
+            callback_port,
+            true, // no_browser
+            Some(&cfg_str),
+        )
+        .await
+    });
+
+    // 4. Send callback request simulating Google OAuth redirect
+    let client = reqwest::Client::new();
+    let mut resp = None;
+    for _ in 0..20 {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        for p in callback_port..callback_port + 10 {
+            let callback_url = format!(
+                "http://127.0.0.1:{}/oauth2callback?code=mock-code-success&state=123",
+                p
+            );
+            if let Ok(r) = client.get(&callback_url).send().await {
+                if r.status().is_success() {
+                    resp = Some(r);
+                    break;
+                }
+            }
+        }
+        if resp.is_some() {
+            break;
+        }
+    }
+    assert!(resp.is_some(), "Failed to send callback to bound callback port");
+
+    // 5. Await auth completion
+    let res = auth_task.await.expect("Task panicked");
+    assert!(res.is_ok(), "handle_key_auth_agy failed: {:?}", res.err());
+
+    // 6. Verify config file written
+    let updated_cfg = ConfigFile::load_or_default(cfg_path.to_str()).expect("Failed to reload config");
+    let agy_provider = updated_cfg.providers.get("antigravity").expect("antigravity provider missing");
+    let key = agy_provider.keys.iter().find(|k| k.id == "my-ag-custom-account").expect("Key not found");
+    assert_eq!(key.api_key, "1//0mock-refresh-token-e2e");
+    assert_eq!(key.priority, 1);
+    assert_eq!(key.weight, 15);
+
+    std::env::remove_var("ANTIGRAVITY_OAUTH_TOKEN_URL_OVERRIDE");
+    std::env::remove_var("PONYLLM_NON_INTERACTIVE");
 }

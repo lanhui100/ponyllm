@@ -77,6 +77,7 @@ impl WriteTestHarness {
                 cached_price: Some(1.25),
                 output_price: Some(10.0),
                 protocol: None,
+                base_url: None,
                 thinking_default: None,
                 thinking_max: None,
                 proxy: None,
@@ -122,6 +123,7 @@ impl WriteTestHarness {
             cached_price: Some(1.25),
             output_price: Some(10.0),
             protocol: None,
+            base_url: None,
             thinking_default: None,
             thinking_max: None,
             proxy: None,
@@ -432,7 +434,11 @@ async fn test_model_cud() {
             "name": "gpt-4o-mini",
             "tier": "Light",
             "context_window": "128K",
-            "thinking_default": "low"
+            "thinking_default": "low",
+            "input_types": ["text", "image"],
+            "output_types": ["text"],
+            "protocol": "chat",
+            "base_url": "https://custom-model.endpoint.com"
         }))
         .send()
         .await
@@ -441,6 +447,10 @@ async fn test_model_cud() {
     let m: serde_json::Value = create_resp.json().await.unwrap();
     assert_eq!(m["name"], "gpt-4o-mini");
     assert_eq!(m["tier"], "Light");
+    assert_eq!(m["input_types"], serde_json::json!(["text", "image"]));
+    assert_eq!(m["output_types"], serde_json::json!(["text"]));
+    assert_eq!(m["protocol"], "chat");
+    assert_eq!(m["base_url"], "https://custom-model.endpoint.com");
 
     // 2. Duplicate Model returns 409
     let dup_resp = client
@@ -463,7 +473,10 @@ async fn test_model_cud() {
         .header("If-Match", "\"1\"")
         .json(&serde_json::json!({
             "provider": "openai",
-            "context_window": "256K"
+            "context_window": "256K",
+            "input_types": ["text", "image", "audio"],
+            "output_types": ["text", "audio"],
+            "base_url": ""
         }))
         .send()
         .await
@@ -471,6 +484,9 @@ async fn test_model_cud() {
     assert_eq!(update_resp.status(), StatusCode::OK);
     let updated: serde_json::Value = update_resp.json().await.unwrap();
     assert_eq!(updated["context_window"], "256K");
+    assert_eq!(updated["input_types"], serde_json::json!(["text", "image", "audio"]));
+    assert_eq!(updated["output_types"], serde_json::json!(["text", "audio"]));
+    assert!(updated["base_url"].is_null());
 
     // 4. Delete Model
     let del_resp = client
