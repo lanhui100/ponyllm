@@ -70,33 +70,33 @@ check_one() { # $1 = 决策文件路径
   lc="${rel%%/*}"
   # 1.5 深度：恰好 {lifecycle}/{class}/ 两级
   slashes="${rel//[!\/]/}"
-  [ "${#slashes}" -eq 2 ] || { fail "1.5 $f：未恰好位于 {lifecycle}/{class}/ 两级"; return 0; }
+  [ "${#slashes}" -eq 2 ] || { fail "1.5 ${f}：未恰好位于 {lifecycle}/{class}/ 两级"; return 0; }
   # 1.6 文件名 + 日期合法性
   if ! printf '%s\n' "$b" | grep -qE '^[0-9]{4}-[0-9]{2}-[0-9]{2}-.+\.md$'; then
-    fail "1.6 $f：文件名不符 yyyy-mm-dd-topic.md"
+    fail "1.6 ${f}：文件名不符 yyyy-mm-dd-topic.md"
     return 0
   fi
   if [ "$DATE_OK" = "1" ]; then
     d8="${b:0:10}"
-    date -d "$d8" >/dev/null 2>&1 || fail "1.6 $f：日期不合法（$d8）"
+    date -d "$d8" >/dev/null 2>&1 || fail "1.6 ${f}：日期不合法（$d8）"
   fi
   # 1.7 Status 首词与所在 lifecycle 一致（archived 允许 implemented/archived）
   st=$(sed -n 's/\r$//;s/^Status:[[:space:]]*//p' "$f" 2>/dev/null | head -n1 | awk '{print $1}')
   if [ -z "$st" ]; then
-    fail "1.7 $f：缺 Status: 行"
+    fail "1.7 ${f}：缺 Status: 行"
   elif [ "$lc" = "archived" ]; then
-    [ "$st" = "implemented" ] || [ "$st" = "archived" ] || fail "1.7 $f：archived 下 Status 应为 implemented/archived，实得 $st"
+    [ "$st" = "implemented" ] || [ "$st" = "archived" ] || fail "1.7 ${f}：archived 下 Status 应为 implemented/archived，实得 $st"
   elif [ "$st" != "$lc" ]; then
-    fail "1.7 $f：Status($st) 与目录($lc) 不一致"
+    fail "1.7 ${f}：Status($st) 与目录($lc) 不一致"
   fi
   # 1.8 骨架标题与 lifecycle 匹配
   case "$lc" in
     implemented)
       grep -qE '^## (Proposal|Plan|Migration plan|Acceptance criteria)([[:space:]]|$)' "$f" \
-        && fail "1.8 $f：implemented 含提案时代标题（## Proposal/## Plan/## Migration plan/## Acceptance criteria）" ;;
+        && fail "1.8 ${f}：implemented 含提案时代标题（## Proposal/## Plan/## Migration plan/## Acceptance criteria）" ;;
     proposed|rejected)
-      grep -qE '^## Proposal([[:space:]]|$)' "$f" || fail "1.8 $f：$lc 缺 ## Proposal"
-      grep -qE '^## Decision([[:space:]]|$)' "$f" && fail "1.8 $f：$lc 含现在时 ## Decision（提案伪装成决定）" ;;
+      grep -qE '^## Proposal([[:space:]]|$)' "$f" || fail "1.8 ${f}：$lc 缺 ## Proposal"
+      grep -qE '^## Decision([[:space:]]|$)' "$f" && fail "1.8 ${f}：$lc 含现在时 ## Decision（提案伪装成决定）" ;;
   esac
   return 0
 }
