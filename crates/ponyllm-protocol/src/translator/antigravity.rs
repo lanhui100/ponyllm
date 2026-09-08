@@ -1,5 +1,6 @@
 use serde_json::{json, Value};
 use uuid::Uuid;
+use crate::common::ReasoningEffort;
 use crate::error::Result;
 use crate::openai::chat::{
     ChatCompletionChunk, ChatCompletionRequest, ChatChunkChoice, ChatChunkDelta,
@@ -33,11 +34,63 @@ pub fn extract_or_generate_session_id(first_text: Option<&str>) -> String {
     format!("-{}", (Uuid::new_v4().as_u128() % 9_000_000_000_000_000_000) as i64)
 }
 
-/// Convert OpenAI ChatCompletionRequest into Antigravity CLI envelope
+/// Map an explicit ponyllm [`ReasoningEffort`] to an Antigravity
+/// `thinkingConfig` value, mirroring the reference `gcli2api` behavior:
+///
+/// - `None` (caller passed no explicit effort): return `None` so the legacy
+///   wire shape is preserved byte-for-byte (backend default applies).
+/// - `Off`: `{"includeThoughts": false}`, no budget (suppress thought return).
+/// - Active (`Low`/`Medium`/`High`): `{"includeThoughts": true}` plus a
+///   `thinkingBudget` of 1024 / 4096 / 16384 — except for `gemini-3*` models,
+///   where the backend selects depth from the model route (`-high`/`-low`
+///   suffix) and rejects/conflicts on an explicit budget, so only
+///   `includeThoughts` is sent (reference strips `thinkingBudget` /
+///   `thinkingLevel` there too).
+pub fn antigravity_thinking_config(model: &str, thinking: Option<ReasoningEffort>) -> Option<Value> {
+    let effort = thinking?;
+    if effort == ReasoningEffort::Off {
+        return Some(json!({ "includeThoughts": false }));
+    }
+    let mut cfg = json!({ "includeThoughts": true });
+    if !model.to_ascii_lowercase().contains("gemini-3") {
+        let budget = match effort {
+            ReasoningEffort::Low => 1024,
+            ReasoningEffort::Medium => 4096,
+            ReasoningEffort::High => 16384,
+            ReasoningEffort::Off => unreachable!(),
+        };
+        cfg["thinkingBudget"] = json!(budget);
+    }
+    Some(cfg)
+}
+
+/// Ensure `generationConfig.maxOutputTokens` can accommodate an explicit
+/// thinking budget: the backend couples the two and truncates the answer
+/// (early `max_tokens` stop) when the budget exceeds the output cap.
+/// Only raises an explicitly-set cap; absent caps keep backend defaults.
+fn clamp_max_output_for_thinking_budget(gen_config: &mut Value, thinking_cfg: &Value) {
+    let budget = thinking_cfg
+        .get("thinkingBudget")
+        .and_then(|v| v.as_u64());
+    let Some(budget) = budget else { return };
+    if let Some(cap) = gen_config
+        .get_mut("maxOutputTokens")
+        .and_then(|v| v.as_u64())
+    {
+        if cap < budget {
+            gen_config["maxOutputTokens"] = json!(budget);
+        }
+    }
+}
+/// Convert OpenAI ChatCompletionRequest into Antigravity CLI envelope.
+/// `thinking` carries the caller's *explicit* effort request (`None` keeps the
+/// legacy wire shape); ceiling enforcement happens at the route layer via
+/// `ModelThinkingSpec::resolve`.
 pub fn chat_to_antigravity_request(
     req: &ChatCompletionRequest,
     model: &str,
     project_id: &str,
+    thinking: Option<ReasoningEffort>,
 ) -> Result<Value> {
     let mut contents = Vec::new();
     let mut first_user_text: Option<String> = None;
@@ -129,7 +182,19 @@ pub fn chat_to_antigravity_request(
     if let Some(m) = req.max_tokens.or(req.max_completion_tokens) {
         gen_config["maxOutputTokens"] = json!(m);
     }
-    if gen_config.as_object().map(|o| !o.is_empty()).unwrap_or(false) {
+    if let Some(thinking_cfg) = antigravity_thinking_config(model, thinking) {
+        clamp_max_output_for_thinking_budget(&mut gen_config, &thinking_cfg);
+        if gen_config.as_object().map(|o| !o.is_empty()).unwrap_or(false) {
+            inner_request["generationConfig"] = gen_config;
+        }
+        if !inner_request
+            .get("generationConfig")
+            .is_some_and(|v| v.is_object())
+        {
+            inner_request["generationConfig"] = json!({});
+        }
+        inner_request["generationConfig"]["thinkingConfig"] = thinking_cfg;
+    } else if gen_config.as_object().map(|o| !o.is_empty()).unwrap_or(false) {
         inner_request["generationConfig"] = gen_config;
     }
 
@@ -146,10 +211,12 @@ pub fn chat_to_antigravity_request(
 }
 
 /// Convert Anthropic MessageRequest into Antigravity CLI envelope
+/// (`thinking` semantics identical to [`chat_to_antigravity_request`]).
 pub fn messages_to_antigravity_request(
     req: &MessageRequest,
     model: &str,
     project_id: &str,
+    thinking: Option<ReasoningEffort>,
 ) -> Result<Value> {
     let mut contents = Vec::new();
     let mut first_user_text: Option<String> = None;
@@ -212,6 +279,10 @@ pub fn messages_to_antigravity_request(
     }
     if let Some(p) = req.top_p {
         gen_config["topP"] = json!(p);
+    }
+    if let Some(thinking_cfg) = antigravity_thinking_config(model, thinking) {
+        clamp_max_output_for_thinking_budget(&mut gen_config, &thinking_cfg);
+        gen_config["thinkingConfig"] = thinking_cfg;
     }
     inner_request["generationConfig"] = gen_config;
 
@@ -447,13 +518,94 @@ mod tests {
             name: None,
         }));
 
-        let env = chat_to_antigravity_request(&req, "gemini-3.8-flash-low", "aicode-consumers").unwrap();
+        let env = chat_to_antigravity_request(&req, "gemini-3.8-flash-low", "aicode-consumers", None).unwrap();
         assert_eq!(env["project"], "aicode-consumers");
         assert_eq!(env["model"], "gemini-3.8-flash-low");
         assert_eq!(env["userAgent"], "antigravity");
         assert_eq!(env["requestType"], "agent");
         assert!(env["requestId"].as_str().unwrap().starts_with("agent/"));
         assert!(env["request"]["toolConfig"]["functionCallingConfig"]["mode"] == "VALIDATED");
+        // No explicit effort → legacy wire shape, no thinkingConfig injected.
+        assert!(env["request"].get("generationConfig").is_none());
+    }
+
+    #[test]
+    fn test_antigravity_thinking_config_mapping() {
+        // Legacy: no explicit effort → untouched wire shape.
+        assert!(antigravity_thinking_config("gemini-2.5-flash", None).is_none());
+
+        // Off suppresses thought return without a budget key.
+        let off = antigravity_thinking_config("gemini-2.5-flash", Some(ReasoningEffort::Off)).unwrap();
+        assert_eq!(off["includeThoughts"], false);
+        assert!(off.get("thinkingBudget").is_none());
+
+        // Tiered budgets on budget-honoring models.
+        let low = antigravity_thinking_config("gemini-2.5-flash", Some(ReasoningEffort::Low)).unwrap();
+        assert_eq!(low["thinkingBudget"], 1024);
+        let med = antigravity_thinking_config("gemini-2.5-flash", Some(ReasoningEffort::Medium)).unwrap();
+        assert_eq!(med["thinkingBudget"], 4096);
+        let high = antigravity_thinking_config("claude-sonnet-4-6", Some(ReasoningEffort::High)).unwrap();
+        assert_eq!(high["thinkingBudget"], 16384);
+        assert_eq!(high["includeThoughts"], true);
+
+        // gemini-3.x: route selects depth, budget must not be sent.
+        for model in ["gemini-3.8-flash-high", "gemini-3.8-flash-low", "GEMINI-3.1-PRO-HIGH"] {
+            let cfg = antigravity_thinking_config(model, Some(ReasoningEffort::High)).unwrap();
+            assert_eq!(cfg["includeThoughts"], true);
+            assert!(cfg.get("thinkingBudget").is_none(), "model {}", model);
+            assert!(cfg.get("thinkingLevel").is_none(), "model {}", model);
+        }
+    }
+
+    #[test]
+    fn test_chat_to_antigravity_injects_thinking_config() {
+        let mut req = ChatCompletionRequest::default();
+        req.model = "gemini-2.5-flash".to_string();
+        req.messages.push(ChatMessage::User(crate::openai::chat::UserMessage {
+            content: "Hi".into(),
+            name: None,
+        }));
+
+        let env = chat_to_antigravity_request(&req, "gemini-2.5-flash", "aicode-consumers", Some(ReasoningEffort::High)).unwrap();
+        assert_eq!(env["request"]["generationConfig"]["thinkingConfig"]["thinkingBudget"], 16384);
+    }
+
+    #[test]
+    fn test_thinking_budget_raises_small_max_output_cap() {
+        use crate::anthropic::messages::{AnthropicContent, AnthropicMessage, AnthropicRole};
+        let req = MessageRequest {
+            model: "gemini-2.5-flash".to_string(),
+            messages: vec![AnthropicMessage {
+                role: AnthropicRole::User,
+                content: AnthropicContent::Text("Hi".to_string()),
+            }],
+            max_tokens: 500,
+            system: None,
+            metadata: None,
+            stop_sequences: None,
+            stream: None,
+            temperature: None,
+            top_p: None,
+            top_k: None,
+            tools: None,
+            tool_choice: None,
+            thinking: None,
+            reasoning_effort: None,
+            extra: Default::default(),
+        };
+
+        // High budget (16384) exceeds the 500 cap → raised to the budget.
+        let env = messages_to_antigravity_request(&req, "gemini-2.5-flash", "aicode-consumers", Some(ReasoningEffort::High)).unwrap();
+        assert_eq!(env["request"]["generationConfig"]["maxOutputTokens"], 16384);
+
+        // Low budget (1024) exceeds the 500 cap → raised to 1024.
+        let env = messages_to_antigravity_request(&req, "gemini-2.5-flash", "aicode-consumers", Some(ReasoningEffort::Low)).unwrap();
+        assert_eq!(env["request"]["generationConfig"]["maxOutputTokens"], 1024);
+
+        // No thinking → caller's cap preserved verbatim (legacy).
+        let env = messages_to_antigravity_request(&req, "gemini-2.5-flash", "aicode-consumers", None).unwrap();
+        assert_eq!(env["request"]["generationConfig"]["maxOutputTokens"], 500);
+        assert!(env["request"]["generationConfig"].get("thinkingConfig").is_none());
     }
 
     #[test]

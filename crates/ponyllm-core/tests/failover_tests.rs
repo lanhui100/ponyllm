@@ -256,6 +256,107 @@ async fn test_executor_fails_over_on_server_error_without_immediate_cooldown() {
 }
 
 #[test]
+fn test_transient_geo_gate_signature() {
+    // Genuine caller errors never match.
+    assert!(!is_transient_geo_gate(400, r#"{"error":{"message":"messages must not be empty"}}"#));
+    assert!(!is_transient_geo_gate(429, "User location is not supported for the API use."));
+    // Google geo-gate shape matches (case-insensitive).
+    assert!(is_transient_geo_gate(400, r#"{"error":{"code":400,"message":"User location is not supported for the API use.","status":"FAILED_PRECONDITION"}}"#));
+    assert!(is_transient_geo_gate(400, "400 FAILED_PRECONDITION: UNSUPPORTED_LOCATION"));
+}
+
+#[tokio::test]
+async fn test_singleton_retries_transient_geo_gate_once() {
+    let call_count = Arc::new(AtomicUsize::new(0));
+    let cc = call_count.clone();
+
+    // First call hits the transient geo-gate, second succeeds.
+    let app = Router::new().route("/v1/chat/completions", post(move |_headers: axum::http::HeaderMap, _body: String| {
+        let cc = cc.clone();
+        async move {
+            let n = cc.fetch_add(1, Ordering::SeqCst);
+            if n == 0 {
+                (axum::http::StatusCode::BAD_REQUEST, Json(json!({
+                    "error": {"code": 400, "message": "User location is not supported for the API use.", "status": "FAILED_PRECONDITION"}
+                }))).into_response()
+            } else {
+                (axum::http::StatusCode::OK, Json(json!({
+                    "id": "chatcmpl-test",
+                    "object": "chat.completion",
+                    "created": 1710000000,
+                    "model": "mock-model",
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "Recovered after geo blip!"},
+                        "finish_reason": "stop"
+                    }]
+                }))).into_response()
+            }
+        }
+    }));
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let endpoint = format!("http://{}/v1/chat/completions", addr);
+
+    let pool = Arc::new(KeyPool::new("mock-provider", RoutingStrategy::Priority));
+    pool.add_key(ApiKeyEntry::new("only-key", "key-1", 1, 10));
+
+    let executor = UpstreamExecutor::new(pool.clone(), 3);
+    let request_payload = json!({
+        "model": "mock-model",
+        "messages": [{"role": "user", "content": "hello"}]
+    });
+
+    let response = executor.execute_json_request(&endpoint, &request_payload).await.unwrap();
+    assert_eq!(response["choices"][0]["message"]["content"], "Recovered after geo blip!");
+    assert_eq!(call_count.load(Ordering::SeqCst), 2);
+    // Geo-gate records no pool state: the key stays healthy.
+    assert_eq!(pool.get_key_status("only-key").unwrap(), KeyState::Active);
+}
+
+#[tokio::test]
+async fn test_genuine_400_stays_terminal_without_retry() {
+    let call_count = Arc::new(AtomicUsize::new(0));
+    let cc = call_count.clone();
+
+    let app = Router::new().route("/v1/chat/completions", post(move |_headers: axum::http::HeaderMap, _body: String| {
+        let cc = cc.clone();
+        async move {
+            cc.fetch_add(1, Ordering::SeqCst);
+            (axum::http::StatusCode::BAD_REQUEST, Json(json!({
+                "error": {"message": "messages must not be empty", "type": "invalid_request_error"}
+            }))).into_response()
+        }
+    }));
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let endpoint = format!("http://{}/v1/chat/completions", addr);
+
+    let pool = Arc::new(KeyPool::new("mock-provider", RoutingStrategy::Priority));
+    pool.add_key(ApiKeyEntry::new("only-key", "key-1", 1, 10));
+
+    let executor = UpstreamExecutor::new(pool.clone(), 3);
+    let request_payload = json!({
+        "model": "mock-model",
+        "messages": [{"role": "user", "content": "hello"}]
+    });
+
+    let err = executor.execute_json_request(&endpoint, &request_payload).await.unwrap_err();
+    assert!(matches!(err, CoreError::UpstreamStatusError { .. }));
+    assert_eq!(call_count.load(Ordering::SeqCst), 1);
+}
+
+#[test]
 fn test_create_upstream_http_client_options() {
     use ponyllm_core::executor::{create_upstream_http_client, create_upstream_http_client_with_options};
 

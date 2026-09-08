@@ -147,6 +147,36 @@ fn transient_retry_delay(
     Some(base.unwrap_or(Duration::from_millis(1200)))
 }
 
+/// Whether a terminal 400 body looks like Google's transient geo-gate
+/// (`FAILED_PRECONDITION: User location is not supported`) rather than a
+/// genuine caller error. Sampling shows these arrive in time-windowed storms
+/// affecting every client of the egress IP equally (reference gateway fails
+/// identically), then clear on their own — while genuine 400s (empty
+/// messages, bad schema) never match this signature.
+pub fn is_transient_geo_gate(status_code: u16, err_body: &str) -> bool {
+    if status_code != 400 {
+        return false;
+    }
+    let lower = err_body.to_ascii_lowercase();
+    lower.contains("failed_precondition")
+        && (lower.contains("location is not supported")
+            || lower.contains("unsupported_location")
+            || lower.contains("unsupported location"))
+}
+
+/// One bounded same-key retry for a transient geo-gate on a **singleton**
+/// pool: the gate is egress/account-level, so failing over is pointless and
+/// there is no other key anyway. Fires at most once per request (`attempt ==
+/// 0`) with a ~2.5s backoff — enough for sub-10s blips, short enough that
+/// multi-minute storms still surface fast. Never records pool state (the key
+/// is healthy; cf. reference gateways that auto-ban credentials on these).
+fn geo_gate_retry_delay(attempt: usize, pool: &KeyPool) -> Option<Duration> {
+    if attempt != 0 || pool.total_key_count() != 1 {
+        return None;
+    }
+    Some(Duration::from_millis(2500))
+}
+
 /// Resolve the upstream session id: first valid downstream session header,
 /// else a freshly generated gateway-side id.
 pub fn resolve_upstream_session(downstream: &HeaderMap) -> String {
@@ -641,6 +671,14 @@ impl UpstreamExecutor {
                         }
                     } else {
                         // Client error that is not retryable (e.g. 400 Bad Request)
+                        if is_transient_geo_gate(status_code, &err_body) {
+                            if let Some(delay) = geo_gate_retry_delay(attempt, &self.pool) {
+                                attempted_keys.retain(|id| id != &key.id);
+                                self.emit_both(&key.id, attempt_idx, Some(status_code), GatewayErrorKind::ClientBadRequest, last_error.clone(), Some(err_body), attempt_start.elapsed());
+                                tokio::time::sleep(delay).await;
+                                continue;
+                            }
+                        }
                         self.emit_both(&key.id, attempt_idx, Some(status_code), GatewayErrorKind::ClientBadRequest, last_error.clone(), Some(err_body.clone()), attempt_start.elapsed());
                         return Err(CoreError::UpstreamStatusError {
                             status,
@@ -783,6 +821,16 @@ impl UpstreamExecutor {
                             continue;
                         }
                     } else {
+                        // Genuine 400s stay terminal; transient geo-gates earn
+                        // one bounded same-key retry (see json path).
+                        if is_transient_geo_gate(status_code, &err_body) {
+                            if let Some(delay) = geo_gate_retry_delay(attempt, &self.pool) {
+                                attempted_keys.retain(|id| id != &key.id);
+                                self.emit_both(&key.id, attempt_idx, Some(status_code), GatewayErrorKind::ClientBadRequest, last_error.clone(), Some(err_body), attempt_start.elapsed());
+                                tokio::time::sleep(delay).await;
+                                continue;
+                            }
+                        }
                         self.emit_both(&key.id, attempt_idx, Some(status_code), GatewayErrorKind::ClientBadRequest, last_error.clone(), Some(err_body.clone()), attempt_start.elapsed());
                         return Err(CoreError::UpstreamStatusError {
                             status,

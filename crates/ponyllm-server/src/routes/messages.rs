@@ -336,7 +336,9 @@ pub async fn handle_messages(
             }
             ponyllm_core::pool::UpstreamProtocol::Antigravity => {
                 let url = target.antigravity_url(is_streaming);
-                let val = match messages_to_antigravity_request(&target_req, &target.physical_model, "aicode-consumers") {
+                // Explicit-only thinking passthrough (see chat.rs).
+                let thinking = requested_thinking.map(|_| effective_thinking);
+                let val = match messages_to_antigravity_request(&target_req, &target.physical_model, "aicode-consumers", thinking) {
                     Ok(v) => v,
                     Err(e) => {
                         last_error = format!("Translation error for {}: {}", target.provider_name, e);
