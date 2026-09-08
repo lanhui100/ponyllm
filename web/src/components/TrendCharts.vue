@@ -27,6 +27,20 @@ function formatTime(ts: number): string {
   return `${d.getMinutes().toString().padStart(2, '0')}:${d.getSeconds().toString().padStart(2, '0')}`;
 }
 
+const commonTooltip = {
+  trigger: 'axis' as const,
+  backgroundColor: 'rgba(15, 23, 42, 0.88)',
+  borderColor: 'transparent',
+  borderWidth: 0,
+  padding: [6, 10],
+  textStyle: {
+    color: '#ffffff',
+    fontSize: 12,
+  },
+};
+
+const commonGrid = { top: 16, right: 12, bottom: 20, left: 36 };
+
 function updateCharts() {
   const timestamps = props.history.map((h) => formatTime(h.timestamp));
   const qpsData = props.history.map((h) => h.qps);
@@ -35,73 +49,146 @@ function updateCharts() {
   const errorData = props.history.map((h) => h.errorRate);
 
   qpsChart?.setOption({
-    title: { show: false },
-    tooltip: { trigger: 'axis' },
-    grid: { top: 20, right: 20, bottom: 25, left: 40 },
-    xAxis: { type: 'category', data: timestamps, boundaryGap: false },
-    yAxis: { type: 'value', min: 0 },
+    tooltip: commonTooltip,
+    grid: commonGrid,
+    xAxis: {
+      type: 'category',
+      data: timestamps,
+      boundaryGap: false,
+      axisLine: { lineStyle: { color: '#e2e8f0' } },
+      axisTick: { show: false },
+      axisLabel: { color: '#94a3b8', fontSize: 11 },
+    },
+    yAxis: {
+      type: 'value',
+      min: 0,
+      splitLine: { lineStyle: { color: '#f8fafc' } },
+      axisLabel: { color: '#94a3b8', fontSize: 11 },
+    },
     series: [
       {
         name: 'QPS',
         type: 'line',
         smooth: true,
+        showSymbol: false,
         data: qpsData,
-        areaStyle: { opacity: 0.15 },
+        areaStyle: {
+          color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+            { offset: 0, color: 'rgba(59, 130, 246, 0.25)' },
+            { offset: 1, color: 'rgba(59, 130, 246, 0.01)' },
+          ]),
+        },
         itemStyle: { color: '#3b82f6' },
+        lineStyle: { width: 2 },
       },
     ],
   });
 
   tokenChart?.setOption({
-    title: { show: false },
-    tooltip: { trigger: 'axis' },
-    grid: { top: 20, right: 20, bottom: 25, left: 50 },
-    xAxis: { type: 'category', data: timestamps, boundaryGap: false },
-    yAxis: { type: 'value', min: 0 },
+    tooltip: commonTooltip,
+    grid: { ...commonGrid, left: 45 },
+    xAxis: {
+      type: 'category',
+      data: timestamps,
+      boundaryGap: false,
+      axisLine: { lineStyle: { color: '#e2e8f0' } },
+      axisTick: { show: false },
+      axisLabel: { color: '#94a3b8', fontSize: 11 },
+    },
+    yAxis: {
+      type: 'value',
+      min: 0,
+      splitLine: { lineStyle: { color: '#f8fafc' } },
+      axisLabel: { color: '#94a3b8', fontSize: 11 },
+    },
     series: [
       {
         name: 'Tokens/s',
         type: 'line',
         smooth: true,
+        showSymbol: false,
         data: tokenData,
-        areaStyle: { opacity: 0.15 },
+        areaStyle: {
+          color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+            { offset: 0, color: 'rgba(16, 185, 129, 0.25)' },
+            { offset: 1, color: 'rgba(16, 185, 129, 0.01)' },
+          ]),
+        },
         itemStyle: { color: '#10b981' },
+        lineStyle: { width: 2 },
       },
     ],
   });
 
   latencyChart?.setOption({
-    title: { show: false },
-    tooltip: { trigger: 'axis' },
-    grid: { top: 20, right: 20, bottom: 25, left: 50 },
-    xAxis: { type: 'category', data: timestamps, boundaryGap: false },
-    yAxis: { type: 'value', min: 0 },
+    tooltip: commonTooltip,
+    grid: { ...commonGrid, left: 45 },
+    xAxis: {
+      type: 'category',
+      data: timestamps,
+      boundaryGap: false,
+      axisLine: { lineStyle: { color: '#e2e8f0' } },
+      axisTick: { show: false },
+      axisLabel: { color: '#94a3b8', fontSize: 11 },
+    },
+    yAxis: {
+      type: 'value',
+      min: 0,
+      splitLine: { lineStyle: { color: '#f8fafc' } },
+      axisLabel: { color: '#94a3b8', fontSize: 11 },
+    },
     series: [
       {
         name: '延迟 (ms)',
         type: 'line',
         smooth: true,
+        showSymbol: false,
         data: latencyData,
-        areaStyle: { opacity: 0.15 },
+        areaStyle: {
+          color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+            { offset: 0, color: 'rgba(245, 158, 11, 0.25)' },
+            { offset: 1, color: 'rgba(245, 158, 11, 0.01)' },
+          ]),
+        },
         itemStyle: { color: '#f59e0b' },
+        lineStyle: { width: 2 },
       },
     ],
   });
 
   errorChart?.setOption({
-    title: { show: false },
-    tooltip: { trigger: 'axis' },
-    grid: { top: 20, right: 20, bottom: 25, left: 40 },
-    xAxis: { type: 'category', data: timestamps, boundaryGap: false },
-    yAxis: { type: 'value', min: 0, max: 100 },
+    tooltip: commonTooltip,
+    grid: commonGrid,
+    xAxis: {
+      type: 'category',
+      data: timestamps,
+      boundaryGap: false,
+      axisLine: { lineStyle: { color: '#e2e8f0' } },
+      axisTick: { show: false },
+      axisLabel: { color: '#94a3b8', fontSize: 11 },
+    },
+    yAxis: {
+      type: 'value',
+      min: 0,
+      max: 100,
+      splitLine: { lineStyle: { color: '#f8fafc' } },
+      axisLabel: { color: '#94a3b8', fontSize: 11 },
+    },
     series: [
       {
         name: '故障率 (%)',
         type: 'line',
         smooth: true,
+        showSymbol: false,
         data: errorData,
-        areaStyle: { opacity: 0.15 },
+        areaStyle: {
+          color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+            { offset: 0, color: 'rgba(239, 68, 68, 0.25)' },
+            { offset: 1, color: 'rgba(239, 68, 68, 0.01)' },
+          ]),
+        },
         itemStyle: { color: '#ef4444' },
+        lineStyle: { width: 2 },
       },
     ],
   });
@@ -151,60 +238,35 @@ onUnmounted(() => {
   }
 });
 
-watch(() => props.history, () => {
-  updateCharts();
-}, { deep: true });
+watch(
+  () => props.history,
+  () => {
+    updateCharts();
+  },
+  { deep: true }
+);
 </script>
 
 <template>
-  <div class="charts-grid">
-    <div class="chart-box">
-      <div class="chart-header">QPS 趋势 (30s)</div>
-      <div ref="qpsChartRef" class="chart-container" />
+  <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+    <div class="bg-white rounded-xl shadow-xs p-4">
+      <div class="text-xs font-semibold text-slate-700 mb-2">QPS 趋势 (30s)</div>
+      <div ref="qpsChartRef" class="w-full h-44" />
     </div>
 
-    <div class="chart-box">
-      <div class="chart-header">Token 吞吐量趋势 (tok/s)</div>
-      <div ref="tokenChartRef" class="chart-container" />
+    <div class="bg-white rounded-xl shadow-xs p-4">
+      <div class="text-xs font-semibold text-slate-700 mb-2">Token 吞吐量趋势 (tok/s)</div>
+      <div ref="tokenChartRef" class="w-full h-44" />
     </div>
 
-    <div class="chart-box">
-      <div class="chart-header">TTFT 延迟趋势 (ms)</div>
-      <div ref="latencyChartRef" class="chart-container" />
+    <div class="bg-white rounded-xl shadow-xs p-4">
+      <div class="text-xs font-semibold text-slate-700 mb-2">TTFT 延迟趋势 (ms)</div>
+      <div ref="latencyChartRef" class="w-full h-44" />
     </div>
 
-    <div class="chart-box">
-      <div class="chart-header">故障率趋势 (%)</div>
-      <div ref="errorChartRef" class="chart-container" />
+    <div class="bg-white rounded-xl shadow-xs p-4">
+      <div class="text-xs font-semibold text-slate-700 mb-2">故障率趋势 (%)</div>
+      <div ref="errorChartRef" class="w-full h-44" />
     </div>
   </div>
 </template>
-
-<style scoped>
-.charts-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
-  gap: 16px;
-  margin-bottom: 24px;
-}
-
-.chart-box {
-  background: #ffffff;
-  border: 1px solid #e2e8f0;
-  border-radius: 8px;
-  padding: 16px;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
-}
-
-.chart-header {
-  font-size: 14px;
-  font-weight: 500;
-  color: #334155;
-  margin-bottom: 12px;
-}
-
-.chart-container {
-  width: 100%;
-  height: 200px;
-}
-</style>

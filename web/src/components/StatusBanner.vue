@@ -1,4 +1,7 @@
 <script setup lang="ts">
+import Icons from './ui/Icons.vue';
+import UiButton from './ui/UiButton.vue';
+
 defineProps<{
   health: 'ok' | 'down' | 'degraded' | 'unknown';
   transport: 'sse' | 'polling' | 'offline';
@@ -11,119 +14,56 @@ const emit = defineEmits<{
 </script>
 
 <template>
-  <div class="status-banner" :class="[health, { 'banner-down': isDown }]">
-    <div class="status-indicator">
-      <span class="dot" :class="health" />
-      <span class="label">
-        网关状态: <strong>{{ health.toUpperCase() }}</strong>
+  <div
+    class="flex items-center justify-between px-4 py-2.5 rounded-xl shadow-xs mb-6 transition-all duration-200"
+    :class="isDown ? 'bg-rose-50 border border-rose-200' : 'bg-white'"
+  >
+    <div class="flex items-center gap-2.5 text-xs">
+      <!-- 极简脉冲呼吸灯 -->
+      <span class="relative flex h-2.5 w-2.5 items-center justify-center">
+        <span
+          v-if="health === 'ok'"
+          class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"
+        />
+        <span
+          class="relative inline-flex rounded-full h-2 w-2"
+          :class="{
+            'bg-emerald-500': health === 'ok',
+            'bg-amber-500': health === 'degraded',
+            'bg-rose-500': health === 'down',
+            'bg-slate-400': health === 'unknown',
+          }"
+        />
       </span>
-      <span class="transport-tag" :class="transport">
+
+      <span class="text-slate-700">
+        网关状态: <strong class="font-semibold text-slate-900">{{ health.toUpperCase() }}</strong>
+      </span>
+
+      <span class="text-slate-300">·</span>
+
+      <span
+        class="px-2 py-0.5 rounded-full text-2xs font-medium"
+        :class="{
+          'bg-emerald-50 text-emerald-700': transport === 'sse',
+          'bg-blue-50 text-blue-700': transport === 'polling',
+          'bg-rose-50 text-rose-700': transport === 'offline',
+        }"
+      >
         {{ transport === 'sse' ? '实时 SSE' : transport === 'polling' ? '轮询 (1.5s)' : '离线' }}
       </span>
     </div>
 
-    <div v-if="isDown" class="down-action">
-      <span class="down-msg">网关连接中断或异常</span>
-      <button class="retry-btn" @click="emit('retry')">重试连接</button>
+    <div v-if="isDown" class="flex items-center gap-2">
+      <span class="text-xs text-rose-600 font-medium">连接异常</span>
+      <UiButton
+        variant="destructive"
+        size="sm"
+        @click="emit('retry')"
+      >
+        <Icons name="refresh" size="12" />
+        重试连接
+      </UiButton>
     </div>
   </div>
 </template>
-
-<style scoped>
-.status-banner {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 12px 20px;
-  background: #f8fafc;
-  border-radius: 8px;
-  border: 1px solid #e2e8f0;
-  margin-bottom: 20px;
-  transition: all 0.2s ease;
-}
-
-.banner-down {
-  background: #fef2f2;
-  border-color: #fecaca;
-}
-
-.status-indicator {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.dot {
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  background: #94a3b8;
-}
-
-.dot.ok {
-  background: #22c55e;
-  box-shadow: 0 0 8px rgba(34, 197, 94, 0.4);
-}
-
-.dot.degraded {
-  background: #eab308;
-}
-
-.dot.down {
-  background: #ef4444;
-}
-
-.label {
-  font-size: 14px;
-  color: #334155;
-}
-
-.transport-tag {
-  font-size: 12px;
-  padding: 2px 8px;
-  border-radius: 12px;
-  background: #e2e8f0;
-  color: #475569;
-}
-
-.transport-tag.sse {
-  background: #dcfce7;
-  color: #166534;
-}
-
-.transport-tag.polling {
-  background: #e0f2fe;
-  color: #0369a1;
-}
-
-.transport-tag.offline {
-  background: #fee2e2;
-  color: #991b1b;
-}
-
-.down-action {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-
-.down-msg {
-  font-size: 13px;
-  color: #b91c1c;
-}
-
-.retry-btn {
-  padding: 6px 14px;
-  background: #ef4444;
-  color: white;
-  border: none;
-  border-radius: 6px;
-  cursor: pointer;
-  font-size: 13px;
-  font-weight: 500;
-}
-
-.retry-btn:hover {
-  background: #dc2626;
-}
-</style>

@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue';
+import Icons from '../ui/Icons.vue';
+import UiBadge from '../ui/UiBadge.vue';
 
 const props = defineProps<{
   currentStrategy: string;
@@ -13,9 +15,12 @@ const emit = defineEmits<{
 const selected = ref(props.currentStrategy || 'economy');
 const saving = ref(false);
 
-watch(() => props.currentStrategy, (val) => {
-  if (val) selected.value = val;
-});
+watch(
+  () => props.currentStrategy,
+  (val) => {
+    if (val) selected.value = val;
+  }
+);
 
 const strategies = [
   {
@@ -60,156 +65,56 @@ async function handleSelect(id: string) {
 </script>
 
 <template>
-  <div class="section-container">
-    <div class="section-header">
+  <div class="bg-white rounded-xl shadow-xs p-5">
+    <div class="flex items-center justify-between mb-4">
       <div>
-        <h2 class="section-title">全局路由调度策略 (Global Strategy)</h2>
-        <p class="section-desc">决定网关派发请求时跨 Provider 与跨模型的调度偏好算法</p>
+        <h2 class="text-sm font-bold text-slate-900 flex items-center gap-1.5">
+          <Icons name="activity" size="16" class="text-blue-600" />
+          全局分流调度策略
+        </h2>
+        <p class="text-xs text-slate-400 mt-0.5">
+          决定网关向模型与服务商路由请求时的全局偏好算法
+        </p>
       </div>
-      <div v-if="saving" class="saving-indicator">保存中...</div>
+      <div v-if="saving" class="text-xs font-semibold text-blue-600 animate-pulse">
+        保存生效中...
+      </div>
     </div>
 
-    <div class="strategy-grid">
+    <div class="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
       <div
         v-for="s in strategies"
         :key="s.id"
-        class="strategy-card"
-        :class="{
-          active: selected === s.id,
-          disabled: !adminWriteEnabled,
-        }"
+        class="p-4 rounded-xl border transition-all duration-200 cursor-pointer select-none flex flex-col justify-between"
+        :class="[
+          selected === s.id
+            ? 'bg-blue-50/50 border-blue-500/80 shadow-2xs'
+            : 'bg-slate-50/60 border-slate-200/70 hover:bg-white hover:border-slate-300',
+          { 'opacity-60 cursor-not-allowed': !adminWriteEnabled },
+        ]"
         data-testid="strategy-card"
         @click="handleSelect(s.id)"
       >
-        <div class="card-header">
-          <span class="card-title">{{ s.title }}</span>
-          <span class="card-tag">{{ s.tag }}</span>
+        <div>
+          <div class="flex items-center justify-between mb-2">
+            <span class="font-bold text-xs text-slate-900">{{ s.title }}</span>
+            <UiBadge :variant="selected === s.id ? 'default' : 'secondary'">
+              {{ s.tag }}
+            </UiBadge>
+          </div>
+          <p class="text-xs text-slate-500 leading-relaxed mb-4">
+            {{ s.desc }}
+          </p>
         </div>
-        <p class="card-desc">{{ s.desc }}</p>
-        <div class="card-footer">
-          <span v-if="selected === s.id" class="active-badge">✓ 当前生效</span>
-          <span v-else class="inactive-badge">点击切换</span>
+
+        <div class="flex items-center justify-end text-xs font-medium">
+          <span v-if="selected === s.id" class="text-blue-600 flex items-center gap-1">
+            <Icons name="check" size="13" />
+            当前生效
+          </span>
+          <span v-else class="text-slate-400">点击应用</span>
         </div>
       </div>
     </div>
   </div>
 </template>
-
-<style scoped>
-.section-container {
-  background: #ffffff;
-  border: 1px solid #e2e8f0;
-  border-radius: 8px;
-  padding: 20px;
-}
-
-.section-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 20px;
-}
-
-.section-title {
-  font-size: 18px;
-  font-weight: 700;
-  color: #0f172a;
-  margin: 0 0 4px 0;
-}
-
-.section-desc {
-  font-size: 13px;
-  color: #64748b;
-  margin: 0;
-}
-
-.saving-indicator {
-  font-size: 13px;
-  font-weight: 600;
-  color: #2563eb;
-}
-
-.strategy-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-  gap: 16px;
-}
-
-.strategy-card {
-  border: 2px solid #e2e8f0;
-  border-radius: 8px;
-  padding: 16px;
-  cursor: pointer;
-  transition: all 0.2s ease;
-  display: flex;
-  flex-direction: column;
-  justify-content: space-between;
-  background: #f8fafc;
-}
-
-.strategy-card:hover:not(.disabled) {
-  border-color: #93c5fd;
-  background: #ffffff;
-}
-
-.strategy-card.active {
-  border-color: #2563eb;
-  background: #eff6ff;
-}
-
-.strategy-card.disabled {
-  cursor: not-allowed;
-  opacity: 0.7;
-}
-
-.card-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 8px;
-}
-
-.card-title {
-  font-size: 14px;
-  font-weight: 700;
-  color: #0f172a;
-}
-
-.card-tag {
-  font-size: 11px;
-  padding: 2px 6px;
-  background: #e2e8f0;
-  color: #475569;
-  border-radius: 4px;
-  font-weight: 600;
-}
-
-.strategy-card.active .card-tag {
-  background: #dbeafe;
-  color: #1d4ed8;
-}
-
-.card-desc {
-  font-size: 12px;
-  color: #64748b;
-  line-height: 1.5;
-  margin: 0 0 16px 0;
-  flex: 1;
-}
-
-.card-footer {
-  display: flex;
-  justify-content: flex-end;
-}
-
-.active-badge {
-  font-size: 12px;
-  font-weight: 700;
-  color: #2563eb;
-}
-
-.inactive-badge {
-  font-size: 12px;
-  color: #94a3b8;
-}
-</style>

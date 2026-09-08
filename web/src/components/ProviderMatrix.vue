@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import type { ProviderFlowSnapshot } from '../types/telemetry';
+import Icons from './ui/Icons.vue';
+import UiBadge from './ui/UiBadge.vue';
 
 defineProps<{
   providers: Record<string, ProviderFlowSnapshot> | undefined;
@@ -7,118 +9,49 @@ defineProps<{
 </script>
 
 <template>
-  <div class="provider-section">
-    <div class="section-title">Provider 节点健康矩阵</div>
-    <div v-if="!providers || Object.keys(providers).length === 0" class="empty-hint">
+  <div class="bg-white rounded-xl shadow-xs p-5">
+    <div class="flex items-center gap-2 text-xs font-semibold text-slate-800 mb-3">
+      <Icons name="server" size="14" class="text-blue-600" />
+      Provider 节点健康矩阵
+    </div>
+
+    <div v-if="!providers || Object.keys(providers).length === 0" class="text-xs text-slate-400 py-6 text-center">
       暂无活跃 Provider 节点数据
     </div>
-    <div v-else class="table-wrap">
-      <table class="matrix-table">
+
+    <div v-else class="overflow-x-auto">
+      <table class="w-full text-left text-xs">
         <thead>
-          <tr>
-            <th>Provider</th>
-            <th>状态</th>
-            <th>流调用数</th>
-            <th>平均 TTFT</th>
-            <th>平均 TPS</th>
-            <th>错误数</th>
+          <tr class="text-slate-400 border-b border-slate-100 font-medium">
+            <th class="pb-2.5 font-medium">Provider</th>
+            <th class="pb-2.5 font-medium">状态</th>
+            <th class="pb-2.5 font-medium">流调用数</th>
+            <th class="pb-2.5 font-medium">平均 TTFT</th>
+            <th class="pb-2.5 font-medium">平均 TPS</th>
+            <th class="pb-2.5 font-medium text-right">错误数</th>
           </tr>
         </thead>
-        <tbody>
-          <tr v-for="(p, name) in providers" :key="name">
-            <td class="font-medium">{{ name }}</td>
-            <td>
-              <span class="badge" :class="p.status || 'healthy'">
+        <tbody class="divide-y divide-slate-50">
+          <tr v-for="(p, name) in providers" :key="name" class="hover:bg-slate-50/60 transition-colors">
+            <td class="py-3 font-semibold text-slate-900">{{ name }}</td>
+            <td class="py-3">
+              <UiBadge :variant="(p.status === 'healthy' || !p.status) ? 'success' : p.status === 'degraded' ? 'warning' : 'destructive'">
                 {{ (p.status || 'healthy').toUpperCase() }}
-              </span>
+              </UiBadge>
             </td>
-            <td>{{ p.stream_count ?? 0 }}</td>
-            <td>{{ p.avg_ttft_ms !== undefined && p.avg_ttft_ms !== null ? `${p.avg_ttft_ms.toFixed(1)} ms` : '--' }}</td>
-            <td>{{ p.avg_tps !== undefined && p.avg_tps !== null ? `${p.avg_tps.toFixed(1)} tok/s` : '--' }}</td>
-            <td :class="{ 'text-error': (p.error_count ?? 0) > 0 }">{{ p.error_count ?? 0 }}</td>
+            <td class="py-3 text-slate-600 font-mono">{{ p.stream_count ?? 0 }}</td>
+            <td class="py-3 text-slate-600 font-mono">
+              {{ p.avg_ttft_ms !== undefined && p.avg_ttft_ms !== null ? `${p.avg_ttft_ms.toFixed(1)} ms` : '--' }}
+            </td>
+            <td class="py-3 text-slate-600 font-mono">
+              {{ p.avg_tps !== undefined && p.avg_tps !== null ? `${p.avg_tps.toFixed(1)} tok/s` : '--' }}
+            </td>
+            <td class="py-3 text-right font-mono" :class="(p.error_count ?? 0) > 0 ? 'text-rose-600 font-semibold' : 'text-slate-400'">
+              {{ p.error_count ?? 0 }}
+            </td>
           </tr>
         </tbody>
       </table>
     </div>
   </div>
 </template>
-
-<style scoped>
-.provider-section {
-  background: #ffffff;
-  border: 1px solid #e2e8f0;
-  border-radius: 8px;
-  padding: 16px 20px;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
-}
-
-.section-title {
-  font-size: 15px;
-  font-weight: 600;
-  color: #1e293b;
-  margin-bottom: 12px;
-}
-
-.empty-hint {
-  font-size: 13px;
-  color: #94a3b8;
-  padding: 24px 0;
-  text-align: center;
-}
-
-.table-wrap {
-  overflow-x: auto;
-}
-
-.matrix-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 13px;
-}
-
-.matrix-table th {
-  text-align: left;
-  padding: 10px 12px;
-  color: #64748b;
-  font-weight: 500;
-  border-bottom: 1px solid #e2e8f0;
-}
-
-.matrix-table td {
-  padding: 12px;
-  border-bottom: 1px solid #f1f5f9;
-  color: #334155;
-}
-
-.font-medium {
-  font-weight: 500;
-  color: #0f172a;
-}
-
-.badge {
-  font-size: 11px;
-  padding: 2px 8px;
-  border-radius: 10px;
-  font-weight: 500;
-}
-
-.badge.healthy {
-  background: #dcfce7;
-  color: #15803d;
-}
-
-.badge.degraded {
-  background: #fef9c3;
-  color: #a16207;
-}
-
-.badge.unhealthy {
-  background: #fee2e2;
-  color: #b91c1c;
-}
-
-.text-error {
-  color: #ef4444;
-  font-weight: 500;
-}
-</style>

@@ -1,6 +1,9 @@
 <script setup lang="ts">
 import { ref } from 'vue';
 import type { CreateKeyResponse } from '../../types/admin';
+import Icons from '../ui/Icons.vue';
+import UiButton from '../ui/UiButton.vue';
+import UiBadge from '../ui/UiBadge.vue';
 
 const props = defineProps<{
   keyResult: CreateKeyResponse | null;
@@ -21,191 +24,68 @@ async function handleCopy() {
       copied.value = false;
     }, 2000);
   } catch {
-    // Clipboard API might fail in non-secure or test environments
+    // Clipboard API fallback
   }
-}
-
-function handleClose() {
-  emit('close');
 }
 </script>
 
 <template>
-  <div v-if="keyResult" class="modal-backdrop">
-    <div class="modal-card">
-      <div class="modal-header">
-        <h3 class="modal-title">API 密钥创建成功</h3>
+  <div v-if="keyResult" class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-xs">
+    <div class="bg-white rounded-2xl shadow-xl w-full max-w-lg overflow-hidden border border-slate-100">
+      <div class="p-5 border-b border-slate-100 flex items-center justify-between">
+        <h3 class="text-sm font-bold text-slate-900 flex items-center gap-2">
+          <Icons name="key" size="16" class="text-amber-500" />
+          API 密钥创建成功
+        </h3>
+        <UiBadge variant="success">仅展示一次</UiBadge>
       </div>
 
-      <div class="modal-body">
-        <div class="alert-warning">
-          <strong>安全警示：</strong>
-          该密钥明文仅在创建瞬间显示一次。网关后续仅返回脱敏掩码，且绝不持久化在浏览器端。请立即复制妥善保存！
+      <div class="p-5 space-y-4 text-xs">
+        <div class="p-3 bg-amber-50/80 border border-amber-200/80 rounded-xl text-amber-800 leading-relaxed">
+          <strong class="font-medium">安全提示：</strong>
+          密钥明文仅在创建瞬间展示一次，网关后续仅回显脱敏掩码，且绝不持久化在浏览器中。请立即复制并妥善保管！
         </div>
 
-        <div class="key-display-box">
-          <label class="box-label">密钥明文 (ID: {{ keyResult.id }})</label>
-          <div class="key-value-row">
+        <div>
+          <label class="block text-2xs font-medium text-slate-500 mb-1.5">
+            明文凭证 (ID: {{ keyResult.id }})
+          </label>
+          <div class="flex items-center gap-2">
             <input
               type="text"
               readonly
               :value="keyResult.api_key"
-              class="key-input"
+              class="flex-1 font-mono text-xs bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-slate-900 select-all"
               data-testid="plaintext-key-input"
             />
-            <button
-              type="button"
-              class="copy-btn"
+            <UiButton
+              variant="outline"
+              size="sm"
               data-testid="copy-key-btn"
               @click="handleCopy"
             >
-              {{ copied ? '已复制' : '复制密钥' }}
-            </button>
+              <Icons :name="copied ? 'check' : 'copy'" size="13" />
+              {{ copied ? '已复制' : '复制' }}
+            </UiButton>
           </div>
         </div>
 
-        <div class="meta-row">
-          <span>所属 Provider: <strong>{{ keyResult.provider }}</strong></span>
+        <div class="flex items-center gap-4 text-2xs text-slate-400 font-mono pt-1">
+          <span>服务商: {{ keyResult.provider }}</span>
           <span>权重: {{ keyResult.weight }}</span>
           <span>优先级: {{ keyResult.priority }}</span>
         </div>
       </div>
 
-      <div class="modal-footer">
-        <button
-          type="button"
-          class="confirm-btn"
+      <div class="p-4 bg-slate-50 border-t border-slate-100 flex justify-end">
+        <UiButton
+          size="sm"
           data-testid="close-key-modal-btn"
-          @click="handleClose"
+          @click="emit('close')"
         >
-          我已安全记录，关闭
-        </button>
+          我已安全保存，关闭
+        </UiButton>
       </div>
     </div>
   </div>
 </template>
-
-<style scoped>
-.modal-backdrop {
-  position: fixed;
-  inset: 0;
-  background: rgba(15, 23, 42, 0.6);
-  backdrop-filter: blur(2px);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 999;
-}
-
-.modal-card {
-  background: #ffffff;
-  border-radius: 12px;
-  width: 100%;
-  max-width: 520px;
-  box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
-  overflow: hidden;
-}
-
-.modal-header {
-  padding: 16px 20px;
-  border-bottom: 1px solid #e2e8f0;
-}
-
-.modal-title {
-  margin: 0;
-  font-size: 16px;
-  font-weight: 700;
-  color: #0f172a;
-}
-
-.modal-body {
-  padding: 20px;
-}
-
-.alert-warning {
-  background: #fffbeb;
-  border: 1px solid #fef3c7;
-  color: #b45309;
-  font-size: 13px;
-  line-height: 1.5;
-  padding: 12px;
-  border-radius: 8px;
-  margin-bottom: 16px;
-}
-
-.key-display-box {
-  margin-bottom: 16px;
-}
-
-.box-label {
-  display: block;
-  font-size: 12px;
-  font-weight: 600;
-  color: #475569;
-  margin-bottom: 6px;
-}
-
-.key-value-row {
-  display: flex;
-  gap: 8px;
-}
-
-.key-input {
-  flex: 1;
-  font-family: monospace;
-  font-size: 13px;
-  background: #f8fafc;
-  border: 1px solid #cbd5e1;
-  border-radius: 6px;
-  padding: 8px 12px;
-  color: #0f172a;
-}
-
-.copy-btn {
-  padding: 8px 14px;
-  font-size: 13px;
-  font-weight: 600;
-  background: #f1f5f9;
-  border: 1px solid #cbd5e1;
-  border-radius: 6px;
-  color: #334155;
-  cursor: pointer;
-  white-space: nowrap;
-  transition: all 0.15s;
-}
-
-.copy-btn:hover {
-  background: #e2e8f0;
-}
-
-.meta-row {
-  display: flex;
-  gap: 16px;
-  font-size: 13px;
-  color: #64748b;
-}
-
-.modal-footer {
-  padding: 16px 20px;
-  border-top: 1px solid #e2e8f0;
-  display: flex;
-  justify-content: flex-end;
-  background: #f8fafc;
-}
-
-.confirm-btn {
-  padding: 8px 18px;
-  font-size: 14px;
-  font-weight: 600;
-  background: #2563eb;
-  color: #ffffff;
-  border: none;
-  border-radius: 6px;
-  cursor: pointer;
-  transition: background 0.15s;
-}
-
-.confirm-btn:hover {
-  background: #1d4ed8;
-}
-</style>

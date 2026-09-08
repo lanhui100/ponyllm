@@ -1,4 +1,7 @@
 <script setup lang="ts">
+import Icons from '../ui/Icons.vue';
+import UiButton from '../ui/UiButton.vue';
+
 defineProps<{
   show: boolean;
 }>();
@@ -10,139 +13,45 @@ const emit = defineEmits<{
 </script>
 
 <template>
-  <div v-if="show" class="modal-backdrop">
-    <div class="modal-card">
-      <div class="modal-header">
-        <h3 class="modal-title">配置版本冲突 (HTTP 412)</h3>
+  <div v-if="show" class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-xs">
+    <div class="bg-white rounded-2xl shadow-xl w-full max-w-md overflow-hidden border border-slate-100">
+      <div class="p-5 border-b border-slate-100 flex items-center justify-between">
+        <h3 class="text-sm font-bold text-rose-600 flex items-center gap-2">
+          <Icons name="lock" size="16" />
+          配置版本冲突 (HTTP 412)
+        </h3>
       </div>
 
-      <div class="modal-body">
-        <div class="alert-conflict">
-          <strong>并发修改拦截：</strong>
-          当前网关配置已被其他管理员或外部进程修改（版本号不匹配）。为了防止误覆盖他人变更，您的提交已被安全拦截。
+      <div class="p-5 space-y-3 text-xs text-slate-600 leading-relaxed">
+        <div class="p-3 bg-rose-50 border border-rose-200 rounded-xl text-rose-700">
+          <strong>并发写入拦截：</strong>
+          当前网关配置已被其他管理终端修改。为防止覆盖他人变更，提交已被安全拦截。
         </div>
 
-        <p class="modal-text">
-          请点击下方“拉取最新配置”获取远端最新状态，核对差异后再次尝试提交。
+        <p>
+          请点击下方“拉取最新配置”获取服务端最新状态，核对无误后再次提交。
         </p>
       </div>
 
-      <div class="modal-footer">
-        <button
-          type="button"
-          class="cancel-btn"
+      <div class="p-4 bg-slate-50 border-t border-slate-100 flex items-center justify-end gap-2">
+        <UiButton
+          variant="ghost"
+          size="sm"
           data-testid="close-conflict-modal-btn"
           @click="emit('close')"
         >
           暂不刷新
-        </button>
-        <button
-          type="button"
-          class="refresh-btn"
+        </UiButton>
+        <UiButton
+          variant="destructive"
+          size="sm"
           data-testid="refresh-config-btn"
           @click="emit('refresh')"
         >
+          <Icons name="refresh" size="13" />
           拉取最新配置
-        </button>
+        </UiButton>
       </div>
     </div>
   </div>
 </template>
-
-<style scoped>
-.modal-backdrop {
-  position: fixed;
-  inset: 0;
-  background: rgba(15, 23, 42, 0.6);
-  backdrop-filter: blur(2px);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 999;
-}
-
-.modal-card {
-  background: #ffffff;
-  border-radius: 12px;
-  width: 100%;
-  max-width: 500px;
-  box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
-  overflow: hidden;
-}
-
-.modal-header {
-  padding: 16px 20px;
-  border-bottom: 1px solid #e2e8f0;
-}
-
-.modal-title {
-  margin: 0;
-  font-size: 16px;
-  font-weight: 700;
-  color: #dc2626;
-}
-
-.modal-body {
-  padding: 20px;
-}
-
-.alert-conflict {
-  background: #fef2f2;
-  border: 1px solid #fee2e2;
-  color: #b91c1c;
-  font-size: 13px;
-  line-height: 1.5;
-  padding: 12px;
-  border-radius: 8px;
-  margin-bottom: 16px;
-}
-
-.modal-text {
-  font-size: 14px;
-  color: #475569;
-  line-height: 1.6;
-  margin: 0;
-}
-
-.modal-footer {
-  padding: 16px 20px;
-  border-top: 1px solid #e2e8f0;
-  display: flex;
-  justify-content: flex-end;
-  gap: 12px;
-  background: #f8fafc;
-}
-
-.cancel-btn {
-  padding: 8px 14px;
-  font-size: 13px;
-  font-weight: 500;
-  background: transparent;
-  border: 1px solid #cbd5e1;
-  border-radius: 6px;
-  color: #64748b;
-  cursor: pointer;
-  transition: all 0.15s;
-}
-
-.cancel-btn:hover {
-  background: #f1f5f9;
-  color: #334155;
-}
-
-.refresh-btn {
-  padding: 8px 18px;
-  font-size: 13px;
-  font-weight: 600;
-  background: #dc2626;
-  color: #ffffff;
-  border: none;
-  border-radius: 6px;
-  cursor: pointer;
-  transition: background 0.15s;
-}
-
-.refresh-btn:hover {
-  background: #b91c1c;
-}
-</style>

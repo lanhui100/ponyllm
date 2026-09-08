@@ -3,18 +3,20 @@
 ## Project Info
 - Name: web-console
 - Owner: codex-orchestrator
-- Current Stage: M5 Web 资源治理与配置管理
+- Current Stage: M6 Web 现代极简 UI/UX 重构
 - Updated At: 2026-09-07
 
 ## Goals
 1. TUI/CLI 能力 Web 化，8 页可测
 2. Alova 链路打通，只读先上线
 3. Admin 契约冻结后闭环治理
+4. 现代化极简 Web 端 UI/UX 重构
 
 ## Current Status
 - Most critical task: 无（当前阶段全量任务均已交付归档）
 - Biggest blocker: 无
-- Next smallest action: 分支合入 main 并更新 Merge 注记
+- Next smallest action: 交付用户审查
+- Active Workers: 0
 
 ## Task Overview
 | ID | Title | Status | Priority | Owner | Next Step |
