@@ -478,9 +478,60 @@ pub enum ModelCommands {
     },
 }
 
+/// Formats the Web Console URL or disabled indicator for status inspection display.
+///
+/// If `web_enabled` is false, returns a disabled indicator string.
+/// If `api_key` is non-empty and not "none", returns `{base_url}/?token={api_key}`.
+/// Otherwise returns `{base_url}/`.
+pub fn format_web_status_url(base_url: &str, web_enabled: bool, api_key: &str) -> String {
+    if !web_enabled {
+        return "已关闭 (web_enabled = false)".to_string();
+    }
+    let trimmed = base_url.trim_end_matches('/');
+    if !api_key.is_empty() && !api_key.eq_ignore_ascii_case("none") {
+        format!("{}/?token={}", trimmed, api_key)
+    } else {
+        format!("{}/", trimmed)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_format_web_status_url() {
+        // 1. With valid token
+        assert_eq!(
+            format_web_status_url("http://127.0.0.1:8080", true, "sk-pony-test-123"),
+            "http://127.0.0.1:8080/?token=sk-pony-test-123"
+        );
+        // Trims trailing slash from base url
+        assert_eq!(
+            format_web_status_url("http://127.0.0.1:8080/", true, "sk-pony-test-123"),
+            "http://127.0.0.1:8080/?token=sk-pony-test-123"
+        );
+
+        // 2. Without token (empty or case-insensitive "none")
+        assert_eq!(
+            format_web_status_url("http://127.0.0.1:8080", true, ""),
+            "http://127.0.0.1:8080/"
+        );
+        assert_eq!(
+            format_web_status_url("http://127.0.0.1:8080", true, "none"),
+            "http://127.0.0.1:8080/"
+        );
+        assert_eq!(
+            format_web_status_url("http://127.0.0.1:8080", true, "NONE"),
+            "http://127.0.0.1:8080/"
+        );
+
+        // 3. Web disabled
+        assert_eq!(
+            format_web_status_url("http://127.0.0.1:8080", false, "sk-pony-test-123"),
+            "已关闭 (web_enabled = false)"
+        );
+    }
 
     #[test]
     fn test_web_subcommand_defaults() {

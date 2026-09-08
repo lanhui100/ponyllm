@@ -9,7 +9,10 @@ use clap::Parser;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use ponyllm_core::pool::{ApiKeyEntry, GatewayRoutingStrategy, KeyPool, RoutingStrategy};
 use ponyllm_server::{create_app, AppState, GatewayConfig, ProviderConfig};
-use ponyllm_cli::cli::{Cli, Commands, KeyCommands, ModelCommands, ProviderCommands, StrategyCommands};
+use ponyllm_cli::cli::{
+    format_web_status_url, Cli, Commands, KeyCommands, ModelCommands, ProviderCommands,
+    StrategyCommands,
+};
 use ponyllm_cli::config::{
     generate_sample_config, generate_secure_api_key, parse_gateway_auth_action, ConfigFile,
     GatewayAuthAction,
@@ -1165,6 +1168,15 @@ async fn handle_gateway_status(
     } else {
         println!("  密钥：未设置，不用填也能连");
     }
+
+    let web_display = if cfg.gateway.web_enabled {
+        let raw_url = format_web_status_url(&base_url, true, &active_key);
+        paint("4;36", &raw_url)
+    } else {
+        format_web_status_url(&base_url, false, &active_key)
+    };
+    println!("  Web 控制台：{}", web_display);
+
     println!("  OpenAI 地址：{}/v1", base_url);
     println!("  Anthropic 地址：{}", base_url);
 
