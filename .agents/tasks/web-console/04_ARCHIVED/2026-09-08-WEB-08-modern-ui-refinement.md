@@ -8,6 +8,7 @@
 - Created At: 2026-09-08
 - Updated At: 2026-09-08
 - Branch: task/WEB-08-modern-ui-refinement
+- Merge: 8d2c525
 - Estimated Effort: 1天
 - Blocker: 无
 - Unblock Condition: 无
