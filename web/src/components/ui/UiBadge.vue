@@ -17,25 +17,25 @@ const variantClass = computed(() => {
     case 'secondary':
       return 'bg-slate-100 text-slate-600';
     case 'success':
-      return 'bg-emerald-50 text-emerald-700';
+      return 'bg-teal-50/90 text-teal-800';
     case 'warning':
-      return 'bg-amber-50 text-amber-700';
+      return 'bg-amber-50/90 text-amber-800';
     case 'destructive':
-      return 'bg-rose-50 text-rose-700';
+      return 'bg-rose-50/90 text-rose-700';
     case 'purple':
-      return 'bg-purple-50 text-purple-700';
+      return 'bg-purple-50/90 text-purple-700';
     case 'outline':
       return 'bg-transparent text-slate-600 border border-slate-200';
     case 'default':
     default:
-      return 'bg-blue-50 text-blue-700';
+      return 'bg-indigo-50/90 text-indigo-700';
   }
 });
 </script>
 
 <template>
   <span
-    class="inline-flex items-center px-2 py-0.5 rounded-full text-2xs font-medium tracking-wide"
+    class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium tracking-normal"
     :class="[variantClass, props.class]"
   >
     <slot />

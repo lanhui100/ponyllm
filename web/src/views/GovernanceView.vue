@@ -269,15 +269,15 @@ const providerMap = computed(() => {
       </div>
 
       <!-- 页面头部：精简标题与操作栏 -->
-      <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
+      <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-7">
         <div>
-          <h1 class="text-xl font-bold tracking-tight text-slate-900 flex items-center gap-2">
+          <h1 class="text-2xl font-bold tracking-tight text-slate-900 flex items-center gap-2.5">
             模型管理
-            <UiBadge variant="secondary" class="font-mono text-2xs" data-testid="config-version-val">
+            <UiBadge variant="secondary" class="font-mono text-xs font-semibold" data-testid="config-version-val">
               v{{ configVersion }}
             </UiBadge>
           </h1>
-          <p class="text-xs text-slate-500 mt-1">
+          <p class="text-sm text-slate-500 mt-1.5">
             统一管理模型提供商、挂载模型字典、密钥池与全局分流策略
           </p>
         </div>
@@ -292,7 +292,7 @@ const providerMap = computed(() => {
               data-testid="refresh-all-btn"
               @click="handleRefresh"
             >
-              <Icons name="refresh" size="13" :class="loading ? 'animate-spin' : ''" />
+              <Icons name="refresh" size="14" :class="loading ? 'animate-spin' : ''" />
               {{ loading ? '刷新中' : '刷新' }}
             </UiButton>
           </UiTooltip>
@@ -306,7 +306,7 @@ const providerMap = computed(() => {
               data-testid="test-all-keys-btn"
               @click="batchTestAllKeys"
             >
-              <Icons name="zap" size="13" class="text-amber-500" />
+              <Icons name="zap" size="14" class="text-amber-500" />
               {{ batchTesting.running ? `测速 (${batchTesting.current}/${batchTesting.total})` : '全量测速' }}
             </UiButton>
           </UiTooltip>
@@ -318,22 +318,22 @@ const providerMap = computed(() => {
             data-testid="add-provider-btn"
             @click="openAddProvider"
           >
-            <Icons name="plus" size="13" />
+            <Icons name="plus" size="14" />
             服务商
           </UiButton>
         </div>
       </div>
 
       <!-- 拨测进度条 -->
-      <div v-if="batchTesting.running" class="h-1 w-full bg-slate-200 rounded-full mb-6 overflow-hidden">
+      <div v-if="batchTesting.running" class="h-1.5 w-full bg-slate-200/80 rounded-full mb-6 overflow-hidden">
         <div
-          class="h-full bg-blue-600 transition-all duration-200"
+          class="h-full bg-indigo-600 transition-all duration-200"
           :style="{ width: `${(batchTesting.current / Math.max(1, batchTesting.total)) * 100}%` }"
         />
       </div>
 
       <!-- 错误提示横幅 -->
-      <div v-if="error" class="flex items-center justify-between p-3 mb-6 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-700">
+      <div v-if="error" class="flex items-center justify-between p-3.5 mb-6 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-700">
         <span>配置获取失败: {{ error }}</span>
         <UiButton variant="ghost" size="sm" class="text-rose-700 hover:bg-rose-100/60" @click="handleRefresh">
           重试
@@ -342,22 +342,22 @@ const providerMap = computed(() => {
 
       <!-- 行内平滑展开：新建服务商表单 (替代原有抽屉) -->
       <UiCollapsible :open="isAddingProvider">
-        <div class="bg-white rounded-xl shadow-xs p-4 mb-6 border border-slate-200/80">
-          <div class="flex items-center justify-between mb-3">
-            <span class="font-bold text-sm text-slate-800 flex items-center gap-1.5">
-              <Icons name="server" size="16" class="text-blue-600" />
+        <div class="borderless-card p-5 mb-6">
+          <div class="flex items-center justify-between mb-3.5">
+            <span class="font-bold text-base text-slate-800 flex items-center gap-2">
+              <Icons name="server" size="18" class="text-indigo-600" />
               新建服务商
             </span>
             <button type="button" class="text-slate-400 hover:text-slate-600 cursor-pointer" @click="cancelAddProvider">
-              <Icons name="cross" size="14" />
+              <Icons name="cross" size="15" />
             </button>
           </div>
 
-          <div v-if="providerFormError" class="p-2.5 mb-3 bg-rose-50 text-rose-600 rounded-lg text-xs">
+          <div v-if="providerFormError" class="p-2.5 mb-3.5 bg-rose-50 text-rose-600 rounded-lg text-xs font-medium">
             {{ providerFormError }}
           </div>
 
-          <form class="space-y-3" @submit.prevent="handleSaveProvider">
+          <form class="space-y-3.5" @submit.prevent="handleSaveProvider">
             <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
               <div>
                 <label class="block text-xs font-medium text-slate-600 mb-1">服务商标识 *</label>
@@ -366,7 +366,7 @@ const providerMap = computed(() => {
                   type="text"
                   placeholder="例如: openai / deepseek"
                   required
-                  class="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-1.5 text-xs text-slate-900 focus:outline-none focus:ring-1 focus:ring-blue-500 focus:bg-white"
+                  class="w-full bg-slate-50 border border-slate-200/80 rounded-lg px-3 py-2 text-xs text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 focus:bg-white"
                   data-testid="provider-name-input"
                 />
               </div>
@@ -378,7 +378,7 @@ const providerMap = computed(() => {
                   type="url"
                   placeholder="https://api.openai.com/v1"
                   required
-                  class="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-1.5 text-xs text-slate-900 focus:outline-none focus:ring-1 focus:ring-blue-500 focus:bg-white"
+                  class="w-full bg-slate-50 border border-slate-200/80 rounded-lg px-3 py-2 text-xs text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 focus:bg-white"
                   data-testid="provider-base-url-input"
                 />
               </div>
@@ -391,7 +391,7 @@ const providerMap = computed(() => {
                   v-model="newProviderForm.default_model"
                   type="text"
                   placeholder="gpt-4o"
-                  class="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-1.5 text-xs text-slate-900 focus:outline-none focus:ring-1 focus:ring-blue-500 focus:bg-white"
+                  class="w-full bg-slate-50 border border-slate-200/80 rounded-lg px-3 py-2 text-xs text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 focus:bg-white"
                   data-testid="provider-default-model-input"
                 />
               </div>
@@ -400,7 +400,7 @@ const providerMap = computed(() => {
                 <label class="block text-xs font-medium text-slate-600 mb-1">路由调度算法</label>
                 <select
                   v-model="newProviderForm.strategy"
-                  class="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-1.5 text-xs text-slate-900 focus:outline-none focus:ring-1 focus:ring-blue-500 focus:bg-white"
+                  class="w-full bg-slate-50 border border-slate-200/80 rounded-lg px-3 py-2 text-xs text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 focus:bg-white"
                 >
                   <option value="economy">Economy 经济优先</option>
                   <option value="speed">Speed 速度优先</option>
@@ -426,8 +426,8 @@ const providerMap = computed(() => {
       <div class="flex items-center gap-1.5 mb-6 border-b border-slate-200/60 pb-2">
         <button
           type="button"
-          class="px-3 py-1.5 text-xs font-medium rounded-lg transition-colors cursor-pointer"
-          :class="currentTab === 'providers' ? 'bg-white shadow-2xs text-blue-600 font-semibold' : 'text-slate-500 hover:text-slate-800'"
+          class="px-3.5 py-1.5 text-xs font-medium rounded-lg transition-colors cursor-pointer"
+          :class="currentTab === 'providers' ? 'bg-white shadow-2xs text-indigo-600 font-semibold' : 'text-slate-500 hover:text-slate-800'"
           data-testid="tab-providers"
           @click="currentTab = 'providers'"
         >
@@ -436,8 +436,8 @@ const providerMap = computed(() => {
 
         <button
           type="button"
-          class="px-3 py-1.5 text-xs font-medium rounded-lg transition-colors cursor-pointer"
-          :class="currentTab === 'models' ? 'bg-white shadow-2xs text-blue-600 font-semibold' : 'text-slate-500 hover:text-slate-800'"
+          class="px-3.5 py-1.5 text-xs font-medium rounded-lg transition-colors cursor-pointer"
+          :class="currentTab === 'models' ? 'bg-white shadow-2xs text-indigo-600 font-semibold' : 'text-slate-500 hover:text-slate-800'"
           data-testid="tab-models"
           @click="currentTab = 'models'"
         >
@@ -446,8 +446,8 @@ const providerMap = computed(() => {
 
         <button
           type="button"
-          class="px-3 py-1.5 text-xs font-medium rounded-lg transition-colors cursor-pointer"
-          :class="currentTab === 'keys' ? 'bg-white shadow-2xs text-blue-600 font-semibold' : 'text-slate-500 hover:text-slate-800'"
+          class="px-3.5 py-1.5 text-xs font-medium rounded-lg transition-colors cursor-pointer"
+          :class="currentTab === 'keys' ? 'bg-white shadow-2xs text-indigo-600 font-semibold' : 'text-slate-500 hover:text-slate-800'"
           data-testid="tab-keys"
           @click="currentTab = 'keys'"
         >
@@ -456,8 +456,8 @@ const providerMap = computed(() => {
 
         <button
           type="button"
-          class="px-3 py-1.5 text-xs font-medium rounded-lg transition-colors cursor-pointer"
-          :class="currentTab === 'strategy' ? 'bg-white shadow-2xs text-blue-600 font-semibold' : 'text-slate-500 hover:text-slate-800'"
+          class="px-3.5 py-1.5 text-xs font-medium rounded-lg transition-colors cursor-pointer"
+          :class="currentTab === 'strategy' ? 'bg-white shadow-2xs text-indigo-600 font-semibold' : 'text-slate-500 hover:text-slate-800'"
           data-testid="tab-strategy"
           @click="currentTab = 'strategy'"
         >

@@ -68,31 +68,31 @@ function handleBatchTest() {
 
 <template>
   <div
-    class="bg-white rounded-xl shadow-xs transition-all duration-200 overflow-hidden mb-4"
+    class="borderless-card mb-4 overflow-hidden"
     data-testid="provider-row"
   >
     <!-- 服务商一级卡片头部 (一等常显) -->
     <div
-      class="p-4 flex items-center justify-between gap-4 cursor-pointer hover:bg-slate-50/50 transition-colors select-none"
+      class="p-4.5 flex items-center justify-between gap-4 cursor-pointer hover:bg-slate-50/50 transition-colors select-none"
       @click="expanded = !expanded"
     >
       <!-- 左侧：厂商标识与摘要 -->
-      <div class="flex items-center gap-3 min-w-0">
-        <div class="w-9 h-9 rounded-lg bg-blue-50 text-blue-600 flex items-center justify-center shrink-0 font-bold text-sm">
-          <Icons name="server" size="18" />
+      <div class="flex items-center gap-3.5 min-w-0">
+        <div class="w-10 h-10 rounded-xl bg-indigo-50 text-indigo-600 flex items-center justify-center shrink-0 font-bold text-sm">
+          <Icons name="server" size="20" />
         </div>
 
         <div class="min-w-0">
-          <div class="flex items-center gap-2">
-            <span class="font-bold text-slate-900 text-sm tracking-tight truncate">
+          <div class="flex items-center gap-2.5">
+            <span class="font-bold text-slate-900 text-base tracking-tight truncate">
               {{ provider.name }}
             </span>
-            <UiBadge variant="secondary" class="text-2xs font-mono">
+            <UiBadge variant="secondary" class="text-xs font-mono font-medium">
               {{ provider.strategy }}
             </UiBadge>
           </div>
 
-          <div class="flex items-center gap-2 text-xs text-slate-400 mt-0.5 font-mono truncate">
+          <div class="flex items-center gap-2 text-xs text-slate-400 mt-1 font-mono truncate">
             <span>{{ provider.base_url }}</span>
             <span v-if="provider.default_model" class="text-slate-500 font-sans">
               · 默认: {{ provider.default_model }}
@@ -102,12 +102,12 @@ function handleBatchTest() {
       </div>
 
       <!-- 右侧：概览徽标与一等纯图标操作组 -->
-      <div class="flex items-center gap-2 shrink-0" @click.stop>
-        <div class="hidden sm:flex items-center gap-1.5 mr-2">
-          <UiBadge variant="default" class="text-2xs">
+      <div class="flex items-center gap-2.5 shrink-0" @click.stop>
+        <div class="hidden sm:flex items-center gap-2 mr-2">
+          <UiBadge variant="default" class="text-xs font-medium">
             {{ models.length }} 模型
           </UiBadge>
-          <UiBadge :variant="activeKeysCount > 0 ? 'success' : 'secondary'" class="text-2xs">
+          <UiBadge :variant="activeKeysCount > 0 ? 'success' : 'secondary'" class="text-xs font-medium">
             {{ activeKeysCount }}/{{ keys.length }} 密钥可用
           </UiBadge>
         </div>
@@ -153,9 +153,9 @@ function handleBatchTest() {
 
     <!-- 二级折叠展开区域 (包含密钥、模型及高级配置) -->
     <UiCollapsible :open="expanded">
-      <div class="px-4 pb-4 pt-1 border-t border-slate-100 bg-slate-50/30 space-y-4">
+      <div class="px-4.5 pb-4.5 pt-2 border-t border-slate-100 bg-slate-50/50 space-y-4">
         <!-- 密钥凭证子区域 -->
-        <div class="bg-white rounded-lg p-3 shadow-2xs">
+        <div class="bg-white rounded-xl p-4 shadow-2xs">
           <KeySubSection
             :provider-name="provider.name"
             :keys="keys"
@@ -169,7 +169,7 @@ function handleBatchTest() {
         </div>
 
         <!-- 挂载模型子区域 -->
-        <div class="bg-white rounded-lg p-3 shadow-2xs">
+        <div class="bg-white rounded-xl p-4 shadow-2xs">
           <ModelSubSection
             :provider-name="provider.name"
             :models="models"
@@ -184,27 +184,27 @@ function handleBatchTest() {
         <div class="pt-1">
           <button
             type="button"
-            class="text-2xs text-slate-400 hover:text-slate-600 inline-flex items-center gap-1 cursor-pointer py-1 font-medium"
+            class="text-xs text-slate-500 hover:text-indigo-600 inline-flex items-center gap-1.5 cursor-pointer py-1 font-medium select-none"
             @click="showAdvancedConfig = !showAdvancedConfig"
           >
-            <Icons :name="showAdvancedConfig ? 'chevron-down' : 'chevron-right'" size="11" />
-            计费单价与高级参数
+            <Icons :name="showAdvancedConfig ? 'chevron-down' : 'chevron-right'" size="12" />
+            计费单价与服务商高级参数
           </button>
 
           <UiCollapsible :open="showAdvancedConfig">
-            <div class="mt-2 p-3 bg-white rounded-lg shadow-2xs text-xs space-y-2">
-              <div class="grid grid-cols-3 gap-2">
-                <div class="p-2 bg-slate-50 rounded">
-                  <span class="block text-2xs text-slate-400">输入单价 ($/M)</span>
-                  <span class="font-mono text-slate-700 font-medium">{{ provider.input_price }}</span>
+            <div class="mt-2 p-3.5 bg-white rounded-xl shadow-2xs text-xs space-y-2">
+              <div class="grid grid-cols-3 gap-2.5">
+                <div class="p-2.5 bg-slate-50/80 rounded-lg">
+                  <span class="block text-3xs text-slate-400 mb-0.5">输入单价 ($/M)</span>
+                  <span class="font-mono text-slate-800 font-semibold text-xs">{{ provider.input_price }}</span>
                 </div>
-                <div class="p-2 bg-slate-50 rounded">
-                  <span class="block text-2xs text-slate-400">缓存命中单价 ($/M)</span>
-                  <span class="font-mono text-slate-700 font-medium">{{ provider.cached_price }}</span>
+                <div class="p-2.5 bg-slate-50/80 rounded-lg">
+                  <span class="block text-3xs text-slate-400 mb-0.5">缓存命中单价 ($/M)</span>
+                  <span class="font-mono text-slate-800 font-semibold text-xs">{{ provider.cached_price }}</span>
                 </div>
-                <div class="p-2 bg-slate-50 rounded">
-                  <span class="block text-2xs text-slate-400">输出单价 ($/M)</span>
-                  <span class="font-mono text-slate-700 font-medium">{{ provider.output_price }}</span>
+                <div class="p-2.5 bg-slate-50/80 rounded-lg">
+                  <span class="block text-3xs text-slate-400 mb-0.5">输出单价 ($/M)</span>
+                  <span class="font-mono text-slate-800 font-semibold text-xs">{{ provider.output_price }}</span>
                 </div>
               </div>
             </div>

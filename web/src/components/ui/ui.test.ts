@@ -66,7 +66,7 @@ describe('UI Primitives & Modern Design System', () => {
     await nextTick();
 
     const badge = container.querySelector('span');
-    expect(badge?.className).toContain('bg-emerald-50');
+    expect(badge?.className).toContain('bg-teal-50');
     expect(badge?.textContent).toBe('Active');
     app.unmount();
   });

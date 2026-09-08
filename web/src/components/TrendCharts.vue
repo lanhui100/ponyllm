@@ -74,11 +74,11 @@ function updateCharts() {
         data: qpsData,
         areaStyle: {
           color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
-            { offset: 0, color: 'rgba(59, 130, 246, 0.25)' },
-            { offset: 1, color: 'rgba(59, 130, 246, 0.01)' },
+            { offset: 0, color: 'rgba(99, 102, 241, 0.25)' },
+            { offset: 1, color: 'rgba(99, 102, 241, 0.01)' },
           ]),
         },
-        itemStyle: { color: '#3b82f6' },
+        itemStyle: { color: '#6366f1' },
         lineStyle: { width: 2 },
       },
     ],
@@ -110,11 +110,11 @@ function updateCharts() {
         data: tokenData,
         areaStyle: {
           color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
-            { offset: 0, color: 'rgba(16, 185, 129, 0.25)' },
-            { offset: 1, color: 'rgba(16, 185, 129, 0.01)' },
+            { offset: 0, color: 'rgba(168, 85, 247, 0.25)' },
+            { offset: 1, color: 'rgba(168, 85, 247, 0.01)' },
           ]),
         },
-        itemStyle: { color: '#10b981' },
+        itemStyle: { color: '#a855f7' },
         lineStyle: { width: 2 },
       },
     ],
@@ -146,11 +146,11 @@ function updateCharts() {
         data: latencyData,
         areaStyle: {
           color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
-            { offset: 0, color: 'rgba(245, 158, 11, 0.25)' },
-            { offset: 1, color: 'rgba(245, 158, 11, 0.01)' },
+            { offset: 0, color: 'rgba(217, 119, 6, 0.25)' },
+            { offset: 1, color: 'rgba(217, 119, 6, 0.01)' },
           ]),
         },
-        itemStyle: { color: '#f59e0b' },
+        itemStyle: { color: '#d97706' },
         lineStyle: { width: 2 },
       },
     ],
@@ -183,11 +183,11 @@ function updateCharts() {
         data: errorData,
         areaStyle: {
           color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
-            { offset: 0, color: 'rgba(239, 68, 68, 0.25)' },
-            { offset: 1, color: 'rgba(239, 68, 68, 0.01)' },
+            { offset: 0, color: 'rgba(225, 29, 72, 0.25)' },
+            { offset: 1, color: 'rgba(225, 29, 72, 0.01)' },
           ]),
         },
-        itemStyle: { color: '#ef4444' },
+        itemStyle: { color: '#e11d48' },
         lineStyle: { width: 2 },
       },
     ],
@@ -249,23 +249,23 @@ watch(
 
 <template>
   <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
-    <div class="bg-white rounded-xl shadow-xs p-4">
-      <div class="text-xs font-semibold text-slate-700 mb-2">QPS 趋势 (30s)</div>
+    <div class="borderless-card p-5">
+      <div class="text-sm font-semibold text-slate-800 mb-2">QPS 趋势 (30s)</div>
       <div ref="qpsChartRef" class="w-full h-44" />
     </div>
 
-    <div class="bg-white rounded-xl shadow-xs p-4">
-      <div class="text-xs font-semibold text-slate-700 mb-2">Token 吞吐量趋势 (tok/s)</div>
+    <div class="borderless-card p-5">
+      <div class="text-sm font-semibold text-slate-800 mb-2">Token 吞吐量趋势 (tok/s)</div>
       <div ref="tokenChartRef" class="w-full h-44" />
     </div>
 
-    <div class="bg-white rounded-xl shadow-xs p-4">
-      <div class="text-xs font-semibold text-slate-700 mb-2">TTFT 延迟趋势 (ms)</div>
+    <div class="borderless-card p-5">
+      <div class="text-sm font-semibold text-slate-800 mb-2">TTFT 延迟趋势 (ms)</div>
       <div ref="latencyChartRef" class="w-full h-44" />
     </div>
 
-    <div class="bg-white rounded-xl shadow-xs p-4">
-      <div class="text-xs font-semibold text-slate-700 mb-2">故障率趋势 (%)</div>
+    <div class="borderless-card p-5">
+      <div class="text-sm font-semibold text-slate-800 mb-2">故障率趋势 (%)</div>
       <div ref="errorChartRef" class="w-full h-44" />
     </div>
   </div>

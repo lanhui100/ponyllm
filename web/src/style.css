@@ -2,56 +2,80 @@
 
 @layer base {
   :root {
-    --background: 210 40% 98%;
-    --foreground: 222.2 84% 4.9%;
+    --background: 220 14% 97%;
+    --foreground: 224 25% 12%;
     --card: 0 0% 100%;
-    --card-foreground: 222.2 84% 4.9%;
+    --card-foreground: 224 25% 12%;
     --popover: 0 0% 100%;
-    --popover-foreground: 222.2 84% 4.9%;
-    --primary: 221.2 83.2% 53.3%;
-    --primary-foreground: 210 40% 98%;
-    --secondary: 210 40% 96.1%;
-    --secondary-foreground: 222.2 47.4% 11.2%;
-    --muted: 210 40% 96.1%;
-    --muted-foreground: 215.4 16.3% 46.9%;
-    --accent: 210 40% 96.1%;
-    --accent-foreground: 222.2 47.4% 11.2%;
-    --destructive: 0 84.2% 60.2%;
-    --destructive-foreground: 210 40% 98%;
-    --border: 214.3 31.8% 91.4%;
-    --input: 214.3 31.8% 91.4%;
-    --ring: 221.2 83.2% 53.3%;
-    --radius: 0.5rem;
+    --popover-foreground: 224 25% 12%;
+    /* 电光鸢尾紫 (Iris Violet) 主题色 */
+    --primary: 243 75% 59%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 220 14% 94%;
+    --secondary-foreground: 224 25% 20%;
+    --muted: 220 14% 94%;
+    --muted-foreground: 220 10% 46%;
+    --accent: 243 75% 96%;
+    --accent-foreground: 243 75% 50%;
+    --destructive: 350 89% 60%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 220 13% 91%;
+    --input: 220 13% 91%;
+    --ring: 243 75% 59%;
+    --radius: 0.625rem;
+
+    /* Surface 无边框分层体系 (风格2) */
+    --surface-canvas: #f8f9fa;
+    --surface-card: #ffffff;
+    --surface-inset: #f1f3f5;
+    --surface-track: #e9ecef;
   }
 
   body {
-    background-color: #f8fafc;
-    color: #0f172a;
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    background-color: #f8f9fa;
+    color: #1a1f2c;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans SC", sans-serif;
+    font-size: 14px;
+    line-height: 1.55;
     margin: 0;
     padding: 0;
     -webkit-font-smoothing: antialiased;
+    font-feature-settings: "tnum";
+    font-variant-numeric: tabular-nums;
   }
 }
 
-/* 现代化无边框微阴影卡片 */
+/* 风格2: 现代化无边框阶梯式漫反射阴影卡片 */
 .borderless-card {
   background: #ffffff;
-  border-radius: 12px;
-  box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.03), 0 4px 12px -2px rgba(0, 0, 0, 0.04);
+  border-radius: 14px;
+  box-shadow: 0 2px 8px -1px rgba(15, 23, 42, 0.03), 0 8px 24px -4px rgba(15, 23, 42, 0.04);
 }
 
-/* 平滑过渡动效 */
+/* 下沉嵌套层 */
+.surface-inset {
+  background-color: #f1f3f5;
+  border-radius: 10px;
+}
+
+/* 按钮组基座凹槽 */
+.segment-track {
+  background-color: #e9ecef;
+  padding: 3px;
+  border-radius: 8px;
+}
+
+/* 平滑过渡动效 (物理弹性软阻尼) */
 .smooth-collapse-enter-active,
 .smooth-collapse-leave-active {
-  transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+  transition: all 0.24s cubic-bezier(0.16, 1, 0.3, 1);
   overflow: hidden;
 }
 
 .smooth-collapse-enter-from,
 .smooth-collapse-leave-to {
   opacity: 0;
-  transform: translateY(-6px);
+  transform: translateY(-5px);
   max-height: 0;
 }
 
@@ -59,5 +83,5 @@
 .smooth-collapse-leave-from {
   opacity: 1;
   transform: translateY(0);
-  max-height: 1000px;
+  max-height: 1200px;
 }

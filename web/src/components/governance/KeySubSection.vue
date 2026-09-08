@@ -110,89 +110,89 @@ async function handleDelete(id: string) {
         size="sm"
         :disabled="!adminWriteEnabled || isAdding"
         data-testid="add-key-btn"
-        class="text-blue-600 hover:text-blue-700 hover:bg-blue-50/60 font-medium px-2 py-0.5 text-xs"
+        class="text-indigo-600 hover:text-indigo-700 hover:bg-indigo-50/60 font-medium px-2.5 py-1 text-xs"
         @click="openAddInline"
       >
-        <Icons name="plus" size="12" />
+        <Icons name="plus" size="13" />
         密钥
       </UiButton>
     </div>
 
     <!-- 行内平滑展开新建表单 -->
     <UiCollapsible :open="isAdding">
-      <div class="p-3 bg-slate-50/90 rounded-lg border border-slate-200/80 mb-2.5 text-xs">
-        <div class="flex items-center justify-between mb-2">
-          <span class="font-medium text-slate-800">新建密钥凭证</span>
+      <div class="p-4 bg-slate-50/90 rounded-xl mb-3 text-xs space-y-3">
+        <div class="flex items-center justify-between">
+          <span class="font-semibold text-slate-800 text-sm">新建密钥凭证</span>
           <button
             type="button"
             class="text-slate-400 hover:text-slate-600 cursor-pointer"
             @click="cancelAdd"
           >
-            <Icons name="cross" size="13" />
+            <Icons name="cross" size="14" />
           </button>
         </div>
 
-        <div v-if="formError" class="p-2 mb-2 bg-rose-50 text-rose-600 rounded text-xs">
+        <div v-if="formError" class="p-2.5 bg-rose-50 text-rose-600 rounded-lg text-xs font-medium">
           {{ formError }}
         </div>
 
-        <form class="space-y-2.5" @submit.prevent="handleSubmit">
-          <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+        <form class="space-y-3" @submit.prevent="handleSubmit">
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
-              <label class="block text-slate-500 mb-1">Key 标识 *</label>
+              <label class="block text-slate-600 font-medium mb-1 text-xs">Key 标识 *</label>
               <input
                 v-model="form.id"
                 type="text"
                 placeholder="例如: key-01"
                 required
-                class="w-full bg-white border border-slate-200 rounded px-2.5 py-1.5 text-xs text-slate-800 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                class="w-full bg-white border border-slate-200/80 rounded-lg px-3 py-2 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
                 data-testid="key-id-input"
               />
             </div>
 
             <div>
-              <label class="block text-slate-500 mb-1">API Key 明文 *</label>
+              <label class="block text-slate-600 font-medium mb-1 text-xs">API Key 明文 *</label>
               <input
                 v-model="form.api_key"
                 type="password"
                 placeholder="sk-..."
                 required
-                class="w-full bg-white border border-slate-200 rounded px-2.5 py-1.5 text-xs text-slate-800 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                class="w-full bg-white border border-slate-200/80 rounded-lg px-3 py-2 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
                 data-testid="key-secret-input"
               />
             </div>
           </div>
 
           <!-- 高级选项折叠 (权重/优先级) -->
-          <div>
+          <div class="pt-0.5">
             <button
               type="button"
-              class="text-2xs text-slate-500 hover:text-slate-700 inline-flex items-center gap-1 cursor-pointer py-0.5"
+              class="text-xs font-semibold text-slate-600 hover:text-indigo-600 inline-flex items-center gap-1 cursor-pointer py-1 select-none"
               @click="showAdvanced = !showAdvanced"
             >
-              <Icons :name="showAdvanced ? 'chevron-down' : 'chevron-right'" size="10" />
-              调度参数 (权重与优先级)
+              <Icons :name="showAdvanced ? 'chevron-down' : 'chevron-right'" size="11" />
+              高级调度参数 (权重与优先级)
             </button>
 
             <UiCollapsible :open="showAdvanced">
-              <div class="grid grid-cols-2 gap-2 pt-2">
+              <div class="grid grid-cols-2 gap-3 pt-2 p-3 bg-slate-100/70 rounded-lg mt-1">
                 <div>
-                  <label class="block text-2xs text-slate-500 mb-0.5">优先级 (数值越小越优先)</label>
+                  <label class="block text-3xs text-slate-500 mb-0.5 font-medium">优先级 (数值越小越优先)</label>
                   <input
                     v-model.number="form.priority"
                     type="number"
                     min="0"
-                    class="w-full bg-white border border-slate-200 rounded px-2 py-1 text-xs"
+                    class="w-full bg-white border border-slate-200 rounded px-2.5 py-1.5 text-xs text-slate-800"
                     data-testid="key-priority-input"
                   />
                 </div>
                 <div>
-                  <label class="block text-2xs text-slate-500 mb-0.5">权重 (轮询比重)</label>
+                  <label class="block text-3xs text-slate-500 mb-0.5 font-medium">权重 (轮询比重)</label>
                   <input
                     v-model.number="form.weight"
                     type="number"
                     min="1"
-                    class="w-full bg-white border border-slate-200 rounded px-2 py-1 text-xs"
+                    class="w-full bg-white border border-slate-200 rounded px-2.5 py-1.5 text-xs text-slate-800"
                     data-testid="key-weight-input"
                   />
                 </div>
@@ -200,7 +200,7 @@ async function handleDelete(id: string) {
             </UiCollapsible>
           </div>
 
-          <div class="flex items-center justify-end gap-2 pt-1 border-t border-slate-200/60">
+          <div class="flex items-center justify-end gap-2 pt-2 border-t border-slate-200/60">
             <UiButton variant="ghost" size="sm" @click="cancelAdd">
               取消
             </UiButton>
@@ -222,16 +222,16 @@ async function handleDelete(id: string) {
       暂未配置密钥，点击上方「+ 密钥」快速添加
     </div>
 
-    <div v-else class="space-y-1.5">
+    <div v-else class="space-y-2">
       <div
         v-for="k in keys"
         :key="k.id"
-        class="flex items-center justify-between px-3 py-2 bg-slate-50/70 hover:bg-slate-100/60 rounded-lg transition-colors text-xs"
+        class="flex items-center justify-between px-3.5 py-2.5 bg-slate-50/70 hover:bg-slate-100/70 rounded-xl transition-colors text-xs"
         data-testid="key-row"
       >
         <div class="flex items-center gap-2.5 min-w-0">
-          <span class="font-mono text-slate-800 font-medium truncate">{{ k.id }}</span>
-          <span class="font-mono text-slate-400 text-2xs">{{ k.masked_key }}</span>
+          <span class="font-mono text-slate-800 font-semibold text-xs truncate">{{ k.id }}</span>
+          <span class="font-mono text-slate-400 text-xs">{{ k.masked_key }}</span>
           <UiBadge :variant="k.state === 'active' ? 'success' : 'warning'">
             {{ k.state === 'active' ? '就绪' : k.state }}
           </UiBadge>
@@ -247,7 +247,7 @@ async function handleDelete(id: string) {
               {{ keyTestResults[k.id].success ? `${keyTestResults[k.id].latency_ms}ms` : '异常' }}
             </UiBadge>
           </template>
-          <span v-else-if="testingKeyIds.has(k.id)" class="text-2xs text-blue-600 animate-pulse">
+          <span v-else-if="testingKeyIds.has(k.id)" class="text-xs text-indigo-600 animate-pulse font-medium">
             测速中...
           </span>
 
@@ -261,7 +261,7 @@ async function handleDelete(id: string) {
               class="text-slate-500 hover:text-amber-600 hover:bg-amber-50"
               @click="emit('test-single', k.id)"
             >
-              <Icons name="zap" size="13" />
+              <Icons name="zap" size="14" />
             </UiButton>
           </UiTooltip>
 
@@ -275,7 +275,7 @@ async function handleDelete(id: string) {
               class="text-slate-400 hover:text-rose-600 hover:bg-rose-50"
               @click="handleDelete(k.id)"
             >
-              <Icons name="trash" size="13" />
+              <Icons name="trash" size="14" />
             </UiButton>
           </UiTooltip>
         </div>

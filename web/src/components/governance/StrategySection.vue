@@ -65,31 +65,31 @@ async function handleSelect(id: string) {
 </script>
 
 <template>
-  <div class="bg-white rounded-xl shadow-xs p-5">
-    <div class="flex items-center justify-between mb-4">
+  <div class="borderless-card p-6">
+    <div class="flex items-center justify-between mb-5">
       <div>
-        <h2 class="text-sm font-bold text-slate-900 flex items-center gap-1.5">
-          <Icons name="activity" size="16" class="text-blue-600" />
+        <h2 class="text-base font-bold text-slate-900 flex items-center gap-2">
+          <Icons name="activity" size="18" class="text-indigo-600" />
           全局分流调度策略
         </h2>
-        <p class="text-xs text-slate-400 mt-0.5">
+        <p class="text-xs text-slate-400 mt-1">
           决定网关向模型与服务商路由请求时的全局偏好算法
         </p>
       </div>
-      <div v-if="saving" class="text-xs font-semibold text-blue-600 animate-pulse">
+      <div v-if="saving" class="text-xs font-semibold text-indigo-600 animate-pulse">
         保存生效中...
       </div>
     </div>
 
-    <div class="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+    <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
       <div
         v-for="s in strategies"
         :key="s.id"
-        class="p-4 rounded-xl border transition-all duration-200 cursor-pointer select-none flex flex-col justify-between"
+        class="p-4.5 rounded-xl transition-all duration-200 cursor-pointer select-none flex flex-col justify-between"
         :class="[
           selected === s.id
-            ? 'bg-blue-50/50 border-blue-500/80 shadow-2xs'
-            : 'bg-slate-50/60 border-slate-200/70 hover:bg-white hover:border-slate-300',
+            ? 'bg-indigo-50/70 ring-2 ring-indigo-500/70 shadow-2xs'
+            : 'bg-slate-50/70 hover:bg-white hover:shadow-xs',
           { 'opacity-60 cursor-not-allowed': !adminWriteEnabled },
         ]"
         data-testid="strategy-card"
@@ -97,22 +97,25 @@ async function handleSelect(id: string) {
       >
         <div>
           <div class="flex items-center justify-between mb-2">
-            <span class="font-bold text-xs text-slate-900">{{ s.title }}</span>
+            <span class="font-bold text-sm text-slate-900">{{ s.title }}</span>
             <UiBadge :variant="selected === s.id ? 'default' : 'secondary'">
               {{ s.tag }}
             </UiBadge>
           </div>
-          <p class="text-xs text-slate-500 leading-relaxed mb-4">
+          <p class="text-xs text-slate-500 leading-relaxed">
             {{ s.desc }}
           </p>
         </div>
 
-        <div class="flex items-center justify-end text-xs font-medium">
-          <span v-if="selected === s.id" class="text-blue-600 flex items-center gap-1">
-            <Icons name="check" size="13" />
-            当前生效
+        <div class="mt-4 flex items-center justify-between text-xs pt-2 border-t border-slate-200/50">
+          <span class="text-slate-400">状态</span>
+          <span
+            class="font-semibold flex items-center gap-1"
+            :class="selected === s.id ? 'text-indigo-600' : 'text-slate-400'"
+          >
+            <Icons v-if="selected === s.id" name="check" size="14" />
+            {{ selected === s.id ? '当前生效' : '未激活' }}
           </span>
-          <span v-else class="text-slate-400">点击应用</span>
         </div>
       </div>
     </div>

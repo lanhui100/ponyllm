@@ -202,17 +202,36 @@ describe('Modern Minimalist UI/UX System-Wide E2E Verification Suite (WEB-07)', 
     editModelBtn.click();
     await nextTick();
 
-    // 验证思考强度 4 档选择器渲染
-    const thinkingDefaultSelect = container.querySelector('[data-testid="thinking-default-select"]') as HTMLSelectElement;
-    const thinkingMaxSelect = container.querySelector('[data-testid="thinking-max-select"]') as HTMLSelectElement;
-    expect(thinkingDefaultSelect).not.toBeNull();
-    expect(thinkingMaxSelect).not.toBeNull();
+    // 1. 验证模型分级 (Tier) 按钮选项组
+    const tierLargeBtn = container.querySelector('[data-testid="tier-btn-large"]') as HTMLButtonElement;
+    expect(tierLargeBtn).not.toBeNull();
+    tierLargeBtn.click();
+    await nextTick();
 
-    // 变更思考强度配置并提交
-    thinkingDefaultSelect.value = 'Low';
-    thinkingDefaultSelect.dispatchEvent(new Event('change'));
-    thinkingMaxSelect.value = 'High';
-    thinkingMaxSelect.dispatchEvent(new Event('change'));
+    // 2. 验证上下文窗口快捷按钮组
+    const context32kBtn = container.querySelector('[data-testid="context-btn-32k"]') as HTMLButtonElement;
+    expect(context32kBtn).not.toBeNull();
+    context32kBtn.click();
+    await nextTick();
+
+    // 3. 验证思考强度单项按钮选项器 (彻底淘汰最大上限)
+    const thinkingBtnLow = container.querySelector('[data-testid="thinking-btn-low"]') as HTMLButtonElement;
+    expect(thinkingBtnLow).not.toBeNull();
+    // 严格断言：不再存在旧有的最大上限下拉框
+    expect(container.querySelector('[data-testid="thinking-max-select"]')).toBeNull();
+    thinkingBtnLow.click();
+    await nextTick();
+
+    // 4. 验证多模态纯图标按钮组
+    const modalityVideoBtn = container.querySelector('[data-testid="modality-btn-video"]') as HTMLButtonElement;
+    expect(modalityVideoBtn).not.toBeNull();
+    modalityVideoBtn.click();
+    await nextTick();
+
+    // 5. 验证高级折叠按钮存在且初始折叠
+    const toggleAdvancedBtn = container.querySelector('[data-testid="toggle-advanced-btn"]') as HTMLButtonElement;
+    expect(toggleAdvancedBtn).not.toBeNull();
+    expect(toggleAdvancedBtn.textContent).toContain('高级');
 
     const submitModelBtn = container.querySelector('[data-testid="submit-model-btn"]') as HTMLButtonElement;
     expect(submitModelBtn).not.toBeNull();
@@ -221,10 +240,12 @@ describe('Modern Minimalist UI/UX System-Wide E2E Verification Suite (WEB-07)', 
     await nextTick();
     await new Promise((r) => setTimeout(r, 20));
 
-    // 验证 updateModel 携带了正确的 thinking_default 与 thinking_max
+    // 验证 updateModel 携带了按钮选中的正确参数
     expect(updateModelSpy).toHaveBeenCalledWith(
       'gpt-4o',
       expect.objectContaining({
+        tier: 'Large',
+        context_window: '32k',
         thinking_default: 'Low',
         thinking_max: 'High',
       }),
@@ -337,6 +358,91 @@ describe('Modern Minimalist UI/UX System-Wide E2E Verification Suite (WEB-07)', 
 
     const addBtn = container.querySelector('[data-testid="add-provider-btn"]') as HTMLButtonElement;
     expect(addBtn.disabled).toBe(true);
+
+    app.unmount();
+  });
+
+  it('Verification 6: Full-button model editor, modalities pure icons, and advanced collapse', async () => {
+    const session = useSessionStore(pinia);
+    session.login('sk-admin-token');
+
+    vi.spyOn(adminApi, 'getOverview').mockReturnValue({ send: () => Promise.resolve(mockOverviewWritable) } as any);
+    vi.spyOn(adminApi, 'getProviders').mockReturnValue({ send: () => Promise.resolve(mockProviders) } as any);
+    vi.spyOn(adminApi, 'getModels').mockReturnValue({ send: () => Promise.resolve(mockModels) } as any);
+    vi.spyOn(adminApi, 'getKeys').mockReturnValue({ send: () => Promise.resolve(mockKeys) } as any);
+    vi.spyOn(adminApi, 'getStrategy').mockReturnValue({ send: () => Promise.resolve(mockStrategy) } as any);
+
+    const createModelSpy = vi.spyOn(adminApi, 'createModel').mockReturnValue({
+      send: () => Promise.resolve({ ...mockModels[0], name: 'qwen-max-2.5' }),
+    } as any);
+
+    const app = createApp(GovernanceView);
+    app.use(router);
+    app.use(pinia);
+    app.mount(container);
+
+    await nextTick();
+    await new Promise((r) => setTimeout(r, 20));
+
+    // 点击行内添加模型
+    const addModelBtn = container.querySelector('[data-testid="add-model-btn"]') as HTMLButtonElement;
+    expect(addModelBtn).not.toBeNull();
+    addModelBtn.click();
+    await nextTick();
+
+    // 输入模型名称
+    const nameInput = container.querySelector('[data-testid="model-name-input"]') as HTMLInputElement;
+    expect(nameInput).not.toBeNull();
+    nameInput.value = 'qwen-max-2.5';
+    nameInput.dispatchEvent(new Event('input'));
+
+    // 验证 Tier 按钮组存在并点击轻量 (Fast)
+    const tierFastBtn = container.querySelector('[data-testid="tier-btn-fast"]') as HTMLButtonElement;
+    expect(tierFastBtn).not.toBeNull();
+    tierFastBtn.click();
+    await nextTick();
+
+    // 验证上下文窗口快捷预设按钮组并点击 1M
+    const context1mBtn = container.querySelector('[data-testid="context-btn-1m"]') as HTMLButtonElement;
+    expect(context1mBtn).not.toBeNull();
+    context1mBtn.click();
+    await nextTick();
+
+    // 验证思考强度 4 档按钮组并点击平衡 (Medium)
+    const thinkingMediumBtn = container.querySelector('[data-testid="thinking-btn-medium"]') as HTMLButtonElement;
+    expect(thinkingMediumBtn).not.toBeNull();
+    thinkingMediumBtn.click();
+    await nextTick();
+
+    // 验证多模态纯图标按钮组并点击音频
+    const modalityMicBtn = container.querySelector('[data-testid="modality-btn-audio"]') as HTMLButtonElement;
+    expect(modalityMicBtn).not.toBeNull();
+    modalityMicBtn.click();
+    await nextTick();
+
+    // 验证高级折叠按钮并展开
+    const toggleAdvBtn = container.querySelector('[data-testid="toggle-advanced-btn"]') as HTMLButtonElement;
+    expect(toggleAdvBtn).not.toBeNull();
+    expect(toggleAdvBtn.textContent).toContain('高级');
+    toggleAdvBtn.click();
+    await nextTick();
+
+    // 提交保存
+    const submitBtn = container.querySelector('[data-testid="submit-model-btn"]') as HTMLButtonElement;
+    expect(submitBtn).not.toBeNull();
+    submitBtn.click();
+    await nextTick();
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(createModelSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        name: 'qwen-max-2.5',
+        tier: 'Fast',
+        context_window: '1m',
+        thinking_default: 'Medium',
+      }),
+      20
+    );
 
     app.unmount();
   });

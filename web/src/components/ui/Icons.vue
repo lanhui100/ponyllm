@@ -20,7 +20,11 @@ const props = withDefaults(
       | 'server'
       | 'key'
       | 'activity'
-      | 'cross';
+      | 'cross'
+      | 'file-text'
+      | 'image'
+      | 'video'
+      | 'mic';
     size?: number | string;
     class?: any;
   }>(),
@@ -115,5 +119,30 @@ const pxSize = computed(() => (typeof props.size === 'number' ? `${props.size}px
     <path v-else-if="name === 'activity'" d="M22 12h-4l-3 9L9 3l-3 9H2" />
     <!-- cross -->
     <path v-else-if="name === 'cross'" d="M18 6 6 18M6 6l12 12" />
+    <!-- file-text (text modality) -->
+    <g v-else-if="name === 'file-text'">
+      <path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z" />
+      <polyline points="14 2 14 8 20 8" />
+      <line x1="16" x2="8" y1="13" y2="13" />
+      <line x1="16" x2="8" y1="17" y2="17" />
+      <line x1="10" x2="8" y1="9" y2="9" />
+    </g>
+    <!-- image (vision modality) -->
+    <g v-else-if="name === 'image'">
+      <rect width="18" height="18" x="3" y="3" rx="2" ry="2" />
+      <circle cx="9" cy="9" r="2" />
+      <path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21" />
+    </g>
+    <!-- video (video modality) -->
+    <g v-else-if="name === 'video'">
+      <path d="m22 8-6 4 6 4V8Z" />
+      <rect width="14" height="12" x="2" y="6" rx="2" ry="2" />
+    </g>
+    <!-- mic (audio modality) -->
+    <g v-else-if="name === 'mic'">
+      <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z" />
+      <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+      <line x1="12" x2="12" y1="19" y2="22" />
+    </g>
   </svg>
 </template>

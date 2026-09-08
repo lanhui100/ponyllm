@@ -34,21 +34,21 @@ const variantClasses = computed(() => {
       return 'bg-slate-100 text-slate-700 hover:bg-slate-200/70';
     case 'default':
     default:
-      return 'bg-blue-600 text-white hover:bg-blue-700 shadow-2xs';
+      return 'bg-indigo-600 text-white hover:bg-indigo-700 shadow-2xs active:scale-[0.98]';
   }
 });
 
 const sizeClasses = computed(() => {
   switch (props.size) {
     case 'sm':
-      return 'h-7 px-2.5 text-xs rounded-md gap-1.5';
+      return 'h-8 px-3 text-xs rounded-lg gap-1.5';
     case 'lg':
-      return 'h-10 px-4 text-sm rounded-lg gap-2';
+      return 'h-11 px-5 text-base rounded-xl gap-2.5';
     case 'icon':
-      return 'h-7 w-7 p-0 justify-center rounded-md';
+      return 'h-8 w-8 p-0 justify-center rounded-lg';
     case 'default':
     default:
-      return 'h-8 px-3 text-xs font-medium rounded-md gap-1.5';
+      return 'h-9 px-4 text-sm font-medium rounded-lg gap-2';
   }
 });
 </script>
@@ -57,7 +57,7 @@ const sizeClasses = computed(() => {
   <button
     :type="type"
     :disabled="disabled"
-    class="inline-flex items-center justify-center font-medium transition-all duration-150 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed select-none focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/30"
+    class="inline-flex items-center justify-center font-medium transition-all duration-150 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed select-none focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/30"
     :class="[variantClasses, sizeClasses, props.class]"
     @click="emit('click', $event)"
   >
