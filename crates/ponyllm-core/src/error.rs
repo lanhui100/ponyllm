@@ -50,6 +50,13 @@ pub enum CoreError {
         body: String,
     },
 
+    /// Antigravity OAuth refresh definitively rejected (`invalid_grant`):
+    /// the stored refresh_token is dead and the key must be permanently
+    /// isolated. Kept distinct from `Internal` so callers can separate
+    /// fatal credential death from transient network/5xx refresh failures.
+    #[error("Antigravity credential '{key_id}' rejected by OAuth endpoint: {reason}")]
+    AuthInvalid { key_id: String, reason: String },
+
     #[error("Capacity exhausted: required context '{required_context}', {message}")]
     CapacityExhausted {
         required_context: String,
@@ -95,6 +102,7 @@ impl CoreError {
     pub fn kind(&self) -> GatewayErrorKind {
         match self {
             CoreError::AllRetriesFailed { kind, .. } => kind.clone(),
+            CoreError::AuthInvalid { .. } => GatewayErrorKind::AuthInvalid,
             CoreError::CapacityExhausted { .. } => GatewayErrorKind::CapacityExhausted,
             CoreError::UnsupportedModality { .. } => GatewayErrorKind::ClientBadRequest,
             CoreError::NoAvailableKey(_) => GatewayErrorKind::RateLimitExceeded { retry_after: None },
@@ -114,6 +122,12 @@ impl CoreError {
             }
             CoreError::Internal(msg) if msg.contains("No provider configured") || msg.contains("does not exist") => {
                 GatewayErrorKind::ModelNotFound
+            }
+            // Mid-stream SSE collect failure after headers succeeded: the
+            // request reached the upstream, so this is a transport/server
+            // fault (failover-eligible), not an internal bug (B4).
+            CoreError::Internal(msg) if msg.starts_with("Antigravity stream collect failed") => {
+                GatewayErrorKind::UpstreamUnavailable
             }
             _ => GatewayErrorKind::Internal,
         }

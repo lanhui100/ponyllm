@@ -55,10 +55,15 @@ pub struct ProviderView {
     pub cached_price: f64,
     pub output_price: f64,
     pub models: usize,
+    pub default_protocol: Option<String>,
+    pub chat_url: Option<String>,
+    pub responses_url: Option<String>,
+    pub messages_url: Option<String>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ModelView {
+    pub provider: String,
     pub name: String,
     pub tier: String,
     pub context_window: String,
@@ -140,6 +145,26 @@ fn default_strategy_str() -> String {
 }
 fn default_billing_mode_str() -> String {
     "metered".to_string()
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct UpdateProviderPayload {
+    #[serde(default)]
+    pub base_url: Option<String>,
+    #[serde(default)]
+    pub default_model: Option<String>,
+    #[serde(default)]
+    pub strategy: Option<String>,
+    #[serde(default)]
+    pub default_protocol: Option<String>,
+    #[serde(default)]
+    pub chat_url: Option<String>,
+    #[serde(default)]
+    pub responses_url: Option<String>,
+    #[serde(default)]
+    pub messages_url: Option<String>,
+    #[serde(default)]
+    pub proxy: Option<String>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -374,7 +399,7 @@ fn bind_of(state: &AppState) -> String {
 fn parse_protocol_opt(s: &str) -> Option<UpstreamProtocol> {
     match s.trim().to_ascii_lowercase().as_str() {
         "chat" | "openai" => Some(UpstreamProtocol::Chat),
-        "anthropic" => Some(UpstreamProtocol::Anthropic),
+        "anthropic" | "messages" => Some(UpstreamProtocol::Anthropic),
         "responses" => Some(UpstreamProtocol::Responses),
         _ => None,
     }
@@ -382,9 +407,9 @@ fn parse_protocol_opt(s: &str) -> Option<UpstreamProtocol> {
 
 fn parse_tier(s: &str) -> ModelTier {
     match s.trim().to_ascii_lowercase().as_str() {
-        "light" | "l" => ModelTier::Light,
-        "standard" | "s" => ModelTier::Standard,
-        "flagship" | "f" => ModelTier::Flagship,
+        "light" | "l" | "fast" => ModelTier::Light,
+        "standard" | "s" | "smart" => ModelTier::Standard,
+        "flagship" | "f" | "large" => ModelTier::Flagship,
         _ => ModelTier::Standard,
     }
 }
@@ -405,6 +430,35 @@ fn parse_pool_strategy(s: &str) -> ponyllm_core::pool::RoutingStrategy {
         "weighted_round_robin" | "weighted" => ponyllm_core::pool::RoutingStrategy::WeightedRoundRobin,
         _ => ponyllm_core::pool::RoutingStrategy::RoundRobin,
     }
+}
+
+/// Build a live pool entry from a stored key (P0-4). Antigravity
+/// credentials must go through their `TokenManager` — constructing a
+/// static bearer from refresh JSON both breaks auth and sends the raw
+/// refresh material as an `Authorization` header. Mirrors the CLI serve
+/// path; every hot pool mutation (create-key, delete-rebuild) uses it.
+fn build_pool_entry(
+    state: &AppState,
+    provider_name: &str,
+    p_sec: &ProviderSection,
+    key: &KeySection,
+) -> ApiKeyEntry {
+    if key.is_antigravity(p_sec.default_protocol, provider_name) {
+        if let Ok(cred) = key.to_antigravity_credential() {
+            let mgr = Arc::new(ponyllm_core::pool::AntigravityTokenManager::new(
+                &key.id,
+                cred,
+                state.http_client_for_provider(provider_name),
+            ));
+            return ApiKeyEntry::new_antigravity(&key.id, mgr, key.priority, key.weight);
+        }
+        tracing::warn!(
+            provider = %provider_name,
+            key_id = %key.id,
+            "stored key looks like Antigravity but credential parse failed; falling back to static entry"
+        );
+    }
+    ApiKeyEntry::new(&key.id, &key.api_key, key.priority, key.weight)
 }
 
 // ---------- handlers ----------
@@ -459,6 +513,10 @@ pub async fn handle_admin_providers(State(state): State<Arc<AppState>>) -> impl 
             cached_price: p.cached_price,
             output_price: p.output_price,
             models: p.model_specs.len(),
+            default_protocol: p.default_protocol.map(|proto| format!("{proto:?}").to_lowercase()),
+            chat_url: p.chat_url.clone(),
+            responses_url: p.responses_url.clone(),
+            messages_url: p.messages_url.clone(),
         })
         .collect();
     views.sort_by(|a, b| a.name.cmp(&b.name));
@@ -549,9 +607,9 @@ pub async fn handle_admin_create_provider(
         models: vec![default_model.clone()],
         model_specs: vec![],
         default_protocol: default_proto,
-        chat_url: payload.chat_url,
-        responses_url: payload.responses_url,
-        messages_url: payload.messages_url,
+        chat_url: payload.chat_url.clone(),
+        responses_url: payload.responses_url.clone(),
+        messages_url: payload.messages_url.clone(),
         proxy: payload.proxy,
     };
     state.config.write().providers.insert(name.clone(), p_cfg);
@@ -576,7 +634,139 @@ pub async fn handle_admin_create_provider(
             cached_price: payload.cached_price,
             output_price: payload.output_price,
             models: 0,
+            default_protocol: payload.default_protocol,
+            chat_url: payload.chat_url,
+            responses_url: payload.responses_url,
+            messages_url: payload.messages_url,
         }),
+    )
+        .into_response()
+}
+
+#[utoipa::path(put, path = "/api/admin/providers/{name}", params(("name" = String, Path)), request_body = UpdateProviderPayload, responses((status = 200, body = ProviderView)))]
+pub async fn handle_admin_update_provider(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    headers: HeaderMap,
+    Json(payload): Json<UpdateProviderPayload>,
+) -> impl IntoResponse {
+    if let Err(resp) = check_admin_write_enabled(&state) {
+        return resp;
+    }
+    let _lock = state.admin_write_lock.lock().await;
+    let mut file = match load_store_config(&state) {
+        Ok(f) => f,
+        Err(resp) => return resp,
+    };
+    if let Err(resp) = check_if_match(&headers, file.config_version) {
+        return resp;
+    }
+
+    let p = match file.providers.get_mut(&name) {
+        Some(p) => p,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": {"message": format!("provider '{name}' not found"), "code": "provider_not_found"}})),
+            )
+                .into_response();
+        }
+    };
+
+    if let Some(ref bu) = payload.base_url {
+        p.base_url = bu.clone();
+    }
+    if let Some(ref dm) = payload.default_model {
+        p.default_model = dm.clone();
+    }
+    if let Some(ref strat) = payload.strategy {
+        p.strategy = strat.clone();
+    }
+    if let Some(ref dp) = payload.default_protocol {
+        p.default_protocol = if dp.trim().is_empty() {
+            None
+        } else {
+            parse_protocol_opt(dp)
+        };
+    }
+    if let Some(ref chat_url) = payload.chat_url {
+        p.chat_url = if chat_url.trim().is_empty() {
+            None
+        } else {
+            Some(chat_url.trim().to_string())
+        };
+    }
+    if let Some(ref responses_url) = payload.responses_url {
+        p.responses_url = if responses_url.trim().is_empty() {
+            None
+        } else {
+            Some(responses_url.trim().to_string())
+        };
+    }
+    if let Some(ref messages_url) = payload.messages_url {
+        p.messages_url = if messages_url.trim().is_empty() {
+            None
+        } else {
+            Some(messages_url.trim().to_string())
+        };
+    }
+    if let Some(ref proxy) = payload.proxy {
+        p.proxy = if proxy.trim().is_empty() {
+            None
+        } else {
+            Some(proxy.trim().to_string())
+        };
+    }
+
+    let updated_p = p.clone();
+
+    let new_ver = match save_store_config(&state, &mut file) {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
+
+    if let Some(p_cfg) = state.config.write().providers.get_mut(&name) {
+        p_cfg.base_url = updated_p.base_url.clone();
+        p_cfg.default_model = updated_p.default_model.clone();
+        p_cfg.strategy = updated_p.strategy.clone();
+        p_cfg.default_protocol = updated_p.default_protocol;
+        p_cfg.chat_url = updated_p.chat_url.clone();
+        p_cfg.responses_url = updated_p.responses_url.clone();
+        p_cfg.messages_url = updated_p.messages_url.clone();
+        p_cfg.proxy = updated_p.proxy.clone();
+    }
+
+    if let Some(ref st) = payload.strategy {
+        let core_strat = parse_pool_strategy(st);
+        let new_pool = Arc::new(KeyPool::new(&name, core_strat));
+        for k in &updated_p.keys {
+            new_pool.add_key(build_pool_entry(&state, &name, &updated_p, k));
+        }
+        state.pools.write().insert(name.clone(), new_pool);
+    }
+
+    tracing::info!(provider = %name, "admin updated provider");
+
+    let view = ProviderView {
+        name: name.clone(),
+        base_url: updated_p.base_url,
+        default_model: updated_p.default_model,
+        strategy: updated_p.strategy,
+        billing_mode: format!("{:?}", updated_p.billing_mode),
+        input_price: updated_p.input_price,
+        cached_price: updated_p.cached_price,
+        output_price: updated_p.output_price,
+        models: updated_p.models.len(),
+        default_protocol: updated_p.default_protocol.map(|pr| format!("{pr:?}").to_lowercase()),
+        chat_url: updated_p.chat_url,
+        responses_url: updated_p.responses_url,
+        messages_url: updated_p.messages_url,
+    };
+
+    (
+        StatusCode::OK,
+        [("ETag", format!("\"{new_ver}\""))],
+        Json(view),
     )
         .into_response()
 }
@@ -640,6 +830,7 @@ pub async fn handle_admin_provider_models(
             let spec = m.thinking_spec();
             let effective_default = spec.resolve(None);
             ModelView {
+                provider: name.clone(),
                 name: m.name.clone(),
                 tier: format!("{:?}", m.tier),
                 context_window: m.context_window.clone(),
@@ -656,13 +847,14 @@ pub async fn handle_admin_provider_models(
 pub async fn handle_admin_models(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let cfg = state.config.read();
     let mut views: Vec<ModelView> = Vec::new();
-    let mut providers_sorted: Vec<_> = cfg.providers.values().collect();
-    providers_sorted.sort_by_key(|p| &p.base_url);
-    for p in providers_sorted {
+    let mut providers_sorted: Vec<_> = cfg.providers.iter().collect();
+    providers_sorted.sort_by_key(|(_, p)| &p.base_url);
+    for (p_name, p) in providers_sorted {
         for m in &p.model_specs {
             let spec = m.thinking_spec();
             let effective_default = spec.resolve(None);
             views.push(ModelView {
+                provider: p_name.clone(),
                 name: m.name.clone(),
                 tier: format!("{:?}", m.tier),
                 context_window: m.context_window.clone(),
@@ -783,6 +975,7 @@ pub async fn handle_admin_create_model(
     (
         StatusCode::CREATED,
         Json(ModelView {
+            provider: payload.provider.clone(),
             name: model_name,
             tier: format!("{tier:?}"),
             context_window: ctx_win,
@@ -928,6 +1121,7 @@ pub async fn handle_admin_update_model(
     tracing::info!(provider = %target_provider_name, model = %name, "admin updated model");
 
     Json(ModelView {
+        provider: target_provider_name.clone(),
         name,
         tier: format!("{:?}", existing_config.tier),
         context_window: existing_config.context_window,
@@ -1097,12 +1291,21 @@ pub async fn handle_admin_create_key(
     };
 
     if let Some(pool) = state.pools.read().get(&payload.provider) {
-        pool.add_key(ApiKeyEntry::new(
-            &key_id,
-            &payload.api_key,
-            payload.priority,
-            payload.weight,
-        ));
+        let entry = match file.providers.get(&payload.provider) {
+            Some(p_sec) => build_pool_entry(
+                &state,
+                &payload.provider,
+                p_sec,
+                &KeySection {
+                    id: key_id.clone(),
+                    api_key: payload.api_key.clone(),
+                    priority: payload.priority,
+                    weight: payload.weight,
+                },
+            ),
+            None => ApiKeyEntry::new(&key_id, &payload.api_key, payload.priority, payload.weight),
+        };
+        pool.add_key(entry);
     }
 
     tracing::info!(provider = %payload.provider, key_id = %key_id, "admin created key");
@@ -1189,10 +1392,17 @@ pub async fn handle_admin_delete_key(
         Err(resp) => return resp,
     };
 
-    // Hot-rebuild KeyPool with remaining keys
+    // Hot-rebuild KeyPool with remaining keys (P0-4: same Antigravity
+    // branching as create-key, never a bare static entry).
     let new_pool = Arc::new(KeyPool::new(&target_provider_name, strat));
-    for k in &remaining_keys {
-        new_pool.add_key(ApiKeyEntry::new(&k.id, &k.api_key, k.priority, k.weight));
+    if let Some(p_sec) = file.providers.get(&target_provider_name) {
+        for k in &remaining_keys {
+            new_pool.add_key(build_pool_entry(&state, &target_provider_name, p_sec, k));
+        }
+    } else {
+        for k in &remaining_keys {
+            new_pool.add_key(ApiKeyEntry::new(&k.id, &k.api_key, k.priority, k.weight));
+        }
     }
     state
         .pools
@@ -1259,12 +1469,27 @@ pub async fn handle_admin_test_key(
         };
 
         let start = Instant::now();
-        let mgr = ponyllm_core::pool::AntigravityTokenManager::new(&key_sec.id, cred, state.http_client.clone());
+        // Probe through the provider-effective client (P0-7): OAuth and the
+        // data plane must share the egress IP, otherwise Google sees the
+        // token minted on one IP and used on another (sharing-theft signal).
+        let mgr = ponyllm_core::pool::AntigravityTokenManager::new(
+            &key_sec.id,
+            cred,
+            state.http_client_for_provider(&p_name),
+        );
         let token_res = mgr.get_valid_token().await;
         let latency_ms = start.elapsed().as_millis() as u64;
 
         let test_view = match token_res {
             Ok(_) => {
+                // Desynchronize on-demand quota probes (B5): a fixed probe
+                // rhythm is a machine fingerprint; sub-second jitter here
+                // costs nothing on a manual/admin path.
+                let jitter_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.subsec_micros() % 1500)
+                    .unwrap_or(0);
+                tokio::time::sleep(std::time::Duration::from_millis(jitter_ms as u64)).await;
                 let quota_res = mgr.fetch_quota(Some(&base_url)).await;
                 let (quota_view, quota_msg) = match quota_res {
                     Ok(snapshot) => {
@@ -1563,6 +1788,7 @@ pub async fn handle_admin_auth_rotate(State(state): State<Arc<AppState>>) -> imp
         handle_admin_overview,
         handle_admin_providers,
         handle_admin_create_provider,
+        handle_admin_update_provider,
         handle_admin_delete_provider,
         handle_admin_provider_models,
         handle_admin_models,
@@ -1582,6 +1808,7 @@ pub async fn handle_admin_auth_rotate(State(state): State<Arc<AppState>>) -> imp
         OverviewView,
         ProviderView,
         CreateProviderPayload,
+        UpdateProviderPayload,
         ModelView,
         CreateModelPayload,
         UpdateModelPayload,
@@ -1607,7 +1834,7 @@ pub fn admin_routes() -> axum::Router<Arc<AppState>> {
         )
         .route(
             "/api/admin/providers/{name}",
-            delete(handle_admin_delete_provider),
+            put(handle_admin_update_provider).delete(handle_admin_delete_provider),
         )
         .route(
             "/api/admin/providers/{name}/models",

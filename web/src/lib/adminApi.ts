@@ -8,6 +8,7 @@ import type {
   KeyTestView,
   StrategyView,
   CreateProviderPayload,
+  UpdateProviderPayload,
   CreateModelPayload,
   UpdateModelPayload,
   CreateKeyPayload,
@@ -55,6 +56,12 @@ export const adminApi = {
   // Write APIs (With optional If-Match optimistic concurrency headers)
   createProvider(payload: CreateProviderPayload, ifMatchVersion?: number | string) {
     return alova.Post<ProviderView>('/api/admin/providers', payload, {
+      headers: ifMatchHeaders(ifMatchVersion),
+    });
+  },
+
+  updateProvider(name: string, payload: UpdateProviderPayload, ifMatchVersion?: number | string) {
+    return alova.Put<ProviderView>(`/api/admin/providers/${encodeURIComponent(name)}`, payload, {
       headers: ifMatchHeaders(ifMatchVersion),
     });
   },

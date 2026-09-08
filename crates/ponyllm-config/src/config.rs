@@ -469,6 +469,9 @@ impl ConfigFile {
 
     /// Save configuration atomically (write to temp file, sync, then rename)
     pub fn save_to_path(&self, path: &str) -> std::io::Result<()> {
+        #[cfg(unix)]
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
         let content = toml::to_string_pretty(self)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
@@ -481,7 +484,12 @@ impl ConfigFile {
         // Write-before-backup (WEB-06): if target exists, backup to <path>.bak
         if target_path.exists() {
             let backup_path = target_path.with_extension("toml.bak");
-            let _ = fs::copy(target_path, backup_path);
+            let _ = fs::copy(target_path, &backup_path);
+            // Backups hold the same key material (P0-8): restrict to owner.
+            #[cfg(unix)]
+            {
+                let _ = fs::set_permissions(&backup_path, fs::Permissions::from_mode(0o600));
+            }
         }
 
         let temp_file_name = format!(
@@ -493,11 +501,15 @@ impl ConfigFile {
         let temp_path = parent.join(temp_file_name);
 
         {
-            let mut file = fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .open(&temp_path)?;
+            let mut opts = fs::OpenOptions::new();
+            opts.write(true).create(true).truncate(true);
+            #[cfg(unix)]
+            opts.mode(0o600);
+
+            let mut file = opts.open(&temp_path)?;
+            #[cfg(unix)]
+            let _ = fs::set_permissions(&temp_path, fs::Permissions::from_mode(0o600));
+
             file.write_all(content.as_bytes())?;
             file.sync_all()?;
         }
@@ -506,6 +518,9 @@ impl ConfigFile {
             let _ = fs::remove_file(&temp_path);
             return Err(e);
         }
+
+        #[cfg(unix)]
+        let _ = fs::set_permissions(target_path, fs::Permissions::from_mode(0o600));
 
         Ok(())
     }
@@ -745,5 +760,27 @@ impl KeySection {
         } else {
             "***".to_string()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[cfg(unix)]
+    fn test_config_atomic_save_permission_0600() {
+        use std::os::unix::fs::PermissionsExt;
+        let test_dir = std::env::temp_dir().join(format!("ponyllm_test_{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&test_dir).unwrap();
+        let target = test_dir.join("config.toml");
+        let mut cfg = ConfigFile::load_or_default(None).unwrap();
+        cfg.gateway.api_key = "test-secret-key".to_string();
+        cfg.save_to_path(target.to_str().unwrap()).unwrap();
+
+        let meta = fs::metadata(&target).unwrap();
+        let mode = meta.permissions().mode() & 0o777;
+        let _ = fs::remove_dir_all(&test_dir);
+        assert_eq!(mode, 0o600, "Expected file mode 0600, but got {:o}", mode);
     }
 }

@@ -137,6 +137,30 @@ pub async fn handle_responses(
             }
         }
     }
+    // B6: Antigravity has no /v1/responses translation. Mixed routings
+    // simply skip those targets (failover covers them); an all-Antigravity
+    // routing set gets an explicit 501 instead of a misleading aggregated
+    // error after silently skipping every target.
+    if !targets.is_empty()
+        && targets
+            .iter()
+            .all(|t| t.upstream_protocol == ponyllm_core::pool::UpstreamProtocol::Antigravity)
+    {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(serde_json::json!({
+                "error": {
+                    "message": format!(
+                        "Model '{}' is served by Antigravity providers only, which do not support /v1/responses yet. Use /v1/chat/completions or /v1/messages.",
+                        requested_raw_model
+                    ),
+                    "type": "invalid_request_error",
+                    "code": "protocol_unsupported"
+                }
+            })),
+        )
+            .into_response();
+    }
     let routing_ms = routing_start.elapsed().as_secs_f64() * 1000.0;
     stages.lock().routing_ms = Some(routing_ms);
     state.emit(
@@ -331,7 +355,9 @@ pub async fn handle_responses(
                             axum::body::Body::from_stream(monitored)
                         }
                         ponyllm_core::pool::UpstreamProtocol::Antigravity => {
-                            unreachable!("Antigravity protocol targets are skipped for /v1/responses");
+                            // Filtered at translation time above; kept to
+                            // keep the match exhaustive, never reached.
+                            unreachable!("Antigravity targets skip /v1/responses at translation time");
                         }
                     };
                     let mut resp = axum::response::Response::new(body);
@@ -407,7 +433,9 @@ pub async fn handle_responses(
                     }
                     ponyllm_core::pool::UpstreamProtocol::Responses => resp_val,
                     ponyllm_core::pool::UpstreamProtocol::Antigravity => {
-                        unreachable!("Antigravity protocol targets are skipped for /v1/responses");
+                        // Filtered at translation time above; kept to keep
+                        // the match exhaustive, never reached.
+                        unreachable!("Antigravity targets skip /v1/responses at translation time");
                     }
                 };
                 let latency = start_time.elapsed();

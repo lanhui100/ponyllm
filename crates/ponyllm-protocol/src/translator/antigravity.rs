@@ -17,14 +17,18 @@ pub fn generate_antigravity_request_id(session_id: &str, step: u32) -> String {
     format!("agent/{}/{}/{}/{}", Uuid::new_v4(), now_ms, session_id, step)
 }
 
-/// Synthesize a session ID from the first user prompt text or fallback to random
-pub fn extract_or_generate_session_id(first_text: Option<&str>) -> String {
+/// Synthesize a session ID from the first user prompt text or fallback to random.
+/// `salt` isolates identical prompts across keys/accounts (B7): without it,
+/// the same first prompt under different credentials yields the same
+/// sessionId, a cross-account clustering signal. An empty salt preserves the
+/// legacy output exactly (embedded SDK path).
+pub fn extract_or_generate_session_id(first_text: Option<&str>, salt: &str) -> String {
     if let Some(text) = first_text {
         let trimmed = text.trim();
         if !trimmed.is_empty() {
             // Simple deterministic integer hash prefixed with negative sign to match CLI convention
             let mut hash: u64 = 5381;
-            for b in trimmed.bytes() {
+            for b in salt.bytes().chain(trimmed.bytes()) {
                 hash = ((hash << 5).wrapping_add(hash)).wrapping_add(b as u64);
             }
             let val = (hash & 0x7FFFFFFFFFFFFFFF) as i64;
@@ -49,7 +53,11 @@ pub fn extract_or_generate_session_id(first_text: Option<&str>) -> String {
 pub fn antigravity_thinking_config(model: &str, thinking: Option<ReasoningEffort>) -> Option<Value> {
     let effort = thinking?;
     if effort == ReasoningEffort::Off {
-        return Some(json!({ "includeThoughts": false }));
+        if !model.to_ascii_lowercase().contains("gemini-3") {
+            return Some(json!({ "includeThoughts": false, "thinkingBudget": 0 }));
+        } else {
+            return Some(json!({ "includeThoughts": false }));
+        }
     }
     let mut cfg = json!({ "includeThoughts": true });
     if !model.to_ascii_lowercase().contains("gemini-3") {
@@ -73,12 +81,15 @@ fn clamp_max_output_for_thinking_budget(gen_config: &mut Value, thinking_cfg: &V
         .get("thinkingBudget")
         .and_then(|v| v.as_u64());
     let Some(budget) = budget else { return };
+    if budget == 0 {
+        return;
+    }
     if let Some(cap) = gen_config
         .get_mut("maxOutputTokens")
         .and_then(|v| v.as_u64())
     {
-        if cap < budget {
-            gen_config["maxOutputTokens"] = json!(budget);
+        if cap <= budget {
+            gen_config["maxOutputTokens"] = json!(budget + 1024);
         }
     }
 }
@@ -91,6 +102,7 @@ pub fn chat_to_antigravity_request(
     model: &str,
     project_id: &str,
     thinking: Option<ReasoningEffort>,
+    session_salt: &str,
 ) -> Result<Value> {
     let mut contents = Vec::new();
     let mut first_user_text: Option<String> = None;
@@ -144,7 +156,13 @@ pub fn chat_to_antigravity_request(
         }
     }
 
-    let session_id = extract_or_generate_session_id(first_user_text.as_deref());
+    let session_id = extract_or_generate_session_id(first_user_text.as_deref(), session_salt);
+    // `trajectory_id` is one fresh id used consistently in BOTH the
+    // `requestId` segment and `labels.trajectory_id` (P0-5): the previous
+    // code generated a uuid for the requestId but labeled the session hash
+    // instead, a mismatch detectable by server-side stitching rules.
+    // `step` stays 1: the gateway is stateless per request and fabricating
+    // increments would add a worse fake pattern (see ADR).
     let trajectory_id = Uuid::new_v4().to_string();
     let request_id = generate_antigravity_request_id(&trajectory_id, 1);
     let used_claude = model.to_ascii_lowercase().contains("claude");
@@ -155,7 +173,7 @@ pub fn chat_to_antigravity_request(
         "labels": {
             "last_step_index": "1",
             "model_enum": model,
-            "trajectory_id": session_id,
+            "trajectory_id": trajectory_id,
             "used_claude": if used_claude { "true" } else { "false" },
             "used_claude_conservative": if used_claude { "true" } else { "false" }
         },
@@ -217,6 +235,7 @@ pub fn messages_to_antigravity_request(
     model: &str,
     project_id: &str,
     thinking: Option<ReasoningEffort>,
+    session_salt: &str,
 ) -> Result<Value> {
     let mut contents = Vec::new();
     let mut first_user_text: Option<String> = None;
@@ -243,7 +262,13 @@ pub fn messages_to_antigravity_request(
         }
     }
 
-    let session_id = extract_or_generate_session_id(first_user_text.as_deref());
+    let session_id = extract_or_generate_session_id(first_user_text.as_deref(), session_salt);
+    // `trajectory_id` is one fresh id used consistently in BOTH the
+    // `requestId` segment and `labels.trajectory_id` (P0-5): the previous
+    // code generated a uuid for the requestId but labeled the session hash
+    // instead, a mismatch detectable by server-side stitching rules.
+    // `step` stays 1: the gateway is stateless per request and fabricating
+    // increments would add a worse fake pattern (see ADR).
     let trajectory_id = Uuid::new_v4().to_string();
     let request_id = generate_antigravity_request_id(&trajectory_id, 1);
     let used_claude = model.to_ascii_lowercase().contains("claude");
@@ -254,7 +279,7 @@ pub fn messages_to_antigravity_request(
         "labels": {
             "last_step_index": "1",
             "model_enum": model,
-            "trajectory_id": session_id,
+            "trajectory_id": trajectory_id,
             "used_claude": if used_claude { "true" } else { "false" },
             "used_claude_conservative": if used_claude { "true" } else { "false" }
         },
@@ -312,6 +337,7 @@ pub fn antigravity_to_chat_response(
     // frames (`response.candidates` envelope).
     let target = resp.get("response").unwrap_or(resp);
     let mut full_text = String::new();
+    let mut reasoning_text = String::new();
     let mut finish_reason = "stop";
 
     if let Some(candidates) = target.get("candidates").and_then(|v| v.as_array()) {
@@ -325,8 +351,13 @@ pub fn antigravity_to_chat_response(
             }
             if let Some(parts) = first.get("content").and_then(|c| c.get("parts")).and_then(|p| p.as_array()) {
                 for p in parts {
+                    let is_thought = p.get("thought").and_then(|v| v.as_bool()).unwrap_or(false);
                     if let Some(txt) = p.get("text").and_then(|t| t.as_str()) {
-                        full_text.push_str(txt);
+                        if is_thought {
+                            reasoning_text.push_str(txt);
+                        } else {
+                            full_text.push_str(txt);
+                        }
                     }
                 }
             }
@@ -346,6 +377,14 @@ pub fn antigravity_to_chat_response(
         .and_then(|t| t.as_u64())
         .unwrap_or(prompt_tokens + completion_tokens);
 
+    let mut message = json!({
+        "role": "assistant",
+        "content": full_text
+    });
+    if !reasoning_text.is_empty() {
+        message["reasoning_content"] = json!(reasoning_text);
+    }
+
     json!({
         "id": format!("chatcmpl-{}", Uuid::new_v4().simple()),
         "object": "chat.completion",
@@ -354,10 +393,7 @@ pub fn antigravity_to_chat_response(
         "choices": [
             {
                 "index": 0,
-                "message": {
-                    "role": "assistant",
-                    "content": full_text
-                },
+                "message": message,
                 "finish_reason": finish_reason
             }
         ],
@@ -376,6 +412,7 @@ pub fn antigravity_to_messages_response(
 ) -> Value {
     let target = resp.get("response").unwrap_or(resp);
     let mut full_text = String::new();
+    let mut reasoning_text = String::new();
     let mut stop_reason = "end_turn";
 
     if let Some(candidates) = target.get("candidates").and_then(|v| v.as_array()) {
@@ -389,8 +426,13 @@ pub fn antigravity_to_messages_response(
             }
             if let Some(parts) = first.get("content").and_then(|c| c.get("parts")).and_then(|p| p.as_array()) {
                 for p in parts {
+                    let is_thought = p.get("thought").and_then(|v| v.as_bool()).unwrap_or(false);
                     if let Some(txt) = p.get("text").and_then(|t| t.as_str()) {
-                        full_text.push_str(txt);
+                        if is_thought {
+                            reasoning_text.push_str(txt);
+                        } else {
+                            full_text.push_str(txt);
+                        }
                     }
                 }
             }
@@ -406,17 +448,24 @@ pub fn antigravity_to_messages_response(
         .and_then(|t| t.as_u64())
         .unwrap_or(0);
 
+    let mut content_blocks = Vec::new();
+    if !reasoning_text.is_empty() {
+        content_blocks.push(json!({
+            "type": "thinking",
+            "thinking": reasoning_text
+        }));
+    }
+    content_blocks.push(json!({
+        "type": "text",
+        "text": full_text
+    }));
+
     json!({
         "id": format!("msg_{}", Uuid::new_v4().simple()),
         "type": "message",
         "role": "assistant",
         "model": model,
-        "content": [
-            {
-                "type": "text",
-                "text": full_text
-            }
-        ],
+        "content": content_blocks,
         "stop_reason": stop_reason,
         "stop_sequence": null,
         "usage": {
@@ -441,10 +490,16 @@ pub fn antigravity_chunk_to_chat_chunk(
     let first = candidates.first()?;
     
     let mut text = String::new();
+    let mut reasoning = String::new();
     if let Some(parts) = first.get("content").and_then(|c| c.get("parts")).and_then(|p| p.as_array()) {
         for p in parts {
+            let is_thought = p.get("thought").and_then(|v| v.as_bool()).unwrap_or(false);
             if let Some(t) = p.get("text").and_then(|v| v.as_str()) {
-                text.push_str(t);
+                if is_thought {
+                    reasoning.push_str(t);
+                } else {
+                    text.push_str(t);
+                }
             }
         }
     }
@@ -465,7 +520,7 @@ pub fn antigravity_chunk_to_chat_chunk(
     let delta = ChatChunkDelta {
         role: None,
         content: if text.is_empty() { None } else { Some(text) },
-        reasoning_content: None,
+        reasoning_content: if reasoning.is_empty() { None } else { Some(reasoning) },
         refusal: None,
         tool_calls: None,
     };
@@ -506,6 +561,40 @@ mod tests {
     use crate::openai::chat::SystemMessage;
 
     #[test]
+    fn test_trajectory_id_aligned_between_request_id_and_labels() {
+        // P0-5: requestId's trajectory segment and labels.trajectory_id
+        // must be the same id; sessionId stays an independent value.
+        let mut req = ChatCompletionRequest::default();
+        req.model = "claude-sonnet-4-6".to_string();
+        req.messages.push(ChatMessage::User(crate::openai::chat::UserMessage {
+            content: "Hello!".into(),
+            name: None,
+        }));
+
+        let env = chat_to_antigravity_request(&req, "claude-sonnet-4-6", "proj-1", None, "").unwrap();
+        let request_id = env["requestId"].as_str().unwrap();
+        // agent/{uuid}/{ms}/{trajectory}/{step}
+        let segs: Vec<&str> = request_id.split('/').collect();
+        assert_eq!((segs[0], segs.len()), ("agent", 5), "got {}", request_id);
+        let traj_in_id = segs[3];
+        assert_eq!(env["request"]["labels"]["trajectory_id"].as_str().unwrap(), traj_in_id);
+        // sessionId is a distinct value (prompt hash), not the trajectory.
+        assert_ne!(env["request"]["sessionId"].as_str().unwrap(), traj_in_id);
+    }
+
+    #[test]
+    fn test_session_id_isolated_by_salt() {
+        // B7: identical prompts under different key salts must not share
+        // a sessionId; empty salt preserves the legacy digest.
+        let a = extract_or_generate_session_id(Some("Count from 1 to 5."), "key-1");
+        let b = extract_or_generate_session_id(Some("Count from 1 to 5."), "key-2");
+        let legacy = extract_or_generate_session_id(Some("Count from 1 to 5."), "");
+        assert_ne!(a, b);
+        assert_ne!(a, legacy);
+        assert_ne!(b, legacy);
+    }
+
+    #[test]
     fn test_chat_to_antigravity_envelope() {
         let mut req = ChatCompletionRequest::default();
         req.model = "gemini-3.8-flash-low".to_string();
@@ -518,7 +607,7 @@ mod tests {
             name: None,
         }));
 
-        let env = chat_to_antigravity_request(&req, "gemini-3.8-flash-low", "aicode-consumers", None).unwrap();
+        let env = chat_to_antigravity_request(&req, "gemini-3.8-flash-low", "aicode-consumers", None, "").unwrap();
         assert_eq!(env["project"], "aicode-consumers");
         assert_eq!(env["model"], "gemini-3.8-flash-low");
         assert_eq!(env["userAgent"], "antigravity");
@@ -534,10 +623,14 @@ mod tests {
         // Legacy: no explicit effort → untouched wire shape.
         assert!(antigravity_thinking_config("gemini-2.5-flash", None).is_none());
 
-        // Off suppresses thought return without a budget key.
+        // Off suppresses thought return with thinkingBudget: 0 for gemini-2.x/claude.
         let off = antigravity_thinking_config("gemini-2.5-flash", Some(ReasoningEffort::Off)).unwrap();
         assert_eq!(off["includeThoughts"], false);
-        assert!(off.get("thinkingBudget").is_none());
+        assert_eq!(off["thinkingBudget"], 0);
+
+        let off_g3 = antigravity_thinking_config("gemini-3.8-flash-low", Some(ReasoningEffort::Off)).unwrap();
+        assert_eq!(off_g3["includeThoughts"], false);
+        assert!(off_g3.get("thinkingBudget").is_none());
 
         // Tiered budgets on budget-honoring models.
         let low = antigravity_thinking_config("gemini-2.5-flash", Some(ReasoningEffort::Low)).unwrap();
@@ -566,7 +659,7 @@ mod tests {
             name: None,
         }));
 
-        let env = chat_to_antigravity_request(&req, "gemini-2.5-flash", "aicode-consumers", Some(ReasoningEffort::High)).unwrap();
+        let env = chat_to_antigravity_request(&req, "gemini-2.5-flash", "aicode-consumers", Some(ReasoningEffort::High), "").unwrap();
         assert_eq!(env["request"]["generationConfig"]["thinkingConfig"]["thinkingBudget"], 16384);
     }
 
@@ -594,18 +687,83 @@ mod tests {
             extra: Default::default(),
         };
 
-        // High budget (16384) exceeds the 500 cap → raised to the budget.
-        let env = messages_to_antigravity_request(&req, "gemini-2.5-flash", "aicode-consumers", Some(ReasoningEffort::High)).unwrap();
-        assert_eq!(env["request"]["generationConfig"]["maxOutputTokens"], 16384);
+        // High budget (16384) exceeds the 500 cap → raised to budget + 1024 (17408) to satisfy maxOutputTokens > thinkingBudget.
+        let env = messages_to_antigravity_request(&req, "gemini-2.5-flash", "aicode-consumers", Some(ReasoningEffort::High), "").unwrap();
+        assert_eq!(env["request"]["generationConfig"]["maxOutputTokens"], 17408);
 
-        // Low budget (1024) exceeds the 500 cap → raised to 1024.
-        let env = messages_to_antigravity_request(&req, "gemini-2.5-flash", "aicode-consumers", Some(ReasoningEffort::Low)).unwrap();
-        assert_eq!(env["request"]["generationConfig"]["maxOutputTokens"], 1024);
+        // Low budget (1024) exceeds the 500 cap → raised to 2048.
+        let env = messages_to_antigravity_request(&req, "gemini-2.5-flash", "aicode-consumers", Some(ReasoningEffort::Low), "").unwrap();
+        assert_eq!(env["request"]["generationConfig"]["maxOutputTokens"], 2048);
 
         // No thinking → caller's cap preserved verbatim (legacy).
-        let env = messages_to_antigravity_request(&req, "gemini-2.5-flash", "aicode-consumers", None).unwrap();
+        let env = messages_to_antigravity_request(&req, "gemini-2.5-flash", "aicode-consumers", None, "").unwrap();
         assert_eq!(env["request"]["generationConfig"]["maxOutputTokens"], 500);
         assert!(env["request"]["generationConfig"].get("thinkingConfig").is_none());
+    }
+
+    #[test]
+    fn test_gemini_thinking_off_budget_zero() {
+        let cfg = antigravity_thinking_config("gemini-2.5-flash", Some(ReasoningEffort::Off)).unwrap();
+        assert_eq!(cfg["includeThoughts"], false);
+        assert_eq!(cfg["thinkingBudget"], 0);
+
+        let claude_cfg = antigravity_thinking_config("claude-sonnet-4-6", Some(ReasoningEffort::Off)).unwrap();
+        assert_eq!(claude_cfg["includeThoughts"], false);
+        assert_eq!(claude_cfg["thinkingBudget"], 0);
+    }
+
+    #[test]
+    fn test_claude_thinking_budget_clamping_strict_greater() {
+        let mut gen_cfg = json!({
+            "maxOutputTokens": 1024
+        });
+        let thinking_cfg = json!({
+            "thinkingBudget": 1024
+        });
+        clamp_max_output_for_thinking_budget(&mut gen_cfg, &thinking_cfg);
+        assert_eq!(gen_cfg["maxOutputTokens"], 2048);
+    }
+
+    #[test]
+    fn test_thought_content_separated_to_reasoning_content() {
+        let ant_resp = json!({
+            "candidates": [
+                {
+                    "content": {
+                        "role": "model",
+                        "parts": [
+                            {
+                                "thought": true,
+                                "text": "Analyzing the question..."
+                            },
+                            {
+                                "text": "Here is the direct answer."
+                            }
+                        ]
+                    },
+                    "finishReason": "STOP"
+                }
+            ],
+            "usageMetadata": {
+                "promptTokenCount": 10,
+                "candidatesTokenCount": 25,
+                "totalTokenCount": 35
+            }
+        });
+
+        // Chat response separation
+        let chat_resp = antigravity_to_chat_response(&ant_resp, "gemini-2.5-flash");
+        assert_eq!(chat_resp["choices"][0]["message"]["content"], "Here is the direct answer.");
+        assert_eq!(chat_resp["choices"][0]["message"]["reasoning_content"], "Analyzing the question...");
+
+        // Messages response separation
+        let msg_resp = antigravity_to_messages_response(&ant_resp, "claude-sonnet-4-6");
+        let content_blocks = msg_resp["content"].as_array().unwrap();
+        assert_eq!(content_blocks.len(), 2);
+        assert_eq!(content_blocks[0]["type"], "thinking");
+        assert_eq!(content_blocks[0]["thinking"], "Analyzing the question...");
+        assert_eq!(content_blocks[1]["type"], "text");
+        assert_eq!(content_blocks[1]["text"], "Here is the direct answer.");
     }
 
     #[test]

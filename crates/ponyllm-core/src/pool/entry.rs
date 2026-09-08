@@ -4,6 +4,24 @@ use std::time::{Duration, Instant};
 use parking_lot::RwLock;
 use crate::pool::antigravity::AntigravityTokenManager;
 
+/// Process-wide jitter counter: mixed with wall-clock nanos so concurrent
+/// instances and synchronized retries desynchronize (B1). Not cryptographic,
+/// only backoff decorrelation.
+static JITTER_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+fn backoff_jitter_millis(spread: u64) -> u64 {
+    let n = JITTER_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as u64)
+        .unwrap_or(0);
+    // Knuth multiplicative mix of counter and clock, then bound.
+    let mixed = n
+        .wrapping_mul(0x9E3779B97F4A7C15)
+        .wrapping_add(nanos.rotate_left(17));
+    (mixed >> 11) % spread.max(1)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyState {
     Active,
@@ -14,7 +32,11 @@ pub enum KeyState {
 #[derive(Debug, Clone)]
 pub enum PoolErrorType {
     RateLimit { retry_after: Option<Duration> },
-    QuotaExhausted,
+    /// Quota exhaustion cools the key down (never permanently disables):
+    /// real quota recovers at `resetTime`, fake 429-style throttling clears
+    /// on its own. `retry_after` defaults to a conservative 15 minutes when
+    /// the upstream gave no explicit signal.
+    QuotaExhausted { retry_after: Option<Duration> },
     AuthInvalid,
     PolicyViolation,
     ServerError,
@@ -27,6 +49,7 @@ pub struct KeyStats {
     pub successful_requests: AtomicU64,
     pub failed_requests: AtomicU64,
     pub consecutive_failures: AtomicUsize,
+    pub policy_violations: AtomicUsize,
     pub cooldown_until: RwLock<Option<Instant>>,
     pub disabled_reason: RwLock<Option<String>>,
 }
@@ -38,6 +61,7 @@ impl Default for KeyStats {
             successful_requests: AtomicU64::new(0),
             failed_requests: AtomicU64::new(0),
             consecutive_failures: AtomicUsize::new(0),
+            policy_violations: AtomicUsize::new(0),
             cooldown_until: RwLock::new(None),
             disabled_reason: RwLock::new(None),
         }
@@ -66,7 +90,6 @@ impl std::fmt::Debug for KeyAuth {
     }
 }
 
-#[derive(Debug)]
 pub struct ApiKeyEntry {
     pub id: String,
     pub api_key: String,
@@ -74,6 +97,20 @@ pub struct ApiKeyEntry {
     pub priority: u32,
     pub weight: u32,
     pub stats: KeyStats,
+}
+
+// Manual Debug: `#[derive(Debug)]` would print `api_key` verbatim into
+// logs/dumps (P0-8). Only a short non-sensitive preview is emitted.
+impl std::fmt::Debug for ApiKeyEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ApiKeyEntry")
+            .field("id", &self.id)
+            .field("api_key", &crate::telemetry::FlightRecorder::sanitize_key(&self.api_key))
+            .field("auth", &self.auth)
+            .field("priority", &self.priority)
+            .field("weight", &self.weight)
+            .finish()
+    }
 }
 
 impl ApiKeyEntry {
@@ -180,6 +217,7 @@ impl ApiKeyEntry {
     pub fn record_transient_failure(&self) {
         self.stats.total_requests.fetch_add(1, Ordering::Relaxed);
         self.stats.failed_requests.fetch_add(1, Ordering::Relaxed);
+        self.stats.consecutive_failures.fetch_add(1, Ordering::SeqCst);
     }
 
     /// Record a failed request and transition state accordingly
@@ -190,16 +228,30 @@ impl ApiKeyEntry {
 
         match err_type {
             PoolErrorType::RateLimit { retry_after } => {
-                let duration = retry_after.unwrap_or_else(|| {
-                    let base_multiplier = 2u64.saturating_pow((consecutive as u32).saturating_sub(1));
-                    let base_secs = (3u64.saturating_mul(base_multiplier)).min(60);
-                    let jitter_millis = (consecutive as u64 * 37 + 13) % 500;
-                    Duration::from_millis(base_secs * 1000 + jitter_millis)
-                });
+                let duration = match retry_after {
+                    Some(d) if d >= Duration::from_secs(300) => {
+                        // Long policy-driven coolings (geo-gate #1008,
+                        // quota): escalate 5m -> 30m -> 2h cap across
+                        // consecutive hits so a sustained storm backs off
+                        // instead of knocking every 5 minutes (B3).
+                        let step = consecutive.min(4).saturating_sub(1) as u32;
+                        d.saturating_mul(2u32.saturating_pow(step)).min(Duration::from_secs(7200))
+                    }
+                    Some(d) => d,
+                    None => {
+                        let base_multiplier = 2u64.saturating_pow((consecutive as u32).saturating_sub(1));
+                        let base_secs = (3u64.saturating_mul(base_multiplier)).min(60);
+                        Duration::from_millis(base_secs * 1000 + backoff_jitter_millis(500))
+                    }
+                };
                 *self.stats.cooldown_until.write() = Some(Instant::now() + duration);
             }
-            PoolErrorType::QuotaExhausted => {
-                *self.stats.disabled_reason.write() = Some("Quota exceeded".to_string());
+            PoolErrorType::QuotaExhausted { retry_after } => {
+                // Quota exhaustion is transient by nature (real quota
+                // recovers at resetTime; throttling clears on its own), so
+                // it cools down instead of permanently disabling the key.
+                let duration = retry_after.unwrap_or(Duration::from_secs(15 * 60));
+                *self.stats.cooldown_until.write() = Some(Instant::now() + duration);
             }
             PoolErrorType::AuthInvalid => {
                 *self.stats.disabled_reason.write() = Some("Authentication failed (invalid key)".to_string());

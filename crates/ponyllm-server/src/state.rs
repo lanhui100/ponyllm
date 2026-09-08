@@ -316,6 +316,30 @@ impl AppState {
         self.http_client_for_target(provider_name, "")
     }
 
+    /// Best-effort Antigravity identity for envelope translation (P0-6, B7):
+    /// `(project_id, key_id)` from the provider's pool. Prefers an Active
+    /// key's manager so cooling/disabled credentials don't donate a stale
+    /// project; the key id salts the session hash so identical prompts
+    /// under different credentials don't cluster. Falls back to any
+    /// Antigravity manager, else `None` (callers use defaults).
+    /// Read-only: never touches the round-robin counters. Cross-key
+    /// failover inside one request can still mix projects —
+    /// single-project-per-provider is the supported topology until
+    /// translation moves per-attempt.
+    pub fn peek_antigravity_identity(&self, provider_name: &str) -> Option<(String, String)> {
+        let pools = self.pools.read();
+        let pool = pools.get(provider_name)?;
+        let keys = pool.snapshot_keys();
+        keys.iter()
+            .filter_map(|k| {
+                let mgr = k.antigravity_manager()?;
+                let state = k.current_state();
+                Some((state == ponyllm_core::pool::KeyState::Active, mgr.project_id(), k.id.clone()))
+            })
+            .max_by_key(|(active, _, _)| *active)
+            .map(|(_, project, key_id)| (project, key_id))
+    }
+
     pub fn reload_config_with_pools(
         &self,
         new_config: GatewayConfig,

@@ -34,18 +34,18 @@ function handleLogout() {
           Dashboard
         </router-link>
         <router-link
-          to="/recorder"
-          class="px-3.5 py-1.5 rounded-lg transition-colors text-slate-600 hover:text-slate-900 hover:bg-slate-100/70"
-          :class="{ '!text-orange-600 !bg-orange-50/90 font-semibold': route.path === '/recorder' }"
-        >
-          可观测性
-        </router-link>
-        <router-link
           to="/governance"
           class="px-3.5 py-1.5 rounded-lg transition-colors text-slate-600 hover:text-slate-900 hover:bg-slate-100/70"
           :class="{ '!text-orange-600 !bg-orange-50/90 font-semibold': route.path === '/governance' }"
         >
           模型管理
+        </router-link>
+        <router-link
+          to="/recorder"
+          class="px-3.5 py-1.5 rounded-lg transition-colors text-slate-600 hover:text-slate-900 hover:bg-slate-100/70"
+          :class="{ '!text-orange-600 !bg-orange-50/90 font-semibold': route.path === '/recorder' }"
+        >
+          可观测性
         </router-link>
       </nav>
     </div>

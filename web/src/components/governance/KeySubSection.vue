@@ -6,6 +6,7 @@ import UiButton from '../ui/UiButton.vue';
 import UiBadge from '../ui/UiBadge.vue';
 import UiTooltip from '../ui/UiTooltip.vue';
 import UiCollapsible from '../ui/UiCollapsible.vue';
+import { formatKeyState } from '../../utils/format';
 
 const props = defineProps<{
   providerName: string;
@@ -13,6 +14,7 @@ const props = defineProps<{
   adminWriteEnabled: boolean;
   keyTestResults: Record<string, KeyTestView>;
   testingKeyIds: Set<string>;
+  defaultExpanded?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -21,6 +23,7 @@ const emit = defineEmits<{
   (e: 'test-single', id: string): Promise<void>;
 }>();
 
+const isExpanded = ref(props.defaultExpanded ?? false);
 const isAdding = ref(false);
 const showAdvanced = ref(false);
 const submitting = ref(false);
@@ -44,6 +47,7 @@ function openAddInline() {
   };
   formError.value = null;
   showAdvanced.value = false;
+  isExpanded.value = true;
   isAdding.value = true;
 }
 
@@ -95,34 +99,51 @@ async function handleDelete(id: string) {
 
 <template>
   <div class="space-y-2">
-    <!-- 标题与快捷添加按钮 -->
-    <div class="flex items-center justify-between pb-1">
+    <!-- 标题与快捷添加按钮 (支持独立折叠) -->
+    <div
+      class="flex items-center justify-between pb-1 cursor-pointer select-none"
+      @click="isExpanded = !isExpanded"
+    >
       <div class="flex items-center gap-1.5 text-xs font-semibold text-slate-700">
         <Icons name="key" size="13" class="text-amber-500" />
-        密钥凭证 ({{ keys.length }})
+        密钥 ({{ keys.length }})
         <UiTooltip content="网关向该厂商转发请求所使用的 API 密钥池，支持多 Key 负载均衡">
           <Icons name="info" size="12" class="text-slate-400 cursor-pointer" />
         </UiTooltip>
       </div>
 
-      <UiButton
-        variant="ghost"
-        size="sm"
-        :disabled="!adminWriteEnabled || isAdding"
-        data-testid="add-key-btn"
-        class="text-indigo-600 hover:text-indigo-700 hover:bg-indigo-50/60 font-medium px-2.5 py-1 text-xs"
-        @click="openAddInline"
-      >
-        <Icons name="plus" size="13" />
-        密钥
-      </UiButton>
+      <div class="flex items-center gap-1" @click.stop>
+        <UiButton
+          variant="ghost"
+          size="sm"
+          :disabled="!adminWriteEnabled || isAdding"
+          data-testid="add-key-btn"
+          class="text-indigo-600 hover:text-indigo-700 hover:bg-indigo-50/60 font-medium px-2.5 py-1 text-xs"
+          @click="openAddInline"
+        >
+          <Icons name="plus" size="13" />
+          密钥
+        </UiButton>
+        <UiButton
+          variant="ghost"
+          size="icon"
+          class="text-slate-400 hover:text-slate-600"
+          data-testid="toggle-keys-btn"
+          @click="isExpanded = !isExpanded"
+        >
+          <Icons :name="isExpanded ? 'chevron-down' : 'chevron-right'" size="14" />
+        </UiButton>
+      </div>
     </div>
 
-    <!-- 行内平滑展开新建表单 -->
-    <UiCollapsible :open="isAdding">
-      <div class="p-4 bg-slate-50/90 rounded-xl mb-3 text-xs space-y-3">
-        <div class="flex items-center justify-between">
-          <span class="font-semibold text-slate-800 text-sm">新建密钥凭证</span>
+    <!-- 可独立折叠的内容容器 (默认折叠) -->
+    <UiCollapsible :open="isExpanded">
+      <div class="pt-2 space-y-2">
+        <!-- 行内平滑展开新建表单 -->
+        <UiCollapsible :open="isAdding">
+          <div class="p-4 bg-slate-50/90 rounded-xl mb-3 text-xs space-y-3">
+            <div class="flex items-center justify-between">
+              <span class="font-semibold text-slate-800 text-sm">新建密钥</span>
           <button
             type="button"
             class="text-slate-400 hover:text-slate-600 cursor-pointer"
@@ -233,7 +254,7 @@ async function handleDelete(id: string) {
           <span class="font-mono text-slate-800 font-semibold text-xs truncate">{{ k.id }}</span>
           <span class="font-mono text-slate-400 text-xs">{{ k.masked_key }}</span>
           <UiBadge :variant="k.state === 'active' ? 'success' : 'warning'">
-            {{ k.state === 'active' ? '就绪' : k.state }}
+            {{ formatKeyState(k.state) }}
           </UiBadge>
         </div>
 
@@ -266,7 +287,7 @@ async function handleDelete(id: string) {
           </UiTooltip>
 
           <!-- 删除纯图标按钮 -->
-          <UiTooltip content="移除此密钥凭证">
+          <UiTooltip content="移除此密钥">
             <UiButton
               variant="ghost"
               size="icon"
@@ -281,5 +302,7 @@ async function handleDelete(id: string) {
         </div>
       </div>
     </div>
+    </div>
+  </UiCollapsible>
   </div>
 </template>

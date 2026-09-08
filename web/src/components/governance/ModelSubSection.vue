@@ -7,11 +7,13 @@ import UiBadge from '../ui/UiBadge.vue';
 import UiTooltip from '../ui/UiTooltip.vue';
 import UiCollapsible from '../ui/UiCollapsible.vue';
 import ThinkingEffortSelect from './ThinkingEffortSelect.vue';
+import { formatTierLabel } from '../../utils/format';
 
 const props = defineProps<{
   providerName: string;
   models: ModelView[];
   adminWriteEnabled: boolean;
+  defaultExpanded?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -19,6 +21,8 @@ const emit = defineEmits<{
   (e: 'update', name: string, payload: UpdateModelPayload): Promise<void>;
   (e: 'delete', name: string): Promise<void>;
 }>();
+
+const isExpanded = ref(props.defaultExpanded ?? false);
 
 const MODEL_TIERS = [
   { value: 'Smart', label: '主力 (Standard)' },
@@ -70,11 +74,13 @@ function openAddInline() {
   isCustomContext.value = false;
   formError.value = null;
   showAdvanced.value = false;
+  isExpanded.value = true;
   isAdding.value = true;
 }
 
 function openEditInline(model: ModelView) {
   isAdding.value = false;
+  isExpanded.value = true;
   editingModelName.value = model.name;
   const cw = model.context_window || '128k';
   const isPreset = (CONTEXT_PRESETS as readonly string[]).includes(cw.toLowerCase());
@@ -179,34 +185,51 @@ function getTierBadgeVariant(tier?: string) {
 
 <template>
   <div class="space-y-2">
-    <!-- 标题与快捷添加按钮 -->
-    <div class="flex items-center justify-between pb-1">
+    <!-- 标题与快捷添加按钮 (支持独立折叠) -->
+    <div
+      class="flex items-center justify-between pb-1 cursor-pointer select-none"
+      @click="isExpanded = !isExpanded"
+    >
       <div class="flex items-center gap-1.5 text-xs font-semibold text-slate-700">
         <Icons name="sparkles" size="14" class="text-indigo-500" />
-        挂载模型 ({{ models.length }})
+        模型 ({{ models.length }})
         <UiTooltip content="该服务商对外暴露的可路由模型字典及其上下文与思考强度参数">
           <Icons name="info" size="12" class="text-slate-400 cursor-pointer" />
         </UiTooltip>
       </div>
 
-      <UiButton
-        variant="ghost"
-        size="sm"
-        :disabled="!adminWriteEnabled || isAdding"
-        data-testid="add-model-btn"
-        class="text-indigo-600 hover:text-indigo-700 hover:bg-indigo-50/60 font-medium px-2.5 py-1 text-xs"
-        @click="openAddInline"
-      >
-        <Icons name="plus" size="13" />
-        模型
-      </UiButton>
+      <div class="flex items-center gap-1" @click.stop>
+        <UiButton
+          variant="ghost"
+          size="sm"
+          :disabled="!adminWriteEnabled || isAdding"
+          data-testid="add-model-btn"
+          class="text-indigo-600 hover:text-indigo-700 hover:bg-indigo-50/60 font-medium px-2.5 py-1 text-xs"
+          @click="openAddInline"
+        >
+          <Icons name="plus" size="13" />
+          模型
+        </UiButton>
+        <UiButton
+          variant="ghost"
+          size="icon"
+          class="text-slate-400 hover:text-slate-600"
+          data-testid="toggle-models-btn"
+          @click="isExpanded = !isExpanded"
+        >
+          <Icons :name="isExpanded ? 'chevron-down' : 'chevron-right'" size="14" />
+        </UiButton>
+      </div>
     </div>
 
-    <!-- 行内平滑展开新建模型表单 -->
-    <UiCollapsible :open="isAdding">
-      <div class="p-4 bg-slate-50/90 rounded-xl mb-3 text-xs space-y-3">
-        <div class="flex items-center justify-between">
-          <span class="font-semibold text-slate-800 text-sm">新建模型配置</span>
+    <!-- 可独立折叠的内容容器 (默认折叠) -->
+    <UiCollapsible :open="isExpanded">
+      <div class="pt-2 space-y-2">
+        <!-- 行内平滑展开新建模型表单 -->
+        <UiCollapsible :open="isAdding">
+          <div class="p-4 bg-slate-50/90 rounded-xl mb-3 text-xs space-y-3">
+            <div class="flex items-center justify-between">
+              <span class="font-semibold text-slate-800 text-sm">新建模型配置</span>
           <button
             type="button"
             class="text-slate-400 hover:text-slate-600 cursor-pointer"
@@ -440,7 +463,7 @@ function getTierBadgeVariant(tier?: string) {
           <div class="flex items-center gap-2.5 min-w-0">
             <span class="font-semibold text-slate-800 text-sm truncate">{{ m.name }}</span>
             <UiBadge :variant="getTierBadgeVariant(m.tier)">
-              {{ m.tier }}
+              {{ formatTierLabel(m.tier) }}
             </UiBadge>
             <span class="text-slate-400 text-xs font-mono">{{ m.context_window }}</span>
 
@@ -706,5 +729,7 @@ function getTierBadgeVariant(tier?: string) {
         </UiCollapsible>
       </div>
     </div>
+    </div>
+  </UiCollapsible>
   </div>
 </template>

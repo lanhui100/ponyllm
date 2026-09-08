@@ -307,6 +307,42 @@
       }
     },
     "/api/admin/providers/{name}": {
+      "put": {
+        "tags": [],
+        "operationId": "handle_admin_update_provider",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateProviderPayload"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProviderView"
+                }
+              }
+            }
+          }
+        }
+      },
       "delete": {
         "tags": [],
         "operationId": "handle_admin_delete_provider",
@@ -737,6 +773,7 @@
       "ModelView": {
         "type": "object",
         "required": [
+          "provider",
           "name",
           "tier",
           "context_window",
@@ -755,6 +792,9 @@
               "string",
               "null"
             ]
+          },
+          "provider": {
+            "type": "string"
           },
           "thinking_default": {
             "type": "string"
@@ -845,12 +885,30 @@
             "type": "number",
             "format": "double"
           },
+          "chat_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "default_model": {
             "type": "string"
+          },
+          "default_protocol": {
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "input_price": {
             "type": "number",
             "format": "double"
+          },
+          "messages_url": {
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "models": {
             "type": "integer",
@@ -862,6 +920,12 @@
           "output_price": {
             "type": "number",
             "format": "double"
+          },
+          "responses_url": {
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "strategy": {
             "type": "string"
@@ -994,6 +1058,59 @@
             ]
           },
           "tier": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "UpdateProviderPayload": {
+        "type": "object",
+        "properties": {
+          "base_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "chat_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "default_model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "default_protocol": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "messages_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "proxy": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "responses_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "strategy": {
             "type": [
               "string",
               "null"

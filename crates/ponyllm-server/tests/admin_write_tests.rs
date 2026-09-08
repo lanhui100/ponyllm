@@ -184,6 +184,7 @@ async fn test_admin_write_disabled_gate() {
 
     let endpoints = vec![
         ("POST", "/api/admin/providers", serde_json::json!({"name": "test", "base_url": "http://example.com"})),
+        ("PUT", "/api/admin/providers/openai", serde_json::json!({"strategy": "speed"})),
         ("DELETE", "/api/admin/providers/openai", serde_json::json!({})),
         ("POST", "/api/admin/models", serde_json::json!({"provider": "openai", "name": "m1"})),
         ("PUT", "/api/admin/models/gpt-4o", serde_json::json!({"context_window": "256K"})),
@@ -344,11 +345,58 @@ async fn test_provider_cud() {
         .unwrap();
     assert_eq!(dup_resp.status(), StatusCode::CONFLICT);
 
+    // 2.1 Update Provider protocol and endpoints
+    let update_resp = client
+        .put(format!("http://{}/api/admin/providers/google", harness.addr))
+        .header("Authorization", &auth)
+        .header("If-Match", "\"1\"")
+        .json(&serde_json::json!({
+            "strategy": "priority",
+            "default_protocol": "messages",
+            "chat_url": "https://custom-chat.example.com"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(update_resp.status(), StatusCode::OK);
+    let updated: serde_json::Value = update_resp.json().await.unwrap();
+    assert_eq!(updated["strategy"], "priority");
+    assert_eq!(updated["default_protocol"], "anthropic");
+    assert_eq!(updated["chat_url"], "https://custom-chat.example.com");
+
+    // 2.2 Clear endpoint by sending empty string
+    let clear_resp = client
+        .put(format!("http://{}/api/admin/providers/google", harness.addr))
+        .header("Authorization", &auth)
+        .header("If-Match", "\"2\"")
+        .json(&serde_json::json!({
+            "chat_url": ""
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(clear_resp.status(), StatusCode::OK);
+    let cleared: serde_json::Value = clear_resp.json().await.unwrap();
+    assert!(cleared["chat_url"].is_null());
+
+    // 2.3 If-Match precondition failure
+    let conflict_resp = client
+        .put(format!("http://{}/api/admin/providers/google", harness.addr))
+        .header("Authorization", &auth)
+        .header("If-Match", "\"1\"")
+        .json(&serde_json::json!({
+            "strategy": "speed"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(conflict_resp.status(), StatusCode::PRECONDITION_FAILED);
+
     // 3. Delete Provider
     let del_resp = client
         .delete(format!("http://{}/api/admin/providers/google", harness.addr))
         .header("Authorization", &auth)
-        .header("If-Match", "\"1\"")
+        .header("If-Match", "\"3\"")
         .send()
         .await
         .unwrap();
@@ -358,7 +406,7 @@ async fn test_provider_cud() {
     let not_found_resp = client
         .delete(format!("http://{}/api/admin/providers/non_existent", harness.addr))
         .header("Authorization", &auth)
-        .header("If-Match", "\"2\"")
+        .header("If-Match", "\"4\"")
         .send()
         .await
         .unwrap();

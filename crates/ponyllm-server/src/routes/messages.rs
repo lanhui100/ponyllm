@@ -338,7 +338,11 @@ pub async fn handle_messages(
                 let url = target.antigravity_url(is_streaming);
                 // Explicit-only thinking passthrough (see chat.rs).
                 let thinking = requested_thinking.map(|_| effective_thinking);
-                let val = match messages_to_antigravity_request(&target_req, &target.physical_model, "aicode-consumers", thinking) {
+                // Per-credential project (P0-6, see chat.rs).
+                let (ag_project, ag_salt) = state
+                    .peek_antigravity_identity(&target.provider_name)
+                    .unwrap_or_else(|| ("aicode-consumers".to_string(), String::new()));
+                let val = match messages_to_antigravity_request(&target_req, &target.physical_model, &ag_project, thinking, &ag_salt) {
                     Ok(v) => v,
                     Err(e) => {
                         last_error = format!("Translation error for {}: {}", target.provider_name, e);
@@ -454,7 +458,7 @@ pub async fn handle_messages(
                         let raw_stream = resp.bytes_stream();
                         match collect_antigravity_sse_to_json(raw_stream).await {
                             Ok(v) => Ok(v),
-                            Err(e) => Err(CoreError::Internal(format!("Failed to collect Antigravity stream: {}", e))),
+                            Err(e) => Err(CoreError::Internal(format!("Antigravity stream collect failed: {}", e))),
                         }
                     }
                     Err(e) => Err(e),

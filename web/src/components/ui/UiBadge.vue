@@ -15,20 +15,20 @@ const props = withDefaults(
 const variantClass = computed(() => {
   switch (props.variant) {
     case 'secondary':
-      return 'bg-slate-100 text-slate-600';
+      return 'bg-slate-700 text-white';
     case 'success':
-      return 'bg-teal-50/90 text-teal-800';
+      return 'bg-emerald-600 text-white';
     case 'warning':
-      return 'bg-amber-50/90 text-amber-800';
+      return 'bg-amber-600 text-white';
     case 'destructive':
-      return 'bg-rose-50/90 text-rose-700';
+      return 'bg-rose-600 text-white';
     case 'purple':
-      return 'bg-purple-50/90 text-purple-700';
+      return 'bg-purple-600 text-white';
     case 'outline':
-      return 'bg-transparent text-slate-600 border border-slate-200';
+      return 'bg-slate-800 text-white border border-slate-600';
     case 'default':
     default:
-      return 'bg-orange-50/90 text-orange-700';
+      return 'bg-slate-800 text-white';
   }
 });
 </script>

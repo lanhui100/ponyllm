@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue';
+import { ref, computed, watch } from 'vue';
 import type {
   ProviderView,
   ModelView,
@@ -8,6 +8,7 @@ import type {
   CreateModelPayload,
   UpdateModelPayload,
   CreateKeyPayload,
+  UpdateProviderPayload,
 } from '../../types/admin';
 import Icons from '../ui/Icons.vue';
 import UiButton from '../ui/UiButton.vue';
@@ -16,6 +17,7 @@ import UiTooltip from '../ui/UiTooltip.vue';
 import UiCollapsible from '../ui/UiCollapsible.vue';
 import KeySubSection from './KeySubSection.vue';
 import ModelSubSection from './ModelSubSection.vue';
+import { formatStrategyLabel } from '../../utils/format';
 
 const props = defineProps<{
   provider: ProviderView;
@@ -29,6 +31,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   (e: 'delete-provider', name: string): Promise<void>;
+  (e: 'update-provider', name: string, payload: UpdateProviderPayload): Promise<void>;
   (e: 'create-model', payload: CreateModelPayload): Promise<void>;
   (e: 'update-model', name: string, payload: UpdateModelPayload): Promise<void>;
   (e: 'delete-model', name: string): Promise<void>;
@@ -39,8 +42,116 @@ const emit = defineEmits<{
 }>();
 
 const expanded = ref(props.defaultExpanded ?? true);
-const isEditingProvider = ref(false);
-const showAdvancedConfig = ref(false);
+
+const PROTOCOL_OPTIONS = [
+  { id: 'chat', label: 'OpenAI Chat' },
+  { id: 'messages', label: 'Anthropic Messages' },
+  { id: 'responses', label: 'OpenAI Responses' },
+] as const;
+
+function getInitialProtocols(): string[] {
+  const list: string[] = [];
+  if (props.provider.chat_url || props.provider.default_protocol === 'chat') {
+    list.push('chat');
+  }
+  if (
+    props.provider.messages_url ||
+    props.provider.default_protocol === 'messages' ||
+    props.provider.default_protocol === 'anthropic'
+  ) {
+    list.push('messages');
+  }
+  if (props.provider.responses_url || props.provider.default_protocol === 'responses') {
+    list.push('responses');
+  }
+  if (list.length === 0) {
+    list.push('chat');
+  }
+  return list;
+}
+
+const activeProtocols = ref<string[]>(getInitialProtocols());
+const customUrls = ref({
+  chat: props.provider.chat_url || '',
+  messages: props.provider.messages_url || '',
+  responses: props.provider.responses_url || '',
+});
+const isEditingProtocols = ref(false);
+const protocolsSaving = ref(false);
+
+watch(
+  () => props.provider,
+  (p) => {
+    activeProtocols.value = getInitialProtocols();
+    customUrls.value = {
+      chat: p.chat_url || '',
+      messages: p.messages_url || '',
+      responses: p.responses_url || '',
+    };
+  },
+  { deep: true }
+);
+
+function toggleProtocol(id: string) {
+  if (!isEditingProtocols.value) return;
+  const idx = activeProtocols.value.indexOf(id);
+  if (idx > -1) {
+    if (activeProtocols.value.length > 1) {
+      activeProtocols.value.splice(idx, 1);
+    }
+  } else {
+    activeProtocols.value.push(id);
+  }
+}
+
+function cancelEditProtocols() {
+  activeProtocols.value = getInitialProtocols();
+  customUrls.value = {
+    chat: props.provider.chat_url || '',
+    messages: props.provider.messages_url || '',
+    responses: props.provider.responses_url || '',
+  };
+  isEditingProtocols.value = false;
+}
+
+async function handleSaveProtocols() {
+  const urlRegex = /^https?:\/\//i;
+  const chatVal = customUrls.value.chat.trim();
+  const messagesVal = customUrls.value.messages.trim();
+  const responsesVal = customUrls.value.responses.trim();
+
+  if (activeProtocols.value.includes('chat') && chatVal && !urlRegex.test(chatVal)) {
+    alert('OpenAI Chat 专属 Base URL 必须以 http:// 或 https:// 开头');
+    return;
+  }
+  if (activeProtocols.value.includes('messages') && messagesVal && !urlRegex.test(messagesVal)) {
+    alert('Anthropic Messages 专属 Base URL 必须以 http:// 或 https:// 开头');
+    return;
+  }
+  if (activeProtocols.value.includes('responses') && responsesVal && !urlRegex.test(responsesVal)) {
+    alert('OpenAI Responses 专属 Base URL 必须以 http:// 或 https:// 开头');
+    return;
+  }
+
+  protocolsSaving.value = true;
+  try {
+    await emit('update-provider', props.provider.name, {
+      default_protocol: activeProtocols.value[0] || 'chat',
+      chat_url: activeProtocols.value.includes('chat') ? chatVal : '',
+      messages_url: activeProtocols.value.includes('messages') ? messagesVal : '',
+      responses_url: activeProtocols.value.includes('responses') ? responsesVal : '',
+    });
+    isEditingProtocols.value = false;
+  } catch (err: unknown) {
+    alert(`保存协议配置失败: ${err instanceof Error ? err.message : String(err)}`);
+  } finally {
+    protocolsSaving.value = false;
+  }
+}
+
+const hasCustomUrls = computed(() => {
+  return Boolean(props.provider.chat_url || props.provider.messages_url || props.provider.responses_url);
+});
 
 const activeKeysCount = computed(() => {
   return props.keys.filter((k) => k.state === 'active').length;
@@ -78,7 +189,8 @@ function handleBatchTest() {
     >
       <!-- 左侧：厂商标识与摘要 -->
       <div class="flex items-center gap-3.5 min-w-0">
-        <div class="w-10 h-10 rounded-xl bg-indigo-50 text-indigo-600 flex items-center justify-center shrink-0 font-bold text-sm">
+        <!-- 暖橙色图标 -->
+        <div class="w-10 h-10 rounded-xl bg-orange-50 text-orange-600 border border-orange-200/60 flex items-center justify-center shrink-0 font-bold text-sm">
           <Icons name="server" size="20" />
         </div>
 
@@ -87,16 +199,14 @@ function handleBatchTest() {
             <span class="font-bold text-slate-900 text-base tracking-tight truncate">
               {{ provider.name }}
             </span>
-            <UiBadge variant="secondary" class="text-xs font-mono font-medium">
-              {{ provider.strategy }}
+            <UiBadge variant="secondary" class="text-xs font-medium">
+              {{ formatStrategyLabel(provider.strategy) }}
             </UiBadge>
           </div>
 
-          <div class="flex items-center gap-2 text-xs text-slate-400 mt-1 font-mono truncate">
-            <span>{{ provider.base_url }}</span>
-            <span v-if="provider.default_model" class="text-slate-500 font-sans">
-              · 默认: {{ provider.default_model }}
-            </span>
+          <!-- 去除敏感明文 URL，仅在有默认模型时显示默认模型 -->
+          <div v-if="provider.default_model" class="flex items-center gap-2 text-xs text-slate-500 mt-1 truncate">
+            <span>默认模型: {{ provider.default_model }}</span>
           </div>
         </div>
       </div>
@@ -151,10 +261,116 @@ function handleBatchTest() {
       </div>
     </div>
 
-    <!-- 二级折叠展开区域 (包含密钥、模型及高级配置) -->
+    <!-- 二级折叠展开区域 (包含模型协议、密钥及模型) -->
     <UiCollapsible :open="expanded">
       <div class="px-4.5 pb-4.5 pt-2 border-t border-slate-100 bg-slate-50/50 space-y-4">
-        <!-- 密钥凭证子区域 -->
+        <!-- 模型协议选择器与专属端点 (同级非下拉多选) -->
+        <div class="bg-white rounded-xl p-4 shadow-2xs space-y-3" data-testid="protocol-section">
+          <div class="flex items-center justify-between">
+            <div class="flex items-center gap-1.5 text-xs font-semibold text-slate-700">
+              <Icons name="activity" size="14" class="text-amber-600" />
+              模型协议
+              <UiTooltip content="该服务商默认提供的协议与端点，未覆盖时统一走 Base URL">
+                <Icons name="info" size="12" class="text-slate-400 cursor-pointer" />
+              </UiTooltip>
+            </div>
+
+            <div v-if="adminWriteEnabled">
+              <UiButton
+                v-if="!isEditingProtocols"
+                variant="ghost"
+                size="sm"
+                class="text-indigo-600 hover:text-indigo-700 hover:bg-indigo-50/60 text-xs py-1"
+                data-testid="edit-protocols-btn"
+                @click="isEditingProtocols = true"
+              >
+                配置端点
+              </UiButton>
+              <div v-else class="flex items-center gap-1.5">
+                <UiButton
+                  variant="ghost"
+                  size="sm"
+                  class="text-xs py-1"
+                  @click="cancelEditProtocols"
+                >
+                  取消
+                </UiButton>
+                <UiButton
+                  size="sm"
+                  class="text-xs py-1"
+                  :disabled="protocolsSaving"
+                  data-testid="save-protocols-btn"
+                  @click="handleSaveProtocols"
+                >
+                  {{ protocolsSaving ? '保存中...' : '保存' }}
+                </UiButton>
+              </div>
+            </div>
+          </div>
+
+          <!-- 非下拉多选协议药丸胶囊 -->
+          <div class="flex flex-wrap gap-2 items-center">
+            <button
+              v-for="proto in PROTOCOL_OPTIONS"
+              :key="proto.id"
+              type="button"
+              :disabled="!isEditingProtocols"
+              class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all border select-none cursor-pointer disabled:cursor-default"
+              :class="activeProtocols.includes(proto.id)
+                ? 'bg-amber-100 text-amber-900 border-amber-300 font-semibold shadow-2xs'
+                : 'bg-slate-50 text-slate-500 border-slate-200/80 hover:bg-slate-100/80'"
+              :data-testid="`protocol-pill-${proto.id}`"
+              @click="toggleProtocol(proto.id)"
+            >
+              <span
+                class="w-2 h-2 rounded-full"
+                :class="activeProtocols.includes(proto.id) ? 'bg-amber-500' : 'bg-slate-300'"
+              />
+              {{ proto.label }}
+            </button>
+          </div>
+
+          <!-- 各协议专属端点配置 (可编辑模式或已配置展示) -->
+          <div v-if="isEditingProtocols" class="space-y-2 pt-2 border-t border-slate-100 text-xs">
+            <div v-if="activeProtocols.includes('chat')" class="space-y-1">
+              <label class="block text-3xs font-medium text-slate-500">OpenAI Chat 专属 Base URL</label>
+              <input
+                v-model="customUrls.chat"
+                type="url"
+                placeholder="未单独覆盖时统一走 Base URL"
+                class="w-full bg-slate-50 border border-slate-200 rounded-lg px-2.5 py-1.5 text-xs text-slate-800 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                data-testid="chat-url-input"
+              />
+            </div>
+            <div v-if="activeProtocols.includes('messages')" class="space-y-1">
+              <label class="block text-3xs font-medium text-slate-500">Anthropic Messages 专属 Base URL</label>
+              <input
+                v-model="customUrls.messages"
+                type="url"
+                placeholder="未单独覆盖时统一走 Base URL"
+                class="w-full bg-slate-50 border border-slate-200 rounded-lg px-2.5 py-1.5 text-xs text-slate-800 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                data-testid="messages-url-input"
+              />
+            </div>
+            <div v-if="activeProtocols.includes('responses')" class="space-y-1">
+              <label class="block text-3xs font-medium text-slate-500">OpenAI Responses 专属 Base URL</label>
+              <input
+                v-model="customUrls.responses"
+                type="url"
+                placeholder="未单独覆盖时统一走 Base URL"
+                class="w-full bg-slate-50 border border-slate-200 rounded-lg px-2.5 py-1.5 text-xs text-slate-800 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                data-testid="responses-url-input"
+              />
+            </div>
+          </div>
+          <div v-else-if="hasCustomUrls" class="pt-1 text-3xs text-slate-400 space-y-0.5 font-mono">
+            <div v-if="provider.chat_url">Chat 端点: {{ provider.chat_url }}</div>
+            <div v-if="provider.messages_url">Messages 端点: {{ provider.messages_url }}</div>
+            <div v-if="provider.responses_url">Responses 端点: {{ provider.responses_url }}</div>
+          </div>
+        </div>
+
+        <!-- 密钥子区域 (默认折叠) -->
         <div class="bg-white rounded-xl p-4 shadow-2xs">
           <KeySubSection
             :provider-name="provider.name"
@@ -168,7 +384,7 @@ function handleBatchTest() {
           />
         </div>
 
-        <!-- 挂载模型子区域 -->
+        <!-- 模型子区域 (默认折叠) -->
         <div class="bg-white rounded-xl p-4 shadow-2xs">
           <ModelSubSection
             :provider-name="provider.name"
@@ -178,37 +394,6 @@ function handleBatchTest() {
             @update="(name, payload) => emit('update-model', name, payload)"
             @delete="(name) => emit('delete-model', name)"
           />
-        </div>
-
-        <!-- 服务商高级配置 (计费单价与详细参数折叠) -->
-        <div class="pt-1">
-          <button
-            type="button"
-            class="text-xs text-slate-500 hover:text-indigo-600 inline-flex items-center gap-1.5 cursor-pointer py-1 font-medium select-none"
-            @click="showAdvancedConfig = !showAdvancedConfig"
-          >
-            <Icons :name="showAdvancedConfig ? 'chevron-down' : 'chevron-right'" size="12" />
-            计费单价与服务商高级参数
-          </button>
-
-          <UiCollapsible :open="showAdvancedConfig">
-            <div class="mt-2 p-3.5 bg-white rounded-xl shadow-2xs text-xs space-y-2">
-              <div class="grid grid-cols-3 gap-2.5">
-                <div class="p-2.5 bg-slate-50/80 rounded-lg">
-                  <span class="block text-3xs text-slate-400 mb-0.5">输入单价 ($/M)</span>
-                  <span class="font-mono text-slate-800 font-semibold text-xs">{{ provider.input_price }}</span>
-                </div>
-                <div class="p-2.5 bg-slate-50/80 rounded-lg">
-                  <span class="block text-3xs text-slate-400 mb-0.5">缓存命中单价 ($/M)</span>
-                  <span class="font-mono text-slate-800 font-semibold text-xs">{{ provider.cached_price }}</span>
-                </div>
-                <div class="p-2.5 bg-slate-50/80 rounded-lg">
-                  <span class="block text-3xs text-slate-400 mb-0.5">输出单价 ($/M)</span>
-                  <span class="font-mono text-slate-800 font-semibold text-xs">{{ provider.output_price }}</span>
-                </div>
-              </div>
-            </div>
-          </UiCollapsible>
         </div>
       </div>
     </UiCollapsible>

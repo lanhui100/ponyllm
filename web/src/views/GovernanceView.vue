@@ -11,8 +11,7 @@ import UiButton from '../components/ui/UiButton.vue';
 import UiBadge from '../components/ui/UiBadge.vue';
 import UiTooltip from '../components/ui/UiTooltip.vue';
 import UiCollapsible from '../components/ui/UiCollapsible.vue';
-import ThinkingEffortSelect from '../components/governance/ThinkingEffortSelect.vue';
-import type { CreateProviderPayload, CreateModelPayload, UpdateModelPayload, CreateKeyPayload } from '../types/admin';
+import type { CreateProviderPayload } from '../types/admin';
 
 const {
   providers,
@@ -30,6 +29,7 @@ const {
   batchTesting,
   fetchAll,
   saveProvider,
+  editProvider,
   removeProvider,
   saveModel,
   editModel,
@@ -43,7 +43,7 @@ const {
   clearCreatedKeyResult,
 } = useAdminConfig({ autoFetch: true });
 
-type TabType = 'providers' | 'models' | 'keys' | 'strategy';
+type TabType = 'providers' | 'strategy';
 const currentTab = ref<TabType>('providers');
 
 // 行内新建服务商状态
@@ -52,7 +52,7 @@ const providerSubmitting = ref(false);
 const providerFormError = ref<string | null>(null);
 const newProviderForm = ref<CreateProviderPayload>({
   name: '',
-  base_url: '',
+  base_url: 'https://tokens.ponyjob.top/v1',
   default_model: '',
   strategy: 'economy',
   billing_mode: 'token',
@@ -61,36 +61,17 @@ const newProviderForm = ref<CreateProviderPayload>({
   output_price: 0,
 });
 
-// 行内快捷新建模型状态 (全局/Tab下)
-const isAddingGlobalModel = ref(false);
-const globalModelSubmitting = ref(false);
-const globalModelError = ref<string | null>(null);
-const globalModelForm = ref({
-  name: '',
-  provider: '',
-  tier: 'Smart',
-  context_window: '128k',
-  thinking_default: 'Off',
-  thinking_max: 'High',
-  protocol: '',
-});
-
-// 行内快捷新建 Key 状态 (全局/Tab下)
-const isAddingGlobalKey = ref(false);
-const globalKeySubmitting = ref(false);
-const globalKeyError = ref<string | null>(null);
-const globalKeyForm = ref<CreateKeyPayload>({
-  id: '',
-  provider: '',
-  api_key: '',
-  priority: 1,
-  weight: 10,
+const newProviderProtocols = ref<string[]>(['chat']);
+const newProviderCustomUrls = ref({
+  chat: '',
+  messages: '',
+  responses: '',
 });
 
 function openAddProvider() {
   newProviderForm.value = {
     name: '',
-    base_url: '',
+    base_url: 'https://tokens.ponyjob.top/v1',
     default_model: '',
     strategy: 'economy',
     billing_mode: 'token',
@@ -98,6 +79,8 @@ function openAddProvider() {
     cached_price: 0,
     output_price: 0,
   };
+  newProviderProtocols.value = ['chat'];
+  newProviderCustomUrls.value = { chat: '', messages: '', responses: '' };
   providerFormError.value = null;
   isAddingProvider.value = true;
 }
@@ -109,7 +92,7 @@ function cancelAddProvider() {
 
 async function handleSaveProvider() {
   const name = newProviderForm.value.name.trim();
-  const url = newProviderForm.value.base_url.trim();
+  const url = newProviderForm.value.base_url.trim() || 'https://tokens.ponyjob.top/v1';
   if (!name) {
     providerFormError.value = '请输入服务商标识';
     return;
@@ -126,6 +109,10 @@ async function handleSaveProvider() {
       ...newProviderForm.value,
       name,
       base_url: url,
+      default_protocol: newProviderProtocols.value[0] || 'chat',
+      chat_url: newProviderProtocols.value.includes('chat') ? (newProviderCustomUrls.value.chat.trim() || null) : null,
+      messages_url: newProviderProtocols.value.includes('messages') ? (newProviderCustomUrls.value.messages.trim() || null) : null,
+      responses_url: newProviderProtocols.value.includes('responses') ? (newProviderCustomUrls.value.responses.trim() || null) : null,
     });
     isAddingProvider.value = false;
   } catch (err: unknown) {
@@ -135,119 +122,10 @@ async function handleSaveProvider() {
   }
 }
 
-function openAddGlobalModel() {
-  globalModelForm.value = {
-    name: '',
-    provider: providers.value[0]?.name || '',
-    tier: 'Smart',
-    context_window: '128k',
-    thinking_default: 'Off',
-    thinking_max: 'High',
-    protocol: '',
-  };
-  globalModelError.value = null;
-  isAddingGlobalModel.value = true;
-}
-
-async function handleSaveGlobalModel() {
-  const name = globalModelForm.value.name.trim();
-  if (!name) {
-    globalModelError.value = '请输入模型名称';
-    return;
-  }
-  if (!globalModelForm.value.provider) {
-    globalModelError.value = '请选择所属服务商';
-    return;
-  }
-
-  globalModelSubmitting.value = true;
-  globalModelError.value = null;
-  try {
-    await saveModel({
-      name,
-      provider: globalModelForm.value.provider,
-      tier: globalModelForm.value.tier,
-      context_window: globalModelForm.value.context_window,
-      thinking_default: globalModelForm.value.thinking_default,
-      thinking_max: globalModelForm.value.thinking_max,
-      protocol: globalModelForm.value.protocol || null,
-    });
-    isAddingGlobalModel.value = false;
-  } catch (err: unknown) {
-    globalModelError.value = err instanceof Error ? err.message : String(err);
-  } finally {
-    globalModelSubmitting.value = false;
-  }
-}
-
-function openAddGlobalKey() {
-  globalKeyForm.value = {
-    id: `key-${Date.now().toString().slice(-4)}`,
-    provider: providers.value[0]?.name || '',
-    api_key: '',
-    priority: 1,
-    weight: 10,
-  };
-  globalKeyError.value = null;
-  isAddingGlobalKey.value = true;
-}
-
-async function handleSaveGlobalKey() {
-  const id = globalKeyForm.value.id.trim();
-  const rawKey = globalKeyForm.value.api_key.trim();
-  if (!id) {
-    globalKeyError.value = '请输入密钥标识';
-    return;
-  }
-  if (!globalKeyForm.value.provider) {
-    globalKeyError.value = '请选择所属服务商';
-    return;
-  }
-  if (!rawKey) {
-    globalKeyError.value = '请输入 API Key 明文';
-    return;
-  }
-
-  globalKeySubmitting.value = true;
-  globalKeyError.value = null;
-  try {
-    await addKey({
-      ...globalKeyForm.value,
-      id,
-      api_key: rawKey,
-    });
-    isAddingGlobalKey.value = false;
-  } catch (err: unknown) {
-    globalKeyError.value = err instanceof Error ? err.message : String(err);
-  } finally {
-    globalKeySubmitting.value = false;
-  }
-}
-
 async function handleRefresh() {
   clearConflict();
   await fetchAll().catch(() => {});
 }
-
-function getProviderModels(providerName: string) {
-  return models.value.filter((m) => {
-    // Check if associated or belongs to this provider
-    return true; // We partition or pass models
-  });
-}
-
-const providerMap = computed(() => {
-  return providers.value.map((p) => {
-    return {
-      provider: p,
-      models: models.value.filter((m) => {
-        // Find if model belongs to this provider
-        return p.models > 0 || true;
-      }),
-      keys: keys.value.filter((k) => k.provider === p.name),
-    };
-  });
-});
 </script>
 
 <template>
@@ -376,7 +254,7 @@ const providerMap = computed(() => {
                 <input
                   v-model="newProviderForm.base_url"
                   type="url"
-                  placeholder="https://api.openai.com/v1"
+                  placeholder="https://tokens.ponyjob.top/v1"
                   required
                   class="w-full bg-slate-50 border border-slate-200/80 rounded-lg px-3 py-2 text-xs text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 focus:bg-white"
                   data-testid="provider-base-url-input"
@@ -402,11 +280,45 @@ const providerMap = computed(() => {
                   v-model="newProviderForm.strategy"
                   class="w-full bg-slate-50 border border-slate-200/80 rounded-lg px-3 py-2 text-xs text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 focus:bg-white"
                 >
-                  <option value="economy">Economy 经济优先</option>
-                  <option value="speed">Speed 速度优先</option>
-                  <option value="reliable">Reliable 稳定优先</option>
-                  <option value="balanced">Balanced 综合均衡</option>
+                  <option value="round_robin">轮询 (Round Robin)</option>
+                  <option value="priority">主备优先级 (Priority)</option>
+                  <option value="weighted_round_robin">加权轮询 (Weighted)</option>
+                  <option value="economy">经济优先 (Economy)</option>
+                  <option value="speed">速度优先 (Speed)</option>
+                  <option value="reliable">稳定优先 (Reliable)</option>
+                  <option value="balanced">综合均衡 (Balanced)</option>
                 </select>
+              </div>
+            </div>
+
+            <!-- 支持模型协议选择器 (非下拉胶囊药丸) -->
+            <div>
+              <label class="block text-xs font-medium text-slate-600 mb-1.5">支持模型协议</label>
+              <div class="flex flex-wrap gap-2">
+                <button
+                  v-for="proto in [
+                    { id: 'chat', label: 'OpenAI Chat' },
+                    { id: 'messages', label: 'Anthropic Messages' },
+                    { id: 'responses', label: 'OpenAI Responses' },
+                  ]"
+                  :key="proto.id"
+                  type="button"
+                  class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all border select-none cursor-pointer"
+                  :class="newProviderProtocols.includes(proto.id)
+                    ? 'bg-amber-100 text-amber-900 border-amber-300 font-semibold shadow-2xs'
+                    : 'bg-slate-50 text-slate-500 border-slate-200/80 hover:bg-slate-100/80'"
+                  @click="
+                    newProviderProtocols.includes(proto.id)
+                      ? (newProviderProtocols.length > 1 && newProviderProtocols.splice(newProviderProtocols.indexOf(proto.id), 1))
+                      : newProviderProtocols.push(proto.id)
+                  "
+                >
+                  <span
+                    class="w-2 h-2 rounded-full"
+                    :class="newProviderProtocols.includes(proto.id) ? 'bg-amber-500' : 'bg-slate-300'"
+                  />
+                  {{ proto.label }}
+                </button>
               </div>
             </div>
 
@@ -434,25 +346,6 @@ const providerMap = computed(() => {
           全部服务商 ({{ providers.length }})
         </button>
 
-        <button
-          type="button"
-          class="px-3.5 py-1.5 text-xs font-medium rounded-lg transition-colors cursor-pointer"
-          :class="currentTab === 'models' ? 'bg-white shadow-2xs text-indigo-600 font-semibold' : 'text-slate-500 hover:text-slate-800'"
-          data-testid="tab-models"
-          @click="currentTab = 'models'"
-        >
-          模型字典 ({{ models.length }})
-        </button>
-
-        <button
-          type="button"
-          class="px-3.5 py-1.5 text-xs font-medium rounded-lg transition-colors cursor-pointer"
-          :class="currentTab === 'keys' ? 'bg-white shadow-2xs text-indigo-600 font-semibold' : 'text-slate-500 hover:text-slate-800'"
-          data-testid="tab-keys"
-          @click="currentTab = 'keys'"
-        >
-          密钥池 ({{ keys.length }})
-        </button>
 
         <button
           type="button"
@@ -478,12 +371,13 @@ const providerMap = computed(() => {
             v-for="p in providers"
             :key="p.name"
             :provider="p"
-            :models="models.filter((m) => p.models > 0 || true)"
+            :models="models.filter((m) => m.provider ? m.provider === p.name : true)"
             :keys="keys.filter((k) => k.provider === p.name)"
             :admin-write-enabled="adminWriteEnabled"
             :key-test-results="keyTestResults"
             :testing-key-ids="testingKeyIds"
             @delete-provider="removeProvider"
+            @update-provider="editProvider"
             @create-model="saveModel"
             @update-model="editModel"
             @delete-model="removeModel"
@@ -497,239 +391,6 @@ const providerMap = computed(() => {
         </template>
       </div>
 
-      <!-- Models Tab：聚焦视图（兼容旧测试同时支持行内快速新建） -->
-      <div v-else-if="currentTab === 'models'" class="space-y-4">
-        <div class="flex items-center justify-between p-3 bg-white rounded-xl shadow-xs mb-3">
-          <div class="text-xs text-slate-500">
-            跨服务商聚合模型字典（共 {{ models.length }} 个）
-          </div>
-          <UiButton
-            size="sm"
-            :disabled="!adminWriteEnabled || isAddingGlobalModel"
-            data-testid="add-model-btn"
-            @click="openAddGlobalModel"
-          >
-            <Icons name="plus" size="12" />
-            模型
-          </UiButton>
-        </div>
-
-        <!-- 行内展开新建模型 -->
-        <UiCollapsible :open="isAddingGlobalModel">
-          <div class="p-4 bg-white rounded-xl shadow-xs mb-3 text-xs">
-            <div class="flex items-center justify-between mb-2">
-              <span class="font-bold text-slate-800">新建模型配置</span>
-              <button type="button" class="text-slate-400 hover:text-slate-600" @click="isAddingGlobalModel = false">
-                <Icons name="cross" size="13" />
-              </button>
-            </div>
-            <div v-if="globalModelError" class="p-2 mb-2 bg-rose-50 text-rose-600 rounded text-xs">
-              {{ globalModelError }}
-            </div>
-            <form class="space-y-3" @submit.prevent="handleSaveGlobalModel">
-              <div class="grid grid-cols-1 sm:grid-cols-3 gap-2">
-                <div>
-                  <label class="block text-slate-500 mb-1">模型名称 *</label>
-                  <input
-                    v-model="globalModelForm.name"
-                    type="text"
-                    required
-                    class="w-full bg-slate-50 border border-slate-200 rounded px-2.5 py-1.5 text-xs text-slate-800"
-                    data-testid="model-name-input"
-                  />
-                </div>
-                <div>
-                  <label class="block text-slate-500 mb-1">所属服务商 *</label>
-                  <select
-                    v-model="globalModelForm.provider"
-                    required
-                    class="w-full bg-slate-50 border border-slate-200 rounded px-2.5 py-1.5 text-xs text-slate-800"
-                    data-testid="model-provider-select"
-                  >
-                    <option v-for="p in providers" :key="p.name" :value="p.name">{{ p.name }}</option>
-                  </select>
-                </div>
-                <div>
-                  <label class="block text-slate-500 mb-1">分级 Tier</label>
-                  <select
-                    v-model="globalModelForm.tier"
-                    class="w-full bg-slate-50 border border-slate-200 rounded px-2.5 py-1.5 text-xs text-slate-800"
-                    data-testid="model-tier-select"
-                  >
-                    <option value="Fast">Fast</option>
-                    <option value="Smart">Smart</option>
-                    <option value="Large">Large</option>
-                    <option value="Fallback">Fallback</option>
-                  </select>
-                </div>
-              </div>
-
-              <!-- 思考强度折叠 -->
-              <ThinkingEffortSelect
-                v-model:default-effort="globalModelForm.thinking_default"
-                v-model:max-effort="globalModelForm.thinking_max"
-              />
-
-              <div class="flex justify-end gap-2 pt-1">
-                <UiButton variant="ghost" size="sm" @click="isAddingGlobalModel = false">取消</UiButton>
-                <UiButton type="submit" size="sm" :disabled="globalModelSubmitting" data-testid="submit-model-btn">
-                  {{ globalModelSubmitting ? '保存中...' : '确认添加' }}
-                </UiButton>
-              </div>
-            </form>
-          </div>
-        </UiCollapsible>
-
-        <!-- 模型列表条目 -->
-        <div class="bg-white rounded-xl shadow-xs overflow-hidden divide-y divide-slate-100">
-          <div
-            v-for="m in models"
-            :key="m.name"
-            class="flex items-center justify-between p-3.5 text-xs hover:bg-slate-50/60 transition-colors"
-            data-testid="model-row"
-          >
-            <div class="flex items-center gap-3">
-              <span class="font-bold text-slate-900">{{ m.name }}</span>
-              <UiBadge variant="default">{{ m.tier }}</UiBadge>
-              <span class="text-slate-400 text-2xs">{{ m.context_window }}</span>
-              <span v-if="m.thinking_max && m.thinking_max !== 'Off'" class="text-indigo-600 bg-indigo-50 px-1.5 py-0.5 rounded text-2xs">
-                思考上限: {{ m.thinking_max }}
-              </span>
-            </div>
-
-            <div class="flex items-center gap-2">
-              <UiButton
-                variant="ghost"
-                size="icon"
-                :disabled="!adminWriteEnabled"
-                data-testid="delete-model-btn"
-                class="text-slate-400 hover:text-rose-600 hover:bg-rose-50"
-                @click="removeModel(m.name)"
-              >
-                <Icons name="trash" size="13" />
-              </UiButton>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <!-- Keys Tab：聚焦视图（兼容旧测试同时支持行内快速新建） -->
-      <div v-else-if="currentTab === 'keys'" class="space-y-4">
-        <div class="flex items-center justify-between p-3 bg-white rounded-xl shadow-xs mb-3">
-          <div class="text-xs text-slate-500">
-            跨服务商聚合密钥池（共 {{ keys.length }} 个凭证）
-          </div>
-          <UiButton
-            size="sm"
-            :disabled="!adminWriteEnabled || isAddingGlobalKey"
-            data-testid="add-key-btn"
-            @click="openAddGlobalKey"
-          >
-            <Icons name="plus" size="12" />
-            密钥
-          </UiButton>
-        </div>
-
-        <!-- 行内展开新建密钥 (带兼容 key-drawer testid) -->
-        <UiCollapsible :open="isAddingGlobalKey">
-          <div class="p-4 bg-white rounded-xl shadow-xs mb-3 text-xs" data-testid="key-drawer">
-            <div class="flex items-center justify-between mb-2">
-              <span class="font-bold text-slate-800">新建 API 密钥凭证</span>
-              <button type="button" class="text-slate-400 hover:text-slate-600" @click="isAddingGlobalKey = false">
-                <Icons name="cross" size="13" />
-              </button>
-            </div>
-            <div v-if="globalKeyError" class="p-2 mb-2 bg-rose-50 text-rose-600 rounded text-xs">
-              {{ globalKeyError }}
-            </div>
-            <form class="space-y-3" @submit.prevent="handleSaveGlobalKey">
-              <div class="grid grid-cols-1 sm:grid-cols-3 gap-2">
-                <div>
-                  <label class="block text-slate-500 mb-1">Key 标识 *</label>
-                  <input
-                    v-model="globalKeyForm.id"
-                    type="text"
-                    required
-                    class="w-full bg-slate-50 border border-slate-200 rounded px-2.5 py-1.5 text-xs text-slate-800"
-                    data-testid="key-id-input"
-                  />
-                </div>
-                <div>
-                  <label class="block text-slate-500 mb-1">所属服务商 *</label>
-                  <select
-                    v-model="globalKeyForm.provider"
-                    required
-                    class="w-full bg-slate-50 border border-slate-200 rounded px-2.5 py-1.5 text-xs text-slate-800"
-                    data-testid="key-provider-select"
-                  >
-                    <option v-for="p in providers" :key="p.name" :value="p.name">{{ p.name }}</option>
-                  </select>
-                </div>
-                <div>
-                  <label class="block text-slate-500 mb-1">API Key 明文 *</label>
-                  <input
-                    v-model="globalKeyForm.api_key"
-                    type="password"
-                    required
-                    class="w-full bg-slate-50 border border-slate-200 rounded px-2.5 py-1.5 text-xs text-slate-800"
-                    data-testid="key-secret-input"
-                  />
-                </div>
-              </div>
-
-              <div class="flex justify-end gap-2 pt-1">
-                <UiButton variant="ghost" size="sm" @click="isAddingGlobalKey = false">取消</UiButton>
-                <UiButton type="submit" size="sm" :disabled="globalKeySubmitting" data-testid="submit-key-btn">
-                  {{ globalKeySubmitting ? '保存中...' : '确认创建' }}
-                </UiButton>
-              </div>
-            </form>
-          </div>
-        </UiCollapsible>
-
-        <!-- 密钥列表条目 -->
-        <div class="bg-white rounded-xl shadow-xs overflow-hidden divide-y divide-slate-100">
-          <div
-            v-for="k in keys"
-            :key="k.id"
-            class="flex items-center justify-between p-3.5 text-xs hover:bg-slate-50/60 transition-colors"
-            data-testid="key-row"
-          >
-            <div class="flex items-center gap-3">
-              <span class="font-mono font-bold text-slate-900">{{ k.id }}</span>
-              <UiBadge variant="secondary">{{ k.provider }}</UiBadge>
-              <span class="font-mono text-slate-400 text-2xs">{{ k.masked_key }}</span>
-              <UiBadge :variant="k.state === 'active' ? 'success' : 'warning'">{{ k.state }}</UiBadge>
-            </div>
-
-            <div class="flex items-center gap-2">
-              <span v-if="keyTestResults[k.id]" class="text-2xs font-mono px-2 py-0.5 rounded bg-emerald-50 text-emerald-700">
-                {{ keyTestResults[k.id].success ? `${keyTestResults[k.id].latency_ms}ms` : '异常' }}
-              </span>
-              <UiButton
-                variant="ghost"
-                size="icon"
-                :disabled="testingKeyIds.has(k.id) || !adminWriteEnabled"
-                data-testid="test-single-key-btn"
-                class="text-amber-500 hover:text-amber-600 hover:bg-amber-50"
-                @click="testSingleKey(k.id)"
-              >
-                <Icons name="zap" size="13" />
-              </UiButton>
-              <UiButton
-                variant="ghost"
-                size="icon"
-                :disabled="!adminWriteEnabled"
-                data-testid="delete-key-btn"
-                class="text-slate-400 hover:text-rose-600 hover:bg-rose-50"
-                @click="removeKey(k.id)"
-              >
-                <Icons name="trash" size="13" />
-              </UiButton>
-            </div>
-          </div>
-        </div>
-      </div>
 
       <!-- Strategy Tab：全局调度策略 -->
       <div v-else-if="currentTab === 'strategy'">

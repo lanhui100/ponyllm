@@ -744,8 +744,20 @@ where
     S: Stream<Item = Result<Bytes, E>> + Send + 'static,
     E: std::fmt::Display + Send + 'static,
 {
+    collect_antigravity_sse_to_json_with_timeout(stream, std::time::Duration::from_secs(15)).await
+}
+
+/// Collect upstream Antigravity SSE stream into a consolidated Gemini response Value with configurable chunk timeout.
+pub async fn collect_antigravity_sse_to_json_with_timeout<S, E>(
+    stream: S,
+    chunk_timeout: std::time::Duration,
+) -> Result<serde_json::Value, String>
+where
+    S: Stream<Item = Result<Bytes, E>> + Send + 'static,
+    E: std::fmt::Display + Send + 'static,
+{
     let mut sse_stream = Box::pin(sse_event_stream(stream));
-    let mut collected_text = String::new();
+    let mut collected_parts: Vec<serde_json::Value> = Vec::new();
     let mut finish_reason = None;
     let mut usage_metadata = serde_json::json!({
         "promptTokenCount": 0,
@@ -754,14 +766,24 @@ where
     });
     let mut has_data = false;
 
-    while let Some(res) = sse_stream.next().await {
-        match res {
+    loop {
+        let chunk_res = match tokio::time::timeout(chunk_timeout, sse_stream.next()).await {
+            Ok(Some(res)) => res,
+            Ok(None) => break,
+            Err(_) => return Err(format!("Antigravity SSE stream stalled: {:?} chunk timeout exceeded", chunk_timeout)),
+        };
+
+        match chunk_res {
             Ok(evt) => {
                 let data = evt.data.trim();
                 if data.is_empty() || data == "[DONE]" {
                     continue;
                 }
                 if let Ok(val) = serde_json::from_str::<serde_json::Value>(data) {
+                    if let Some(err_obj) = val.get("error").or_else(|| val.get("response").and_then(|r| r.get("error"))) {
+                        let msg = err_obj.get("message").and_then(|m| m.as_str()).unwrap_or("Antigravity upstream error frame");
+                        return Err(format!("Antigravity stream error frame: {}", msg));
+                    }
                     has_data = true;
                     let target = val.get("response").unwrap_or(&val);
                     if let Some(candidates) = target.get("candidates").and_then(|v| v.as_array()) {
@@ -771,9 +793,19 @@ where
                             }
                             if let Some(parts) = cand.get("content").and_then(|c| c.get("parts")).and_then(|p| p.as_array()) {
                                 for part in parts {
-                                    if let Some(txt) = part.get("text").and_then(|t| t.as_str()) {
-                                        collected_text.push_str(txt);
+                                    if let (Some(last), Some(new_text)) = (collected_parts.last_mut(), part.get("text").and_then(|t| t.as_str())) {
+                                        let last_thought = last.get("thought").and_then(|t| t.as_bool()).unwrap_or(false);
+                                        let new_thought = part.get("thought").and_then(|t| t.as_bool()).unwrap_or(false);
+                                        if last.get("text").is_some() && last_thought == new_thought {
+                                            if let Some(old_text) = last.get_mut("text") {
+                                                if let Some(s) = old_text.as_str() {
+                                                    *old_text = serde_json::Value::String(format!("{}{}", s, new_text));
+                                                    continue;
+                                                }
+                                            }
+                                        }
                                     }
+                                    collected_parts.push(part.clone());
                                 }
                             }
                         }
@@ -789,7 +821,7 @@ where
         }
     }
 
-    if !has_data && collected_text.is_empty() {
+    if !has_data && collected_parts.is_empty() {
         return Err("No data collected from Antigravity SSE stream".to_string());
     }
 
@@ -797,7 +829,7 @@ where
         "candidates": [{
             "content": {
                 "role": "model",
-                "parts": [{"text": collected_text}]
+                "parts": collected_parts
             },
             "finishReason": finish_reason.unwrap_or_else(|| "STOP".to_string())
         }],
@@ -1558,6 +1590,70 @@ mod tests {
         );
         assert_eq!(json_val["candidates"][0]["finishReason"], "STOP");
         assert_eq!(json_val["usageMetadata"]["totalTokenCount"], 7);
+    }
+
+    #[tokio::test]
+    async fn test_collect_sse_with_error_returns_err() {
+        let err_chunk = format!(
+            "data: {}\n\n",
+            serde_json::json!({
+                "error": {
+                    "code": 503,
+                    "message": "The model is overloaded."
+                }
+            })
+        );
+        let s = bytes_stream(vec![Bytes::from(err_chunk)]);
+        let res = collect_antigravity_sse_to_json(s).await;
+        assert!(res.is_err());
+        let err_msg = res.unwrap_err();
+        assert!(
+            err_msg.contains("Antigravity stream error frame: The model is overloaded."),
+            "actual: {}",
+            err_msg
+        );
+    }
+
+    #[tokio::test]
+    async fn test_collect_sse_with_response_error_returns_err() {
+        let err_chunk = format!(
+            "data: {}\n\n",
+            serde_json::json!({
+                "response": {
+                    "error": {
+                        "code": 429,
+                        "message": "Resource has been exhausted"
+                    }
+                }
+            })
+        );
+        let s = bytes_stream(vec![Bytes::from(err_chunk)]);
+        let res = collect_antigravity_sse_to_json(s).await;
+        assert!(res.is_err());
+        let err_msg = res.unwrap_err();
+        assert!(
+            err_msg.contains("Antigravity stream error frame: Resource has been exhausted"),
+            "actual: {}",
+            err_msg
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sse_chunk_timeout_guard() {
+        let stream = futures_util::stream::pending::<Result<Bytes, std::io::Error>>();
+        let res = collect_antigravity_sse_to_json_with_timeout(stream, std::time::Duration::from_millis(30)).await;
+        assert!(res.is_err());
+        let err_msg = res.unwrap_err();
+        assert!(
+            err_msg.contains("Antigravity SSE stream stalled:"),
+            "actual: {}",
+            err_msg
+        );
+        assert!(
+            err_msg.contains("chunk timeout exceeded"),
+            "actual: {}",
+            err_msg
+        );
     }
 }
 

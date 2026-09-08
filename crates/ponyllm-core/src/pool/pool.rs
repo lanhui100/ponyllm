@@ -37,11 +37,16 @@ impl KeyPool {
 
     /// Snapshot of all keys for admin observability (WEB-03): id/priority/weight
     /// plus effective state. Read-only; never exposes the raw key material.
-    pub fn list_keys(&self) -> Vec<(String, u32, u32, KeyState)> {
-        let keys = self.keys.read();
+    pub fn list_keys(&self) -> Vec<(String, u32, u32, KeyState)> {        let keys = self.keys.read();
         keys.iter()
             .map(|k| (k.id.clone(), k.priority, k.weight, k.current_state()))
             .collect()
+    }
+
+    /// Read-only snapshot of key entries (e.g. for project-id peeking).
+    /// Clones only the `Arc`s; counters and state stay live.
+    pub fn snapshot_keys(&self) -> Vec<Arc<ApiKeyEntry>> {
+        self.keys.read().clone()
     }
 
     /// Select the next active, healthy key according to configured routing strategy
@@ -104,15 +109,67 @@ impl KeyPool {
     /// Record an error on a key
     pub fn record_error(&self, key_id: &str, error: PoolErrorType) {
         let keys = self.keys.read();
-        if keys.len() == 1 && matches!(error, PoolErrorType::RateLimit { .. }) {
-            if let Some(entry) = keys.iter().find(|k| k.id == key_id) {
-                entry.record_transient_failure();
+        // Singleton passthrough (B2): a lone key stays Active through
+        // up to 2 transient 429 retries. Sustained failures (>=2 consecutive)
+        // MUST cool down to prevent hammering the upstream without backoff.
+        if keys.len() == 1 {
+            if let PoolErrorType::RateLimit { retry_after } = &error {
+                if retry_after.map(|d| d <= std::time::Duration::from_secs(60)).unwrap_or(true) {
+                    if let Some(entry) = keys.iter().find(|k| k.id == key_id) {
+                        if entry.stats.consecutive_failures.load(Ordering::Relaxed) < 2 {
+                            entry.record_transient_failure();
+                            return;
+                        }
+                    }
+                }
             }
+        }
+        let Some(entry) = keys.iter().find(|k| k.id == key_id).cloned() else {
+            return;
+        };
+
+        let is_policy_violation = matches!(error, PoolErrorType::PolicyViolation);
+        let violations = if is_policy_violation {
+            entry.stats.policy_violations.fetch_add(1, Ordering::Relaxed) + 1
+        } else {
+            0
+        };
+
+        // Mass-disable circuit breaker: permanently isolating a key
+        // while it would leave <=50% of the pool alive is downgraded to a
+        // 5-minute cooling.
+        // HOWEVER, a key that triggers PolicyViolation for a second time (violations >= 2)
+        // is confirmed dead and must be permanently disabled to avoid infinite oscillation loops.
+        let permanent = is_policy_violation
+            || (matches!(error, PoolErrorType::AuthInvalid) && entry.is_antigravity());
+
+        if permanent && violations < 2 && self.would_break_floor_locked(&keys, key_id) {
+            tracing::warn!(
+                provider = %self.provider,
+                key_id = %key_id,
+                error = ?error,
+                violations = violations,
+                "mass-disable breaker tripped: downgrading permanent isolate to 5m cooling"
+            );
+            entry.record_failure(PoolErrorType::RateLimit {
+                retry_after: Some(std::time::Duration::from_secs(300)),
+            });
             return;
         }
-        if let Some(entry) = keys.iter().find(|k| k.id == key_id) {
-            entry.record_failure(error);
+        entry.record_failure(error);
+    }
+
+    /// True when permanently isolating `key_id` would leave at most half of
+    /// the pool alive. Single-key pools are exempt (no floor to protect).
+    fn would_break_floor_locked(&self, keys: &[Arc<ApiKeyEntry>], key_id: &str) -> bool {
+        if keys.len() < 2 {
+            return false;
         }
+        let alive = keys
+            .iter()
+            .filter(|k| k.id == key_id || k.current_state() != KeyState::Disabled)
+            .count();
+        alive.saturating_sub(1) * 2 <= keys.len()
     }
 
     /// Count active healthy keys

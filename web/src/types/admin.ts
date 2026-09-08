@@ -23,9 +23,14 @@ export interface ProviderView {
   cached_price: number;
   output_price: number;
   models: number;
+  default_protocol?: string | null;
+  chat_url?: string | null;
+  responses_url?: string | null;
+  messages_url?: string | null;
 }
 
 export interface ModelView {
+  provider?: string;
   name: string;
   tier: string;
   context_window: string;
@@ -78,6 +83,17 @@ export interface CreateProviderPayload {
   responses_url?: string | null;
   proxy?: string | null;
   default_protocol?: string | null;
+}
+
+export interface UpdateProviderPayload {
+  base_url?: string | null;
+  default_model?: string | null;
+  strategy?: string | null;
+  default_protocol?: string | null;
+  chat_url?: string | null;
+  responses_url?: string | null;
+  messages_url?: string | null;
+  proxy?: string | null;
 }
 
 export interface CreateModelPayload {

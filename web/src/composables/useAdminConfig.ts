@@ -9,6 +9,7 @@ import type {
   KeyView,
   KeyTestView,
   CreateProviderPayload,
+  UpdateProviderPayload,
   CreateModelPayload,
   UpdateModelPayload,
   CreateKeyPayload,
@@ -92,6 +93,14 @@ export function useAdminConfig(options: UseAdminConfigOptions = {}) {
   async function saveProvider(payload: CreateProviderPayload): Promise<ProviderView> {
     return runWithConflictCheck(async () => {
       const res = await adminApi.createProvider(payload, configVersion.value).send();
+      await fetchAll();
+      return res;
+    });
+  }
+
+  async function editProvider(name: string, payload: UpdateProviderPayload): Promise<ProviderView> {
+    return runWithConflictCheck(async () => {
+      const res = await adminApi.updateProvider(name, payload, configVersion.value).send();
       await fetchAll();
       return res;
     });
@@ -216,6 +225,7 @@ export function useAdminConfig(options: UseAdminConfigOptions = {}) {
     batchTesting,
     fetchAll,
     saveProvider,
+    editProvider,
     removeProvider,
     saveModel,
     editModel,

@@ -55,15 +55,16 @@ fn test_key_cooldown_on_429_and_automatic_failover() {
 }
 
 #[test]
-fn test_key_disabled_on_quota_exceeded() {
+fn test_key_cooling_on_quota_exhausted() {
     let pool = KeyPool::new("deepseek", RoutingStrategy::RoundRobin);
     pool.add_key(ApiKeyEntry::new("k1", "sk-ds-1", 1, 10));
     pool.add_key(ApiKeyEntry::new("k2", "sk-ds-2", 1, 10));
 
-    // k1 hits quota exceeded
-    pool.record_error("k1", PoolErrorType::QuotaExhausted);
+    // k1 hits quota exceeded -> cools down (never permanently disabled)
+    pool.record_error("k1", PoolErrorType::QuotaExhausted { retry_after: Some(Duration::from_secs(60)) });
+    assert_eq!(pool.get_key_status("k1"), Some(KeyState::CoolingDown));
 
-    // Only k2 should be returned from now on
+    // Only k2 should be returned while k1 cools
     for _ in 0..5 {
         let k = pool.select_key().unwrap();
         assert_eq!(k.id, "k2");
@@ -71,14 +72,62 @@ fn test_key_disabled_on_quota_exceeded() {
 }
 
 #[test]
-fn test_all_keys_exhausted() {
+fn test_all_keys_cooling_still_exhausts_pool() {
     let pool = KeyPool::new("openai", RoutingStrategy::RoundRobin);
     pool.add_key(ApiKeyEntry::new("k1", "sk-1", 1, 10));
 
-    pool.record_error("k1", PoolErrorType::QuotaExhausted);
+    pool.record_error("k1", PoolErrorType::QuotaExhausted { retry_after: None });
 
+    assert_eq!(pool.get_key_status("k1"), Some(KeyState::CoolingDown));
     let res = pool.select_key();
     assert!(res.is_err());
+}
+
+#[test]
+fn test_mass_disable_breaker_downgrades_to_cooling() {
+    // 2-key pool: permanently isolating one key would leave only 50%
+    // alive, so the breaker must downgrade to a 5-minute cooling.
+    let pool = KeyPool::new("ag", RoutingStrategy::RoundRobin);
+    pool.add_key(ApiKeyEntry::new("k1", "sk-1", 1, 10));
+    pool.add_key(ApiKeyEntry::new("k2", "sk-2", 1, 10));
+
+    pool.record_error("k1", PoolErrorType::PolicyViolation);
+    assert_eq!(
+        pool.get_key_status("k1"),
+        Some(KeyState::CoolingDown),
+        "breaker must prevent the first permanent isolate in a 2-key pool"
+    );
+
+    // Single-key pools are exempt: nothing to protect, isolate directly.
+    let solo = KeyPool::new("solo", RoutingStrategy::RoundRobin);
+    solo.add_key(ApiKeyEntry::new("only", "sk-1", 1, 10));
+    solo.record_error("only", PoolErrorType::PolicyViolation);
+    assert_eq!(solo.get_key_status("only"), Some(KeyState::Disabled));
+}
+
+#[test]
+fn test_breaker_allows_isolate_above_floor() {
+    // 3-key pool: isolating the first key leaves 2/3 alive (> 50%),
+    // so the permanent isolate goes through.
+    let pool = KeyPool::new("ag", RoutingStrategy::RoundRobin);
+    pool.add_key(ApiKeyEntry::new("k1", "sk-1", 1, 10));
+    pool.add_key(ApiKeyEntry::new("k2", "sk-2", 1, 10));
+    pool.add_key(ApiKeyEntry::new("k3", "sk-3", 1, 10));
+
+    pool.record_error("k1", PoolErrorType::PolicyViolation);
+    assert_eq!(pool.get_key_status("k1"), Some(KeyState::Disabled));
+
+    // Isolating a second key would leave 1/3 alive: breaker trips.
+    pool.record_error("k2", PoolErrorType::PolicyViolation);
+    assert_eq!(pool.get_key_status("k2"), Some(KeyState::CoolingDown));
+}
+
+#[test]
+fn test_entry_debug_never_prints_raw_key() {
+    let entry = ApiKeyEntry::new("k1", "sk-live-secret-value-12345", 1, 10);
+    let dbg = format!("{:?}", entry);
+    assert!(!dbg.contains("sk-live-secret-value-12345"), "got {}", dbg);
+    assert!(dbg.contains("k1"));
 }
 
 #[test]
@@ -137,5 +186,37 @@ fn test_rate_limit_cooldown_capped_at_60s() {
     let remaining = cd.saturating_duration_since(std::time::Instant::now());
     assert!(remaining <= Duration::from_secs(61),
         "Cooldown should cap at 60s, got {:?}", remaining);
+}
+
+#[test]
+fn test_single_key_429_exhaustion_triggers_cooldown() {
+    let pool = KeyPool::new("solo", RoutingStrategy::RoundRobin);
+    pool.add_key(ApiKeyEntry::new("only", "sk-1", 1, 10));
+
+    // First and second 429: transient retry allowed (stays Active)
+    pool.record_error("only", PoolErrorType::RateLimit { retry_after: None });
+    assert_eq!(pool.get_key_status("only"), Some(KeyState::Active));
+
+    pool.record_error("only", PoolErrorType::RateLimit { retry_after: None });
+    assert_eq!(pool.get_key_status("only"), Some(KeyState::Active));
+
+    // Third 429: sustained rate limiting -> must cool down to prevent hammering storm
+    pool.record_error("only", PoolErrorType::RateLimit { retry_after: None });
+    assert_eq!(pool.get_key_status("only"), Some(KeyState::CoolingDown));
+}
+
+#[test]
+fn test_two_key_pool_tos_second_strike_permanent_isolation() {
+    let pool = KeyPool::new("ag", RoutingStrategy::RoundRobin);
+    pool.add_key(ApiKeyEntry::new("k1", "sk-1", 1, 10));
+    pool.add_key(ApiKeyEntry::new("k2", "sk-2", 1, 10));
+
+    // First ToS strike on k1: breaker downgrades to cooling to prevent sudden panic
+    pool.record_error("k1", PoolErrorType::PolicyViolation);
+    assert_eq!(pool.get_key_status("k1"), Some(KeyState::CoolingDown));
+
+    // Second ToS strike on k1: confirmed dead credential, breaker permits permanent isolation!
+    pool.record_error("k1", PoolErrorType::PolicyViolation);
+    assert_eq!(pool.get_key_status("k1"), Some(KeyState::Disabled));
 }
 
