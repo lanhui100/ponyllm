@@ -4,6 +4,8 @@ import * as echarts from 'echarts/core';
 import { LineChart, BarChart } from 'echarts/charts';
 import { GridComponent, TooltipComponent, LegendComponent } from 'echarts/components';
 import { CanvasRenderer } from 'echarts/renderers';
+import Icons from './ui/Icons.vue';
+import UiTooltip from './ui/UiTooltip.vue';
 import type { TelemetryPoint } from '../composables/useTelemetry';
 import type { TimeseriesHistoryResponse } from '../types/telemetry';
 
@@ -72,6 +74,13 @@ const COLOR_SLATE_CYAN = '#0284c7';
 const COLOR_TEAL = '#0d9488';
 const COLOR_ROSE = '#e11d48';
 
+function formatAxisNumber(val: number): string {
+  if (val >= 1_000_000) return `${(val / 1_000_000).toFixed(1)}M`;
+  if (val >= 1_000) return `${(val / 1_000).toFixed(1)}k`;
+  if (Number.isInteger(val)) return val.toString();
+  return val.toFixed(1);
+}
+
 function updateCharts() {
   const points = props.historyData?.points || [];
   const useHistorical = points.length > 0;
@@ -92,13 +101,22 @@ function updateCharts() {
       boundaryGap: false,
       axisLine: { lineStyle: { color: '#e2e8f0' } },
       axisTick: { show: false },
-      axisLabel: { color: '#64748b', fontSize: 11 },
+      axisLabel: {
+        color: '#64748b',
+        fontSize: 11,
+        interval: (index: number) => index % 2 === 0,
+      },
     },
     yAxis: {
       type: 'value',
       min: 0,
+      splitNumber: 4,
       splitLine: { lineStyle: { color: '#f1f5f9' } },
-      axisLabel: { color: '#64748b', fontSize: 11 },
+      axisLabel: {
+        color: '#64748b',
+        fontSize: 11,
+        formatter: (val: number, idx: number) => (idx % 2 === 0 ? formatAxisNumber(val) : ''),
+      },
     },
     series: [
       {
@@ -172,13 +190,22 @@ function updateCharts() {
         data: timestamps,
         axisLine: { lineStyle: { color: '#e2e8f0' } },
         axisTick: { show: false },
-        axisLabel: { color: '#64748b', fontSize: 11 },
+        axisLabel: {
+          color: '#64748b',
+          fontSize: 11,
+          interval: (index: number) => index % 2 === 0,
+        },
       },
       yAxis: {
         type: 'value',
         min: 0,
+        splitNumber: 4,
         splitLine: { lineStyle: { color: '#f1f5f9' } },
-        axisLabel: { color: '#64748b', fontSize: 11 },
+        axisLabel: {
+          color: '#64748b',
+          fontSize: 11,
+          formatter: (val: number, idx: number) => (idx % 2 === 0 ? formatAxisNumber(val) : ''),
+        },
       },
       series: barSeries,
     }, { notMerge: true });
@@ -193,13 +220,22 @@ function updateCharts() {
         data: timestamps,
         axisLine: { lineStyle: { color: '#e2e8f0' } },
         axisTick: { show: false },
-        axisLabel: { color: '#64748b', fontSize: 11 },
+        axisLabel: {
+          color: '#64748b',
+          fontSize: 11,
+          interval: (index: number) => index % 2 === 0,
+        },
       },
       yAxis: {
         type: 'value',
         min: 0,
+        splitNumber: 4,
         splitLine: { lineStyle: { color: '#f1f5f9' } },
-        axisLabel: { color: '#64748b', fontSize: 11 },
+        axisLabel: {
+          color: '#64748b',
+          fontSize: 11,
+          formatter: (val: number, idx: number) => (idx % 2 === 0 ? formatAxisNumber(val) : ''),
+        },
       },
       series: [
         {
@@ -224,13 +260,22 @@ function updateCharts() {
       boundaryGap: false,
       axisLine: { lineStyle: { color: '#e2e8f0' } },
       axisTick: { show: false },
-      axisLabel: { color: '#64748b', fontSize: 11 },
+      axisLabel: {
+        color: '#64748b',
+        fontSize: 11,
+        interval: (index: number) => index % 2 === 0,
+      },
     },
     yAxis: {
       type: 'value',
       min: 0,
+      splitNumber: 4,
       splitLine: { lineStyle: { color: '#f1f5f9' } },
-      axisLabel: { color: '#64748b', fontSize: 11 },
+      axisLabel: {
+        color: '#64748b',
+        fontSize: 11,
+        formatter: (val: number, idx: number) => (idx % 2 === 0 ? formatAxisNumber(val) : ''),
+      },
     },
     series: [
       {
@@ -262,14 +307,23 @@ function updateCharts() {
       boundaryGap: false,
       axisLine: { lineStyle: { color: '#e2e8f0' } },
       axisTick: { show: false },
-      axisLabel: { color: '#64748b', fontSize: 11 },
+      axisLabel: {
+        color: '#64748b',
+        fontSize: 11,
+        interval: (index: number) => index % 2 === 0,
+      },
     },
     yAxis: {
       type: 'value',
       min: 0,
       max: 100,
+      splitNumber: 4,
       splitLine: { lineStyle: { color: '#f1f5f9' } },
-      axisLabel: { color: '#64748b', fontSize: 11 },
+      axisLabel: {
+        color: '#64748b',
+        fontSize: 11,
+        formatter: (val: number, idx: number) => (idx % 2 === 0 ? `${Math.round(val)}%` : ''),
+      },
     },
     series: [
       {
@@ -361,7 +415,21 @@ watch(
     <!-- 图表全局头部与周期切换器 -->
     <div class="flex flex-wrap items-center justify-between gap-3 mb-4">
       <div>
-        <h2 class="text-base font-bold text-slate-900 tracking-tight">趋势与指标分布</h2>
+        <div class="flex items-center gap-2">
+          <h2 class="text-base font-bold text-slate-900 tracking-tight">趋势与指标分布</h2>
+          <UiTooltip
+            content="基于时序聚合引擎，支持 24小时、7天与30天多周期回溯分析，直观掌握并发洪峰、Token用量分布、延迟走势与异常波动。"
+            wrap
+          >
+            <button
+              type="button"
+              aria-label="指标分布概览说明"
+              class="text-slate-400 hover:text-slate-600 transition-colors cursor-help inline-flex items-center"
+            >
+              <Icons name="info" size="14" />
+            </button>
+          </UiTooltip>
+        </div>
         <p class="text-xs text-slate-400">多周期并发、吞吐柱状分布与延迟波形追踪</p>
       </div>
 
@@ -389,7 +457,21 @@ watch(
       <!-- 1. QPS 趋势 (折线面积图) -->
       <div class="borderless-card p-5">
         <div class="flex items-center justify-between mb-2">
-          <div class="text-sm font-bold text-slate-800">QPS 并发洪峰 (折线面积图)</div>
+          <div class="flex items-center gap-1.5">
+            <div class="text-sm font-bold text-slate-800">QPS 并发洪峰 (折线面积图)</div>
+            <UiTooltip
+              content="展示选定周期（24小时/7天/30天）内，网关每秒处理的 API 请求频次（Queries Per Second），波峰反映系统流量高峰时刻。"
+              wrap
+            >
+              <button
+                type="button"
+                aria-label="QPS 说明"
+                class="text-slate-400 hover:text-slate-600 transition-colors cursor-help inline-flex items-center"
+              >
+                <Icons name="info" size="13" />
+              </button>
+            </UiTooltip>
+          </div>
           <span class="text-xs text-slate-400 font-mono">req/s</span>
         </div>
         <div ref="qpsChartRef" class="w-full h-44" />
@@ -398,7 +480,21 @@ watch(
       <!-- 2. Token 吞吐量 (柱状分布图，带 Provider / Model 切换 switch) -->
       <div class="borderless-card p-5">
         <div class="flex items-center justify-between mb-2">
-          <div class="text-sm font-bold text-slate-800">Token 吞吐量分布 (柱状分布图)</div>
+          <div class="flex items-center gap-1.5">
+            <div class="text-sm font-bold text-slate-800">Token 吞吐量分布 (柱状分布图)</div>
+            <UiTooltip
+              content="展示各时间切片内消耗的 Token 总量，支持按“提供商（Provider）”或“模型（Model）”维度进行堆叠拆解，直观掌握算力与费用分布。"
+              wrap
+            >
+              <button
+                type="button"
+                aria-label="Token 吞吐说明"
+                class="text-slate-400 hover:text-slate-600 transition-colors cursor-help inline-flex items-center"
+              >
+                <Icons name="info" size="13" />
+              </button>
+            </UiTooltip>
+          </div>
           <!-- 维度切换 switch -->
           <div class="segment-track inline-flex items-center">
             <button
@@ -425,7 +521,21 @@ watch(
       <!-- 3. TTFT 延迟与生成速率 (波形图) -->
       <div class="borderless-card p-5">
         <div class="flex items-center justify-between mb-2">
-          <div class="text-sm font-bold text-slate-800">延迟与速率起伏 (波形图)</div>
+          <div class="flex items-center gap-1.5">
+            <div class="text-sm font-bold text-slate-800">延迟与速率起伏 (波形图)</div>
+            <UiTooltip
+              content="展示网关端到端平均处理延迟（毫秒），平缓低位代表性能优异，尖峰通常代表上游排队或公网波动。"
+              wrap
+            >
+              <button
+                type="button"
+                aria-label="延迟说明"
+                class="text-slate-400 hover:text-slate-600 transition-colors cursor-help inline-flex items-center"
+              >
+                <Icons name="info" size="13" />
+              </button>
+            </UiTooltip>
+          </div>
           <span class="text-xs text-slate-400 font-mono">ms</span>
         </div>
         <div ref="latencyChartRef" class="w-full h-44" />
@@ -434,7 +544,21 @@ watch(
       <!-- 4. 故障率异常台阶 (微波阶梯图) -->
       <div class="borderless-card p-5">
         <div class="flex items-center justify-between mb-2">
-          <div class="text-sm font-bold text-slate-800">故障率异常波动 (阶梯图)</div>
+          <div class="flex items-center gap-1.5">
+            <div class="text-sm font-bold text-slate-800">故障率异常波动 (阶梯图)</div>
+            <UiTooltip
+              content="展示各周期切片内失败请求（上游 5xx、超时或鉴权失败）占总请求的比例。系统正常运转时应稳定在 0% 底部基准线。"
+              wrap
+            >
+              <button
+                type="button"
+                aria-label="故障率说明"
+                class="text-slate-400 hover:text-slate-600 transition-colors cursor-help inline-flex items-center"
+              >
+                <Icons name="info" size="13" />
+              </button>
+            </UiTooltip>
+          </div>
           <span class="text-xs text-slate-400 font-mono">%</span>
         </div>
         <div ref="errorChartRef" class="w-full h-44" />

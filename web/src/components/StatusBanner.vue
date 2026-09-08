@@ -2,6 +2,7 @@
 import type { ConnectivityBarSeries } from '../types/telemetry';
 import Icons from './ui/Icons.vue';
 import UiButton from './ui/UiButton.vue';
+import UiTooltip from './ui/UiTooltip.vue';
 import UptimeBars from './ui/UptimeBars.vue';
 
 defineProps<{
@@ -39,9 +40,23 @@ const emit = defineEmits<{
         />
       </span>
 
-      <span class="text-slate-700 font-semibold">
-        网关状态: <strong class="font-bold text-slate-900">{{ health.toUpperCase() }}</strong>
-      </span>
+      <div class="flex items-center gap-1.5">
+        <span class="text-slate-700 font-semibold">
+          网关状态: <strong class="font-bold text-slate-900">{{ health.toUpperCase() }}</strong>
+        </span>
+        <UiTooltip
+          content="连续展示最近 1 分钟内的公网网关健康状态（探测目标：https://tokens.ponyjob.top）。每根微柱代表一次网络探测：绿色表示极速畅通 (<300ms)，黄色表示轻微延迟 (300~1000ms)，红色表示超时或异常；右侧徽章显示最新一次公网往返耗时。"
+          wrap
+        >
+          <button
+            type="button"
+            aria-label="网关状态说明"
+            class="text-slate-400 hover:text-slate-600 transition-colors cursor-help inline-flex items-center"
+          >
+            <Icons name="info" size="14" />
+          </button>
+        </UiTooltip>
+      </div>
 
       <!-- 40根柱状连续排列连通性图例 (Uptime Bars) -->
       <div class="flex items-center pl-2 border-l border-slate-200">

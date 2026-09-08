@@ -25,6 +25,8 @@ export interface UseTelemetryOptions {
   baseUrl?: string;
 }
 
+export const PUBLIC_GATEWAY_PROBE_URL = 'https://tokens.ponyjob.top/health';
+
 export function useTelemetry(options: UseTelemetryOptions = {}) {
   const {
     autoStart = true,
@@ -127,20 +129,58 @@ export function useTelemetry(options: UseTelemetryOptions = {}) {
     await fetchHistory(r);
   }
 
+  async function probeGatewayRtt(): Promise<{ ok: boolean; latencyMs: number }> {
+    const t0 = Date.now();
+    const probeUrl = `${PUBLIC_GATEWAY_PROBE_URL}?_t=${t0}`;
+    try {
+      const res = await fetch(probeUrl, { method: 'GET', mode: 'cors', cache: 'no-store' });
+      const elapsed = Math.max(1, Date.now() - t0);
+      if (res.ok) {
+        return { ok: true, latencyMs: elapsed };
+      }
+    } catch {
+      // Best-effort public probe, fallback handled by caller
+    }
+    return { ok: false, latencyMs: 0 };
+  }
+
   async function fetchSnapshot() {
     try {
       const headers = getAuthHeaders();
-      const t0 = Date.now();
-      const [hRes, mRes, sRes] = await Promise.allSettled([
+      const localT0 = Date.now();
+      const [probeRes, hRes, mRes, sRes] = await Promise.allSettled([
+        probeGatewayRtt(),
         fetch(getFullUrl('/health'), { headers }),
         fetch(getFullUrl('/v1/telemetry/metrics'), { headers }),
         fetch(getFullUrl('/v1/telemetry/stream'), { headers }),
       ]);
-      const rtt = Math.max(1, Date.now() - t0);
+      const localRtt = Math.max(1, Date.now() - localT0);
+
+      // Determine public vs local latency
+      let rtt = localRtt;
+      let isHealthy = false;
+
+      if (probeRes.status === 'fulfilled' && probeRes.value.ok) {
+        rtt = probeRes.value.latencyMs;
+        isHealthy = true;
+      } else if (hRes.status === 'fulfilled' && hRes.value.ok) {
+        rtt = localRtt;
+        isHealthy = true;
+      }
 
       if (hRes.status === 'fulfilled' && hRes.value.ok) {
         const hData = (await hRes.value.json()) as HealthStatus;
         health.value = hData.status === 'ok' ? 'ok' : 'degraded';
+        isDown.value = false;
+        latestGatewayLatency.value = rtt;
+        gatewaySlots.value.push({
+          timestamp_ms: Date.now(),
+          latency_ms: rtt,
+          status: rtt < 300 ? 'ok' : rtt < 1000 ? 'degraded' : 'down',
+        });
+        if (gatewaySlots.value.length > 40) gatewaySlots.value.shift();
+      } else if (isHealthy) {
+        health.value = 'ok';
         isDown.value = false;
         latestGatewayLatency.value = rtt;
         gatewaySlots.value.push({
@@ -298,6 +338,12 @@ export function useTelemetry(options: UseTelemetryOptions = {}) {
   }
 
   const gatewayUptimeBars = computed<ConnectivityBarSeries>(() => {
+    if (gatewaySlots.value.length > 0) {
+      return {
+        slots: gatewaySlots.value,
+        latest_latency_ms: latestGatewayLatency.value,
+      };
+    }
     if (stream.value?.gateway_uptime_bars?.slots && stream.value.gateway_uptime_bars.slots.length > 0) {
       return stream.value.gateway_uptime_bars;
     }

@@ -56,16 +56,16 @@ function getSlotTooltip(slot: ConnectivitySlot): string {
 </script>
 
 <template>
-  <div class="inline-flex items-center gap-2.5">
+  <div class="inline-flex items-center gap-2.5 shrink-0">
     <!-- 连续排列的微型状态柱 -->
-    <div class="flex items-center gap-[2px]">
+    <div class="flex items-center gap-[2px] flex-nowrap shrink-0">
       <div
         v-for="(slot, idx) in normalizedSlots"
         :key="idx"
         data-testid="uptime-bar"
         :data-status="slot.status"
         :title="getSlotTooltip(slot)"
-        class="w-[3px] rounded-[1px] transition-all duration-150 cursor-pointer"
+        class="w-1 shrink-0 rounded-[1px] transition-all duration-150 cursor-pointer"
         :class="[
           barHeight,
           slot.status === 'ok'

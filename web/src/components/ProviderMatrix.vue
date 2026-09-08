@@ -2,6 +2,7 @@
 import { computed } from 'vue';
 import type { ProviderFlowSnapshot } from '../types/telemetry';
 import Icons from './ui/Icons.vue';
+import UiTooltip from './ui/UiTooltip.vue';
 import UptimeBars from './ui/UptimeBars.vue';
 
 const props = withDefaults(
@@ -18,6 +19,13 @@ const props = withDefaults(
 const emit = defineEmits<{
   (e: 'update:range', range: '24h' | '7d' | '30d'): void;
 }>();
+
+const sortedProviders = computed(() => {
+  if (!props.providers) return [];
+  return Object.entries(props.providers)
+    .map(([name, snapshot]) => ({ name, snapshot }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+});
 
 const rangeOptions: Array<{ key: '24h' | '7d' | '30d'; label: string }> = [
   { key: '24h', label: '24小时' },
@@ -62,7 +70,21 @@ function formatTokens(n: number): string {
           <Icons name="server" size="16" />
         </div>
         <div>
-          <h2 class="text-base font-bold text-slate-900 tracking-tight">提供商状态</h2>
+          <div class="flex items-center gap-2">
+            <h2 class="text-base font-bold text-slate-900 tracking-tight">提供商状态</h2>
+            <UiTooltip
+              content="展示系统挂载的各大模型上游供应商（如 Sense、OpenCode、BAI）最近 1 分钟的连通性切片、统计周期内的累计 Token 消耗与占比，以及平均首字延迟（TTFT）和平均生成速率（TPS）。"
+              wrap
+            >
+              <button
+                type="button"
+                aria-label="提供商状态说明"
+                class="text-slate-400 hover:text-slate-600 transition-colors cursor-help inline-flex items-center"
+              >
+                <Icons name="info" size="14" />
+              </button>
+            </UiTooltip>
+          </div>
           <p class="text-xs text-slate-400">活跃上游节点的连通性微柱切片与吞吐概览</p>
         </div>
       </div>
@@ -105,7 +127,7 @@ function formatTokens(n: number): string {
         </thead>
         <tbody class="divide-y divide-slate-50">
           <tr
-            v-for="(p, name) in providers"
+            v-for="{ name, snapshot: p } in sortedProviders"
             :key="name"
             class="hover:bg-slate-50/70 transition-colors group"
           >

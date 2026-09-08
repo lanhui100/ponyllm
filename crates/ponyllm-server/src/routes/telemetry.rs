@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use axum::extract::{Query, State};
@@ -32,7 +32,7 @@ pub struct ProviderSnapshotWithBars {
 #[derive(Debug, Serialize)]
 pub struct StreamTelemetrySnapshot {
     pub global: StreamFlowSummary,
-    pub providers: HashMap<String, ProviderSnapshotWithBars>,
+    pub providers: BTreeMap<String, ProviderSnapshotWithBars>,
     pub gateway_uptime_bars: ConnectivityBarSeries,
     /// Events lost by the lossy disk segment drain (hot path never blocks).
     /// Non-zero means projections are complete but persisted history has gaps.
@@ -64,7 +64,7 @@ pub async fn handle_get_stream(State(state): State<Arc<AppState>>) -> impl IntoR
         }
     }
 
-    let mut providers = HashMap::with_capacity(all_provider_names.len());
+    let mut providers = BTreeMap::new();
     for name in all_provider_names {
         let snap = base_providers.remove(&name).unwrap_or_default();
         let uptime_bars = state.connectivity_sampler.get_series(&name, now_ms);
