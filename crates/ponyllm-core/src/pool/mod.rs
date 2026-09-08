@@ -8,6 +8,7 @@ pub mod pool;
 pub mod hot_cache;
 pub mod scoring;
 pub mod thinking;
+pub mod antigravity;
 
 pub use entry::*;
 pub use strategy::*;
@@ -18,4 +19,6 @@ pub use pool::*;
 pub use hot_cache::*;
 pub use scoring::*;
 pub use thinking::*;
+pub use antigravity::*;
+
 

@@ -16,6 +16,8 @@ pub enum UpstreamProtocol {
     Responses,
     /// Anthropic Messages (`/v1/messages`)
     Anthropic,
+    /// Google Antigravity Internal API
+    Antigravity,
 }
 
 impl UpstreamProtocol {
@@ -24,11 +26,16 @@ impl UpstreamProtocol {
             Self::Chat => "chat",
             Self::Responses => "responses",
             Self::Anthropic => "anthropic",
+            Self::Antigravity => "antigravity",
         }
     }
 
     pub fn is_anthropic(&self) -> bool {
         matches!(self, Self::Anthropic)
+    }
+
+    pub fn is_antigravity(&self) -> bool {
+        matches!(self, Self::Antigravity)
     }
 }
 
@@ -44,6 +51,7 @@ impl FromStr for UpstreamProtocol {
                 Ok(Self::Responses)
             }
             "anthropic" | "messages" | "claude" => Ok(Self::Anthropic),
+            "antigravity" | "ant" | "gcli" | "cloudcode" => Ok(Self::Antigravity),
             _ => Err(format!("Unknown upstream protocol '{}'", s)),
         }
     }

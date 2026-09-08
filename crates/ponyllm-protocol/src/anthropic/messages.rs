@@ -101,6 +101,19 @@ pub enum AnthropicSystem {
     Blocks(Vec<AnthropicSystemBlock>),
 }
 
+impl AnthropicSystem {
+    pub fn as_plain_text(&self) -> String {
+        match self {
+            AnthropicSystem::Text(s) => s.clone(),
+            AnthropicSystem::Blocks(blocks) => {
+                blocks.iter().map(|b| match b {
+                    AnthropicSystemBlock::Text { text, .. } => text.as_str(),
+                }).collect::<Vec<_>>().join("\n")
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AnthropicSystemBlock {
@@ -125,6 +138,17 @@ pub enum AnthropicRole {
     System,
     #[serde(other)]
     Unknown,
+}
+
+impl AnthropicRole {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Assistant => "assistant",
+            Self::System => "system",
+            Self::Unknown => "unknown",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

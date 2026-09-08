@@ -28,6 +28,7 @@ use ponyllm_protocol::anthropic::messages::MessageStreamEvent;
 use ponyllm_protocol::openai::chat::ChatCompletionChunk;
 use ponyllm_protocol::openai::responses::ResponseStreamEvent;
 use ponyllm_protocol::translator::{
+    antigravity_chunk_to_chat_chunk,
     AnthropicStreamToChatFsm, AnthropicToResponsesFsm, ChatStreamToAnthropicFsm,
     ChatToResponsesFsm, ResponsesToAnthropicFsm, ResponsesToChatFsm,
 };
@@ -572,6 +573,236 @@ where
             Ok::<_, E>(Bytes::from(buf))
         }))
         .boxed()
+}
+
+fn uuid_simple() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("{:x}", nanos)
+}
+
+/// Translate an upstream **Antigravity** SSE byte stream into **OpenAI** SSE
+/// frames (`data: {chunk}\n\n`, terminating with `data: [DONE]`). Used by
+/// `/v1/chat/completions` when the routed upstream is Antigravity.
+pub fn antigravity_sse_to_openai_stream<S, E>(
+    stream: S,
+    fallback_model: &str,
+) -> impl Stream<Item = Result<Bytes, E>>
+where
+    S: Stream<Item = Result<Bytes, E>> + Send + 'static,
+    E: Send + 'static,
+{
+    let response_id = format!("chatcmpl-{}", uuid_simple());
+    let model = fallback_model.to_string();
+    let stopped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stopped_flag = stopped.clone();
+
+    let response_id_stream = response_id.clone();
+    let model_stream = model.clone();
+
+    let translated = sse_event_stream(stream).flat_map(move |res| {
+        let mut out: Vec<Result<Bytes, E>> = Vec::new();
+        match res {
+            Ok(evt) => {
+                let data = evt.data.trim();
+                if data.is_empty() || data == "[DONE]" {
+                    // terminal / heartbeat frame: nothing to forward
+                } else if let Ok(val) = serde_json::from_str::<serde_json::Value>(data) {
+                    if let Some(chunk) = antigravity_chunk_to_chat_chunk(&val, &model_stream, &response_id_stream) {
+                        if chunk.choices.iter().any(|ch| ch.finish_reason.is_some()) {
+                            stopped_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                        }
+                        if let Ok(json) = serde_json::to_string(&chunk) {
+                            out.push(Ok(Bytes::from(format!("data: {}\n\n", json))));
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                stopped_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                out.push(Err(e));
+            }
+        }
+        let iter = futures_util::stream::iter(out);
+        futures_util::stream::BoxStream::from(Box::pin(iter)
+            as std::pin::Pin<Box<dyn futures_util::Stream<Item = Result<Bytes, E>> + Send>>)
+    });
+
+    // OpenAI streams must terminate with `data: [DONE]`.
+    translated
+        .chain(futures_util::stream::once(async move {
+            let mut buf = Vec::new();
+            if !stopped.load(std::sync::atomic::Ordering::SeqCst) {
+                let final_chunk = ChatCompletionChunk {
+                    id: response_id,
+                    object: "chat.completion.chunk".to_string(),
+                    created: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs(),
+                    model,
+                    choices: vec![ponyllm_protocol::openai::chat::ChatChunkChoice {
+                        index: 0,
+                        delta: ponyllm_protocol::openai::chat::ChatChunkDelta::default(),
+                        finish_reason: Some(ponyllm_protocol::openai::chat::FinishReason::Stop),
+                        logprobs: None,
+                    }],
+                    usage: None,
+                    system_fingerprint: None,
+                    service_tier: None,
+                };
+                if let Ok(json) = serde_json::to_string(&final_chunk) {
+                    buf.extend_from_slice(format!("data: {}\n\n", json).as_bytes());
+                }
+            }
+            buf.extend_from_slice(b"data: [DONE]\n\n");
+            Ok::<_, E>(Bytes::from(buf))
+        }))
+        .boxed()
+}
+
+/// Translate an upstream **Antigravity** SSE byte stream into **Anthropic** SSE
+/// frames (`event: <type>\ndata: <json>\n\n`). Used by `/v1/messages` when
+/// the routed upstream is Antigravity.
+pub fn antigravity_sse_to_anthropic_stream<S, E>(
+    stream: S,
+    fallback_model: &str,
+) -> impl Stream<Item = Result<Bytes, E>>
+where
+    S: Stream<Item = Result<Bytes, E>> + Send + 'static,
+    E: Send + 'static,
+{
+    let fsm = std::sync::Arc::new(Mutex::new(ChatStreamToAnthropicFsm::new(fallback_model)));
+    let fsm_flat = fsm.clone();
+    let response_id = format!("chatcmpl-{}", uuid_simple());
+    let model = fallback_model.to_string();
+    let stopped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stopped_flag = stopped.clone();
+
+    let translated = sse_event_stream(stream).flat_map(move |res| {
+        let mut out: Vec<Result<Bytes, E>> = Vec::new();
+        match res {
+            Ok(evt) => {
+                let data = evt.data.trim();
+                if data.is_empty() || data == "[DONE]" {
+                    // terminal / heartbeat frame: nothing to forward
+                } else if let Ok(val) = serde_json::from_str::<serde_json::Value>(data) {
+                    if let Some(chunk) = antigravity_chunk_to_chat_chunk(&val, &model, &response_id) {
+                        if let Ok(events) = fsm_flat.lock().process_chunk(chunk) {
+                            for e in events {
+                                if matches!(e, MessageStreamEvent::MessageStop) {
+                                    stopped_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                                }
+                                if let Some(b) = anthropic_event_to_sse_bytes(&e) {
+                                    out.push(Ok(b));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                stopped_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                out.push(Err(e));
+            }
+        }
+        let iter = futures_util::stream::iter(out);
+        futures_util::stream::BoxStream::from(Box::pin(iter)
+            as std::pin::Pin<Box<dyn futures_util::Stream<Item = Result<Bytes, E>> + Send>>)
+    });
+
+    // At stream end, guarantee the Anthropic conversation terminates unless a
+    // transport error already ended it with failure.
+    translated
+        .chain(futures_util::stream::once(async move {
+            let synthetic = if !stopped.load(std::sync::atomic::Ordering::SeqCst) {
+                match fsm.lock().finish_if_open() {
+                    Some(events) => {
+                        let mut buf = Vec::new();
+                        for e in &events {
+                            if let Some(b) = anthropic_event_to_sse_bytes(e) {
+                                buf.extend_from_slice(&b);
+                            }
+                        }
+                        Bytes::from(buf)
+                    }
+                    None => Bytes::new(),
+                }
+            } else {
+                Bytes::new()
+            };
+            Ok::<_, E>(synthetic)
+        }))
+        .boxed()
+}
+
+/// Collect upstream Antigravity SSE stream into a consolidated Gemini response Value.
+pub async fn collect_antigravity_sse_to_json<S, E>(stream: S) -> Result<serde_json::Value, String>
+where
+    S: Stream<Item = Result<Bytes, E>> + Send + 'static,
+    E: std::fmt::Display + Send + 'static,
+{
+    let mut sse_stream = Box::pin(sse_event_stream(stream));
+    let mut collected_text = String::new();
+    let mut finish_reason = None;
+    let mut usage_metadata = serde_json::json!({
+        "promptTokenCount": 0,
+        "candidatesTokenCount": 0,
+        "totalTokenCount": 0
+    });
+    let mut has_data = false;
+
+    while let Some(res) = sse_stream.next().await {
+        match res {
+            Ok(evt) => {
+                let data = evt.data.trim();
+                if data.is_empty() || data == "[DONE]" {
+                    continue;
+                }
+                if let Ok(val) = serde_json::from_str::<serde_json::Value>(data) {
+                    has_data = true;
+                    let target = val.get("response").unwrap_or(&val);
+                    if let Some(candidates) = target.get("candidates").and_then(|v| v.as_array()) {
+                        if let Some(cand) = candidates.first() {
+                            if let Some(fr) = cand.get("finishReason").and_then(|f| f.as_str()) {
+                                finish_reason = Some(fr.to_string());
+                            }
+                            if let Some(parts) = cand.get("content").and_then(|c| c.get("parts")).and_then(|p| p.as_array()) {
+                                for part in parts {
+                                    if let Some(txt) = part.get("text").and_then(|t| t.as_str()) {
+                                        collected_text.push_str(txt);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if let Some(usage) = target.get("usageMetadata") {
+                        usage_metadata = usage.clone();
+                    }
+                }
+            }
+            Err(e) => {
+                return Err(format!("SSE stream error while collecting: {}", e));
+            }
+        }
+    }
+
+    if !has_data && collected_text.is_empty() {
+        return Err("No data collected from Antigravity SSE stream".to_string());
+    }
+
+    Ok(serde_json::json!({
+        "candidates": [{
+            "content": {
+                "role": "model",
+                "parts": [{"text": collected_text}]
+            },
+            "finishReason": finish_reason.unwrap_or_else(|| "STOP".to_string())
+        }],
+        "usageMetadata": usage_metadata
+    }))
 }
 
 /// Context for single-append stream telemetry.
@@ -1276,6 +1507,57 @@ mod tests {
             "must synthesize finish_reason:stop at EOF for anthropic->openai: {joined}"
         );
         assert!(out.last().unwrap().contains("[DONE]"), "missing [DONE]: {out:?}");
+    }
+
+    #[tokio::test]
+    async fn test_collect_antigravity_sse_to_json() {
+        let chunk1 = format!(
+            "data: {}\n\n",
+            serde_json::json!({
+                "response": {
+                    "candidates": [{
+                        "content": {
+                            "role": "model",
+                            "parts": [{"text": "Hello, "}]
+                        }
+                    }]
+                }
+            })
+        );
+        let chunk2 = format!(
+            "data: {}\n\n",
+            serde_json::json!({
+                "response": {
+                    "candidates": [{
+                        "content": {
+                            "role": "model",
+                            "parts": [{"text": "world!"}]
+                        },
+                        "finishReason": "STOP"
+                    }],
+                    "usageMetadata": {
+                        "promptTokenCount": 5,
+                        "candidatesTokenCount": 2,
+                        "totalTokenCount": 7
+                    }
+                }
+            })
+        );
+        let done = "data: [DONE]\n\n";
+
+        let s = bytes_stream(vec![
+            Bytes::from(chunk1),
+            Bytes::from(chunk2),
+            Bytes::from_static(done.as_bytes()),
+        ]);
+
+        let json_val = collect_antigravity_sse_to_json(s).await.expect("collect should succeed");
+        assert_eq!(
+            json_val["candidates"][0]["content"]["parts"][0]["text"],
+            "Hello, world!"
+        );
+        assert_eq!(json_val["candidates"][0]["finishReason"], "STOP");
+        assert_eq!(json_val["usageMetadata"]["totalTokenCount"], 7);
     }
 }
 

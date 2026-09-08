@@ -4,7 +4,7 @@ use parking_lot::Mutex;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE, USER_AGENT};
 use serde_json::Value;
 use crate::error::{CoreError, GatewayErrorKind, Result};
-use crate::pool::{ApiKeyEntry, KeyPool, PoolErrorType};
+use crate::pool::{ApiKeyEntry, KeyPool, KeyState, PoolErrorType};
 use crate::telemetry::{GatewayEvent, StageTimings};
 
 /// One upstream attempt outcome inside an executor retry loop.
@@ -116,6 +116,35 @@ fn clean_session_value(value: &HeaderValue) -> Option<String> {
         return None;
     }
     Some(trimmed.to_string())
+}
+
+/// Transient-retry backoff for **singleton** pools only: when the sole key
+/// survives `record_error` still `Active` (singleton 429 via
+/// `record_transient_failure`, or sub-threshold 5xx/network), allow the same
+/// key to be retried within this request instead of failing with
+/// `NoAvailableKey` after one attempt.
+///
+/// Multi-key pools always fail over to the next key (see
+/// `test_executor_fails_over_on_server_error_without_immediate_cooldown`);
+/// retrying the same Active key there would starve healthy candidates.
+fn transient_retry_delay(
+    pool: &KeyPool,
+    key_id: &str,
+    attempt: usize,
+    max_attempts: usize,
+    retry_after: Option<Duration>,
+) -> Option<Duration> {
+    if attempt + 1 >= max_attempts {
+        return None;
+    }
+    if pool.total_key_count() != 1 {
+        return None;
+    }
+    if pool.get_key_status(key_id) != Some(KeyState::Active) {
+        return None;
+    }
+    let base = retry_after.map(|d| d.min(Duration::from_secs(5)));
+    Some(base.unwrap_or(Duration::from_millis(1200)))
 }
 
 /// Resolve the upstream session id: first valid downstream session header,
@@ -441,15 +470,30 @@ impl UpstreamExecutor {
         });
     }
 
-    fn build_headers(&self, key: &ApiKeyEntry) -> Result<HeaderMap> {
+    async fn build_headers(&self, key: &ApiKeyEntry) -> Result<HeaderMap> {
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
+
+        if key.is_antigravity() {
+            let token = key.resolve_token().await?;
+            headers.insert(USER_AGENT, HeaderValue::from_static(crate::pool::ANTIGRAVITY_USER_AGENT));
+            headers.insert("requestType", HeaderValue::from_static("agent"));
+            let req_id = format!("req-{}", uuid::Uuid::new_v4());
+            if let Ok(val) = HeaderValue::from_str(&req_id) {
+                headers.insert("requestId", val);
+            }
+            let bearer_val = HeaderValue::from_str(&format!("Bearer {}", token.trim()))
+                .map_err(|e| CoreError::Internal(format!("Invalid Antigravity bearer token for '{}': {}", key.id, e)))?;
+            headers.insert(AUTHORIZATION, bearer_val);
+            return Ok(headers);
+        }
 
         let clean_key = key.api_key.trim();
         if clean_key.is_empty() {
             return Err(CoreError::Internal(format!("API key for '{}' is empty", key.id)));
         }
+
+        headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
 
         // Bearer header for OpenAI/DeepSeek
         let bearer_val = HeaderValue::from_str(&format!("Bearer {}", clean_key))
@@ -517,7 +561,7 @@ impl UpstreamExecutor {
             attempted_keys.push(key.id.clone());
             self.emit_key_selected(&key.id, select_start.elapsed());
 
-            let headers = match self.build_headers(&key) {
+            let headers = match self.build_headers(&key).await {
                 Ok(h) => h,
                 Err(e) => {
                     self.pool.record_error(&key.id, PoolErrorType::AuthInvalid);
@@ -555,15 +599,46 @@ impl UpstreamExecutor {
                     if status_code == 429 {
                         last_kind = GatewayErrorKind::RateLimitExceeded { retry_after };
                         self.pool.record_error(&key.id, PoolErrorType::RateLimit { retry_after });
+                        if let Some(delay) = transient_retry_delay(&self.pool, &key.id, attempt, max_attempts, retry_after) {
+                            attempted_keys.retain(|id| id != &key.id);
+                            self.emit_both(&key.id, attempt_idx, Some(status_code), last_kind.clone(), last_error.clone(), Some(err_body), attempt_start.elapsed());
+                            tokio::time::sleep(delay).await;
+                            continue;
+                        }
                     } else if status_code == 401 {
                         last_kind = GatewayErrorKind::AuthInvalid;
                         self.pool.record_error(&key.id, PoolErrorType::AuthInvalid);
-                    } else if status_code == 402 || (status_code == 403 && err_body.to_lowercase().contains("quota")) {
+                    } else if status_code == 403 {
+                        let lower = err_body.to_lowercase();
+                        if lower.contains("violation")
+                            || lower.contains("terms of service")
+                            || lower.contains("terms_of_service")
+                            || lower.contains("suspended")
+                        {
+                            last_kind = GatewayErrorKind::AuthInvalid;
+                            self.pool.record_error(&key.id, PoolErrorType::PolicyViolation);
+                        } else if lower.contains("quota") || lower.contains("#3501") || lower.contains("resource_exhausted") {
+                            last_kind = GatewayErrorKind::QuotaExhausted;
+                            self.pool.record_error(&key.id, PoolErrorType::QuotaExhausted);
+                        } else if lower.contains("#1008") || lower.contains("unsupported_location") {
+                            last_kind = GatewayErrorKind::RateLimitExceeded { retry_after: Some(Duration::from_secs(300)) };
+                            self.pool.record_error(&key.id, PoolErrorType::RateLimit { retry_after: Some(Duration::from_secs(300)) });
+                        } else {
+                            last_kind = GatewayErrorKind::AuthInvalid;
+                            self.pool.record_error(&key.id, PoolErrorType::AuthInvalid);
+                        }
+                    } else if status_code == 402 {
                         last_kind = GatewayErrorKind::QuotaExhausted;
                         self.pool.record_error(&key.id, PoolErrorType::QuotaExhausted);
                     } else if status.is_server_error() {
                         last_kind = GatewayErrorKind::UpstreamUnavailable;
                         self.pool.record_error(&key.id, PoolErrorType::ServerError);
+                        if let Some(delay) = transient_retry_delay(&self.pool, &key.id, attempt, max_attempts, None) {
+                            attempted_keys.retain(|id| id != &key.id);
+                            self.emit_both(&key.id, attempt_idx, Some(status_code), last_kind.clone(), last_error.clone(), Some(err_body), attempt_start.elapsed());
+                            tokio::time::sleep(delay).await;
+                            continue;
+                        }
                     } else {
                         // Client error that is not retryable (e.g. 400 Bad Request)
                         self.emit_both(&key.id, attempt_idx, Some(status_code), GatewayErrorKind::ClientBadRequest, last_error.clone(), Some(err_body.clone()), attempt_start.elapsed());
@@ -578,6 +653,12 @@ impl UpstreamExecutor {
                     last_error = format!("Network error with {}: {}", key.id, err);
                     last_kind = GatewayErrorKind::UpstreamUnavailable;
                     self.pool.record_error(&key.id, PoolErrorType::NetworkError);
+                    if let Some(delay) = transient_retry_delay(&self.pool, &key.id, attempt, max_attempts, None) {
+                        attempted_keys.retain(|id| id != &key.id);
+                        self.emit_both(&key.id, attempt_idx, None, last_kind.clone(), last_error.clone(), None, attempt_start.elapsed());
+                        tokio::time::sleep(delay).await;
+                        continue;
+                    }
                     self.emit_both(&key.id, attempt_idx, None, last_kind.clone(), last_error.clone(), None, attempt_start.elapsed());
                 }
             }
@@ -625,7 +706,7 @@ impl UpstreamExecutor {
             attempted_keys.push(key.id.clone());
             self.emit_key_selected(&key.id, select_start.elapsed());
 
-            let headers = match self.build_headers(&key) {
+            let headers = match self.build_headers(&key).await {
                 Ok(h) => h,
                 Err(e) => {
                     self.pool.record_error(&key.id, PoolErrorType::AuthInvalid);
@@ -661,15 +742,46 @@ impl UpstreamExecutor {
                     if status_code == 429 {
                         last_kind = GatewayErrorKind::RateLimitExceeded { retry_after };
                         self.pool.record_error(&key.id, PoolErrorType::RateLimit { retry_after });
+                        if let Some(delay) = transient_retry_delay(&self.pool, &key.id, attempt, max_attempts, retry_after) {
+                            attempted_keys.retain(|id| id != &key.id);
+                            self.emit_both(&key.id, attempt_idx, Some(status_code), last_kind.clone(), last_error.clone(), Some(err_body), attempt_start.elapsed());
+                            tokio::time::sleep(delay).await;
+                            continue;
+                        }
                     } else if status_code == 401 {
                         last_kind = GatewayErrorKind::AuthInvalid;
                         self.pool.record_error(&key.id, PoolErrorType::AuthInvalid);
-                    } else if status_code == 402 || (status_code == 403 && err_body.to_lowercase().contains("quota")) {
+                    } else if status_code == 403 {
+                        let lower = err_body.to_lowercase();
+                        if lower.contains("violation")
+                            || lower.contains("terms of service")
+                            || lower.contains("terms_of_service")
+                            || lower.contains("suspended")
+                        {
+                            last_kind = GatewayErrorKind::AuthInvalid;
+                            self.pool.record_error(&key.id, PoolErrorType::PolicyViolation);
+                        } else if lower.contains("quota") || lower.contains("#3501") || lower.contains("resource_exhausted") {
+                            last_kind = GatewayErrorKind::QuotaExhausted;
+                            self.pool.record_error(&key.id, PoolErrorType::QuotaExhausted);
+                        } else if lower.contains("#1008") || lower.contains("unsupported_location") {
+                            last_kind = GatewayErrorKind::RateLimitExceeded { retry_after: Some(Duration::from_secs(300)) };
+                            self.pool.record_error(&key.id, PoolErrorType::RateLimit { retry_after: Some(Duration::from_secs(300)) });
+                        } else {
+                            last_kind = GatewayErrorKind::AuthInvalid;
+                            self.pool.record_error(&key.id, PoolErrorType::AuthInvalid);
+                        }
+                    } else if status_code == 402 {
                         last_kind = GatewayErrorKind::QuotaExhausted;
                         self.pool.record_error(&key.id, PoolErrorType::QuotaExhausted);
                     } else if status.is_server_error() {
                         last_kind = GatewayErrorKind::UpstreamUnavailable;
                         self.pool.record_error(&key.id, PoolErrorType::ServerError);
+                        if let Some(delay) = transient_retry_delay(&self.pool, &key.id, attempt, max_attempts, None) {
+                            attempted_keys.retain(|id| id != &key.id);
+                            self.emit_both(&key.id, attempt_idx, Some(status_code), last_kind.clone(), last_error.clone(), Some(err_body), attempt_start.elapsed());
+                            tokio::time::sleep(delay).await;
+                            continue;
+                        }
                     } else {
                         self.emit_both(&key.id, attempt_idx, Some(status_code), GatewayErrorKind::ClientBadRequest, last_error.clone(), Some(err_body.clone()), attempt_start.elapsed());
                         return Err(CoreError::UpstreamStatusError {
@@ -683,6 +795,12 @@ impl UpstreamExecutor {
                     last_error = format!("Network error with {}: {}", key.id, err);
                     last_kind = GatewayErrorKind::UpstreamUnavailable;
                     self.pool.record_error(&key.id, PoolErrorType::NetworkError);
+                    if let Some(delay) = transient_retry_delay(&self.pool, &key.id, attempt, max_attempts, None) {
+                        attempted_keys.retain(|id| id != &key.id);
+                        self.emit_both(&key.id, attempt_idx, None, last_kind.clone(), last_error.clone(), None, attempt_start.elapsed());
+                        tokio::time::sleep(delay).await;
+                        continue;
+                    }
                     self.emit_both(&key.id, attempt_idx, None, last_kind.clone(), last_error.clone(), None, attempt_start.elapsed());
                 }
             }
@@ -780,7 +898,7 @@ mod session_header_tests {
         let executor = UpstreamExecutor::new(pool, 1)
             .with_downstream_headers(&downstream(&[("x-opencode-session", "ses-keep")]))
             .with_opencode_zen(true);
-        let headers = executor.build_headers(&key).unwrap();
+        let headers = futures::executor::block_on(executor.build_headers(&key)).unwrap();
         assert_eq!(headers.get("x-opencode-session").unwrap(), "ses-keep");
         assert_eq!(headers.get("x-session-affinity").unwrap(), "ses-keep");
         assert_eq!(headers.get("x-session-id").unwrap(), "ses-keep");
@@ -792,7 +910,7 @@ mod session_header_tests {
 
         let pool = Arc::new(KeyPool::new("test", RoutingStrategy::RoundRobin));
         let fallback = UpstreamExecutor::new(pool, 1).with_opencode_zen(true);
-        let headers = fallback.build_headers(&key).unwrap();
+        let headers = futures::executor::block_on(fallback.build_headers(&key)).unwrap();
         let session = headers
             .get("x-opencode-session")
             .unwrap()
@@ -808,12 +926,15 @@ mod session_header_tests {
         // Default executor: no session headers at all (historical wire shape).
         let plain = UpstreamExecutor::new(pool, 1)
             .with_downstream_headers(&downstream(&[("x-opencode-session", "ses-keep")]));
-        let headers = plain.build_headers(&key).unwrap();
+        let headers = futures::executor::block_on(plain.build_headers(&key)).unwrap();
         assert!(headers.get("x-opencode-session").is_none());
         assert!(headers.get("x-session-affinity").is_none());
         assert!(headers.get("x-session-id").is_none());
         assert!(headers.get("x-opencode-client").is_none());
-        assert!(headers.get(USER_AGENT).is_none());
+        assert_eq!(
+            headers.get(USER_AGENT).map(|v| v.to_str().unwrap()),
+            None
+        );
         // Auth headers still present.
         assert!(headers.get(AUTHORIZATION).is_some());
         assert!(headers.get("x-api-key").is_some());

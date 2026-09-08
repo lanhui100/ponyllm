@@ -46,6 +46,10 @@ impl ProviderInfo {
     fn responses_url(&self) -> String {
         normalize_responses_url(&self.base_url)
     }
+
+    fn antigravity_url(&self) -> String {
+        format!("{}/v1internal:generateContent", self.base_url.trim_end_matches('/'))
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -150,6 +154,13 @@ impl PonyGateway {
                 let resp: ChatCompletionResponse = serde_json::from_value(resp_val)?;
                 Ok(resp)
             }
+            UpstreamProtocol::Antigravity => {
+                let ant_req = chat_to_antigravity_request(req, &req.model, "aicode-consumers")?;
+                let resp_val = executor.execute_json_request(&provider.antigravity_url(), &ant_req).await?;
+                let chat_val = antigravity_to_chat_response(&resp_val, &req.model);
+                let resp: ChatCompletionResponse = serde_json::from_value(chat_val)?;
+                Ok(resp)
+            }
         }
     }
 
@@ -181,6 +192,13 @@ impl PonyGateway {
                 let ant_resp = chat_to_anthropic_response(&chat_resp)?;
                 Ok(ant_resp)
             }
+            UpstreamProtocol::Antigravity => {
+                let ant_req = messages_to_antigravity_request(req, &req.model, "aicode-consumers")?;
+                let resp_val = executor.execute_json_request(&provider.antigravity_url(), &ant_req).await?;
+                let msg_val = antigravity_to_messages_response(&resp_val, &req.model);
+                let resp: MessageResponse = serde_json::from_value(msg_val)?;
+                Ok(resp)
+            }
         }
     }
 
@@ -211,6 +229,9 @@ impl PonyGateway {
                 let resp_val = executor.execute_json_request(&provider.responses_url(), &body).await?;
                 let resp: ResponseObject = serde_json::from_value(resp_val)?;
                 Ok(resp)
+            }
+            UpstreamProtocol::Antigravity => {
+                Err(CoreError::Internal("Antigravity protocol does not support Responses API".to_string()))
             }
         }
     }

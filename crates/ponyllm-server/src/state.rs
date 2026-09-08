@@ -72,6 +72,11 @@ impl RoutedTarget {
     pub fn messages_url(&self) -> String {
         normalize_messages_url(self.endpoint_base.as_deref().unwrap_or(&self.base_url))
     }
+
+    pub fn antigravity_url(&self, _stream: bool) -> String {
+        let base = self.endpoint_base.as_deref().unwrap_or(&self.base_url).trim_end_matches('/');
+        format!("{}/v1internal:streamGenerateContent?alt=sse", base)
+    }
 }
 
 /// Legacy protocol guess preserved for zero-migration old configs that set
