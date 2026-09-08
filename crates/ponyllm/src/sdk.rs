@@ -155,7 +155,7 @@ impl PonyGateway {
                 Ok(resp)
             }
             UpstreamProtocol::Antigravity => {
-                let ant_req = chat_to_antigravity_request(req, &req.model, "aicode-consumers")?;
+                let ant_req = chat_to_antigravity_request(req, &req.model, "aicode-consumers", req.get_reasoning_effort())?;
                 let resp_val = executor.execute_json_request(&provider.antigravity_url(), &ant_req).await?;
                 let chat_val = antigravity_to_chat_response(&resp_val, &req.model);
                 let resp: ChatCompletionResponse = serde_json::from_value(chat_val)?;
@@ -193,7 +193,7 @@ impl PonyGateway {
                 Ok(ant_resp)
             }
             UpstreamProtocol::Antigravity => {
-                let ant_req = messages_to_antigravity_request(req, &req.model, "aicode-consumers")?;
+                let ant_req = messages_to_antigravity_request(req, &req.model, "aicode-consumers", req.get_reasoning_effort())?;
                 let resp_val = executor.execute_json_request(&provider.antigravity_url(), &ant_req).await?;
                 let msg_val = antigravity_to_messages_response(&resp_val, &req.model);
                 let resp: MessageResponse = serde_json::from_value(msg_val)?;
