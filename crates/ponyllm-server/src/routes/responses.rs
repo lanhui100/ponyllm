@@ -262,6 +262,10 @@ pub async fn handle_responses(
                 };
                 (target.responses_url(), val)
             }
+            ponyllm_core::pool::UpstreamProtocol::Antigravity => {
+                last_error = format!("Antigravity protocol does not support /v1/responses endpoint yet for provider {}", provider_name);
+                continue;
+            }
         };
 
         let req_snippet = Some(format_request_snippet(&req_val));
@@ -325,6 +329,9 @@ pub async fn handle_responses(
                             let stream = passthrough_sse(upstream_resp.bytes_stream());
                             let monitored = wrap_telemetry_stream(stream, failure_ctx);
                             axum::body::Body::from_stream(monitored)
+                        }
+                        ponyllm_core::pool::UpstreamProtocol::Antigravity => {
+                            unreachable!("Antigravity protocol targets are skipped for /v1/responses");
                         }
                     };
                     let mut resp = axum::response::Response::new(body);
@@ -399,6 +406,9 @@ pub async fn handle_responses(
                         }
                     }
                     ponyllm_core::pool::UpstreamProtocol::Responses => resp_val,
+                    ponyllm_core::pool::UpstreamProtocol::Antigravity => {
+                        unreachable!("Antigravity protocol targets are skipped for /v1/responses");
+                    }
                 };
                 let latency = start_time.elapsed();
                 let (prompt_tokens, completion_tokens) = extract_usage_tokens(&resp_val);

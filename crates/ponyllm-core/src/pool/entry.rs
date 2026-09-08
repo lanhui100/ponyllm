@@ -1,6 +1,8 @@
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use parking_lot::RwLock;
+use crate::pool::antigravity::AntigravityTokenManager;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyState {
@@ -14,6 +16,7 @@ pub enum PoolErrorType {
     RateLimit { retry_after: Option<Duration> },
     QuotaExhausted,
     AuthInvalid,
+    PolicyViolation,
     ServerError,
     NetworkError,
 }
@@ -41,10 +44,33 @@ impl Default for KeyStats {
     }
 }
 
+#[derive(Clone)]
+pub enum KeyAuth {
+    Static(String),
+    Antigravity(Arc<AntigravityTokenManager>),
+}
+
+impl std::fmt::Debug for KeyAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Static(key) => {
+                let masked = if key.len() > 8 {
+                    format!("{}...{}", &key[..4], &key[key.len() - 4..])
+                } else {
+                    "***".to_string()
+                };
+                write!(f, "Static({})", masked)
+            }
+            Self::Antigravity(_) => write!(f, "Antigravity(TokenManager)"),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct ApiKeyEntry {
     pub id: String,
     pub api_key: String,
+    pub auth: KeyAuth,
     pub priority: u32,
     pub weight: u32,
     pub stats: KeyStats,
@@ -52,12 +78,48 @@ pub struct ApiKeyEntry {
 
 impl ApiKeyEntry {
     pub fn new(id: impl Into<String>, api_key: impl Into<String>, priority: u32, weight: u32) -> Self {
+        let k = api_key.into();
         Self {
             id: id.into(),
-            api_key: api_key.into(),
+            api_key: k.clone(),
+            auth: KeyAuth::Static(k),
             priority,
             weight,
             stats: KeyStats::default(),
+        }
+    }
+
+    pub fn new_antigravity(
+        id: impl Into<String>,
+        manager: Arc<AntigravityTokenManager>,
+        priority: u32,
+        weight: u32,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            api_key: String::new(),
+            auth: KeyAuth::Antigravity(manager),
+            priority,
+            weight,
+            stats: KeyStats::default(),
+        }
+    }
+
+    pub fn is_antigravity(&self) -> bool {
+        matches!(self.auth, KeyAuth::Antigravity(_))
+    }
+
+    pub fn antigravity_manager(&self) -> Option<Arc<AntigravityTokenManager>> {
+        match &self.auth {
+            KeyAuth::Antigravity(mgr) => Some(mgr.clone()),
+            _ => None,
+        }
+    }
+
+    pub async fn resolve_token(&self) -> crate::error::Result<String> {
+        match &self.auth {
+            KeyAuth::Static(key) => Ok(key.clone()),
+            KeyAuth::Antigravity(mgr) => mgr.get_valid_token().await,
         }
     }
 
@@ -129,15 +191,8 @@ impl ApiKeyEntry {
         match err_type {
             PoolErrorType::RateLimit { retry_after } => {
                 let duration = retry_after.unwrap_or_else(|| {
-                    // Exponential backoff: 3s × 2^(consecutive-1) + jitter, capped at 60s.
-                    // Progression: 3s → 6s → 12s → 24s → 48s → 60s (cap).
-                    // Short initial cooldown cooperates with downstream tools' retry
-                    // curves (e.g. Claude Code 1.5s → 3s → 6s) — the first retry at
-                    // ~1.5–3s will find the key still cooling, the second at ~3–6s hits
-                    // the unlock window.
                     let base_multiplier = 2u64.saturating_pow((consecutive as u32).saturating_sub(1));
                     let base_secs = (3u64.saturating_mul(base_multiplier)).min(60);
-                    // Deterministic jitter spread across keys (0–499 ms) to avoid thundering herd
                     let jitter_millis = (consecutive as u64 * 37 + 13) % 500;
                     Duration::from_millis(base_secs * 1000 + jitter_millis)
                 });
@@ -149,10 +204,11 @@ impl ApiKeyEntry {
             PoolErrorType::AuthInvalid => {
                 *self.stats.disabled_reason.write() = Some("Authentication failed (invalid key)".to_string());
             }
+            PoolErrorType::PolicyViolation => {
+                *self.stats.disabled_reason.write() = Some("Account policy violation / Terms of Service suspension (permanent isolate)".to_string());
+            }
             PoolErrorType::ServerError | PoolErrorType::NetworkError => {
                 if consecutive >= 3 {
-                    // Progressive cooldown: 1s × 2^(consecutive-3), capped at 30s.
-                    // Starts only after 3 consecutive failures to avoid penalizing transient blips.
                     let exp = (consecutive as u32).saturating_sub(3);
                     let secs = (1u64.saturating_mul(2u64.saturating_pow(exp))).min(30);
                     *self.stats.cooldown_until.write() = Some(Instant::now() + Duration::from_secs(secs));

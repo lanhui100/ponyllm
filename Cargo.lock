@@ -1295,6 +1295,7 @@ name = "ponyllm-cli"
 version = "0.2.31"
 dependencies = [
  "axum",
+ "chrono",
  "clap",
  "crossterm 0.28.1",
  "flate2",
@@ -1325,6 +1326,7 @@ dependencies = [
  "ponyllm-core",
  "ponyllm-protocol",
  "serde",
+ "serde_json",
  "toml",
  "uuid",
 ]
@@ -1359,6 +1361,7 @@ dependencies = [
  "serde_json",
  "thiserror",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

@@ -685,3 +685,65 @@ keys = [
 ]
 "#
 }
+
+impl KeySection {
+    pub fn is_antigravity(&self, provider_protocol: Option<UpstreamProtocol>, provider_name: &str) -> bool {
+        if let Some(UpstreamProtocol::Antigravity) = provider_protocol {
+            return true;
+        }
+        if provider_name.to_lowercase().contains("antigravity") {
+            return true;
+        }
+        let trimmed = self.api_key.trim();
+        if trimmed.starts_with('{') && trimmed.contains("refresh_token") {
+            return true;
+        }
+        if trimmed.starts_with("1//") {
+            return true;
+        }
+        false
+    }
+
+    pub fn to_antigravity_credential(&self) -> Result<ponyllm_core::pool::AntigravityCredential, String> {
+        let trimmed = self.api_key.trim();
+        if trimmed.starts_with('{') {
+            serde_json::from_str::<ponyllm_core::pool::AntigravityCredential>(trimmed)
+                .map_err(|e| format!("Failed to parse Antigravity credential JSON: {}", e))
+        } else if trimmed.starts_with("1//") {
+            Ok(ponyllm_core::pool::AntigravityCredential {
+                access_token: None,
+                refresh_token: trimmed.to_string(),
+                client_id: ponyllm_core::pool::DEFAULT_ANTIGRAVITY_CLIENT_ID.to_string(),
+                client_secret: ponyllm_core::pool::DEFAULT_ANTIGRAVITY_CLIENT_SECRET.to_string(),
+                project_id: "aicode-consumers".to_string(),
+                expiry: None,
+            })
+        } else {
+            Err("Not a valid Antigravity credential (must be JSON or start with 1//)".to_string())
+        }
+    }
+
+    pub fn masked_display_key(&self) -> String {
+        let trimmed = self.api_key.trim();
+        if trimmed.starts_with('{') {
+            if let Ok(cred) = serde_json::from_str::<serde_json::Value>(trimmed) {
+                if let Some(rf) = cred.get("refresh_token").and_then(|v| v.as_str()) {
+                    if rf.len() > 10 {
+                        return format!("ag(1//...{})", &rf[rf.len() - 4..]);
+                    }
+                }
+            }
+            "ag(masked-json)".to_string()
+        } else if trimmed.starts_with("1//") {
+            if trimmed.len() > 10 {
+                format!("1//...{}", &trimmed[trimmed.len() - 4..])
+            } else {
+                "1//***".to_string()
+            }
+        } else if trimmed.len() > 8 {
+            format!("{}...{}", &trimmed[..4], &trimmed[trimmed.len() - 4..])
+        } else {
+            "***".to_string()
+        }
+    }
+}

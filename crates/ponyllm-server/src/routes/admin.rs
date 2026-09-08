@@ -222,12 +222,23 @@ pub struct DeleteKeyQuery {
 }
 
 #[derive(Debug, Serialize, ToSchema)]
+pub struct AntigravityQuotaItemView {
+    pub model_id: String,
+    pub remaining_fraction: f64,
+    pub reset_time: Option<String>,
+    pub reset_time_beijing: Option<String>,
+    pub time_until_reset: Option<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
 pub struct KeyTestView {
     pub success: bool,
     pub latency_ms: u64,
     pub http_status: Option<u16>,
     pub error_code: Option<String>,
     pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quota: Option<Vec<AntigravityQuotaItemView>>,
 }
 
 // ---------- helpers ----------
@@ -1231,6 +1242,85 @@ pub async fn handle_admin_test_key(
     };
 
     let base_url = p_sec.base_url.clone();
+    if key_sec.is_antigravity(p_sec.default_protocol, &p_name) {
+        let cred = match key_sec.to_antigravity_credential() {
+            Ok(c) => c,
+            Err(e) => {
+                return Json(KeyTestView {
+                    success: false,
+                    latency_ms: 0,
+                    http_status: None,
+                    error_code: Some("invalid_credential".to_string()),
+                    message: format!("Invalid Antigravity credential: {}", e),
+                    quota: None,
+                })
+                .into_response();
+            }
+        };
+
+        let start = Instant::now();
+        let mgr = ponyllm_core::pool::AntigravityTokenManager::new(&key_sec.id, cred, state.http_client.clone());
+        let token_res = mgr.get_valid_token().await;
+        let latency_ms = start.elapsed().as_millis() as u64;
+
+        let test_view = match token_res {
+            Ok(_) => {
+                let quota_res = mgr.fetch_quota(Some(&base_url)).await;
+                let (quota_view, quota_msg) = match quota_res {
+                    Ok(snapshot) => {
+                        let mut list = Vec::new();
+                        let mut models: Vec<_> = snapshot.models.values().collect();
+                        models.sort_by_key(|m| &m.model_id);
+                        for m in models {
+                            let (beijing_time, remaining_desc) = match m.reset_time {
+                                Some(utc_dt) => {
+                                    let bj_dt = utc_dt + chrono::Duration::hours(8);
+                                    let now = chrono::Utc::now();
+                                    let diff = if utc_dt > now {
+                                        let dur = utc_dt - now;
+                                        format!("{}小时{}分后", dur.num_hours(), dur.num_minutes() % 60)
+                                    } else {
+                                        "已就绪".to_string()
+                                    };
+                                    (Some(bj_dt.format("%Y-%m-%d %H:%M:%S").to_string()), Some(diff))
+                                }
+                                None => (None, None),
+                            };
+                            list.push(AntigravityQuotaItemView {
+                                model_id: m.model_id.clone(),
+                                remaining_fraction: m.remaining_fraction,
+                                reset_time: m.reset_time.map(|t| t.to_rfc3339()),
+                                reset_time_beijing: beijing_time,
+                                time_until_reset: remaining_desc,
+                            });
+                        }
+                        (Some(list), format!("probe ok (quota fetched for {} models)", snapshot.models.len()))
+                    }
+                    Err(e) => (None, format!("probe ok (quota fetch error: {})", e)),
+                };
+
+                KeyTestView {
+                    success: true,
+                    latency_ms,
+                    http_status: Some(200),
+                    error_code: None,
+                    message: quota_msg,
+                    quota: quota_view,
+                }
+            }
+            Err(e) => KeyTestView {
+                success: false,
+                latency_ms,
+                http_status: Some(401),
+                error_code: Some("auth_failed".to_string()),
+                message: format!("OAuth token refresh failed: {}", e),
+                quota: None,
+            },
+        };
+
+        return Json(test_view).into_response();
+    }
+
     let raw_key = key_sec.api_key.clone();
     let is_anthropic = p_sec
         .default_protocol
@@ -1274,6 +1364,7 @@ pub async fn handle_admin_test_key(
                     http_status: Some(status.as_u16()),
                     error_code: None,
                     message: "probe ok".to_string(),
+                    quota: None,
                 }
             } else if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
                 KeyTestView {
@@ -1282,6 +1373,7 @@ pub async fn handle_admin_test_key(
                     http_status: Some(status.as_u16()),
                     error_code: Some("unauthorized".to_string()),
                     message: "upstream authentication failed".to_string(),
+                    quota: None,
                 }
             } else if status == StatusCode::TOO_MANY_REQUESTS {
                 KeyTestView {
@@ -1290,6 +1382,7 @@ pub async fn handle_admin_test_key(
                     http_status: Some(status.as_u16()),
                     error_code: Some("rate_limited".to_string()),
                     message: "upstream rate limit exceeded".to_string(),
+                    quota: None,
                 }
             } else {
                 KeyTestView {
@@ -1298,6 +1391,7 @@ pub async fn handle_admin_test_key(
                     http_status: Some(status.as_u16()),
                     error_code: Some("upstream_error".to_string()),
                     message: format!("upstream returned HTTP {}", status.as_u16()),
+                    quota: None,
                 }
             }
         }
@@ -1309,6 +1403,7 @@ pub async fn handle_admin_test_key(
                     http_status: None,
                     error_code: Some("timeout".to_string()),
                     message: "dial test timed out after 3s".to_string(),
+                    quota: None,
                 }
             } else {
                 KeyTestView {
@@ -1317,6 +1412,7 @@ pub async fn handle_admin_test_key(
                     http_status: None,
                     error_code: Some("connect_error".to_string()),
                     message: "upstream connection error".to_string(),
+                    quota: None,
                 }
             }
         }

@@ -98,6 +98,22 @@ fn build_gateway_config_and_pools(
         };
         let pool = Arc::new(KeyPool::new(p_name, strat));
         for k in &p_sec.keys {
+            if k.is_antigravity(p_sec.default_protocol, p_name) {
+                if let Ok(cred) = k.to_antigravity_credential() {
+                    let effective_proxy = p_sec.proxy.as_deref().or(config_file.gateway.proxy.as_deref());
+                    let http_client = ponyllm_core::executor::create_upstream_http_client_with_options(
+                        effective_proxy,
+                        config_file.gateway.use_system_proxy,
+                    );
+                    let mgr = Arc::new(ponyllm_core::pool::AntigravityTokenManager::new(
+                        &k.id,
+                        cred,
+                        http_client,
+                    ));
+                    pool.add_key(ApiKeyEntry::new_antigravity(&k.id, mgr, k.priority, k.weight));
+                    continue;
+                }
+            }
             pool.add_key(ApiKeyEntry::new(&k.id, &k.api_key, k.priority, k.weight));
         }
         pools.insert(p_name.clone(), pool);
@@ -570,7 +586,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     for k in &p.keys {
                         println!(
                             "{:<15} {:<20} {:<25} {:<8} {:<8}",
-                            p_name, k.id, ConfigFile::mask_key(&k.api_key), k.priority, k.weight
+                            p_name, k.id, k.masked_display_key(), k.priority, k.weight
                         );
                     }
                 }
@@ -604,9 +620,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
             }
-            KeyCommands::Test { provider: _, config: _ } => {
-                println!("🔍 正在执行 API Key 连通性测试...");
-                println!("✅ 所有在线 Key 均健康可用。");
+            KeyCommands::Test { provider, config } => {
+                handle_test_keys(provider, config).await?;
             }
             KeyCommands::Gateway { config, key, rotate } => {
                 handle_manage_gateway_auth(config.as_deref(), key, rotate)?;
@@ -1255,5 +1270,158 @@ async fn handle_gateway_status(
         println!("服务没有运行，先执行 ponyllm serve 启动。");
     }
 
+    Ok(())
+}
+
+async fn handle_test_keys(
+    provider: Option<String>,
+    config: Option<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let resolved = resolve_path(config.as_deref());
+    let cfg = ConfigFile::load_or_default(resolved.to_str())?;
+
+    println!("🔍 正在执行 API Key 连通性测试...");
+    println!("   • 配置文件: {}", resolved.display());
+
+    let mut tested_count = 0;
+    let mut success_count = 0;
+
+    for (p_name, p) in &cfg.providers {
+        if let Some(ref target) = provider {
+            if p_name != target {
+                continue;
+            }
+        }
+
+        println!("\n▶ 提供商: {} (端点: {})", p_name, p.base_url);
+        let effective_proxy = p.proxy.as_deref().or(cfg.gateway.proxy.as_deref());
+        if let Some(pxy) = effective_proxy {
+            println!("  [网络代理] {}", pxy);
+        }
+
+        for k in &p.keys {
+            tested_count += 1;
+            print!("  • [{}] {} ... ", k.id, k.masked_display_key());
+            std::io::Write::flush(&mut std::io::stdout())?;
+
+            if k.is_antigravity(p.default_protocol, p_name) {
+                match k.to_antigravity_credential() {
+                    Ok(cred) => {
+                        let client = ponyllm_core::executor::create_upstream_http_client_with_options(
+                            effective_proxy,
+                            cfg.gateway.use_system_proxy,
+                        );
+                        let mgr = ponyllm_core::pool::AntigravityTokenManager::new(&k.id, cred, client);
+                        let start = std::time::Instant::now();
+                        match mgr.get_valid_token().await {
+                            Ok(_) => {
+                                let latency = start.elapsed();
+                                println!("✅ 有效 (OAuth续期成功, 耗时 {}ms)", latency.as_millis());
+                                success_count += 1;
+
+                                print!("    ↳ 正在抓取 Antigravity 模型配额与重置时间... ");
+                                std::io::Write::flush(&mut std::io::stdout())?;
+                                match mgr.fetch_quota(Some(&p.base_url)).await {
+                                    Ok(snapshot) => {
+                                        println!("✅ 成功 (获取到 {} 个模型)", snapshot.models.len());
+                                        println!("      {:<28} {:<12} {:<24} {:<16}", "模型", "剩余额度", "恢复时间(北京时间)", "距离恢复");
+                                        println!("      {}", "-".repeat(82));
+                                        let mut models: Vec<_> = snapshot.models.values().collect();
+                                        models.sort_by_key(|m| &m.model_id);
+                                        for m in models {
+                                            let pct = format!("{:.1}%", m.remaining_fraction * 100.0);
+                                            let (beijing_time, remaining_desc) = match m.reset_time {
+                                                Some(utc_dt) => {
+                                                    let bj_dt = utc_dt + chrono::Duration::hours(8);
+                                                    let now = chrono::Utc::now();
+                                                    let diff = if utc_dt > now {
+                                                        let dur = utc_dt - now;
+                                                        let hours = dur.num_hours();
+                                                        let mins = dur.num_minutes() % 60;
+                                                        format!("{}小时{}分后", hours, mins)
+                                                    } else {
+                                                        "已就绪".to_string()
+                                                    };
+                                                    (bj_dt.format("%Y-%m-%d %H:%M:%S").to_string(), diff)
+                                                }
+                                                None => ("N/A".to_string(), "N/A".to_string()),
+                                            };
+                                            println!("      {:<28} {:<12} {:<24} {:<16}", m.model_id, pct, beijing_time, remaining_desc);
+                                        }
+                                    }
+                                    Err(e) => {
+                                        println!("⚠️ 额度抓取异常: {}", e);
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                println!("❌ 鉴权失败: {}", e);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        println!("❌ 凭证格式错误: {}", e);
+                    }
+                }
+            } else {
+                let client = ponyllm_core::executor::create_upstream_http_client_with_options(
+                    effective_proxy,
+                    cfg.gateway.use_system_proxy,
+                );
+                let probe_url = if let Some(ref chat) = p.chat_url {
+                    chat.clone()
+                } else {
+                    format!("{}/models", p.base_url.trim_end_matches('/'))
+                };
+
+                let start = std::time::Instant::now();
+                let mut req = client
+                    .get(&probe_url)
+                    .timeout(std::time::Duration::from_secs(5))
+                    .header(reqwest::header::USER_AGENT, "ponyllm-cli/dialtest");
+
+                let is_anthropic = p.default_protocol.map(|p| p.is_anthropic()).unwrap_or(false)
+                    || p.base_url.contains("anthropic");
+
+                if is_anthropic {
+                    req = req
+                        .header("x-api-key", &k.api_key)
+                        .header("anthropic-version", "2023-06-01");
+                } else {
+                    req = req.header(
+                        reqwest::header::AUTHORIZATION,
+                        format!("Bearer {}", k.api_key),
+                    );
+                }
+
+                match req.send().await {
+                    Ok(resp) => {
+                        let latency = start.elapsed();
+                        if resp.status().is_success() {
+                            println!("✅ 健康 (HTTP 200, 耗时 {}ms)", latency.as_millis());
+                            success_count += 1;
+                        } else {
+                            println!(
+                                "⚠️ 异常 (HTTP {}, 耗时 {}ms)",
+                                resp.status().as_u16(),
+                                latency.as_millis()
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        println!("❌ 网络连接失败: {}", e);
+                    }
+                }
+            }
+        }
+    }
+
+    println!("\n=== 探测总结 ===");
+    println!(
+        "共测试 {} 个密钥凭证，成功: {}，失败/异常: {}",
+        tested_count,
+        success_count,
+        tested_count - success_count
+    );
     Ok(())
 }

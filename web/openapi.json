@@ -428,6 +428,40 @@
   },
   "components": {
     "schemas": {
+      "AntigravityQuotaItemView": {
+        "type": "object",
+        "required": [
+          "model_id",
+          "remaining_fraction"
+        ],
+        "properties": {
+          "model_id": {
+            "type": "string"
+          },
+          "remaining_fraction": {
+            "type": "number",
+            "format": "double"
+          },
+          "reset_time": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reset_time_beijing": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "time_until_reset": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
       "CreateKeyPayload": {
         "type": "object",
         "required": [
@@ -650,6 +684,15 @@
           },
           "message": {
             "type": "string"
+          },
+          "quota": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/AntigravityQuotaItemView"
+            }
           },
           "success": {
             "type": "boolean"

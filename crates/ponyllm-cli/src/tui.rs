@@ -850,7 +850,7 @@ fn handle_modal_key(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                         2 => default_model.push(' '),
                         3 => *strategy_idx = (*strategy_idx + 1) % 3,
                         4 => *billing_mode_idx = (*billing_mode_idx + 1) % 3,
-                        5 => *protocol_idx = (*protocol_idx + 1) % 4,
+                        5 => *protocol_idx = (*protocol_idx + 1) % 5,
                         _ => {}
                     }
                     keep_modal = true;
@@ -870,7 +870,7 @@ fn handle_modal_key(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                         *strategy_idx += 1;
                     } else if *active_field == 4 && *billing_mode_idx < 2 {
                         *billing_mode_idx += 1;
-                    } else if *active_field == 5 && *protocol_idx < 3 {
+                    } else if *active_field == 5 && *protocol_idx < 4 {
                         *protocol_idx += 1;
                     }
                     keep_modal = true;
@@ -885,6 +885,7 @@ fn handle_modal_key(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                 KeyCode::Char('2') if *active_field == 5 => { *protocol_idx = 1; keep_modal = true; }
                 KeyCode::Char('3') if *active_field == 5 => { *protocol_idx = 2; keep_modal = true; }
                 KeyCode::Char('4') if *active_field == 5 => { *protocol_idx = 3; keep_modal = true; }
+                KeyCode::Char('5') if *active_field == 5 => { *protocol_idx = 4; keep_modal = true; }
                 KeyCode::Backspace => {
                     match *active_field {
                         0 => { name.pop(); }
@@ -998,7 +999,7 @@ fn handle_modal_key(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                         1 => default_model.push(' '),
                         2 => *strategy_idx = (*strategy_idx + 1) % 3,
                         3 => *billing_mode_idx = (*billing_mode_idx + 1) % 3,
-                        4 => *protocol_idx = (*protocol_idx + 1) % 4,
+                        4 => *protocol_idx = (*protocol_idx + 1) % 5,
                         _ => {}
                     }
                     keep_modal = true;
@@ -1018,7 +1019,7 @@ fn handle_modal_key(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                         *strategy_idx += 1;
                     } else if *active_field == 3 && *billing_mode_idx < 2 {
                         *billing_mode_idx += 1;
-                    } else if *active_field == 4 && *protocol_idx < 3 {
+                    } else if *active_field == 4 && *protocol_idx < 4 {
                         *protocol_idx += 1;
                     }
                     keep_modal = true;
@@ -1033,6 +1034,7 @@ fn handle_modal_key(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                 KeyCode::Char('2') if *active_field == 4 => { *protocol_idx = 1; keep_modal = true; }
                 KeyCode::Char('3') if *active_field == 4 => { *protocol_idx = 2; keep_modal = true; }
                 KeyCode::Char('4') if *active_field == 4 => { *protocol_idx = 3; keep_modal = true; }
+                KeyCode::Char('5') if *active_field == 4 => { *protocol_idx = 4; keep_modal = true; }
                 KeyCode::Backspace => {
                     match *active_field {
                         0 => { base_url.pop(); }
@@ -1173,7 +1175,7 @@ fn handle_modal_key(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                         0 => model_name.push(' '),
                         1 => *tier_idx = (*tier_idx + 1) % 3,
                         2 => *billing_mode_idx = (*billing_mode_idx + 1) % 4,
-                        3 => *protocol_idx = (*protocol_idx + 1) % 4,
+                        3 => *protocol_idx = (*protocol_idx + 1) % 5,
                         7 => context_window.push(' '),
                         8 => max_output.push(' '),
                         9 => input_modalities[0] = !input_modalities[0],
@@ -1198,7 +1200,7 @@ fn handle_modal_key(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                         *tier_idx += 1;
                     } else if *active_field == 2 && *billing_mode_idx < 3 {
                         *billing_mode_idx += 1;
-                    } else if *active_field == 3 && *protocol_idx < 3 {
+                    } else if *active_field == 3 && *protocol_idx < 4 {
                         *protocol_idx += 1;
                     }
                     keep_modal = true;
@@ -1214,6 +1216,7 @@ fn handle_modal_key(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                 KeyCode::Char('2') if *active_field == 3 => { *protocol_idx = 1; keep_modal = true; }
                 KeyCode::Char('3') if *active_field == 3 => { *protocol_idx = 2; keep_modal = true; }
                 KeyCode::Char('4') if *active_field == 3 => { *protocol_idx = 3; keep_modal = true; }
+                KeyCode::Char('5') if *active_field == 3 => { *protocol_idx = 4; keep_modal = true; }
                 KeyCode::Char('1') if *active_field == 9 => { input_modalities[0] = !input_modalities[0]; keep_modal = true; }
                 KeyCode::Char('2') if *active_field == 9 => { input_modalities[1] = !input_modalities[1]; keep_modal = true; }
                 KeyCode::Char('3') if *active_field == 9 => { input_modalities[2] = !input_modalities[2]; keep_modal = true; }
@@ -1356,7 +1359,7 @@ fn handle_modal_key(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                     match *active_field {
                         0 => *tier_idx = (*tier_idx + 1) % 3,
                         1 => *billing_mode_idx = (*billing_mode_idx + 1) % 4,
-                        2 => *protocol_idx = (*protocol_idx + 1) % 4,
+                        2 => *protocol_idx = (*protocol_idx + 1) % 5,
                         6 => context_window.push(' '),
                         7 => max_output.push(' '),
                         8 => input_modalities[0] = !input_modalities[0],
@@ -1381,7 +1384,7 @@ fn handle_modal_key(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                         *tier_idx += 1;
                     } else if *active_field == 1 && *billing_mode_idx < 3 {
                         *billing_mode_idx += 1;
-                    } else if *active_field == 2 && *protocol_idx < 3 {
+                    } else if *active_field == 2 && *protocol_idx < 4 {
                         *protocol_idx += 1;
                     }
                     keep_modal = true;
@@ -1397,6 +1400,7 @@ fn handle_modal_key(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                 KeyCode::Char('2') if *active_field == 2 => { *protocol_idx = 1; keep_modal = true; }
                 KeyCode::Char('3') if *active_field == 2 => { *protocol_idx = 2; keep_modal = true; }
                 KeyCode::Char('4') if *active_field == 2 => { *protocol_idx = 3; keep_modal = true; }
+                KeyCode::Char('5') if *active_field == 2 => { *protocol_idx = 4; keep_modal = true; }
                 KeyCode::Char('1') if *active_field == 8 => { input_modalities[0] = !input_modalities[0]; keep_modal = true; }
                 KeyCode::Char('2') if *active_field == 8 => { input_modalities[1] = !input_modalities[1]; keep_modal = true; }
                 KeyCode::Char('3') if *active_field == 8 => { input_modalities[2] = !input_modalities[2]; keep_modal = true; }
@@ -2145,6 +2149,7 @@ fn render_providers_and_models_tab(f: &mut Frame, area: Rect, app: &mut TuiApp) 
                                 UpstreamProtocol::Chat => "chat/completions",
                                 UpstreamProtocol::Responses => "responses",
                                 UpstreamProtocol::Anthropic => "messages",
+                                UpstreamProtocol::Antigravity => "antigravity",
                             }, proto),
                             None => format!("{}/v1/chat/completions [auto]", base_url.trim_end_matches('/')),
                         }
@@ -2895,6 +2900,7 @@ fn protocol_to_idx(protocol: Option<UpstreamProtocol>) -> usize {
         Some(UpstreamProtocol::Chat) => 1,
         Some(UpstreamProtocol::Responses) => 2,
         Some(UpstreamProtocol::Anthropic) => 3,
+        Some(UpstreamProtocol::Antigravity) => 4,
     }
 }
 
@@ -2903,6 +2909,7 @@ fn idx_to_protocol(idx: usize) -> Option<UpstreamProtocol> {
         1 => Some(UpstreamProtocol::Chat),
         2 => Some(UpstreamProtocol::Responses),
         3 => Some(UpstreamProtocol::Anthropic),
+        4 => Some(UpstreamProtocol::Antigravity),
         _ => None,
     }
 }
@@ -2980,6 +2987,8 @@ fn render_protocol_selector(protocol_idx: usize, is_active: bool, is_model_level
             make_item(2, "3:resp"),
             Span::raw(" "),
             make_item(3, "4:anth"),
+            Span::raw(" "),
+            make_item(4, "5:antigravity"),
         ])
     } else {
         Line::from(vec![
@@ -2991,6 +3000,8 @@ fn render_protocol_selector(protocol_idx: usize, is_active: bool, is_model_level
             make_item(2, "3:resp"),
             Span::raw(" "),
             make_item(3, "4:anth"),
+            Span::raw(" "),
+            make_item(4, "5:antigravity"),
         ])
     }
 }

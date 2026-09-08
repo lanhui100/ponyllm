@@ -10,15 +10,21 @@ use ponyllm_core::pool::GatewayRoutingStrategy;
 use ponyllm_core::telemetry::{EventCtx, GatewayEvent, StageTimings};
 use ponyllm_protocol::anthropic::messages::MessageResponse;
 use ponyllm_protocol::openai::chat::ChatCompletionRequest;
-use ponyllm_protocol::translator::{anthropic_to_chat_response, chat_to_anthropic_request, chat_to_responses_request, responses_to_chat_response};
+use ponyllm_protocol::translator::{
+    anthropic_to_chat_response, antigravity_to_chat_response,
+    chat_to_antigravity_request, chat_to_anthropic_request,
+    chat_to_responses_request, responses_to_chat_response,
+};
 use parking_lot::Mutex;
 use std::str::FromStr;
 use crate::extractors::{format_request_snippet, AppJson};
 use crate::routes::models::ParsedRequestModel;
 use crate::state::{AppState, RoutedTarget};
 use crate::streaming::{
-    anthropic_sse_to_openai_stream, extract_usage_tokens, passthrough_sse,
-    responses_sse_to_chat_stream, wrap_telemetry_stream, StreamFailureContext,
+    antigravity_sse_to_openai_stream, anthropic_sse_to_openai_stream,
+    collect_antigravity_sse_to_json,
+    extract_usage_tokens, passthrough_sse, responses_sse_to_chat_stream,
+    wrap_telemetry_stream, StreamFailureContext,
 };
 
 use ponyllm_protocol::openai::chat::ChatMessage;
@@ -283,6 +289,17 @@ pub async fn handle_chat_completions(
                 };
                 (url, val)
             }
+            ponyllm_core::pool::UpstreamProtocol::Antigravity => {
+                let url = target.antigravity_url(is_streaming);
+                let val = match chat_to_antigravity_request(&target_req, &target.physical_model, "aicode-consumers") {
+                    Ok(v) => v,
+                    Err(e) => {
+                        last_error = format!("Translation error for {}: {}", target.provider_name, e);
+                        continue;
+                    }
+                };
+                (url, val)
+            }
         };
 
 
@@ -353,6 +370,14 @@ pub async fn handle_chat_completions(
                             let monitored = wrap_telemetry_stream(stream, failure_ctx);
                             axum::body::Body::from_stream(monitored)
                         }
+                        ponyllm_core::pool::UpstreamProtocol::Antigravity => {
+                            let stream = antigravity_sse_to_openai_stream(
+                                raw_stream,
+                                &target.physical_model,
+                            );
+                            let monitored = wrap_telemetry_stream(stream, failure_ctx);
+                            axum::body::Body::from_stream(monitored)
+                        }
                     };
 
                     let mut resp = axum::response::Response::new(body);
@@ -374,7 +399,22 @@ pub async fn handle_chat_completions(
                 }
             }
         } else {
-            match executor.execute_json_request(&target_url, &req_val).await {
+            let upstream_result = if target.upstream_protocol == ponyllm_core::pool::UpstreamProtocol::Antigravity {
+                match executor.execute_stream_request(&target_url, &req_val).await {
+                    Ok(resp) => {
+                        let raw_stream = resp.bytes_stream();
+                        match collect_antigravity_sse_to_json(raw_stream).await {
+                            Ok(v) => Ok(v),
+                            Err(e) => Err(CoreError::Internal(format!("Failed to collect Antigravity stream: {}", e))),
+                        }
+                    }
+                    Err(e) => Err(e),
+                }
+            } else {
+                executor.execute_json_request(&target_url, &req_val).await
+            };
+
+            match upstream_result {
                 Ok(resp_val) => {
                     let latency = start_time.elapsed();
                     let mut final_val = match target.upstream_protocol {
@@ -424,6 +464,9 @@ pub async fn handle_chat_completions(
                                     continue;
                                 }
                             }
+                        }
+                        ponyllm_core::pool::UpstreamProtocol::Antigravity => {
+                            antigravity_to_chat_response(&resp_val, &target.physical_model)
                         }
                         _ => resp_val,
                     };

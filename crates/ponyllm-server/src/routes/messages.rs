@@ -10,7 +10,11 @@ use ponyllm_core::pool::GatewayRoutingStrategy;
 use ponyllm_core::telemetry::{EventCtx, GatewayEvent, StageTimings};
 use ponyllm_protocol::anthropic::messages::{MessageRequest, MessageResponse};
 use ponyllm_protocol::openai::chat::ChatCompletionResponse;
-use ponyllm_protocol::translator::{anthropic_to_chat_request, anthropic_to_responses_request, chat_to_anthropic_response, responses_to_anthropic_response};
+use ponyllm_protocol::translator::{
+    anthropic_to_chat_request, anthropic_to_responses_request,
+    antigravity_to_messages_response, chat_to_anthropic_response,
+    messages_to_antigravity_request, responses_to_anthropic_response,
+};
 use parking_lot::Mutex;
 use std::str::FromStr;
 use crate::extractors::{format_request_snippet, AppJson};
@@ -18,6 +22,7 @@ use crate::routes::chat::{inject_routing_headers, inject_telemetry_headers};
 use crate::routes::models::ParsedRequestModel;
 use crate::state::AppState;
 use crate::streaming::{
+    antigravity_sse_to_anthropic_stream, collect_antigravity_sse_to_json,
     openai_sse_to_anthropic_stream, passthrough_sse,
     responses_sse_to_anthropic_stream, wrap_telemetry_stream, StreamFailureContext,
 };
@@ -329,6 +334,17 @@ pub async fn handle_messages(
             };
             (url, val)
             }
+            ponyllm_core::pool::UpstreamProtocol::Antigravity => {
+                let url = target.antigravity_url(is_streaming);
+                let val = match messages_to_antigravity_request(&target_req, &target.physical_model, "aicode-consumers") {
+                    Ok(v) => v,
+                    Err(e) => {
+                        last_error = format!("Translation error for {}: {}", target.provider_name, e);
+                        continue;
+                    }
+                };
+                (url, val)
+            }
         };
 
         // Forensics snippet must be the actual upstream wire JSON, not the
@@ -401,6 +417,14 @@ pub async fn handle_messages(
                             let monitored = wrap_telemetry_stream(stream, failure_ctx);
                             axum::body::Body::from_stream(monitored)
                         }
+                        ponyllm_core::pool::UpstreamProtocol::Antigravity => {
+                            let stream = antigravity_sse_to_anthropic_stream(
+                                raw_stream,
+                                &target.physical_model,
+                            );
+                            let monitored = wrap_telemetry_stream(stream, failure_ctx);
+                            axum::body::Body::from_stream(monitored)
+                        }
                     };
 
                     let mut resp = axum::response::Response::new(body);
@@ -422,7 +446,22 @@ pub async fn handle_messages(
                 }
             }
         } else {
-            match executor.execute_json_request(&target_url, &req_val).await {
+            let upstream_result = if target.upstream_protocol == ponyllm_core::pool::UpstreamProtocol::Antigravity {
+                match executor.execute_stream_request(&target_url, &req_val).await {
+                    Ok(resp) => {
+                        let raw_stream = resp.bytes_stream();
+                        match collect_antigravity_sse_to_json(raw_stream).await {
+                            Ok(v) => Ok(v),
+                            Err(e) => Err(CoreError::Internal(format!("Failed to collect Antigravity stream: {}", e))),
+                        }
+                    }
+                    Err(e) => Err(e),
+                }
+            } else {
+                executor.execute_json_request(&target_url, &req_val).await
+            };
+
+            match upstream_result {
                 Ok(resp_val) => {
                     let latency = start_time.elapsed();
                     let mut ant_resp: MessageResponse = match target.upstream_protocol {
@@ -465,6 +504,16 @@ pub async fn handle_messages(
                                 Ok(ar) => ar,
                                 Err(e) => {
                                     last_error = format!("Invalid Anthropic response from {}: {}", target.provider_name, e);
+                                    continue;
+                                }
+                            }
+                        }
+                        ponyllm_core::pool::UpstreamProtocol::Antigravity => {
+                            let ant_val = antigravity_to_messages_response(&resp_val, &target.physical_model);
+                            match serde_json::from_value(ant_val) {
+                                Ok(ar) => ar,
+                                Err(e) => {
+                                    last_error = format!("Invalid Antigravity translated response from {}: {}", target.provider_name, e);
                                     continue;
                                 }
                             }

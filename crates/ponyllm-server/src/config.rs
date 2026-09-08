@@ -268,6 +268,7 @@ impl ProviderConfig {
             UpstreamProtocol::Chat => self.chat_url.as_deref(),
             UpstreamProtocol::Responses => self.responses_url.as_deref(),
             UpstreamProtocol::Anthropic => self.messages_url.as_deref(),
+            UpstreamProtocol::Antigravity => None,
         }
     }
 }
