@@ -73,24 +73,22 @@ describe('UptimeBars Component', () => {
 
     const latencyLabel = container.querySelector('[data-testid="latest-latency"]');
     expect(latencyLabel?.textContent?.trim()).toBe('--');
-    expect(latencyLabel?.className).toContain('text-slate-400');
+    expect(latencyLabel?.className).toContain('text-slate-500');
     app.unmount();
   });
 
-  it('renders exactly 6 bars when slotCount is 6, displaying call metrics in tooltip and 24h speed in t/s', async () => {
-    const slots: ConnectivitySlot[] = [
-      { timestamp_ms: 1000, latency_ms: 80, tps: 45.5, status: 'ok' },
-      { timestamp_ms: 2000, latency_ms: 110, tps: 52.0, status: 'ok' },
-      { timestamp_ms: 3000, latency_ms: 320, tps: 28.3, status: 'degraded' },
-      { timestamp_ms: 4000, latency_ms: 95, tps: 60.1, status: 'ok' },
-      { timestamp_ms: 5000, latency_ms: 1500, tps: 0, status: 'down' },
-      { timestamp_ms: 6000, latency_ms: 90, tps: 58.4, status: 'ok' },
-    ];
+  it('renders exactly 24 bars when slotCount is 24, displaying call metrics in tooltip and 24h speed in t/s', async () => {
+    const slots: ConnectivitySlot[] = Array.from({ length: 24 }, (_, i) => ({
+      timestamp_ms: 1000 + i * 5000,
+      latency_ms: i === 23 ? 90 : 80 + i,
+      tps: 45 + i,
+      status: i === 20 ? 'degraded' : i === 21 ? 'down' : 'ok',
+    }));
 
     const app = createApp({
       render: () => h(UptimeBars, {
         slots,
-        slotCount: 6,
+        slotCount: 24,
         latestLatencyMs: 90,
         speed24h: 48.6,
       }),
@@ -98,17 +96,17 @@ describe('UptimeBars Component', () => {
     app.mount(container);
     await nextTick();
 
-    // Exactly 6 bars
+    // Exactly 24 bars (5s/柱, 最近2分钟)
     const bars = container.querySelectorAll('[data-testid="uptime-bar"]');
-    expect(bars.length).toBe(6);
+    expect(bars.length).toBe(24);
 
-    // Verify 6-bar width is wider (w-2 rounded-[2px])
-    expect(bars[0].className).toContain('w-2');
+    // Verify 24-bar width is narrow (w-1)
+    expect(bars[0].className).toContain('w-1');
 
     // Tooltip includes status, latency, and speed in t/s
     const firstBarTitle = bars[0].getAttribute('title') || '';
     expect(firstBarTitle).toContain('80.0 ms');
-    expect(firstBarTitle).toContain('45.5 t/s');
+    expect(firstBarTitle).toContain('45.0 t/s');
     expect(firstBarTitle).toContain('响应及时');
 
     // 24h speed badge in t/s is present

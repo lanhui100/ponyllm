@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use ponyllm_core::telemetry::{
     ConnectivitySampler, ConnectivityStatus, EventBus, EventCtx, GatewayEvent,
-    TimeseriesProjection,
+    TimeseriesProjection, GATEWAY_SLOT_COUNT, GATEWAY_STEP_MS,
 };
 
 #[test]
@@ -200,5 +200,91 @@ fn test_timeseries_clock_skew_resilience() {
     let resp = timeseries_proj.query_history("24h", base_now + 1000);
     assert_eq!(resp.total_requests, 1, "Legitimate sample should still be present");
     assert_eq!(resp.total_tokens, 150);
+}
+
+#[test]
+fn test_gateway_default_is_24_slots_5s_covering_2min() {
+    assert_eq!(GATEWAY_SLOT_COUNT, 24);
+    assert_eq!(GATEWAY_STEP_MS, 5000);
+    assert_eq!(GATEWAY_SLOT_COUNT as u64 * GATEWAY_STEP_MS, 120_000);
+
+    let sampler = ConnectivitySampler::default();
+    assert_eq!(sampler.gateway_slot_count(), 24);
+    assert_eq!(sampler.gateway_step_ms(), 5000);
+    let now = 1_700_000_000_000u64;
+    sampler.record("gateway", now, Some(20.0), true);
+    let series = sampler.get_series("gateway", now);
+    assert_eq!(series.slots.len(), 24);
+    assert_eq!(series.slots.last().unwrap().status, ConnectivityStatus::Ok);
+    // 间隔应为5s
+    let n = series.slots.len();
+    assert_eq!(
+        series.slots[n - 1].timestamp_ms - series.slots[n - 2].timestamp_ms,
+        5000
+    );
+}
+
+#[test]
+fn test_provider_bars_are_continuous_per_call_no_time_gaps() {
+    let sampler = ConnectivitySampler::default();
+    let base = 1_700_000_000_000u64;
+    // 稀疏调用：间隔远大于5s，时间桶方案会在中间产生Empty
+    sampler.record("prov-a", base, Some(100.0), true);
+    sampler.record("prov-a", base + 3600_000, Some(500.0), true);
+    sampler.record("prov-a", base + 7200_000, Some(50.0), false);
+
+    let series = sampler.get_series("prov-a", base + 7200_000 + 1000);
+    assert_eq!(series.slots.len(), 40);
+    // 尾部3柱必须连续为本次3次调用，无Empty空洞
+    let tail = &series.slots[37..];
+    assert_eq!(tail[0].status, ConnectivityStatus::Ok);
+    assert_eq!(tail[1].status, ConnectivityStatus::Degraded);
+    assert_eq!(tail[2].status, ConnectivityStatus::Down);
+    assert!(tail.iter().all(|s| s.status != ConnectivityStatus::Empty));
+}
+
+#[test]
+fn test_connectivity_snapshot_restore_preserves_calls() {
+    let sampler = ConnectivitySampler::default();
+    let base = 1_700_000_000_000u64;
+    sampler.record("prov-b", base, Some(120.0), true);
+    sampler.record("prov-b", base + 1000, Some(1500.0), true);
+    sampler.record("gateway", base, Some(10.0), true);
+
+    let snap = sampler.snapshot_state();
+    let restored = ConnectivitySampler::default();
+    restored.restore_state(snap);
+
+    let p = restored.get_series("prov-b", base + 2000);
+    assert_eq!(p.slots.len(), 40);
+    let tail = &p.slots[38..];
+    assert_eq!(tail[0].status, ConnectivityStatus::Ok);
+    assert_eq!(tail[1].status, ConnectivityStatus::Down);
+
+    let g = restored.get_series("gateway", base + 2000);
+    assert_eq!(g.slots.len(), 24);
+}
+
+#[test]
+fn test_timeseries_and_metrics_snapshot_restore() {
+    use ponyllm_core::telemetry::MetricsCollector;
+    let ts = TimeseriesProjection::default();
+    let now = 1_700_000_000_000u64;
+    ts.record_metric(now, Some("p"), Some("m"), 100, 50, 150.0, true);
+    let buckets = ts.snapshot_buckets();
+    let ts2 = TimeseriesProjection::default();
+    ts2.restore_buckets(buckets);
+    let resp = ts2.query_history("24h", now + 1000);
+    assert_eq!(resp.total_requests, 1);
+    assert_eq!(resp.total_tokens, 150);
+
+    let m = MetricsCollector::new();
+    m.record_request("/v1/chat", std::time::Duration::from_millis(100), 10, 20, true);
+    let snap = m.snapshot_counters();
+    let m2 = MetricsCollector::new();
+    m2.restore_counters(&snap);
+    let summary = m2.get_summary();
+    assert_eq!(summary.total_requests, 1);
+    assert_eq!(summary.total_tokens, 30);
 }
 

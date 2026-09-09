@@ -75,6 +75,7 @@ pub fn snapshot_path_for_config(
             if !parent.as_os_str().is_empty() {
                 return Some(parent.join("telemetry-snapshot.json"));
             }
+            return Some(std::path::PathBuf::from("telemetry-snapshot.json"));
         }
     }
     None
