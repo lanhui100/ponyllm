@@ -101,10 +101,22 @@ export function useAdminConfig(options: UseAdminConfigOptions = {}) {
     try {
       return await fn();
     } catch (err: unknown) {
-      if (isPreconditionFailed(err)) {
-        conflictDetected.value = true;
+      if (!isPreconditionFailed(err)) throw err;
+      // 版本过期多半是系统后台任务（如密钥自动续期写盘）碰了配置，并非真的
+      // 有人抢改：先刷新到最新自动重试一次，仍冲突才认为是真正的并发修改。
+      try {
+        await fetchAll();
+      } catch {
+        // 刷新失败也不阻塞重试，交由第二次提交的结果定夺
       }
-      throw err;
+      try {
+        return await fn();
+      } catch (retryErr: unknown) {
+        if (isPreconditionFailed(retryErr)) {
+          conflictDetected.value = true;
+        }
+        throw retryErr;
+      }
     }
   }
 

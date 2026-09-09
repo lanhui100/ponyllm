@@ -137,6 +137,41 @@ describe('useAdminConfig composable (WEB-04 Governance & Admin CUD)', () => {
     expect(config.conflictDetected.value).toBe(false);
   });
 
+  it('retries once after refresh on a transient 412 without flagging conflict', async () => {
+    const sendOnce = vi.fn();
+    sendOnce.mockRejectedValueOnce(new PreconditionFailedError());
+    sendOnce.mockResolvedValueOnce({ ok: true });
+    vi.spyOn(adminApi, 'createProvider').mockReturnValue({ send: sendOnce } as any);
+    const overviewV2: OverviewView = {
+      version: '0.2.35',
+      bind: '127.0.0.1:8080',
+      auth_mode: 'token',
+      providers: 0,
+      keys: 0,
+      keys_active: 0,
+      strategy: 'economy',
+      hot_reload_ms: 500,
+      admin_write_enabled: true,
+      config_version: 11,
+    };
+    vi.spyOn(adminApi, 'getOverview').mockReturnValue({ send: () => Promise.resolve(overviewV2) } as any);
+    vi.spyOn(adminApi, 'getProviders').mockReturnValue({ send: () => Promise.resolve([]) } as any);
+    vi.spyOn(adminApi, 'getModels').mockReturnValue({ send: () => Promise.resolve([]) } as any);
+    vi.spyOn(adminApi, 'getKeys').mockReturnValue({ send: () => Promise.resolve([]) } as any);
+    vi.spyOn(adminApi, 'getStrategy').mockReturnValue({
+      send: () => Promise.resolve({ strategy: 'economy', config_version: 11 }),
+    } as any);
+
+    const config = useAdminConfig({ autoFetch: false });
+    config.configVersion.value = 10;
+
+    const res = await config.saveProvider({ name: 'test', base_url: 'https://example.com' });
+    expect(res).toEqual({ ok: true });
+    expect(sendOnce).toHaveBeenCalledTimes(2);
+    expect(config.conflictDetected.value).toBe(false);
+    expect(config.configVersion.value).toBe(11);
+  });
+
   it('handles key creation and one-time plaintext key lifecycle', async () => {
     const mockCreatedKey: CreateKeyResponse = {
       id: 'key-new',

@@ -18,18 +18,18 @@ const emit = defineEmits<{
       <div class="p-5 border-b border-slate-100 flex items-center justify-between">
         <h3 class="text-sm font-bold text-rose-600 flex items-center gap-2">
           <Icons name="lock" size="16" />
-          配置版本冲突 (HTTP 412)
+          网关配置刚被改过，提交没成功
         </h3>
       </div>
 
       <div class="p-5 space-y-3 text-sm text-slate-600 leading-relaxed">
         <div class="p-3 bg-rose-50 border border-rose-200 rounded-xl text-rose-700 text-xs leading-relaxed">
-          <strong>并发写入拦截：</strong>
-          当前网关配置已被其他管理终端修改。为防止覆盖他人变更，提交已被安全拦截。
+          你操作的同时，网关配置发生了变化——通常是系统在后台自动续期了密钥，
+          也可能是另一个管理页面做了修改。你填的内容都还在，不用重填。
         </div>
 
         <p>
-          请点击下方“拉取最新配置”获取服务端最新状态，核对无误后再次提交。
+          点“刷新数据”拿到最新配置后，再点一次保存即可。
         </p>
       </div>
 
@@ -40,7 +40,7 @@ const emit = defineEmits<{
           data-testid="close-conflict-modal-btn"
           @click="emit('close')"
         >
-          暂不刷新
+          知道了
         </UiButton>
         <UiButton
           variant="destructive"
@@ -49,7 +49,7 @@ const emit = defineEmits<{
           @click="emit('refresh')"
         >
           <Icons name="refresh" size="13" />
-          拉取最新配置
+          刷新数据
         </UiButton>
       </div>
     </div>
