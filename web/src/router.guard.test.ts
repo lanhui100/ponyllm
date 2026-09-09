@@ -188,5 +188,18 @@ describe('URL token direct authorization', () => {
     expect(reloadedSession.token).toBe('');
     expect(window.sessionStorage.getItem('ponyllm_session_token')).toBeNull();
   });
+
+  it('sessionStorage throw does not crash store login/logout', () => {
+    const originalSet = window.sessionStorage.setItem;
+    window.sessionStorage.setItem = () => {
+      throw new Error('QuotaExceededError');
+    };
+    const session = useSessionStore();
+    expect(() => session.login('test-token-under-quota')).not.toThrow();
+    expect(session.token).toBe('test-token-under-quota');
+    expect(() => session.logout()).not.toThrow();
+    expect(session.token).toBe('');
+    window.sessionStorage.setItem = originalSet;
+  });
 });
 

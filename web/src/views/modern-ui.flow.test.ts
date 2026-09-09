@@ -107,6 +107,7 @@ describe('Modern Minimalist UI/UX System-Wide E2E Verification Suite (WEB-07)', 
   };
 
   beforeEach(() => {
+    window.sessionStorage?.clear();
     pinia = createPinia();
     setActivePinia(pinia);
     router = createRouter({

@@ -130,7 +130,26 @@ pub fn create_app(state: Arc<AppState>) -> Router {
     };
     let web = build_web_router(web_enabled, &web_dist_dir);
 
+    let security_headers = axum::middleware::from_fn(|req, next: axum::middleware::Next| async move {
+        let mut res = next.run(req).await;
+        let headers = res.headers_mut();
+        if !headers.contains_key(axum::http::header::X_FRAME_OPTIONS) {
+            headers.insert(
+                axum::http::header::X_FRAME_OPTIONS,
+                axum::http::HeaderValue::from_static("SAMEORIGIN"),
+            );
+        }
+        if !headers.contains_key(axum::http::header::X_CONTENT_TYPE_OPTIONS) {
+            headers.insert(
+                axum::http::header::X_CONTENT_TYPE_OPTIONS,
+                axum::http::HeaderValue::from_static("nosniff"),
+            );
+        }
+        res
+    });
+
     api.merge(web)
+        .layer(security_headers)
         .layer(cors)
         .layer(TraceLayer::new_for_http())
         .layer(DefaultBodyLimit::max(body_limit))
