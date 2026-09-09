@@ -46,6 +46,8 @@ fn script() -> Vec<(Option<String>, GatewayEvent)> {
                     tpot_p50_ms: Some(18.0),
                     tpot_p95_ms: Some(40.0),
                     tpot_mean_ms: Some(20.0),
+                    prompt_tokens: 0,
+                    completion_tokens: 50,
                 },
                 stages: StageTimings {
                     routing_ms: Some(2.0),

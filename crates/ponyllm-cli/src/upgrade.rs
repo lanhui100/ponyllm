@@ -247,6 +247,44 @@ pub fn build_download_client() -> Result<reqwest::Client, String> {
         .map_err(|e| format!("Failed to build download client: {e}"))
 }
 
+fn format_mb(bytes: u64) -> String {
+    format!("{:.1}MB", bytes as f64 / 1_048_576.0)
+}
+
+fn format_speed(bytes_per_sec: f64) -> String {
+    if bytes_per_sec >= 1_048_576.0 {
+        format!("{:.1}MB/s", bytes_per_sec / 1_048_576.0)
+    } else if bytes_per_sec >= 1024.0 {
+        format!("{:.0}KB/s", bytes_per_sec / 1024.0)
+    } else {
+        format!("{:.0}B/s", bytes_per_sec)
+    }
+}
+
+/// 单行进度条（纯函数）：`下载 [██████░░░░]  51% 3.3/6.5MB 20KB/s`
+pub fn render_progress_line(downloaded: u64, total: u64, elapsed_secs: f64) -> String {
+    let pct = if total > 0 {
+        ((downloaded as f64 / total as f64) * 100.0).clamp(0.0, 100.0)
+    } else {
+        0.0
+    };
+    let filled = (pct / 5.0).round() as usize;
+    let bar: String = (0..20).map(|i| if i < filled { '█' } else { '░' }).collect();
+    let speed = if elapsed_secs > 0.0 {
+        downloaded as f64 / elapsed_secs
+    } else {
+        0.0
+    };
+    format!(
+        "下载 [{}] {:>3.0}% {}/{} {}",
+        bar,
+        pct,
+        format_mb(downloaded),
+        if total > 0 { format_mb(total) } else { "?".to_string() },
+        format_speed(speed)
+    )
+}
+
 async fn download_asset_with_retry(
     client: &reqwest::Client,
     primary_url: &str,
@@ -258,7 +296,7 @@ async fn download_asset_with_retry(
 
     for (attempt, url) in candidate_urls.iter().enumerate() {
         if attempt > 0 {
-            println!("--> [备选加速通道] 正在尝试备用下载源 #{}: {}", attempt, url);
+            eprintln!("备选源 #{} 不可用，换下一个", attempt);
         }
         let result: Result<Vec<u8>, String> = async {
             let resp = client
@@ -271,28 +309,49 @@ async fn download_asset_with_retry(
                 return Err(format!("HTTP 状态异常: {}", resp.status()));
             }
             let total = resp.content_length().unwrap_or(0);
-            if total > 0 {
-                println!("--> 资产大小: {:.2} MB，开始流式下载...", total as f64 / 1_048_576.0);
-            }
             let mut buf = Vec::with_capacity(total.min(64 * 1024 * 1024) as usize);
             let mut stream = resp.bytes_stream();
             use futures_util::StreamExt;
-            let mut next_mark = 1u64 * 1024 * 1024;
+            use std::io::{IsTerminal, Write as _};
+            let interactive = std::io::stdout().is_terminal();
+            let started = std::time::Instant::now();
+            let mut last_pct = u64::MAX;
+            let mut last_print = std::time::Instant::now();
+            // TTY 原地刷新单行进度条；非 TTY 每 25% 一行，避免日志刷屏
+            let mut paint = |downloaded: u64, force: bool| {
+                let pct = if total > 0 {
+                    ((downloaded as f64 / total as f64) * 100.0).clamp(0.0, 100.0) as u64
+                } else {
+                    0
+                };
+                let due = last_print.elapsed() >= std::time::Duration::from_millis(500);
+                if interactive {
+                    if force || pct != last_pct || due {
+                        print!(
+                            "\r{}",
+                            render_progress_line(downloaded, total, started.elapsed().as_secs_f64())
+                        );
+                        let _ = std::io::stdout().flush();
+                        last_pct = pct;
+                        last_print = std::time::Instant::now();
+                    }
+                } else if force || pct / 25 != last_pct / 25 {
+                    println!(
+                        "{}",
+                        render_progress_line(downloaded, total, started.elapsed().as_secs_f64())
+                    );
+                    last_pct = pct;
+                }
+            };
+            paint(0, true);
             while let Some(chunk) = stream.next().await {
                 let chunk = chunk.map_err(|e| format!("读取数据流失败: {e}"))?;
                 buf.extend_from_slice(&chunk);
-                if (buf.len() as u64) >= next_mark {
-                    if total > 0 {
-                        println!(
-                            "--> 已下载 {:.2}/{:.2} MB",
-                            buf.len() as f64 / 1_048_576.0,
-                            total as f64 / 1_048_576.0
-                        );
-                    } else {
-                        println!("--> 已下载 {:.2} MB...", buf.len() as f64 / 1_048_576.0);
-                    }
-                    next_mark += 1u64 * 1024 * 1024;
-                }
+                paint(buf.len() as u64, false);
+            }
+            paint(buf.len() as u64, true);
+            if interactive {
+                println!();
             }
             if buf.is_empty() {
                 return Err("下载到空数据包".to_string());
@@ -304,7 +363,6 @@ async fn download_asset_with_retry(
         match result {
             Ok(b) => return Ok(b),
             Err(e) => {
-                eprintln!("--> 下载源 #{} 失败: {}", attempt, e);
                 attempt_errors.push(format!("[{}] {}", url, e));
             }
         }
@@ -328,36 +386,35 @@ pub async fn run_upgrade(
     let (asset_name, binary_name, is_zip) = detect_target_asset_name()
         .map_err(|e| format!("Platform detection error: {e}"))?;
 
-    println!("========================================================");
-    println!("  ponyllm 自动升级检测");
-    println!("  当前安装版本: v{}", current_version);
-    println!("  当前系统架构: {}-{} (目标资产: {})", std::env::consts::OS, std::env::consts::ARCH, asset_name);
-    println!("========================================================");
+    println!(
+        "ponyllm 升级检查：当前 v{}（{}-{}）",
+        current_version,
+        std::env::consts::OS,
+        std::env::consts::ARCH
+    );
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(API_TIMEOUT_SECS))
         .build()?;
 
-    println!("--> 正在查询 GitHub Releases 最新版本信息...");
+    println!("查询最新版本...");
     let release = fetch_release_info(&client, target_version.as_deref()).await?;
     let release_tag = release.tag_name.trim();
     let is_newer = is_newer_version(current_version, release_tag);
 
-    println!("--> 远程发布版本: {}", release_tag);
+    println!("最新版本：{}", release_tag);
 
     if check_only {
         if is_newer {
-            println!("--> [发现新版本] 可升级至: {} (发布详情: {})", release_tag, release.html_url);
-            println!("    运行 'ponyllm upgrade' 即可原地一键升级。");
+            println!("发现新版本 {}，运行 `ponyllm upgrade` 一键升级。", release_tag);
         } else {
-            println!("--> [已是最新版本] 当前版本 v{} 无需升级。", current_version);
+            println!("已是最新版本，无需升级。");
         }
         return Ok(());
     }
 
     if !is_newer && !force && target_version.is_none() {
-        println!("--> [已是最新版本] 当前安装的 v{} 已是最新发布版本。", current_version);
-        println!("    如需强制重装当前版本，请添加 '--force' 参数：ponyllm upgrade --force");
+        println!("已是最新版本 v{}，无需升级（`--force` 可强制重装）。", current_version);
         return Ok(());
     }
 
@@ -376,24 +433,22 @@ pub async fn run_upgrade(
         })?;
 
     println!(
-        "--> 找到匹配平台资产: {} ({:.2} MB)",
+        "资产：{}（{}），开始下载...",
         matching_asset.name,
-        matching_asset.size as f64 / 1_048_576.0
+        format_mb(matching_asset.size)
     );
-    println!("--> 资源下载地址: {}", matching_asset.browser_download_url);
 
     if dry_run {
-        println!("--> [Dry Run] 模拟运行已完成，未下载或修改任何本地文件。");
+        println!("Dry Run：仅检查，不下载不修改。");
         return Ok(());
     }
 
-    println!("--> 正在流式下载资产包...");
     let user_agent = format!("ponyllm/{}", current_version);
     let download_client =
         build_download_client().map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
     let archive_bytes =
         download_asset_with_retry(&download_client, &matching_asset.browser_download_url, &user_agent).await?;
-    println!("--> 下载完成 ({} 字节)，正在解压校验...", archive_bytes.len());
+    println!("下载完成，解压校验...");
 
     let temp_dir = tempfile::tempdir()?;
     let extracted_binary = if is_zip {
@@ -402,17 +457,15 @@ pub async fn run_upgrade(
         extract_targz(&archive_bytes, binary_name, temp_dir.path())?
     };
 
-    println!("--> 解压完成: {}", extracted_binary.display());
-    println!("--> 正在执行可执行文件原地自替换...");
-
+    println!("解压通过，正在替换...");
     let replaced_path = perform_self_replacement(&extracted_binary)?;
 
-    println!("========================================================");
-    println!("  ponyllm 升级成功！");
-    println!("  安装路径: {}", replaced_path.display());
-    println!("  版本变更: v{} -> {}", current_version, release_tag);
-    println!("========================================================");
-    println!("  运行 'ponyllm --version' 验证更新后的版本。");
+    println!(
+        "升级成功：v{} -> {}（{}）",
+        current_version,
+        release_tag,
+        replaced_path.display()
+    );
 
     Ok(())
 }

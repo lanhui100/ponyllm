@@ -197,18 +197,19 @@ pub async fn handle_messages(
             target_req.top_p = target.top_p;
         }
 
-        // Clamp max_tokens against model's declared max_output
-        {
-            let model_max = ponyllm_core::pool::parse_context_capacity_tokens(&target.max_output);
-            if model_max > 0 {
-                target_req.max_tokens = target_req.max_tokens.min(model_max as u32);
-            }
-        }
-
         let requested_thinking = header_thinking
             .or(parsed.thinking_override)
             .or_else(|| req.get_reasoning_effort());
         let effective_thinking = target.resolve_thinking(requested_thinking);
+
+        // Apply thinking-aware output token safeguard:
+        // 1. Ensures max_tokens is floored to safe minimum if thinking is active to prevent zero-content choking.
+        // 2. Clamps against model's declared max_output.
+        target_req.max_tokens = ponyllm_core::pool::apply_thinking_output_safeguard(
+            Some(target_req.max_tokens),
+            &target.max_output,
+            effective_thinking,
+        ).unwrap_or(target_req.max_tokens);
 
         if effective_thinking.is_active() {
             target_req.reasoning_effort = Some(effective_thinking);

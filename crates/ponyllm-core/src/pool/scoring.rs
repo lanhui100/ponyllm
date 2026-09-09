@@ -131,10 +131,22 @@ impl NodeLatencyMetrics {
     }
 
     pub fn flow_snapshot(&self) -> ProviderFlowSnapshot {
+        let total = self.total_requests.load(Ordering::Relaxed);
+        let success = self.successful_requests.load(Ordering::Relaxed);
+        let error_count = total.saturating_sub(success);
+        let sc = self.get_stream_count();
+        let has_activity = sc > 0 || total > 0;
+        let ttft = if has_activity { self.get_ttft_ms() } else { 0.0 };
+        let tps = if has_activity { self.get_tps() } else { 0.0 };
+
         ProviderFlowSnapshot {
-            ttft_ms: self.get_ttft_ms(),
-            tps: self.get_tps(),
-            stream_count: self.get_stream_count(),
+            ttft_ms: ttft,
+            avg_ttft_ms: ttft,
+            tps,
+            avg_tps: tps,
+            stream_count: sc,
+            total_requests: total,
+            error_count,
             avg_gap_ms: self.get_avg_gap_ms(),
             max_gap_ms: self.get_max_gap_ms(),
             total_stalls: self.get_total_stalls(),
@@ -199,8 +211,16 @@ impl NodeLatencyMetrics {
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct ProviderFlowSnapshot {
     pub ttft_ms: f64,
+    #[serde(default)]
+    pub avg_ttft_ms: f64,
     pub tps: f64,
+    #[serde(default)]
+    pub avg_tps: f64,
     pub stream_count: u64,
+    #[serde(default)]
+    pub total_requests: u64,
+    #[serde(default)]
+    pub error_count: u64,
     pub avg_gap_ms: Option<f64>,
     pub max_gap_ms: Option<f64>,
     pub total_stalls: u64,

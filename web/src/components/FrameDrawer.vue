@@ -148,11 +148,11 @@ watch(
           <div class="stream-grid">
             <div class="stream-item">
               <span class="label">TTFT</span>
-              <span class="val">{{ frame.stream_flow.ttft_ms !== undefined ? `${frame.stream_flow.ttft_ms.toFixed(1)} ms` : '--' }}</span>
+              <span class="val">{{ frame.stream_flow.ttft_ms !== undefined ? `${Math.round(frame.stream_flow.ttft_ms)} ms` : '--' }}</span>
             </div>
             <div class="stream-item">
               <span class="label">TTLB</span>
-              <span class="val">{{ frame.stream_flow.ttlb_ms !== undefined ? `${frame.stream_flow.ttlb_ms.toFixed(1)} ms` : '--' }}</span>
+              <span class="val">{{ frame.stream_flow.ttlb_ms !== undefined ? `${Math.round(frame.stream_flow.ttlb_ms)} ms` : '--' }}</span>
             </div>
             <div class="stream-item">
               <span class="label">Chunks</span>
@@ -164,7 +164,7 @@ watch(
             </div>
             <div class="stream-item">
               <span class="label">TPS</span>
-              <span class="val">{{ frame.stream_flow.tps !== undefined ? `${frame.stream_flow.tps.toFixed(1)} tok/s` : '--' }}</span>
+              <span class="val">{{ frame.stream_flow.tps !== undefined ? `${Math.round(frame.stream_flow.tps)} tok/s` : '--' }}</span>
             </div>
             <div class="stream-item">
               <span class="label">Stalls</span>

@@ -15,6 +15,10 @@ pub struct StreamFlowSample {
     pub tpot_p95_ms: Option<f64>,
     #[serde(default)]
     pub tpot_mean_ms: Option<f64>,
+    #[serde(default)]
+    pub prompt_tokens: u64,
+    #[serde(default)]
+    pub completion_tokens: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use serde_json::{json, Value};
 use uuid::Uuid;
 use crate::common::ReasoningEffort;
@@ -72,15 +73,38 @@ pub fn antigravity_thinking_config(model: &str, thinking: Option<ReasoningEffort
     Some(cfg)
 }
 
-/// Ensure `generationConfig.maxOutputTokens` can accommodate an explicit
-/// thinking budget: the backend couples the two and truncates the answer
+/// Ensure `generationConfig.maxOutputTokens` can accommodate an explicit or
+/// implicit thinking budget: the backend couples the two and truncates the answer
 /// (early `max_tokens` stop) when the budget exceeds the output cap.
 /// Only raises an explicitly-set cap; absent caps keep backend defaults.
-fn clamp_max_output_for_thinking_budget(gen_config: &mut Value, thinking_cfg: &Value) {
-    let budget = thinking_cfg
+fn clamp_max_output_for_thinking_budget(
+    gen_config: &mut Value,
+    thinking_cfg: &Value,
+    model: &str,
+    thinking: Option<ReasoningEffort>,
+) {
+    let mut min_budget = thinking_cfg
         .get("thinkingBudget")
         .and_then(|v| v.as_u64());
-    let Some(budget) = budget else { return };
+
+    // Gemini 3 models omit thinkingBudget from wire format because the backend
+    // selects depth from model route (-high/-low), but they still consume output tokens.
+    // Ensure gen_config has sufficient headroom for implicit Gemini 3 thinking budgets.
+    if min_budget.is_none() && model.to_ascii_lowercase().contains("gemini-3") {
+        let is_high = model.to_ascii_lowercase().contains("-high")
+            || thinking == Some(ReasoningEffort::High);
+        let is_low = model.to_ascii_lowercase().contains("-low")
+            || thinking == Some(ReasoningEffort::Low);
+        if is_high {
+            min_budget = Some(16384);
+        } else if is_low {
+            min_budget = Some(2048);
+        } else {
+            min_budget = Some(8192);
+        }
+    }
+
+    let Some(budget) = min_budget else { return };
     if budget == 0 {
         return;
     }
@@ -93,6 +117,68 @@ fn clamp_max_output_for_thinking_budget(gen_config: &mut Value, thinking_cfg: &V
         }
     }
 }
+fn push_or_merge_turn(contents: &mut Vec<Value>, role: &str, mut parts: Vec<Value>) {
+    if parts.is_empty() {
+        return;
+    }
+    if let Some(last) = contents.last_mut() {
+        if last.get("role").and_then(|r| r.as_str()) == Some(role) {
+            if let Some(existing_parts) = last.get_mut("parts").and_then(|p| p.as_array_mut()) {
+                existing_parts.append(&mut parts);
+                return;
+            }
+        }
+    }
+    contents.push(json!({
+        "role": role,
+        "parts": parts,
+    }));
+}
+
+fn convert_tools_to_gemini(tools: &[crate::openai::chat::ToolDefinition]) -> Option<Value> {
+    let mut decls = Vec::new();
+    for t in tools {
+        if t.r#type == "function" {
+            let mut decl = json!({
+                "name": t.function.name,
+            });
+            if let Some(ref desc) = t.function.description {
+                decl["description"] = json!(desc);
+            }
+            if let Some(ref params) = t.function.parameters {
+                decl["parameters"] = params.clone();
+            }
+            decls.push(decl);
+        }
+    }
+    if decls.is_empty() {
+        None
+    } else {
+        Some(json!([{
+            "functionDeclarations": decls
+        }]))
+    }
+}
+
+fn convert_anthropic_tools_to_gemini(tools: &[crate::anthropic::messages::AnthropicTool]) -> Option<Value> {
+    let mut decls = Vec::new();
+    for t in tools {
+        let decl = json!({
+            "name": t.name,
+            "description": t.description,
+            "parameters": t.input_schema,
+        });
+        decls.push(decl);
+    }
+    if decls.is_empty() {
+        None
+    } else {
+        Some(json!([{
+            "functionDeclarations": decls
+        }]))
+    }
+}
+
 /// Convert OpenAI ChatCompletionRequest into Antigravity CLI envelope.
 /// `thinking` carries the caller's *explicit* effort request (`None` keeps the
 /// legacy wire shape); ceiling enforcement happens at the route layer via
@@ -107,6 +193,17 @@ pub fn chat_to_antigravity_request(
     let mut contents = Vec::new();
     let mut first_user_text: Option<String> = None;
     let mut system_instruction_parts = Vec::new();
+    let mut tool_id_to_name: HashMap<String, String> = HashMap::new();
+
+    for msg in &req.messages {
+        if let ChatMessage::Assistant(m) = msg {
+            if let Some(ref tcs) = m.tool_calls {
+                for tc in tcs {
+                    tool_id_to_name.insert(tc.id.clone(), tc.function.name.clone());
+                }
+            }
+        }
+    }
 
     for msg in &req.messages {
         match msg {
@@ -127,42 +224,64 @@ pub fn chat_to_antigravity_request(
                 if first_user_text.is_none() && !txt.trim().is_empty() {
                     first_user_text = Some(txt.clone());
                 }
-                contents.push(json!({
-                    "role": "user",
-                    "parts": [{"text": txt}]
-                }));
+                if !txt.trim().is_empty() {
+                    push_or_merge_turn(&mut contents, "user", vec![json!({"text": txt})]);
+                }
             }
             ChatMessage::Assistant(m) => {
+                let mut parts = Vec::new();
                 let txt = m.content.as_ref().map(|c| c.as_plain_text()).unwrap_or_default();
-                contents.push(json!({
-                    "role": "model",
-                    "parts": [{"text": txt}]
-                }));
+                if !txt.trim().is_empty() {
+                    parts.push(json!({"text": txt}));
+                }
+                if let Some(ref tool_calls) = m.tool_calls {
+                    for tc in tool_calls {
+                        let args_val: Value = serde_json::from_str(&tc.function.arguments)
+                            .unwrap_or_else(|_| json!({}));
+                        parts.push(json!({
+                            "functionCall": {
+                                "name": tc.function.name,
+                                "args": args_val
+                            },
+                            "thoughtSignature": "skip_thought_signature_validator"
+                        }));
+                    }
+                }
+                push_or_merge_turn(&mut contents, "model", parts);
             }
             ChatMessage::Tool(m) => {
                 let txt = m.content.as_plain_text();
-                contents.push(json!({
-                    "role": "user",
-                    "parts": [{"text": format!("[Tool Result for {}]: {}", m.tool_call_id, txt)}]
-                }));
+                let func_name = tool_id_to_name.get(&m.tool_call_id).cloned().unwrap_or_else(|| "tool".to_string());
+                let response_obj = match serde_json::from_str::<Value>(&txt) {
+                    Ok(Value::Object(map)) => Value::Object(map),
+                    Ok(v) => json!({"response": v}),
+                    Err(_) => json!({"response": txt}),
+                };
+                push_or_merge_turn(&mut contents, "user", vec![json!({
+                    "functionResponse": {
+                        "name": func_name,
+                        "response": response_obj
+                    }
+                })]);
             }
             ChatMessage::Function(m) => {
                 let txt = m.content.clone().unwrap_or_default();
-                contents.push(json!({
-                    "role": "user",
-                    "parts": [{"text": format!("[Function Result for {}]: {}", m.name, txt)}]
-                }));
+                let response_obj = match serde_json::from_str::<Value>(&txt) {
+                    Ok(Value::Object(map)) => Value::Object(map),
+                    Ok(v) => json!({"response": v}),
+                    Err(_) => json!({"response": txt}),
+                };
+                push_or_merge_turn(&mut contents, "user", vec![json!({
+                    "functionResponse": {
+                        "name": m.name,
+                        "response": response_obj
+                    }
+                })]);
             }
         }
     }
 
     let session_id = extract_or_generate_session_id(first_user_text.as_deref(), session_salt);
-    // `trajectory_id` is one fresh id used consistently in BOTH the
-    // `requestId` segment and `labels.trajectory_id` (P0-5): the previous
-    // code generated a uuid for the requestId but labeled the session hash
-    // instead, a mismatch detectable by server-side stitching rules.
-    // `step` stays 1: the gateway is stateless per request and fabricating
-    // increments would add a worse fake pattern (see ADR).
     let trajectory_id = Uuid::new_v4().to_string();
     let request_id = generate_antigravity_request_id(&trajectory_id, 1);
     let used_claude = model.to_ascii_lowercase().contains("claude");
@@ -184,6 +303,12 @@ pub fn chat_to_antigravity_request(
         }
     });
 
+    if let Some(ref tools_def) = req.tools {
+        if let Some(gemini_tools) = convert_tools_to_gemini(tools_def) {
+            inner_request["tools"] = gemini_tools;
+        }
+    }
+
     if !system_instruction_parts.is_empty() {
         inner_request["systemInstruction"] = json!({
             "parts": system_instruction_parts
@@ -201,7 +326,7 @@ pub fn chat_to_antigravity_request(
         gen_config["maxOutputTokens"] = json!(m);
     }
     if let Some(thinking_cfg) = antigravity_thinking_config(model, thinking) {
-        clamp_max_output_for_thinking_budget(&mut gen_config, &thinking_cfg);
+        clamp_max_output_for_thinking_budget(&mut gen_config, &thinking_cfg, model, thinking);
         if gen_config.as_object().map(|o| !o.is_empty()).unwrap_or(false) {
             inner_request["generationConfig"] = gen_config;
         }
@@ -251,6 +376,7 @@ pub fn messages_to_antigravity_request(
     let mut contents = Vec::new();
     let mut first_user_text: Option<String> = None;
     let mut system_instruction_parts = Vec::new();
+    let mut tool_id_to_name: HashMap<String, String> = HashMap::new();
 
     if let Some(ref sys) = req.system {
         let sys_text = sys.as_plain_text();
@@ -260,26 +386,81 @@ pub fn messages_to_antigravity_request(
     }
 
     for msg in &req.messages {
-        let role_str = if msg.role == crate::anthropic::messages::AnthropicRole::Assistant { "model" } else { "user" };
-        let txt = msg.content.as_plain_text();
-        if !txt.trim().is_empty() {
-            if first_user_text.is_none() && role_str == "user" {
-                first_user_text = Some(txt.clone());
+        if let crate::anthropic::messages::AnthropicContent::Blocks(blocks) = &msg.content {
+            for b in blocks {
+                if let crate::anthropic::messages::AnthropicContentBlock::ToolUse { id, name, .. } = b {
+                    tool_id_to_name.insert(id.clone(), name.clone());
+                }
             }
-            contents.push(json!({
-                "role": role_str,
-                "parts": [{"text": txt}]
-            }));
         }
     }
 
+    for msg in &req.messages {
+        let is_model = msg.role == crate::anthropic::messages::AnthropicRole::Assistant;
+        let role_str = if is_model { "model" } else { "user" };
+        let mut parts = Vec::new();
+
+        match &msg.content {
+            crate::anthropic::messages::AnthropicContent::Text(t) => {
+                if !t.trim().is_empty() {
+                    if first_user_text.is_none() && role_str == "user" {
+                        first_user_text = Some(t.clone());
+                    }
+                    parts.push(json!({"text": t}));
+                }
+            }
+            crate::anthropic::messages::AnthropicContent::Blocks(blocks) => {
+                for b in blocks {
+                    match b {
+                        crate::anthropic::messages::AnthropicContentBlock::Text { text, .. } => {
+                            if !text.trim().is_empty() {
+                                if first_user_text.is_none() && role_str == "user" {
+                                    first_user_text = Some(text.clone());
+                                }
+                                parts.push(json!({"text": text}));
+                            }
+                        }
+                        crate::anthropic::messages::AnthropicContentBlock::ToolUse { name, input, .. } => {
+                            parts.push(json!({
+                                "functionCall": {
+                                    "name": name,
+                                    "args": input
+                                },
+                                "thoughtSignature": "skip_thought_signature_validator"
+                            }));
+                        }
+                        crate::anthropic::messages::AnthropicContentBlock::ToolResult { tool_use_id, content, .. } => {
+                            let func_name = tool_id_to_name.get(tool_use_id).cloned().unwrap_or_else(|| "tool".to_string());
+                            let txt = match content {
+                                crate::anthropic::messages::ToolResultContent::Text(s) => s.clone(),
+                                crate::anthropic::messages::ToolResultContent::Blocks(bls) => {
+                                    bls.iter().filter_map(|blk| match blk {
+                                        crate::anthropic::messages::ToolResultBlock::Text { text } => Some(text.clone()),
+                                        _ => None,
+                                    }).collect::<Vec<_>>().join("\n")
+                                }
+                            };
+                            let response_obj = match serde_json::from_str::<Value>(&txt) {
+                                Ok(Value::Object(map)) => Value::Object(map),
+                                Ok(v) => json!({"response": v}),
+                                Err(_) => json!({"response": txt}),
+                            };
+                            parts.push(json!({
+                                "functionResponse": {
+                                    "name": func_name,
+                                    "response": response_obj
+                                }
+                            }));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        push_or_merge_turn(&mut contents, role_str, parts);
+    }
+
     let session_id = extract_or_generate_session_id(first_user_text.as_deref(), session_salt);
-    // `trajectory_id` is one fresh id used consistently in BOTH the
-    // `requestId` segment and `labels.trajectory_id` (P0-5): the previous
-    // code generated a uuid for the requestId but labeled the session hash
-    // instead, a mismatch detectable by server-side stitching rules.
-    // `step` stays 1: the gateway is stateless per request and fabricating
-    // increments would add a worse fake pattern (see ADR).
     let trajectory_id = Uuid::new_v4().to_string();
     let request_id = generate_antigravity_request_id(&trajectory_id, 1);
     let used_claude = model.to_ascii_lowercase().contains("claude");
@@ -301,6 +482,12 @@ pub fn messages_to_antigravity_request(
         }
     });
 
+    if let Some(ref tools_def) = req.tools {
+        if let Some(gemini_tools) = convert_anthropic_tools_to_gemini(tools_def) {
+            inner_request["tools"] = gemini_tools;
+        }
+    }
+
     if !system_instruction_parts.is_empty() {
         inner_request["systemInstruction"] = json!({
             "parts": system_instruction_parts
@@ -317,7 +504,7 @@ pub fn messages_to_antigravity_request(
         gen_config["topP"] = json!(p);
     }
     if let Some(thinking_cfg) = antigravity_thinking_config(model, thinking) {
-        clamp_max_output_for_thinking_budget(&mut gen_config, &thinking_cfg);
+        clamp_max_output_for_thinking_budget(&mut gen_config, &thinking_cfg, model, thinking);
         gen_config["thinkingConfig"] = thinking_cfg;
     }
     inner_request["generationConfig"] = gen_config;
@@ -360,6 +547,7 @@ pub fn antigravity_to_chat_response(
     let target = resp.get("response").unwrap_or(resp);
     let mut full_text = String::new();
     let mut reasoning_text = String::new();
+    let mut tool_calls = Vec::new();
     let mut finish_reason = "stop";
 
     if let Some(candidates) = target.get("candidates").and_then(|v| v.as_array()) {
@@ -381,9 +569,30 @@ pub fn antigravity_to_chat_response(
                             full_text.push_str(txt);
                         }
                     }
+                    if let Some(fc) = p.get("functionCall") {
+                        let name = fc.get("name").and_then(|n| n.as_str()).unwrap_or_default().to_string();
+                        let args_str = match fc.get("args") {
+                            Some(Value::String(s)) => s.clone(),
+                            Some(v) => serde_json::to_string(v).unwrap_or_else(|_| "{}".to_string()),
+                            None => "{}".to_string(),
+                        };
+                        let call_id = format!("call_{}", Uuid::new_v4().simple());
+                        tool_calls.push(json!({
+                            "id": call_id,
+                            "type": "function",
+                            "function": {
+                                "name": name,
+                                "arguments": args_str
+                            }
+                        }));
+                    }
                 }
             }
         }
+    }
+
+    if !tool_calls.is_empty() && finish_reason == "stop" {
+        finish_reason = "tool_calls";
     }
 
     let prompt_tokens = target.get("usageMetadata")
@@ -401,13 +610,16 @@ pub fn antigravity_to_chat_response(
 
     let mut message = json!({
         "role": "assistant",
-        "content": full_text
+        "content": if full_text.is_empty() && !tool_calls.is_empty() { Value::Null } else { json!(full_text) }
     });
     if !reasoning_text.is_empty() {
         message["reasoning_content"] = json!(reasoning_text);
     }
+    if !tool_calls.is_empty() {
+        message["tool_calls"] = json!(tool_calls);
+    }
 
-    if message["content"].as_str().map(|s| s.is_empty()).unwrap_or(true) {
+    if full_text.is_empty() && tool_calls.is_empty() {
         tracing::warn!(
             target_model = %model,
             finish_reason = %finish_reason,
@@ -456,6 +668,7 @@ pub fn antigravity_to_messages_response(
     let target = resp.get("response").unwrap_or(resp);
     let mut full_text = String::new();
     let mut reasoning_text = String::new();
+    let mut tool_uses = Vec::new();
     let mut stop_reason = "end_turn";
 
     if let Some(candidates) = target.get("candidates").and_then(|v| v.as_array()) {
@@ -477,7 +690,25 @@ pub fn antigravity_to_messages_response(
                             full_text.push_str(txt);
                         }
                     }
+                    if let Some(fc) = p.get("functionCall") {
+                        let name = fc.get("name").and_then(|n| n.as_str()).unwrap_or_default().to_string();
+                        let args_val = match fc.get("args") {
+                            Some(v) => v.clone(),
+                            None => json!({}),
+                        };
+                        let call_id = format!("toolu_{}", Uuid::new_v4().simple());
+                        tool_uses.push(json!({
+                            "type": "tool_use",
+                            "id": call_id,
+                            "name": name,
+                            "input": args_val
+                        }));
+                    }
                 }
+            }
+
+            if !tool_uses.is_empty() && stop_reason == "end_turn" {
+                stop_reason = "tool_use";
             }
         }
     }
@@ -498,12 +729,17 @@ pub fn antigravity_to_messages_response(
             "thinking": reasoning_text
         }));
     }
-    content_blocks.push(json!({
-        "type": "text",
-        "text": full_text
-    }));
+    if !full_text.is_empty() {
+        content_blocks.push(json!({
+            "type": "text",
+            "text": full_text
+        }));
+    }
+    for tu in tool_uses {
+        content_blocks.push(tu);
+    }
 
-    if full_text.is_empty() {
+    if content_blocks.is_empty() {
         tracing::warn!(
             target_model = %model,
             stop_reason = %stop_reason,
@@ -555,8 +791,9 @@ pub fn antigravity_chunk_to_chat_chunk(
     
     let mut text = String::new();
     let mut reasoning = String::new();
+    let mut tool_calls = Vec::new();
     if let Some(parts) = first.get("content").and_then(|c| c.get("parts")).and_then(|p| p.as_array()) {
-        for p in parts {
+        for (idx, p) in parts.iter().enumerate() {
             let is_thought = p.get("thought").and_then(|v| v.as_bool()).unwrap_or(false);
             if let Some(t) = p.get("text").and_then(|v| v.as_str()) {
                 if is_thought {
@@ -565,14 +802,39 @@ pub fn antigravity_chunk_to_chat_chunk(
                     text.push_str(t);
                 }
             }
+            if let Some(fc) = p.get("functionCall") {
+                let name = fc.get("name").and_then(|n| n.as_str()).map(|s| s.to_string());
+                let args = match fc.get("args") {
+                    Some(Value::String(s)) => Some(s.clone()),
+                    Some(v) => Some(serde_json::to_string(v).unwrap_or_else(|_| "{}".to_string())),
+                    None => None,
+                };
+                let id = format!("call_{}", Uuid::new_v4().simple());
+                tool_calls.push(crate::openai::chat::ToolCallChunk {
+                    index: idx as u32,
+                    id: Some(id),
+                    r#type: Some("function".to_string()),
+                    function: Some(crate::openai::chat::FunctionCallChunk {
+                        name,
+                        arguments: args,
+                    }),
+                });
+            }
         }
     }
 
+    let has_tools = !tool_calls.is_empty();
     let finish_reason = first.get("finishReason").and_then(|v| v.as_str()).map(|r| {
         match r {
             "MAX_TOKENS" => FinishReason::Length,
             "SAFETY" => FinishReason::ContentFilter,
-            _ => FinishReason::Stop,
+            _ => {
+                if has_tools {
+                    FinishReason::ToolCalls
+                } else {
+                    FinishReason::Stop
+                }
+            }
         }
     });
 
@@ -586,7 +848,7 @@ pub fn antigravity_chunk_to_chat_chunk(
         content: if text.is_empty() { None } else { Some(text) },
         reasoning_content: if reasoning.is_empty() { None } else { Some(reasoning) },
         refusal: None,
-        tool_calls: None,
+        tool_calls: if tool_calls.is_empty() { None } else { Some(tool_calls) },
     };
 
     let usage = target.get("usageMetadata").map(|u| {
@@ -784,7 +1046,7 @@ mod tests {
         let thinking_cfg = json!({
             "thinkingBudget": 1024
         });
-        clamp_max_output_for_thinking_budget(&mut gen_cfg, &thinking_cfg);
+        clamp_max_output_for_thinking_budget(&mut gen_cfg, &thinking_cfg, "claude-sonnet-4-6", Some(ReasoningEffort::Low));
         assert_eq!(gen_cfg["maxOutputTokens"], 2048);
     }
 

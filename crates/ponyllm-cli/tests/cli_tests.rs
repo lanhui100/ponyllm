@@ -485,6 +485,24 @@ fn test_upgrade_candidate_urls_primary_first_and_download_timeout() {
 }
 
 #[test]
+fn test_upgrade_progress_line_format() {
+    use ponyllm_cli::upgrade::render_progress_line;
+
+    let line = render_progress_line(3_407_872, 6_794_039, 170.0);
+    assert!(line.starts_with("下载 ["), "unexpected: {line}");
+    assert!(line.contains("50%"), "unexpected: {line}");
+    assert!(line.contains("3.2MB/6.5MB"), "unexpected: {line}");
+    assert!(line.contains("KB/s"), "unexpected: {line}");
+
+    let done = render_progress_line(6_794_039, 6_794_039, 330.0);
+    assert!(done.contains("100%"), "unexpected: {done}");
+    assert!(done.contains("6.5MB/6.5MB"), "unexpected: {done}");
+
+    let unknown = render_progress_line(1_048_576, 0, 10.0);
+    assert!(unknown.contains("1.0MB/?") || unknown.contains("1.0/?"), "unexpected: {unknown}");
+}
+
+#[test]
 fn test_secure_api_key_generation_and_cli_auth_commands() {
     use ponyllm_cli::config::generate_secure_api_key;
 

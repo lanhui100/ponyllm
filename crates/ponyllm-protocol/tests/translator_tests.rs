@@ -1,4 +1,5 @@
 use ponyllm_protocol::anthropic::messages::*;
+use ponyllm_protocol::common::ReasoningEffort;
 use ponyllm_protocol::openai::chat::*;
 use ponyllm_protocol::openai::responses::*;
 use ponyllm_protocol::translator::*;
@@ -1916,5 +1917,250 @@ fn test_response_object_tolerates_missing_and_null_fields() {
     assert_eq!(chunks[0].choices[0].finish_reason, Some(FinishReason::Stop));
 }
 
+#[test]
+fn test_antigravity_chunk_to_chat_chunk_function_call() {
+    let chunk_val = serde_json::json!({
+        "response": {
+            "candidates": [{
+                "content": {
+                    "role": "model",
+                    "parts": [{
+                        "functionCall": {
+                            "name": "execute_bash",
+                            "args": {
+                                "command": "cargo test"
+                            }
+                        }
+                    }]
+                },
+                "finishReason": "STOP"
+            }]
+        }
+    });
 
+    let chunk = antigravity_chunk_to_chat_chunk(&chunk_val, "gemini-3.8-flash-high", "test-resp-1").unwrap();
+    assert_eq!(chunk.choices.len(), 1);
+    let delta = &chunk.choices[0].delta;
+    let tool_calls = delta.tool_calls.as_ref().expect("delta should have tool_calls");
+    assert_eq!(tool_calls.len(), 1);
+    assert_eq!(tool_calls[0].function.as_ref().unwrap().name.as_deref(), Some("execute_bash"));
+    assert_eq!(tool_calls[0].function.as_ref().unwrap().arguments.as_deref(), Some("{\"command\":\"cargo test\"}"));
+    assert_eq!(chunk.choices[0].finish_reason, Some(FinishReason::ToolCalls));
+}
+
+#[test]
+fn test_antigravity_to_chat_response_function_call() {
+    let resp_val = serde_json::json!({
+        "response": {
+            "candidates": [{
+                "content": {
+                    "role": "model",
+                    "parts": [{
+                        "functionCall": {
+                            "name": "view_file",
+                            "args": {
+                                "path": "Cargo.toml"
+                            }
+                        }
+                    }]
+                },
+                "finishReason": "STOP"
+            }],
+            "usageMetadata": {
+                "promptTokenCount": 50,
+                "candidatesTokenCount": 25,
+                "totalTokenCount": 75
+            }
+        }
+    });
+
+    let chat_resp = antigravity_to_chat_response(&resp_val, "gemini-3.8-flash-high");
+    assert_eq!(chat_resp["choices"][0]["finish_reason"], "tool_calls");
+    let tool_calls = chat_resp["choices"][0]["message"]["tool_calls"].as_array().expect("tool_calls should be array");
+    assert_eq!(tool_calls.len(), 1);
+    assert_eq!(tool_calls[0]["function"]["name"], "view_file");
+    assert_eq!(tool_calls[0]["function"]["arguments"], "{\"path\":\"Cargo.toml\"}");
+}
+
+#[test]
+fn test_chat_to_antigravity_gemini3_thinking_output_clamped() {
+    let req = ChatCompletionRequest {
+        model: "gemini-3.8-flash-high".to_string(),
+        messages: vec![ChatMessage::User(UserMessage {
+            content: "Hello".into(),
+            name: None,
+        })],
+        max_tokens: Some(2048),
+        ..Default::default()
+    };
+
+    let env = chat_to_antigravity_request(
+        &req,
+        "gemini-3.8-flash-high",
+        "aicode-consumers",
+        Some(ReasoningEffort::High),
+        "",
+    ).unwrap();
+
+    let max_output = env["request"]["generationConfig"]["maxOutputTokens"].as_u64().unwrap();
+    assert!(
+        max_output >= 16384,
+        "Gemini 3 High thinking output tokens must be floored to >= 16384, got {}",
+        max_output
+    );
+}
+
+#[test]
+fn test_chat_to_antigravity_tools_and_multi_turn_history() {
+    let req = ChatCompletionRequest {
+        model: "gemini-3.8-flash-high".to_string(),
+        messages: vec![
+            ChatMessage::User(UserMessage {
+                content: "你好".into(),
+                name: None,
+            }),
+            ChatMessage::User(UserMessage {
+                content: "<system-reminder>keep it concise</system-reminder>".into(),
+                name: None,
+            }),
+            ChatMessage::Assistant(AssistantMessage {
+                content: None,
+                name: None,
+                refusal: None,
+                reasoning_content: None,
+                tool_calls: Some(vec![ToolCall {
+                    id: "call_123".to_string(),
+                    r#type: "function".to_string(),
+                    function: FunctionCall {
+                        name: "lookup_stock".to_string(),
+                        arguments: "{\"symbol\":\"GOOG\"}".to_string(),
+                    },
+                }]),
+            }),
+            ChatMessage::Tool(ToolMessage {
+                content: "{\"price\": 180}".into(),
+                tool_call_id: "call_123".to_string(),
+            }),
+        ],
+        tools: Some(vec![ToolDefinition {
+            r#type: "function".to_string(),
+            function: FunctionDefinition {
+                name: "lookup_stock".to_string(),
+                description: Some("Lookup stock price".to_string()),
+                parameters: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "symbol": {"type": "string"}
+                    }
+                })),
+                strict: None,
+            },
+        }]),
+        ..Default::default()
+    };
+
+    let env = chat_to_antigravity_request(
+        &req,
+        "gemini-3.8-flash-high",
+        "aicode-consumers",
+        None,
+        "",
+    ).unwrap();
+
+    let inner = &env["request"];
+    // 1. tools should be mapped to functionDeclarations
+    let tools = inner["tools"].as_array().expect("tools must be present in request");
+    assert_eq!(tools.len(), 1);
+    let func_decls = tools[0]["functionDeclarations"].as_array().expect("functionDeclarations present");
+    assert_eq!(func_decls[0]["name"], "lookup_stock");
+
+    // 2. consecutive user messages should be merged into a single user turn
+    let contents = inner["contents"].as_array().expect("contents array present");
+    assert_eq!(contents.len(), 3, "2 merged user turns + 1 model turn + 1 user(tool) turn");
+    assert_eq!(contents[0]["role"], "user");
+    let user_parts = contents[0]["parts"].as_array().unwrap();
+    assert_eq!(user_parts.len(), 2, "Both user texts should be in parts of turn 0");
+
+    // 3. assistant with tool_calls should NOT emit text: "" and should contain functionCall
+    assert_eq!(contents[1]["role"], "model");
+    let model_parts = contents[1]["parts"].as_array().unwrap();
+    assert!(model_parts.iter().all(|p| p.get("text").map(|t| !t.as_str().unwrap().is_empty()).unwrap_or(true)), "No empty text parts");
+    assert_eq!(model_parts[0]["functionCall"]["name"], "lookup_stock");
+    assert_eq!(model_parts[0]["thoughtSignature"], "skip_thought_signature_validator");
+
+    // 4. tool response should be mapped to functionResponse
+    assert_eq!(contents[2]["role"], "user");
+    let tool_parts = contents[2]["parts"].as_array().unwrap();
+    assert!(tool_parts[0].get("functionResponse").is_some(), "Tool result must be mapped to functionResponse");
+}
+
+#[test]
+fn test_messages_to_antigravity_tools_and_multi_turn_history() {
+    let req = MessageRequest {
+        model: "claude-sonnet-4-6".to_string(),
+        messages: vec![
+            AnthropicMessage {
+                role: AnthropicRole::User,
+                content: AnthropicContent::Text("What is the weather in Tokyo?".into()),
+            },
+            AnthropicMessage {
+                role: AnthropicRole::Assistant,
+                content: AnthropicContent::Blocks(vec![
+                    AnthropicContentBlock::ToolUse {
+                        id: "toolu_456".to_string(),
+                        name: "get_weather".to_string(),
+                        input: json!({"city": "Tokyo"}),
+                        cache_control: None,
+                    },
+                ]),
+            },
+            AnthropicMessage {
+                role: AnthropicRole::User,
+                content: AnthropicContent::Blocks(vec![
+                    AnthropicContentBlock::ToolResult {
+                        tool_use_id: "toolu_456".to_string(),
+                        content: ToolResultContent::Text("Sunny, 22C".into()),
+                        is_error: None,
+                        cache_control: None,
+                    },
+                ]),
+            },
+        ],
+        tools: Some(vec![AnthropicTool {
+            name: "get_weather".to_string(),
+            description: Some("Get weather for a city".to_string()),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "city": {"type": "string"}
+                }
+            }),
+            cache_control: None,
+        }]),
+        max_tokens: 2048,
+        ..Default::default()
+    };
+
+    let env = messages_to_antigravity_request(
+        &req,
+        "claude-sonnet-4-6",
+        "aicode-consumers",
+        None,
+        "",
+    ).unwrap();
+
+    let inner = &env["request"];
+    let tools = inner["tools"].as_array().expect("tools must be present");
+    assert_eq!(tools.len(), 1);
+    let decls = tools[0]["functionDeclarations"].as_array().unwrap();
+    assert_eq!(decls[0]["name"], "get_weather");
+
+    let contents = inner["contents"].as_array().expect("contents array present");
+    assert_eq!(contents.len(), 3);
+    assert_eq!(contents[1]["role"], "model");
+    assert_eq!(contents[1]["parts"][0]["functionCall"]["name"], "get_weather");
+    assert_eq!(contents[1]["parts"][0]["thoughtSignature"], "skip_thought_signature_validator");
+    assert_eq!(contents[2]["role"], "user");
+    assert_eq!(contents[2]["parts"][0]["functionResponse"]["name"], "get_weather");
+}
 

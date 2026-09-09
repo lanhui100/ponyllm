@@ -10,11 +10,13 @@ const props = defineProps<{
 }>();
 
 const qps = computed(() => {
-  return props.latestPoint?.qps ?? 0;
+  const v = props.latestPoint?.qps ?? 0;
+  return Math.round(v);
 });
 
 const tokenThroughput = computed(() => {
-  return props.latestPoint?.tokenThroughput ?? 0;
+  const v = props.latestPoint?.tokenThroughput ?? 0;
+  return Math.round(v);
 });
 
 const totalTokens = computed(() => {
@@ -23,12 +25,12 @@ const totalTokens = computed(() => {
 
 const ttft = computed(() => {
   const v = props.metrics?.stream?.avg_ttft_ms;
-  return v !== undefined && v !== null ? `${v.toFixed(1)} ms` : '--';
+  return v !== undefined && v !== null ? `${Math.round(v)} ms` : '--';
 });
 
 const avgTps = computed(() => {
   const v = props.metrics?.stream?.avg_tps;
-  return v !== undefined && v !== null ? `${v.toFixed(1)} tok/s` : '--';
+  return v !== undefined && v !== null ? `${Math.round(v)} tok/s` : '--';
 });
 
 const errorRate = computed(() => {

@@ -77,18 +77,18 @@ describe('UptimeBars Component', () => {
     app.unmount();
   });
 
-  it('renders exactly 24 bars when slotCount is 24, displaying call metrics in tooltip and 24h speed in t/s', async () => {
-    const slots: ConnectivitySlot[] = Array.from({ length: 24 }, (_, i) => ({
+  it('renders exactly 28 bars when slotCount is 28, displaying call metrics in tooltip and 24h speed in t/s', async () => {
+    const slots: ConnectivitySlot[] = Array.from({ length: 28 }, (_, i) => ({
       timestamp_ms: 1000 + i * 5000,
-      latency_ms: i === 23 ? 90 : 80 + i,
+      latency_ms: i === 27 ? 90 : 80 + i,
       tps: 45 + i,
-      status: i === 20 ? 'degraded' : i === 21 ? 'down' : 'ok',
+      status: i === 24 ? 'degraded' : i === 25 ? 'down' : 'ok',
     }));
 
     const app = createApp({
       render: () => h(UptimeBars, {
         slots,
-        slotCount: 24,
+        slotCount: 28,
         latestLatencyMs: 90,
         speed24h: 48.6,
       }),
@@ -96,24 +96,24 @@ describe('UptimeBars Component', () => {
     app.mount(container);
     await nextTick();
 
-    // Exactly 24 bars (5s/柱, 最近2分钟)
+    // Exactly 28 bars (5s/柱, 最近约2分钟)
     const bars = container.querySelectorAll('[data-testid="uptime-bar"]');
-    expect(bars.length).toBe(24);
+    expect(bars.length).toBe(28);
 
-    // Verify 24-bar width is narrow (w-1)
+    // Verify 28-bar width is narrow (w-1)
     expect(bars[0].className).toContain('w-1');
 
-    // Tooltip includes status, latency, and speed in t/s
+    // Tooltip includes status, latency, and speed in integer t/s
     const firstBarTitle = bars[0].getAttribute('title') || '';
     expect(firstBarTitle).toContain('80.0 ms');
-    expect(firstBarTitle).toContain('45.0 t/s');
+    expect(firstBarTitle).toContain('45 t/s');
     expect(firstBarTitle).toContain('响应及时');
 
-    // 24h speed badge in t/s is present
+    // 24h speed badge in t/s is present and rounded to integer
     const speedBadge = container.querySelector('[data-testid="speed-24h"]');
     expect(speedBadge).not.toBeNull();
     expect(speedBadge?.textContent).toContain('24h');
-    expect(speedBadge?.textContent).toContain('48.6 t/s');
+    expect(speedBadge?.textContent).toContain('49 t/s');
 
     app.unmount();
   });

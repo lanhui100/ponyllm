@@ -137,3 +137,56 @@ pub fn is_context_capacity_compatible(source_capacity_str: &str, target_capacity
     let tgt = parse_context_capacity_tokens(target_capacity_str);
     tgt >= src
 }
+
+/// Calculate the minimum safe output tokens required for a given thinking effort.
+/// This prevents thinking models from consuming the entire output limit on thinking
+/// tokens alone (which results in zero text content and client-side errors).
+pub fn min_safe_thinking_output_tokens(effort: ponyllm_protocol::common::ReasoningEffort) -> u32 {
+    match effort {
+        ponyllm_protocol::common::ReasoningEffort::High => 16384,
+        ponyllm_protocol::common::ReasoningEffort::Medium => 8192,
+        ponyllm_protocol::common::ReasoningEffort::Low => 4096,
+        ponyllm_protocol::common::ReasoningEffort::Off => 0,
+    }
+}
+
+/// Apply a thinking-aware safeguard to client-requested output tokens:
+/// 1. Clamps against model's physical maximum (`model_max`).
+/// 2. If thinking is active, ensures output tokens is floored up to at least
+///    `min_safe_thinking_output_tokens(effort)`, bounded by `model_max`.
+/// 3. If client passed None, returns Some(floor) if thinking is active and floor > 0,
+///    or None if thinking is not active.
+pub fn apply_thinking_output_safeguard(
+    client_tokens: Option<u32>,
+    model_max_str: &str,
+    effort: ponyllm_protocol::common::ReasoningEffort,
+) -> Option<u32> {
+    let model_max = parse_context_capacity_tokens(model_max_str) as u32;
+    let floor = min_safe_thinking_output_tokens(effort);
+
+    match client_tokens {
+        Some(ct) => {
+            let floored = if effort.is_active() {
+                ct.max(floor)
+            } else {
+                ct
+            };
+            if model_max > 0 {
+                Some(floored.min(model_max))
+            } else {
+                Some(floored)
+            }
+        }
+        None => {
+            if effort.is_active() && floor > 0 {
+                if model_max > 0 {
+                    Some(floor.min(model_max))
+                } else {
+                    Some(floor)
+                }
+            } else {
+                None
+            }
+        }
+    }
+}

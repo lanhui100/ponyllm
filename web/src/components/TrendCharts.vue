@@ -48,10 +48,23 @@ let errorChart: echarts.ECharts | null = null;
 
 function formatTimestamp(ts: number, range: string): string {
   const d = new Date(ts);
-  if (range === '30d' || range === '7d') {
+  if (range === '30d') {
+    return `${(d.getMonth() + 1).toString().padStart(2, '0')}/${d.getDate().toString().padStart(2, '0')}`;
+  }
+  if (range === '7d') {
     return `${(d.getMonth() + 1).toString().padStart(2, '0')}/${d.getDate().toString().padStart(2, '0')} ${d.getHours().toString().padStart(2, '0')}:00`;
   }
   return `${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}`;
+}
+
+function getXAxisLabelConfig() {
+  const r = props.range;
+  return {
+    color: '#64748b',
+    fontSize: 12,
+    hideOverlap: true,
+    interval: r === '30d' ? 4 : r === '7d' ? 3 : (index: number) => index % 2 === 0,
+  };
 }
 
 const commonTooltip = {
@@ -77,8 +90,7 @@ const COLOR_ROSE = '#e11d48';
 function formatAxisNumber(val: number): string {
   if (val >= 1_000_000) return `${(val / 1_000_000).toFixed(1)}M`;
   if (val >= 1_000) return `${(val / 1_000).toFixed(1)}k`;
-  if (Number.isInteger(val)) return val.toString();
-  return val.toFixed(1);
+  return Math.round(val).toString();
 }
 
 function updateCharts() {
@@ -101,11 +113,7 @@ function updateCharts() {
       boundaryGap: false,
       axisLine: { lineStyle: { color: '#e2e8f0' } },
       axisTick: { show: false },
-      axisLabel: {
-        color: '#64748b',
-        fontSize: 12,
-        interval: (index: number) => index % 2 === 0,
-      },
+      axisLabel: getXAxisLabelConfig(),
     },
     yAxis: {
       type: 'value',
@@ -175,7 +183,35 @@ function updateCharts() {
     }
 
     tokenChart?.setOption({
-      tooltip: commonTooltip,
+      tooltip: {
+        ...commonTooltip,
+        formatter: (params: any) => {
+          if (!Array.isArray(params) || params.length === 0) return '';
+          const idx = params[0].dataIndex;
+          const pt = points[idx];
+          const time = params[0].axisValueLabel || '';
+          let html = `<div style="font-weight:600;margin-bottom:4px">${time}</div>`;
+          if (pt) {
+            html += `<div style="font-size:11px;color:#94a3b8;margin-bottom:6px">切片请求: ${pt.total_requests.toLocaleString()} 次</div>`;
+          }
+          let totalTokens = 0;
+          for (const item of params) {
+            const val = Number(item.value) || 0;
+            totalTokens += val;
+            html += `<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;font-size:12px">
+              <span>${item.marker} ${item.seriesName}</span>
+              <span style="font-weight:600;font-family:monospace">${val.toLocaleString()} tok</span>
+            </div>`;
+          }
+          if (params.length > 1) {
+            html += `<div style="border-top:1px solid #334155;margin-top:4px;padding-top:4px;display:flex;justify-content:space-between;font-size:12px;font-weight:600">
+              <span>合计</span>
+              <span style="font-family:monospace">${totalTokens.toLocaleString()} tok</span>
+            </div>`;
+          }
+          return html;
+        },
+      },
       legend: {
         show: seriesKeys.length > 1,
         top: 0,
@@ -190,11 +226,7 @@ function updateCharts() {
         data: timestamps,
         axisLine: { lineStyle: { color: '#e2e8f0' } },
         axisTick: { show: false },
-        axisLabel: {
-          color: '#64748b',
-          fontSize: 12,
-          interval: (index: number) => index % 2 === 0,
-        },
+        axisLabel: getXAxisLabelConfig(),
       },
       yAxis: {
         type: 'value',
@@ -220,11 +252,7 @@ function updateCharts() {
         data: timestamps,
         axisLine: { lineStyle: { color: '#e2e8f0' } },
         axisTick: { show: false },
-        axisLabel: {
-          color: '#64748b',
-          fontSize: 12,
-          interval: (index: number) => index % 2 === 0,
-        },
+        axisLabel: getXAxisLabelConfig(),
       },
       yAxis: {
         type: 'value',
@@ -260,11 +288,7 @@ function updateCharts() {
       boundaryGap: false,
       axisLine: { lineStyle: { color: '#e2e8f0' } },
       axisTick: { show: false },
-      axisLabel: {
-        color: '#64748b',
-        fontSize: 12,
-        interval: (index: number) => index % 2 === 0,
-      },
+      axisLabel: getXAxisLabelConfig(),
     },
     yAxis: {
       type: 'value',
@@ -307,11 +331,7 @@ function updateCharts() {
       boundaryGap: false,
       axisLine: { lineStyle: { color: '#e2e8f0' } },
       axisTick: { show: false },
-      axisLabel: {
-        color: '#64748b',
-        fontSize: 12,
-        interval: (index: number) => index % 2 === 0,
-      },
+      axisLabel: getXAxisLabelConfig(),
     },
     yAxis: {
       type: 'value',
@@ -454,11 +474,11 @@ watch(
 
     <!-- 2x2 图表网格 -->
     <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-      <!-- 1. QPS 趋势 (折线面积图) -->
+      <!-- 1. QPS 趋势 -->
       <div class="swiss-card p-5">
         <div class="flex items-center justify-between mb-2">
           <div class="flex items-center gap-1.5">
-            <div class="text-[15px] font-semibold text-slate-900">QPS 并发洪峰 (折线面积图)</div>
+            <div class="text-[15px] font-semibold text-slate-900">QPS 并发洪峰</div>
             <UiTooltip
               content="展示选定周期（24小时/7天/30天）内，网关每秒处理的 API 请求频次（Queries Per Second），波峰反映系统流量高峰时刻。"
               wrap
@@ -477,11 +497,11 @@ watch(
         <div ref="qpsChartRef" class="w-full h-44" />
       </div>
 
-      <!-- 2. Token 吞吐量 (柱状分布图，带 Provider / Model 切换 switch) -->
+      <!-- 2. Token 吞吐量 (带 Provider / Model 切换 switch) -->
       <div class="swiss-card p-5">
         <div class="flex items-center justify-between mb-2">
           <div class="flex items-center gap-1.5">
-            <div class="text-[15px] font-semibold text-slate-900">Token 吞吐量分布 (柱状分布图)</div>
+            <div class="text-[15px] font-semibold text-slate-900">Token 吞吐量分布</div>
             <UiTooltip
               content="展示各时间切片内消耗的 Token 总量，支持按“提供商（Provider）”或“模型（Model）”维度进行堆叠拆解，直观掌握算力与费用分布。"
               wrap
@@ -518,11 +538,11 @@ watch(
         <div ref="tokenChartRef" class="w-full h-44" />
       </div>
 
-      <!-- 3. TTFT 延迟与生成速率 (波形图) -->
+      <!-- 3. TTFT 延迟与生成速率 -->
       <div class="swiss-card p-5">
         <div class="flex items-center justify-between mb-2">
           <div class="flex items-center gap-1.5">
-            <div class="text-[15px] font-semibold text-slate-900">延迟与速率起伏 (波形图)</div>
+            <div class="text-[15px] font-semibold text-slate-900">延迟与速率起伏</div>
             <UiTooltip
               content="展示网关端到端平均处理延迟（毫秒），平缓低位代表性能优异，尖峰通常代表上游排队或公网波动。"
               wrap
@@ -541,11 +561,11 @@ watch(
         <div ref="latencyChartRef" class="w-full h-44" />
       </div>
 
-      <!-- 4. 故障率异常台阶 (微波阶梯图) -->
+      <!-- 4. 故障率异常台阶 -->
       <div class="swiss-card p-5">
         <div class="flex items-center justify-between mb-2">
           <div class="flex items-center gap-1.5">
-            <div class="text-[15px] font-semibold text-slate-900">故障率异常波动 (阶梯图)</div>
+            <div class="text-[15px] font-semibold text-slate-900">故障率异常波动</div>
             <UiTooltip
               content="展示各周期切片内失败请求（上游 5xx、超时或鉴权失败）占总请求的比例。系统正常运转时应稳定在 0% 底部基准线。"
               wrap

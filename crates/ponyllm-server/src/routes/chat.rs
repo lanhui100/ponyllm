@@ -198,20 +198,6 @@ pub async fn handle_chat_completions(
             target_req.top_p = target.top_p;
         }
 
-        // Clamp max_tokens against model's declared max_output to prevent
-        // upstream 400 errors from models with smaller limits (e.g. kimi-k3 "4K").
-        {
-            let model_max = ponyllm_core::pool::parse_context_capacity_tokens(&target.max_output);
-            if model_max > 0 {
-                if let Some(ref mut mt) = target_req.max_completion_tokens {
-                    *mt = (*mt).min(model_max as u32);
-                }
-                if let Some(ref mut mt) = target_req.max_tokens {
-                    *mt = (*mt).min(model_max as u32);
-                }
-            }
-        }
-
         let requested_thinking = header_thinking
             .or(parsed.thinking_override)
             .or_else(|| req.get_reasoning_effort());
@@ -223,6 +209,22 @@ pub async fn handle_chat_completions(
             target_req.reasoning_effort = None;
             target_req.extra.remove("reasoning_effort");
             target_req.extra.remove("thinking");
+        }
+
+        // Apply thinking-aware output token safeguard:
+        // 1. Ensures max_tokens is floored to safe minimum if thinking is active to prevent zero-content choking.
+        // 2. Clamps against model's declared max_output.
+        target_req.max_tokens = ponyllm_core::pool::apply_thinking_output_safeguard(
+            target_req.max_tokens,
+            &target.max_output,
+            effective_thinking,
+        );
+        if let Some(ref mut mt) = target_req.max_completion_tokens {
+            *mt = ponyllm_core::pool::apply_thinking_output_safeguard(
+                Some(*mt),
+                &target.max_output,
+                effective_thinking,
+            ).unwrap_or(*mt);
         }
 
         let (target_url, req_val) = match target.upstream_protocol {

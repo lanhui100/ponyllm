@@ -135,6 +135,8 @@ fn test_stream_flow_aggregate_reusable() {
         tpot_p50_ms: Some(40.0),
         tpot_p95_ms: Some(300.0),
         tpot_mean_ms: Some(45.0),
+        prompt_tokens: 0,
+        completion_tokens: 100,
     });
     metrics.record_stream(&StreamFlowSample {
         ttft_ms: Some(1000.0),
@@ -147,6 +149,8 @@ fn test_stream_flow_aggregate_reusable() {
         tpot_p50_ms: Some(30.0),
         tpot_p95_ms: Some(200.0),
         tpot_mean_ms: Some(35.0),
+        prompt_tokens: 0,
+        completion_tokens: 200,
     });
     let summary = metrics.get_summary();
     assert_eq!(summary.stream.stream_count, 2);

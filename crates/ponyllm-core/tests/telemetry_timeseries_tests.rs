@@ -12,10 +12,10 @@ fn test_connectivity_sampler_thresholds_and_bar_count() {
 
     // 1. Record fast success (<300ms) -> Ok
     sampler.record("deepseek", now, Some(120.0), true);
-    // 2. Record moderate success (300ms..1000ms) -> Degraded
-    sampler.record("openai", now, Some(450.0), true);
-    // 3. Record slow success (>=1000ms) -> Down
-    sampler.record("anthropic", now, Some(1500.0), true);
+    // 2. Record moderate success (3s..5s) -> Degraded
+    sampler.record("openai", now, Some(3500.0), true);
+    // 3. Record slow success (>=5s) -> Down
+    sampler.record("anthropic", now, Some(5500.0), true);
     // 4. Record failure -> Down
     sampler.record("fallback", now, Some(80.0), false);
 
@@ -26,12 +26,12 @@ fn test_connectivity_sampler_thresholds_and_bar_count() {
     assert_eq!(last_ds.status, ConnectivityStatus::Ok);
 
     let oa_bars = sampler.get_series("openai", now);
-    assert_eq!(oa_bars.latest_latency_ms, Some(450.0));
+    assert_eq!(oa_bars.latest_latency_ms, Some(3500.0));
     let last_oa = oa_bars.slots.last().unwrap();
     assert_eq!(last_oa.status, ConnectivityStatus::Degraded);
 
     let an_bars = sampler.get_series("anthropic", now);
-    assert_eq!(an_bars.latest_latency_ms, Some(1500.0));
+    assert_eq!(an_bars.latest_latency_ms, Some(5500.0));
     let last_an = an_bars.slots.last().unwrap();
     assert_eq!(last_an.status, ConnectivityStatus::Down);
 
@@ -203,18 +203,18 @@ fn test_timeseries_clock_skew_resilience() {
 }
 
 #[test]
-fn test_gateway_default_is_24_slots_5s_covering_2min() {
-    assert_eq!(GATEWAY_SLOT_COUNT, 24);
+fn test_gateway_default_is_28_slots_5s_covering_2min() {
+    assert_eq!(GATEWAY_SLOT_COUNT, 28);
     assert_eq!(GATEWAY_STEP_MS, 5000);
-    assert_eq!(GATEWAY_SLOT_COUNT as u64 * GATEWAY_STEP_MS, 120_000);
+    assert_eq!(GATEWAY_SLOT_COUNT as u64 * GATEWAY_STEP_MS, 140_000);
 
     let sampler = ConnectivitySampler::default();
-    assert_eq!(sampler.gateway_slot_count(), 24);
+    assert_eq!(sampler.gateway_slot_count(), 28);
     assert_eq!(sampler.gateway_step_ms(), 5000);
     let now = 1_700_000_000_000u64;
     sampler.record("gateway", now, Some(20.0), true);
     let series = sampler.get_series("gateway", now);
-    assert_eq!(series.slots.len(), 24);
+    assert_eq!(series.slots.len(), 28);
     assert_eq!(series.slots.last().unwrap().status, ConnectivityStatus::Ok);
     // 间隔应为5s
     let n = series.slots.len();
@@ -229,8 +229,9 @@ fn test_provider_bars_are_continuous_per_call_no_time_gaps() {
     let sampler = ConnectivitySampler::default();
     let base = 1_700_000_000_000u64;
     // 稀疏调用：间隔远大于5s，时间桶方案会在中间产生Empty
+    // Provider 阈值：< 3s 为 Ok，3s ~ 5s 为 Degraded，> 5s 或失败为 Down
     sampler.record("prov-a", base, Some(100.0), true);
-    sampler.record("prov-a", base + 3600_000, Some(500.0), true);
+    sampler.record("prov-a", base + 3600_000, Some(3500.0), true);
     sampler.record("prov-a", base + 7200_000, Some(50.0), false);
 
     let series = sampler.get_series("prov-a", base + 7200_000 + 1000);
@@ -248,7 +249,7 @@ fn test_connectivity_snapshot_restore_preserves_calls() {
     let sampler = ConnectivitySampler::default();
     let base = 1_700_000_000_000u64;
     sampler.record("prov-b", base, Some(120.0), true);
-    sampler.record("prov-b", base + 1000, Some(1500.0), true);
+    sampler.record("prov-b", base + 1000, Some(6000.0), true);
     sampler.record("gateway", base, Some(10.0), true);
 
     let snap = sampler.snapshot_state();
@@ -262,7 +263,7 @@ fn test_connectivity_snapshot_restore_preserves_calls() {
     assert_eq!(tail[1].status, ConnectivityStatus::Down);
 
     let g = restored.get_series("gateway", base + 2000);
-    assert_eq!(g.slots.len(), 24);
+    assert_eq!(g.slots.len(), 28);
 }
 
 #[test]

@@ -71,7 +71,7 @@ async fn test_telemetry_history_and_stream_uptime_bars() {
     let bytes2 = axum::body::to_bytes(resp2.into_body(), usize::MAX).await.unwrap();
     let json2: Value = serde_json::from_slice(&bytes2).unwrap();
     assert!(json2["gateway_uptime_bars"]["slots"].is_array());
-    assert_eq!(json2["gateway_uptime_bars"]["slots"].as_array().unwrap().len(), 24);
+    assert_eq!(json2["gateway_uptime_bars"]["slots"].as_array().unwrap().len(), 28);
     // Non-streaming provider deepseek should appear in providers map
     assert!(json2["providers"]["deepseek"].is_object(), "deepseek provider should be in stream snapshot");
     assert_eq!(json2["providers"]["deepseek"]["uptime_bars"]["slots"].as_array().unwrap().len(), 40);

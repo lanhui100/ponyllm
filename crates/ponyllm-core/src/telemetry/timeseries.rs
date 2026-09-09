@@ -299,27 +299,41 @@ impl Projection for TimeseriesProjection {
                 );
             }
             GatewayEvent::StreamCompleted { flow, .. } => {
-                self.record_metric(
-                    env.wall_ms,
-                    env.provider.as_deref(),
-                    env.model.as_deref(),
-                    0,
-                    flow.chunks,
-                    flow.ttlb_ms,
-                    true,
-                );
-            }
-            GatewayEvent::StreamFailed { flow, .. } => {
-                let (chunks, latency) = match flow {
-                    Some(s) => (s.chunks, s.ttlb_ms),
-                    None => (0, 0.0),
+                let prompt = flow.prompt_tokens;
+                let completion = if flow.completion_tokens > 0 {
+                    flow.completion_tokens
+                } else {
+                    (flow.bytes / 3).max(flow.chunks)
                 };
                 self.record_metric(
                     env.wall_ms,
                     env.provider.as_deref(),
                     env.model.as_deref(),
-                    0,
-                    chunks,
+                    prompt,
+                    completion,
+                    flow.ttlb_ms,
+                    true,
+                );
+            }
+            GatewayEvent::StreamFailed { flow, .. } => {
+                let (prompt, completion, latency) = match flow {
+                    Some(s) => {
+                        let p = s.prompt_tokens;
+                        let c = if s.completion_tokens > 0 {
+                            s.completion_tokens
+                        } else {
+                            (s.bytes / 3).max(s.chunks)
+                        };
+                        (p, c, s.ttlb_ms)
+                    }
+                    None => (0, 0, 0.0),
+                };
+                self.record_metric(
+                    env.wall_ms,
+                    env.provider.as_deref(),
+                    env.model.as_deref(),
+                    prompt,
+                    completion,
                     latency,
                     false,
                 );

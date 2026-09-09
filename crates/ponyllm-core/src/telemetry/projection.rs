@@ -32,23 +32,35 @@ impl Projection for MetricsProjection {
     fn apply(&self, env: &EventEnvelope) {
         match &env.event {
             GatewayEvent::StreamCompleted { flow, .. } => {
+                let prompt = flow.prompt_tokens;
+                let completion = if flow.completion_tokens > 0 {
+                    flow.completion_tokens
+                } else {
+                    (flow.bytes / 3).max(flow.chunks)
+                };
                 self.inner.record_stream(flow);
                 self.inner.record_request(
                     &env.endpoint,
                     ms(flow.ttlb_ms),
-                    0,
-                    flow.chunks,
+                    prompt,
+                    completion,
                     true,
                 );
             }
             GatewayEvent::StreamFailed { flow, .. } => {
                 if let Some(sample) = flow {
+                    let prompt = sample.prompt_tokens;
+                    let completion = if sample.completion_tokens > 0 {
+                        sample.completion_tokens
+                    } else {
+                        (sample.bytes / 3).max(sample.chunks)
+                    };
                     self.inner.record_stream(sample);
                     self.inner.record_request(
                         &env.endpoint,
                         ms(sample.ttlb_ms),
-                        0,
-                        sample.chunks,
+                        prompt,
+                        completion,
                         false,
                     );
                 } else {
@@ -171,8 +183,9 @@ impl Projection for StreamProjection {
                     }
                 }
             }
-            GatewayEvent::RequestCompleted { tps, .. } => {
-                self.node_for(provider).update(None, *tps, false);
+            GatewayEvent::RequestCompleted { tps, status_code, .. } => {
+                let is_error = !(200..300).contains(status_code);
+                self.node_for(provider).update(None, *tps, is_error);
             }
             _ => {}
         }

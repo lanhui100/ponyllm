@@ -59,6 +59,20 @@ function formatTokens(n: number): string {
   if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
   return n.toLocaleString();
 }
+
+function getProviderTtft(p: any): string {
+  const val = p.avg_ttft_ms ?? p.ttft_ms;
+  const hasCalls = (p.stream_count ?? 0) > 0 || (p.total_requests ?? 0) > 0;
+  if (!hasCalls || val === undefined || val === null || val <= 0) return '--';
+  return `${Math.round(val)} ms`;
+}
+
+function getProviderTps(p: any): string {
+  const val = p.avg_tps ?? p.tps;
+  const hasCalls = (p.stream_count ?? 0) > 0 || (p.total_requests ?? 0) > 0;
+  if (!hasCalls || val === undefined || val === null || val <= 0) return '--';
+  return `${Math.round(val)} tok/s`;
+}
 </script>
 
 <template>
@@ -138,11 +152,12 @@ function formatTokens(n: number): string {
               </span>
             </td>
 
-            <!-- 柱状连续排列的连通性图例 (Uptime Bars) -->
+            <!-- 柱状连续排列的连通性图例 (Uptime Bars, 3s/5s 阈值) -->
             <td class="py-3.5 whitespace-nowrap">
               <UptimeBars
                 :slots="p.uptime_bars?.slots"
                 :latest-latency-ms="p.uptime_bars?.latest_latency_ms"
+                :is-provider="true"
                 bar-height="h-4"
               />
             </td>
@@ -169,12 +184,12 @@ function formatTokens(n: number): string {
 
             <!-- 平均 TTFT -->
             <td class="py-3.5 text-slate-700 font-mono text-[13px] whitespace-nowrap">
-              {{ p.avg_ttft_ms !== undefined && p.avg_ttft_ms !== null ? `${p.avg_ttft_ms.toFixed(1)} ms` : '--' }}
+              {{ getProviderTtft(p) }}
             </td>
 
             <!-- 平均 TPS -->
             <td class="py-3.5 text-slate-700 font-mono text-[13px] whitespace-nowrap">
-              {{ p.avg_tps !== undefined && p.avg_tps !== null ? `${p.avg_tps.toFixed(1)} tok/s` : '--' }}
+              {{ getProviderTps(p) }}
             </td>
 
             <!-- 错误数 -->

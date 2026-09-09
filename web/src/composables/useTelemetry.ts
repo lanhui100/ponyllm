@@ -81,13 +81,13 @@ export function useTelemetry(options: UseTelemetryOptions = {}) {
     if (m) {
       if (lastReqCount.value !== null) {
         const deltaReq = Math.max(0, m.total_requests - lastReqCount.value);
-        qps = Number((deltaReq / elapsedSec).toFixed(1));
+        qps = Math.round(deltaReq / elapsedSec);
       }
       lastReqCount.value = m.total_requests;
 
       if (lastTokenCount.value !== null) {
         const deltaTokens = Math.max(0, m.total_tokens - lastTokenCount.value);
-        tokenRate = Number((deltaTokens / elapsedSec).toFixed(0));
+        tokenRate = Math.round(deltaTokens / elapsedSec);
       }
       lastTokenCount.value = m.total_tokens;
 
@@ -178,7 +178,7 @@ export function useTelemetry(options: UseTelemetryOptions = {}) {
           latency_ms: rtt,
           status: rtt < 300 ? 'ok' : rtt < 1000 ? 'degraded' : 'down',
         });
-        if (gatewaySlots.value.length > 24) gatewaySlots.value.shift();
+        if (gatewaySlots.value.length > 28) gatewaySlots.value.shift();
       } else if (isHealthy) {
         health.value = 'ok';
         isDown.value = false;
@@ -188,7 +188,7 @@ export function useTelemetry(options: UseTelemetryOptions = {}) {
           latency_ms: rtt,
           status: rtt < 300 ? 'ok' : rtt < 1000 ? 'degraded' : 'down',
         });
-        if (gatewaySlots.value.length > 24) gatewaySlots.value.shift();
+        if (gatewaySlots.value.length > 28) gatewaySlots.value.shift();
       } else {
         health.value = 'down';
         isDown.value = true;
@@ -198,7 +198,7 @@ export function useTelemetry(options: UseTelemetryOptions = {}) {
           latency_ms: undefined,
           status: 'down',
         });
-        if (gatewaySlots.value.length > 24) gatewaySlots.value.shift();
+        if (gatewaySlots.value.length > 28) gatewaySlots.value.shift();
         return;
       }
 
@@ -221,7 +221,7 @@ export function useTelemetry(options: UseTelemetryOptions = {}) {
         latency_ms: undefined,
         status: 'down',
       });
-      if (gatewaySlots.value.length > 24) gatewaySlots.value.shift();
+      if (gatewaySlots.value.length > 28) gatewaySlots.value.shift();
     }
   }
 

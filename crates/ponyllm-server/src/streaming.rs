@@ -839,6 +839,7 @@ where
                             }
                             if let Some(parts) = cand.get("content").and_then(|c| c.get("parts")).and_then(|p| p.as_array()) {
                                 for part in parts {
+                                    tracing::info!("Antigravity candidate part: {:?}", part);
                                     let is_thought = part.get("thought").and_then(|t| t.as_bool()).unwrap_or(false);
                                     if let Some(txt) = part.get("text").and_then(|t| t.as_str()) {
                                         if is_thought {
@@ -1029,6 +1030,8 @@ impl<S> TelemetryStream<S> {
             tpot_p50_ms: p50,
             tpot_p95_ms: p95,
             tpot_mean_ms: avg_gap,
+            prompt_tokens: 0,
+            completion_tokens: (self.bytes_emitted / 3).max(self.chunks_emitted),
         };
         (sample, avg_gap)
     }

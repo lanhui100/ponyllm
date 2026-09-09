@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_SLOT_COUNT: usize = 40;
 pub const DEFAULT_STEP_MS: u64 = 1500; // legacy compat; gateway default is 5s below
-pub const GATEWAY_SLOT_COUNT: usize = 24; // 24 * 5s = 120s (最近2分钟)
+pub const GATEWAY_SLOT_COUNT: usize = 28; // 28 * 5s = 140s (~2分钟)
 pub const GATEWAY_STEP_MS: u64 = 5000;
 pub const PROVIDER_SLOT_COUNT: usize = 40; // 每柱一次调用，最近40次
 
@@ -112,6 +112,17 @@ fn classify_status(latency_ms: Option<f64>, is_success: bool) -> ConnectivitySta
     }
 }
 
+fn classify_provider_status(latency_ms: Option<f64>, is_success: bool) -> ConnectivityStatus {
+    if !is_success {
+        return ConnectivityStatus::Down;
+    }
+    match latency_ms {
+        Some(lat) if lat >= 5000.0 => ConnectivityStatus::Down,
+        Some(lat) if lat >= 3000.0 => ConnectivityStatus::Degraded,
+        _ => ConnectivityStatus::Ok,
+    }
+}
+
 fn normalize_latency(latency_ms: Option<f64>) -> Option<f64> {
     match latency_ms {
         Some(lat) if lat.is_finite() && lat >= 0.0 => Some((lat * 10.0).round() / 10.0),
@@ -202,7 +213,7 @@ impl ConnectivitySampler {
                 }
             }
         } else {
-            let status = classify_status(valid_latency, is_success);
+            let status = classify_provider_status(valid_latency, is_success);
             state.calls.push_back(ConnectivitySlot {
                 timestamp_ms,
                 latency_ms: valid_latency,
@@ -216,7 +227,7 @@ impl ConnectivitySampler {
     }
 
     /// Query the series up to `now_ms`.
-    /// gateway 返回时间环（24柱/5s/2分钟）；provider 返回最近调用的连续队列。
+    /// gateway 返回时间环（28柱/5s/~2分钟）；provider 返回最近调用的连续队列。
     pub fn get_series(&self, provider: &str, now_ms: u64) -> ConnectivityBarSeries {
         if provider == "gateway" {
             return self.get_gateway_series(now_ms);

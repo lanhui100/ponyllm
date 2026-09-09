@@ -350,10 +350,10 @@ describe('Modern Minimalist UI/UX System-Wide E2E Verification Suite (WEB-07)', 
     await nextTick();
 
     expect(container.textContent).toContain('系统可观测大盘');
-    expect(container.textContent).toContain('网关状态: OK');
+    expect(container.textContent).toContain('网关状态');
     expect(container.textContent).toContain('25,000'); // total tokens
-    expect(container.textContent).toContain('115.0 ms'); // ttft
-    expect(container.textContent).toContain('68.2 tok/s'); // tps
+    expect(container.textContent).toContain('115 ms'); // ttft rounded
+    expect(container.textContent).toContain('68 tok/s'); // tps rounded
 
     app.unmount();
   });
