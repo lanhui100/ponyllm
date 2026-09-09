@@ -296,11 +296,40 @@ impl std::io::Write for BoundedWriter {
     }
 }
 
+/// Recursively sanitize multimodal Base64 fields in JSON before snippet formatting
+/// to prevent giant Base64 strings from consuming all characters in FlightRecorder snippets.
+fn sanitize_multimodal_value(val: &serde_json::Value) -> serde_json::Value {
+    match val {
+        serde_json::Value::Object(map) => {
+            let mut new_map = serde_json::Map::with_capacity(map.len());
+            for (k, v) in map {
+                if (k == "data" || k == "url" || k == "image_url" || k == "file_url")
+                    && v.as_str().map(|s| s.starts_with("data:") && s.len() > 100).unwrap_or(false)
+                {
+                    let s = v.as_str().unwrap();
+                    let prefix = s.split_once(',').map(|(p, _)| p).unwrap_or("data:media");
+                    new_map.insert(k.clone(), serde_json::Value::String(format!("[{}... {} bytes]", prefix, s.len())));
+                } else if k == "data" && v.as_str().map(|s| s.len() > 200).unwrap_or(false) {
+                    new_map.insert(k.clone(), serde_json::Value::String(format!("[base64 data... {} bytes]", v.as_str().unwrap().len())));
+                } else {
+                    new_map.insert(k.clone(), sanitize_multimodal_value(v));
+                }
+            }
+            serde_json::Value::Object(new_map)
+        }
+        serde_json::Value::Array(arr) => {
+            serde_json::Value::Array(arr.iter().map(sanitize_multimodal_value).collect())
+        }
+        _ => val.clone(),
+    }
+}
+
 /// Create a bounded, lightweight snippet of a JSON value for telemetry.
 /// Avoids giant string allocations on multi-megabyte payloads.
 pub fn format_request_snippet(val: &serde_json::Value) -> String {
+    let sanitized = sanitize_multimodal_value(val);
     let mut writer = BoundedWriter::new(MAX_SNIPPET_CHARS);
-    let _ = serde_json::to_writer(&mut writer, val);
+    let _ = serde_json::to_writer(&mut writer, &sanitized);
     let mut s = String::from_utf8_lossy(&writer.buf).into_owned();
     if writer.reached {
         s.push_str("...[TRUNCATED]");

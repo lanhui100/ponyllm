@@ -199,3 +199,98 @@ fn test_responses_to_anthropic_preserves_image() {
         _ => panic!("Expected Blocks"),
     }
 }
+
+#[test]
+fn test_chat_and_messages_to_antigravity_multimodal() {
+    // 1. OpenAI Chat to Antigravity
+    let chat_req = ChatCompletionRequest {
+        model: "gemini-3.8-flash-high".to_string(),
+        messages: vec![ChatMessage::User(UserMessage {
+            content: MessageContent::Parts(vec![
+                ContentPart::Text { text: "Look at this:".to_string() },
+                ContentPart::ImageUrl {
+                    image_url: ImageUrlObject {
+                        url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==".to_string(),
+                        detail: None,
+                    },
+                },
+                ContentPart::InputAudio {
+                    input_audio: InputAudioObject {
+                        data: "UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=".to_string(),
+                        format: "wav".to_string(),
+                    },
+                },
+                ContentPart::File {
+                    file: InputFileObject {
+                        file_id: None,
+                        file_url: Some("data:application/pdf;base64,JVBERi0xLjUKJeLjz9MKMSAwIG9iago8PAovVHlwZSAvQ2F0YWxvZwo=".to_string()),
+                        filename: Some("test.pdf".to_string()),
+                    },
+                },
+            ]),
+            name: None,
+        })],
+        ..Default::default()
+    };
+
+    let ant_val = chat_to_antigravity_request(&chat_req, "gemini-3.8-flash-high", "test-project", None, "").expect("chat_to_antigravity_request should succeed");
+    let parts = &ant_val["request"]["contents"][0]["parts"];
+    assert_eq!(parts.as_array().unwrap().len(), 4);
+    assert_eq!(parts[0]["text"], "Look at this:");
+    assert_eq!(parts[1]["inlineData"]["mimeType"], "image/png");
+    assert!(parts[1]["inlineData"]["data"].as_str().unwrap().starts_with("iVBORw0KGgo"));
+    assert_eq!(parts[2]["inlineData"]["mimeType"], "audio/wav");
+    assert_eq!(parts[3]["inlineData"]["mimeType"], "application/pdf");
+
+    // 2. Anthropic Messages to Antigravity
+    let msg_req = MessageRequest {
+        model: "gemini-3.8-flash-high".to_string(),
+        max_tokens: 100,
+        messages: vec![AnthropicMessage {
+            role: AnthropicRole::User,
+            content: AnthropicContent::Blocks(vec![
+                AnthropicContentBlock::Text {
+                    text: "Check document:".to_string(),
+                    cache_control: None,
+                },
+                AnthropicContentBlock::Image {
+                    source: AnthropicImageSource {
+                        r#type: "base64".to_string(),
+                        media_type: "image/jpeg".to_string(),
+                        data: "abc123jpeg==".to_string(),
+                    },
+                    cache_control: None,
+                },
+                AnthropicContentBlock::Document {
+                    source: AnthropicDocumentSource {
+                        r#type: "base64".to_string(),
+                        media_type: "application/pdf".to_string(),
+                        data: "JVBERi0xLjUK==".to_string(),
+                    },
+                    cache_control: None,
+                },
+            ]),
+        }],
+        system: None,
+        temperature: None,
+        top_p: None,
+        top_k: None,
+        metadata: None,
+        stop_sequences: None,
+        stream: None,
+        tools: None,
+        tool_choice: None,
+        thinking: None,
+        reasoning_effort: None,
+        extra: Default::default(),
+    };
+
+    let ant_msg_val = messages_to_antigravity_request(&msg_req, "gemini-3.8-flash-high", "test-project", None, "").expect("messages_to_antigravity_request should succeed");
+    let msg_parts = &ant_msg_val["request"]["contents"][0]["parts"];
+    assert_eq!(msg_parts.as_array().unwrap().len(), 3);
+    assert_eq!(msg_parts[0]["text"], "Check document:");
+    assert_eq!(msg_parts[1]["inlineData"]["mimeType"], "image/jpeg");
+    assert_eq!(msg_parts[1]["inlineData"]["data"], "abc123jpeg==");
+    assert_eq!(msg_parts[2]["inlineData"]["mimeType"], "application/pdf");
+    assert_eq!(msg_parts[2]["inlineData"]["data"], "JVBERi0xLjUK==");
+}

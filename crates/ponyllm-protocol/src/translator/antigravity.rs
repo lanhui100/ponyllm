@@ -39,6 +39,111 @@ pub fn extract_or_generate_session_id(first_text: Option<&str>, salt: &str) -> S
     format!("-{}", (Uuid::new_v4().as_u128() % 9_000_000_000_000_000_000) as i64)
 }
 
+/// Helper to parse and normalize data URI or raw base64 data for Gemini inlineData
+pub fn parse_inline_data_part(raw_url_or_data: &str, default_mime: &str) -> Option<Value> {
+    let raw = raw_url_or_data.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    if let Some(stripped) = raw.strip_prefix("data:") {
+        if let Some((mime, b64)) = stripped.split_once(";base64,") {
+            let mime_clean = mime.trim();
+            let b64_clean = b64.trim();
+            // If the mime type is a text-based document (e.g. text/plain, text/csv, application/json),
+            // Gemini inlineData does not accept it (causes 400 INVALID_ARGUMENT: Unsupported MIME type).
+            // Try decoding it to utf-8 text.
+            if is_text_document_mime(mime_clean) {
+                if let Ok(bytes) = base64_decode(b64_clean) {
+                    if let Ok(text) = String::from_utf8(bytes) {
+                        return Some(json!({ "text": text }));
+                    }
+                }
+            }
+            return Some(json!({
+                "inlineData": {
+                    "mimeType": mime_clean,
+                    "data": b64_clean
+                }
+            }));
+        }
+    }
+
+    // If it's already a raw base64 string or URI
+    Some(json!({
+        "inlineData": {
+            "mimeType": default_mime,
+            "data": raw
+        }
+    }))
+}
+
+/// Simple base64 decoding helper without external dependencies
+fn base64_decode(input: &str) -> std::result::Result<Vec<u8>, ()> {
+    // Quick base64 decode implementation using standard base64 table
+    const TABLE: [i8; 256] = {
+        let mut t = [-1i8; 256];
+        let mut i = 0usize;
+        while i < 26 {
+            t[(b'A' + i as u8) as usize] = i as i8;
+            t[(b'a' + i as u8) as usize] = (i + 26) as i8;
+            i += 1;
+        }
+        let mut d = 0usize;
+        while d < 10 {
+            t[(b'0' + d as u8) as usize] = (d + 52) as i8;
+            d += 1;
+        }
+        t[b'+' as usize] = 62;
+        t[b'/' as usize] = 63;
+        t
+    };
+
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len() * 3 / 4);
+    let mut buf = 0u32;
+    let mut bits = 0;
+
+    for &b in bytes {
+        if b == b'=' || b.is_ascii_whitespace() {
+            continue;
+        }
+        let val = TABLE[b as usize];
+        if val < 0 {
+            return Err(());
+        }
+        buf = (buf << 6) | (val as u32);
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((buf >> bits) as u8);
+            buf &= (1 << bits) - 1;
+        }
+    }
+    Ok(out)
+}
+
+fn is_text_document_mime(mime: &str) -> bool {
+    let m = mime.to_ascii_lowercase();
+    m.starts_with("text/")
+        || m == "application/json"
+        || m == "application/xml"
+        || m == "application/x-yaml"
+        || m == "application/yaml"
+        || m == "application/javascript"
+}
+
+fn map_audio_format_to_mime(format: &str) -> &'static str {
+    match format.to_ascii_lowercase().as_str() {
+        "wav" => "audio/wav",
+        "mp3" => "audio/mp3",
+        "aac" => "audio/aac",
+        "ogg" | "opus" => "audio/ogg",
+        "flac" => "audio/flac",
+        "m4a" => "audio/m4a",
+        _ => "audio/wav",
+    }
+}
+
 /// Map an explicit ponyllm [`ReasoningEffort`] to an Antigravity
 /// `thinkingConfig` value, mirroring the reference `gcli2api` behavior:
 ///
@@ -220,12 +325,68 @@ pub fn chat_to_antigravity_request(
                 }
             }
             ChatMessage::User(m) => {
-                let txt = m.content.as_plain_text();
-                if first_user_text.is_none() && !txt.trim().is_empty() {
-                    first_user_text = Some(txt.clone());
+                let mut parts = Vec::new();
+                match &m.content {
+                    crate::openai::chat::MessageContent::Text(txt) => {
+                        if first_user_text.is_none() && !txt.trim().is_empty() {
+                            first_user_text = Some(txt.clone());
+                        }
+                        if !txt.trim().is_empty() {
+                            parts.push(json!({"text": txt}));
+                        }
+                    }
+                    crate::openai::chat::MessageContent::Parts(c_parts) => {
+                        for p in c_parts {
+                            match p {
+                                crate::openai::chat::ContentPart::Text { text } => {
+                                    if first_user_text.is_none() && !text.trim().is_empty() {
+                                        first_user_text = Some(text.clone());
+                                    }
+                                    if !text.trim().is_empty() {
+                                        parts.push(json!({"text": text}));
+                                    }
+                                }
+                                crate::openai::chat::ContentPart::ImageUrl { image_url } => {
+                                    if first_user_text.is_none() {
+                                        first_user_text = Some("image_modality_seed".to_string());
+                                    }
+                                    if let Some(inline) = parse_inline_data_part(&image_url.url, "image/jpeg") {
+                                        parts.push(inline);
+                                    }
+                                }
+                                crate::openai::chat::ContentPart::InputAudio { input_audio } => {
+                                    if first_user_text.is_none() {
+                                        first_user_text = Some("audio_modality_seed".to_string());
+                                    }
+                                    let mime = map_audio_format_to_mime(&input_audio.format);
+                                    if let Some(inline) = parse_inline_data_part(&input_audio.data, mime) {
+                                        parts.push(inline);
+                                    }
+                                }
+                                crate::openai::chat::ContentPart::VideoUrl { video_url } => {
+                                    if first_user_text.is_none() {
+                                        first_user_text = Some("video_modality_seed".to_string());
+                                    }
+                                    if let Some(inline) = parse_inline_data_part(&video_url.url, "video/mp4") {
+                                        parts.push(inline);
+                                    }
+                                }
+                                crate::openai::chat::ContentPart::File { file } => {
+                                    if first_user_text.is_none() {
+                                        first_user_text = Some("file_modality_seed".to_string());
+                                    }
+                                    if let Some(ref url) = file.file_url {
+                                        if let Some(inline) = parse_inline_data_part(url, "application/pdf") {
+                                            parts.push(inline);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
-                if !txt.trim().is_empty() {
-                    push_or_merge_turn(&mut contents, "user", vec![json!({"text": txt})]);
+                if !parts.is_empty() {
+                    push_or_merge_turn(&mut contents, "user", parts);
                 }
             }
             ChatMessage::Assistant(m) => {
@@ -431,12 +592,18 @@ pub fn messages_to_antigravity_request(
                         }
                         crate::anthropic::messages::AnthropicContentBlock::ToolResult { tool_use_id, content, .. } => {
                             let func_name = tool_id_to_name.get(tool_use_id).cloned().unwrap_or_else(|| "tool".to_string());
+                            let mut extra_inline_parts = Vec::new();
                             let txt = match content {
                                 crate::anthropic::messages::ToolResultContent::Text(s) => s.clone(),
                                 crate::anthropic::messages::ToolResultContent::Blocks(bls) => {
                                     bls.iter().filter_map(|blk| match blk {
                                         crate::anthropic::messages::ToolResultBlock::Text { text } => Some(text.clone()),
-                                        _ => None,
+                                        crate::anthropic::messages::ToolResultBlock::Image { source } => {
+                                            if let Some(inline) = parse_inline_data_part(&format!("data:{};base64,{}", source.media_type, source.data), &source.media_type) {
+                                                extra_inline_parts.push(inline);
+                                            }
+                                            None
+                                        }
                                     }).collect::<Vec<_>>().join("\n")
                                 }
                             };
@@ -451,6 +618,30 @@ pub fn messages_to_antigravity_request(
                                     "response": response_obj
                                 }
                             }));
+                            // Parallel inline data for Gemini Tool Calling contract
+                            parts.extend(extra_inline_parts);
+                        }
+                        crate::anthropic::messages::AnthropicContentBlock::Image { source, .. } => {
+                            if first_user_text.is_none() && role_str == "user" {
+                                first_user_text = Some("anthropic_image_seed".to_string());
+                            }
+                            if let Some(inline) = parse_inline_data_part(
+                                &format!("data:{};base64,{}", source.media_type, source.data),
+                                &source.media_type,
+                            ) {
+                                parts.push(inline);
+                            }
+                        }
+                        crate::anthropic::messages::AnthropicContentBlock::Document { source, .. } => {
+                            if first_user_text.is_none() && role_str == "user" {
+                                first_user_text = Some("anthropic_doc_seed".to_string());
+                            }
+                            if let Some(inline) = parse_inline_data_part(
+                                &format!("data:{};base64,{}", source.media_type, source.data),
+                                &source.media_type,
+                            ) {
+                                parts.push(inline);
+                            }
                         }
                         _ => {}
                     }

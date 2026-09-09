@@ -1002,10 +1002,11 @@ impl<S> TelemetryStream<S> {
             (t.saturating_duration_since(start).as_secs_f64() * 1000.0).max(1.0)
         });
         let ttlb_ms = now.saturating_duration_since(start).as_secs_f64() * 1000.0;
+        let completion_tokens = (self.bytes_emitted / 3).max(self.chunks_emitted);
         let tps = if let Some(ft) = self.first_token_time {
             let gen_dur = now.saturating_duration_since(ft).as_secs_f64();
-            if gen_dur > 0.05 && self.chunks_emitted > 0 {
-                Some((self.chunks_emitted as f64 / gen_dur).max(1.0))
+            if gen_dur > 0.05 && completion_tokens > 0 {
+                Some((completion_tokens as f64 / gen_dur).max(1.0))
             } else {
                 None
             }
