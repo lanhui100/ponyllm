@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onUnmounted } from 'vue';
+import { ref, onUnmounted } from 'vue';
 import { useAdminConfig } from '../composables/useAdminConfig';
 import NavBar from '../components/NavBar.vue';
 import ProviderCard from '../components/governance/ProviderCard.vue';
@@ -11,6 +11,7 @@ import UiButton from '../components/ui/UiButton.vue';
 import UiBadge from '../components/ui/UiBadge.vue';
 import UiTooltip from '../components/ui/UiTooltip.vue';
 import UiCollapsible from '../components/ui/UiCollapsible.vue';
+import UiToast from '../components/ui/UiToast.vue';
 import type { CreateProviderPayload } from '../types/admin';
 
 const {
@@ -51,8 +52,52 @@ const {
 type TabType = 'providers' | 'strategy';
 const currentTab = ref<TabType>('providers');
 
-/** 全量 provider 已配置模型的并集，供模型名输入下拉建议。 */
-const allModelNames = computed(() => [...new Set(models.value.map((m) => m.name).filter(Boolean))]);
+/** 轻量 toast（单条，自动消失）。 */
+const toastMessage = ref<string | null>(null);
+let toastTimer: ReturnType<typeof setTimeout> | null = null;
+function showToast(message: string, ms = 3500) {
+  toastMessage.value = message;
+  if (toastTimer) clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => {
+    toastMessage.value = null;
+    toastTimer = null;
+  }, ms);
+}
+
+/** 上游名单批量添加：逐个复用 saveModel（版本控制内聚），409 记为跳过。 */
+async function batchCreateModels(
+  provider: string,
+  ids: string[],
+  onProgress: (done: number, total: number) => void,
+): Promise<{ added: number; skipped: number; failed: number }> {
+  let added = 0;
+  let skipped = 0;
+  let failed = 0;
+  for (let i = 0; i < ids.length; i += 1) {
+    try {
+      await saveModel({
+        name: ids[i],
+        provider,
+        tier: 'Smart',
+        context_window: '256k',
+        thinking_default: 'Off',
+        thinking_max: 'High',
+        input_types: ['text', 'image'],
+        output_types: ['text'],
+      });
+      added += 1;
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (/409|already exists|已存在/.test(msg)) {
+        skipped += 1;
+      } else {
+        failed += 1;
+      }
+    }
+    onProgress(i + 1, ids.length);
+  }
+  return { added, skipped, failed };
+}
 
 type ProviderMode = 'standard' | 'antigravity';
 const newProviderMode = ref<ProviderMode>('standard');
@@ -377,6 +422,7 @@ async function handleRefresh() {
 
 onUnmounted(() => {
   cleanupOAuthSession();
+  if (toastTimer) clearTimeout(toastTimer);
 });
 </script>
 
@@ -882,8 +928,9 @@ onUnmounted(() => {
             :key="p.name"
             :provider="p"
             :models="models.filter((m) => m.provider ? m.provider === p.name : true)"
-            :all-model-names="allModelNames"
             :keys="keys.filter((k) => k.provider === p.name)"
+            :on-batch-create="batchCreateModels"
+            @notice="showToast"
             :admin-write-enabled="adminWriteEnabled"
             :key-test-results="keyTestResults"
             :testing-key-ids="testingKeyIds"
@@ -926,5 +973,7 @@ onUnmounted(() => {
       @refresh="handleRefresh"
       @close="clearConflict"
     />
+
+    <UiToast :message="toastMessage" />
   </div>
 </template>

@@ -45,6 +45,17 @@ export interface ModelView {
   output_price?: number | null;
   temperature?: number | null;
   top_p?: number | null;
+  display_name?: string | null;
+}
+
+export interface UpstreamModelItem {
+  id: string;
+}
+
+export interface UpstreamModelsView {
+  provider: string;
+  source: string;
+  models: UpstreamModelItem[];
 }
 
 export interface KeyView {
@@ -131,6 +142,7 @@ export interface CreateModelPayload {
   output_price?: number | null;
   temperature?: number | null;
   top_p?: number | null;
+  display_name?: string | null;
 }
 
 export interface UpdateModelPayload {
@@ -150,6 +162,7 @@ export interface UpdateModelPayload {
   output_price?: number | null;
   temperature?: number | null;
   top_p?: number | null;
+  display_name?: string | null;
 }
 
 export interface CreateKeyPayload {

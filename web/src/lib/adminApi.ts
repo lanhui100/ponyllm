@@ -19,6 +19,7 @@ import type {
   AuthorizeAntigravityPayload,
   AuthorizeAntigravityResponse,
   ProxyStatusView,
+  UpstreamModelsView,
 } from '../types/admin';
 
 export function ifMatchHeaders(version?: number | string): Record<string, string> {
@@ -48,6 +49,12 @@ export const adminApi = {
 
   getProviderModels(providerName: string) {
     return alova.Get<ModelView[]>(`/api/admin/providers/${encodeURIComponent(providerName)}/models`);
+  },
+
+  getUpstreamModels(providerName: string) {
+    return alova.Get<UpstreamModelsView>(
+      `/api/admin/providers/${encodeURIComponent(providerName)}/upstream-models`,
+    );
   },
 
   getKeys() {

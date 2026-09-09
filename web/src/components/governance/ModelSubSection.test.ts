@@ -1,8 +1,18 @@
 // @vitest-environment happy-dom
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { createApp, nextTick } from 'vue';
 import ModelSubSection from './ModelSubSection.vue';
 import type { ModelView } from '../../types/admin';
+
+let upstreamImpl: () => Promise<{ provider: string; source: string; models: { id: string }[] }>;
+
+vi.mock('../../lib/adminApi', () => ({
+  adminApi: {
+    getUpstreamModels: (_provider: string) => ({
+      send: () => upstreamImpl(),
+    }),
+  },
+}));
 
 const mockModels: ModelView[] = [
   {
@@ -30,35 +40,9 @@ function mountSection(extraProps: Record<string, unknown> = {}) {
   return { container, app };
 }
 
-describe('ModelSubSection model name suggestions', () => {
-  it('lists union names excluding current-section models, keeps free input', async () => {
-    const { container, app } = mountSection({
-      suggestedModelNames: ['gpt-4o', 'deepseek-chat', 'claude-opus-4-6'],
-    });
-    await nextTick();
-
-    const input = container.querySelector('[data-testid="model-name-input"]') as HTMLInputElement;
-    expect(input).not.toBeNull();
-    // combobox wiring: input references the datalist, free text still allowed
-    const listId = input.getAttribute('list');
-    expect(listId).toBeTruthy();
-    const options = [...container.querySelectorAll(`#${CSS.escape(listId!)} option`)].map((o) =>
-      (o as HTMLOptionElement).value,
-    );
-    expect(options).toContain('deepseek-chat');
-    expect(options).toContain('claude-opus-4-6');
-    // already in this section -> excluded to avoid 409
-    expect(options).not.toContain('gpt-4o');
-
-    input.value = 'my-custom-model';
-    input.dispatchEvent(new Event('input'));
-    await nextTick();
-    expect((container.querySelector('[data-testid="model-name-input"]') as HTMLInputElement).value).toBe(
-      'my-custom-model',
-    );
-
-    app.unmount();
-    document.body.removeChild(container);
+describe('ModelSubSection model form', () => {
+  beforeEach(() => {
+    upstreamImpl = async () => ({ provider: 'openai', source: 'upstream', models: [] });
   });
 
   it('shows sampling/pricing badges for customized models', async () => {
@@ -70,7 +54,7 @@ describe('ModelSubSection model name suggestions', () => {
     document.body.removeChild(container);
   });
 
-  it('submits sampling and pricing overrides, omits emptied fields', async () => {
+  it('submits sampling, pricing and display name, omits emptied fields', async () => {
     const container = document.createElement('div');
     document.body.appendChild(container);
     let created: any = null;
@@ -85,7 +69,9 @@ describe('ModelSubSection model name suggestions', () => {
     app.mount(container);
     await nextTick();
 
+    // 上游无名单 -> 回退手输表单
     (container.querySelector('[data-testid="add-model-btn"]') as HTMLButtonElement).click();
+    await nextTick();
     await nextTick();
 
     const setVal = (testid: string, v: string) => {
@@ -94,6 +80,7 @@ describe('ModelSubSection model name suggestions', () => {
       el.dispatchEvent(new Event('input'));
     };
     setVal('model-name-input', 'gpt-4o-mini');
+    setVal('model-display-name-input', 'GPT-4o Mini');
     // open 高级
     (container.querySelector('[data-testid="toggle-advanced-btn"]') as HTMLButtonElement).click();
     await nextTick();
@@ -110,11 +97,72 @@ describe('ModelSubSection model name suggestions', () => {
 
     expect(created).not.toBeNull();
     expect(created.name).toBe('gpt-4o-mini');
+    expect(created.display_name).toBe('GPT-4o Mini');
     expect(created.temperature).toBe(0.7);
     expect(created.top_p).toBe(0.9);
     expect(created.input_price).toBe(0.15);
     expect(created.output_price).toBe(0.6);
     expect('cached_price' in created).toBe(false);
+
+    app.unmount();
+    document.body.removeChild(container);
+  });
+
+  it('opens the upstream picker when the provider lists models', async () => {
+    upstreamImpl = async () => ({
+      provider: 'openai',
+      source: 'upstream',
+      models: [{ id: 'gpt-4o' }, { id: 'gpt-4o-mini' }],
+    });
+    const notices: string[] = [];
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const app = createApp(ModelSubSection, {
+      providerName: 'openai',
+      models: mockModels,
+      adminWriteEnabled: true,
+      onNotice: (msg: string) => notices.push(msg),
+    });
+    app.mount(container);
+    await nextTick();
+
+    (container.querySelector('[data-testid="add-model-btn"]') as HTMLButtonElement).click();
+    await nextTick();
+    await nextTick();
+
+    expect(container.querySelector('[data-testid="upstream-model-picker"]')).not.toBeNull();
+    // gpt-4o 已存在 -> 标记已添加；gpt-4o-mini 可选
+    expect(container.textContent).toContain('gpt-4o-mini');
+    expect(notices).toEqual([]);
+
+    app.unmount();
+    document.body.removeChild(container);
+  });
+
+  it('falls back to manual form with a notice when the provider has no list interface', async () => {
+    upstreamImpl = async () => {
+      throw new Error('404');
+    };
+    const notices: string[] = [];
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const app = createApp(ModelSubSection, {
+      providerName: 'openai',
+      models: [],
+      adminWriteEnabled: true,
+      onNotice: (msg: string) => notices.push(msg),
+    });
+    app.mount(container);
+    await nextTick();
+
+    (container.querySelector('[data-testid="add-model-btn"]') as HTMLButtonElement).click();
+    await nextTick();
+    await nextTick();
+
+    expect(container.querySelector('[data-testid="upstream-model-picker"]')).toBeNull();
+    expect(notices).toEqual(['该提供商未提供模型列表接口，请手动添加']);
+    // 手输表单已展开
+    expect(container.querySelector('[data-testid="model-name-input"]')).not.toBeNull();
 
     app.unmount();
     document.body.removeChild(container);

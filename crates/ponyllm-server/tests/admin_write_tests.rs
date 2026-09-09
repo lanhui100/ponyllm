@@ -76,6 +76,7 @@ impl WriteTestHarness {
                 input_price: Some(2.5),
                 cached_price: Some(1.25),
                 output_price: Some(10.0),
+                display_name: None,
                 temperature: None,
                 top_p: None,
                 protocol: None,
@@ -124,6 +125,7 @@ impl WriteTestHarness {
             input_price: Some(2.5),
             cached_price: Some(1.25),
             output_price: Some(10.0),
+            display_name: None,
             temperature: None,
             top_p: None,
             protocol: None,
@@ -770,6 +772,7 @@ async fn test_model_sampling_and_pricing_overrides() {
         .json(&serde_json::json!({
             "provider": "openai",
             "name": "gpt-4o-mini",
+            "display_name": "GPT-4o Mini",
             "temperature": 0.7,
             "top_p": 0.9,
             "input_price": 0.15,
@@ -781,6 +784,7 @@ async fn test_model_sampling_and_pricing_overrides() {
         .unwrap();
     assert_eq!(create_resp.status(), StatusCode::CREATED);
     let m: serde_json::Value = create_resp.json().await.unwrap();
+    assert_eq!(m["display_name"], "GPT-4o Mini");
     assert_eq!(m["temperature"], serde_json::json!(0.7));
     assert_eq!(m["top_p"], serde_json::json!(0.9));
     assert_eq!(m["input_price"], serde_json::json!(0.15));
@@ -833,4 +837,158 @@ async fn test_model_sampling_and_pricing_overrides() {
         .await
         .unwrap();
     assert_eq!(bad_price.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_provider_upstream_models() {
+    use axum::routing::get;
+
+    // Mock upstream: only /v1/models exists.
+    let mock = axum::Router::new().route(
+        "/v1/models",
+        get(|| async {
+            axum::Json(serde_json::json!({
+                "object": "list",
+                "data": [{"id": "m-b"}, {"id": "m-a"}, {"id": "m-a"}]
+            }))
+        }),
+    );
+    let mock_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mock_addr = mock_listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(mock_listener, mock).await.unwrap();
+    });
+    let mock_base = format!("http://{}", mock_addr);
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let config_path = temp_dir.path().join("ponyllm.toml");
+    let api_key = "admin-secret-token".to_string();
+
+    let key = || KeySection {
+        id: "k1".to_string(),
+        api_key: "sk-test-1234567890".to_string(),
+        priority: 1,
+        weight: 10,
+    };
+    let mut providers = HashMap::new();
+    for (pname, base, proto) in [
+        ("openai", format!("{}/v1", mock_base), None),
+        (
+            "weird",
+            format!("{}/other", mock_base),
+            None,
+        ),
+        (
+            "claude",
+            "https://api.anthropic.com".to_string(),
+            Some(ponyllm_core::pool::UpstreamProtocol::Anthropic),
+        ),
+    ] {
+        providers.insert(
+            pname.to_string(),
+            ProviderSection {
+                base_url: base,
+                default_model: "m-a".to_string(),
+                strategy: "round_robin".to_string(),
+                billing_mode: BillingMode::Metered,
+                input_price: 0.0,
+                cached_price: 0.0,
+                output_price: 0.0,
+                models: vec!["m-a".to_string()],
+                model_configs: vec![],
+                keys: vec![key()],
+                default_protocol: proto,
+                chat_url: None,
+                responses_url: None,
+                messages_url: None,
+                proxy: None,
+            },
+        );
+    }
+    let mut config_file = ConfigFile::default();
+    config_file.gateway.bind = "127.0.0.1:8080".to_string();
+    config_file.gateway.api_key = api_key.clone();
+    config_file.gateway.admin_write_enabled = true;
+    config_file.providers = providers;
+    config_file.save_to_path(config_path.to_str().unwrap()).unwrap();
+
+    let mut gw_config = GatewayConfig::default();
+    gw_config.bind_addr = "127.0.0.1:8080".to_string();
+    gw_config.api_key = api_key.clone();
+    gw_config.admin_write_enabled = true;
+    for (pname, psec) in &config_file.providers {
+        gw_config.providers.insert(
+            pname.clone(),
+            ProviderConfig {
+                base_url: psec.base_url.clone(),
+                default_model: psec.default_model.clone(),
+                strategy: psec.strategy.clone(),
+                billing_mode: psec.billing_mode,
+                input_price: 0.0,
+                cached_price: 0.0,
+                output_price: 0.0,
+                models: psec.models.clone(),
+                model_specs: vec![],
+                default_protocol: psec.default_protocol,
+                chat_url: None,
+                responses_url: None,
+                messages_url: None,
+                proxy: None,
+            },
+        );
+    }
+
+    let store = Arc::new(FileConfigStore::new(config_path.to_str().unwrap()));
+    let state = Arc::new(AppState::new(gw_config).with_config_store(store));
+    let app = create_app(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let client = reqwest::Client::new();
+    let auth = format!("Bearer {}", api_key);
+
+    // 1. OpenAI-style list: sorted, deduped ids
+    let ok = client
+        .get(format!("http://{}/api/admin/providers/openai/upstream-models", addr))
+        .header("Authorization", &auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ok.status(), StatusCode::OK);
+    let body: serde_json::Value = ok.json().await.unwrap();
+    assert_eq!(body["source"], "upstream");
+    assert_eq!(
+        body["models"],
+        serde_json::json!([{"id": "m-a"}, {"id": "m-b"}])
+    );
+
+    // 2. Base without a listable path -> 502, console falls back to manual entry
+    let missing = client
+        .get(format!("http://{}/api/admin/providers/weird/upstream-models", addr))
+        .header("Authorization", &auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), StatusCode::BAD_GATEWAY);
+
+    // 3. Anthropic-native protocol -> 404 unsupported
+    let unsupported = client
+        .get(format!("http://{}/api/admin/providers/claude/upstream-models", addr))
+        .header("Authorization", &auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unsupported.status(), StatusCode::NOT_FOUND);
+
+    // 4. Unknown provider -> 404
+    let gone = client
+        .get(format!("http://{}/api/admin/providers/nope/upstream-models", addr))
+        .header("Authorization", &auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(gone.status(), StatusCode::NOT_FOUND);
 }

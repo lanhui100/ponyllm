@@ -500,6 +500,35 @@
         }
       }
     },
+    "/api/admin/providers/{name}/upstream-models": {
+      "get": {
+        "tags": [],
+        "summary": "List models offered by the provider's upstream (`source: \"quota\"` for\nAntigravity, `\"upstream\"` for OpenAI-style `/models`).\nProviders without a listable interface answer 404 so the console can fall\nback to manual entry with a toast instead of a picker modal.",
+        "operationId": "handle_admin_provider_upstream_models",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpstreamModelsView"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/admin/proxy/status": {
       "get": {
         "tags": [],
@@ -846,6 +875,12 @@
               "null"
             ]
           },
+          "display_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "input_price": {
             "type": [
               "number",
@@ -1107,6 +1142,12 @@
           },
           "context_window": {
             "type": "string"
+          },
+          "display_name": {
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "input_price": {
             "type": [
@@ -1437,6 +1478,12 @@
               "null"
             ]
           },
+          "display_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "input_price": {
             "type": [
               "number",
@@ -1577,6 +1624,39 @@
               "string",
               "null"
             ]
+          }
+        }
+      },
+      "UpstreamModelItem": {
+        "type": "object",
+        "required": [
+          "id"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          }
+        }
+      },
+      "UpstreamModelsView": {
+        "type": "object",
+        "required": [
+          "provider",
+          "source",
+          "models"
+        ],
+        "properties": {
+          "models": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/UpstreamModelItem"
+            }
+          },
+          "provider": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string"
           }
         }
       }

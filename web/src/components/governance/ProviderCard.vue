@@ -27,8 +27,11 @@ const props = defineProps<{
   keyTestResults: Record<string, KeyTestView>;
   testingKeyIds: Set<string>;
   defaultExpanded?: boolean;
-  /** 全量模型名并集，透传给模型子区域做名称下拉建议。 */
-  allModelNames?: string[];
+  onBatchCreate?: (
+    provider: string,
+    ids: string[],
+    onProgress: (done: number, total: number) => void,
+  ) => Promise<{ added: number; skipped: number; failed: number }>;
 }>();
 
 const emit = defineEmits<{
@@ -37,6 +40,7 @@ const emit = defineEmits<{
   (e: 'create-model', payload: CreateModelPayload): Promise<void>;
   (e: 'update-model', name: string, payload: UpdateModelPayload): Promise<void>;
   (e: 'delete-model', name: string): Promise<void>;
+  (e: 'notice', message: string): void;
   (e: 'create-key', payload: CreateKeyPayload): Promise<void>;
   (e: 'delete-key', id: string): Promise<void>;
   (e: 'test-single-key', id: string): Promise<void>;
@@ -407,11 +411,12 @@ function handleBatchTest() {
           <ModelSubSection
             :provider-name="provider.name"
             :models="models"
-            :suggested-model-names="allModelNames ?? []"
+            :on-batch-create="onBatchCreate"
             :admin-write-enabled="adminWriteEnabled"
             @create="(payload) => emit('create-model', payload)"
             @update="(name, payload) => emit('update-model', name, payload)"
             @delete="(name) => emit('delete-model', name)"
+            @notice="(message) => emit('notice', message)"
           />
         </div>
       </div>

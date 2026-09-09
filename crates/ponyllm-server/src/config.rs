@@ -27,6 +27,9 @@ pub struct ModelSpec {
     pub cached_price: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_price: Option<f64>,
+    /// Cosmetic display name for consoles; routing always uses `name`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
     /// Default sampling temperature for this model (applied when the request omits it).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
@@ -81,6 +84,7 @@ impl Default for ModelSpec {
             input_price: None,
             cached_price: None,
             output_price: None,
+            display_name: None,
             temperature: None,
             top_p: None,
             protocol: None,
@@ -219,6 +223,7 @@ impl ProviderConfig {
             input_price: None,
             cached_price: None,
             output_price: None,
+            display_name: None,
             temperature: None,
             top_p: None,
             protocol: None,

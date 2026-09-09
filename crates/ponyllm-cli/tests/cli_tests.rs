@@ -299,6 +299,7 @@ fn test_model_config_crud_and_params() {
         input_price: None,
         cached_price: None,
         output_price: None,
+        display_name: None,
         temperature: None,
         top_p: None,
         protocol: None,

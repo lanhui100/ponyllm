@@ -88,6 +88,8 @@ pub struct ModelView {
     pub temperature: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub top_p: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -219,6 +221,8 @@ pub struct CreateModelPayload {
     pub temperature: Option<f32>,
     #[serde(default)]
     pub top_p: Option<f32>,
+    #[serde(default)]
+    pub display_name: Option<String>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -255,6 +259,8 @@ pub struct UpdateModelPayload {
     pub temperature: Option<f32>,
     #[serde(default)]
     pub top_p: Option<f32>,
+    #[serde(default)]
+    pub display_name: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -988,6 +994,7 @@ pub async fn handle_admin_provider_models(
                 output_price: m.output_price,
                 temperature: m.temperature,
                 top_p: m.top_p,
+                display_name: m.display_name.clone(),
             }
         })
         .collect();
@@ -1025,6 +1032,7 @@ pub async fn handle_admin_models(State(state): State<Arc<AppState>>) -> impl Int
                 output_price: m.output_price,
                 temperature: m.temperature,
                 top_p: m.top_p,
+                display_name: m.display_name.clone(),
             });
         }
     }
@@ -1125,6 +1133,12 @@ pub async fn handle_admin_create_model(
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_string);
+    let display_name = payload
+        .display_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
 
     let m_cfg = ModelConfig {
         name: model_name.clone(),
@@ -1137,6 +1151,7 @@ pub async fn handle_admin_create_model(
         input_price: payload.input_price,
         cached_price: payload.cached_price,
         output_price: payload.output_price,
+        display_name: display_name.clone(),
         temperature: payload.temperature,
         top_p: payload.top_p,
         protocol: proto,
@@ -1164,6 +1179,7 @@ pub async fn handle_admin_create_model(
         input_price: payload.input_price,
         cached_price: payload.cached_price,
         output_price: payload.output_price,
+        display_name: display_name.clone(),
         temperature: payload.temperature,
         top_p: payload.top_p,
         protocol: proto,
@@ -1207,6 +1223,7 @@ pub async fn handle_admin_create_model(
             input_price: payload.input_price,
             cached_price: payload.cached_price,
             output_price: payload.output_price,
+            display_name,
             temperature: payload.temperature,
             top_p: payload.top_p,
         }),
@@ -1298,6 +1315,7 @@ pub async fn handle_admin_update_model(
             input_price: None,
             cached_price: None,
             output_price: None,
+            display_name: None,
             temperature: None,
             top_p: None,
             protocol: None,
@@ -1356,6 +1374,14 @@ pub async fn handle_admin_update_model(
     if payload.top_p.is_some() {
         existing_config.top_p = payload.top_p;
     }
+    if payload.display_name.is_some() {
+        existing_config.display_name = payload
+            .display_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+    }
 
     p_sec.model_configs.retain(|m| m.name != name);
     p_sec.model_configs.push(existing_config.clone());
@@ -1378,6 +1404,7 @@ pub async fn handle_admin_update_model(
         input_price: existing_config.input_price,
         cached_price: existing_config.cached_price,
         output_price: existing_config.output_price,
+        display_name: existing_config.display_name.clone(),
         temperature: existing_config.temperature,
         top_p: existing_config.top_p,
         protocol: existing_config.protocol,
@@ -1419,6 +1446,7 @@ pub async fn handle_admin_update_model(
         input_price: existing_config.input_price,
         cached_price: existing_config.cached_price,
         output_price: existing_config.output_price,
+        display_name: existing_config.display_name,
         temperature: existing_config.temperature,
         top_p: existing_config.top_p,
     })
@@ -2733,6 +2761,192 @@ pub async fn handle_admin_authorize_antigravity(
     resp
 }
 
+#[derive(Debug, Serialize, ToSchema)]
+pub struct UpstreamModelItem {
+    pub id: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct UpstreamModelsView {
+    pub provider: String,
+    pub source: String,
+    pub models: Vec<UpstreamModelItem>,
+}
+
+/// Normalize an OpenAI-style models-list URL from a provider base URL.
+fn upstream_models_url(base_url: &str) -> String {
+    let trimmed = base_url.trim_end_matches('/');
+    if trimmed.ends_with("/models") {
+        return trimmed.to_string();
+    }
+    if trimmed.ends_with("/v1") {
+        return format!("{trimmed}/models");
+    }
+    format!("{trimmed}/v1/models")
+}
+
+/// List models offered by the provider's upstream (`source: "quota"` for
+/// Antigravity, `"upstream"` for OpenAI-style `/models`).
+/// Providers without a listable interface answer 404 so the console can fall
+/// back to manual entry with a toast instead of a picker modal.
+#[utoipa::path(get, path = "/api/admin/providers/{name}/upstream-models", params(("name" = String, Path)), responses((status = 200, body = UpstreamModelsView)))]
+pub async fn handle_admin_provider_upstream_models(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    let unsupported = || {
+        (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": {"message": format!("provider '{name}' does not expose an upstream models interface"), "code": "upstream-models-unsupported"}})),
+        )
+            .into_response()
+    };
+    let not_found = || {
+        (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": {"message": format!("provider '{name}' not found"), "code": "provider_not_found"}})),
+        )
+            .into_response()
+    };
+
+    let (base_url, default_protocol) = {
+        let cfg = state.config.read();
+        let Some(p) = cfg.providers.get(&name) else {
+            return not_found();
+        };
+        (p.base_url.clone(), p.default_protocol)
+    };
+
+    // Antigravity: available models come from the quota probe, not HTTP.
+    if default_protocol == Some(UpstreamProtocol::Antigravity) {
+        let file = match load_store_config(&state) {
+            Ok(f) => f,
+            Err(resp) => return resp,
+        };
+        let Some(p_sec) = file.providers.get(&name) else {
+            return not_found();
+        };
+        let Some(key_sec) = p_sec.keys.iter().find(|k| k.is_antigravity(p_sec.default_protocol, &name)) else {
+            return unsupported();
+        };
+        let pool_mgr = {
+            let pools = state.pools.read();
+            pools.get(&name).and_then(|pool| {
+                pool.snapshot_keys()
+                    .into_iter()
+                    .find(|entry| entry.id == key_sec.id)
+                    .and_then(|entry| entry.antigravity_manager())
+            })
+        };
+        let mgr = if let Some(m) = pool_mgr {
+            m
+        } else {
+            let cred = match key_sec.to_antigravity_credential() {
+                Ok(c) => c,
+                Err(_) => return unsupported(),
+            };
+            let m = Arc::new(ponyllm_core::pool::AntigravityTokenManager::new(
+                &key_sec.id,
+                cred,
+                state.http_client_for_provider(&name),
+            ));
+            attach_rotation_hook(&state, &name, &m);
+            m
+        };
+        return match mgr.fetch_quota(Some(&base_url)).await {
+            Ok(snapshot) => {
+                let mut ids: Vec<String> = snapshot.models.keys().cloned().collect();
+                ids.sort();
+                Json(UpstreamModelsView {
+                    provider: name.clone(),
+                    source: "quota".to_string(),
+                    models: ids.into_iter().map(|id| UpstreamModelItem { id }).collect(),
+                })
+                .into_response()
+            }
+            Err(e) => (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({"error": {"message": format!("upstream quota probe failed: {e}"), "code": "upstream-models-unavailable"}})),
+            )
+                .into_response(),
+        };
+    }
+
+    // Anthropic-native providers expose no generic list contract here.
+    if default_protocol == Some(UpstreamProtocol::Anthropic) {
+        return unsupported();
+    }
+
+    // Chat / Responses / unset: OpenAI-style GET {base}/v1/models.
+    let file = match load_store_config(&state) {
+        Ok(f) => f,
+        Err(resp) => return resp,
+    };
+    let Some(p_sec) = file.providers.get(&name) else {
+        return not_found();
+    };
+    let Some(raw_key) = p_sec
+        .keys
+        .iter()
+        .find(|k| !k.is_antigravity(p_sec.default_protocol, &name))
+        .map(|k| k.api_key.clone())
+    else {
+        return unsupported();
+    };
+
+    let url = upstream_models_url(&base_url);
+    let client = state.http_client_for_provider(&name);
+    let resp = match tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        client.get(&url).bearer_auth(raw_key).send(),
+    )
+    .await
+    {
+        Ok(Ok(r)) => r,
+        _ => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({"error": {"message": "upstream models request failed or timed out", "code": "upstream-models-unavailable"}})),
+            )
+                .into_response();
+        }
+    };
+    if !resp.status().is_success() {
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({"error": {"message": format!("upstream models request failed: HTTP {}", resp.status()), "code": "upstream-models-unavailable"}})),
+        )
+            .into_response();
+    }
+    let body: serde_json::Value = match resp.json().await {
+        Ok(v) => v,
+        Err(_) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({"error": {"message": "upstream models response was not JSON", "code": "upstream-models-unavailable"}})),
+            )
+                .into_response();
+        }
+    };
+    let mut ids: Vec<String> = body
+        .get("data")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|m| m.get("id").and_then(|v| v.as_str()).map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    ids.sort();
+    ids.dedup();
+    Json(UpstreamModelsView {
+        provider: name.clone(),
+        source: "upstream".to_string(),
+        models: ids.into_iter().map(|id| UpstreamModelItem { id }).collect(),
+    })
+    .into_response()
+}
+
 // ---------- router ----------
 
 #[derive(utoipa::OpenApi)]
@@ -2745,6 +2959,7 @@ pub async fn handle_admin_authorize_antigravity(
         handle_admin_delete_provider,
         handle_admin_provider_models,
         handle_admin_models,
+        handle_admin_provider_upstream_models,
         handle_admin_create_model,
         handle_admin_update_model,
         handle_admin_delete_model,
@@ -2769,6 +2984,8 @@ pub async fn handle_admin_authorize_antigravity(
         ModelView,
         CreateModelPayload,
         UpdateModelPayload,
+        UpstreamModelItem,
+        UpstreamModelsView,
         KeyView,
         CreateKeyPayload,
         CreateKeyResponse,
@@ -2802,6 +3019,10 @@ pub fn admin_routes() -> axum::Router<Arc<AppState>> {
         .route(
             "/api/admin/providers/{name}/models",
             get(handle_admin_provider_models),
+        )
+        .route(
+            "/api/admin/providers/{name}/upstream-models",
+            get(handle_admin_provider_upstream_models),
         )
         .route(
             "/api/admin/models",

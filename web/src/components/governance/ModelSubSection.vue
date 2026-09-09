@@ -1,12 +1,14 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue';
+import { ref } from 'vue';
 import type { ModelView, CreateModelPayload, UpdateModelPayload } from '../../types/admin';
+import { adminApi } from '../../lib/adminApi';
 import Icons from '../ui/Icons.vue';
 import UiButton from '../ui/UiButton.vue';
 import UiBadge from '../ui/UiBadge.vue';
 import UiTooltip from '../ui/UiTooltip.vue';
 import UiCollapsible from '../ui/UiCollapsible.vue';
 import ThinkingEffortSelect from './ThinkingEffortSelect.vue';
+import UpstreamModelPicker from './UpstreamModelPicker.vue';
 import { formatTierLabel } from '../../utils/format';
 
 const props = defineProps<{
@@ -14,14 +16,19 @@ const props = defineProps<{
   models: ModelView[];
   adminWriteEnabled: boolean;
   defaultExpanded?: boolean;
-  /** 全量 provider 已配置模型的并集，用于名称输入的下拉建议（仍允许手输任意名）。 */
-  suggestedModelNames?: string[];
+  /** 批量添加执行器（由视图层注入，内部复用带版本控制的 saveModel 循环）。 */
+  onBatchCreate?: (
+    provider: string,
+    ids: string[],
+    onProgress: (done: number, total: number) => void,
+  ) => Promise<{ added: number; skipped: number; failed: number }>;
 }>();
 
 const emit = defineEmits<{
   (e: 'create', payload: CreateModelPayload): Promise<void>;
   (e: 'update', name: string, payload: UpdateModelPayload): Promise<void>;
   (e: 'delete', name: string): Promise<void>;
+  (e: 'notice', message: string): void;
 }>();
 
 const isExpanded = ref(props.defaultExpanded ?? false);
@@ -56,6 +63,7 @@ const isCustomContext = ref(false);
 
 const form = ref({
   name: '',
+  display_name: '',
   tier: 'Smart',
   context_window: '256k',
   thinking_default: 'Off',
@@ -70,17 +78,11 @@ const form = ref({
   output_price: '',
 });
 
-/** 下拉建议：排除本服务商已有模型，按名字排序；手输不受限。 */
-const nameSuggestions = computed(() => {
-  const existing = new Set(props.models.map((m) => m.name));
-  return [...new Set(props.suggestedModelNames ?? [])]
-    .filter((n) => n && !existing.has(n))
-    .sort((a, b) => a.localeCompare(b));
-});
-
-const nameListId = computed(
-  () => `model-name-suggestions-${props.providerName.replace(/[^a-zA-Z0-9_-]/g, '_')}`,
-);
+const pickerOpen = ref(false);
+const pickerModels = ref<{ id: string }[]>([]);
+const pickerLoading = ref(false);
+const batchSubmitting = ref(false);
+const batchProgress = ref<string | null>(null);
 
 function parseOptionalNumber(raw: string): number | undefined {
   const t = raw.trim();
@@ -130,6 +132,7 @@ function openAddInline() {
   editingModelName.value = null;
   form.value = {
     name: '',
+    display_name: '',
     tier: 'Smart',
     context_window: '256k',
     thinking_default: 'Off',
@@ -160,6 +163,7 @@ function openEditInline(model: ModelView) {
 
   form.value = {
     name: model.name,
+    display_name: model.display_name || '',
     tier: model.tier || 'Smart',
     context_window: cw,
     thinking_default: model.thinking_default || 'Off',
@@ -177,12 +181,57 @@ function openEditInline(model: ModelView) {
   showAdvanced.value = Boolean(
     model.protocol ||
       model.base_url ||
+      model.display_name ||
       model.temperature != null ||
       model.top_p != null ||
       model.input_price != null ||
       model.cached_price != null ||
       model.output_price != null,
   );
+}
+
+/** 添加入口：优先拉取该提供商上游模型名单弹窗多选；无接口则 toast 回退手输。 */
+async function handleAddClick() {
+  if (!props.adminWriteEnabled || isAdding.value) return;
+  pickerLoading.value = true;
+  try {
+    const view = await adminApi.getUpstreamModels(props.providerName).send();
+    const ids = (view.models ?? []).map((m) => m.id).filter(Boolean);
+    if (ids.length > 0) {
+      pickerModels.value = ids.map((id) => ({ id }));
+      isExpanded.value = true;
+      pickerOpen.value = true;
+      return;
+    }
+    emit('notice', '该提供商未返回模型名单，请手动添加');
+    openAddInline();
+  } catch {
+    emit('notice', '该提供商未提供模型列表接口，请手动添加');
+    openAddInline();
+  } finally {
+    pickerLoading.value = false;
+  }
+}
+
+async function handlePickerConfirm(ids: string[]) {
+  if (!props.onBatchCreate || batchSubmitting.value) return;
+  batchSubmitting.value = true;
+  batchProgress.value = `添加中 0/${ids.length}`;
+  try {
+    const summary = await props.onBatchCreate(props.providerName, ids, (done, total) => {
+      batchProgress.value = `添加中 ${done}/${total}`;
+    });
+    const parts = [`已添加 ${summary.added} 个`];
+    if (summary.skipped > 0) parts.push(`跳过 ${summary.skipped} 个（已存在）`);
+    if (summary.failed > 0) parts.push(`失败 ${summary.failed} 个`);
+    emit('notice', parts.join('，'));
+  } catch {
+    emit('notice', '批量添加失败，请重试');
+  } finally {
+    batchSubmitting.value = false;
+    batchProgress.value = null;
+    pickerOpen.value = false;
+  }
 }
 
 function cancelForm() {
@@ -259,6 +308,7 @@ async function handleSubmit() {
       output_types: form.value.output_types,
       protocol: form.value.protocol ? form.value.protocol.trim() : '',
       base_url: form.value.base_url ? form.value.base_url.trim() : '',
+      display_name: form.value.display_name ? form.value.display_name.trim() : '',
       ...(temperature !== undefined ? { temperature } : {}),
       ...(topP !== undefined ? { top_p: topP } : {}),
       ...(inputPrice !== undefined ? { input_price: inputPrice } : {}),
@@ -323,13 +373,13 @@ function getTierBadgeVariant(tier?: string) {
         <UiButton
           variant="ghost"
           size="sm"
-          :disabled="!adminWriteEnabled || isAdding"
+          :disabled="!adminWriteEnabled || isAdding || pickerLoading"
           data-testid="add-model-btn"
           class="text-indigo-600 hover:text-indigo-700 hover:bg-indigo-50/60 font-medium px-2.5 py-1 text-xs"
-          @click="openAddInline"
+          @click="handleAddClick"
         >
           <Icons name="plus" size="13" />
-          模型
+          {{ pickerLoading ? '获取中…' : '模型' }}
         </UiButton>
         <UiButton
           variant="ghost"
@@ -366,25 +416,31 @@ function getTierBadgeVariant(tier?: string) {
         </div>
 
         <form class="space-y-3" @submit.prevent="handleSubmit">
-          <!-- 模型名称输入 (下拉建议 + 手输) -->
+          <!-- 模型 ID 输入 -->
           <div>
-            <label class="block text-slate-600 font-medium mb-1 text-xs">模型名称 *</label>
+            <label class="block text-slate-600 font-medium mb-1 text-xs">模型 ID *</label>
             <input
               v-model="form.name"
               type="text"
-              :list="nameListId"
-              placeholder="例如: gpt-4o 或 deepseek-v3，可下拉选择或直接输入"
+              placeholder="例如: gpt-4o，必须与上游模型标识一致"
               required
               autocomplete="off"
               class="w-full bg-white border border-slate-200/80 rounded-lg px-3 py-2 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
               data-testid="model-name-input"
             />
-            <datalist :id="nameListId" data-testid="model-name-suggestions">
-              <option v-for="n in nameSuggestions" :key="n" :value="n" />
-            </datalist>
-            <p v-if="nameSuggestions.length > 0" class="text-3xs text-slate-400 mt-1">
-              已收录 {{ nameSuggestions.length }} 个其他服务商模型供选择，未收录的可直接输入。
-            </p>
+          </div>
+
+          <!-- 模型显示名称 (选填) -->
+          <div>
+            <label class="block text-slate-600 font-medium mb-1 text-xs">显示名称 (选填)</label>
+            <input
+              v-model="form.display_name"
+              type="text"
+              placeholder="控制台展示用，留空则显示模型 ID"
+              autocomplete="off"
+              class="w-full bg-white border border-slate-200/80 rounded-lg px-3 py-2 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
+              data-testid="model-display-name-input"
+            />
           </div>
 
           <!-- 模型分级 (Tier) 按钮选项组 (暖黄色底色 200 色阶) -->
@@ -679,7 +735,8 @@ function getTierBadgeVariant(tier?: string) {
         <!-- 一等常显行 -->
         <div class="flex items-center justify-between px-3.5 py-2.5">
           <div class="flex items-center gap-2.5 min-w-0">
-            <span class="font-semibold text-slate-800 text-sm truncate" :title="m.name">{{ m.name }}</span>
+            <span class="font-semibold text-slate-800 text-sm truncate" :title="m.display_name ? `${m.display_name} (${m.name})` : m.name">{{ m.display_name || m.name }}</span>
+            <span v-if="m.display_name" class="text-slate-400 text-xs font-mono truncate" :title="m.name">{{ m.name }}</span>
             <UiBadge :variant="getTierBadgeVariant(m.tier)">
               {{ formatTierLabel(m.tier) }}
             </UiBadge>
@@ -795,6 +852,19 @@ function getTierBadgeVariant(tier?: string) {
             </div>
 
             <form class="space-y-3" @submit.prevent="handleSubmit">
+              <!-- 显示名称 (选填，仅控制台展示) -->
+              <div>
+                <label class="block text-slate-600 font-medium mb-1 text-xs">显示名称 (选填)</label>
+                <input
+                  v-model="form.display_name"
+                  type="text"
+                  placeholder="留空则显示模型 ID"
+                  autocomplete="off"
+                  class="w-full bg-white border border-slate-200/80 rounded-lg px-3 py-1.5 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
+                  data-testid="model-display-name-input"
+                />
+              </div>
+
               <!-- 模型分级 (Tier) 按钮选项组 (暖黄色底色 200 色阶) -->
               <div>
                 <label class="block text-slate-600 font-medium mb-1.5 text-xs">模型分级 (Tier)</label>
@@ -1075,6 +1145,18 @@ function getTierBadgeVariant(tier?: string) {
       </div>
     </div>
     </div>
-  </UiCollapsible>
+    </UiCollapsible>
+
+    <!-- 上游模型多选弹窗 -->
+    <UpstreamModelPicker
+      v-if="pickerOpen"
+      :provider-name="providerName"
+      :models="pickerModels"
+      :existing-names="models.map((m) => m.name)"
+      :submitting="batchSubmitting"
+      :progress="batchProgress"
+      @confirm="handlePickerConfirm"
+      @close="pickerOpen = false"
+    />
   </div>
 </template>
