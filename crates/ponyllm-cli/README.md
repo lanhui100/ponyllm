@@ -8,8 +8,8 @@
 ### 1. 配置初始化与管理
 - `ponyllm init`: 极简交互式初始化向导（内置 DeepSeek 3 协议、OpenAI、Anthropic 等模板，自动锁定官方 URL，无需输入本地监听地址；目标文件已存在时默认拒绝覆写，按 Enter 安全退出，保护生产配置）；
 - `ponyllm init --non-interactive`: CI/无交互脚本环境快速生成默认配置模板（目标文件已存在时直接硬报错中断，严禁静默覆写）；
-- `ponyllm provider list / add / remove`: 管理模型上游提供商；
-- `ponyllm key list / add / remove / test`: 管理多 Key 账户池（自动脱敏）与在线网络连通性拨测；
+- `ponyllm provider list / add / remove`: 管理模型上游提供商；执行 `ponyllm provider add agy`（或 `antigravity`）将直接触发 Google OAuth 交互式授权流程，一站式配置端点、默认模型目录并追加账户凭证到连接池（支持多账号追加）；
+- `ponyllm key list / add / remove / test`: 管理多 Key 账户池（自动脱敏）与在线网络连通性拨测；兼容支持 `ponyllm key auth agy`；
 - `ponyllm model list / add / remove / set`: 管理各提供商默认主模型与附加支持模型清单。
 
 ### 2. 网关运行与监控

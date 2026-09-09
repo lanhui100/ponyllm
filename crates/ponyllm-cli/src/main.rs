@@ -474,8 +474,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 responses_url,
                 messages_url,
                 proxy,
+                id,
+                priority,
+                weight,
+                port,
+                no_browser,
                 config,
             } => {
+                if name.eq_ignore_ascii_case("agy") || name.eq_ignore_ascii_case("antigravity") {
+                    let resolved_proxy = match proxy.as_deref() {
+                        Some("auto") => ponyllm_core::detect_system_proxy(),
+                        Some("none") | Some("direct") => None,
+                        Some(u) => {
+                            let trimmed = u.trim();
+                            if trimmed.is_empty() {
+                                None
+                            } else {
+                                Some(trimmed.to_string())
+                            }
+                        }
+                        None => None,
+                    };
+                    ponyllm_cli::oauth_agy::handle_key_auth_agy(
+                        &name,
+                        id.as_deref(),
+                        priority,
+                        weight,
+                        port,
+                        no_browser,
+                        config.as_deref(),
+                        resolved_proxy.as_deref(),
+                    )
+                    .await
+                    .map_err(|e| -> Box<dyn std::error::Error> { e })?;
+                    return Ok(());
+                }
+
                 if input_price < 0.0 || input_price.is_nan() || input_price.is_infinite() {
                     return Err(format!("常规输入单价 --input-price 必须为大于等于 0 的合法数值，输入: {}", input_price).into());
                 }
@@ -594,6 +628,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             KeyCommands::Add { provider, id, key, priority, weight, config } => {
+                if (provider.eq_ignore_ascii_case("agy") || provider.eq_ignore_ascii_case("antigravity"))
+                    && !key.starts_with("1//")
+                    && !key.trim().starts_with('{')
+                {
+                    println!("💡 提示: 如需添加 Antigravity，请运行: ponyllm provider add agy");
+                }
                 let resolved = resolve_path(config.as_deref());
                 let path = resolved.to_str().unwrap_or("ponyllm.toml");
                 let mut cfg = ConfigFile::load_or_default(Some(path).filter(|_| resolved.exists()))
@@ -645,6 +685,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     port,
                     no_browser,
                     config.as_deref(),
+                    None,
                 )
                 .await
                 .map_err(|e| -> Box<dyn std::error::Error> { e })?;
@@ -1018,6 +1059,10 @@ fn handle_manage_gateway_auth(
             println!("║  • 若要查看网关访问 Token:     ponyllm auth  或  ponyllm status         ║");
             println!("║  • 若要查看【上游模型厂商】Key: ponyllm key list                         ║");
             println!("╚════════════════════════════════════════════════════════════════════════╝\n");
+            return Ok(());
+        }
+        GatewayAuthAction::MisdirectedAgy => {
+            println!("\n💡 如需添加 Antigravity，请运行：\n   👉 ponyllm provider add agy\n");
             return Ok(());
         }
         GatewayAuthAction::Show => {

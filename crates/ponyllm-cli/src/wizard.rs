@@ -283,6 +283,7 @@ pub fn run_interactive_init(output_path: &str) -> Result<(), Box<dyn std::error:
     println!("║    ponyllm strategy list            # 查看调度策略一览                 ║");
     println!("║    ponyllm strategy set speed       # 切换为极速模式                   ║");
     println!("║    ponyllm auth                     # 重新生成/查看网关 API Key        ║");
+    println!("║    ponyllm provider add agy         # 交互式授权接入 Google Antigravity║");
     println!("║    ponyllm provider list            # 查看已配置提供商                 ║");
     println!("║    ponyllm tui                      # 打开全屏交互监控看板             ║");
     println!("╚════════════════════════════════════════════════════════════════════════╝\n");

@@ -586,6 +586,20 @@ fn test_gateway_auth_action_safety_rules() {
         parse_gateway_auth_action(Some("sk-pony-my-custom-key"), false),
         GatewayAuthAction::Set("sk-pony-my-custom-key".to_string())
     );
+
+    // 6. User typing "agy" or "antigravity" must be intercepted as MisdirectedAgy, never as Set("agy")
+    assert_eq!(
+        parse_gateway_auth_action(Some("agy"), false),
+        GatewayAuthAction::MisdirectedAgy
+    );
+    assert_eq!(
+        parse_gateway_auth_action(Some("AGY"), true),
+        GatewayAuthAction::MisdirectedAgy
+    );
+    assert_eq!(
+        parse_gateway_auth_action(Some("antigravity"), false),
+        GatewayAuthAction::MisdirectedAgy
+    );
 }
 
 #[test]
@@ -714,8 +728,11 @@ fn test_key_auth_agy_cli_parsing() {
     }
 }
 
+static OAUTH_ENV_MUTEX: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[tokio::test]
 async fn test_handle_key_auth_agy_full_flow() {
+    let _guard = OAUTH_ENV_MUTEX.lock().await;
     use axum::{routing::post, Json, Router};
     use serde_json::json;
 
@@ -763,6 +780,7 @@ async fn test_handle_key_auth_agy_full_flow() {
             callback_port,
             true, // no_browser
             Some(&cfg_str),
+            None,
         )
         .await
     });
@@ -801,6 +819,154 @@ async fn test_handle_key_auth_agy_full_flow() {
     assert_eq!(key.api_key, "1//0mock-refresh-token-e2e");
     assert_eq!(key.priority, 1);
     assert_eq!(key.weight, 15);
+
+    std::env::remove_var("ANTIGRAVITY_OAUTH_TOKEN_URL_OVERRIDE");
+    std::env::remove_var("PONYLLM_NON_INTERACTIVE");
+}
+
+#[test]
+fn test_provider_add_agy_cli_parsing() {
+    // 1. `ponyllm provider add agy`
+    let cli1 = Cli::try_parse_from(["ponyllm", "provider", "add", "agy"]).unwrap();
+    match cli1.command {
+        Commands::Provider(ProviderCommands::Add { name, id, priority, weight, port, no_browser, .. }) => {
+            assert_eq!(name, "agy");
+            assert_eq!(id, None);
+            assert_eq!(priority, 1);
+            assert_eq!(weight, 10);
+            assert_eq!(port, 51121);
+            assert!(!no_browser);
+        }
+        _ => panic!("Expected Provider Add command"),
+    }
+
+    // 2. `ponyllm provider add agy --id agy-label -P 2 -W 25 --port 51180 --no-browser`
+    let cli2 = Cli::try_parse_from([
+        "ponyllm", "provider", "add", "agy", "--id", "agy-label", "-P", "2", "-W", "25", "--port", "51180", "--no-browser"
+    ]).unwrap();
+    match cli2.command {
+        Commands::Provider(ProviderCommands::Add { name, id, priority, weight, port, no_browser, .. }) => {
+            assert_eq!(name, "agy");
+            assert_eq!(id, Some("agy-label".to_string()));
+            assert_eq!(priority, 2);
+            assert_eq!(weight, 25);
+            assert_eq!(port, 51180);
+            assert!(no_browser);
+        }
+        _ => panic!("Expected Provider Add command with flags"),
+    }
+
+    // 3. `ponyllm provider add antigravity`
+    let cli3 = Cli::try_parse_from(["ponyllm", "provider", "add", "antigravity"]).unwrap();
+    match cli3.command {
+        Commands::Provider(ProviderCommands::Add { name, .. }) => {
+            assert_eq!(name, "antigravity");
+        }
+        _ => panic!("Expected Provider Add command"),
+    }
+}
+
+#[tokio::test]
+async fn test_provider_add_agy_multi_account_append() {
+    let _guard = OAUTH_ENV_MUTEX.lock().await;
+    use axum::{routing::post, Json, Router};
+    use serde_json::json;
+
+    let oauth_app = Router::new().route(
+        "/token",
+        post(|axum::Form(params): axum::Form<std::collections::HashMap<String, String>>| async move {
+            let code = params.get("code").map(|s| s.as_str()).unwrap_or("");
+            Json(json!({
+                "access_token": "ya29.mock-access",
+                "refresh_token": format!("1//0mock-refresh-{}", code),
+                "expires_in": 3600,
+                "id_token": "eyJhbGciOiJSUzI1NiJ9.eyJlbWFpbCI6ImFneS5kZXZlbG9wZXJAZ21haWwuY29tIiwic3ViIjoiOTk5In0.sig"
+            }))
+        }),
+    );
+
+    let oauth_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let oauth_port = oauth_listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        axum::serve(oauth_listener, oauth_app).await.unwrap();
+    });
+
+    std::env::set_var(
+        "ANTIGRAVITY_OAUTH_TOKEN_URL_OVERRIDE",
+        format!("http://127.0.0.1:{}/token", oauth_port),
+    );
+    std::env::set_var("PONYLLM_NON_INTERACTIVE", "1");
+
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg_path = tmp.path().join("ponyllm.toml");
+    std::fs::write(&cfg_path, "[gateway]\nbind = \"127.0.0.1:8080\"\n").unwrap();
+    let cfg_str = cfg_path.to_str().unwrap().to_string();
+
+    // 1. First account: ponyllm provider add agy --id agy-acc-1 -P 1 -W 10
+    let p1 = 51210;
+    let cfg_str_clone = cfg_str.clone();
+    let task1 = tokio::spawn(async move {
+        ponyllm_cli::oauth_agy::handle_key_auth_agy(
+            "agy",
+            Some("agy-acc-1"),
+            1,
+            10,
+            p1,
+            true,
+            Some(&cfg_str_clone),
+            None,
+        )
+        .await
+    });
+
+    let client = reqwest::Client::new();
+    for _ in 0..20 {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        if let Ok(r) = client.get(format!("http://127.0.0.1:{}/oauth2callback?code=acc1", p1)).send().await {
+            if r.status().is_success() { break; }
+        }
+    }
+    task1.await.unwrap().unwrap();
+
+    // 2. Second account: ponyllm provider add antigravity --id agy-acc-2 -P 2 -W 20
+    let p2 = 51230;
+    let cfg_str_clone2 = cfg_str.clone();
+    let task2 = tokio::spawn(async move {
+        ponyllm_cli::oauth_agy::handle_key_auth_agy(
+            "antigravity",
+            Some("agy-acc-2"),
+            2,
+            20,
+            p2,
+            true,
+            Some(&cfg_str_clone2),
+            None,
+        )
+        .await
+    });
+
+    for _ in 0..20 {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        if let Ok(r) = client.get(format!("http://127.0.0.1:{}/oauth2callback?code=acc2", p2)).send().await {
+            if r.status().is_success() { break; }
+        }
+    }
+    task2.await.unwrap().unwrap();
+
+    // 3. Verify multi-account pool in config
+    let updated = ConfigFile::load_or_default(cfg_path.to_str()).expect("Failed to load config");
+    let provider = updated.providers.get("antigravity").expect("antigravity provider missing");
+    assert_eq!(provider.keys.len(), 2, "Expected 2 keys in antigravity provider pool");
+
+    let k1 = provider.keys.iter().find(|k| k.id == "agy-acc-1").expect("k1 not found");
+    assert_eq!(k1.api_key, "1//0mock-refresh-acc1");
+    assert_eq!(k1.priority, 1);
+    assert_eq!(k1.weight, 10);
+
+    let k2 = provider.keys.iter().find(|k| k.id == "agy-acc-2").expect("k2 not found");
+    assert_eq!(k2.api_key, "1//0mock-refresh-acc2");
+    assert_eq!(k2.priority, 2);
+    assert_eq!(k2.weight, 20);
 
     std::env::remove_var("ANTIGRAVITY_OAUTH_TOKEN_URL_OVERRIDE");
     std::env::remove_var("PONYLLM_NON_INTERACTIVE");

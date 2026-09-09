@@ -57,6 +57,10 @@ ponyllm init
 ponyllm provider list
 # 挂载 DeepSeek（三协议合一：chat/responses 走 base-url，messages 走独立路径）
 ponyllm provider add deepseek --base-url https://api.deepseek.com --model deepseek-v4-flash --strategy priority --messages-url https://api.deepseek.com/anthropic
+# 挂载并交互式授权接入 Google Antigravity (agy)（支持浏览器自动回调或远程 SSH 终端粘贴 Code；再次运行可为连接池追加更多账号）
+ponyllm provider add agy
+# 指定账户标签与无浏览器/远程模式
+ponyllm provider add agy --id agy-account-1 --no-browser
 ponyllm provider remove my-provider
 
 # === 2. 管理模型映射与多模型追加 (Model) ===

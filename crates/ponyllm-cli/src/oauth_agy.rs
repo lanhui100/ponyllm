@@ -74,7 +74,7 @@ async fn read_stdin_line() -> std::io::Result<String> {
     }
 }
 
-/// Main interactive handler for `ponyllm key auth agy [ID]`
+/// Main interactive handler for `ponyllm provider add agy` / `ponyllm key auth agy [ID]`
 pub async fn handle_key_auth_agy(
     provider_arg: &str,
     id_arg: Option<&str>,
@@ -83,6 +83,7 @@ pub async fn handle_key_auth_agy(
     preferred_port: u16,
     no_browser: bool,
     config_path: Option<&str>,
+    cli_proxy: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let (target_provider, custom_id) = match provider_arg.to_lowercase().as_str() {
         "agy" | "antigravity" => ("antigravity".to_string(), id_arg.map(str::to_string)),
@@ -152,47 +153,26 @@ pub async fn handle_key_auth_agy(
     let headless = no_browser || is_ssh_or_headless();
 
     println!();
-    println!("╔════════════════════════════════════════════════════════════════════════════╗");
-    println!("║       Antigravity (agy) 账户授权与凭证获取向导 (Google OAuth2)             ║");
-    println!("╚════════════════════════════════════════════════════════════════════════════╝");
-    println!("  • 提供商: {}", target_provider);
-    println!("  • 回调地址: {}", redirect_uri);
-    println!();
-
     if headless {
-        println!("ℹ️  检测到当前处于 SSH / 远程无桌面环境或指定了 --no-browser。");
-        println!("   请在您本地浏览器的地址栏中打开以下授权链接：");
-        println!();
-        println!("👉 \x1b[36m{}\x1b[0m", auth_url);
-        println!();
-        println!("💡 操作说明：");
-        println!("   1. 在网页中选择需要加入连接池的 Google 账户并点击【允许】；");
-        println!("   2. 完成授权后，浏览器可能会显示“无法访问此网站 / 连接被拒绝”");
-        println!("      （这是正常现象，因为页面重定向到了本地环回端口）；");
-        println!("   3. 请直接将浏览器地址栏中的【完整重定向 URL】或其中的【code 参数】");
-        println!("      复制并粘贴在下方提示符中。");
-        println!("────────────────────────────────────────────────────────────────────────────");
+        println!("🔗 请在浏览器打开以下链接授权：");
+        println!("   \x1b[36m{}\x1b[0m", auth_url);
+        print!("请输入重定向 URL 或 Code（按 Ctrl+C 取消）: ");
     } else {
-        println!("🚀 正在尝试唤起系统默认浏览器进行 Google 授权...");
+        println!("🚀 正在打开浏览器授权（若未弹出请手动访问）：");
+        println!("   \x1b[36m{}\x1b[0m", auth_url);
         open_in_browser(&auth_url);
-        println!("   若浏览器未自动弹出，请手动复制以下链接并在浏览器中打开：");
-        println!("👉 \x1b[36m{}\x1b[0m", auth_url);
-        println!("────────────────────────────────────────────────────────────────────────────");
+        print!("等待授权中（可直接粘贴重定向 URL 或 Code，按 Ctrl+C 取消）: ");
     }
-
-    print!("等待授权回调中 (按 Ctrl+C 可取消)...\n请输入重定向 URL 或 Code: ");
     std::io::Write::flush(&mut std::io::stdout())?;
 
     let captured_code = tokio::select! {
         Some(code) = rx.recv() => {
-            println!("\n✅ 已通过本地回调端口成功截获授权码！");
             code
         }
         line_res = read_stdin_line() => {
             match line_res {
                 Ok(text) => {
                     if let Some(code) = parse_code_from_input(&text) {
-                        println!("\n✅ 已从终端输入中成功解析授权码！");
                         code
                     } else {
                         server_handle.abort();
@@ -213,9 +193,8 @@ pub async fn handle_key_auth_agy(
 
     server_handle.abort();
 
-    println!("⏳ 正在向 Google OAuth 端点兑换长期凭证...");
-    let effective_proxy = cfg.providers.get(&target_provider)
-        .and_then(|p| p.proxy.as_deref())
+    let effective_proxy = cli_proxy
+        .or_else(|| cfg.providers.get(&target_provider).and_then(|p| p.proxy.as_deref()))
         .or(cfg.gateway.proxy.as_deref());
 
     let http_client = ponyllm_core::executor::create_upstream_http_client_with_options(
@@ -264,11 +243,14 @@ pub async fn handle_key_auth_agy(
             }
         });
 
+        if let Some(pxy) = cli_proxy {
+            p_sec.proxy = Some(pxy.to_string());
+        }
+
         if let Some(existing_key) = p_sec.keys.iter_mut().find(|k| k.id == final_id) {
             existing_key.api_key = auth_res.credential.refresh_token.clone();
             existing_key.priority = priority;
             existing_key.weight = weight;
-            println!("🔄 已更新现有 Key '{}' 的凭证", final_id);
         } else {
             p_sec.keys.push(KeySection {
                 id: final_id.clone(),
@@ -276,21 +258,15 @@ pub async fn handle_key_auth_agy(
                 priority,
                 weight,
             });
-            println!("➕ 已新增 Key '{}' 至服务商 '{}'", final_id, target_provider);
         }
         p_sec.base_url.clone()
     };
 
     cfg.save_to_path(path_str)?;
 
-    println!("✅ 授权凭证已安全写入配置文件: {}", resolved.display());
-    if let Some(ref email) = auth_res.email {
-        println!("   • 关联 Google 账户: {}", email);
-    }
-    println!("   • 优先级: {}, 权重: {}", priority, weight);
+    let account_label = auth_res.email.as_deref().unwrap_or(&final_id);
+    println!("\n✅ 授权成功！凭证已保存（账户: {}）", account_label);
 
-    println!();
-    println!("🔍 正在抓取新账户 '{}' 的 Antigravity 模型配额与重置时间...", final_id);
     let mgr = AntigravityTokenManager::new(&final_id, auth_res.credential, http_client);
     let quota_res = tokio::time::timeout(
         std::time::Duration::from_secs(4),
@@ -298,43 +274,29 @@ pub async fn handle_key_auth_agy(
     )
     .await;
 
-    match quota_res {
-        Ok(Ok(snapshot)) => {
-            println!("✅ 配额探活成功 (获取到 {} 个模型可用配额)", snapshot.models.len());
-            println!("      {:<28} {:<12} {:<24} {:<16}", "模型", "剩余额度", "恢复时间(北京时间)", "距离恢复");
-            println!("      {}", "-".repeat(82));
-            let mut models: Vec<_> = snapshot.models.values().collect();
-            models.sort_by_key(|m| &m.model_id);
-            for m in models {
-                let pct = format!("{:.1}%", m.remaining_fraction * 100.0);
-                let (beijing_time, remaining_desc) = match m.reset_time {
-                    Some(utc_dt) => {
-                        let bj_dt = utc_dt + chrono::Duration::hours(8);
-                        let now = chrono::Utc::now();
-                        let diff = if utc_dt > now {
-                            let dur = utc_dt - now;
-                            let hours = dur.num_hours();
-                            let mins = dur.num_minutes() % 60;
-                            format!("{}小时{}分后", hours, mins)
-                        } else {
-                            "已就绪".to_string()
-                        };
-                        (bj_dt.format("%Y-%m-%d %H:%M:%S").to_string(), diff)
+    if let Ok(Ok(snapshot)) = quota_res {
+        println!("可用模型与配额:");
+        let mut models: Vec<_> = snapshot.models.values().collect();
+        models.sort_by_key(|m| &m.model_id);
+        for m in models {
+            let pct = format!("{:.1}%", m.remaining_fraction * 100.0);
+            let remaining_desc = match m.reset_time {
+                Some(utc_dt) => {
+                    let now = chrono::Utc::now();
+                    if utc_dt > now {
+                        let dur = utc_dt - now;
+                        let hours = dur.num_hours();
+                        let mins = dur.num_minutes() % 60;
+                        format!("{}小时{}分后重置", hours, mins)
+                    } else {
+                        "已就绪".to_string()
                     }
-                    None => ("N/A".to_string(), "N/A".to_string()),
-                };
-                println!("      {:<28} {:<12} {:<24} {:<16}", m.model_id, pct, beijing_time, remaining_desc);
-            }
-        }
-        Ok(Err(e)) => {
-            println!("⚠️ 账号凭证已保存，但配额抓取暂未返回: {}", e);
-        }
-        Err(_) => {
-            println!("⚠️ 账号凭证已保存，配额抓取探活超时（可稍后执行 ponyllm key test 查看）。");
+                }
+                None => "已就绪".to_string(),
+            };
+            println!("  • {:<20} {:>6} ({})", m.model_id, pct, remaining_desc);
         }
     }
-
     println!();
-    println!("🎉 Antigravity 账户授权并接入完成！");
     Ok(())
 }

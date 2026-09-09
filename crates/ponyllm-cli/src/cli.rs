@@ -26,11 +26,11 @@ pub enum Commands {
         non_interactive: bool,
     },
 
-    /// Manage LLM providers (add, list, remove)
+    /// Manage LLM providers (add, list, remove; use 'add agy' for Antigravity Google OAuth)
     #[command(subcommand)]
     Provider(ProviderCommands),
 
-    /// Manage upstream provider API Key pools (DeepSeek, OpenAI, SenseNova, etc.)
+    /// Manage upstream provider API Key pools (DeepSeek, OpenAI, Antigravity, etc.)
     #[command(subcommand)]
     Key(KeyCommands),
 
@@ -253,9 +253,9 @@ pub enum ProviderCommands {
         #[arg(short, long)]
         config: Option<String>,
     },
-    /// Add a new provider interactively or via flags
+    /// Add a new provider interactively or via flags (use 'agy' or 'antigravity' for interactive OAuth2 authorization)
     Add {
-        /// Provider name (e.g. openai, deepseek, anthropic)
+        /// Provider name (e.g. openai, deepseek, anthropic, or 'agy'/'antigravity' for Google OAuth)
         name: String,
 
         /// Base URL (e.g. https://api.deepseek.com or https://api.deepseek.com/anthropic)
@@ -285,7 +285,7 @@ pub enum ProviderCommands {
         #[arg(long, default_value_t = 1.00)]
         output_price: f64,
 
-        /// Default native wire protocol: chat, responses, anthropic (unset = legacy URL heuristic)
+        /// Default native wire protocol: chat, responses, anthropic, antigravity (unset = legacy URL heuristic)
         #[arg(long)]
         default_protocol: Option<ponyllm_core::pool::UpstreamProtocol>,
 
@@ -304,6 +304,26 @@ pub enum ProviderCommands {
         /// Outbound HTTP proxy (URL, 'auto' to detect system proxy, 'none' to force direct)
         #[arg(long)]
         proxy: Option<String>,
+
+        /// Optional key identifier / label for OAuth providers (defaults to Google account email)
+        #[arg(long, value_name = "ID")]
+        id: Option<String>,
+
+        /// Key priority for provider connection pool (1 = highest, fallback to 2, 3...)
+        #[arg(short = 'P', long, default_value_t = 1)]
+        priority: u32,
+
+        /// Key weight for weighted round-robin
+        #[arg(short = 'W', long, default_value_t = 10)]
+        weight: u32,
+
+        /// Local callback redirect port for OAuth authorization (default: 51121)
+        #[arg(long, default_value_t = ponyllm_core::pool::DEFAULT_ANTIGRAVITY_OAUTH_REDIRECT_PORT)]
+        port: u16,
+
+        /// Do not attempt to open browser automatically during OAuth
+        #[arg(long)]
+        no_browser: bool,
 
         #[arg(short, long)]
         config: Option<String>,

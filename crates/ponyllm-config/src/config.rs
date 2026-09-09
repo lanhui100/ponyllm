@@ -93,6 +93,7 @@ pub enum GatewayAuthAction {
     Rotate,
     Set(String),
     MisdirectedList,
+    MisdirectedAgy,
 }
 
 pub fn parse_gateway_auth_action(custom_key: Option<&str>, rotate: bool) -> GatewayAuthAction {
@@ -100,6 +101,9 @@ pub fn parse_gateway_auth_action(custom_key: Option<&str>, rotate: bool) -> Gate
         let trimmed = k.trim();
         if trimmed.eq_ignore_ascii_case("list") {
             return GatewayAuthAction::MisdirectedList;
+        }
+        if trimmed.eq_ignore_ascii_case("agy") || trimmed.eq_ignore_ascii_case("antigravity") {
+            return GatewayAuthAction::MisdirectedAgy;
         }
         if trimmed.eq_ignore_ascii_case("show") || trimmed.eq_ignore_ascii_case("get") {
             return GatewayAuthAction::Show;
