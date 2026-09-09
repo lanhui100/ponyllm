@@ -10,6 +10,7 @@ describe('guard decision (WEB-01 acceptance 3)', () => {
   beforeEach(() => {
     setActivePinia(createPinia());
     stopAllPolling();
+    window.sessionStorage.clear();
   });
 
   it('exposes /connect, /dashboard, /recorder and a 404 catch-all', () => {
@@ -63,6 +64,7 @@ describe('401 single-flight (WEB-01 P0-2)', () => {
   beforeEach(() => {
     setActivePinia(createPinia());
     stopAllPolling();
+    window.sessionStorage.clear();
   });
 
   it('first 401 claims; concurrent second is dropped; logout/login re-arms', () => {
@@ -155,6 +157,7 @@ describe('header + storage contract (WEB-01 acceptance 6)', () => {
 describe('URL token direct authorization', () => {
   beforeEach(() => {
     setActivePinia(createPinia());
+    window.sessionStorage.clear();
   });
 
   it('router navigation with ?token= extracts token and cleans query', async () => {
@@ -164,6 +167,26 @@ describe('URL token direct authorization', () => {
     expect(session.token).toBe('my-secret-token');
     expect(router.currentRoute.value.path).toBe('/dashboard');
     expect(router.currentRoute.value.query.token).toBeUndefined();
+  });
+
+  it('page refresh preserves token from sessionStorage', async () => {
+    const session = useSessionStore();
+    session.login('session-persistent-token');
+    expect(window.sessionStorage.getItem('ponyllm_session_token')).toBe('session-persistent-token');
+
+    // Simulate page reload by creating a fresh Pinia instance
+    setActivePinia(createPinia());
+    const reloadedSession = useSessionStore();
+    expect(reloadedSession.token).toBe('session-persistent-token');
+
+    // Guard permits directly without redirecting to /connect
+    const verdict = await decideRoute('/dashboard', '/dashboard', true, reloadedSession.token !== '', async () => false);
+    expect(verdict).toBe(true);
+
+    // Logout clears both store and sessionStorage
+    reloadedSession.logout();
+    expect(reloadedSession.token).toBe('');
+    expect(window.sessionStorage.getItem('ponyllm_session_token')).toBeNull();
   });
 });
 

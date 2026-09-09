@@ -598,6 +598,10 @@ where
     let model = fallback_model.to_string();
     let stopped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let stopped_flag = stopped.clone();
+    let has_emitted_content = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let has_emitted_content_flag = has_emitted_content.clone();
+    let transport_errored = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let transport_errored_flag = transport_errored.clone();
 
     let response_id_stream = response_id.clone();
     let model_stream = model.clone();
@@ -617,6 +621,15 @@ where
                     // terminal / heartbeat frame: nothing to forward
                 } else if let Ok(val) = serde_json::from_str::<serde_json::Value>(data) {
                     if let Some(chunk) = antigravity_chunk_to_chat_chunk(&val, &model_stream, &response_id_stream) {
+                        let chunk_has_content = chunk.choices.iter().any(|ch| {
+                            ch.delta.content.as_ref().map(|s| !s.is_empty()).unwrap_or(false)
+                                || ch.delta.reasoning_content.as_ref().map(|s| !s.is_empty()).unwrap_or(false)
+                                || ch.delta.tool_calls.as_ref().map(|t| !t.is_empty()).unwrap_or(false)
+                        });
+                        if chunk_has_content {
+                            has_emitted_content_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                        }
+
                         if chunk.choices.iter().any(|ch| ch.finish_reason.is_some()) {
                             tracing::debug!(
                                 model = %model_stream,
@@ -625,6 +638,46 @@ where
                                 "Antigravity SSE stream choice completed"
                             );
                             stopped_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+
+                            // Zero-Content Safeguard: If the stream is stopping without emitting any
+                            // content (text, reasoning, or tools), inject a whitespace delta right before
+                            // the finish reason chunk so clients (pi-ai, Claude Code, etc.) do not reject
+                            // the completion with EMPTY_RESPONSE ("returned a completed response with no content").
+                            if !has_emitted_content_flag.load(std::sync::atomic::Ordering::SeqCst) {
+                                tracing::warn!(
+                                    model = %model_stream,
+                                    response_id = %response_id_stream,
+                                    "Antigravity SSE stream stopped with zero content; injecting whitespace pad chunk to satisfy downstream client contract"
+                                );
+                                has_emitted_content_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                                let pad_chunk = ChatCompletionChunk {
+                                    id: response_id_stream.clone(),
+                                    object: "chat.completion.chunk".to_string(),
+                                    created: std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .unwrap_or_default()
+                                        .as_secs(),
+                                    model: model_stream.clone(),
+                                    choices: vec![ponyllm_protocol::openai::chat::ChatChunkChoice {
+                                        index: 0,
+                                        delta: ponyllm_protocol::openai::chat::ChatChunkDelta {
+                                            role: Some("assistant".to_string()),
+                                            content: Some(" ".to_string()),
+                                            reasoning_content: None,
+                                            refusal: None,
+                                            tool_calls: None,
+                                        },
+                                        finish_reason: None,
+                                        logprobs: None,
+                                    }],
+                                    usage: None,
+                                    system_fingerprint: None,
+                                    service_tier: None,
+                                };
+                                if let Ok(pad_json) = serde_json::to_string(&pad_chunk) {
+                                    out.push(Ok(Bytes::from(format!("data: {}\n\n", pad_json))));
+                                }
+                            }
                         }
                         if let Ok(json) = serde_json::to_string(&chunk) {
                             out.push(Ok(Bytes::from(format!("data: {}\n\n", json))));
@@ -634,6 +687,7 @@ where
             }
             Err(e) => {
                 tracing::warn!("Antigravity SSE to OpenAI stream transport error encountered");
+                transport_errored_flag.store(true, std::sync::atomic::Ordering::SeqCst);
                 stopped_flag.store(true, std::sync::atomic::Ordering::SeqCst);
                 out.push(Err(e));
             }
@@ -647,7 +701,39 @@ where
     translated
         .chain(futures_util::stream::once(async move {
             let mut buf = Vec::new();
-            if !stopped.load(std::sync::atomic::Ordering::SeqCst) {
+            // If the stream did not stop normally and no transport error occurred,
+            // synthesize the graceful Stop chunk. But if a transport error occurred,
+            // never synthesize a fake Stop chunk that masks the network error as a successful completion.
+            if !stopped.load(std::sync::atomic::Ordering::SeqCst) && !transport_errored.load(std::sync::atomic::Ordering::SeqCst) {
+                if !has_emitted_content.load(std::sync::atomic::Ordering::SeqCst) {
+                    let pad_chunk = ChatCompletionChunk {
+                        id: response_id.clone(),
+                        object: "chat.completion.chunk".to_string(),
+                        created: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs(),
+                        model: model.clone(),
+                        choices: vec![ponyllm_protocol::openai::chat::ChatChunkChoice {
+                            index: 0,
+                            delta: ponyllm_protocol::openai::chat::ChatChunkDelta {
+                                role: Some("assistant".to_string()),
+                                content: Some(" ".to_string()),
+                                reasoning_content: None,
+                                refusal: None,
+                                tool_calls: None,
+                            },
+                            finish_reason: None,
+                            logprobs: None,
+                        }],
+                        usage: None,
+                        system_fingerprint: None,
+                        service_tier: None,
+                    };
+                    if let Ok(json) = serde_json::to_string(&pad_chunk) {
+                        buf.extend_from_slice(format!("data: {}\n\n", json).as_bytes());
+                    }
+                }
                 let final_chunk = ChatCompletionChunk {
                     id: response_id.clone(),
                     object: "chat.completion.chunk".to_string(),
@@ -1785,6 +1871,41 @@ mod tests {
         );
         assert_eq!(json_val["candidates"][0]["finishReason"], "MAX_TOKENS");
         assert_eq!(json_val["usageMetadata"]["candidatesTokenCount"], 2048);
+    }
+
+    #[tokio::test]
+    async fn test_antigravity_sse_to_openai_stream_zero_content_pads_whitespace() {
+        // When upstream sends a candidate that has only empty parts or no content
+        // followed by finishReason STOP, antigravity_sse_to_openai_stream must inject
+        // a whitespace pad chunk before the stop chunk so downstream clients don't crash with EMPTY_RESPONSE.
+        let empty_chunk = format!(
+            "data: {}\n\n",
+            serde_json::json!({
+                "response": {
+                    "candidates": [{
+                        "content": {
+                            "role": "model",
+                            "parts": []
+                        },
+                        "finishReason": "STOP"
+                    }]
+                }
+            })
+        );
+        let s = bytes_stream(vec![
+            Bytes::from(empty_chunk),
+            Bytes::from_static(b"data: [DONE]\n\n"),
+        ]);
+
+        let out: Vec<String> = antigravity_sse_to_openai_stream(s, "gemini-3.8-flash-high")
+            .map(|r| String::from_utf8_lossy(&r.unwrap()).to_string())
+            .collect()
+            .await;
+
+        let joined = out.join("");
+        assert!(joined.contains("\"content\":\" \""), "Stream must inject pad whitespace: {}", joined);
+        assert!(joined.contains("\"finish_reason\":\"stop\""), "Stream must preserve stop: {}", joined);
+        assert!(joined.ends_with("data: [DONE]\n\n"), "Stream must end with [DONE]");
     }
 }
 

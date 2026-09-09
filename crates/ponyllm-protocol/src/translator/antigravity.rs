@@ -269,6 +269,31 @@ fn convert_tools_to_gemini(tools: &[crate::openai::chat::ToolDefinition]) -> Opt
     }
 }
 
+fn permissive_safety_settings() -> Value {
+    json!([
+        {
+            "category": "HARM_CATEGORY_HARASSMENT",
+            "threshold": "BLOCK_NONE"
+        },
+        {
+            "category": "HARM_CATEGORY_HATE_SPEECH",
+            "threshold": "BLOCK_NONE"
+        },
+        {
+            "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+            "threshold": "BLOCK_NONE"
+        },
+        {
+            "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
+            "threshold": "BLOCK_NONE"
+        },
+        {
+            "category": "HARM_CATEGORY_CIVIC_INTEGRITY",
+            "threshold": "BLOCK_NONE"
+        }
+    ])
+}
+
 fn convert_anthropic_tools_to_gemini(tools: &[crate::anthropic::messages::AnthropicTool]) -> Option<Value> {
     let mut decls = Vec::new();
     for t in tools {
@@ -505,7 +530,8 @@ pub fn chat_to_antigravity_request(
             "functionCallingConfig": {
                 "mode": "VALIDATED"
             }
-        }
+        },
+        "safetySettings": permissive_safety_settings()
     });
 
     if let Some(ref tools_def) = req.tools {
@@ -714,7 +740,8 @@ pub fn messages_to_antigravity_request(
             "functionCallingConfig": {
                 "mode": "VALIDATED"
             }
-        }
+        },
+        "safetySettings": permissive_safety_settings()
     });
 
     if let Some(ref tools_def) = req.tools {

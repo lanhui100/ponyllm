@@ -1,6 +1,7 @@
 import { ref, computed, getCurrentInstance, onMounted, onUnmounted } from 'vue';
 import { onStopPolling } from '../router';
 import { useSessionStore } from '../stores/session';
+import { handleUnauthorizedResponse } from '../lib/alova';
 import type {
   ConnectivityBarSeries,
   ConnectivitySlot,
@@ -154,6 +155,15 @@ export function useTelemetry(options: UseTelemetryOptions = {}) {
         fetch(getFullUrl('/v1/telemetry/metrics'), { headers }),
         fetch(getFullUrl('/v1/telemetry/stream'), { headers }),
       ]);
+
+      // Check if telemetry request was rejected with 401 Unauthorized
+      if (
+        (mRes.status === 'fulfilled' && mRes.value.status === 401) ||
+        (sRes.status === 'fulfilled' && sRes.value.status === 401)
+      ) {
+        handleUnauthorizedResponse();
+        return;
+      }
       const localRtt = Math.max(1, Date.now() - localT0);
 
       // Determine public vs local latency

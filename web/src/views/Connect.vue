@@ -84,7 +84,7 @@
 
         <div class="mt-6 pt-5 border-t border-slate-100 flex items-center justify-between text-[11px] text-slate-400">
           <span>PonyLLM Console</span>
-          <span class="font-mono">In-Memory Auth</span>
+          <span class="font-mono">Session Auth</span>
         </div>
       </UiCard>
     </div>
@@ -116,6 +116,8 @@ onMounted(async () => {
     await submit();
     return;
   }
+  // If navigating to /connect explicitly without token in URL, clear any stale session
+  session.logout();
   openMode.value = await probeOpenMode().catch(() => false);
 });
 

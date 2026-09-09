@@ -247,7 +247,7 @@ async function fetchAndOpenAuthUrl() {
       oauthPopupRef.value = window.open(
         res.auth_url,
         'google_oauth_popup',
-        `width=${width},height=${height},left=${left},top=${top},status=no,toolbar=no,menubar=no`
+        `width=${width},height=${height},left=${left},top=${top},status=no,toolbar=no,menubar=no,noopener=no`
       );
 
 

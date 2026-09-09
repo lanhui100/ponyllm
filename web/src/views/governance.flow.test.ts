@@ -80,6 +80,7 @@ describe('GovernanceView End-to-End User Flow (WEB-04)', () => {
   };
 
   beforeEach(() => {
+    window.sessionStorage?.clear();
     pinia = createPinia();
     setActivePinia(pinia);
     router = createRouter({

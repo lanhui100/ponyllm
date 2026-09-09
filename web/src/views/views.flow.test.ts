@@ -15,6 +15,7 @@ describe('WEB-02 End-to-End User Flow (Connect -> Dashboard -> Recorder)', () =>
   let container: HTMLDivElement;
 
   beforeEach(() => {
+    window.sessionStorage?.clear();
     pinia = createPinia();
     setActivePinia(pinia);
     stopAllPolling();

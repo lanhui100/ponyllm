@@ -10,7 +10,7 @@ const route = useRoute();
 const session = useSessionStore();
 
 function handleLogout() {
-  session.clearToken();
+  session.logout();
   void router.push('/connect');
 }
 </script>
