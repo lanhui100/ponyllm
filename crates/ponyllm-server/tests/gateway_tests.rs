@@ -445,3 +445,88 @@ async fn test_gateway_auth_middleware() {
         .unwrap();
     assert_eq!(plain_token_resp.status(), 200);
 }
+
+#[tokio::test]
+async fn test_model_default_sampling_applied() {
+    // Mock upstream echoes the sampling params it actually received.
+    let mock_upstream = Router::new().route(
+        "/v1/chat/completions",
+        post(|Json(req): Json<serde_json::Value>| async move {
+            let temp = req.get("temperature").cloned().unwrap_or(serde_json::Value::Null);
+            let top_p = req.get("top_p").cloned().unwrap_or(serde_json::Value::Null);
+            axum::Json(json!({
+                "id": "chatcmpl-mock-sampling",
+                "object": "chat.completion",
+                "created": 1710000000,
+                "model": "gpt-4o",
+                "choices": [{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": format!("t={:.6} p={:.6}", temp.as_f64().unwrap_or(-1.0), top_p.as_f64().unwrap_or(-1.0))
+                    },
+                    "finish_reason": "stop"
+                }],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+            }))
+        }),
+    );
+    let upstream_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_addr = upstream_listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(upstream_listener, mock_upstream).await.unwrap();
+    });
+
+    let pool = Arc::new(KeyPool::new("openai", RoutingStrategy::RoundRobin));
+    pool.add_key(ApiKeyEntry::new("k1", "sk-mock-key-123456", 1, 10));
+
+    let mut config = GatewayConfig::default();
+    let mut prov = make_mock_provider_config(&format!("http://{}", upstream_addr), "gpt-4o", vec!["gpt-4o"]);
+    prov.model_specs.push(ponyllm_server::ModelSpec {
+        name: "gpt-4o".to_string(),
+        temperature: Some(0.7),
+        top_p: Some(0.9),
+        ..Default::default()
+    });
+    config.providers.insert("openai".to_string(), prov);
+
+    let state = Arc::new(AppState::new(config));
+    state.register_pool("openai", pool);
+    let gateway_app = create_app(state);
+    let gateway_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let gateway_addr = gateway_listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(gateway_listener, gateway_app).await.unwrap();
+    });
+    let client = reqwest::Client::new();
+
+    // 1. Omitted sampling params -> model defaults reach upstream
+    let resp = client
+        .post(format!("http://{}/v1/chat/completions", gateway_addr))
+        .json(&json!({
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "hi"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["choices"][0]["message"]["content"], "t=0.700000 p=0.900000");
+
+    // 2. Explicit request values win over model defaults
+    let resp2 = client
+        .post(format!("http://{}/v1/chat/completions", gateway_addr))
+        .json(&json!({
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "hi"}],
+            "temperature": 0.1,
+            "top_p": 0.2
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp2.status(), 200);
+    let body2: serde_json::Value = resp2.json().await.unwrap();
+    assert_eq!(body2["choices"][0]["message"]["content"], "t=0.100000 p=0.200000");
+}

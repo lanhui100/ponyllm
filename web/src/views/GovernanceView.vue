@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onUnmounted } from 'vue';
+import { ref, computed, onUnmounted } from 'vue';
 import { useAdminConfig } from '../composables/useAdminConfig';
 import NavBar from '../components/NavBar.vue';
 import ProviderCard from '../components/governance/ProviderCard.vue';
@@ -50,6 +50,9 @@ const {
 
 type TabType = 'providers' | 'strategy';
 const currentTab = ref<TabType>('providers');
+
+/** 全量 provider 已配置模型的并集，供模型名输入下拉建议。 */
+const allModelNames = computed(() => [...new Set(models.value.map((m) => m.name).filter(Boolean))]);
 
 type ProviderMode = 'standard' | 'antigravity';
 const newProviderMode = ref<ProviderMode>('standard');
@@ -879,6 +882,7 @@ onUnmounted(() => {
             :key="p.name"
             :provider="p"
             :models="models.filter((m) => m.provider ? m.provider === p.name : true)"
+            :all-model-names="allModelNames"
             :keys="keys.filter((k) => k.provider === p.name)"
             :admin-write-enabled="adminWriteEnabled"
             :key-test-results="keyTestResults"

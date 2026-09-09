@@ -194,6 +194,14 @@ pub async fn handle_responses(
         let mut target_req = req.clone();
         target_req.model = physical_model.clone();
 
+        // Model-level default sampling: request value wins when present.
+        if target_req.temperature.is_none() {
+            target_req.temperature = target.temperature;
+        }
+        if target_req.top_p.is_none() {
+            target_req.top_p = target.top_p;
+        }
+
         // Clamp max_output_tokens against model's declared max_output
         {
             let model_max = ponyllm_core::pool::parse_context_capacity_tokens(&target.max_output);

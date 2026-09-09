@@ -168,6 +168,14 @@ pub struct ModelConfig {
     pub cached_price: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_price: Option<f64>,
+    /// Optional default sampling temperature for this model (0.0–2.0).
+    /// Applied only when the inbound request omits `temperature`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f32>,
+    /// Optional default nucleus sampling cutoff for this model (0.0–1.0).
+    /// Applied only when the inbound request omits `top_p`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_p: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub protocol: Option<UpstreamProtocol>,
     /// Optional custom base_url override for this model.
@@ -205,6 +213,8 @@ impl Default for ModelConfig {
             input_price: None,
             cached_price: None,
             output_price: None,
+            temperature: None,
+            top_p: None,
             protocol: None,
             base_url: None,
             thinking_default: None,
@@ -227,6 +237,8 @@ impl ModelConfig {
             input_price: None,
             cached_price: None,
             output_price: None,
+            temperature: None,
+            top_p: None,
             protocol: None,
             base_url: None,
             thinking_default: None,
@@ -451,6 +463,49 @@ pub fn validate_provider_fields(
                     label, u
                 ));
             }
+        }
+    }
+    Ok(())
+}
+
+/// Strict validation for per-model pricing overrides (USD per 1M tokens).
+/// `None` inherits the provider baseline; provided values must be finite and >= 0.
+pub fn validate_model_pricing(
+    input_price: Option<f64>,
+    cached_price: Option<f64>,
+    output_price: Option<f64>,
+) -> Result<(), String> {
+    for (label, v) in [
+        ("input_price", input_price),
+        ("cached_price", cached_price),
+        ("output_price", output_price),
+    ] {
+        if let Some(p) = v {
+            if p.is_nan() || p.is_infinite() || p < 0.0 {
+                return Err(format!(
+                    "模型价格 {} 必须为大于等于 0 的合法数值，输入: {}",
+                    label, p
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Strict validation for per-model default sampling parameters.
+/// `None` means "no override, keep the request value".
+pub fn validate_model_sampling(temperature: Option<f32>, top_p: Option<f32>) -> Result<(), String> {
+    if let Some(t) = temperature {
+        if !t.is_finite() || t < 0.0 || t > 2.0 {
+            return Err(format!(
+                "模型默认 temperature 必须在 0.0–2.0 之间，输入: {}",
+                t
+            ));
+        }
+    }
+    if let Some(p) = top_p {
+        if !p.is_finite() || p < 0.0 || p > 1.0 {
+            return Err(format!("模型默认 top_p 必须在 0.0–1.0 之间，输入: {}", p));
         }
     }
     Ok(())

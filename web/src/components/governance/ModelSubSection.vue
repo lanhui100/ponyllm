@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from 'vue';
+import { ref, computed } from 'vue';
 import type { ModelView, CreateModelPayload, UpdateModelPayload } from '../../types/admin';
 import Icons from '../ui/Icons.vue';
 import UiButton from '../ui/UiButton.vue';
@@ -14,6 +14,8 @@ const props = defineProps<{
   models: ModelView[];
   adminWriteEnabled: boolean;
   defaultExpanded?: boolean;
+  /** 全量 provider 已配置模型的并集，用于名称输入的下拉建议（仍允许手输任意名）。 */
+  suggestedModelNames?: string[];
 }>();
 
 const emit = defineEmits<{
@@ -61,10 +63,31 @@ const form = ref({
   output_types: ['text'] as string[],
   protocol: '',
   base_url: '',
-  input_price: 0,
-  cached_price: 0,
-  output_price: 0,
+  temperature: '',
+  top_p: '',
+  input_price: '',
+  cached_price: '',
+  output_price: '',
 });
+
+/** 下拉建议：排除本服务商已有模型，按名字排序；手输不受限。 */
+const nameSuggestions = computed(() => {
+  const existing = new Set(props.models.map((m) => m.name));
+  return [...new Set(props.suggestedModelNames ?? [])]
+    .filter((n) => n && !existing.has(n))
+    .sort((a, b) => a.localeCompare(b));
+});
+
+const nameListId = computed(
+  () => `model-name-suggestions-${props.providerName.replace(/[^a-zA-Z0-9_-]/g, '_')}`,
+);
+
+function parseOptionalNumber(raw: string): number | undefined {
+  const t = raw.trim();
+  if (!t) return undefined;
+  const v = Number(t);
+  return Number.isFinite(v) ? v : NaN;
+}
 
 function normalizeProtocol(proto?: string | null): string {
   if (!proto) return '';
@@ -114,9 +137,11 @@ function openAddInline() {
     output_types: ['text'],
     protocol: '',
     base_url: '',
-    input_price: 0,
-    cached_price: 0,
-    output_price: 0,
+    temperature: '',
+    top_p: '',
+    input_price: '',
+    cached_price: '',
+    output_price: '',
   };
   isCustomContext.value = false;
   formError.value = null;
@@ -142,12 +167,22 @@ function openEditInline(model: ModelView) {
     output_types: model.output_types && model.output_types.length > 0 ? [...model.output_types] : ['text'],
     protocol: normalizeProtocol(model.protocol),
     base_url: model.base_url || '',
-    input_price: 0,
-    cached_price: 0,
-    output_price: 0,
+    temperature: model.temperature != null ? String(model.temperature) : '',
+    top_p: model.top_p != null ? String(model.top_p) : '',
+    input_price: model.input_price != null ? String(model.input_price) : '',
+    cached_price: model.cached_price != null ? String(model.cached_price) : '',
+    output_price: model.output_price != null ? String(model.output_price) : '',
   };
   formError.value = null;
-  showAdvanced.value = Boolean(model.protocol || model.base_url);
+  showAdvanced.value = Boolean(
+    model.protocol ||
+      model.base_url ||
+      model.temperature != null ||
+      model.top_p != null ||
+      model.input_price != null ||
+      model.cached_price != null ||
+      model.output_price != null,
+  );
 }
 
 function cancelForm() {
@@ -198,6 +233,22 @@ async function handleSubmit() {
   submitting.value = true;
   formError.value = null;
   try {
+    const temperature = parseOptionalNumber(form.value.temperature);
+    const topP = parseOptionalNumber(form.value.top_p);
+    const inputPrice = parseOptionalNumber(form.value.input_price);
+    const cachedPrice = parseOptionalNumber(form.value.cached_price);
+    const outputPrice = parseOptionalNumber(form.value.output_price);
+    if (
+      temperature !== undefined && !Number.isFinite(temperature) ||
+      topP !== undefined && !Number.isFinite(topP) ||
+      inputPrice !== undefined && !Number.isFinite(inputPrice) ||
+      cachedPrice !== undefined && !Number.isFinite(cachedPrice) ||
+      outputPrice !== undefined && !Number.isFinite(outputPrice)
+    ) {
+      formError.value = '高级参数中的数字格式不正确，请输入合法数值或留空';
+      submitting.value = false;
+      return;
+    }
     const payloadData = {
       provider: props.providerName,
       tier: form.value.tier,
@@ -208,6 +259,11 @@ async function handleSubmit() {
       output_types: form.value.output_types,
       protocol: form.value.protocol ? form.value.protocol.trim() : '',
       base_url: form.value.base_url ? form.value.base_url.trim() : '',
+      ...(temperature !== undefined ? { temperature } : {}),
+      ...(topP !== undefined ? { top_p: topP } : {}),
+      ...(inputPrice !== undefined ? { input_price: inputPrice } : {}),
+      ...(cachedPrice !== undefined ? { cached_price: cachedPrice } : {}),
+      ...(outputPrice !== undefined ? { output_price: outputPrice } : {}),
     };
 
     if (editingModelName.value) {
@@ -310,17 +366,25 @@ function getTierBadgeVariant(tier?: string) {
         </div>
 
         <form class="space-y-3" @submit.prevent="handleSubmit">
-          <!-- 模型名称输入 -->
+          <!-- 模型名称输入 (下拉建议 + 手输) -->
           <div>
             <label class="block text-slate-600 font-medium mb-1 text-xs">模型名称 *</label>
             <input
               v-model="form.name"
               type="text"
-              placeholder="例如: gpt-4o 或 deepseek-v3"
+              :list="nameListId"
+              placeholder="例如: gpt-4o 或 deepseek-v3，可下拉选择或直接输入"
               required
+              autocomplete="off"
               class="w-full bg-white border border-slate-200/80 rounded-lg px-3 py-2 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
               data-testid="model-name-input"
             />
+            <datalist :id="nameListId" data-testid="model-name-suggestions">
+              <option v-for="n in nameSuggestions" :key="n" :value="n" />
+            </datalist>
+            <p v-if="nameSuggestions.length > 0" class="text-3xs text-slate-400 mt-1">
+              已收录 {{ nameSuggestions.length }} 个其他服务商模型供选择，未收录的可直接输入。
+            </p>
           </div>
 
           <!-- 模型分级 (Tier) 按钮选项组 (暖黄色底色 200 色阶) -->
@@ -512,6 +576,73 @@ function getTierBadgeVariant(tier?: string) {
                     data-testid="model-base-url-input"
                   />
                 </div>
+
+                <!-- 默认采样参数 (请求未传时生效) -->
+                <div class="grid grid-cols-2 gap-2">
+                  <div>
+                    <label class="block text-slate-600 font-medium mb-1 text-xs">默认 Temperature (选填)</label>
+                    <input
+                      v-model="form.temperature"
+                      type="text"
+                      inputmode="decimal"
+                      placeholder="留空继承，如 0.7"
+                      class="w-full bg-white border border-slate-200/80 rounded-lg px-2.5 py-1.5 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
+                      data-testid="model-temperature-input"
+                    />
+                  </div>
+                  <div>
+                    <label class="block text-slate-600 font-medium mb-1 text-xs">默认 Top P (选填)</label>
+                    <input
+                      v-model="form.top_p"
+                      type="text"
+                      inputmode="decimal"
+                      placeholder="留空继承，如 0.9"
+                      class="w-full bg-white border border-slate-200/80 rounded-lg px-2.5 py-1.5 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
+                      data-testid="model-top-p-input"
+                    />
+                  </div>
+                </div>
+                <p class="text-3xs text-slate-400 -mt-2">请求里显式传了 temperature/top_p 时，以请求值为准。</p>
+
+                <!-- 模型专属价格 ($/1M tokens，留空继承服务商) -->
+                <div>
+                  <label class="block text-slate-600 font-medium mb-1.5 text-xs">模型专属价格 (选填，留空继承服务商)</label>
+                  <div class="grid grid-cols-3 gap-2">
+                    <div>
+                      <label class="block text-slate-500 mb-1 text-3xs">输入</label>
+                      <input
+                        v-model="form.input_price"
+                        type="text"
+                        inputmode="decimal"
+                        placeholder="如 0.50"
+                        class="w-full bg-white border border-slate-200/80 rounded-lg px-2.5 py-1.5 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
+                        data-testid="model-input-price-input"
+                      />
+                    </div>
+                    <div>
+                      <label class="block text-slate-500 mb-1 text-3xs">缓存命中</label>
+                      <input
+                        v-model="form.cached_price"
+                        type="text"
+                        inputmode="decimal"
+                        placeholder="如 0.25"
+                        class="w-full bg-white border border-slate-200/80 rounded-lg px-2.5 py-1.5 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
+                        data-testid="model-cached-price-input"
+                      />
+                    </div>
+                    <div>
+                      <label class="block text-slate-500 mb-1 text-3xs">输出</label>
+                      <input
+                        v-model="form.output_price"
+                        type="text"
+                        inputmode="decimal"
+                        placeholder="如 1.00"
+                        class="w-full bg-white border border-slate-200/80 rounded-lg px-2.5 py-1.5 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
+                        data-testid="model-output-price-input"
+                      />
+                    </div>
+                  </div>
+                </div>
               </div>
             </UiCollapsible>
           </div>
@@ -580,6 +711,24 @@ function getTierBadgeVariant(tier?: string) {
             >
               {{ m.protocol }}
             </UiBadge>
+
+            <!-- 采样/价格定制标记 -->
+            <UiTooltip
+              v-if="m.temperature != null || m.top_p != null"
+              :content="`默认采样: ${m.temperature != null ? `temperature=${m.temperature}` : ''}${m.temperature != null && m.top_p != null ? ' · ' : ''}${m.top_p != null ? `top_p=${m.top_p}` : ''} (请求显式传参时以请求为准)`"
+            >
+              <UiBadge variant="secondary" class="hidden md:inline-flex items-center text-3xs font-mono font-normal cursor-help">
+                T{{ m.temperature != null ? `=${m.temperature}` : '' }}{{ m.top_p != null ? ` P=${m.top_p}` : '' }}
+              </UiBadge>
+            </UiTooltip>
+            <UiTooltip
+              v-if="m.input_price != null || m.cached_price != null || m.output_price != null"
+              :content="`专属价格($/1M): 入${m.input_price ?? '继承'} / 缓${m.cached_price ?? '继承'} / 出${m.output_price ?? '继承'}`"
+            >
+              <UiBadge variant="secondary" class="hidden md:inline-flex items-center text-3xs font-mono font-normal cursor-help">
+                ￥定制
+              </UiBadge>
+            </UiTooltip>
 
             <!-- 思考强度简明标记 (当非 Off 时展示微标) -->
             <UiTooltip
@@ -835,6 +984,73 @@ function getTierBadgeVariant(tier?: string) {
                         class="w-full bg-white border border-slate-200/80 rounded-lg px-2.5 py-1.5 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
                         data-testid="model-base-url-input"
                       />
+                    </div>
+
+                    <!-- 默认采样参数 (请求未传时生效) -->
+                    <div class="grid grid-cols-2 gap-2">
+                      <div>
+                        <label class="block text-slate-600 font-medium mb-1 text-xs">默认 Temperature (选填)</label>
+                        <input
+                          v-model="form.temperature"
+                          type="text"
+                          inputmode="decimal"
+                          placeholder="留空继承，如 0.7"
+                          class="w-full bg-white border border-slate-200/80 rounded-lg px-2.5 py-1.5 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
+                          data-testid="model-temperature-input"
+                        />
+                      </div>
+                      <div>
+                        <label class="block text-slate-600 font-medium mb-1 text-xs">默认 Top P (选填)</label>
+                        <input
+                          v-model="form.top_p"
+                          type="text"
+                          inputmode="decimal"
+                          placeholder="留空继承，如 0.9"
+                          class="w-full bg-white border border-slate-200/80 rounded-lg px-2.5 py-1.5 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
+                          data-testid="model-top-p-input"
+                        />
+                      </div>
+                    </div>
+                    <p class="text-3xs text-slate-400 -mt-2">请求里显式传了 temperature/top_p 时，以请求值为准。</p>
+
+                    <!-- 模型专属价格 ($/1M tokens，留空继承服务商) -->
+                    <div>
+                      <label class="block text-slate-600 font-medium mb-1.5 text-xs">模型专属价格 (选填，留空继承服务商)</label>
+                      <div class="grid grid-cols-3 gap-2">
+                        <div>
+                          <label class="block text-slate-500 mb-1 text-3xs">输入</label>
+                          <input
+                            v-model="form.input_price"
+                            type="text"
+                            inputmode="decimal"
+                            placeholder="如 0.50"
+                            class="w-full bg-white border border-slate-200/80 rounded-lg px-2.5 py-1.5 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
+                            data-testid="model-input-price-input"
+                          />
+                        </div>
+                        <div>
+                          <label class="block text-slate-500 mb-1 text-3xs">缓存命中</label>
+                          <input
+                            v-model="form.cached_price"
+                            type="text"
+                            inputmode="decimal"
+                            placeholder="如 0.25"
+                            class="w-full bg-white border border-slate-200/80 rounded-lg px-2.5 py-1.5 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
+                            data-testid="model-cached-price-input"
+                          />
+                        </div>
+                        <div>
+                          <label class="block text-slate-500 mb-1 text-3xs">输出</label>
+                          <input
+                            v-model="form.output_price"
+                            type="text"
+                            inputmode="decimal"
+                            placeholder="如 1.00"
+                            class="w-full bg-white border border-slate-200/80 rounded-lg px-2.5 py-1.5 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
+                            data-testid="model-output-price-input"
+                          />
+                        </div>
+                      </div>
                     </div>
                   </div>
                 </UiCollapsible>

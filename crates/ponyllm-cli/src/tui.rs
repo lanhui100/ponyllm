@@ -1144,6 +1144,8 @@ fn handle_modal_key(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                             input_price: in_p,
                             cached_price: ca_p,
                             output_price: out_p,
+                            temperature: None,
+                            top_p: None,
                             protocol: proto_val,
                             base_url: None,
                             thinking_default: None,
@@ -1328,16 +1330,18 @@ fn handle_modal_key(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                         max_output: if max_output.trim().is_empty() { "32K".to_string() } else { max_output.trim().to_string() },
                         input_types: if in_types.is_empty() { vec!["text".to_string()] } else { in_types },
                         output_types: if out_types.is_empty() { vec!["text".to_string()] } else { out_types },
-                        billing_mode: mode_val,
-                        input_price: in_p,
-                        cached_price: ca_p,
-                        output_price: out_p,
-                        protocol: proto_val,
-                        base_url: None,
-                        thinking_default: None,
-                        thinking_max: None,
-                        proxy: None,
-                    };
+                    billing_mode: mode_val,
+                    input_price: in_p,
+                    cached_price: ca_p,
+                    output_price: out_p,
+                    temperature: None,
+                    top_p: None,
+                    protocol: proto_val,
+                    base_url: None,
+                    thinking_default: None,
+                    thinking_max: None,
+                    proxy: None,
+                };
 
 
                     let p_name = provider_name.clone();

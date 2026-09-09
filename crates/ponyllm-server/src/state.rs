@@ -35,6 +35,10 @@ pub struct RoutedTarget {
     pub billing_mode: BillingMode,
     pub pricing: PricingConfig,
     pub thinking_spec: ModelThinkingSpec,
+    /// Model-level default sampling temperature (request value wins when present).
+    pub temperature: Option<f32>,
+    /// Model-level default nucleus sampling cutoff (request value wins when present).
+    pub top_p: Option<f32>,
     pub input_types: Vec<String>,
     pub max_output: String,
 }
@@ -736,6 +740,8 @@ impl AppState {
                     billing_mode,
                     pricing,
                     thinking_spec,
+                    temperature: spec.temperature,
+                    top_p: spec.top_p,
                     input_types: spec.input_types,
                     max_output: spec.max_output,
                 });
@@ -764,6 +770,8 @@ impl AppState {
                         billing_mode,
                         pricing,
                         thinking_spec,
+                        temperature: spec.temperature,
+                        top_p: spec.top_p,
                         input_types: spec.input_types,
                         max_output: spec.max_output,
                     });
@@ -798,6 +806,8 @@ impl AppState {
                         billing_mode,
                         pricing,
                         thinking_spec,
+                        temperature: spec.temperature,
+                        top_p: spec.top_p,
                         input_types: spec.input_types,
                         max_output: spec.max_output,
                     });
@@ -860,6 +870,8 @@ impl AppState {
                     billing_mode: default_billing,
                     pricing: default_pricing,
                     thinking_spec,
+                    temperature: default_spec.temperature,
+                    top_p: default_spec.top_p,
                     input_types: default_spec.input_types,
                     max_output: default_spec.max_output,
                 });
@@ -885,6 +897,8 @@ impl AppState {
                             billing_mode: m_billing,
                             pricing: m_pricing,
                             thinking_spec,
+                            temperature: spec.temperature,
+                            top_p: spec.top_p,
                             input_types: spec.input_types,
                             max_output: spec.max_output,
                         });

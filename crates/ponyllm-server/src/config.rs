@@ -27,6 +27,12 @@ pub struct ModelSpec {
     pub cached_price: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_price: Option<f64>,
+    /// Default sampling temperature for this model (applied when the request omits it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f32>,
+    /// Default nucleus sampling cutoff for this model (applied when the request omits it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_p: Option<f32>,
     /// Native wire protocol of this model. `None` inherits the provider default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub protocol: Option<UpstreamProtocol>,
@@ -75,6 +81,8 @@ impl Default for ModelSpec {
             input_price: None,
             cached_price: None,
             output_price: None,
+            temperature: None,
+            top_p: None,
             protocol: None,
             base_url: None,
             thinking_default: None,
@@ -211,6 +219,8 @@ impl ProviderConfig {
             input_price: None,
             cached_price: None,
             output_price: None,
+            temperature: None,
+            top_p: None,
             protocol: None,
             base_url: None,
             thinking_default: None,

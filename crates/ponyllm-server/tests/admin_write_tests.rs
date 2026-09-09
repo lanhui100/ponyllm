@@ -76,6 +76,8 @@ impl WriteTestHarness {
                 input_price: Some(2.5),
                 cached_price: Some(1.25),
                 output_price: Some(10.0),
+                temperature: None,
+                top_p: None,
                 protocol: None,
                 base_url: None,
                 thinking_default: None,
@@ -122,6 +124,8 @@ impl WriteTestHarness {
             input_price: Some(2.5),
             cached_price: Some(1.25),
             output_price: Some(10.0),
+            temperature: None,
+            top_p: None,
             protocol: None,
             base_url: None,
             thinking_default: None,
@@ -750,4 +754,83 @@ async fn test_write_queue_concurrency() {
     let final_cfg = store.load().unwrap();
     assert_eq!(final_cfg.config_version, 10);
     assert_eq!(final_cfg.providers["openai"].models.len(), 11); // 1 initial + 10 added
+}
+
+#[tokio::test]
+async fn test_model_sampling_and_pricing_overrides() {
+    let harness = WriteTestHarness::new(true).await;
+    let client = reqwest::Client::new();
+    let auth = format!("Bearer {}", harness.api_key);
+
+    // 1. Create with sampling + pricing overrides echoes them back
+    let create_resp = client
+        .post(format!("http://{}/api/admin/models", harness.addr))
+        .header("Authorization", &auth)
+        .header("If-Match", "\"0\"")
+        .json(&serde_json::json!({
+            "provider": "openai",
+            "name": "gpt-4o-mini",
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "input_price": 0.15,
+            "cached_price": 0.075,
+            "output_price": 0.6
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(create_resp.status(), StatusCode::CREATED);
+    let m: serde_json::Value = create_resp.json().await.unwrap();
+    assert_eq!(m["temperature"], serde_json::json!(0.7));
+    assert_eq!(m["top_p"], serde_json::json!(0.9));
+    assert_eq!(m["input_price"], serde_json::json!(0.15));
+    assert_eq!(m["cached_price"], serde_json::json!(0.075));
+    assert_eq!(m["output_price"], serde_json::json!(0.6));
+
+    // 2. Update overrides partially; untouched fields keep prior values
+    let update_resp = client
+        .put(format!("http://{}/api/admin/models/gpt-4o-mini", harness.addr))
+        .header("Authorization", &auth)
+        .header("If-Match", "\"1\"")
+        .json(&serde_json::json!({
+            "provider": "openai",
+            "temperature": 0.2
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(update_resp.status(), StatusCode::OK);
+    let updated: serde_json::Value = update_resp.json().await.unwrap();
+    assert_eq!(updated["temperature"], serde_json::json!(0.2));
+    assert_eq!(updated["top_p"], serde_json::json!(0.9));
+    assert_eq!(updated["input_price"], serde_json::json!(0.15));
+
+    // 3. Out-of-range temperature rejected
+    let bad_temp = client
+        .post(format!("http://{}/api/admin/models", harness.addr))
+        .header("Authorization", &auth)
+        .header("If-Match", "\"2\"")
+        .json(&serde_json::json!({
+            "provider": "openai",
+            "name": "gpt-4o-bad",
+            "temperature": 9.9
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bad_temp.status(), StatusCode::BAD_REQUEST);
+
+    // 4. Negative price rejected
+    let bad_price = client
+        .put(format!("http://{}/api/admin/models/gpt-4o-mini", harness.addr))
+        .header("Authorization", &auth)
+        .header("If-Match", "\"2\"")
+        .json(&serde_json::json!({
+            "provider": "openai",
+            "input_price": -1.0
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bad_price.status(), StatusCode::BAD_REQUEST);
 }

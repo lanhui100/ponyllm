@@ -40,6 +40,11 @@ export interface ModelView {
   thinking_max: string;
   protocol?: string | null;
   base_url?: string | null;
+  input_price?: number | null;
+  cached_price?: number | null;
+  output_price?: number | null;
+  temperature?: number | null;
+  top_p?: number | null;
 }
 
 export interface KeyView {
@@ -121,6 +126,11 @@ export interface CreateModelPayload {
   proxy?: string | null;
   thinking_default?: string | null;
   thinking_max?: string | null;
+  input_price?: number | null;
+  cached_price?: number | null;
+  output_price?: number | null;
+  temperature?: number | null;
+  top_p?: number | null;
 }
 
 export interface UpdateModelPayload {
@@ -135,6 +145,11 @@ export interface UpdateModelPayload {
   proxy?: string | null;
   thinking_default?: string | null;
   thinking_max?: string | null;
+  input_price?: number | null;
+  cached_price?: number | null;
+  output_price?: number | null;
+  temperature?: number | null;
+  top_p?: number | null;
 }
 
 export interface CreateKeyPayload {

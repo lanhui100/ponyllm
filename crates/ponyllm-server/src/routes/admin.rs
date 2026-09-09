@@ -76,6 +76,18 @@ pub struct ModelView {
     pub base_url: Option<String>,
     pub thinking_default: String,
     pub thinking_max: String,
+    /// Model-level price overrides (`None` inherits the provider baseline).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_price: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_price: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_price: Option<f64>,
+    /// Model-level default sampling (`None` keeps the request value).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_p: Option<f32>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -197,6 +209,16 @@ pub struct CreateModelPayload {
     pub thinking_max: Option<String>,
     #[serde(default)]
     pub proxy: Option<String>,
+    #[serde(default)]
+    pub input_price: Option<f64>,
+    #[serde(default)]
+    pub cached_price: Option<f64>,
+    #[serde(default)]
+    pub output_price: Option<f64>,
+    #[serde(default)]
+    pub temperature: Option<f32>,
+    #[serde(default)]
+    pub top_p: Option<f32>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -223,6 +245,16 @@ pub struct UpdateModelPayload {
     pub thinking_max: Option<String>,
     #[serde(default)]
     pub proxy: Option<String>,
+    #[serde(default)]
+    pub input_price: Option<f64>,
+    #[serde(default)]
+    pub cached_price: Option<f64>,
+    #[serde(default)]
+    pub output_price: Option<f64>,
+    #[serde(default)]
+    pub temperature: Option<f32>,
+    #[serde(default)]
+    pub top_p: Option<f32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -951,6 +983,11 @@ pub async fn handle_admin_provider_models(
                 base_url: m.base_url.clone(),
                 thinking_default: format!("{effective_default:?}"),
                 thinking_max: format!("{:?}", spec.max_effort),
+                input_price: m.input_price,
+                cached_price: m.cached_price,
+                output_price: m.output_price,
+                temperature: m.temperature,
+                top_p: m.top_p,
             }
         })
         .collect();
@@ -983,6 +1020,11 @@ pub async fn handle_admin_models(State(state): State<Arc<AppState>>) -> impl Int
                 base_url: m.base_url.clone(),
                 thinking_default: format!("{effective_default:?}"),
                 thinking_max: format!("{:?}", spec.max_effort),
+                input_price: m.input_price,
+                cached_price: m.cached_price,
+                output_price: m.output_price,
+                temperature: m.temperature,
+                top_p: m.top_p,
             });
         }
     }
@@ -1034,6 +1076,35 @@ pub async fn handle_admin_create_model(
     }
 
     let tier = payload.tier.as_deref().map(parse_tier).unwrap_or(ModelTier::Standard);
+    if let Err(msg) = ponyllm_config::validate_model_pricing(
+        payload.input_price,
+        payload.cached_price,
+        payload.output_price,
+    ) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": {"message": msg, "code": "invalid_model_pricing"}})),
+        )
+            .into_response();
+    }
+    if let Err(msg) = ponyllm_config::validate_model_pricing(
+        payload.input_price,
+        payload.cached_price,
+        payload.output_price,
+    ) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": {"message": msg, "code": "invalid_model_pricing"}})),
+        )
+            .into_response();
+    }
+    if let Err(msg) = ponyllm_config::validate_model_sampling(payload.temperature, payload.top_p) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": {"message": msg, "code": "invalid_model_sampling"}})),
+        )
+            .into_response();
+    }
     let proto = payload.protocol.as_deref().and_then(parse_protocol_opt);
     let think_def = payload.thinking_default.as_deref().and_then(parse_effort_opt);
     let think_max = payload.thinking_max.as_deref().and_then(parse_effort_opt);
@@ -1063,9 +1134,11 @@ pub async fn handle_admin_create_model(
         max_output: max_out.clone(),
         input_types: input_types.clone(),
         output_types: output_types.clone(),
-        input_price: None,
-        cached_price: None,
-        output_price: None,
+        input_price: payload.input_price,
+        cached_price: payload.cached_price,
+        output_price: payload.output_price,
+        temperature: payload.temperature,
+        top_p: payload.top_p,
         protocol: proto,
         base_url: base_url.clone(),
         thinking_default: think_def,
@@ -1088,9 +1161,11 @@ pub async fn handle_admin_create_model(
         input_types: input_types.clone(),
         output_types: output_types.clone(),
         billing_mode: None,
-        input_price: None,
-        cached_price: None,
-        output_price: None,
+        input_price: payload.input_price,
+        cached_price: payload.cached_price,
+        output_price: payload.output_price,
+        temperature: payload.temperature,
+        top_p: payload.top_p,
         protocol: proto,
         base_url: base_url.clone(),
         thinking_default: think_def,
@@ -1129,6 +1204,11 @@ pub async fn handle_admin_create_model(
             base_url,
             thinking_default: format!("{effective_def:?}"),
             thinking_max: format!("{:?}", spec_obj.max_effort),
+            input_price: payload.input_price,
+            cached_price: payload.cached_price,
+            output_price: payload.output_price,
+            temperature: payload.temperature,
+            top_p: payload.top_p,
         }),
     )
         .into_response()
@@ -1183,6 +1263,25 @@ pub async fn handle_admin_update_model(
 
     let p_sec = file.providers.get_mut(&target_provider_name).unwrap();
 
+    if let Err(msg) = ponyllm_config::validate_model_pricing(
+        payload.input_price,
+        payload.cached_price,
+        payload.output_price,
+    ) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": {"message": msg, "code": "invalid_model_pricing"}})),
+        )
+            .into_response();
+    }
+    if let Err(msg) = ponyllm_config::validate_model_sampling(payload.temperature, payload.top_p) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": {"message": msg, "code": "invalid_model_sampling"}})),
+        )
+            .into_response();
+    }
+
     let mut existing_config = p_sec
         .model_configs
         .iter()
@@ -1199,6 +1298,8 @@ pub async fn handle_admin_update_model(
             input_price: None,
             cached_price: None,
             output_price: None,
+            temperature: None,
+            top_p: None,
             protocol: None,
             base_url: None,
             thinking_default: None,
@@ -1240,6 +1341,21 @@ pub async fn handle_admin_update_model(
     if payload.proxy.is_some() {
         existing_config.proxy = payload.proxy.clone();
     }
+    if payload.input_price.is_some() {
+        existing_config.input_price = payload.input_price;
+    }
+    if payload.cached_price.is_some() {
+        existing_config.cached_price = payload.cached_price;
+    }
+    if payload.output_price.is_some() {
+        existing_config.output_price = payload.output_price;
+    }
+    if payload.temperature.is_some() {
+        existing_config.temperature = payload.temperature;
+    }
+    if payload.top_p.is_some() {
+        existing_config.top_p = payload.top_p;
+    }
 
     p_sec.model_configs.retain(|m| m.name != name);
     p_sec.model_configs.push(existing_config.clone());
@@ -1262,6 +1378,8 @@ pub async fn handle_admin_update_model(
         input_price: existing_config.input_price,
         cached_price: existing_config.cached_price,
         output_price: existing_config.output_price,
+        temperature: existing_config.temperature,
+        top_p: existing_config.top_p,
         protocol: existing_config.protocol,
         base_url: existing_config.base_url.clone(),
         thinking_default: existing_config.thinking_default,
@@ -1298,6 +1416,11 @@ pub async fn handle_admin_update_model(
         base_url: existing_config.base_url,
         thinking_default: format!("{effective_def:?}"),
         thinking_max: format!("{:?}", spec_obj.max_effort),
+        input_price: existing_config.input_price,
+        cached_price: existing_config.cached_price,
+        output_price: existing_config.output_price,
+        temperature: existing_config.temperature,
+        top_p: existing_config.top_p,
     })
     .into_response()
 }
@@ -1552,7 +1675,7 @@ pub async fn handle_admin_delete_key(
     };
 
     let (strat, remaining_keys) = {
-        let p_sec = file.providers.get_mut(&target_provider_name).unwrap();
+    let p_sec = file.providers.get_mut(&target_provider_name).unwrap();
         p_sec.keys.retain(|k| k.id != id);
         (parse_pool_strategy(&p_sec.strategy), p_sec.keys.clone())
     };

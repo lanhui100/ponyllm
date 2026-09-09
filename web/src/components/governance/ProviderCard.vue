@@ -27,6 +27,8 @@ const props = defineProps<{
   keyTestResults: Record<string, KeyTestView>;
   testingKeyIds: Set<string>;
   defaultExpanded?: boolean;
+  /** 全量模型名并集，透传给模型子区域做名称下拉建议。 */
+  allModelNames?: string[];
 }>();
 
 const emit = defineEmits<{
@@ -405,6 +407,7 @@ function handleBatchTest() {
           <ModelSubSection
             :provider-name="provider.name"
             :models="models"
+            :suggested-model-names="allModelNames ?? []"
             :admin-write-enabled="adminWriteEnabled"
             @create="(payload) => emit('create-model', payload)"
             @update="(name, payload) => emit('update-model', name, payload)"
