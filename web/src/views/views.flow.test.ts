@@ -65,6 +65,42 @@ describe('WEB-02 End-to-End User Flow (Connect -> Dashboard -> Recorder)', () =>
     await new Promise((resolve) => setTimeout(resolve, 20));
     await nextTick();
     expect(session.token).toBe('sk-test-secret-token');
+    expect(router.currentRoute.value.path).toBe('/dashboard');
+    app.unmount();
+  });
+
+  it('Flow 1b: Connect view sanitizes open redirect and traps external targets', async () => {
+    const session = useSessionStore(pinia);
+    session.logout();
+
+    globalThis.fetch = vi.fn().mockImplementation((url: string) => {
+      if (url.includes('/v1/models')) {
+        return Promise.resolve(new Response(JSON.stringify({ object: 'list', data: [] }), { status: 200 }));
+      }
+      return Promise.reject(new Error('unhandled url'));
+    });
+
+    // Malicious open redirect query
+    await router.push('/connect?redirect=https://evil.com/phishing');
+
+    const app = createApp(ConnectView);
+    app.use(router);
+    app.use(pinia);
+    app.mount(container);
+
+    const input = container.querySelector('input[type="password"]') as HTMLInputElement;
+    input.value = 'sk-valid-key';
+    input.dispatchEvent(new Event('input'));
+
+    const form = container.querySelector('form') as HTMLFormElement;
+    form.dispatchEvent(new Event('submit'));
+
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await nextTick();
+
+    expect(session.token).toBe('sk-valid-key');
+    // Must fall back to safe internal dashboard instead of external domain
+    expect(router.currentRoute.value.path).toBe('/dashboard');
     app.unmount();
   });
 

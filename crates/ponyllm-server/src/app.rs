@@ -16,6 +16,19 @@ use crate::state::AppState;
 /// WEB-01 acceptance greps this exact string (stderr + log).
 pub const WEB_DIST_MISSING_WARN: &str = "[web] web/dist 缺失，Web 控制台未托管（网关转发不受影响）；用 `--no-web` 可显式关闭";
 
+/// Constant-time byte slice comparison to eliminate timing side-channels in token verification.
+#[inline]
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
 async fn auth_middleware(
     State(state): State<Arc<AppState>>,
     req: Request,
@@ -57,9 +70,9 @@ async fn auth_middleware(
         }
     }
 
-    // Validate token
+    // Validate token using constant-time comparison to prevent timing side-channel attacks
     if let Some(token) = provided_token {
-        if token == expected_key {
+        if constant_time_eq(token.as_bytes(), expected_key.as_bytes()) {
             return next.run(req).await;
         }
     }

@@ -53,7 +53,10 @@
                 id="token-input"
                 v-model="input"
                 type="password"
-                autocomplete="off"
+                autocomplete="new-password"
+                autocapitalize="none"
+                autocorrect="off"
+                spellcheck="false"
                 placeholder="请输入网关访问 API Key"
                 class="w-full h-10 px-3 py-2 text-sm bg-slate-50/50 border border-slate-200 rounded-lg focus:outline-none focus:bg-white focus:border-slate-400 focus:ring-2 focus:ring-slate-400/20 text-slate-900 placeholder:text-slate-400 transition-all font-mono tracking-wide"
                 :disabled="loading"
@@ -116,12 +119,26 @@ onMounted(async () => {
   openMode.value = await probeOpenMode().catch(() => false);
 });
 
+function sanitizeRedirect(target: unknown): string {
+  if (typeof target !== 'string') {
+    return '/dashboard';
+  }
+  const trimmed = target.trim();
+  // Must be an internal path starting with a single slash; strictly disallow protocol-relative,
+  // backslash or URI scheme traversal (e.g. "//evil.com", "/\\evil.com", "javascript:", "https:")
+  if (!trimmed.startsWith('/') || trimmed.startsWith('//') || trimmed.startsWith('/\\') || trimmed.includes('://')) {
+    return '/dashboard';
+  }
+  return trimmed;
+}
+
 async function enterDashboard(): Promise<void> {
-  const redirect = route.query.redirect;
-  await router.push(typeof redirect === 'string' ? redirect : '/dashboard');
+  const safeTarget = sanitizeRedirect(route.query.redirect);
+  await router.push(safeTarget);
 }
 
 async function submit(): Promise<void> {
+  if (loading.value) return;
   error.value = '';
   const candidate = input.value.trim();
   if (candidate === '') {
