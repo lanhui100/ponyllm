@@ -103,6 +103,10 @@ pub enum Commands {
         /// the serve working directory; absolute paths preferred for services)
         #[arg(long)]
         web_dist_dir: Option<String>,
+
+        /// Enable verbose debug logging across server, core, and protocol translators
+        #[arg(short = 'd', long)]
+        debug: bool,
     },
 
     /// Start gateway service with Web Console focused (default port: 18080)
@@ -139,6 +143,10 @@ pub enum Commands {
         /// Automatically open web console in default browser (kept for backwards compatibility)
         #[arg(long, conflicts_with = "no_open", hide = true)]
         open: bool,
+
+        /// Enable verbose debug logging across server, core, and protocol translators
+        #[arg(short = 'd', long)]
+        debug: bool,
     },
 
     /// Stop the gateway process associated with the configuration file (pidfile)

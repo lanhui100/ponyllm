@@ -45,6 +45,7 @@ fn build_gateway_config_and_pools(
     gw_config.proxy = config_file.gateway.proxy.clone();
     gw_config.use_system_proxy = config_file.gateway.use_system_proxy;
     gw_config.admin_write_enabled = config_file.gateway.admin_write_enabled;
+    gw_config.telemetry_snapshot_path = config_file.gateway.telemetry_snapshot_path.clone();
 
     let mut pools = HashMap::new();
 
@@ -137,6 +138,7 @@ struct ServerOptions {
     web_dist_dir: Option<String>,
     is_web_focused: bool,
     open_browser: bool,
+    debug: bool,
 }
 
 fn open_in_browser(url: &str) {
@@ -159,10 +161,16 @@ fn open_in_browser(url: &str) {
 }
 
 async fn run_server(opts: ServerOptions) -> Result<(), Box<dyn std::error::Error>> {
+    let default_filter = if opts.debug {
+        "ponyllm_server=debug,ponyllm_protocol=debug,ponyllm_core=debug,tower_http=debug"
+    } else {
+        "ponyllm_server=info,ponyllm_protocol=info,ponyllm_core=info,tower_http=debug"
+    };
+
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "ponyllm_server=info,tower_http=debug".into()),
+                .unwrap_or_else(|_| default_filter.into()),
         )
         .with(tracing_subscriber::fmt::layer())
         .try_init()
@@ -197,7 +205,7 @@ async fn run_server(opts: ServerOptions) -> Result<(), Box<dyn std::error::Error
         secure_key
     };
 
-    let (gw_config, pools) = build_gateway_config_and_pools(
+    let (mut gw_config, pools) = build_gateway_config_and_pools(
         &config_file,
         Some(final_bind.clone()),
         opts.retries,
@@ -207,6 +215,14 @@ async fn run_server(opts: ServerOptions) -> Result<(), Box<dyn std::error::Error
         opts.no_web.then_some(false),
         opts.web_dist_dir.clone(),
     );
+    if gw_config.telemetry_snapshot_path.is_none() {
+        let snap = ponyllm_server::telemetry_snapshot::snapshot_path_for_config(
+            None,
+            gw_config.event_log_dir.as_deref(),
+            Some(&resolved_config),
+        );
+        gw_config.telemetry_snapshot_path = snap.map(|p| p.to_string_lossy().into_owned());
+    }
 
     let state = Arc::new(
         AppState::new(gw_config.clone()).with_config_store(Arc::new(
@@ -936,6 +952,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             retries,
             no_web,
             web_dist_dir,
+            debug,
         } => {
             run_server(ServerOptions {
                 config,
@@ -948,6 +965,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 web_dist_dir,
                 is_web_focused: false,
                 open_browser: false,
+                debug,
             })
             .await?;
         }
@@ -960,6 +978,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             web_dist_dir,
             no_open,
             open: _,
+            debug,
         } => {
             run_server(ServerOptions {
                 config,
@@ -972,6 +991,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 web_dist_dir,
                 is_web_focused: true,
                 open_browser: !no_open,
+                debug,
             })
             .await?;
         }

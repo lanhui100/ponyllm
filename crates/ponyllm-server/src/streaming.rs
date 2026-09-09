@@ -602,6 +602,12 @@ where
     let response_id_stream = response_id.clone();
     let model_stream = model.clone();
 
+    tracing::debug!(
+        model = %model,
+        response_id = %response_id,
+        "Initiating Antigravity SSE to OpenAI stream"
+    );
+
     let translated = sse_event_stream(stream).flat_map(move |res| {
         let mut out: Vec<Result<Bytes, E>> = Vec::new();
         match res {
@@ -612,6 +618,12 @@ where
                 } else if let Ok(val) = serde_json::from_str::<serde_json::Value>(data) {
                     if let Some(chunk) = antigravity_chunk_to_chat_chunk(&val, &model_stream, &response_id_stream) {
                         if chunk.choices.iter().any(|ch| ch.finish_reason.is_some()) {
+                            tracing::debug!(
+                                model = %model_stream,
+                                response_id = %response_id_stream,
+                                finish_reason = ?chunk.choices.first().and_then(|c| c.finish_reason.as_ref()),
+                                "Antigravity SSE stream choice completed"
+                            );
                             stopped_flag.store(true, std::sync::atomic::Ordering::SeqCst);
                         }
                         if let Ok(json) = serde_json::to_string(&chunk) {
@@ -621,6 +633,7 @@ where
                 }
             }
             Err(e) => {
+                tracing::warn!("Antigravity SSE to OpenAI stream transport error encountered");
                 stopped_flag.store(true, std::sync::atomic::Ordering::SeqCst);
                 out.push(Err(e));
             }
@@ -636,13 +649,13 @@ where
             let mut buf = Vec::new();
             if !stopped.load(std::sync::atomic::Ordering::SeqCst) {
                 let final_chunk = ChatCompletionChunk {
-                    id: response_id,
+                    id: response_id.clone(),
                     object: "chat.completion.chunk".to_string(),
                     created: std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default()
                         .as_secs(),
-                    model,
+                    model: model.clone(),
                     choices: vec![ponyllm_protocol::openai::chat::ChatChunkChoice {
                         index: 0,
                         delta: ponyllm_protocol::openai::chat::ChatChunkDelta::default(),
@@ -657,6 +670,11 @@ where
                     buf.extend_from_slice(format!("data: {}\n\n", json).as_bytes());
                 }
             }
+            tracing::debug!(
+                response_id = %response_id,
+                model = %model,
+                "Antigravity SSE to OpenAI stream finalized with [DONE]"
+            );
             buf.extend_from_slice(b"data: [DONE]\n\n");
             Ok::<_, E>(Bytes::from(buf))
         }))
@@ -681,6 +699,14 @@ where
     let stopped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let stopped_flag = stopped.clone();
 
+    let response_id_stream = response_id.clone();
+
+    tracing::debug!(
+        model = %model,
+        response_id = %response_id,
+        "Initiating Antigravity SSE to Anthropic stream"
+    );
+
     let translated = sse_event_stream(stream).flat_map(move |res| {
         let mut out: Vec<Result<Bytes, E>> = Vec::new();
         match res {
@@ -689,10 +715,15 @@ where
                 if data.is_empty() || data == "[DONE]" {
                     // terminal / heartbeat frame: nothing to forward
                 } else if let Ok(val) = serde_json::from_str::<serde_json::Value>(data) {
-                    if let Some(chunk) = antigravity_chunk_to_chat_chunk(&val, &model, &response_id) {
+                    if let Some(chunk) = antigravity_chunk_to_chat_chunk(&val, &model, &response_id_stream) {
                         if let Ok(events) = fsm_flat.lock().process_chunk(chunk) {
                             for e in events {
                                 if matches!(e, MessageStreamEvent::MessageStop) {
+                                    tracing::debug!(
+                                        model = %model,
+                                        response_id = %response_id_stream,
+                                        "Antigravity SSE to Anthropic stream reached MessageStop"
+                                    );
                                     stopped_flag.store(true, std::sync::atomic::Ordering::SeqCst);
                                 }
                                 if let Some(b) = anthropic_event_to_sse_bytes(&e) {
@@ -704,6 +735,7 @@ where
                 }
             }
             Err(e) => {
+                tracing::warn!("Antigravity SSE to Anthropic stream transport error encountered");
                 stopped_flag.store(true, std::sync::atomic::Ordering::SeqCst);
                 out.push(Err(e));
             }
@@ -715,6 +747,8 @@ where
 
     // At stream end, guarantee the Anthropic conversation terminates unless a
     // transport error already ended it with failure.
+    let term_response_id = response_id.clone();
+    let term_model = fallback_model.to_string();
     translated
         .chain(futures_util::stream::once(async move {
             let synthetic = if !stopped.load(std::sync::atomic::Ordering::SeqCst) {
@@ -733,6 +767,11 @@ where
             } else {
                 Bytes::new()
             };
+            tracing::debug!(
+                response_id = %term_response_id,
+                model = %term_model,
+                "Antigravity SSE to Anthropic stream finalized"
+            );
             Ok::<_, E>(synthetic)
         }))
         .boxed()
@@ -765,6 +804,10 @@ where
         "totalTokenCount": 0
     });
     let mut has_data = false;
+    let mut frame_count: u32 = 0;
+    let mut total_thought_bytes: usize = 0;
+    let mut total_text_bytes: usize = 0;
+    let mut function_call_count: usize = 0;
 
     loop {
         let chunk_res = match tokio::time::timeout(chunk_timeout, sse_stream.next()).await {
@@ -782,17 +825,31 @@ where
                 if let Ok(val) = serde_json::from_str::<serde_json::Value>(data) {
                     if let Some(err_obj) = val.get("error").or_else(|| val.get("response").and_then(|r| r.get("error"))) {
                         let msg = err_obj.get("message").and_then(|m| m.as_str()).unwrap_or("Antigravity upstream error frame");
+                        tracing::error!(frame = frame_count + 1, error = %msg, "Antigravity upstream returned error frame");
                         return Err(format!("Antigravity stream error frame: {}", msg));
                     }
                     has_data = true;
+                    frame_count += 1;
                     let target = val.get("response").unwrap_or(&val);
                     if let Some(candidates) = target.get("candidates").and_then(|v| v.as_array()) {
                         if let Some(cand) = candidates.first() {
                             if let Some(fr) = cand.get("finishReason").and_then(|f| f.as_str()) {
                                 finish_reason = Some(fr.to_string());
+                                tracing::debug!(frame = frame_count, finish_reason = %fr, "Antigravity SSE frame carries finishReason");
                             }
                             if let Some(parts) = cand.get("content").and_then(|c| c.get("parts")).and_then(|p| p.as_array()) {
                                 for part in parts {
+                                    let is_thought = part.get("thought").and_then(|t| t.as_bool()).unwrap_or(false);
+                                    if let Some(txt) = part.get("text").and_then(|t| t.as_str()) {
+                                        if is_thought {
+                                            total_thought_bytes += txt.len();
+                                        } else {
+                                            total_text_bytes += txt.len();
+                                        }
+                                    }
+                                    if part.get("functionCall").is_some() {
+                                        function_call_count += 1;
+                                    }
                                     if let (Some(last), Some(new_text)) = (collected_parts.last_mut(), part.get("text").and_then(|t| t.as_str())) {
                                         let last_thought = last.get("thought").and_then(|t| t.as_bool()).unwrap_or(false);
                                         let new_thought = part.get("thought").and_then(|t| t.as_bool()).unwrap_or(false);
@@ -813,6 +870,11 @@ where
                     if let Some(usage) = target.get("usageMetadata") {
                         usage_metadata = usage.clone();
                     }
+                    tracing::trace!(
+                        frame = frame_count,
+                        parts_in_frame = target.get("candidates").and_then(|c| c.as_array()).and_then(|c| c.first()).and_then(|f| f.get("content")).and_then(|c| c.get("parts")).and_then(|p| p.as_array()).map(|p| p.len()).unwrap_or(0),
+                        "Processed Antigravity SSE frame"
+                    );
                 }
             }
             Err(e) => {
@@ -825,13 +887,37 @@ where
         return Err("No data collected from Antigravity SSE stream".to_string());
     }
 
+    let final_finish_reason = finish_reason.unwrap_or_else(|| "STOP".to_string());
+
+    if total_text_bytes == 0 && function_call_count == 0 {
+        tracing::warn!(
+            total_frames = frame_count,
+            total_thought_bytes,
+            total_text_bytes = 0,
+            function_call_count,
+            finish_reason = %final_finish_reason,
+            usage = ?usage_metadata,
+            "Antigravity SSE stream completed with ZERO content bytes! (Model produced only thoughts or hit max_tokens/safety stop)"
+        );
+    } else {
+        tracing::debug!(
+            total_frames = frame_count,
+            total_thought_bytes,
+            total_text_bytes,
+            function_call_count,
+            finish_reason = %final_finish_reason,
+            usage = ?usage_metadata,
+            "Antigravity SSE stream collection finished successfully"
+        );
+    }
+
     Ok(serde_json::json!({
         "candidates": [{
             "content": {
                 "role": "model",
                 "parts": collected_parts
             },
-            "finishReason": finish_reason.unwrap_or_else(|| "STOP".to_string())
+            "finishReason": final_finish_reason
         }],
         "usageMetadata": usage_metadata
     }))
@@ -1655,5 +1741,47 @@ mod tests {
             err_msg
         );
     }
+
+    #[tokio::test]
+    async fn test_collect_antigravity_sse_only_thought_zero_text_content() {
+        let chunk1 = format!(
+            "data: {}\n\n",
+            serde_json::json!({
+                "response": {
+                    "candidates": [{
+                        "content": {
+                            "role": "model",
+                            "parts": [{"thought": true, "text": "Thinking process only..."}]
+                        },
+                        "finishReason": "MAX_TOKENS"
+                    }],
+                    "usageMetadata": {
+                        "promptTokenCount": 10,
+                        "candidatesTokenCount": 2048,
+                        "totalTokenCount": 2058
+                    }
+                }
+            })
+        );
+        let done = "data: [DONE]\n\n";
+
+        let s = bytes_stream(vec![
+            Bytes::from(chunk1),
+            Bytes::from_static(done.as_bytes()),
+        ]);
+
+        let json_val = collect_antigravity_sse_to_json(s).await.expect("collect should succeed");
+        assert_eq!(
+            json_val["candidates"][0]["content"]["parts"][0]["text"],
+            "Thinking process only..."
+        );
+        assert_eq!(
+            json_val["candidates"][0]["content"]["parts"][0]["thought"],
+            true
+        );
+        assert_eq!(json_val["candidates"][0]["finishReason"], "MAX_TOKENS");
+        assert_eq!(json_val["usageMetadata"]["candidatesTokenCount"], 2048);
+    }
 }
+
 

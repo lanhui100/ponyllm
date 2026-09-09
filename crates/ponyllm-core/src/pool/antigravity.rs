@@ -205,6 +205,7 @@ impl AntigravityTokenManager {
             let snapshot = self.cred.read().clone();
             if !Self::credential_needs_refresh(&snapshot) {
                 if let Some(token) = snapshot.access_token {
+                    tracing::trace!(key_id = %self.key_id, "Antigravity OAuth access token cache hit");
                     return Ok(token);
                 }
             }
@@ -334,6 +335,11 @@ impl AntigravityTokenManager {
         let body_text = resp.text().await.unwrap_or_default();
 
         if !status.is_success() {
+            tracing::warn!(
+                key_id = %self.key_id,
+                status = %status,
+                "Antigravity OAuth refresh returned non-success status"
+            );
             // `invalid_grant` is the only definitive credential-death
             // signal: the stored refresh_token is burned and will never
             // recover. Everything else (network blips, 5xx, rate limits)
@@ -366,6 +372,12 @@ impl AntigravityTokenManager {
             .unwrap_or(3600);
 
         let new_expiry = Utc::now() + chrono::Duration::seconds(expires_in_sec as i64);
+
+        tracing::info!(
+            key_id = %self.key_id,
+            expires_in_sec,
+            "Antigravity OAuth token refreshed successfully"
+        );
 
         let maybe_rotated = json_val.get("refresh_token").and_then(|v| v.as_str()).map(|s| s.trim().to_string());
 

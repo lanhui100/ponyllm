@@ -420,12 +420,25 @@ pub async fn handle_chat_completions(
             }
         } else {
             let upstream_result = if target.upstream_protocol == ponyllm_core::pool::UpstreamProtocol::Antigravity {
+                tracing::debug!(
+                    provider = %target.provider_name,
+                    target_url = %target_url,
+                    physical_model = %target.physical_model,
+                    "Dispatching non-stream Antigravity request via stream collector"
+                );
                 match executor.execute_stream_request(&target_url, &req_val).await {
                     Ok(resp) => {
                         let raw_stream = resp.bytes_stream();
                         match collect_antigravity_sse_to_json(raw_stream).await {
                             Ok(v) => Ok(v),
-                            Err(e) => Err(CoreError::Internal(format!("Antigravity stream collect failed: {}", e))),
+                            Err(e) => {
+                                tracing::warn!(
+                                    provider = %target.provider_name,
+                                    error = %e,
+                                    "Antigravity stream collection failed"
+                                );
+                                Err(CoreError::Internal(format!("Antigravity stream collect failed: {}", e)))
+                            }
                         }
                     }
                     Err(e) => Err(e),

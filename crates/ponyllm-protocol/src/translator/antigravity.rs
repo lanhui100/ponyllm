@@ -218,12 +218,23 @@ pub fn chat_to_antigravity_request(
 
     let envelope = json!({
         "project": project_id,
-        "requestId": request_id,
+        "requestId": request_id.clone(),
         "request": inner_request,
         "model": model,
         "userAgent": "antigravity",
         "requestType": "agent"
     });
+
+    tracing::debug!(
+        target_model = %model,
+        request_id = %request_id,
+        session_id = %session_id,
+        messages_count = req.messages.len(),
+        has_system = !system_instruction_parts.is_empty(),
+        max_output_tokens = ?envelope["request"]["generationConfig"].get("maxOutputTokens"),
+        thinking_config = ?envelope["request"]["generationConfig"].get("thinkingConfig"),
+        "Constructed Antigravity chat request envelope"
+    );
 
     Ok(envelope)
 }
@@ -313,12 +324,23 @@ pub fn messages_to_antigravity_request(
 
     let envelope = json!({
         "project": project_id,
-        "requestId": request_id,
+        "requestId": request_id.clone(),
         "request": inner_request,
         "model": model,
         "userAgent": "antigravity",
         "requestType": "agent"
     });
+
+    tracing::debug!(
+        target_model = %model,
+        request_id = %request_id,
+        session_id = %session_id,
+        messages_count = req.messages.len(),
+        has_system = !system_instruction_parts.is_empty(),
+        max_output_tokens = ?envelope["request"]["generationConfig"].get("maxOutputTokens"),
+        thinking_config = ?envelope["request"]["generationConfig"].get("thinkingConfig"),
+        "Constructed Antigravity messages request envelope"
+    );
 
     Ok(envelope)
 }
@@ -383,6 +405,27 @@ pub fn antigravity_to_chat_response(
     });
     if !reasoning_text.is_empty() {
         message["reasoning_content"] = json!(reasoning_text);
+    }
+
+    if message["content"].as_str().map(|s| s.is_empty()).unwrap_or(true) {
+        tracing::warn!(
+            target_model = %model,
+            finish_reason = %finish_reason,
+            thought_len = reasoning_text.len(),
+            prompt_tokens,
+            completion_tokens,
+            "Antigravity non-stream response converted with empty text content (potential token limit exhaustion or unhandled tool_call)"
+        );
+    } else {
+        tracing::debug!(
+            target_model = %model,
+            finish_reason = %finish_reason,
+            thought_len = reasoning_text.len(),
+            content_len = full_text.len(),
+            prompt_tokens,
+            completion_tokens,
+            "Antigravity non-stream response successfully converted to ChatCompletion"
+        );
     }
 
     json!({
@@ -459,6 +502,27 @@ pub fn antigravity_to_messages_response(
         "type": "text",
         "text": full_text
     }));
+
+    if full_text.is_empty() {
+        tracing::warn!(
+            target_model = %model,
+            stop_reason = %stop_reason,
+            thought_len = reasoning_text.len(),
+            input_tokens = prompt_tokens,
+            output_tokens = completion_tokens,
+            "Antigravity non-stream response converted with empty text content for Anthropic messages (potential token limit exhaustion or unhandled tool_call)"
+        );
+    } else {
+        tracing::debug!(
+            target_model = %model,
+            stop_reason = %stop_reason,
+            thought_len = reasoning_text.len(),
+            content_len = full_text.len(),
+            input_tokens = prompt_tokens,
+            output_tokens = completion_tokens,
+            "Antigravity non-stream response successfully converted to Anthropic Message"
+        );
+    }
 
     json!({
         "id": format!("msg_{}", Uuid::new_v4().simple()),
