@@ -30,7 +30,7 @@ export const PUBLIC_GATEWAY_PROBE_URL = 'https://tokens.ponyjob.top/health';
 export function useTelemetry(options: UseTelemetryOptions = {}) {
   const {
     autoStart = true,
-    pollingInterval = 1500,
+    pollingInterval = 5000,
     sseEndpoint = '/v1/telemetry/stream',
     baseUrl = '',
   } = options;
@@ -178,7 +178,7 @@ export function useTelemetry(options: UseTelemetryOptions = {}) {
           latency_ms: rtt,
           status: rtt < 300 ? 'ok' : rtt < 1000 ? 'degraded' : 'down',
         });
-        if (gatewaySlots.value.length > 40) gatewaySlots.value.shift();
+        if (gatewaySlots.value.length > 24) gatewaySlots.value.shift();
       } else if (isHealthy) {
         health.value = 'ok';
         isDown.value = false;
@@ -188,7 +188,7 @@ export function useTelemetry(options: UseTelemetryOptions = {}) {
           latency_ms: rtt,
           status: rtt < 300 ? 'ok' : rtt < 1000 ? 'degraded' : 'down',
         });
-        if (gatewaySlots.value.length > 40) gatewaySlots.value.shift();
+        if (gatewaySlots.value.length > 24) gatewaySlots.value.shift();
       } else {
         health.value = 'down';
         isDown.value = true;
@@ -198,7 +198,7 @@ export function useTelemetry(options: UseTelemetryOptions = {}) {
           latency_ms: undefined,
           status: 'down',
         });
-        if (gatewaySlots.value.length > 40) gatewaySlots.value.shift();
+        if (gatewaySlots.value.length > 24) gatewaySlots.value.shift();
         return;
       }
 
