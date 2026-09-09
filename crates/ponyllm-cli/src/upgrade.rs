@@ -224,48 +224,97 @@ pub fn perform_self_replacement(new_binary_path: &Path) -> Result<PathBuf, Strin
     Ok(canonical_exe)
 }
 
-/// Download release asset with multi-mirror fallback and retries
+/// Download release asset with multi-mirror fallback and retries.
+/// API 查询用短超时，下载用独立长超时：慢链路（实测约 20KB/s，6.5MB 需 5 分钟以上）
+/// 下 30s client 必超时。分块流式读取并按 MB 打印进度；聚合每次尝试的错误，
+/// 避免单次失败掩盖主因。
+pub const API_TIMEOUT_SECS: u64 = 30;
+pub const DOWNLOAD_TIMEOUT_SECS: u64 = 600;
+
+/// 按优先级构造候选下载地址：主源优先，镜像仅作其它网络下的 fallback。
+pub fn build_candidate_urls(primary_url: &str) -> Vec<String> {
+    vec![
+        primary_url.to_string(),
+        format!("https://ghfast.top/{}", primary_url),
+        format!("https://ghproxy.net/{}", primary_url),
+    ]
+}
+
+pub fn build_download_client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(DOWNLOAD_TIMEOUT_SECS))
+        .build()
+        .map_err(|e| format!("Failed to build download client: {e}"))
+}
+
 async fn download_asset_with_retry(
     client: &reqwest::Client,
     primary_url: &str,
     user_agent: &str,
 ) -> Result<Vec<u8>, String> {
-    let candidate_urls = [
-        primary_url.to_string(),
-        format!("https://ghfast.top/{}", primary_url),
-        format!("https://ghproxy.net/{}", primary_url),
-    ];
+    let candidate_urls = build_candidate_urls(primary_url);
 
-    let mut last_err = String::new();
+    let mut attempt_errors: Vec<String> = Vec::new();
 
     for (attempt, url) in candidate_urls.iter().enumerate() {
         if attempt > 0 {
             println!("--> [备选加速通道] 正在尝试备用下载源 #{}: {}", attempt, url);
         }
-        match client
-            .get(url)
-            .header("User-Agent", user_agent)
-            .send()
-            .await
-        {
-            Ok(resp) if resp.status().is_success() => {
-                match resp.bytes().await {
-                    Ok(b) if !b.is_empty() => return Ok(b.to_vec()),
-                    Ok(_) => last_err = "下载到空数据包".to_string(),
-                    Err(e) => last_err = format!("读取数据流失败: {e}"),
+        let result: Result<Vec<u8>, String> = async {
+            let resp = client
+                .get(url)
+                .header("User-Agent", user_agent)
+                .send()
+                .await
+                .map_err(|e| format!("网络连接错误: {e}"))?;
+            if !resp.status().is_success() {
+                return Err(format!("HTTP 状态异常: {}", resp.status()));
+            }
+            let total = resp.content_length().unwrap_or(0);
+            if total > 0 {
+                println!("--> 资产大小: {:.2} MB，开始流式下载...", total as f64 / 1_048_576.0);
+            }
+            let mut buf = Vec::with_capacity(total.min(64 * 1024 * 1024) as usize);
+            let mut stream = resp.bytes_stream();
+            use futures_util::StreamExt;
+            let mut next_mark = 1u64 * 1024 * 1024;
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk.map_err(|e| format!("读取数据流失败: {e}"))?;
+                buf.extend_from_slice(&chunk);
+                if (buf.len() as u64) >= next_mark {
+                    if total > 0 {
+                        println!(
+                            "--> 已下载 {:.2}/{:.2} MB",
+                            buf.len() as f64 / 1_048_576.0,
+                            total as f64 / 1_048_576.0
+                        );
+                    } else {
+                        println!("--> 已下载 {:.2} MB...", buf.len() as f64 / 1_048_576.0);
+                    }
+                    next_mark += 1u64 * 1024 * 1024;
                 }
             }
-            Ok(resp) => {
-                last_err = format!("HTTP 状态异常: {}", resp.status());
+            if buf.is_empty() {
+                return Err("下载到空数据包".to_string());
             }
+            Ok(buf)
+        }
+        .await;
+
+        match result {
+            Ok(b) => return Ok(b),
             Err(e) => {
-                last_err = format!("网络连接错误: {e}");
+                eprintln!("--> 下载源 #{} 失败: {}", attempt, e);
+                attempt_errors.push(format!("[{}] {}", url, e));
             }
         }
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
 
-    Err(format!("下载资产失败（已尝试主源及备用加速镜像）: {last_err}"))
+    Err(format!(
+        "下载资产失败（已尝试主源及备用加速镜像）：\n  {}",
+        attempt_errors.join("\n  ")
+    ))
 }
 
 /// Orchestrate the entire upgrade workflow
@@ -286,7 +335,7 @@ pub async fn run_upgrade(
     println!("========================================================");
 
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
+        .timeout(std::time::Duration::from_secs(API_TIMEOUT_SECS))
         .build()?;
 
     println!("--> 正在查询 GitHub Releases 最新版本信息...");
@@ -340,7 +389,10 @@ pub async fn run_upgrade(
 
     println!("--> 正在流式下载资产包...");
     let user_agent = format!("ponyllm/{}", current_version);
-    let archive_bytes = download_asset_with_retry(&client, &matching_asset.browser_download_url, &user_agent).await?;
+    let download_client =
+        build_download_client().map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+    let archive_bytes =
+        download_asset_with_retry(&download_client, &matching_asset.browser_download_url, &user_agent).await?;
     println!("--> 下载完成 ({} 字节)，正在解压校验...", archive_bytes.len());
 
     let temp_dir = tempfile::tempdir()?;

@@ -466,6 +466,25 @@ fn test_upgrade_zip_and_targz_extraction() {
 }
 
 #[test]
+fn test_upgrade_candidate_urls_primary_first_and_download_timeout() {
+    use ponyllm_cli::upgrade::{
+        build_candidate_urls, build_download_client, API_TIMEOUT_SECS, DOWNLOAD_TIMEOUT_SECS,
+    };
+
+    let primary = "https://github.com/lanhui100/ponyllm/releases/download/v0.2.40/ponyllm-linux-x86_64.tar.gz";
+    let urls = build_candidate_urls(primary);
+    assert_eq!(urls.len(), 3);
+    assert_eq!(urls[0], primary);
+    assert!(urls[1].ends_with(primary));
+    assert!(urls[2].ends_with(primary));
+
+    // 下载超时必须显著大于 API 超时，否则慢链路必失败（回归 2026-09-09 升级失败）
+    assert!(DOWNLOAD_TIMEOUT_SECS >= 10 * API_TIMEOUT_SECS);
+    // 下载 client 可正常构建
+    let _client = build_download_client().unwrap();
+}
+
+#[test]
 fn test_secure_api_key_generation_and_cli_auth_commands() {
     use ponyllm_cli::config::generate_secure_api_key;
 
