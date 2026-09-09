@@ -22,8 +22,8 @@ async fn auth_middleware(
     next: Next,
 ) -> Response {
     let path = req.uri().path();
-    // /health endpoint is exempt from authentication
-    if path == "/health" {
+    // /health and /oauth2callback endpoints are exempt from authentication
+    if path == "/health" || path == "/oauth2callback" {
         return next.run(req).await;
     }
 
@@ -89,6 +89,7 @@ pub fn create_app(state: Arc<AppState>) -> Router {
     // API routes: guarded by auth_middleware (Bearer / x-api-key, /health exempt).
     let api = Router::new()
         .route("/health", get(handle_health))
+        .route("/oauth2callback", get(crate::routes::handle_oauth2_callback))
         .route("/models", get(handle_list_models))
         .route("/models/{model_id}", get(handle_get_model))
         .route("/v1/models", get(handle_list_models))

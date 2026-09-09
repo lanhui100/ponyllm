@@ -12,4 +12,4 @@ pub use messages::*;
 pub use responses::*;
 pub use telemetry::*;
 pub use models::*;
-pub use admin::{admin_routes, openapi_json};
+pub use admin::{admin_routes, handle_oauth2_callback, openapi_json};

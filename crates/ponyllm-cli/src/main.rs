@@ -215,6 +215,7 @@ async fn run_server(opts: ServerOptions) -> Result<(), Box<dyn std::error::Error
     for (p_name, pool) in pools {
         state.register_pool(&p_name, pool);
     }
+    state.attach_antigravity_rotation_hooks_all();
 
     // Spawn background config watcher for zero-downtime hot reload
     let watcher_path = resolved_config.clone();

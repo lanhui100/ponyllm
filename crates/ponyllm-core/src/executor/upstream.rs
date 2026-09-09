@@ -302,11 +302,11 @@ pub fn create_upstream_http_client() -> reqwest::Client {
     create_upstream_http_client_with_options(None, false)
 }
 
-/// Create an upstream HTTP client with optional explicit proxy URL and system proxy inheritance flag.
-pub fn create_upstream_http_client_with_options(
+/// Create an upstream HTTP client with optional explicit proxy URL and system proxy inheritance flag (returns Result).
+pub fn try_create_upstream_http_client_with_options(
     proxy_url: Option<&str>,
     use_system_proxy: bool,
-) -> reqwest::Client {
+) -> std::result::Result<reqwest::Client, String> {
     let mut builder = reqwest::Client::builder()
         .timeout(Duration::from_secs(120))
         .connect_timeout(Duration::from_secs(10))
@@ -322,18 +322,27 @@ pub fn create_upstream_http_client_with_options(
     if let Some(proxy_str) = proxy_url {
         let trimmed = proxy_str.trim();
         if !trimmed.is_empty() {
-            match reqwest::Proxy::all(trimmed) {
-                Ok(proxy) => {
-                    builder = builder.proxy(proxy);
-                }
-                Err(e) => {
-                    tracing::warn!(proxy = trimmed, error = %e, "Failed to parse upstream proxy URL, skipping");
-                }
-            }
+            let proxy = reqwest::Proxy::all(trimmed)
+                .map_err(|e| format!("无法解析代理地址 '{}': {}", trimmed, e))?;
+            let proxy = proxy.no_proxy(reqwest::NoProxy::from_string("localhost,127.0.0.1"));
+            builder = builder.proxy(proxy);
         }
     }
 
-    builder.build().unwrap_or_default()
+    builder.build().map_err(|e| format!("构建 HTTP Client 失败: {}", e))
+}
+
+pub fn create_upstream_http_client_with_options(
+    proxy_url: Option<&str>,
+    use_system_proxy: bool,
+) -> reqwest::Client {
+    match try_create_upstream_http_client_with_options(proxy_url, use_system_proxy) {
+        Ok(client) => client,
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to create configured proxy client, falling back to default");
+            reqwest::Client::builder().build().unwrap_or_default()
+        }
+    }
 }
 
 /// Detects system proxy settings dynamically without hardcoding ports.
@@ -341,7 +350,7 @@ pub fn create_upstream_http_client_with_options(
 /// Priority order:
 /// 1. Environment variables (`HTTPS_PROXY`, `https_proxy`, `HTTP_PROXY`, `http_proxy`, `ALL_PROXY`, `all_proxy`)
 /// 2. User proxy environment file (`~/.pony/proxy.env`)
-/// 3. Local active proxy ports probe (`127.0.0.1` on common ports: 8899, 7890, 10808, 10809, 8080)
+/// 3. Local active proxy ports probe (`127.0.0.1` on common ports: 8899, 7890, 10808, 10809, 7897, 1080)
 pub fn detect_system_proxy() -> Option<String> {
     // 1. Environment variables
     for key in [
@@ -392,7 +401,8 @@ pub fn detect_system_proxy() -> Option<String> {
     }
 
     // 3. Probing common local proxy ports with fast timeout (30ms)
-    const COMMON_LOCAL_PORTS: &[u16] = &[8899, 7890, 10808, 10809, 8080];
+    // Exclude 8080 (PonyLLM's default gateway port) to prevent self-looping
+    const COMMON_LOCAL_PORTS: &[u16] = &[8899, 7890, 10808, 10809, 7897, 1080];
     for &port in COMMON_LOCAL_PORTS {
         let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
         if std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(30)).is_ok() {
@@ -402,6 +412,7 @@ pub fn detect_system_proxy() -> Option<String> {
 
     None
 }
+
 
 fn normalize_proxy_url(url: &str) -> String {
     let trimmed = url.trim();

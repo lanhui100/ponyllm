@@ -28,6 +28,7 @@ pub const DEFAULT_ANTIGRAVITY_CLIENT_SECRET: &str = match std::str::from_utf8(&[
     Err(_) => unreachable!(),
 };
 pub const ANTIGRAVITY_USER_AGENT: &str = "antigravity/cli/1.1.24 windows/amd64";
+pub const ANTIGRAVITY_GOOG_API_CLIENT: &str = "gl-node/22.14.0 gdcl/1.1.24";
 
 pub const DEFAULT_ANTIGRAVITY_OAUTH_SCOPES: &[&str] = &[
     "https://www.googleapis.com/auth/cloud-platform",
@@ -409,8 +410,10 @@ impl AntigravityTokenManager {
             .client
             .post(&url)
             .header(reqwest::header::USER_AGENT, ANTIGRAVITY_USER_AGENT)
+            .header("x-goog-api-client", ANTIGRAVITY_GOOG_API_CLIENT)
             .header(reqwest::header::AUTHORIZATION, format!("Bearer {}", access_token))
             .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .header(reqwest::header::ACCEPT, "application/json")
             .header("requestType", "agent")
             .json(&serde_json::json!({}))
             .timeout(Duration::from_secs(15));
@@ -535,37 +538,96 @@ pub fn build_authorization_url(redirect_uri: &str, state: &str) -> String {
     )
 }
 
-/// Parse OAuth authorization code from either a full redirected URL
-/// (e.g. `http://localhost:51121/oauth2callback?code=4/0A...&scope=...`)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ParsedOAuthCallback {
+    Code {
+        code: String,
+        state: Option<String>,
+        redirect_uri: Option<String>,
+    },
+    Error {
+        error: String,
+        description: Option<String>,
+    },
+}
+
+fn extract_query_param(query_or_url: &str, key: &str) -> Option<String> {
+    let key_pattern = format!("{}=", key);
+    let pos = query_or_url.find(&key_pattern)?;
+    let after = &query_or_url[pos + key_pattern.len()..];
+    let end = after
+        .find(|c: char| c == '&' || c == '#' || c.is_whitespace())
+        .unwrap_or(after.len());
+    let raw = &after[..end];
+    let decoded = url_decode_component(raw).trim().to_string();
+    if decoded.is_empty() {
+        None
+    } else {
+        Some(decoded)
+    }
+}
+
+/// Parse OAuth authorization callback from either a full redirected URL
+/// (e.g. `http://localhost:8080/oauth2callback?code=4/0A...&state=...`)
 /// or a raw/trimmed code string pasted into the terminal.
-pub fn parse_code_from_input(input: &str) -> Option<String> {
+pub fn parse_oauth_callback_input(input: &str) -> Option<ParsedOAuthCallback> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
         return None;
     }
 
-    // Check if input contains `code=`
-    if let Some(pos) = trimmed.find("code=") {
-        let after_code = &trimmed[pos + 5..];
-        let end = after_code
-            .find(|c: char| c == '&' || c == '#' || c.is_whitespace())
-            .unwrap_or(after_code.len());
-        let raw_code = &after_code[..end];
-        let decoded = url_decode_component(raw_code).trim().to_string();
-        if !decoded.is_empty() {
-            return Some(decoded);
-        }
+    // Check if error parameter exists
+    if let Some(err) = extract_query_param(trimmed, "error") {
+        let description = extract_query_param(trimmed, "error_description");
+        return Some(ParsedOAuthCallback::Error {
+            error: err,
+            description,
+        });
     }
 
-    // If no `code=` parameter and not a full URL with query/fragment, treat as raw code
+    // Check if code parameter exists
+    if let Some(code) = extract_query_param(trimmed, "code") {
+        let state = extract_query_param(trimmed, "state");
+        let redirect_uri = if trimmed.contains("://") {
+            trimmed
+                .split('#')
+                .next()
+                .and_then(|s| s.split('?').next())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        } else {
+            None
+        };
+        return Some(ParsedOAuthCallback::Code {
+            code,
+            state,
+            redirect_uri,
+        });
+    }
+
+    // If no `code=` or `error=` parameter and not a full URL with query/fragment, treat as raw code
     if !trimmed.contains("://") && !trimmed.contains('?') && !trimmed.contains('&') {
-        let decoded = url_decode_component(trimmed);
+        let decoded = url_decode_component(trimmed).trim().to_string();
         if !decoded.is_empty() {
-            return Some(decoded);
+            return Some(ParsedOAuthCallback::Code {
+                code: decoded,
+                state: None,
+                redirect_uri: None,
+            });
         }
     }
 
     None
+}
+
+/// Parse OAuth authorization code from either a full redirected URL
+/// (e.g. `http://localhost:51121/oauth2callback?code=4/0A...&scope=...`)
+/// or a raw/trimmed code string pasted into the terminal.
+pub fn parse_code_from_input(input: &str) -> Option<String> {
+    match parse_oauth_callback_input(input) {
+        Some(ParsedOAuthCallback::Code { code, .. }) => Some(code),
+        _ => None,
+    }
 }
 
 fn base64url_decode(input: &str) -> Option<Vec<u8>> {
@@ -641,6 +703,8 @@ pub async fn exchange_code_for_credential_custom(
     let resp = client
         .post(token_url)
         .header(reqwest::header::USER_AGENT, ANTIGRAVITY_USER_AGENT)
+        .header("x-goog-api-client", ANTIGRAVITY_GOOG_API_CLIENT)
+        .header(reqwest::header::ACCEPT, "application/json")
         .form(&form)
         .send()
         .await
@@ -831,6 +895,48 @@ mod tests {
         assert!(url.contains("state=nonce-state-123"));
         assert!(url.contains("response_type=code"));
         assert!(url.contains("http%3A%2F%2Flocalhost%3A51121%2Foauth2callback"));
+    }
+
+    #[test]
+    fn test_parse_oauth_callback_input() {
+        // 1. Full URL with code, state, and redirect_uri extraction
+        let input1 = "http://localhost:8080/oauth2callback?code=4%2F0AY0e-dummy_code&state=nonce-123&scope=email";
+        let parsed1 = parse_oauth_callback_input(input1);
+        assert_eq!(
+            parsed1,
+            Some(ParsedOAuthCallback::Code {
+                code: "4/0AY0e-dummy_code".to_string(),
+                state: Some("nonce-123".to_string()),
+                redirect_uri: Some("http://localhost:8080/oauth2callback".to_string()),
+            })
+        );
+
+        // 2. Google error callback
+        let input2 = "http://localhost:51121/oauth2callback?error=access_denied&error_description=User+declined+authorization&state=xyz";
+        let parsed2 = parse_oauth_callback_input(input2);
+        assert_eq!(
+            parsed2,
+            Some(ParsedOAuthCallback::Error {
+                error: "access_denied".to_string(),
+                description: Some("User declined authorization".to_string()),
+            })
+        );
+
+        // 3. Raw code string pasted
+        let input3 = "   4/0AY0e-raw_code   ";
+        let parsed3 = parse_oauth_callback_input(input3);
+        assert_eq!(
+            parsed3,
+            Some(ParsedOAuthCallback::Code {
+                code: "4/0AY0e-raw_code".to_string(),
+                state: None,
+                redirect_uri: None,
+            })
+        );
+
+        // 4. Empty or whitespace
+        assert_eq!(parse_oauth_callback_input(""), None);
+        assert_eq!(parse_oauth_callback_input("   "), None);
     }
 
     #[test]

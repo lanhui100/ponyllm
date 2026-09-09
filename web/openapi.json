@@ -241,6 +241,107 @@
         }
       }
     },
+    "/api/admin/oauth/antigravity/auth-url": {
+      "get": {
+        "tags": [],
+        "operationId": "handle_admin_antigravity_auth_url",
+        "parameters": [
+          {
+            "name": "redirect_uri",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "state",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AntigravityAuthUrlView"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/oauth/antigravity/authorize": {
+      "post": {
+        "tags": [],
+        "operationId": "handle_admin_authorize_antigravity",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AuthorizeAntigravityPayload"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthorizeAntigravityResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/oauth/antigravity/pending": {
+      "get": {
+        "tags": [],
+        "operationId": "handle_admin_antigravity_pending",
+        "parameters": [
+          {
+            "name": "state",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AntigravityPendingView"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "OAuth state not found or expired"
+          }
+        }
+      }
+    },
     "/api/admin/overview": {
       "get": {
         "tags": [],
@@ -399,6 +500,24 @@
         }
       }
     },
+    "/api/admin/proxy/status": {
+      "get": {
+        "tags": [],
+        "operationId": "handle_admin_proxy_status",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProxyStatusView"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/admin/service/status": {
       "get": {
         "tags": [],
@@ -464,6 +583,52 @@
   },
   "components": {
     "schemas": {
+      "AntigravityAuthUrlView": {
+        "type": "object",
+        "required": [
+          "auth_url",
+          "redirect_uri",
+          "state"
+        ],
+        "properties": {
+          "auth_url": {
+            "type": "string"
+          },
+          "redirect_uri": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string"
+          }
+        }
+      },
+      "AntigravityPendingView": {
+        "type": "object",
+        "required": [
+          "state",
+          "ready"
+        ],
+        "properties": {
+          "code": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "ready": {
+            "type": "boolean"
+          },
+          "state": {
+            "type": "string"
+          }
+        }
+      },
       "AntigravityQuotaItemView": {
         "type": "object",
         "required": [
@@ -495,6 +660,93 @@
               "string",
               "null"
             ]
+          }
+        }
+      },
+      "AuthorizeAntigravityPayload": {
+        "type": "object",
+        "required": [
+          "code_or_url"
+        ],
+        "properties": {
+          "code_or_url": {
+            "type": "string"
+          },
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "priority": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "provider": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "proxy": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "redirect_uri": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "state": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "weight": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          }
+        }
+      },
+      "AuthorizeAntigravityResponse": {
+        "type": "object",
+        "required": [
+          "provider",
+          "id",
+          "config_version"
+        ],
+        "properties": {
+          "config_version": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "email": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "quota": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/AntigravityQuotaItemView"
+            }
           }
         }
       },
@@ -971,6 +1223,43 @@
           },
           "strategy": {
             "type": "string"
+          }
+        }
+      },
+      "ProxyStatusView": {
+        "type": "object",
+        "required": [
+          "available",
+          "proxy_type",
+          "description",
+          "hint"
+        ],
+        "properties": {
+          "available": {
+            "type": "boolean"
+          },
+          "description": {
+            "type": "string"
+          },
+          "hint": {
+            "type": "string"
+          },
+          "latency_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "proxy_type": {
+            "type": "string"
+          },
+          "proxy_url": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },

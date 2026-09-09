@@ -24,7 +24,8 @@ const props = withDefaults(
       | 'file-text'
       | 'image'
       | 'video'
-      | 'mic';
+      | 'mic'
+      | 'external';
     size?: number | string;
     class?: any;
   }>(),
@@ -144,5 +145,7 @@ const pxSize = computed(() => (typeof props.size === 'number' ? `${props.size}px
       <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
       <line x1="12" x2="12" y1="19" y2="22" />
     </g>
+    <!-- external -->
+    <path v-else-if="name === 'external'" d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6m4-3h6v6m-11 5L21 3" />
   </svg>
 </template>

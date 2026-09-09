@@ -39,6 +39,7 @@ const emit = defineEmits<{
   (e: 'delete-key', id: string): Promise<void>;
   (e: 'test-single-key', id: string): Promise<void>;
   (e: 'test-provider-keys', providerName: string): Promise<void>;
+  (e: 'oauth-antigravity', providerName: string): void;
 }>();
 
 const expanded = ref(props.defaultExpanded ?? true);
@@ -47,10 +48,17 @@ const PROTOCOL_OPTIONS = [
   { id: 'chat', label: 'OpenAI Chat' },
   { id: 'messages', label: 'Anthropic Messages' },
   { id: 'responses', label: 'OpenAI Responses' },
+  { id: 'antigravity', label: 'Antigravity' },
 ] as const;
 
 function getInitialProtocols(): string[] {
   const list: string[] = [];
+  if (
+    props.provider.default_protocol === 'antigravity' ||
+    props.provider.name.toLowerCase().includes('antigravity')
+  ) {
+    list.push('antigravity');
+  }
   if (props.provider.chat_url || props.provider.default_protocol === 'chat') {
     list.push('chat');
   }
@@ -381,6 +389,7 @@ function handleBatchTest() {
             @create="(payload) => emit('create-key', payload)"
             @delete="(id) => emit('delete-key', id)"
             @test-single="(id) => emit('test-single-key', id)"
+            @oauth-antigravity="(name) => emit('oauth-antigravity', name)"
           />
         </div>
 

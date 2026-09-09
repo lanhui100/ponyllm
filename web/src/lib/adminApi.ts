@@ -14,6 +14,11 @@ import type {
   CreateKeyPayload,
   CreateKeyResponse,
   PutStrategyPayload,
+  AntigravityAuthUrlView,
+  AntigravityPendingView,
+  AuthorizeAntigravityPayload,
+  AuthorizeAntigravityResponse,
+  ProxyStatusView,
 } from '../types/admin';
 
 export function ifMatchHeaders(version?: number | string): Record<string, string> {
@@ -122,5 +127,25 @@ export const adminApi = {
     return alova.Put<StrategyView>('/api/admin/strategy', payload, {
       headers: ifMatchHeaders(ifMatchVersion),
     });
+  },
+
+  getAntigravityAuthUrl(redirectUri?: string, state?: string) {
+    const params = new URLSearchParams();
+    if (redirectUri) params.set('redirect_uri', redirectUri);
+    if (state) params.set('state', state);
+    const qs = params.toString() ? `?${params.toString()}` : '';
+    return alova.Get<AntigravityAuthUrlView>(`/api/admin/oauth/antigravity/auth-url${qs}`);
+  },
+
+  getAntigravityPending(state: string) {
+    return alova.Get<AntigravityPendingView>(`/api/admin/oauth/antigravity/pending?state=${encodeURIComponent(state)}`);
+  },
+
+  getProxyStatus() {
+    return alova.Get<ProxyStatusView>('/api/admin/proxy/status');
+  },
+
+  authorizeAntigravity(payload: AuthorizeAntigravityPayload) {
+    return alova.Post<AuthorizeAntigravityResponse>('/api/admin/oauth/antigravity/authorize', payload);
   },
 };

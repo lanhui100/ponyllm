@@ -25,7 +25,11 @@ impl KeyPool {
 
     pub fn add_key(&self, entry: ApiKeyEntry) {
         let mut keys = self.keys.write();
-        keys.push(Arc::new(entry));
+        if let Some(existing_idx) = keys.iter().position(|k| k.id == entry.id) {
+            keys[existing_idx] = Arc::new(entry);
+        } else {
+            keys.push(Arc::new(entry));
+        }
         // Sort keys primarily by priority (ascending: 1, 2, 3...)
         keys.sort_by_key(|k| k.priority);
     }
@@ -187,5 +191,27 @@ impl KeyPool {
     /// Total keys in pool
     pub fn total_key_count(&self) -> usize {
         self.keys.read().len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_add_key_deduplication_upsert() {
+        let pool = KeyPool::new("test-provider", RoutingStrategy::RoundRobin);
+        pool.add_key(ApiKeyEntry::new("k1", "token-v1", 1, 10));
+        assert_eq!(pool.total_key_count(), 1);
+
+        // Add key with same ID but different token and priority
+        pool.add_key(ApiKeyEntry::new("k1", "token-v2", 2, 20));
+        assert_eq!(pool.total_key_count(), 1);
+
+        let keys = pool.snapshot_keys();
+        assert_eq!(keys[0].id, "k1");
+        assert_eq!(keys[0].api_key, "token-v2");
+        assert_eq!(keys[0].priority, 2);
+        assert_eq!(keys[0].weight, 20);
     }
 }

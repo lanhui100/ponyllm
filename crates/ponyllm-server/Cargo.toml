@@ -27,6 +27,7 @@ tokio-stream = { workspace = true }
 bytes = { workspace = true }
 reqwest = { workspace = true }
 chrono = { workspace = true }
+uuid = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

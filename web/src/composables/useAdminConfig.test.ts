@@ -213,4 +213,67 @@ describe('useAdminConfig composable (WEB-04 Governance & Admin CUD)', () => {
     expect(config.keyTestResults.value['k1'].success).toBe(true);
     expect(config.keyTestResults.value['k2'].success).toBe(false);
   });
+
+  it('supports Antigravity OAuth URL generation and account authorization', async () => {
+    const mockAuthUrl = {
+      auth_url: 'https://accounts.google.com/o/oauth2/v2/auth?client_id=xxx',
+      redirect_uri: 'http://localhost:51121/oauth2callback',
+      state: 'mock-state',
+    };
+    const mockAuthRes = {
+      provider: 'antigravity',
+      id: 'ag-test@example.com',
+      email: 'test@example.com',
+      config_version: 2,
+      quota: [
+        {
+          model_id: 'claude-sonnet-4-6',
+          remaining_fraction: 0.95,
+          reset_time: '2026-09-09T12:00:00Z',
+          reset_time_beijing: '2026-09-09 20:00:00',
+          time_until_reset: '4小时30分后',
+        },
+      ],
+    };
+
+    const getAuthUrlSpy = vi.spyOn(adminApi, 'getAntigravityAuthUrl').mockReturnValue({
+      send: () => Promise.resolve(mockAuthUrl),
+    } as any);
+
+    const authorizeSpy = vi.spyOn(adminApi, 'authorizeAntigravity').mockReturnValue({
+      send: () => Promise.resolve(mockAuthRes),
+    } as any);
+
+    // Mock fetchAll dependencies called after authorization
+    vi.spyOn(adminApi, 'getOverview').mockReturnValue({
+      send: () => Promise.resolve({ config_version: 2, admin_write_enabled: true } as any),
+    } as any);
+    vi.spyOn(adminApi, 'getProviders').mockReturnValue({
+      send: () => Promise.resolve([{ name: 'antigravity', default_protocol: 'antigravity' }] as any),
+    } as any);
+    vi.spyOn(adminApi, 'getModels').mockReturnValue({ send: () => Promise.resolve([]) } as any);
+    vi.spyOn(adminApi, 'getKeys').mockReturnValue({ send: () => Promise.resolve([]) } as any);
+    vi.spyOn(adminApi, 'getStrategy').mockReturnValue({ send: () => Promise.resolve({ strategy: 'round_robin' } as any) } as any);
+
+    const config = useAdminConfig({ autoFetch: false });
+
+    // Test getAntigravityAuthUrl
+    const urlRes = await config.getAntigravityAuthUrl();
+    expect(getAuthUrlSpy).toHaveBeenCalled();
+    expect(urlRes).toEqual(mockAuthUrl);
+
+    // Test authorizeAntigravity
+    const authRes = await config.authorizeAntigravity({
+      code_or_url: 'http://localhost:51121/oauth2callback?code=test-code',
+      provider: 'antigravity',
+    });
+    expect(authorizeSpy).toHaveBeenCalledWith({
+      code_or_url: 'http://localhost:51121/oauth2callback?code=test-code',
+      provider: 'antigravity',
+    });
+    expect(authRes).toEqual(mockAuthRes);
+    expect(config.configVersion.value).toBe(2);
+    expect(config.providers.value).toHaveLength(1);
+    expect(config.providers.value[0].name).toBe('antigravity');
+  });
 });

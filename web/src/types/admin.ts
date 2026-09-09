@@ -51,12 +51,21 @@ export interface KeyView {
   state: string;
 }
 
+export interface AntigravityQuotaItemView {
+  model_id: string;
+  remaining_fraction: number;
+  reset_time?: string | null;
+  reset_time_beijing?: string | null;
+  time_until_reset?: string | null;
+}
+
 export interface KeyTestView {
   success: boolean;
   latency_ms: number;
   message: string;
   http_status?: number | null;
   error_code?: string | null;
+  quota?: AntigravityQuotaItemView[] | null;
 }
 
 export interface StrategyView {
@@ -154,4 +163,45 @@ export interface AdminConflictError {
   isConflict: true;
   status: 412;
   message: string;
+}
+
+export interface AntigravityAuthUrlView {
+  auth_url: string;
+  redirect_uri: string;
+  state: string;
+}
+
+export interface AuthorizeAntigravityPayload {
+  code_or_url: string;
+  provider?: string | null;
+  id?: string | null;
+  priority?: number;
+  weight?: number;
+  redirect_uri?: string | null;
+  state?: string | null;
+  proxy?: string | null;
+}
+
+export interface AuthorizeAntigravityResponse {
+  provider: string;
+  id: string;
+  email?: string | null;
+  config_version: number;
+  quota?: AntigravityQuotaItemView[] | null;
+}
+
+export interface ProxyStatusView {
+  available: boolean;
+  proxy_url?: string | null;
+  proxy_type: 'pproxy' | 'system' | 'custom' | 'none' | string;
+  description: string;
+  latency_ms?: number | null;
+  hint: string;
+}
+
+export interface AntigravityPendingView {
+  state: string;
+  ready: boolean;
+  code?: string | null;
+  error?: string | null;
 }

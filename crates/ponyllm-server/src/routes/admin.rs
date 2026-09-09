@@ -17,7 +17,7 @@ use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::IntoResponse;
 use axum::Json;
 use ponyllm_config::{ConfigFile, KeySection, ModelConfig, ProviderSection};
-use ponyllm_core::pool::{ApiKeyEntry, BillingMode, KeyPool, ModelTier, UpstreamProtocol};
+use ponyllm_core::pool::{ApiKeyEntry, BillingMode, KeyPool, ModelTier, RoutingStrategy, UpstreamProtocol};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use utoipa::ToSchema;
@@ -264,7 +264,7 @@ pub struct DeleteKeyQuery {
     pub provider: Option<String>,
 }
 
-#[derive(Debug, Serialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct AntigravityQuotaItemView {
     pub model_id: String,
     pub remaining_fraction: f64,
@@ -280,6 +280,83 @@ pub struct KeyTestView {
     pub http_status: Option<u16>,
     pub error_code: Option<String>,
     pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quota: Option<Vec<AntigravityQuotaItemView>>,
+}
+
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+pub struct AntigravityAuthUrlQuery {
+    pub redirect_uri: Option<String>,
+    pub state: Option<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AntigravityAuthUrlView {
+    pub auth_url: String,
+    pub redirect_uri: String,
+    pub state: String,
+}
+
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+pub struct AntigravityPendingQuery {
+    pub state: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AntigravityPendingView {
+    pub state: String,
+    pub ready: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ProxyStatusView {
+    pub available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proxy_url: Option<String>,
+    pub proxy_type: String,
+    pub description: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latency_ms: Option<u64>,
+    pub hint: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OAuth2CallbackQuery {
+    pub code: Option<String>,
+    pub state: Option<String>,
+    pub error: Option<String>,
+    pub error_description: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct AuthorizeAntigravityPayload {
+    pub code_or_url: String,
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default = "default_key_priority")]
+    pub priority: u32,
+    #[serde(default = "default_key_weight")]
+    pub weight: u32,
+    #[serde(default)]
+    pub redirect_uri: Option<String>,
+    #[serde(default)]
+    pub state: Option<String>,
+    #[serde(default)]
+    pub proxy: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct AuthorizeAntigravityResponse {
+    pub provider: String,
+    pub id: String,
+    pub email: Option<String>,
+    pub config_version: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub quota: Option<Vec<AntigravityQuotaItemView>>,
 }
@@ -419,6 +496,7 @@ fn parse_protocol_opt(s: &str) -> Option<UpstreamProtocol> {
         "chat" | "openai" => Some(UpstreamProtocol::Chat),
         "anthropic" | "messages" => Some(UpstreamProtocol::Anthropic),
         "responses" => Some(UpstreamProtocol::Responses),
+        "antigravity" | "agy" => Some(UpstreamProtocol::Antigravity),
         _ => None,
     }
 }
@@ -450,6 +528,15 @@ fn parse_pool_strategy(s: &str) -> ponyllm_core::pool::RoutingStrategy {
     }
 }
 
+fn attach_rotation_hook(
+    state: &AppState,
+    provider_name: &str,
+    mgr: &Arc<ponyllm_core::pool::AntigravityTokenManager>,
+) {
+    state.attach_antigravity_rotation_hook(provider_name, mgr);
+}
+
+
 /// Build a live pool entry from a stored key (P0-4). Antigravity
 /// credentials must go through their `TokenManager` — constructing a
 /// static bearer from refresh JSON both breaks auth and sends the raw
@@ -468,6 +555,7 @@ fn build_pool_entry(
                 cred,
                 state.http_client_for_provider(provider_name),
             ));
+            attach_rotation_hook(state, provider_name, &mgr);
             return ApiKeyEntry::new_antigravity(&key.id, mgr, key.priority, key.weight);
         }
         tracing::warn!(
@@ -754,8 +842,8 @@ pub async fn handle_admin_update_provider(
         p_cfg.proxy = updated_p.proxy.clone();
     }
 
-    if let Some(ref st) = payload.strategy {
-        let core_strat = parse_pool_strategy(st);
+    if payload.strategy.is_some() || payload.proxy.is_some() {
+        let core_strat = parse_pool_strategy(&updated_p.strategy);
         let new_pool = Arc::new(KeyPool::new(&name, core_strat));
         for k in &updated_p.keys {
             new_pool.add_key(build_pool_entry(&state, &name, &updated_p, k));
@@ -1554,11 +1642,27 @@ pub async fn handle_admin_test_key(
         // Probe through the provider-effective client (P0-7): OAuth and the
         // data plane must share the egress IP, otherwise Google sees the
         // token minted on one IP and used on another (sharing-theft signal).
-        let mgr = ponyllm_core::pool::AntigravityTokenManager::new(
-            &key_sec.id,
-            cred,
-            state.http_client_for_provider(&p_name),
-        );
+        // Reuse in-pool token manager if available to preserve in-flight tokens and rotation hook.
+        let pool_mgr = {
+            let pools = state.pools.read();
+            pools.get(&p_name).and_then(|pool| {
+                pool.snapshot_keys()
+                    .into_iter()
+                    .find(|entry| entry.id == key_sec.id)
+                    .and_then(|entry| entry.antigravity_manager())
+            })
+        };
+        let mgr = if let Some(m) = pool_mgr {
+            m
+        } else {
+            let m = Arc::new(ponyllm_core::pool::AntigravityTokenManager::new(
+                &key_sec.id,
+                cred,
+                state.http_client_for_provider(&p_name),
+            ));
+            attach_rotation_hook(&state, &p_name, &m);
+            m
+        };
         let token_res = mgr.get_valid_token().await;
         let latency_ms = start.elapsed().as_millis() as u64;
 
@@ -1862,6 +1966,650 @@ pub async fn handle_admin_auth_rotate(State(state): State<Arc<AppState>>) -> imp
     resp
 }
 
+fn uuid_simple() -> String {
+    uuid::Uuid::new_v4().to_string()
+}
+
+fn escape_html(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '&' => out.push_str("&amp;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#x27;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+fn escape_json_for_html_script(s: &str) -> String {
+    s.replace('<', "\\u003c")
+        .replace('>', "\\u003e")
+        .replace('&', "\\u0026")
+}
+
+fn render_oauth_callback_html(
+    success: bool,
+    code: Option<&str>,
+    state: Option<&str>,
+    error: Option<&str>,
+    target_origin: Option<&str>,
+) -> String {
+    let title = if success { "Google 授权成功" } else { "Google 授权失败" };
+    let status_icon = if success {
+        r##"<div style="width:52px;height:52px;border-radius:50%;background:#059669;display:flex;align-items:center;justify-content:center;margin:0 auto 16px;box-shadow:0 0 20px rgba(16,185,129,0.35);"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg></div>"##
+    } else {
+        r##"<div style="width:52px;height:52px;border-radius:50%;background:#dc2626;display:flex;align-items:center;justify-content:center;margin:0 auto 16px;box-shadow:0 0 20px rgba(239,68,68,0.35);"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg></div>"##
+    };
+    let main_heading = if success { "授权已成功完成" } else { "授权未能完成" };
+    let raw_desc = if success {
+        "已接收到 Google 授权凭据，正在通知 PonyLLM Web 控制台自动闭环..."
+    } else {
+        error.unwrap_or("未能从 Google 回调中获取到有效的授权凭据")
+    };
+    let sub_desc = escape_html(raw_desc);
+
+    let js_code = escape_json_for_html_script(&serde_json::to_string(&code.unwrap_or("")).unwrap_or_default());
+    let js_state = escape_json_for_html_script(&serde_json::to_string(&state.unwrap_or("")).unwrap_or_default());
+    let js_error = escape_json_for_html_script(&serde_json::to_string(&error.unwrap_or("")).unwrap_or_default());
+    let js_success = if success { "true" } else { "false" };
+    let js_target_origin = match target_origin {
+        Some(o) if !o.trim().is_empty() => serde_json::to_string(o).unwrap_or_else(|_| "window.location.origin".to_string()),
+        _ => "window.location.origin".to_string(),
+    };
+
+    format!(r##"<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1">
+    <title>{title} - PonyLLM</title>
+    <style>
+        body {{
+            background: #09090b;
+            color: #f4f4f5;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            margin: 0;
+            padding: 24px;
+            box-sizing: border-box;
+        }}
+        .card {{
+            background: #18181b;
+            border: 1px solid #27272a;
+            border-radius: 12px;
+            padding: 36px 28px;
+            max-width: 440px;
+            width: 100%;
+            text-align: center;
+            box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.5), 0 8px 10px -6px rgba(0, 0, 0, 0.5);
+        }}
+        h2 {{ margin: 0 0 10px; font-size: 20px; font-weight: 600; }}
+        p {{ margin: 0 0 20px; color: #a1a1aa; font-size: 14px; line-height: 1.5; word-break: break-word; }}
+        .tip {{ font-size: 12px; color: #71717a; border-top: 1px solid #27272a; padding-top: 16px; margin: 0; }}
+    </style>
+</head>
+<body>
+    <div class="card">
+        {status_icon}
+        <h2>{main_heading}</h2>
+        <p>{sub_desc}</p>
+        <p class="tip" id="closeTip">本窗口将在 1.5 秒后自动关闭。若未关闭，可直接手动关闭本标签页。</p>
+    </div>
+    <script>
+        (function() {{
+            var payload = {{
+                type: 'antigravity:oauth_callback',
+                success: {js_success},
+                code: {js_code},
+                state: {js_state},
+                error: {js_error}
+            }};
+            var targetOrigin = {js_target_origin};
+            if (window.opener) {{
+                try {{
+                    window.opener.postMessage(payload, targetOrigin);
+                }} catch (e) {{}}
+                setTimeout(function() {{
+                    window.close();
+                }}, 1500);
+            }} else {{
+                var tip = document.getElementById('closeTip');
+                if (tip) {{
+                    tip.innerText = '您可以直接关闭此标签页并返回 PonyLLM 控制台。';
+                }}
+            }}
+        }})();
+    </script>
+</body>
+</html>"##)
+}
+
+/// Public OAuth2 callback endpoint (`GET /oauth2callback`), exempt from auth.
+/// Receives authorization code from Google, records it into in-memory pending state,
+/// and returns an interactive HTML page that sends `postMessage` to the opener window.
+pub async fn handle_oauth2_callback(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<OAuth2CallbackQuery>,
+) -> impl IntoResponse {
+    let (success, code, error_msg) = if let Some(err) = query.error {
+        let desc = query.error_description.unwrap_or(err);
+        (false, None, Some(desc))
+    } else if let Some(code) = query.code {
+        (true, Some(code), None)
+    } else {
+        (false, None, Some("未收到授权码或参数无效".to_string()))
+    };
+
+    let mut target_origin: Option<String> = None;
+    if let Some(ref state_key) = query.state {
+        let exists = {
+            let map = state.pending_antigravity_oauth.read();
+            if let Some(pending) = map.get(state_key) {
+                if let Some(ref uri) = pending.redirect_uri {
+                    if let Ok(parsed) = reqwest::Url::parse(uri) {
+                        target_origin = Some(parsed.origin().ascii_serialization());
+                    }
+                }
+                true
+            } else {
+                false
+            }
+        };
+
+        if exists {
+            let mut pending_map = state.pending_antigravity_oauth.write();
+            if let Some(pending) = pending_map.get_mut(state_key) {
+                if success {
+                    pending.code = code.clone();
+                    pending.error = None;
+                } else {
+                    pending.code = None;
+                    pending.error = error_msg.clone();
+                }
+            }
+        }
+    }
+
+
+    let html = render_oauth_callback_html(
+        success,
+        code.as_deref(),
+        query.state.as_deref(),
+        error_msg.as_deref(),
+        target_origin.as_deref(),
+    );
+
+    let mut resp = (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, HeaderValue::from_static("text/html; charset=utf-8"))],
+        html,
+    )
+        .into_response();
+
+    resp.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store, no-cache, must-revalidate"),
+    );
+    resp.headers_mut().insert(
+        header::PRAGMA,
+        HeaderValue::from_static("no-cache"),
+    );
+    resp.headers_mut().insert(
+        header::HeaderName::from_static("content-security-policy"),
+        HeaderValue::from_static("default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; frame-ancestors 'none'"),
+    );
+    resp.headers_mut().insert(
+        header::HeaderName::from_static("x-frame-options"),
+        HeaderValue::from_static("DENY"),
+    );
+    resp.headers_mut().insert(
+        header::HeaderName::from_static("x-content-type-options"),
+        HeaderValue::from_static("nosniff"),
+    );
+    resp
+}
+
+
+#[utoipa::path(
+    get,
+    path = "/api/admin/oauth/antigravity/pending",
+    params(AntigravityPendingQuery),
+    responses(
+        (status = 200, body = AntigravityPendingView),
+        (status = 404, description = "OAuth state not found or expired")
+    )
+)]
+pub async fn handle_admin_antigravity_pending(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<AntigravityPendingQuery>,
+) -> impl IntoResponse {
+    let pending_map = state.pending_antigravity_oauth.read();
+    if let Some(pending) = pending_map.get(&query.state) {
+        let ready = pending.code.is_some() || pending.error.is_some();
+        (
+            StatusCode::OK,
+            Json(AntigravityPendingView {
+                state: query.state,
+                ready,
+                code: pending.code.clone(),
+                error: pending.error.clone(),
+            }),
+        )
+            .into_response()
+    } else {
+        (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": {"message": "OAuth 状态不存在或已过期", "code": "state_not_found"}})),
+        )
+            .into_response()
+    }
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/admin/proxy/status",
+    responses(
+        (status = 200, body = ProxyStatusView)
+    )
+)]
+pub async fn handle_admin_proxy_status(
+    State(_state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    // 1. First probe local pproxy (127.0.0.1:8899)
+    let pproxy_addr = std::net::SocketAddr::from(([127, 0, 0, 1], 8899));
+    let pproxy_active = std::net::TcpStream::connect_timeout(&pproxy_addr, std::time::Duration::from_millis(50)).is_ok();
+
+    if pproxy_active {
+        let proxy_url = "http://127.0.0.1:8899".to_string();
+        let latency_ms = measure_proxy_latency(&proxy_url).await;
+
+        return Json(ProxyStatusView {
+            available: true,
+            proxy_url: Some(proxy_url),
+            proxy_type: "pproxy".to_string(),
+            description: "本地 pproxy 智能出海代理 (127.0.0.1:8899) 运行中".to_string(),
+            latency_ms,
+            hint: "已自动接管。Antigravity 授权换票及后续模型调用均默认走此代理。".to_string(),
+        });
+    }
+
+    // 2. Check system/env proxy
+    if let Some(sys_proxy) = ponyllm_core::detect_system_proxy() {
+        let latency_ms = measure_proxy_latency(&sys_proxy).await;
+        return Json(ProxyStatusView {
+            available: true,
+            proxy_url: Some(sys_proxy.clone()),
+            proxy_type: "system".to_string(),
+            description: format!("系统/环境出海代理 ({}) 运行中", sys_proxy),
+            latency_ms,
+            hint: "已探测到系统代理。Antigravity 请求将使用此代理。".to_string(),
+        });
+    }
+
+    // 3. No proxy found
+    Json(ProxyStatusView {
+        available: false,
+        proxy_url: None,
+        proxy_type: "none".to_string(),
+        description: "未检测到本地出海代理".to_string(),
+        latency_ms: None,
+        hint: "Google 授权换票及模型调用需要海外代理。请在终端执行 `pproxy on` 启动代理后点击重新探测。".to_string(),
+    })
+}
+
+async fn measure_proxy_latency(proxy_url: &str) -> Option<u64> {
+    let proxy = reqwest::Proxy::all(proxy_url).ok()?;
+    let client = reqwest::Client::builder()
+        .proxy(proxy)
+        .timeout(std::time::Duration::from_millis(1500))
+        .build()
+        .ok()?;
+
+    let start = Instant::now();
+    let resp = client
+        .get("http://www.google.com/generate_204")
+        .send()
+        .await;
+
+    if resp.is_ok() {
+        Some(start.elapsed().as_millis() as u64)
+    } else {
+        None
+    }
+}
+
+#[utoipa::path(get, path = "/api/admin/oauth/antigravity/auth-url", params(AntigravityAuthUrlQuery), responses((status = 200, body = AntigravityAuthUrlView)))]
+pub async fn handle_admin_antigravity_auth_url(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<AntigravityAuthUrlQuery>,
+) -> impl IntoResponse {
+    let redirect_uri = query.redirect_uri.unwrap_or_else(|| {
+        format!(
+            "http://localhost:{}/oauth2callback",
+            ponyllm_core::pool::DEFAULT_ANTIGRAVITY_OAUTH_REDIRECT_PORT
+        )
+    });
+    let state_key = query.state.unwrap_or_else(uuid_simple);
+
+    // Register pending state with expiration cleanup (5 mins) and bounded LRU capacity (max 128)
+    const MAX_PENDING_OAUTH: usize = 128;
+    const PENDING_EXPIRATION_SECS: u64 = 300;
+
+    {
+        let mut pending_map = state.pending_antigravity_oauth.write();
+        let now = Instant::now();
+        pending_map.retain(|_, v| now.duration_since(v.created_at).as_secs() < PENDING_EXPIRATION_SECS);
+        if pending_map.len() >= MAX_PENDING_OAUTH {
+            if let Some(oldest_key) = pending_map
+                .iter()
+                .min_by_key(|(_, v)| v.created_at)
+                .map(|(k, _)| k.clone())
+            {
+                pending_map.remove(&oldest_key);
+            }
+        }
+        pending_map.insert(
+            state_key.clone(),
+            crate::state::PendingAntigravityOAuth {
+                created_at: now,
+                code: None,
+                error: None,
+                redirect_uri: Some(redirect_uri.clone()),
+            },
+        );
+    }
+
+
+    let auth_url = ponyllm_core::pool::build_authorization_url(&redirect_uri, &state_key);
+
+    Json(AntigravityAuthUrlView {
+        auth_url,
+        redirect_uri,
+        state: state_key,
+    })
+}
+
+#[utoipa::path(post, path = "/api/admin/oauth/antigravity/authorize", request_body = AuthorizeAntigravityPayload, responses((status = 200, body = AuthorizeAntigravityResponse)))]
+pub async fn handle_admin_authorize_antigravity(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<AuthorizeAntigravityPayload>,
+) -> impl IntoResponse {
+    if let Err(resp) = check_admin_write_enabled(&state) {
+        return resp;
+    }
+    let _lock = state.admin_write_lock.lock().await;
+    let mut file = match load_store_config(&state) {
+        Ok(f) => f,
+        Err(resp) => return resp,
+    };
+
+    let target_provider = match payload.provider.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(p) => p.to_string(),
+        None => "antigravity".to_string(),
+    };
+
+    // 1. Synthesize effective proxy (payload -> store.provider -> store.gateway -> detect_system_proxy)
+    let explicit_payload_proxy = payload.proxy.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let store_provider_proxy = file.providers.get(&target_provider).and_then(|p| p.proxy.as_deref()).map(str::trim).filter(|s| !s.is_empty());
+    let gateway_proxy = file.gateway.proxy.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let detected_proxy = ponyllm_core::detect_system_proxy();
+
+    let effective_proxy: Option<String> = explicit_payload_proxy
+        .map(|s| s.to_string())
+        .or_else(|| store_provider_proxy.map(|s| s.to_string()))
+        .or_else(|| gateway_proxy.map(|s| s.to_string()))
+        .or(detected_proxy);
+
+    // 2. Parse OAuth input (extract code and potential redirect_uri, or catch Google error)
+    let (code, inferred_redirect) = match ponyllm_core::pool::parse_oauth_callback_input(&payload.code_or_url) {
+        Some(ponyllm_core::pool::ParsedOAuthCallback::Code { code, redirect_uri, .. }) => (code, redirect_uri),
+        Some(ponyllm_core::pool::ParsedOAuthCallback::Error { error, description }) => {
+            let msg = description.unwrap_or(error);
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": {"message": format!("Google 授权未完成: {msg}"), "code": "oauth_denied"}})),
+            )
+                .into_response();
+        }
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": {"message": "未能从输入中提取出有效的 OAuth Code，请确认输入是否完整。", "code": "invalid_code"}})),
+            )
+                .into_response();
+        }
+    };
+
+    let redirect_uri = payload.redirect_uri
+        .or(inferred_redirect)
+        .unwrap_or_else(|| {
+            format!(
+                "http://localhost:{}/oauth2callback",
+                ponyllm_core::pool::DEFAULT_ANTIGRAVITY_OAUTH_REDIRECT_PORT
+            )
+        });
+
+    // 3. Build HTTP client with effective proxy for code exchange (Strict Fail-Closed)
+    let http_client = if let Some(ref proxy_url) = effective_proxy {
+        match ponyllm_core::executor::try_create_upstream_http_client_with_options(Some(proxy_url), false) {
+            Ok(c) => c,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": {"message": format!("无法连接指定的出海代理: {e}"), "code": "invalid_proxy"}})),
+                )
+                    .into_response();
+            }
+        }
+    } else {
+        state.http_client_for_provider(&target_provider)
+    };
+
+    let auth_res = match ponyllm_core::pool::exchange_code_for_credential(
+        &http_client,
+        &code,
+        &redirect_uri,
+    )
+    .await
+    {
+        Ok(res) => res,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": {"message": format!("OAuth code exchange failed: {}", e), "code": "oauth_exchange_failed"}})),
+            )
+                .into_response();
+        }
+    };
+
+    let final_id = if let Some(custom) = payload.id.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        custom.to_string()
+    } else if let Some(ref email) = auth_res.email {
+        format!("ag-{}", email)
+    } else {
+        format!("ag-account-{}", &uuid_simple()[..8])
+    };
+
+    let provider_base_url = {
+        let p_sec = file.providers.entry(target_provider.clone()).or_insert_with(|| {
+            ProviderSection {
+                base_url: ponyllm_core::pool::DEFAULT_ANTIGRAVITY_ENDPOINT.to_string(),
+                default_model: "claude-sonnet-4-6".to_string(),
+                strategy: "round_robin".to_string(),
+                billing_mode: BillingMode::Metered,
+                input_price: 0.0,
+                cached_price: 0.0,
+                output_price: 0.0,
+                models: vec![
+                    "claude-sonnet-4-6".to_string(),
+                    "claude-opus-4-6".to_string(),
+                    "gemini-2.5-flash".to_string(),
+                    "gemini-2.5-pro".to_string(),
+                ],
+                default_protocol: Some(UpstreamProtocol::Antigravity),
+                chat_url: None,
+                responses_url: None,
+                messages_url: None,
+                proxy: None,
+                keys: vec![],
+                model_configs: vec![],
+            }
+        });
+
+        // Ensure provider proxy is set to effective proxy if not configured,
+        // guaranteeing egress IP consistency across data plane and RTR!
+        if p_sec.proxy.is_none() {
+            if let Some(ref proxy_url) = effective_proxy {
+                p_sec.proxy = Some(proxy_url.clone());
+            }
+        }
+
+        if let Some(existing_key) = p_sec.keys.iter_mut().find(|k| k.id == final_id) {
+            existing_key.api_key = auth_res.credential.refresh_token.clone();
+            existing_key.priority = payload.priority;
+            existing_key.weight = payload.weight;
+        } else {
+            p_sec.keys.push(KeySection {
+                id: final_id.clone(),
+                api_key: auth_res.credential.refresh_token.clone(),
+                priority: payload.priority,
+                weight: payload.weight,
+            });
+        }
+        p_sec.base_url.clone()
+    };
+
+    let new_ver = match save_store_config(&state, &mut file) {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
+
+    // 1. Update in-memory state.config for the provider FIRST so proxy configuration is live
+    let p_sec = file.providers.get(&target_provider).unwrap();
+    {
+        let mut gw_cfg = state.config.write();
+        let entry = gw_cfg.providers.entry(target_provider.clone()).or_insert_with(|| {
+            ProviderConfig {
+                base_url: p_sec.base_url.clone(),
+                default_model: p_sec.default_model.clone(),
+                strategy: p_sec.strategy.clone(),
+                billing_mode: p_sec.billing_mode,
+                input_price: p_sec.input_price,
+                cached_price: p_sec.cached_price,
+                output_price: p_sec.output_price,
+                models: p_sec.models.clone(),
+                model_specs: vec![],
+                default_protocol: p_sec.default_protocol,
+                chat_url: p_sec.chat_url.clone(),
+                responses_url: p_sec.responses_url.clone(),
+                messages_url: p_sec.messages_url.clone(),
+                proxy: p_sec.proxy.clone(),
+            }
+        });
+        entry.default_protocol = p_sec.default_protocol;
+        entry.proxy = p_sec.proxy.clone();
+        for m in &p_sec.models {
+            if !entry.models.contains(m) {
+                entry.models.push(m.clone());
+            }
+        }
+    }
+
+    // 2. NOW construct TokenManager with the proxy-aware HTTP client, ensuring 100% Egress IP consistency
+    let mgr = Arc::new(ponyllm_core::pool::AntigravityTokenManager::new(
+        &final_id,
+        auth_res.credential.clone(),
+        state.http_client_for_provider(&target_provider),
+    ));
+    attach_rotation_hook(&state, &target_provider, &mgr);
+    {
+        let mut pools = state.pools.write();
+        let pool = pools.entry(target_provider.clone()).or_insert_with(|| {
+            let strat = match p_sec.strategy.as_str() {
+                "priority" => RoutingStrategy::Priority,
+                "weighted_round_robin" => RoutingStrategy::WeightedRoundRobin,
+                _ => RoutingStrategy::RoundRobin,
+            };
+            Arc::new(KeyPool::new(&target_provider, strat))
+        });
+        let entry = ApiKeyEntry::new_antigravity(&final_id, mgr.clone(), payload.priority, payload.weight);
+        pool.add_key(entry);
+    }
+
+
+    // Clean up consumed pending state
+    if let Some(ref st) = payload.state {
+        state.pending_antigravity_oauth.write().remove(st);
+    }
+
+    // Best-effort quota fetch using the ready token manager
+    let quota = match tokio::time::timeout(
+        std::time::Duration::from_secs(4),
+        mgr.fetch_quota(Some(&provider_base_url)),
+    )
+    .await
+    {
+        Ok(Ok(snapshot)) => {
+            let mut list = Vec::new();
+            let mut models: Vec<_> = snapshot.models.values().collect();
+            models.sort_by_key(|m| &m.model_id);
+            for m in models {
+                let (beijing_time, remaining_desc) = match m.reset_time {
+                    Some(utc_dt) => {
+                        let bj_dt = utc_dt + chrono::Duration::hours(8);
+                        let now = chrono::Utc::now();
+                        let diff = if utc_dt > now {
+                            let dur = utc_dt - now;
+                            format!("{}小时{}分后", dur.num_hours(), dur.num_minutes() % 60)
+                        } else {
+                            "已就绪".to_string()
+                        };
+                        (Some(bj_dt.format("%Y-%m-%d %H:%M:%S").to_string()), Some(diff))
+                    }
+                    None => (None, None),
+                };
+                list.push(AntigravityQuotaItemView {
+                    model_id: m.model_id.clone(),
+                    remaining_fraction: m.remaining_fraction,
+                    reset_time: m.reset_time.map(|t| t.to_rfc3339()),
+                    reset_time_beijing: beijing_time,
+                    time_until_reset: remaining_desc,
+                });
+            }
+            Some(list)
+        }
+        _ => None,
+    };
+
+    let mut resp = (
+        StatusCode::OK,
+        Json(AuthorizeAntigravityResponse {
+            provider: target_provider,
+            id: final_id,
+            email: auth_res.email,
+            config_version: new_ver,
+            quota,
+        }),
+    )
+        .into_response();
+    resp.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store"),
+    );
+    resp.headers_mut().insert(
+        header::PRAGMA,
+        HeaderValue::from_static("no-cache"),
+    );
+    resp
+}
+
 // ---------- router ----------
 
 #[derive(utoipa::OpenApi)]
@@ -1884,7 +2632,11 @@ pub async fn handle_admin_auth_rotate(State(state): State<Arc<AppState>>) -> imp
         handle_admin_get_strategy,
         handle_admin_put_strategy,
         handle_admin_service_status,
-        handle_admin_auth_rotate
+        handle_admin_auth_rotate,
+        handle_admin_antigravity_auth_url,
+        handle_admin_antigravity_pending,
+        handle_admin_authorize_antigravity,
+        handle_admin_proxy_status
     ),
     components(schemas(
         OverviewView,
@@ -1901,7 +2653,13 @@ pub async fn handle_admin_auth_rotate(State(state): State<Arc<AppState>>) -> imp
         StrategyView,
         PutStrategyPayload,
         ServiceStatusView,
-        RotateView
+        RotateView,
+        AntigravityAuthUrlView,
+        AntigravityPendingView,
+        AuthorizeAntigravityPayload,
+        AuthorizeAntigravityResponse,
+        AntigravityQuotaItemView,
+        ProxyStatusView
     ))
 )]
 pub struct AdminApiDoc;
@@ -1948,6 +2706,10 @@ pub fn admin_routes() -> axum::Router<Arc<AppState>> {
         )
         .route("/api/admin/service/status", get(handle_admin_service_status))
         .route("/api/admin/auth/rotate", post(handle_admin_auth_rotate))
+        .route("/api/admin/proxy/status", get(handle_admin_proxy_status))
+        .route("/api/admin/oauth/antigravity/auth-url", get(handle_admin_antigravity_auth_url))
+        .route("/api/admin/oauth/antigravity/pending", get(handle_admin_antigravity_pending))
+        .route("/api/admin/oauth/antigravity/authorize", post(handle_admin_authorize_antigravity))
 }
 
 /// Generated OpenAPI document (committed to `web/openapi.json`; regenerated by

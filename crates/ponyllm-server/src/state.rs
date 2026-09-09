@@ -141,6 +141,14 @@ fn with_endpoint(
     (protocol, endpoint_base)
 }
 
+#[derive(Debug, Clone)]
+pub struct PendingAntigravityOAuth {
+    pub created_at: std::time::Instant,
+    pub code: Option<String>,
+    pub error: Option<String>,
+    pub redirect_uri: Option<String>,
+}
+
 #[derive(Debug)]
 pub struct AppState {
     pub config: RwLock<GatewayConfig>,
@@ -160,6 +168,8 @@ pub struct AppState {
     direct_client: reqwest::Client,
     /// Shared HTTP clients per explicit proxy URL (connection pooling reuse across models & providers).
     proxy_clients: RwLock<HashMap<String, reqwest::Client>>,
+    /// Pending Antigravity OAuth states with TTL for CSRF validation and callback capture.
+    pub pending_antigravity_oauth: RwLock<HashMap<String, PendingAntigravityOAuth>>,
     /// Admin API persistence boundary (WEB-03): `None` for SDK/embedded builds
     /// (write endpoints answer 503 admin_store_unavailable). Hand-written Debug
     /// because the trait object is not Debug.
@@ -167,7 +177,7 @@ pub struct AppState {
     /// Process start instant for admin service/status uptime (WEB-03).
     pub started_at: std::time::Instant,
     /// Write queue lock serializing admin config mutations (WEB-06).
-    pub admin_write_lock: tokio::sync::Mutex<()>,
+    pub admin_write_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl std::fmt::Debug for dyn crate::admin_store::ConfigStore {
@@ -256,11 +266,13 @@ impl AppState {
             http_client,
             direct_client,
             proxy_clients: RwLock::new(proxy_clients),
+            pending_antigravity_oauth: RwLock::new(HashMap::new()),
             config_store: None,
             started_at: std::time::Instant::now(),
-            admin_write_lock: tokio::sync::Mutex::new(()),
+            admin_write_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
+
 
     /// Override the HTTP client (useful for mock transports in tests).
     pub fn with_http_client(mut self, client: reqwest::Client) -> Self {
@@ -401,6 +413,58 @@ impl AppState {
         );
 
         *config_guard = new_config;
+        drop(config_guard);
+        drop(pools_guard);
+
+        self.attach_antigravity_rotation_hooks_all();
+    }
+
+    pub fn attach_antigravity_rotation_hook(
+        &self,
+        provider_name: &str,
+        mgr: &Arc<ponyllm_core::pool::AntigravityTokenManager>,
+    ) {
+        if let Some(ref store) = self.config_store {
+            let store_clone = store.clone();
+            let prov_name = provider_name.to_string();
+            let write_lock = self.admin_write_lock.clone();
+            mgr.set_rotation_hook(Arc::new(move |key_id, new_rf| {
+                let store = store_clone.clone();
+                let prov = prov_name.clone();
+                let k_id = key_id.to_string();
+                let n_rf = new_rf.to_string();
+                let write_lock = write_lock.clone();
+                tokio::spawn(async move {
+                    let _guard = write_lock.lock().await;
+                    if let Ok(mut cfg) = store.load() {
+                        if let Some(p) = cfg.providers.get_mut(&prov) {
+                            if let Some(k) = p.keys.iter_mut().find(|k| k.id == k_id) {
+                                k.api_key = n_rf;
+                                cfg.config_version += 1;
+                                if let Err(e) = store.save(&cfg) {
+                                    tracing::error!(%e, provider = %prov, key_id = %k_id, "failed to persist rotated Antigravity token");
+                                } else {
+                                    tracing::info!(provider = %prov, key_id = %k_id, "successfully persisted rotated Antigravity token");
+                                }
+                            }
+                        }
+                    }
+                });
+            }));
+        }
+    }
+
+    /// Automatically scan all registered pools and attach rotation hooks for any
+    /// AntigravityTokenManagers.
+    pub fn attach_antigravity_rotation_hooks_all(&self) {
+        let pools = self.pools.read();
+        for (prov_name, pool) in pools.iter() {
+            for key_entry in pool.snapshot_keys() {
+                if let Some(mgr) = key_entry.antigravity_manager() {
+                    self.attach_antigravity_rotation_hook(prov_name, &mgr);
+                }
+            }
+        }
     }
 
     pub fn register_pool(&self, provider: &str, pool: Arc<KeyPool>) {

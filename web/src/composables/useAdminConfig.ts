@@ -14,6 +14,11 @@ import type {
   UpdateModelPayload,
   CreateKeyPayload,
   CreateKeyResponse,
+  AntigravityAuthUrlView,
+  AntigravityPendingView,
+  AuthorizeAntigravityPayload,
+  AuthorizeAntigravityResponse,
+  ProxyStatusView,
 } from '../types/admin';
 
 export interface UseAdminConfigOptions {
@@ -37,6 +42,7 @@ export function useAdminConfig(options: UseAdminConfigOptions = {}) {
   const createdKeyResult = ref<CreateKeyResponse | null>(null);
   const keyTestResults = ref<Record<string, KeyTestView>>({});
   const testingKeyIds = ref<Set<string>>(new Set());
+  const proxyStatus = ref<ProxyStatusView | null>(null);
   const batchTesting = ref<{ running: boolean; current: number; total: number }>({
     running: false,
     current: 0,
@@ -52,6 +58,16 @@ export function useAdminConfig(options: UseAdminConfigOptions = {}) {
     }
     return false;
   });
+
+  async function fetchProxyStatus(): Promise<ProxyStatusView | null> {
+    try {
+      const ps = await adminApi.getProxyStatus().send();
+      proxyStatus.value = ps;
+      return ps;
+    } catch {
+      return null;
+    }
+  }
 
   async function fetchAll(): Promise<void> {
     loading.value = true;
@@ -71,6 +87,8 @@ export function useAdminConfig(options: UseAdminConfigOptions = {}) {
       keys.value = kv;
       strategy.value = st.strategy;
       configVersion.value = ov.config_version;
+
+      void fetchProxyStatus().catch(() => {});
     } catch (err: unknown) {
       error.value = err instanceof Error ? err.message : String(err);
       throw err;
@@ -201,6 +219,20 @@ export function useAdminConfig(options: UseAdminConfigOptions = {}) {
     createdKeyResult.value = null;
   }
 
+  async function getAntigravityAuthUrl(redirectUri?: string, state?: string): Promise<AntigravityAuthUrlView> {
+    return adminApi.getAntigravityAuthUrl(redirectUri, state).send();
+  }
+
+  async function getAntigravityPending(state: string): Promise<AntigravityPendingView> {
+    return adminApi.getAntigravityPending(state).send();
+  }
+
+  async function authorizeAntigravity(payload: AuthorizeAntigravityPayload): Promise<AuthorizeAntigravityResponse> {
+    const res = await adminApi.authorizeAntigravity(payload).send();
+    await fetchAll();
+    return res;
+  }
+
   if (autoFetch && getCurrentInstance()) {
     onMounted(() => {
       void fetchAll().catch(() => {});
@@ -222,8 +254,10 @@ export function useAdminConfig(options: UseAdminConfigOptions = {}) {
     createdKeyResult,
     keyTestResults,
     testingKeyIds,
+    proxyStatus,
     batchTesting,
     fetchAll,
+    fetchProxyStatus,
     saveProvider,
     editProvider,
     removeProvider,
@@ -237,5 +271,8 @@ export function useAdminConfig(options: UseAdminConfigOptions = {}) {
     saveStrategy,
     clearConflict,
     clearCreatedKeyResult,
+    getAntigravityAuthUrl,
+    getAntigravityPending,
+    authorizeAntigravity,
   };
 }

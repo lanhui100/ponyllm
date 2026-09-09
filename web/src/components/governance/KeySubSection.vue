@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from 'vue';
+import { ref, computed } from 'vue';
 import type { KeyView, KeyTestView, CreateKeyPayload } from '../../types/admin';
 import Icons from '../ui/Icons.vue';
 import UiButton from '../ui/UiButton.vue';
@@ -21,7 +21,10 @@ const emit = defineEmits<{
   (e: 'create', payload: CreateKeyPayload): Promise<void>;
   (e: 'delete', id: string): Promise<void>;
   (e: 'test-single', id: string): Promise<void>;
+  (e: 'oauth-antigravity', providerName: string): void;
 }>();
+
+const isAntigravity = computed(() => props.providerName.toLowerCase().includes('antigravity'));
 
 const isExpanded = ref(props.defaultExpanded ?? false);
 const isAdding = ref(false);
@@ -113,6 +116,18 @@ async function handleDelete(id: string) {
       </div>
 
       <div class="flex items-center gap-1" @click.stop>
+        <UiButton
+          v-if="isAntigravity"
+          variant="ghost"
+          size="sm"
+          :disabled="!adminWriteEnabled"
+          data-testid="add-antigravity-key-btn"
+          class="text-amber-600 hover:text-amber-700 hover:bg-amber-50/60 font-medium px-2 py-1 text-xs"
+          @click="emit('oauth-antigravity', props.providerName)"
+        >
+          <Icons name="zap" size="13" />
+          授权账号
+        </UiButton>
         <UiButton
           variant="ghost"
           size="sm"
@@ -247,58 +262,97 @@ async function handleDelete(id: string) {
       <div
         v-for="k in keys"
         :key="k.id"
-        class="flex items-center justify-between px-3.5 py-2.5 bg-slate-50/70 hover:bg-slate-100/70 rounded-xl transition-colors text-xs"
+        class="bg-slate-50/70 hover:bg-slate-100/70 rounded-xl transition-colors text-xs p-3 space-y-2"
         data-testid="key-row"
       >
-        <div class="flex items-center gap-2.5 min-w-0">
-          <span class="font-mono text-slate-800 font-semibold text-xs truncate">{{ k.id }}</span>
-          <span class="font-mono text-slate-400 text-xs">{{ k.masked_key }}</span>
-          <UiBadge :variant="k.state === 'active' ? 'success' : 'warning'">
-            {{ formatKeyState(k.state) }}
-          </UiBadge>
+        <div class="flex items-center justify-between">
+          <div class="flex items-center gap-2.5 min-w-0">
+            <span class="font-mono text-slate-800 font-semibold text-xs truncate">{{ k.id }}</span>
+            <span class="font-mono text-slate-400 text-xs">{{ k.masked_key }}</span>
+            <UiBadge :variant="k.state === 'active' ? 'success' : 'warning'">
+              {{ formatKeyState(k.state) }}
+            </UiBadge>
+          </div>
+
+          <div class="flex items-center gap-1.5 shrink-0">
+            <!-- 拨测延迟徽标 -->
+            <template v-if="keyTestResults[k.id]">
+              <UiBadge
+                :variant="keyTestResults[k.id].success ? 'success' : 'destructive'"
+                data-testid="probe-result-badge"
+              >
+                {{ keyTestResults[k.id].success ? `${keyTestResults[k.id].latency_ms}ms` : '异常' }}
+              </UiBadge>
+            </template>
+            <span v-else-if="testingKeyIds.has(k.id)" class="text-xs text-indigo-600 animate-pulse font-medium">
+              测速中...
+            </span>
+
+            <!-- 测速纯图标按钮 -->
+            <UiTooltip content="快速连通性与延迟测速">
+              <UiButton
+                variant="ghost"
+                size="icon"
+                :disabled="testingKeyIds.has(k.id) || !adminWriteEnabled"
+                data-testid="test-single-key-btn"
+                class="text-slate-500 hover:text-amber-600 hover:bg-amber-50"
+                @click="emit('test-single', k.id)"
+              >
+                <Icons name="zap" size="14" />
+              </UiButton>
+            </UiTooltip>
+
+            <!-- 删除纯图标按钮 -->
+            <UiTooltip content="移除此密钥">
+              <UiButton
+                variant="ghost"
+                size="icon"
+                :disabled="!adminWriteEnabled"
+                data-testid="delete-key-btn"
+                class="text-slate-400 hover:text-rose-600 hover:bg-rose-50"
+                @click="handleDelete(k.id)"
+              >
+                <Icons name="trash" size="14" />
+              </UiButton>
+            </UiTooltip>
+          </div>
         </div>
 
-        <div class="flex items-center gap-1.5 shrink-0">
-          <!-- 拨测延迟徽标 -->
-          <template v-if="keyTestResults[k.id]">
-            <UiBadge
-              :variant="keyTestResults[k.id].success ? 'success' : 'destructive'"
-              data-testid="probe-result-badge"
+        <!-- Antigravity 模型配额与重置时间 -->
+        <div
+          v-if="(keyTestResults[k.id]?.quota?.length ?? 0) > 0"
+          class="pt-2 border-t border-slate-200/60"
+          data-testid="antigravity-quota-container"
+        >
+          <div class="text-3xs font-semibold text-slate-500 uppercase tracking-wider mb-1.5 flex items-center gap-1">
+            <Icons name="zap" size="11" class="text-amber-500" />
+            Antigravity 模型配额与重置时间
+          </div>
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+            <div
+              v-for="q in keyTestResults[k.id].quota"
+              :key="q.model_id"
+              class="bg-white p-2 rounded-lg border border-slate-200/80 shadow-2xs text-3xs space-y-1"
             >
-              {{ keyTestResults[k.id].success ? `${keyTestResults[k.id].latency_ms}ms` : '异常' }}
-            </UiBadge>
-          </template>
-          <span v-else-if="testingKeyIds.has(k.id)" class="text-xs text-indigo-600 animate-pulse font-medium">
-            测速中...
-          </span>
-
-          <!-- 测速纯图标按钮 -->
-          <UiTooltip content="快速连通性与延迟测速">
-            <UiButton
-              variant="ghost"
-              size="icon"
-              :disabled="testingKeyIds.has(k.id) || !adminWriteEnabled"
-              data-testid="test-single-key-btn"
-              class="text-slate-500 hover:text-amber-600 hover:bg-amber-50"
-              @click="emit('test-single', k.id)"
-            >
-              <Icons name="zap" size="14" />
-            </UiButton>
-          </UiTooltip>
-
-          <!-- 删除纯图标按钮 -->
-          <UiTooltip content="移除此密钥">
-            <UiButton
-              variant="ghost"
-              size="icon"
-              :disabled="!adminWriteEnabled"
-              data-testid="delete-key-btn"
-              class="text-slate-400 hover:text-rose-600 hover:bg-rose-50"
-              @click="handleDelete(k.id)"
-            >
-              <Icons name="trash" size="14" />
-            </UiButton>
-          </UiTooltip>
+              <div class="flex items-center justify-between font-mono">
+                <span class="font-medium text-slate-700 truncate mr-2">{{ q.model_id }}</span>
+                <span class="font-bold" :class="q.remaining_fraction > 0.2 ? 'text-emerald-600' : 'text-rose-600'">
+                  {{ Math.round(q.remaining_fraction * 100) }}%
+                </span>
+              </div>
+              <div class="w-full bg-slate-100 rounded-full h-1 overflow-hidden">
+                <div
+                  class="h-full transition-all duration-300"
+                  :class="q.remaining_fraction > 0.2 ? 'bg-emerald-500' : 'bg-rose-500'"
+                  :style="{ width: `${Math.round(q.remaining_fraction * 100)}%` }"
+                />
+              </div>
+              <div class="flex items-center justify-between text-slate-400 pt-0.5">
+                <span>恢复时间</span>
+                <span>{{ q.time_until_reset || q.reset_time_beijing || '已就绪' }}</span>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
     </div>
