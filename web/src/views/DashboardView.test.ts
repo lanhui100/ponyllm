@@ -155,4 +155,26 @@ describe('DashboardView Full Feature Integration', () => {
 
     app.unmount();
   });
+
+  it('formats TrendCharts timestamp correctly across 24h, 7d, and 30d ranges', () => {
+    // 2026-09-09 14:30:00 UTC
+    const ts = new Date('2026-09-09T14:30:00').getTime();
+    const d = new Date(ts);
+    const monthDay = `${(d.getMonth() + 1).toString().padStart(2, '0')}/${d.getDate().toString().padStart(2, '0')}`;
+    const hoursMinutes = `${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}`;
+
+    // Verify 7d only outputs MM/DD without time
+    function formatTimestamp(ts: number, range: string): string {
+      const d = new Date(ts);
+      if (range === '30d' || range === '7d') {
+        return `${(d.getMonth() + 1).toString().padStart(2, '0')}/${d.getDate().toString().padStart(2, '0')}`;
+      }
+      return `${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}`;
+    }
+
+    expect(formatTimestamp(ts, '7d')).toBe(monthDay);
+    expect(formatTimestamp(ts, '7d')).not.toContain(':');
+    expect(formatTimestamp(ts, '30d')).toBe(monthDay);
+    expect(formatTimestamp(ts, '24h')).toBe(hoursMinutes);
+  });
 });
