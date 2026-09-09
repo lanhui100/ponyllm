@@ -1,16 +1,91 @@
 <template>
-  <main class="connect">
-    <h1>连接网关</h1>
-    <p v-if="openMode">网关为免鉴模式，无需输入 Token。</p>
-    <form v-else @submit.prevent="submit">
-      <label>
-        Token
-        <input v-model="input" type="password" autocomplete="off" placeholder="sk-pony-..." />
-      </label>
-      <button type="submit">连接</button>
-      <p v-if="error" class="error">{{ error }}</p>
-    </form>
-  </main>
+  <div class="connect-page flex min-h-screen flex-col justify-center py-12 sm:px-6 lg:px-8 bg-slate-50 relative overflow-hidden select-none">
+    <!-- Ambient background gradient -->
+    <div class="pointer-events-none absolute -top-40 left-1/2 -translate-x-1/2 w-[700px] h-[350px] bg-gradient-to-b from-orange-100/60 via-slate-100/30 to-transparent blur-3xl" />
+
+    <div class="sm:mx-auto sm:w-full sm:max-w-md relative z-10">
+      <!-- Brand icon & title -->
+      <div class="flex items-center justify-center gap-2.5 mb-2">
+        <div class="w-10 h-10 rounded-xl bg-slate-900 text-white flex items-center justify-center font-bold text-base shadow-sm ring-1 ring-slate-900/10">
+          P
+        </div>
+        <span class="font-bold text-xl tracking-tight text-slate-900">PonyLLM</span>
+      </div>
+      <h2 class="text-center text-xl font-bold tracking-tight text-slate-800">
+        连接网关
+      </h2>
+      <p class="mt-1.5 text-center text-xs text-slate-500">
+        轻量高效的统一大模型代理与遥测控制台
+      </p>
+    </div>
+
+    <div class="mt-8 sm:mx-auto sm:w-full sm:max-w-[420px] px-4 sm:px-0 relative z-10">
+      <UiCard class="p-6 sm:p-8 shadow-sm border border-slate-200/80 bg-white/95 backdrop-blur-sm">
+        <div v-if="openMode" class="text-center py-4 space-y-4">
+          <div class="w-12 h-12 rounded-full bg-emerald-50 text-emerald-600 flex items-center justify-center mx-auto border border-emerald-100">
+            <Icons name="check" size="22" />
+          </div>
+          <div>
+            <h3 class="text-sm font-semibold text-slate-800">网关处于免鉴权模式</h3>
+            <p class="mt-1 text-xs text-slate-500">
+              当前网关未配置 API Key，无需验证即可直接管理与查看。
+            </p>
+          </div>
+          <UiButton
+            variant="default"
+            class="w-full mt-2"
+            @click="enterDashboard"
+          >
+            进入控制台
+          </UiButton>
+        </div>
+
+        <form v-else class="space-y-4" @submit.prevent="submit">
+          <div>
+            <div class="flex items-center justify-between mb-1.5">
+              <label for="token-input" class="block text-xs font-medium text-slate-700">
+                访问凭证 (Token)
+              </label>
+              <span class="text-[11px] text-slate-400">sk-pony-...</span>
+            </div>
+            <div class="relative">
+              <input
+                id="token-input"
+                v-model="input"
+                type="password"
+                autocomplete="off"
+                placeholder="请输入网关访问 API Key"
+                class="w-full h-10 px-3 py-2 text-sm bg-slate-50/50 border border-slate-200 rounded-lg focus:outline-none focus:bg-white focus:border-slate-400 focus:ring-2 focus:ring-slate-400/20 text-slate-900 placeholder:text-slate-400 transition-all font-mono tracking-wide"
+                :disabled="loading"
+              />
+            </div>
+          </div>
+
+          <div v-if="error" class="p-2.5 rounded-lg bg-rose-50 border border-rose-200/60 text-xs text-rose-600 flex items-start gap-2 animate-in fade-in duration-200">
+            <Icons name="info" size="14" class="mt-0.5 shrink-0 text-rose-500" />
+            <span class="error leading-relaxed">{{ error }}</span>
+          </div>
+
+          <UiButton
+            type="submit"
+            variant="default"
+            size="default"
+            class="w-full h-10 text-sm font-medium gap-2 shadow-sm"
+            :disabled="loading"
+          >
+            <Icons v-if="loading" name="refresh" size="14" class="animate-spin" />
+            <Icons v-else name="lock" size="14" />
+            <span>{{ loading ? '连接中...' : '连接' }}</span>
+          </UiButton>
+        </form>
+
+        <div class="mt-6 pt-5 border-t border-slate-100 flex items-center justify-between text-[11px] text-slate-400">
+          <span>PonyLLM Console</span>
+          <span class="font-mono">In-Memory Auth</span>
+        </div>
+      </UiCard>
+    </div>
+  </div>
 </template>
 
 <script setup lang="ts">
@@ -19,9 +94,13 @@ import { useRoute, useRouter } from 'vue-router';
 import { useSessionStore } from '../stores/session';
 import { bearerValue } from '../lib/alova';
 import { PROBE_PATH, probeOpenMode } from '../router';
+import UiCard from '../components/ui/UiCard.vue';
+import UiButton from '../components/ui/UiButton.vue';
+import Icons from '../components/ui/Icons.vue';
 
 const input = ref('');
 const error = ref('');
+const loading = ref(false);
 const openMode = ref(false);
 const route = useRoute();
 const router = useRouter();
@@ -37,6 +116,11 @@ onMounted(async () => {
   openMode.value = await probeOpenMode().catch(() => false);
 });
 
+async function enterDashboard(): Promise<void> {
+  const redirect = route.query.redirect;
+  await router.push(typeof redirect === 'string' ? redirect : '/dashboard');
+}
+
 async function submit(): Promise<void> {
   error.value = '';
   const candidate = input.value.trim();
@@ -44,6 +128,7 @@ async function submit(): Promise<void> {
     error.value = '请输入 Token';
     return;
   }
+  loading.value = true;
   try {
     const resp = await fetch(PROBE_PATH, {
       headers: { Authorization: bearerValue(candidate) },
@@ -59,21 +144,17 @@ async function submit(): Promise<void> {
       return;
     }
     session.login(candidate);
-    const redirect = route.query.redirect;
-    await router.push(typeof redirect === 'string' ? redirect : '/dashboard');
+    await enterDashboard();
   } catch {
     error.value = '网关不可达';
+  } finally {
+    loading.value = false;
   }
 }
 </script>
 
 <style scoped>
-.connect {
-  max-width: 420px;
-  margin: 12vh auto;
-  font-family: system-ui, sans-serif;
-}
-.error {
-  color: #b3261e;
+.connect-page {
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
 }
 </style>

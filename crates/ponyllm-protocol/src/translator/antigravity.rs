@@ -58,6 +58,8 @@ pub fn parse_inline_data_part(raw_url_or_data: &str, default_mime: &str) -> Opti
                         return Some(json!({ "text": text }));
                     }
                 }
+                // If decoding fails, do NOT send as inlineData because Gemini rejects text MIME types
+                return Some(json!({ "text": format!("[Document: {} (unparsed)]", mime_clean) }));
             }
             return Some(json!({
                 "inlineData": {
@@ -79,7 +81,7 @@ pub fn parse_inline_data_part(raw_url_or_data: &str, default_mime: &str) -> Opti
 
 /// Simple base64 decoding helper without external dependencies
 fn base64_decode(input: &str) -> std::result::Result<Vec<u8>, ()> {
-    // Quick base64 decode implementation using standard base64 table
+    // Quick base64 decode implementation using standard & url-safe base64 table
     const TABLE: [i8; 256] = {
         let mut t = [-1i8; 256];
         let mut i = 0usize;
@@ -94,7 +96,9 @@ fn base64_decode(input: &str) -> std::result::Result<Vec<u8>, ()> {
             d += 1;
         }
         t[b'+' as usize] = 62;
+        t[b'-' as usize] = 62; // URL-safe alias
         t[b'/' as usize] = 63;
+        t[b'_' as usize] = 63; // URL-safe alias
         t
     };
 
@@ -348,7 +352,7 @@ pub fn chat_to_antigravity_request(
                                 }
                                 crate::openai::chat::ContentPart::ImageUrl { image_url } => {
                                     if first_user_text.is_none() {
-                                        first_user_text = Some("image_modality_seed".to_string());
+                                        first_user_text = Some(format!("img_seed_{}", &image_url.url[..image_url.url.len().min(40)]));
                                     }
                                     if let Some(inline) = parse_inline_data_part(&image_url.url, "image/jpeg") {
                                         parts.push(inline);
@@ -356,7 +360,7 @@ pub fn chat_to_antigravity_request(
                                 }
                                 crate::openai::chat::ContentPart::InputAudio { input_audio } => {
                                     if first_user_text.is_none() {
-                                        first_user_text = Some("audio_modality_seed".to_string());
+                                        first_user_text = Some(format!("aud_seed_{}", &input_audio.data[..input_audio.data.len().min(40)]));
                                     }
                                     let mime = map_audio_format_to_mime(&input_audio.format);
                                     if let Some(inline) = parse_inline_data_part(&input_audio.data, mime) {
@@ -365,7 +369,7 @@ pub fn chat_to_antigravity_request(
                                 }
                                 crate::openai::chat::ContentPart::VideoUrl { video_url } => {
                                     if first_user_text.is_none() {
-                                        first_user_text = Some("video_modality_seed".to_string());
+                                        first_user_text = Some(format!("vid_seed_{}", &video_url.url[..video_url.url.len().min(40)]));
                                     }
                                     if let Some(inline) = parse_inline_data_part(&video_url.url, "video/mp4") {
                                         parts.push(inline);
@@ -373,7 +377,7 @@ pub fn chat_to_antigravity_request(
                                 }
                                 crate::openai::chat::ContentPart::File { file } => {
                                     if first_user_text.is_none() {
-                                        first_user_text = Some("file_modality_seed".to_string());
+                                        first_user_text = Some(file.filename.clone().unwrap_or_else(|| "file_seed".to_string()));
                                     }
                                     if let Some(ref url) = file.file_url {
                                         if let Some(inline) = parse_inline_data_part(url, "application/pdf") {
@@ -411,19 +415,59 @@ pub fn chat_to_antigravity_request(
                 push_or_merge_turn(&mut contents, "model", parts);
             }
             ChatMessage::Tool(m) => {
-                let txt = m.content.as_plain_text();
                 let func_name = tool_id_to_name.get(&m.tool_call_id).cloned().unwrap_or_else(|| "tool".to_string());
+                let mut extra_inline_parts = Vec::new();
+                let txt = match &m.content {
+                    crate::openai::chat::MessageContent::Text(t) => t.clone(),
+                    crate::openai::chat::MessageContent::Parts(c_parts) => {
+                        let mut text_acc = Vec::new();
+                        for part in c_parts {
+                            match part {
+                                crate::openai::chat::ContentPart::Text { text } => {
+                                    text_acc.push(text.clone());
+                                }
+                                crate::openai::chat::ContentPart::ImageUrl { image_url } => {
+                                    if let Some(inline) = parse_inline_data_part(&image_url.url, "image/jpeg") {
+                                        extra_inline_parts.push(inline);
+                                    }
+                                }
+                                crate::openai::chat::ContentPart::InputAudio { input_audio } => {
+                                    let mime = map_audio_format_to_mime(&input_audio.format);
+                                    if let Some(inline) = parse_inline_data_part(&input_audio.data, mime) {
+                                        extra_inline_parts.push(inline);
+                                    }
+                                }
+                                crate::openai::chat::ContentPart::VideoUrl { video_url } => {
+                                    if let Some(inline) = parse_inline_data_part(&video_url.url, "video/mp4") {
+                                        extra_inline_parts.push(inline);
+                                    }
+                                }
+                                crate::openai::chat::ContentPart::File { file } => {
+                                    if let Some(ref url) = file.file_url {
+                                        if let Some(inline) = parse_inline_data_part(url, "application/pdf") {
+                                            extra_inline_parts.push(inline);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        text_acc.join("\n")
+                    }
+                };
                 let response_obj = match serde_json::from_str::<Value>(&txt) {
                     Ok(Value::Object(map)) => Value::Object(map),
                     Ok(v) => json!({"response": v}),
                     Err(_) => json!({"response": txt}),
                 };
-                push_or_merge_turn(&mut contents, "user", vec![json!({
+                let mut user_turn_parts = vec![json!({
                     "functionResponse": {
                         "name": func_name,
                         "response": response_obj
                     }
-                })]);
+                })];
+                // Parallel inline data for Gemini Tool Calling contract
+                user_turn_parts.extend(extra_inline_parts);
+                push_or_merge_turn(&mut contents, "user", user_turn_parts);
             }
             ChatMessage::Function(m) => {
                 let txt = m.content.clone().unwrap_or_default();
@@ -623,7 +667,7 @@ pub fn messages_to_antigravity_request(
                         }
                         crate::anthropic::messages::AnthropicContentBlock::Image { source, .. } => {
                             if first_user_text.is_none() && role_str == "user" {
-                                first_user_text = Some("anthropic_image_seed".to_string());
+                                first_user_text = Some(format!("anthropic_img_{}", &source.data[..source.data.len().min(40)]));
                             }
                             if let Some(inline) = parse_inline_data_part(
                                 &format!("data:{};base64,{}", source.media_type, source.data),
@@ -634,7 +678,7 @@ pub fn messages_to_antigravity_request(
                         }
                         crate::anthropic::messages::AnthropicContentBlock::Document { source, .. } => {
                             if first_user_text.is_none() && role_str == "user" {
-                                first_user_text = Some("anthropic_doc_seed".to_string());
+                                first_user_text = Some(format!("anthropic_doc_{}", &source.data[..source.data.len().min(40)]));
                             }
                             if let Some(inline) = parse_inline_data_part(
                                 &format!("data:{};base64,{}", source.media_type, source.data),

@@ -18,7 +18,7 @@ use crate::config::{GatewayConfig, ProviderConfig};
 use crate::frames::FrameConverter;
 use crate::routes::models::ParsedRequestModel;
 
-/// 空字符串视为禁用；显式路径优先，随 `event_log_dir` 次之，默认落盘至全局配置目录保证30天连续性。
+/// 空字符串视为禁用；显式路径优先，随 `event_log_dir` 次之。
 fn resolve_snapshot_path(config: &GatewayConfig) -> Option<std::path::PathBuf> {
     if let Some(p) = config.telemetry_snapshot_path.as_deref() {
         if p.trim().is_empty() {
@@ -31,15 +31,7 @@ fn resolve_snapshot_path(config: &GatewayConfig) -> Option<std::path::PathBuf> {
             return Some(std::path::PathBuf::from(dir).join("telemetry-snapshot.json"));
         }
     }
-    if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
-        return Some(
-            std::path::PathBuf::from(home)
-                .join(".config")
-                .join("ponyllm")
-                .join("telemetry-snapshot.json"),
-        );
-    }
-    Some(std::path::PathBuf::from("telemetry-snapshot.json"))
+    None
 }
 
 fn spawn_snapshot_saver(
