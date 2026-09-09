@@ -154,12 +154,17 @@ pub async fn handle_key_auth_agy(
 
     println!();
     if headless {
-        println!("🔗 请在浏览器打开以下链接授权：");
-        println!("   \x1b[36m{}\x1b[0m", auth_url);
+        println!("🔗 请在浏览器打开以下链接完成授权 (支持按住 Ctrl 点击)：");
+        println!("   \x1b]8;;{}\x1b\\👉 [点击此处打开 Google 授权页面]\x1b]8;;\x1b\\", auth_url);
+        println!("   若终端不支持点击，请直接复制以下链接在浏览器中打开：");
+        println!("{}", auth_url);
+        println!();
         print!("请输入重定向 URL 或 Code（按 Ctrl+C 取消）: ");
     } else {
-        println!("🚀 正在打开浏览器授权（若未弹出请手动访问）：");
-        println!("   \x1b[36m{}\x1b[0m", auth_url);
+        println!("🚀 正在打开浏览器授权（若未弹出可按住 Ctrl 点击）：");
+        println!("   \x1b]8;;{}\x1b\\👉 [点击此处打开 Google 授权页面]\x1b]8;;\x1b\\", auth_url);
+        println!("{}", auth_url);
+        println!();
         open_in_browser(&auth_url);
         print!("等待授权中（可直接粘贴重定向 URL 或 Code，按 Ctrl+C 取消）: ");
     }
@@ -193,13 +198,16 @@ pub async fn handle_key_auth_agy(
 
     server_handle.abort();
 
+    let detected_proxy = ponyllm_core::detect_system_proxy();
     let effective_proxy = cli_proxy
-        .or_else(|| cfg.providers.get(&target_provider).and_then(|p| p.proxy.as_deref()))
-        .or(cfg.gateway.proxy.as_deref());
+        .map(str::to_string)
+        .or_else(|| cfg.providers.get(&target_provider).and_then(|p| p.proxy.clone()))
+        .or_else(|| cfg.gateway.proxy.clone())
+        .or(detected_proxy);
 
     let http_client = ponyllm_core::executor::create_upstream_http_client_with_options(
-        effective_proxy,
-        cfg.gateway.use_system_proxy,
+        effective_proxy.as_deref(),
+        cfg.gateway.use_system_proxy || effective_proxy.is_some(),
     );
 
     let auth_res = exchange_code_for_credential(
@@ -245,6 +253,10 @@ pub async fn handle_key_auth_agy(
 
         if let Some(pxy) = cli_proxy {
             p_sec.proxy = Some(pxy.to_string());
+        } else if p_sec.proxy.is_none() {
+            if let Some(ref pxy) = effective_proxy {
+                p_sec.proxy = Some(pxy.clone());
+            }
         }
 
         if let Some(existing_key) = p_sec.keys.iter_mut().find(|k| k.id == final_id) {

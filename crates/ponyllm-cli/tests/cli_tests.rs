@@ -971,3 +971,73 @@ async fn test_provider_add_agy_multi_account_append() {
     std::env::remove_var("ANTIGRAVITY_OAUTH_TOKEN_URL_OVERRIDE");
     std::env::remove_var("PONYLLM_NON_INTERACTIVE");
 }
+
+#[tokio::test]
+async fn test_provider_add_agy_proxy_auto_detection_and_persistence() {
+    let _guard = OAUTH_ENV_MUTEX.lock().await;
+    use axum::{routing::post, Json, Router};
+    use serde_json::json;
+
+    let oauth_app = Router::new().route(
+        "/token",
+        post(|axum::Form(params): axum::Form<std::collections::HashMap<String, String>>| async move {
+            let code = params.get("code").map(|s| s.as_str()).unwrap_or("");
+            Json(json!({
+                "access_token": "ya29.mock-access",
+                "refresh_token": format!("1//0mock-refresh-{}", code),
+                "expires_in": 3600,
+                "id_token": "eyJhbGciOiJSUzI1NiJ9.eyJlbWFpbCI6InByb3h5LnRlc3RAZ21haWwuY29tIiwic3ViIjoiOTk5In0.sig"
+            }))
+        }),
+    );
+
+    let oauth_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let oauth_port = oauth_listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        axum::serve(oauth_listener, oauth_app).await.unwrap();
+    });
+
+    std::env::set_var(
+        "ANTIGRAVITY_OAUTH_TOKEN_URL_OVERRIDE",
+        format!("http://127.0.0.1:{}/token", oauth_port),
+    );
+    std::env::set_var("PONYLLM_NON_INTERACTIVE", "1");
+    std::env::set_var("https_proxy", "http://127.0.0.1:8899");
+
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg_path = tmp.path().join("ponyllm.toml");
+    std::fs::write(&cfg_path, "[gateway]\nbind = \"127.0.0.1:8080\"\n").unwrap();
+    let cfg_str = cfg_path.to_str().unwrap().to_string();
+
+    let p = 51250;
+    let cfg_str_clone = cfg_str.clone();
+    let task = tokio::spawn(async move {
+        ponyllm_cli::oauth_agy::handle_key_auth_agy(
+            "agy",
+            Some("agy-proxy-acc"),
+            1,
+            10,
+            p,
+            true,
+            Some(&cfg_str_clone),
+            None,
+        )
+        .await
+    });
+
+    let client = reqwest::Client::new();
+    for _ in 0..20 {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        if let Ok(r) = client.get(format!("http://127.0.0.1:{}/oauth2callback?code=pxy1", p)).send().await {
+            if r.status().is_success() { break; }
+        }
+    }
+    task.await.unwrap().unwrap();
+
+    let updated = ConfigFile::load_or_default(cfg_path.to_str()).expect("Failed to load config");
+    let provider = updated.providers.get("antigravity").expect("antigravity provider missing");
+    assert_eq!(provider.proxy.as_deref(), Some("http://127.0.0.1:8899"));
+
+    std::env::remove_var("ANTIGRAVITY_OAUTH_TOKEN_URL_OVERRIDE");
+    std::env::remove_var("PONYLLM_NON_INTERACTIVE");
+}
