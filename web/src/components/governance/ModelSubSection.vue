@@ -188,6 +188,7 @@ function toggleOutputModality(mod: string) {
 }
 
 async function handleSubmit() {
+  if (!props.adminWriteEnabled) return;
   const name = form.value.name.trim();
   if (!name) {
     formError.value = '请输入模型名称';
@@ -226,6 +227,7 @@ async function handleSubmit() {
 }
 
 async function handleDelete(name: string) {
+  if (!props.adminWriteEnabled) return;
   if (!confirm(`确定删除模型 "${name}" 吗？该操作不会中断当前在途请求。`)) {
     return;
   }
@@ -276,6 +278,7 @@ function getTierBadgeVariant(tier?: string) {
         <UiButton
           variant="ghost"
           size="icon"
+          :aria-label="isExpanded ? '收起模型列表' : '展开模型列表'"
           class="text-slate-400 hover:text-slate-600"
           data-testid="toggle-models-btn"
           @click="isExpanded = !isExpanded"
@@ -520,7 +523,7 @@ function getTierBadgeVariant(tier?: string) {
             <UiButton
               type="submit"
               size="sm"
-              :disabled="submitting"
+              :disabled="submitting || !adminWriteEnabled"
               data-testid="submit-model-btn"
             >
               {{ submitting ? '保存中...' : '保存模型' }}
@@ -545,7 +548,7 @@ function getTierBadgeVariant(tier?: string) {
         <!-- 一等常显行 -->
         <div class="flex items-center justify-between px-3.5 py-2.5">
           <div class="flex items-center gap-2.5 min-w-0">
-            <span class="font-semibold text-slate-800 text-sm truncate">{{ m.name }}</span>
+            <span class="font-semibold text-slate-800 text-sm truncate" :title="m.name">{{ m.name }}</span>
             <UiBadge :variant="getTierBadgeVariant(m.tier)">
               {{ formatTierLabel(m.tier) }}
             </UiBadge>
@@ -596,6 +599,7 @@ function getTierBadgeVariant(tier?: string) {
               <UiButton
                 variant="ghost"
                 size="icon"
+                :aria-label="`编辑模型 ${m.name}`"
                 :disabled="!adminWriteEnabled"
                 data-testid="edit-model-btn"
                 class="text-slate-500 hover:text-indigo-600 hover:bg-indigo-50"
@@ -610,6 +614,7 @@ function getTierBadgeVariant(tier?: string) {
               <UiButton
                 variant="ghost"
                 size="icon"
+                :aria-label="`删除模型 ${m.name}`"
                 :disabled="!adminWriteEnabled"
                 data-testid="delete-model-btn"
                 class="text-slate-400 hover:text-rose-600 hover:bg-rose-50"
@@ -624,11 +629,12 @@ function getTierBadgeVariant(tier?: string) {
         <!-- 当前模型的平滑内联编辑区 -->
         <UiCollapsible :open="editingModelName === m.name">
           <div class="p-4 bg-white border-t border-slate-100 text-xs space-y-3">
-            <div class="flex items-center justify-between">
-              <span class="font-semibold text-slate-800 text-sm">编辑模型: {{ m.name }}</span>
+            <div class="flex items-center justify-between gap-3 min-w-0">
+              <span class="font-semibold text-slate-800 text-sm truncate" :title="m.name">编辑模型: {{ m.name }}</span>
               <button
                 type="button"
-                class="text-slate-400 hover:text-slate-600 cursor-pointer"
+                class="text-slate-400 hover:text-slate-600 cursor-pointer shrink-0 p-1"
+                aria-label="关闭编辑"
                 @click="cancelForm"
               >
                 <Icons name="cross" size="14" />
@@ -716,6 +722,7 @@ function getTierBadgeVariant(tier?: string) {
               <!-- 思考强度按钮组 (无最大上限) -->
               <ThinkingEffortSelect
                 v-model:default-effort="form.thinking_default"
+                :disabled="!adminWriteEnabled"
               />
 
               <!-- 支持模态类型拆解：输入模态与输出模态独立选择器 -->
@@ -840,7 +847,7 @@ function getTierBadgeVariant(tier?: string) {
                 <UiButton
                   type="submit"
                   size="sm"
-                  :disabled="submitting"
+                  :disabled="submitting || !adminWriteEnabled"
                   data-testid="update-model-btn"
                 >
                   {{ submitting ? '保存中...' : '更新' }}

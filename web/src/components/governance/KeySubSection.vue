@@ -59,7 +59,12 @@ function cancelAdd() {
   formError.value = null;
 }
 
+function formatQuotaPercent(fraction?: number | null): number {
+  return Math.max(0, Math.min(100, Math.round((fraction ?? 0) * 100)));
+}
+
 async function handleSubmit() {
+  if (!props.adminWriteEnabled) return;
   const id = form.value.id.trim();
   const rawKey = form.value.api_key.trim();
   if (!id) {
@@ -89,6 +94,7 @@ async function handleSubmit() {
 }
 
 async function handleDelete(id: string) {
+  if (!props.adminWriteEnabled) return;
   if (!confirm(`确定移除密钥 "${id}" 吗？该操作将热同步连接池。`)) {
     return;
   }
@@ -107,25 +113,25 @@ async function handleDelete(id: string) {
       class="flex items-center justify-between pb-1 cursor-pointer select-none"
       @click="isExpanded = !isExpanded"
     >
-      <div class="flex items-center gap-1.5 text-xs font-semibold text-slate-700">
-        <Icons name="key" size="13" class="text-amber-500" />
+      <div class="flex items-center gap-2 text-sm font-semibold text-slate-800">
+        <Icons name="key" size="14" class="text-amber-500" />
         密钥 ({{ keys.length }})
         <UiTooltip content="网关向该厂商转发请求所使用的 API 密钥池，支持多 Key 负载均衡">
-          <Icons name="info" size="12" class="text-slate-400 cursor-pointer" />
+          <Icons name="info" size="13" class="text-slate-400 hover:text-slate-600 cursor-pointer" />
         </UiTooltip>
       </div>
 
-      <div class="flex items-center gap-1" @click.stop>
+      <div class="flex items-center gap-1.5" @click.stop>
         <UiButton
           v-if="isAntigravity"
           variant="ghost"
           size="sm"
           :disabled="!adminWriteEnabled"
           data-testid="add-antigravity-key-btn"
-          class="text-amber-600 hover:text-amber-700 hover:bg-amber-50/60 font-medium px-2 py-1 text-xs"
+          class="text-amber-600 hover:text-amber-700 hover:bg-amber-50/60 font-medium px-2.5 py-1 text-[13px]"
           @click="emit('oauth-antigravity', props.providerName)"
         >
-          <Icons name="zap" size="13" />
+          <Icons name="zap" size="14" />
           授权账号
         </UiButton>
         <UiButton
@@ -133,20 +139,21 @@ async function handleDelete(id: string) {
           size="sm"
           :disabled="!adminWriteEnabled || isAdding"
           data-testid="add-key-btn"
-          class="text-indigo-600 hover:text-indigo-700 hover:bg-indigo-50/60 font-medium px-2.5 py-1 text-xs"
+          class="text-indigo-600 hover:text-indigo-700 hover:bg-indigo-50/60 font-medium px-2.5 py-1 text-[13px]"
           @click="openAddInline"
         >
-          <Icons name="plus" size="13" />
+          <Icons name="plus" size="14" />
           密钥
         </UiButton>
         <UiButton
           variant="ghost"
           size="icon"
+          :aria-label="isExpanded ? '收起密钥列表' : '展开密钥列表'"
           class="text-slate-400 hover:text-slate-600"
           data-testid="toggle-keys-btn"
           @click="isExpanded = !isExpanded"
         >
-          <Icons :name="isExpanded ? 'chevron-down' : 'chevron-right'" size="14" />
+          <Icons :name="isExpanded ? 'chevron-down' : 'chevron-right'" size="15" />
         </UiButton>
       </div>
     </div>
@@ -156,207 +163,209 @@ async function handleDelete(id: string) {
       <div class="pt-2 space-y-2">
         <!-- 行内平滑展开新建表单 -->
         <UiCollapsible :open="isAdding">
-          <div class="p-4 bg-slate-50/90 rounded-xl mb-3 text-xs space-y-3">
+          <div class="p-4 bg-slate-50/90 rounded-lg border border-slate-200/80 mb-3 text-sm space-y-3">
             <div class="flex items-center justify-between">
-              <span class="font-semibold text-slate-800 text-sm">新建密钥</span>
-          <button
-            type="button"
-            class="text-slate-400 hover:text-slate-600 cursor-pointer"
-            @click="cancelAdd"
-          >
-            <Icons name="cross" size="14" />
-          </button>
-        </div>
-
-        <div v-if="formError" class="p-2.5 bg-rose-50 text-rose-600 rounded-lg text-xs font-medium">
-          {{ formError }}
-        </div>
-
-        <form class="space-y-3" @submit.prevent="handleSubmit">
-          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <div>
-              <label class="block text-slate-600 font-medium mb-1 text-xs">Key 标识 *</label>
-              <input
-                v-model="form.id"
-                type="text"
-                placeholder="例如: key-01"
-                required
-                class="w-full bg-white border border-slate-200/80 rounded-lg px-3 py-2 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
-                data-testid="key-id-input"
-              />
+              <span class="font-semibold text-slate-900 text-sm">新建密钥</span>
+              <button
+                type="button"
+                class="text-slate-400 hover:text-slate-600 cursor-pointer p-0.5"
+                @click="cancelAdd"
+              >
+                <Icons name="cross" size="14" />
+              </button>
             </div>
 
-            <div>
-              <label class="block text-slate-600 font-medium mb-1 text-xs">API Key 明文 *</label>
-              <input
-                v-model="form.api_key"
-                type="password"
-                placeholder="sk-..."
-                required
-                class="w-full bg-white border border-slate-200/80 rounded-lg px-3 py-2 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
-                data-testid="key-secret-input"
-              />
+            <div v-if="formError" class="p-2.5 bg-rose-50 text-rose-600 rounded-md text-sm font-medium">
+              {{ formError }}
             </div>
-          </div>
 
-          <!-- 高级选项折叠 (权重/优先级) -->
-          <div class="pt-0.5">
-            <button
-              type="button"
-              class="text-xs font-semibold text-slate-600 hover:text-indigo-600 inline-flex items-center gap-1 cursor-pointer py-1 select-none"
-              @click="showAdvanced = !showAdvanced"
-            >
-              <Icons :name="showAdvanced ? 'chevron-down' : 'chevron-right'" size="11" />
-              高级调度参数 (权重与优先级)
-            </button>
-
-            <UiCollapsible :open="showAdvanced">
-              <div class="grid grid-cols-2 gap-3 pt-2 p-3 bg-slate-100/70 rounded-lg mt-1">
+            <form class="space-y-3" @submit.prevent="handleSubmit">
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
-                  <label class="block text-3xs text-slate-500 mb-0.5 font-medium">优先级 (数值越小越优先)</label>
+                  <label class="block text-slate-700 font-medium mb-1.5 text-[13px]">Key 标识 *</label>
                   <input
-                    v-model.number="form.priority"
-                    type="number"
-                    min="0"
-                    class="w-full bg-white border border-slate-200 rounded px-2.5 py-1.5 text-xs text-slate-800"
-                    data-testid="key-priority-input"
+                    v-model="form.id"
+                    type="text"
+                    placeholder="例如: key-01"
+                    required
+                    class="w-full bg-white border border-slate-200/80 rounded-md px-3 py-2 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
+                    data-testid="key-id-input"
                   />
                 </div>
+
                 <div>
-                  <label class="block text-3xs text-slate-500 mb-0.5 font-medium">权重 (轮询比重)</label>
+                  <label class="block text-slate-700 font-medium mb-1.5 text-[13px]">API Key 明文 *</label>
                   <input
-                    v-model.number="form.weight"
-                    type="number"
-                    min="1"
-                    class="w-full bg-white border border-slate-200 rounded px-2.5 py-1.5 text-xs text-slate-800"
-                    data-testid="key-weight-input"
+                    v-model="form.api_key"
+                    type="password"
+                    placeholder="sk-..."
+                    required
+                    class="w-full bg-white border border-slate-200/80 rounded-md px-3 py-2 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
+                    data-testid="key-secret-input"
                   />
                 </div>
               </div>
-            </UiCollapsible>
-          </div>
 
-          <div class="flex items-center justify-end gap-2 pt-2 border-t border-slate-200/60">
-            <UiButton variant="ghost" size="sm" @click="cancelAdd">
-              取消
-            </UiButton>
-            <UiButton
-              type="submit"
-              size="sm"
-              :disabled="submitting"
-              data-testid="submit-key-btn"
-            >
-              {{ submitting ? '保存中...' : '保存密钥' }}
-            </UiButton>
+              <!-- 高级选项折叠 (权重/优先级) -->
+              <div class="pt-0.5">
+                <button
+                  type="button"
+                  class="text-[13px] font-semibold text-slate-700 hover:text-indigo-600 inline-flex items-center gap-1 cursor-pointer py-1 select-none"
+                  @click="showAdvanced = !showAdvanced"
+                >
+                  <Icons :name="showAdvanced ? 'chevron-down' : 'chevron-right'" size="13" />
+                  高级调度参数 (权重与优先级)
+                </button>
+
+                <UiCollapsible :open="showAdvanced">
+                  <div class="grid grid-cols-2 gap-3 pt-2 p-3 bg-slate-100/70 rounded-md border border-slate-200/60 mt-1">
+                    <div>
+                      <label class="block text-xs text-slate-600 mb-1 font-medium">优先级 (数值越小越优先)</label>
+                      <input
+                        v-model.number="form.priority"
+                        type="number"
+                        min="0"
+                        class="w-full bg-white border border-slate-200 rounded-md px-3 py-1.5 text-sm text-slate-900"
+                        data-testid="key-priority-input"
+                      />
+                    </div>
+                    <div>
+                      <label class="block text-xs text-slate-600 mb-1 font-medium">权重 (轮询比重)</label>
+                      <input
+                        v-model.number="form.weight"
+                        type="number"
+                        min="1"
+                        class="w-full bg-white border border-slate-200 rounded-md px-3 py-1.5 text-sm text-slate-900"
+                        data-testid="key-weight-input"
+                      />
+                    </div>
+                  </div>
+                </UiCollapsible>
+              </div>
+
+              <div class="flex items-center justify-end gap-2 pt-2 border-t border-slate-200/60">
+                <UiButton variant="ghost" size="sm" @click="cancelAdd">
+                  取消
+                </UiButton>
+                <UiButton
+                  type="submit"
+                  size="sm"
+                  :disabled="submitting || !adminWriteEnabled"
+                  data-testid="submit-key-btn"
+                >
+                  {{ submitting ? '保存中...' : '保存密钥' }}
+                </UiButton>
+              </div>
+            </form>
           </div>
-        </form>
+        </UiCollapsible>
+
+        <!-- 密钥条目列表 -->
+        <div v-if="keys.length === 0" class="py-3 text-center text-sm text-slate-500 bg-slate-50/60 border border-slate-200/60 rounded-md">
+          暂未配置密钥，点击上方「+ 密钥」快速添加
+        </div>
+
+        <div v-else class="space-y-2">
+          <div
+            v-for="k in keys"
+            :key="k.id"
+            class="bg-white hover:bg-slate-50/70 rounded-md border border-slate-200/80 transition-colors text-sm p-3.5 space-y-2.5"
+            data-testid="key-row"
+          >
+            <div class="flex items-center justify-between">
+              <div class="flex items-center gap-2.5 min-w-0">
+                <span class="font-mono text-slate-900 font-semibold text-sm truncate">{{ k.id }}</span>
+                <span class="font-mono text-slate-500 text-[13px]">{{ k.masked_key }}</span>
+                <UiBadge :variant="k.state === 'active' ? 'success' : 'warning'">
+                  {{ formatKeyState(k.state) }}
+                </UiBadge>
+              </div>
+
+              <div class="flex items-center gap-1.5 shrink-0">
+                <!-- 拨测延迟徽标 -->
+                <template v-if="keyTestResults[k.id]">
+                  <UiBadge
+                    :variant="keyTestResults[k.id].success ? 'success' : 'destructive'"
+                    data-testid="probe-result-badge"
+                  >
+                    {{ keyTestResults[k.id].success ? `${keyTestResults[k.id].latency_ms}ms` : '异常' }}
+                  </UiBadge>
+                </template>
+                <span v-else-if="testingKeyIds.has(k.id)" class="text-sm text-indigo-600 animate-pulse font-medium">
+                  测速中...
+                </span>
+
+                <!-- 测速纯图标按钮 -->
+                <UiTooltip content="快速连通性与延迟测速">
+                  <UiButton
+                    variant="ghost"
+                    size="icon"
+                    :aria-label="`测速密钥 ${k.id}`"
+                    :disabled="testingKeyIds.has(k.id) || !adminWriteEnabled"
+                    data-testid="test-single-key-btn"
+                    class="text-slate-500 hover:text-amber-600 hover:bg-amber-50"
+                    @click="emit('test-single', k.id)"
+                  >
+                    <Icons name="zap" size="14" />
+                  </UiButton>
+                </UiTooltip>
+
+                <!-- 删除纯图标按钮 -->
+                <UiTooltip content="移除此密钥">
+                  <UiButton
+                    variant="ghost"
+                    size="icon"
+                    :aria-label="`删除密钥 ${k.id}`"
+                    :disabled="!adminWriteEnabled"
+                    data-testid="delete-key-btn"
+                    class="text-slate-400 hover:text-rose-600 hover:bg-rose-50"
+                    @click="handleDelete(k.id)"
+                  >
+                    <Icons name="trash" size="14" />
+                  </UiButton>
+                </UiTooltip>
+              </div>
+            </div>
+
+            <!-- Antigravity 模型配额与重置时间 -->
+            <div
+              v-if="(keyTestResults[k.id]?.quota?.length ?? 0) > 0"
+              class="pt-2 border-t border-slate-200/60"
+              data-testid="antigravity-quota-container"
+            >
+              <div class="text-xs font-semibold text-slate-600 uppercase tracking-wider mb-2 flex items-center gap-1.5">
+                <Icons name="zap" size="12" class="text-amber-500" />
+                Antigravity 模型配额与重置时间
+              </div>
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                <div
+                  v-for="q in keyTestResults[k.id].quota"
+                  :key="q.model_id"
+                  class="bg-slate-50/70 p-2.5 rounded-md border border-slate-200/80 text-xs space-y-1.5"
+                >
+                  <div class="flex items-center justify-between font-mono">
+                    <span class="font-medium text-slate-700 truncate mr-2">{{ q.model_id }}</span>
+                    <span class="font-bold" :class="(q.remaining_fraction ?? 0) > 0.2 ? 'text-emerald-600' : 'text-rose-600'">
+                      {{ formatQuotaPercent(q.remaining_fraction) }}%
+                    </span>
+                  </div>
+                  <div class="w-full bg-slate-200/80 rounded-full h-1.5 overflow-hidden">
+                    <div
+                      class="h-full transition-all duration-300"
+                      :class="(q.remaining_fraction ?? 0) > 0.2 ? 'bg-emerald-500' : 'bg-rose-500'"
+                      :style="{ width: `${formatQuotaPercent(q.remaining_fraction)}%` }"
+                    />
+                  </div>
+                  <div class="flex items-center justify-between text-slate-500 pt-0.5">
+                    <span>恢复时间</span>
+                    <span>{{ q.time_until_reset || q.reset_time_beijing || '已就绪' }}</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
     </UiCollapsible>
-
-    <!-- 密钥条目列表 -->
-    <div v-if="keys.length === 0" class="py-3 text-center text-xs text-slate-400 bg-slate-50/50 rounded-lg">
-      暂未配置密钥，点击上方「+ 密钥」快速添加
-    </div>
-
-    <div v-else class="space-y-2">
-      <div
-        v-for="k in keys"
-        :key="k.id"
-        class="bg-slate-50/70 hover:bg-slate-100/70 rounded-xl transition-colors text-xs p-3 space-y-2"
-        data-testid="key-row"
-      >
-        <div class="flex items-center justify-between">
-          <div class="flex items-center gap-2.5 min-w-0">
-            <span class="font-mono text-slate-800 font-semibold text-xs truncate">{{ k.id }}</span>
-            <span class="font-mono text-slate-400 text-xs">{{ k.masked_key }}</span>
-            <UiBadge :variant="k.state === 'active' ? 'success' : 'warning'">
-              {{ formatKeyState(k.state) }}
-            </UiBadge>
-          </div>
-
-          <div class="flex items-center gap-1.5 shrink-0">
-            <!-- 拨测延迟徽标 -->
-            <template v-if="keyTestResults[k.id]">
-              <UiBadge
-                :variant="keyTestResults[k.id].success ? 'success' : 'destructive'"
-                data-testid="probe-result-badge"
-              >
-                {{ keyTestResults[k.id].success ? `${keyTestResults[k.id].latency_ms}ms` : '异常' }}
-              </UiBadge>
-            </template>
-            <span v-else-if="testingKeyIds.has(k.id)" class="text-xs text-indigo-600 animate-pulse font-medium">
-              测速中...
-            </span>
-
-            <!-- 测速纯图标按钮 -->
-            <UiTooltip content="快速连通性与延迟测速">
-              <UiButton
-                variant="ghost"
-                size="icon"
-                :disabled="testingKeyIds.has(k.id) || !adminWriteEnabled"
-                data-testid="test-single-key-btn"
-                class="text-slate-500 hover:text-amber-600 hover:bg-amber-50"
-                @click="emit('test-single', k.id)"
-              >
-                <Icons name="zap" size="14" />
-              </UiButton>
-            </UiTooltip>
-
-            <!-- 删除纯图标按钮 -->
-            <UiTooltip content="移除此密钥">
-              <UiButton
-                variant="ghost"
-                size="icon"
-                :disabled="!adminWriteEnabled"
-                data-testid="delete-key-btn"
-                class="text-slate-400 hover:text-rose-600 hover:bg-rose-50"
-                @click="handleDelete(k.id)"
-              >
-                <Icons name="trash" size="14" />
-              </UiButton>
-            </UiTooltip>
-          </div>
-        </div>
-
-        <!-- Antigravity 模型配额与重置时间 -->
-        <div
-          v-if="(keyTestResults[k.id]?.quota?.length ?? 0) > 0"
-          class="pt-2 border-t border-slate-200/60"
-          data-testid="antigravity-quota-container"
-        >
-          <div class="text-3xs font-semibold text-slate-500 uppercase tracking-wider mb-1.5 flex items-center gap-1">
-            <Icons name="zap" size="11" class="text-amber-500" />
-            Antigravity 模型配额与重置时间
-          </div>
-          <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
-            <div
-              v-for="q in keyTestResults[k.id].quota"
-              :key="q.model_id"
-              class="bg-white p-2 rounded-lg border border-slate-200/80 shadow-2xs text-3xs space-y-1"
-            >
-              <div class="flex items-center justify-between font-mono">
-                <span class="font-medium text-slate-700 truncate mr-2">{{ q.model_id }}</span>
-                <span class="font-bold" :class="q.remaining_fraction > 0.2 ? 'text-emerald-600' : 'text-rose-600'">
-                  {{ Math.round(q.remaining_fraction * 100) }}%
-                </span>
-              </div>
-              <div class="w-full bg-slate-100 rounded-full h-1 overflow-hidden">
-                <div
-                  class="h-full transition-all duration-300"
-                  :class="q.remaining_fraction > 0.2 ? 'bg-emerald-500' : 'bg-rose-500'"
-                  :style="{ width: `${Math.round(q.remaining_fraction * 100)}%` }"
-                />
-              </div>
-              <div class="flex items-center justify-between text-slate-400 pt-0.5">
-                <span>恢复时间</span>
-                <span>{{ q.time_until_reset || q.reset_time_beijing || '已就绪' }}</span>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-    </div>
-  </UiCollapsible>
   </div>
 </template>

@@ -62,11 +62,11 @@ function formatTokens(n: number): string {
 </script>
 
 <template>
-  <div class="borderless-card p-6 mb-6 transition-all duration-200">
+  <div class="swiss-card p-6 mb-6 transition-all duration-200">
     <!-- 头部区域：标题与周期 Switch -->
     <div class="flex flex-wrap items-center justify-between gap-3 pb-4 mb-4 border-b border-slate-100">
       <div class="flex items-center gap-2.5">
-        <div class="w-8 h-8 rounded-lg bg-orange-50 text-orange-600 flex items-center justify-center">
+        <div class="w-8 h-8 rounded-lg bg-orange-50 border border-orange-200/60 text-orange-600 flex items-center justify-center">
           <Icons name="server" size="16" />
         </div>
         <div>
@@ -85,7 +85,7 @@ function formatTokens(n: number): string {
               </button>
             </UiTooltip>
           </div>
-          <p class="text-xs text-slate-400">活跃上游节点的连通性微柱切片与吞吐概览</p>
+          <p class="text-[13px] text-slate-500">活跃上游节点的连通性微柱切片与吞吐概览</p>
         </div>
       </div>
 
@@ -95,10 +95,10 @@ function formatTokens(n: number): string {
           v-for="opt in rangeOptions"
           :key="opt.key"
           type="button"
-          class="px-3 py-1.5 text-xs font-semibold rounded-md transition-all duration-150 cursor-pointer"
+          class="px-3.5 py-1.5 text-[13px] font-medium rounded-md transition-all duration-150 cursor-pointer"
           :class="[
             range === opt.key
-              ? 'bg-white text-orange-600 shadow-xs'
+              ? 'bg-white text-slate-950 font-semibold shadow-2xs'
               : 'text-slate-600 hover:text-slate-900',
           ]"
           @click="emit('update:range', opt.key)"
@@ -108,14 +108,14 @@ function formatTokens(n: number): string {
       </div>
     </div>
 
-    <div v-if="!providers || Object.keys(providers).length === 0" class="text-sm text-slate-400 py-8 text-center">
+    <div v-if="!providers || Object.keys(providers).length === 0" class="text-sm text-slate-500 py-8 text-center">
       暂无活跃 Provider 节点数据
     </div>
 
     <div v-else class="overflow-x-auto">
-      <table class="w-full text-left text-sm">
+      <table class="w-full text-left text-[14px]">
         <thead>
-          <tr class="text-slate-400 border-b border-slate-100 font-medium">
+          <tr class="text-slate-500 border-b border-slate-200/80 font-medium text-[13px]">
             <th class="pb-3 font-semibold whitespace-nowrap">提供商</th>
             <th class="pb-3 font-semibold whitespace-nowrap">连通性状态 (最近1分钟)</th>
             <th class="pb-3 font-semibold whitespace-nowrap">Token 总量</th>
@@ -125,15 +125,15 @@ function formatTokens(n: number): string {
             <th class="pb-3 font-semibold text-right whitespace-nowrap">错误数</th>
           </tr>
         </thead>
-        <tbody class="divide-y divide-slate-50">
+        <tbody class="divide-y divide-slate-100">
           <tr
             v-for="{ name, snapshot: p } in sortedProviders"
             :key="name"
-            class="hover:bg-slate-50/70 transition-colors group"
+            class="hover:bg-slate-50/80 transition-colors group"
           >
             <!-- Provider 名称 -->
             <td class="py-3.5 font-bold text-slate-900 whitespace-nowrap">
-              <span class="px-2 py-0.5 rounded bg-slate-100/80 text-slate-800 font-mono text-xs">
+              <span class="px-2.5 py-1 rounded-md bg-slate-100 border border-slate-200 text-slate-900 font-mono text-[13px] font-semibold">
                 {{ name }}
               </span>
             </td>
@@ -155,7 +155,7 @@ function formatTokens(n: number): string {
                 </span>
                 <span
                   v-if="totalAllTokens > 0"
-                  class="text-[11px] font-mono text-slate-400"
+                  class="text-xs font-mono text-slate-500"
                 >
                   ({{ ((getProviderTokens(name, p) / totalAllTokens) * 100).toFixed(0) }}%)
                 </span>
@@ -163,24 +163,24 @@ function formatTokens(n: number): string {
             </td>
 
             <!-- 流调用数 -->
-            <td class="py-3.5 text-slate-600 font-mono text-xs whitespace-nowrap">
+            <td class="py-3.5 text-slate-700 font-mono text-[13px] whitespace-nowrap">
               {{ p.stream_count ?? 0 }}
             </td>
 
             <!-- 平均 TTFT -->
-            <td class="py-3.5 text-slate-600 font-mono text-xs whitespace-nowrap">
+            <td class="py-3.5 text-slate-700 font-mono text-[13px] whitespace-nowrap">
               {{ p.avg_ttft_ms !== undefined && p.avg_ttft_ms !== null ? `${p.avg_ttft_ms.toFixed(1)} ms` : '--' }}
             </td>
 
             <!-- 平均 TPS -->
-            <td class="py-3.5 text-slate-600 font-mono text-xs whitespace-nowrap">
+            <td class="py-3.5 text-slate-700 font-mono text-[13px] whitespace-nowrap">
               {{ p.avg_tps !== undefined && p.avg_tps !== null ? `${p.avg_tps.toFixed(1)} tok/s` : '--' }}
             </td>
 
             <!-- 错误数 -->
             <td
-              class="py-3.5 text-right font-mono text-xs font-semibold whitespace-nowrap"
-              :class="(p.error_count ?? 0) > 0 ? 'text-rose-600' : 'text-slate-400'"
+              class="py-3.5 text-right font-mono text-[13px] font-semibold whitespace-nowrap"
+              :class="(p.error_count ?? 0) > 0 ? 'text-rose-600' : 'text-slate-500'"
             >
               {{ p.error_count ?? 0 }}
             </td>

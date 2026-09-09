@@ -23,12 +23,19 @@ function hide() {
 </script>
 
 <template>
-  <div class="relative inline-flex items-center" @mouseenter="show" @mouseleave="hide">
+  <div
+    class="relative inline-flex items-center"
+    @mouseenter="show"
+    @mouseleave="hide"
+    @focusin="show"
+    @focusout="hide"
+  >
     <slot />
     <Transition name="fade-tooltip">
       <div
         v-if="visible && content"
-        class="absolute z-50 px-3 py-2 text-xs font-normal text-white bg-slate-900/95 backdrop-blur-xs rounded-lg shadow-xl pointer-events-none transition-all duration-150"
+        role="tooltip"
+        class="absolute z-50 px-3 py-2 text-[13px] font-medium text-white bg-slate-900/95 backdrop-blur-xs rounded-lg shadow-xl pointer-events-none transition-all duration-150 border border-slate-700/60"
         :class="[
           position === 'bottom' ? 'top-full mt-1.5 left-1/2 -translate-x-1/2' : 'bottom-full mb-1.5 left-1/2 -translate-x-1/2',
           wrap ? 'w-64 max-w-xs whitespace-normal leading-relaxed text-left' : 'whitespace-nowrap',

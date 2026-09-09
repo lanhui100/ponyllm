@@ -288,6 +288,7 @@ function cancelAddProvider() {
 }
 
 async function handleSaveProvider() {
+  if (!adminWriteEnabled.value) return;
   const name = newProviderForm.value.name.trim();
   const url = newProviderForm.value.base_url.trim() || 'https://tokens.ponyjob.top/v1';
   if (!name) {
@@ -320,6 +321,7 @@ async function handleSaveProvider() {
 }
 
 async function handleAuthorizeAntigravity() {
+  if (!adminWriteEnabled.value) return;
   const codeOrUrl = antigravityForm.value.code_or_url.trim();
   if (!codeOrUrl) {
     providerFormError.value = '请输入重定向 URL 或 Code';
@@ -355,6 +357,7 @@ async function handleAuthorizeAntigravityKey(payload: {
   priority?: number;
   weight?: number;
 }) {
+  if (!adminWriteEnabled.value) return;
   await authorizeAntigravity(payload);
 }
 
@@ -382,12 +385,12 @@ onUnmounted(() => {
       <!-- 只读模式安全警示胶囊 -->
       <div
         v-if="!adminWriteEnabled"
-        class="flex items-center gap-2 px-3.5 py-2.5 bg-amber-50/90 border border-amber-200/80 rounded-xl mb-6 text-xs text-amber-800 shadow-2xs"
+        class="flex items-center gap-2.5 px-4 py-3 bg-amber-50 border border-amber-200 rounded-xl mb-6 text-sm text-amber-800 shadow-2xs"
         data-testid="readonly-banner"
       >
-        <Icons name="lock" size="15" class="text-amber-600 shrink-0" />
+        <Icons name="lock" size="16" class="text-amber-600 shrink-0" />
         <div class="flex-1">
-          <strong class="font-medium">只读治理模式：</strong>
+          <strong class="font-semibold">只读治理模式：</strong>
           当前网关服务端未启用写权限（<code>admin_write_enabled=false</code>）。所有新增、修改与删除已被安全锁定。
         </div>
       </div>
@@ -397,7 +400,7 @@ onUnmounted(() => {
         <div>
           <h1 class="text-2xl font-bold tracking-tight text-slate-900 flex items-center gap-2.5">
             模型管理
-            <UiBadge variant="secondary" class="font-mono text-xs font-semibold" data-testid="config-version-val">
+            <UiBadge variant="secondary" class="font-mono text-[13px] font-semibold" data-testid="config-version-val">
               v{{ configVersion }}
             </UiBadge>
           </h1>
@@ -457,36 +460,36 @@ onUnmounted(() => {
       </div>
 
       <!-- 错误提示横幅 -->
-      <div v-if="error" class="flex items-center justify-between p-3.5 mb-6 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-700">
+      <div v-if="error" class="flex items-center justify-between p-4 mb-6 bg-rose-50 border border-rose-200 rounded-xl text-sm text-rose-700">
         <span>配置获取失败: {{ error }}</span>
-        <UiButton variant="ghost" size="sm" class="text-rose-700 hover:bg-rose-100/60" @click="handleRefresh">
+        <UiButton variant="ghost" size="sm" class="text-rose-700 hover:bg-rose-100/60 text-[13px]" @click="handleRefresh">
           重试
         </UiButton>
       </div>
 
       <!-- 行内平滑展开：新建服务商表单 (替代原有抽屉) -->
       <UiCollapsible :open="isAddingProvider">
-        <div class="borderless-card p-5 mb-6">
-          <div class="flex items-center justify-between mb-3.5">
-            <span class="font-bold text-base text-slate-800 flex items-center gap-2">
-              <Icons name="server" size="18" class="text-indigo-600" />
+        <div class="swiss-card p-6 mb-6">
+          <div class="flex items-center justify-between mb-4">
+            <span class="font-bold text-lg text-slate-900 flex items-center gap-2">
+              <Icons name="server" size="20" class="text-slate-800" />
               新建服务商
             </span>
-            <button type="button" class="text-slate-400 hover:text-slate-600 cursor-pointer" @click="cancelAddProvider">
-              <Icons name="cross" size="15" />
+            <button type="button" class="text-slate-400 hover:text-slate-700 cursor-pointer" @click="cancelAddProvider">
+              <Icons name="cross" size="16" />
             </button>
           </div>
 
-          <div v-if="providerFormError" class="p-2.5 mb-3.5 bg-rose-50 text-rose-600 rounded-lg text-xs font-medium">
+          <div v-if="providerFormError" class="p-3 mb-4 bg-rose-50 border border-rose-200 text-rose-700 rounded-lg text-sm font-medium">
             {{ providerFormError }}
           </div>
 
           <!-- 服务商类型切换 -->
-          <div class="flex items-center gap-2 p-1 bg-slate-100/80 rounded-lg w-fit mb-4">
+          <div class="flex items-center gap-2 p-1 bg-slate-100 rounded-lg w-fit mb-5 border border-slate-200/80">
             <button
               type="button"
-              class="px-3 py-1.5 text-xs font-medium rounded-md transition-all cursor-pointer"
-              :class="newProviderMode === 'standard' ? 'bg-white text-indigo-600 shadow-2xs font-semibold' : 'text-slate-600 hover:text-slate-900'"
+              class="px-3.5 py-1.5 text-[13px] font-medium rounded-md transition-all cursor-pointer"
+              :class="newProviderMode === 'standard' ? 'bg-white text-slate-950 shadow-2xs font-semibold' : 'text-slate-600 hover:text-slate-900'"
               data-testid="mode-standard-btn"
               @click="newProviderMode = 'standard'"
             >
@@ -494,61 +497,61 @@ onUnmounted(() => {
             </button>
             <button
               type="button"
-              class="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md transition-all cursor-pointer"
-              :class="newProviderMode === 'antigravity' ? 'bg-white text-indigo-600 shadow-2xs font-semibold' : 'text-slate-600 hover:text-slate-900'"
+              class="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-[13px] font-medium rounded-md transition-all cursor-pointer"
+              :class="newProviderMode === 'antigravity' ? 'bg-white text-slate-950 shadow-2xs font-semibold' : 'text-slate-600 hover:text-slate-900'"
               data-testid="mode-antigravity-btn"
               @click="switchToAntigravityMode"
             >
-              <Icons name="zap" size="13" class="text-amber-500" />
+              <Icons name="zap" size="14" class="text-amber-500" />
               Google Antigravity (内置协议与 OAuth2 授权)
             </button>
           </div>
 
           <!-- 通用服务商表单 -->
-          <form v-if="newProviderMode === 'standard'" class="space-y-3.5" @submit.prevent="handleSaveProvider">
-            <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+          <form v-if="newProviderMode === 'standard'" class="space-y-4" @submit.prevent="handleSaveProvider">
+            <div class="grid grid-cols-1 sm:grid-cols-3 gap-3.5">
               <div>
-                <label class="block text-xs font-medium text-slate-600 mb-1">服务商标识 *</label>
+                <label class="block text-[13px] font-medium text-slate-700 mb-1.5">服务商标识 *</label>
                 <input
                   v-model="newProviderForm.name"
                   type="text"
                   placeholder="例如: openai / deepseek"
                   required
-                  class="w-full bg-slate-50 border border-slate-200/80 rounded-lg px-3 py-2 text-xs text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 focus:bg-white"
+                  class="w-full bg-slate-50 border border-slate-200 rounded-lg px-3.5 py-2 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-slate-400/20 focus:border-slate-400 focus:bg-white"
                   data-testid="provider-name-input"
                 />
               </div>
 
               <div class="sm:col-span-2">
-                <label class="block text-xs font-medium text-slate-600 mb-1">Base URL *</label>
+                <label class="block text-[13px] font-medium text-slate-700 mb-1.5">Base URL *</label>
                 <input
                   v-model="newProviderForm.base_url"
                   type="url"
                   placeholder="https://tokens.ponyjob.top/v1"
                   required
-                  class="w-full bg-slate-50 border border-slate-200/80 rounded-lg px-3 py-2 text-xs text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 focus:bg-white"
+                  class="w-full bg-slate-50 border border-slate-200 rounded-lg px-3.5 py-2 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-slate-400/20 focus:border-slate-400 focus:bg-white"
                   data-testid="provider-base-url-input"
                 />
               </div>
             </div>
 
-            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
               <div>
-                <label class="block text-xs font-medium text-slate-600 mb-1">默认模型</label>
+                <label class="block text-[13px] font-medium text-slate-700 mb-1.5">默认模型</label>
                 <input
                   v-model="newProviderForm.default_model"
                   type="text"
                   placeholder="gpt-4o"
-                  class="w-full bg-slate-50 border border-slate-200/80 rounded-lg px-3 py-2 text-xs text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 focus:bg-white"
+                  class="w-full bg-slate-50 border border-slate-200 rounded-lg px-3.5 py-2 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-slate-400/20 focus:border-slate-400 focus:bg-white"
                   data-testid="provider-default-model-input"
                 />
               </div>
 
               <div>
-                <label class="block text-xs font-medium text-slate-600 mb-1">路由调度算法</label>
+                <label class="block text-[13px] font-medium text-slate-700 mb-1.5">路由调度算法</label>
                 <select
                   v-model="newProviderForm.strategy"
-                  class="w-full bg-slate-50 border border-slate-200/80 rounded-lg px-3 py-2 text-xs text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 focus:bg-white"
+                  class="w-full bg-slate-50 border border-slate-200 rounded-lg px-3.5 py-2 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-slate-400/20 focus:border-slate-400 focus:bg-white"
                 >
                   <option value="round_robin">轮询 (Round Robin)</option>
                   <option value="priority">主备优先级 (Priority)</option>
@@ -563,7 +566,7 @@ onUnmounted(() => {
 
             <!-- 支持模型协议选择器 (非下拉胶囊药丸) -->
             <div>
-              <label class="block text-xs font-medium text-slate-600 mb-1.5">支持模型协议</label>
+              <label class="block text-[13px] font-medium text-slate-700 mb-2">支持模型协议</label>
               <div class="flex flex-wrap gap-2">
                 <button
                   v-for="proto in [
@@ -573,10 +576,10 @@ onUnmounted(() => {
                   ]"
                   :key="proto.id"
                   type="button"
-                  class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all border select-none cursor-pointer"
+                  class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[13px] font-medium transition-all border select-none cursor-pointer"
                   :class="newProviderProtocols.includes(proto.id)
                     ? 'bg-amber-100 text-amber-900 border-amber-300 font-semibold shadow-2xs'
-                    : 'bg-slate-50 text-slate-500 border-slate-200/80 hover:bg-slate-100/80'"
+                    : 'bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100'"
                   @click="
                     newProviderProtocols.includes(proto.id)
                       ? (newProviderProtocols.length > 1 && newProviderProtocols.splice(newProviderProtocols.indexOf(proto.id), 1))
@@ -592,11 +595,16 @@ onUnmounted(() => {
               </div>
             </div>
 
-            <div class="flex items-center justify-end gap-2 pt-2 border-t border-slate-100">
+            <div class="flex items-center justify-end gap-2 pt-3 border-t border-slate-100">
               <UiButton variant="ghost" size="sm" @click="cancelAddProvider">
                 取消
               </UiButton>
-              <UiButton type="submit" size="sm" :disabled="providerSubmitting" data-testid="submit-provider-btn">
+              <UiButton
+                type="submit"
+                size="sm"
+                :disabled="providerSubmitting || !adminWriteEnabled"
+                data-testid="submit-provider-btn"
+              >
                 {{ providerSubmitting ? '保存中...' : '确认创建' }}
               </UiButton>
             </div>
@@ -606,7 +614,7 @@ onUnmounted(() => {
           <form v-else class="space-y-4" @submit.prevent="handleAuthorizeAntigravity">
             <!-- 智能出海代理状态感知胶囊 -->
             <div
-              class="flex items-center justify-between p-3 rounded-xl border transition-all text-xs"
+              class="flex items-center justify-between p-3.5 rounded-xl border transition-all text-[13px]"
               :class="proxyStatus?.available ? 'bg-emerald-50/70 border-emerald-200/80 text-emerald-900' : 'bg-amber-50/70 border-amber-200/80 text-amber-900'"
               data-testid="proxy-status-capsule"
             >
@@ -624,11 +632,11 @@ onUnmounted(() => {
                 <div>
                   <div class="font-semibold flex items-center gap-2">
                     <span>{{ proxyStatus?.description || '出海代理状态探测中...' }}</span>
-                    <span v-if="proxyStatus?.latency_ms" class="text-3xs px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-700 font-mono">
+                    <span v-if="proxyStatus?.latency_ms" class="text-xs px-2 py-0.5 rounded bg-emerald-100 text-emerald-700 font-mono">
                       {{ proxyStatus.latency_ms }}ms
                     </span>
                   </div>
-                  <p class="text-3xs opacity-80 mt-0.5">{{ proxyStatus?.hint || '自动感知本地 pproxy (127.0.0.1:8899)' }}</p>
+                  <p class="text-xs opacity-80 mt-0.5">{{ proxyStatus?.hint || '自动感知本地 pproxy (127.0.0.1:8899)' }}</p>
                 </div>
               </div>
               <div class="flex items-center gap-2">
@@ -637,11 +645,11 @@ onUnmounted(() => {
                   type="button"
                   size="sm"
                   variant="outline"
-                  class="text-amber-800 border-amber-300 hover:bg-amber-100/60 text-xs px-2.5 py-1"
+                  class="text-amber-800 border-amber-300 hover:bg-amber-100/60 text-[13px] px-3 py-1"
                   data-testid="copy-pproxy-btn"
                   @click="copyPproxyOn"
                 >
-                  <Icons name="copy" size="12" />
+                  <Icons name="copy" size="13" />
                   {{ copiedPproxyOn ? '已复制命令' : '复制 pproxy on' }}
                 </UiButton>
                 <UiButton
@@ -649,58 +657,58 @@ onUnmounted(() => {
                   size="sm"
                   variant="ghost"
                   :disabled="probingProxy"
-                  class="text-xs px-2 py-1"
+                  class="text-[13px] px-2.5 py-1"
                   :class="proxyStatus?.available ? 'text-emerald-700 hover:bg-emerald-100/60' : 'text-amber-800 hover:bg-amber-100/60'"
                   data-testid="probe-proxy-btn"
                   @click="probeProxy"
                 >
-                  <Icons name="refresh" size="12" :class="{ 'animate-spin': probingProxy }" />
+                  <Icons name="refresh" size="13" :class="{ 'animate-spin': probingProxy }" />
                   {{ probingProxy ? '探测中' : '重新探测' }}
                 </UiButton>
               </div>
             </div>
 
-            <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            <div class="grid grid-cols-1 sm:grid-cols-3 gap-3.5">
               <div>
-                <label class="block text-xs font-medium text-slate-600 mb-1">服务商标识 *</label>
+                <label class="block text-[13px] font-medium text-slate-700 mb-1.5">服务商标识 *</label>
                 <input
                   v-model="antigravityForm.provider"
                   type="text"
                   placeholder="antigravity"
                   required
-                  class="w-full bg-slate-50 border border-slate-200/80 rounded-lg px-3 py-2 text-xs text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 focus:bg-white"
+                  class="w-full bg-slate-50 border border-slate-200 rounded-lg px-3.5 py-2 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-slate-400/20 focus:border-slate-400 focus:bg-white"
                   data-testid="ag-provider-input"
                 />
               </div>
 
               <div class="sm:col-span-2">
-                <label class="block text-xs font-medium text-slate-600 mb-1">Base URL (官方反代端点)</label>
+                <label class="block text-[13px] font-medium text-slate-700 mb-1.5">Base URL (官方反代端点)</label>
                 <input
                   value="https://daily-cloudcode-pa.googleapis.com"
                   type="text"
                   disabled
-                  class="w-full bg-slate-100 border border-slate-200/60 rounded-lg px-3 py-2 text-xs text-slate-500 cursor-not-allowed"
+                  class="w-full bg-slate-100 border border-slate-200/80 rounded-lg px-3.5 py-2 text-sm text-slate-500 cursor-not-allowed"
                 />
               </div>
             </div>
 
             <!-- 内置模型与协议特性提示卡片 -->
-            <div class="bg-indigo-50/60 border border-indigo-100 rounded-xl p-3 text-xs space-y-1.5">
+            <div class="bg-indigo-50/60 border border-indigo-100 rounded-xl p-3.5 text-sm space-y-1.5">
               <div class="flex items-center gap-1.5 text-indigo-900 font-semibold">
-                <Icons name="info" size="14" class="text-indigo-600" />
+                <Icons name="info" size="15" class="text-indigo-600" />
                 内置特性与自动挂载
               </div>
-              <p class="text-indigo-700/90 text-2xs leading-relaxed">
+              <p class="text-indigo-700/90 text-[13px] leading-relaxed">
                 接入后将自动启用 Antigravity 专用双向流式协议（支持 Claude 与 OpenAI 双向转译），并默认挂载官方基座模型：
                 <span class="font-mono font-medium text-indigo-900">claude-sonnet-4-6, claude-opus-4-6, gemini-2.5-flash, gemini-2.5-pro</span>。
               </p>
             </div>
 
             <!-- OAuth 2.0 授权引导步骤 -->
-            <div class="bg-slate-50/90 border border-slate-200/80 rounded-xl p-4 space-y-3">
+            <div class="bg-slate-50 border border-slate-200/90 rounded-xl p-4.5 space-y-3.5">
               <div class="flex items-center justify-between">
-                <span class="text-xs font-semibold text-slate-800 flex items-center gap-1.5">
-                  <span class="flex items-center justify-center w-4 h-4 rounded-full bg-indigo-600 text-white text-3xs font-bold">1</span>
+                <span class="text-[14px] font-semibold text-slate-800 flex items-center gap-2">
+                  <span class="flex items-center justify-center w-5 h-5 rounded-full bg-slate-900 text-white text-xs font-bold">1</span>
                   前往 Google 授权（支持 SSH 隧道与本地自动闭环）
                 </span>
                 <div class="flex items-center gap-2">
@@ -712,7 +720,7 @@ onUnmounted(() => {
                     data-testid="ag-fetch-url-btn"
                     @click="fetchAndOpenAuthUrl"
                   >
-                    <Icons name="external" size="13" />
+                    <Icons name="external" size="14" />
                     {{ fetchingAuthUrl ? '生成中...' : '前往 Google 授权' }}
                   </UiButton>
                   <UiButton
@@ -723,7 +731,7 @@ onUnmounted(() => {
                     data-testid="ag-copy-url-btn"
                     @click="copyAuthUrl"
                   >
-                    <Icons name="copy" size="13" />
+                    <Icons name="copy" size="14" />
                     {{ authUrlCopied ? '已复制！' : '复制授权链接' }}
                   </UiButton>
                 </div>
@@ -732,32 +740,32 @@ onUnmounted(() => {
               <!-- 自动授权监听动态状态条 -->
               <div
                 v-if="oauthWaiting"
-                class="flex items-center justify-between p-2.5 bg-indigo-50/80 border border-indigo-200/70 rounded-lg text-xs text-indigo-900 animate-pulse"
+                class="flex items-center justify-between p-3 bg-indigo-50/80 border border-indigo-200/70 rounded-lg text-[13px] text-indigo-900 animate-pulse"
                 data-testid="ag-waiting-indicator"
               >
                 <div class="flex items-center gap-2">
-                  <Icons name="refresh" size="13" class="animate-spin text-indigo-600" />
+                  <Icons name="refresh" size="14" class="animate-spin text-indigo-600" />
                   <span>已打开授权弹窗，正在等待 Google 回调完成并自动换票...</span>
                 </div>
                 <button
                   type="button"
-                  class="text-3xs text-indigo-600 hover:text-indigo-800 underline cursor-pointer"
+                  class="text-xs text-indigo-600 hover:text-indigo-800 underline cursor-pointer font-medium"
                   @click="cleanupOAuthSession"
                 >
                   取消自动等待
                 </button>
               </div>
 
-              <div v-if="antigravityAuthUrl" class="text-3xs text-slate-500 bg-white p-2 rounded border border-slate-200/60 font-mono break-all line-clamp-2 select-all">
+              <div v-if="antigravityAuthUrl" class="text-xs text-slate-600 bg-white p-2.5 rounded border border-slate-200 font-mono break-all line-clamp-2 select-all">
                 {{ antigravityAuthUrl }}
               </div>
 
               <div class="space-y-1.5 pt-1">
-                <div class="text-xs font-semibold text-slate-800 flex items-center gap-1.5">
-                  <span class="flex items-center justify-center w-4 h-4 rounded-full bg-indigo-600 text-white text-3xs font-bold">2</span>
+                <div class="text-[14px] font-semibold text-slate-800 flex items-center gap-2">
+                  <span class="flex items-center justify-center w-5 h-5 rounded-full bg-slate-900 text-white text-xs font-bold">2</span>
                   重定向 URL 或 Code (弹窗自动闭环，亦可在此手动粘贴兜底) *
                 </div>
-                <p class="text-3xs text-slate-500 leading-relaxed">
+                <p class="text-[13px] text-slate-500 leading-relaxed">
                   提示：在 Google 授权页面选择账号并点击【允许】后，页面会自动通知控制台完成闭环。若浏览器禁用了弹窗通信，亦可直接将浏览器地址栏中的完整重定向 URL 或 Code 粘贴至下方：
                 </p>
                 <input
@@ -765,7 +773,7 @@ onUnmounted(() => {
                   type="text"
                   placeholder="例如: http://localhost:8080/oauth2callback?code=4/0A... 或纯 Code"
                   required
-                  class="w-full bg-white border border-slate-200/80 rounded-lg px-3 py-2 text-xs text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
+                  class="w-full bg-white border border-slate-200 rounded-lg px-3.5 py-2 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-slate-400/20 focus:border-slate-400"
                   data-testid="ag-code-input"
                 />
               </div>
@@ -773,42 +781,42 @@ onUnmounted(() => {
               <div class="pt-1">
                 <button
                   type="button"
-                  class="text-xs font-semibold text-slate-600 hover:text-indigo-600 inline-flex items-center gap-1 cursor-pointer py-0.5 select-none"
+                  class="text-[13px] font-semibold text-slate-700 hover:text-slate-900 inline-flex items-center gap-1.5 cursor-pointer py-0.5 select-none"
                   @click="showAgAdvanced = !showAgAdvanced"
                 >
-                  <Icons :name="showAgAdvanced ? 'chevron-down' : 'chevron-right'" size="11" />
+                  <Icons :name="showAgAdvanced ? 'chevron-down' : 'chevron-right'" size="13" />
                   高级选项 (自定义 Key ID 与调度权重)
                 </button>
 
                 <UiCollapsible :open="showAgAdvanced">
-                  <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-2 p-3 bg-white rounded-lg border border-slate-200/60 mt-1.5">
+                  <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-2 p-3.5 bg-white rounded-lg border border-slate-200 mt-2">
                     <div>
-                      <label class="block text-3xs text-slate-500 mb-0.5 font-medium">Key 标识 (选填)</label>
+                      <label class="block text-xs text-slate-600 mb-1 font-medium">Key 标识 (选填)</label>
                       <input
                         v-model="antigravityForm.id"
                         type="text"
                         placeholder="留空自动以 Google 邮箱命名"
-                        class="w-full bg-slate-50 border border-slate-200 rounded px-2.5 py-1.5 text-xs text-slate-800"
+                        class="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-1.5 text-sm text-slate-900"
                         data-testid="ag-custom-id-input"
                       />
                     </div>
                     <div>
-                      <label class="block text-3xs text-slate-500 mb-0.5 font-medium">优先级</label>
+                      <label class="block text-xs text-slate-600 mb-1 font-medium">优先级</label>
                       <input
                         v-model.number="antigravityForm.priority"
                         type="number"
                         min="0"
-                        class="w-full bg-slate-50 border border-slate-200 rounded px-2.5 py-1.5 text-xs text-slate-800"
+                        class="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-1.5 text-sm text-slate-900"
                         data-testid="ag-priority-input"
                       />
                     </div>
                     <div>
-                      <label class="block text-3xs text-slate-500 mb-0.5 font-medium">权重</label>
+                      <label class="block text-xs text-slate-600 mb-1 font-medium">权重</label>
                       <input
                         v-model.number="antigravityForm.weight"
                         type="number"
                         min="1"
-                        class="w-full bg-slate-50 border border-slate-200 rounded px-2.5 py-1.5 text-xs text-slate-800"
+                        class="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-1.5 text-sm text-slate-900"
                         data-testid="ag-weight-input"
                       />
                     </div>
@@ -817,11 +825,16 @@ onUnmounted(() => {
               </div>
             </div>
 
-            <div class="flex items-center justify-end gap-2 pt-2 border-t border-slate-100">
+            <div class="flex items-center justify-end gap-2 pt-3 border-t border-slate-100">
               <UiButton variant="ghost" size="sm" @click="cancelAddProvider">
                 取消
               </UiButton>
-              <UiButton type="submit" size="sm" :disabled="providerSubmitting" data-testid="submit-ag-provider-btn">
+              <UiButton
+                type="submit"
+                size="sm"
+                :disabled="providerSubmitting || !adminWriteEnabled"
+                data-testid="submit-ag-provider-btn"
+              >
                 {{ providerSubmitting ? '正在授权并兑换凭证...' : '确认授权并创建' }}
               </UiButton>
             </div>
@@ -830,22 +843,21 @@ onUnmounted(() => {
       </UiCollapsible>
 
       <!-- 视图与导航微标签 (兼具分类过滤与测试兼容) -->
-      <div class="flex items-center gap-1.5 mb-6 border-b border-slate-200/60 pb-2">
+      <div class="flex items-center gap-2 mb-6 border-b border-slate-200 pb-2">
         <button
           type="button"
-          class="px-3.5 py-1.5 text-xs font-medium rounded-lg transition-colors cursor-pointer"
-          :class="currentTab === 'providers' ? 'bg-white shadow-2xs text-indigo-600 font-semibold' : 'text-slate-500 hover:text-slate-800'"
+          class="px-4 py-2 text-[14px] font-medium rounded-lg transition-colors cursor-pointer"
+          :class="currentTab === 'providers' ? 'bg-white shadow-2xs text-slate-950 font-semibold border border-slate-200' : 'text-slate-600 hover:text-slate-900'"
           data-testid="tab-providers"
           @click="currentTab = 'providers'"
         >
           全部服务商 ({{ providers.length }})
         </button>
 
-
         <button
           type="button"
-          class="px-3.5 py-1.5 text-xs font-medium rounded-lg transition-colors cursor-pointer"
-          :class="currentTab === 'strategy' ? 'bg-white shadow-2xs text-indigo-600 font-semibold' : 'text-slate-500 hover:text-slate-800'"
+          class="px-4 py-2 text-[14px] font-medium rounded-lg transition-colors cursor-pointer"
+          :class="currentTab === 'strategy' ? 'bg-white shadow-2xs text-slate-950 font-semibold border border-slate-200' : 'text-slate-600 hover:text-slate-900'"
           data-testid="tab-strategy"
           @click="currentTab = 'strategy'"
         >
@@ -855,10 +867,10 @@ onUnmounted(() => {
 
       <!-- 主视图：按服务商一级卡片排列 (三合一架构) -->
       <div v-if="currentTab === 'providers'" class="space-y-4">
-        <div v-if="providers.length === 0" class="text-center py-16 bg-white rounded-xl shadow-xs">
-          <Icons name="server" size="32" class="text-slate-300 mx-auto mb-2" />
-          <p class="text-sm font-medium text-slate-700">暂无模型服务商</p>
-          <p class="text-xs text-slate-400 mt-1 mb-4">点击上方「+ 服务商」按钮即可接入上游 LLM</p>
+        <div v-if="providers.length === 0" class="text-center py-16 swiss-card">
+          <Icons name="server" size="36" class="text-slate-300 mx-auto mb-2.5" />
+          <p class="text-base font-semibold text-slate-800">暂无模型服务商</p>
+          <p class="text-sm text-slate-500 mt-1 mb-4">点击上方「+ 服务商」按钮即可接入上游 LLM</p>
         </div>
 
         <template v-else>

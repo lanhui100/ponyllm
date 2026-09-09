@@ -40,14 +40,14 @@ async function handleCopy() {
         <UiBadge variant="success">仅展示一次</UiBadge>
       </div>
 
-      <div class="p-5 space-y-4 text-xs">
-        <div class="p-3 bg-amber-50/80 border border-amber-200/80 rounded-xl text-amber-800 leading-relaxed">
+      <div class="p-5 space-y-4 text-sm">
+        <div class="p-3 bg-amber-50/80 border border-amber-200/80 rounded-xl text-amber-800 leading-relaxed text-xs">
           <strong class="font-medium">安全提示：</strong>
           密钥明文仅在创建瞬间展示一次，网关后续仅回显脱敏掩码，且绝不持久化在浏览器中。请立即复制并妥善保管！
         </div>
 
         <div>
-          <label class="block text-2xs font-medium text-slate-500 mb-1.5">
+          <label class="block text-xs font-medium text-slate-600 mb-1.5">
             明文凭证 (ID: {{ keyResult.id }})
           </label>
           <div class="flex items-center gap-2">
@@ -55,7 +55,7 @@ async function handleCopy() {
               type="text"
               readonly
               :value="keyResult.api_key"
-              class="flex-1 font-mono text-xs bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-slate-900 select-all"
+              class="flex-1 font-mono text-sm bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-slate-900 select-all"
               data-testid="plaintext-key-input"
             />
             <UiButton
@@ -70,7 +70,7 @@ async function handleCopy() {
           </div>
         </div>
 
-        <div class="flex items-center gap-4 text-2xs text-slate-400 font-mono pt-1">
+        <div class="flex items-center gap-4 text-xs text-slate-500 font-mono pt-1">
           <span>服务商: {{ keyResult.provider }}</span>
           <span>权重: {{ keyResult.weight }}</span>
           <span>优先级: {{ keyResult.priority }}</span>

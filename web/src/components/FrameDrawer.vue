@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue';
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
 import type { RecordedFrame } from '../types/telemetry';
 import { scrubSecrets, maskKey, generateCurlCommand } from '../utils/scrub';
 
@@ -48,17 +48,54 @@ async function copyCurl() {
     // Fallback or permission denied
   }
 }
+
+function handleKeyDown(e: KeyboardEvent) {
+  if (e.key === 'Escape' && props.isOpen) {
+    emit('close');
+  }
+}
+
+onMounted(() => {
+  if (typeof window !== 'undefined') {
+    window.addEventListener('keydown', handleKeyDown);
+  }
+});
+
+onUnmounted(() => {
+  if (typeof window !== 'undefined') {
+    window.removeEventListener('keydown', handleKeyDown);
+    if (typeof document !== 'undefined') {
+      document.body.style.overflow = '';
+    }
+  }
+});
+
+watch(
+  () => props.isOpen,
+  (open) => {
+    if (typeof document !== 'undefined') {
+      document.body.style.overflow = open ? 'hidden' : '';
+    }
+  },
+  { immediate: true }
+);
 </script>
 
 <template>
   <div v-if="isOpen && frame" class="drawer-backdrop" @click="emit('close')">
-    <div class="drawer-panel" @click.stop>
+    <div
+      class="drawer-panel"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="drawer-title"
+      @click.stop
+    >
       <div class="drawer-header">
         <div>
-          <h2 class="drawer-title">录波帧详情</h2>
+          <h2 id="drawer-title" class="drawer-title">录波帧详情</h2>
           <span class="req-id">{{ frame.request_id }}</span>
         </div>
-        <button class="close-btn" @click="emit('close')">×</button>
+        <button class="close-btn" aria-label="关闭录波详情" @click="emit('close')">×</button>
       </div>
 
       <div class="drawer-body">
@@ -194,14 +231,14 @@ async function copyCurl() {
 
 .drawer-title {
   margin: 0 0 4px 0;
-  font-size: 18px;
-  font-weight: 600;
+  font-size: 19px;
+  font-weight: 700;
   color: #0f172a;
 }
 
 .req-id {
-  font-size: 12px;
-  font-family: monospace;
+  font-size: 13px;
+  font-family: ui-monospace, SFMono-Regular, monospace;
   color: #64748b;
 }
 
@@ -229,9 +266,9 @@ async function copyCurl() {
 }
 
 .section-heading {
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 600;
-  color: #475569;
+  color: #334155;
   margin-bottom: 8px;
 }
 
@@ -255,21 +292,25 @@ async function copyCurl() {
 .meta-item {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 3px;
+  min-width: 0;
 }
 
 .meta-label {
-  font-size: 11px;
+  font-size: 12px;
+  font-weight: 500;
   color: #64748b;
 }
 
 .meta-val {
-  font-size: 13px;
+  font-size: 14px;
   color: #0f172a;
+  word-break: break-all;
+  overflow-wrap: anywhere;
 }
 
 .font-mono {
-  font-family: monospace;
+  font-family: ui-monospace, SFMono-Regular, monospace;
 }
 
 .text-masked {
@@ -280,20 +321,23 @@ async function copyCurl() {
 .badge {
   display: inline-block;
   width: fit-content;
-  font-size: 11px;
-  padding: 2px 6px;
+  font-size: 12px;
+  padding: 2px 7px;
   border-radius: 4px;
   font-weight: 600;
+  font-family: ui-monospace, SFMono-Regular, monospace;
 }
 
 .status-ok {
   background: #dcfce7;
   color: #166534;
+  border: 1px solid #bbf7d0;
 }
 
 .status-err {
   background: #fee2e2;
   color: #991b1b;
+  border: 1px solid #fecaca;
 }
 
 .stream-grid {
@@ -312,13 +356,15 @@ async function copyCurl() {
 }
 
 .stream-item .label {
-  font-size: 11px;
+  font-size: 12px;
+  font-weight: 500;
   color: #64748b;
 }
 
 .stream-item .val {
-  font-size: 13px;
-  font-weight: 500;
+  font-size: 14px;
+  font-weight: 600;
+  font-family: ui-monospace, SFMono-Regular, monospace;
   color: #0f172a;
 }
 
@@ -327,12 +373,14 @@ async function copyCurl() {
   color: #f8fafc;
   padding: 12px 14px;
   border-radius: 6px;
-  font-size: 12px;
-  font-family: monospace;
+  font-size: 13px;
+  line-height: 1.5;
+  font-family: ui-monospace, SFMono-Regular, monospace;
   overflow-x: auto;
   white-space: pre-wrap;
   word-break: break-all;
   margin: 0;
+  border: 1px solid #1e293b;
 }
 
 .err-content {
@@ -342,17 +390,19 @@ async function copyCurl() {
 }
 
 .copy-btn {
-  padding: 4px 10px;
-  font-size: 12px;
+  padding: 4px 12px;
+  font-size: 13px;
   background: #f1f5f9;
   border: 1px solid #cbd5e1;
   border-radius: 4px;
   color: #334155;
   cursor: pointer;
   font-weight: 500;
+  transition: all 0.15s ease;
 }
 
 .copy-btn:hover {
   background: #e2e8f0;
+  border-color: #94a3b8;
 }
 </style>

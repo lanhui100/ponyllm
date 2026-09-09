@@ -16,34 +16,34 @@ function handleLogout() {
 </script>
 
 <template>
-  <header class="h-14 bg-white/90 backdrop-blur-md sticky top-0 z-40 px-4 sm:px-8 flex items-center justify-between border-b border-slate-200/60 shadow-2xs">
+  <header class="h-15 bg-white/95 backdrop-blur-md sticky top-0 z-40 px-4 sm:px-8 flex items-center justify-between border-b border-slate-200 shadow-2xs">
     <div class="flex items-center gap-8">
       <div class="flex items-center gap-2.5">
-        <div class="w-8 h-8 rounded-xl bg-orange-500 text-white flex items-center justify-center font-bold text-sm shadow-2xs">
+        <div class="w-8.5 h-8.5 rounded-lg bg-slate-900 text-white flex items-center justify-center font-bold text-sm shadow-2xs">
           P
         </div>
         <span class="font-bold text-base tracking-tight text-slate-900">PonyLLM</span>
       </div>
 
-      <nav class="flex items-center gap-1.5 text-sm font-medium">
+      <nav class="flex items-center gap-2 text-[15px] font-medium">
         <router-link
           to="/dashboard"
-          class="px-3.5 py-1.5 rounded-lg transition-colors text-slate-600 hover:text-slate-900 hover:bg-slate-100/70"
-          :class="{ '!text-orange-600 !bg-orange-50/90 font-semibold': route.path === '/dashboard' }"
+          class="px-3.5 py-1.5 rounded-lg transition-colors text-slate-600 hover:text-slate-900 hover:bg-slate-100/80"
+          :class="{ '!text-slate-950 !bg-slate-100 font-semibold shadow-2xs': route.path === '/dashboard' }"
         >
           Dashboard
         </router-link>
         <router-link
           to="/governance"
-          class="px-3.5 py-1.5 rounded-lg transition-colors text-slate-600 hover:text-slate-900 hover:bg-slate-100/70"
-          :class="{ '!text-orange-600 !bg-orange-50/90 font-semibold': route.path === '/governance' }"
+          class="px-3.5 py-1.5 rounded-lg transition-colors text-slate-600 hover:text-slate-900 hover:bg-slate-100/80"
+          :class="{ '!text-slate-950 !bg-slate-100 font-semibold shadow-2xs': route.path === '/governance' }"
         >
           模型管理
         </router-link>
         <router-link
           to="/recorder"
-          class="px-3.5 py-1.5 rounded-lg transition-colors text-slate-600 hover:text-slate-900 hover:bg-slate-100/70"
-          :class="{ '!text-orange-600 !bg-orange-50/90 font-semibold': route.path === '/recorder' }"
+          class="px-3.5 py-1.5 rounded-lg transition-colors text-slate-600 hover:text-slate-900 hover:bg-slate-100/80"
+          :class="{ '!text-slate-950 !bg-slate-100 font-semibold shadow-2xs': route.path === '/recorder' }"
         >
           可观测性
         </router-link>
@@ -55,10 +55,10 @@ function handleLogout() {
         <UiButton
           variant="ghost"
           size="sm"
-          class="text-slate-500 hover:text-rose-600 hover:bg-rose-50/80 text-xs gap-1.5 font-normal"
+          class="text-slate-600 hover:text-rose-600 hover:bg-rose-50/80 text-[13px] gap-1.5 font-medium"
           @click="handleLogout"
         >
-          <Icons name="lock" size="13" />
+          <Icons name="lock" size="14" />
           <span>退出</span>
         </UiButton>
       </UiTooltip>

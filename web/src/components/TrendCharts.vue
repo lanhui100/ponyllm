@@ -103,7 +103,7 @@ function updateCharts() {
       axisTick: { show: false },
       axisLabel: {
         color: '#64748b',
-        fontSize: 11,
+        fontSize: 12,
         interval: (index: number) => index % 2 === 0,
       },
     },
@@ -114,7 +114,7 @@ function updateCharts() {
       splitLine: { lineStyle: { color: '#f1f5f9' } },
       axisLabel: {
         color: '#64748b',
-        fontSize: 11,
+        fontSize: 12,
         formatter: (val: number, idx: number) => (idx % 2 === 0 ? formatAxisNumber(val) : ''),
       },
     },
@@ -148,7 +148,7 @@ function updateCharts() {
       }
     });
     const seriesKeys = Array.from(keysSet).slice(0, 5); // top 5 series
-    const palette = ['#0284c7', '#f97316', '#0d9488', '#8b5cf6', '#eab308'];
+    const palette = ['#0284c7', '#f97316', '#0d9488', '#8b5cf6', '#ca8a04'];
 
     const barSeries = seriesKeys.map((key, idx) => ({
       name: key,
@@ -180,7 +180,7 @@ function updateCharts() {
         show: seriesKeys.length > 1,
         top: 0,
         right: 0,
-        textStyle: { fontSize: 11, color: '#64748b' },
+        textStyle: { fontSize: 12, color: '#64748b' },
         itemWidth: 10,
         itemHeight: 10,
       },
@@ -192,7 +192,7 @@ function updateCharts() {
         axisTick: { show: false },
         axisLabel: {
           color: '#64748b',
-          fontSize: 11,
+          fontSize: 12,
           interval: (index: number) => index % 2 === 0,
         },
       },
@@ -203,7 +203,7 @@ function updateCharts() {
         splitLine: { lineStyle: { color: '#f1f5f9' } },
         axisLabel: {
           color: '#64748b',
-          fontSize: 11,
+          fontSize: 12,
           formatter: (val: number, idx: number) => (idx % 2 === 0 ? formatAxisNumber(val) : ''),
         },
       },
@@ -222,7 +222,7 @@ function updateCharts() {
         axisTick: { show: false },
         axisLabel: {
           color: '#64748b',
-          fontSize: 11,
+          fontSize: 12,
           interval: (index: number) => index % 2 === 0,
         },
       },
@@ -233,7 +233,7 @@ function updateCharts() {
         splitLine: { lineStyle: { color: '#f1f5f9' } },
         axisLabel: {
           color: '#64748b',
-          fontSize: 11,
+          fontSize: 12,
           formatter: (val: number, idx: number) => (idx % 2 === 0 ? formatAxisNumber(val) : ''),
         },
       },
@@ -262,7 +262,7 @@ function updateCharts() {
       axisTick: { show: false },
       axisLabel: {
         color: '#64748b',
-        fontSize: 11,
+        fontSize: 12,
         interval: (index: number) => index % 2 === 0,
       },
     },
@@ -273,7 +273,7 @@ function updateCharts() {
       splitLine: { lineStyle: { color: '#f1f5f9' } },
       axisLabel: {
         color: '#64748b',
-        fontSize: 11,
+        fontSize: 12,
         formatter: (val: number, idx: number) => (idx % 2 === 0 ? formatAxisNumber(val) : ''),
       },
     },
@@ -309,7 +309,7 @@ function updateCharts() {
       axisTick: { show: false },
       axisLabel: {
         color: '#64748b',
-        fontSize: 11,
+        fontSize: 12,
         interval: (index: number) => index % 2 === 0,
       },
     },
@@ -321,7 +321,7 @@ function updateCharts() {
       splitLine: { lineStyle: { color: '#f1f5f9' } },
       axisLabel: {
         color: '#64748b',
-        fontSize: 11,
+        fontSize: 12,
         formatter: (val: number, idx: number) => (idx % 2 === 0 ? `${Math.round(val)}%` : ''),
       },
     },
@@ -430,7 +430,7 @@ watch(
             </button>
           </UiTooltip>
         </div>
-        <p class="text-xs text-slate-400">多周期并发、吞吐柱状分布与延迟波形追踪</p>
+        <p class="text-[13px] text-slate-500">多周期并发、吞吐柱状分布与延迟波形追踪</p>
       </div>
 
       <!-- 24小时 / 7天 / 30天 Switch 选择器 -->
@@ -439,10 +439,10 @@ watch(
           v-for="opt in rangeOptions"
           :key="opt.key"
           type="button"
-          class="px-3 py-1.5 text-xs font-semibold rounded-md transition-all duration-150 cursor-pointer"
+          class="px-3.5 py-1.5 text-[13px] font-medium rounded-md transition-all duration-150 cursor-pointer"
           :class="[
             range === opt.key
-              ? 'bg-white text-orange-600 shadow-xs'
+              ? 'bg-white text-slate-950 font-semibold shadow-2xs'
               : 'text-slate-600 hover:text-slate-900',
           ]"
           @click="emit('update:range', opt.key)"
@@ -455,10 +455,10 @@ watch(
     <!-- 2x2 图表网格 -->
     <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
       <!-- 1. QPS 趋势 (折线面积图) -->
-      <div class="borderless-card p-5">
+      <div class="swiss-card p-5">
         <div class="flex items-center justify-between mb-2">
           <div class="flex items-center gap-1.5">
-            <div class="text-sm font-bold text-slate-800">QPS 并发洪峰 (折线面积图)</div>
+            <div class="text-[15px] font-semibold text-slate-900">QPS 并发洪峰 (折线面积图)</div>
             <UiTooltip
               content="展示选定周期（24小时/7天/30天）内，网关每秒处理的 API 请求频次（Queries Per Second），波峰反映系统流量高峰时刻。"
               wrap
@@ -468,20 +468,20 @@ watch(
                 aria-label="QPS 说明"
                 class="text-slate-400 hover:text-slate-600 transition-colors cursor-help inline-flex items-center"
               >
-                <Icons name="info" size="13" />
+                <Icons name="info" size="14" />
               </button>
             </UiTooltip>
           </div>
-          <span class="text-xs text-slate-400 font-mono">req/s</span>
+          <span class="text-[13px] text-slate-500 font-mono">req/s</span>
         </div>
         <div ref="qpsChartRef" class="w-full h-44" />
       </div>
 
       <!-- 2. Token 吞吐量 (柱状分布图，带 Provider / Model 切换 switch) -->
-      <div class="borderless-card p-5">
+      <div class="swiss-card p-5">
         <div class="flex items-center justify-between mb-2">
           <div class="flex items-center gap-1.5">
-            <div class="text-sm font-bold text-slate-800">Token 吞吐量分布 (柱状分布图)</div>
+            <div class="text-[15px] font-semibold text-slate-900">Token 吞吐量分布 (柱状分布图)</div>
             <UiTooltip
               content="展示各时间切片内消耗的 Token 总量，支持按“提供商（Provider）”或“模型（Model）”维度进行堆叠拆解，直观掌握算力与费用分布。"
               wrap
@@ -491,7 +491,7 @@ watch(
                 aria-label="Token 吞吐说明"
                 class="text-slate-400 hover:text-slate-600 transition-colors cursor-help inline-flex items-center"
               >
-                <Icons name="info" size="13" />
+                <Icons name="info" size="14" />
               </button>
             </UiTooltip>
           </div>
@@ -499,16 +499,16 @@ watch(
           <div class="segment-track inline-flex items-center">
             <button
               type="button"
-              class="px-2.5 py-1 text-[11px] font-semibold rounded transition-all cursor-pointer"
-              :class="tokenDimension === 'provider' ? 'bg-white text-sky-700 shadow-xs' : 'text-slate-500'"
+              class="px-2.5 py-1 text-[13px] font-medium rounded transition-all cursor-pointer"
+              :class="tokenDimension === 'provider' ? 'bg-white text-slate-900 font-semibold shadow-2xs' : 'text-slate-600'"
               @click="tokenDimension = 'provider'"
             >
               按 Provider
             </button>
             <button
               type="button"
-              class="px-2.5 py-1 text-[11px] font-semibold rounded transition-all cursor-pointer"
-              :class="tokenDimension === 'model' ? 'bg-white text-sky-700 shadow-xs' : 'text-slate-500'"
+              class="px-2.5 py-1 text-[13px] font-medium rounded transition-all cursor-pointer"
+              :class="tokenDimension === 'model' ? 'bg-white text-slate-900 font-semibold shadow-2xs' : 'text-slate-600'"
               @click="tokenDimension = 'model'"
             >
               按模型
@@ -519,10 +519,10 @@ watch(
       </div>
 
       <!-- 3. TTFT 延迟与生成速率 (波形图) -->
-      <div class="borderless-card p-5">
+      <div class="swiss-card p-5">
         <div class="flex items-center justify-between mb-2">
           <div class="flex items-center gap-1.5">
-            <div class="text-sm font-bold text-slate-800">延迟与速率起伏 (波形图)</div>
+            <div class="text-[15px] font-semibold text-slate-900">延迟与速率起伏 (波形图)</div>
             <UiTooltip
               content="展示网关端到端平均处理延迟（毫秒），平缓低位代表性能优异，尖峰通常代表上游排队或公网波动。"
               wrap
@@ -532,20 +532,20 @@ watch(
                 aria-label="延迟说明"
                 class="text-slate-400 hover:text-slate-600 transition-colors cursor-help inline-flex items-center"
               >
-                <Icons name="info" size="13" />
+                <Icons name="info" size="14" />
               </button>
             </UiTooltip>
           </div>
-          <span class="text-xs text-slate-400 font-mono">ms</span>
+          <span class="text-[13px] text-slate-500 font-mono">ms</span>
         </div>
         <div ref="latencyChartRef" class="w-full h-44" />
       </div>
 
       <!-- 4. 故障率异常台阶 (微波阶梯图) -->
-      <div class="borderless-card p-5">
+      <div class="swiss-card p-5">
         <div class="flex items-center justify-between mb-2">
           <div class="flex items-center gap-1.5">
-            <div class="text-sm font-bold text-slate-800">故障率异常波动 (阶梯图)</div>
+            <div class="text-[15px] font-semibold text-slate-900">故障率异常波动 (阶梯图)</div>
             <UiTooltip
               content="展示各周期切片内失败请求（上游 5xx、超时或鉴权失败）占总请求的比例。系统正常运转时应稳定在 0% 底部基准线。"
               wrap
@@ -555,11 +555,11 @@ watch(
                 aria-label="故障率说明"
                 class="text-slate-400 hover:text-slate-600 transition-colors cursor-help inline-flex items-center"
               >
-                <Icons name="info" size="13" />
+                <Icons name="info" size="14" />
               </button>
             </UiTooltip>
           </div>
-          <span class="text-xs text-slate-400 font-mono">%</span>
+          <span class="text-[13px] text-slate-500 font-mono">%</span>
         </div>
         <div ref="errorChartRef" class="w-full h-44" />
       </div>

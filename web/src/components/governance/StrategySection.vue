@@ -65,14 +65,14 @@ async function handleSelect(id: string) {
 </script>
 
 <template>
-  <div class="borderless-card p-6">
+  <div class="swiss-card p-6">
     <div class="flex items-center justify-between mb-5">
       <div>
         <h2 class="text-base font-bold text-slate-900 flex items-center gap-2">
           <Icons name="activity" size="18" class="text-indigo-600" />
           全局分流调度策略
         </h2>
-        <p class="text-xs text-slate-400 mt-1">
+        <p class="text-xs text-slate-500 mt-1">
           决定网关向模型与服务商路由请求时的全局偏好算法
         </p>
       </div>
@@ -108,10 +108,10 @@ async function handleSelect(id: string) {
         </div>
 
         <div class="mt-4 flex items-center justify-between text-xs pt-2 border-t border-slate-200/50">
-          <span class="text-slate-400">状态</span>
+          <span class="text-slate-500">状态</span>
           <span
             class="font-semibold flex items-center gap-1"
-            :class="selected === s.id ? 'text-indigo-600' : 'text-slate-400'"
+            :class="selected === s.id ? 'text-indigo-600' : 'text-slate-500'"
           >
             <Icons v-if="selected === s.id" name="check" size="14" />
             {{ selected === s.id ? '当前生效' : '未激活' }}

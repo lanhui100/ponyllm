@@ -123,6 +123,7 @@ function cancelEditProtocols() {
 }
 
 async function handleSaveProtocols() {
+  if (!props.adminWriteEnabled) return;
   const urlRegex = /^https?:\/\//i;
   const chatVal = customUrls.value.chat.trim();
   const messagesVal = customUrls.value.messages.trim();
@@ -187,34 +188,34 @@ function handleBatchTest() {
 
 <template>
   <div
-    class="borderless-card mb-4 overflow-hidden"
+    class="swiss-card mb-4 overflow-hidden"
     data-testid="provider-row"
   >
     <!-- 服务商一级卡片头部 (一等常显) -->
     <div
-      class="p-4.5 flex items-center justify-between gap-4 cursor-pointer hover:bg-slate-50/50 transition-colors select-none"
+      class="p-5 flex items-center justify-between gap-4 cursor-pointer hover:bg-slate-50/70 transition-colors select-none"
       @click="expanded = !expanded"
     >
       <!-- 左侧：厂商标识与摘要 -->
       <div class="flex items-center gap-3.5 min-w-0">
         <!-- 暖橙色图标 -->
-        <div class="w-10 h-10 rounded-xl bg-orange-50 text-orange-600 border border-orange-200/60 flex items-center justify-center shrink-0 font-bold text-sm">
-          <Icons name="server" size="20" />
+        <div class="w-10.5 h-10.5 rounded-xl bg-orange-50 text-orange-600 border border-orange-200/60 flex items-center justify-center shrink-0 font-bold text-base shadow-2xs">
+          <Icons name="server" size="22" />
         </div>
 
         <div class="min-w-0">
           <div class="flex items-center gap-2.5">
-            <span class="font-bold text-slate-900 text-base tracking-tight truncate">
+            <span class="font-bold text-slate-900 text-lg tracking-tight truncate">
               {{ provider.name }}
             </span>
-            <UiBadge variant="secondary" class="text-xs font-medium">
+            <UiBadge variant="secondary" class="text-[13px] font-semibold">
               {{ formatStrategyLabel(provider.strategy) }}
             </UiBadge>
           </div>
 
           <!-- 去除敏感明文 URL，仅在有默认模型时显示默认模型 -->
-          <div v-if="provider.default_model" class="flex items-center gap-2 text-xs text-slate-500 mt-1 truncate">
-            <span>默认模型: {{ provider.default_model }}</span>
+          <div v-if="provider.default_model" class="flex items-center gap-2 text-sm text-slate-500 mt-1 truncate">
+            <span>默认模型: <span class="font-mono text-slate-700 font-medium">{{ provider.default_model }}</span></span>
           </div>
         </div>
       </div>
@@ -222,10 +223,10 @@ function handleBatchTest() {
       <!-- 右侧：概览徽标与一等纯图标操作组 -->
       <div class="flex items-center gap-2.5 shrink-0" @click.stop>
         <div class="hidden sm:flex items-center gap-2 mr-2">
-          <UiBadge variant="default" class="text-xs font-medium">
+          <UiBadge variant="default" class="text-[13px] font-semibold">
             {{ models.length }} 模型
           </UiBadge>
-          <UiBadge :variant="activeKeysCount > 0 ? 'success' : 'secondary'" class="text-xs font-medium">
+          <UiBadge :variant="activeKeysCount > 0 ? 'success' : 'secondary'" class="text-[13px] font-semibold">
             {{ activeKeysCount }}/{{ keys.length }} 密钥可用
           </UiBadge>
         </div>
@@ -235,11 +236,12 @@ function handleBatchTest() {
           <UiButton
             variant="ghost"
             size="icon"
+            aria-label="一键测试该服务商下所有密钥"
             :disabled="keys.length === 0 || !adminWriteEnabled"
             class="text-amber-500 hover:text-amber-600 hover:bg-amber-50"
             @click="handleBatchTest"
           >
-            <Icons name="zap" size="14" />
+            <Icons name="zap" size="15" />
           </UiButton>
         </UiTooltip>
 
@@ -248,12 +250,13 @@ function handleBatchTest() {
           <UiButton
             variant="ghost"
             size="icon"
+            aria-label="删除该服务商"
             :disabled="!adminWriteEnabled"
             data-testid="delete-provider-btn"
             class="text-slate-400 hover:text-rose-600 hover:bg-rose-50"
             @click="handleDeleteProvider"
           >
-            <Icons name="trash" size="14" />
+            <Icons name="trash" size="15" />
           </UiButton>
         </UiTooltip>
 
@@ -261,25 +264,26 @@ function handleBatchTest() {
         <UiButton
           variant="ghost"
           size="icon"
+          :aria-label="expanded ? '收起服务商详情' : '展开服务商详情'"
           class="text-slate-400 hover:text-slate-700"
           @click="expanded = !expanded"
         >
-          <Icons :name="expanded ? 'chevron-down' : 'chevron-right'" size="15" />
+          <Icons :name="expanded ? 'chevron-down' : 'chevron-right'" size="16" />
         </UiButton>
       </div>
     </div>
 
     <!-- 二级折叠展开区域 (包含模型协议、密钥及模型) -->
     <UiCollapsible :open="expanded">
-      <div class="px-4.5 pb-4.5 pt-2 border-t border-slate-100 bg-slate-50/50 space-y-4">
+      <div class="px-5 pb-5 pt-3 border-t border-slate-200/80 bg-slate-50/60 space-y-4">
         <!-- 模型协议选择器与专属端点 (同级非下拉多选) -->
-        <div class="bg-white rounded-xl p-4 shadow-2xs space-y-3" data-testid="protocol-section">
+        <div class="bg-white rounded-xl p-4.5 border border-slate-200/80 shadow-2xs space-y-3" data-testid="protocol-section">
           <div class="flex items-center justify-between">
-            <div class="flex items-center gap-1.5 text-xs font-semibold text-slate-700">
-              <Icons name="activity" size="14" class="text-amber-600" />
+            <div class="flex items-center gap-1.5 text-[14px] font-semibold text-slate-800">
+              <Icons name="activity" size="16" class="text-amber-600" />
               模型协议
               <UiTooltip content="该服务商默认提供的协议与端点，未覆盖时统一走 Base URL">
-                <Icons name="info" size="12" class="text-slate-400 cursor-pointer" />
+                <Icons name="info" size="14" class="text-slate-400 cursor-pointer" />
               </UiTooltip>
             </div>
 
@@ -288,7 +292,7 @@ function handleBatchTest() {
                 v-if="!isEditingProtocols"
                 variant="ghost"
                 size="sm"
-                class="text-indigo-600 hover:text-indigo-700 hover:bg-indigo-50/60 text-xs py-1"
+                class="text-slate-700 hover:text-slate-900 hover:bg-slate-100 text-[13px] py-1"
                 data-testid="edit-protocols-btn"
                 @click="isEditingProtocols = true"
               >
@@ -298,15 +302,15 @@ function handleBatchTest() {
                 <UiButton
                   variant="ghost"
                   size="sm"
-                  class="text-xs py-1"
+                  class="text-[13px] py-1"
                   @click="cancelEditProtocols"
                 >
                   取消
                 </UiButton>
                 <UiButton
                   size="sm"
-                  class="text-xs py-1"
-                  :disabled="protocolsSaving"
+                  class="text-[13px] py-1"
+                  :disabled="protocolsSaving || !adminWriteEnabled"
                   data-testid="save-protocols-btn"
                   @click="handleSaveProtocols"
                 >
@@ -323,63 +327,66 @@ function handleBatchTest() {
               :key="proto.id"
               type="button"
               :disabled="!isEditingProtocols"
-              class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all border select-none cursor-pointer disabled:cursor-default"
-              :class="activeProtocols.includes(proto.id)
-                ? 'bg-amber-100 text-amber-900 border-amber-300 font-semibold shadow-2xs'
-                : 'bg-slate-50 text-slate-500 border-slate-200/80 hover:bg-slate-100/80'"
               :data-testid="`protocol-pill-${proto.id}`"
+              class="px-3 py-1.5 rounded-lg text-[13px] font-medium transition-all inline-flex items-center gap-2 border select-none"
+              :class="[
+                activeProtocols.includes(proto.id)
+                  ? 'bg-slate-900 text-white border-slate-900 shadow-2xs font-semibold'
+                  : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300',
+                isEditingProtocols ? 'cursor-pointer' : 'cursor-default opacity-90'
+              ]"
               @click="toggleProtocol(proto.id)"
             >
               <span
                 class="w-2 h-2 rounded-full"
-                :class="activeProtocols.includes(proto.id) ? 'bg-amber-500' : 'bg-slate-300'"
+                :class="activeProtocols.includes(proto.id) ? 'bg-amber-400' : 'bg-slate-300'"
               />
               {{ proto.label }}
             </button>
           </div>
 
-          <!-- 各协议专属端点配置 (可编辑模式或已配置展示) -->
-          <div v-if="isEditingProtocols" class="space-y-2 pt-2 border-t border-slate-100 text-xs">
-            <div v-if="activeProtocols.includes('chat')" class="space-y-1">
-              <label class="block text-3xs font-medium text-slate-500">OpenAI Chat 专属 Base URL</label>
+          <!-- 专属 URL 输入字段折叠 (编辑态) / 概览行 (展示态) -->
+          <div v-if="isEditingProtocols" class="pt-2 space-y-2.5">
+            <div v-if="activeProtocols.includes('chat')">
+              <label class="block text-xs font-medium text-slate-600">OpenAI Chat 专属 Base URL</label>
               <input
                 v-model="customUrls.chat"
                 type="url"
                 placeholder="未单独覆盖时统一走 Base URL"
-                class="w-full bg-slate-50 border border-slate-200 rounded-lg px-2.5 py-1.5 text-xs text-slate-800 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                class="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-slate-400/20 focus:border-slate-400 focus:bg-white"
                 data-testid="chat-url-input"
               />
             </div>
-            <div v-if="activeProtocols.includes('messages')" class="space-y-1">
-              <label class="block text-3xs font-medium text-slate-500">Anthropic Messages 专属 Base URL</label>
+            <div v-if="activeProtocols.includes('messages')">
+              <label class="block text-xs font-medium text-slate-600">Anthropic Messages 专属 Base URL</label>
               <input
                 v-model="customUrls.messages"
                 type="url"
                 placeholder="未单独覆盖时统一走 Base URL"
-                class="w-full bg-slate-50 border border-slate-200 rounded-lg px-2.5 py-1.5 text-xs text-slate-800 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                class="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-slate-400/20 focus:border-slate-400 focus:bg-white"
                 data-testid="messages-url-input"
               />
             </div>
-            <div v-if="activeProtocols.includes('responses')" class="space-y-1">
-              <label class="block text-3xs font-medium text-slate-500">OpenAI Responses 专属 Base URL</label>
+            <div v-if="activeProtocols.includes('responses')">
+              <label class="block text-xs font-medium text-slate-600">OpenAI Responses 专属 Base URL</label>
               <input
                 v-model="customUrls.responses"
                 type="url"
                 placeholder="未单独覆盖时统一走 Base URL"
-                class="w-full bg-slate-50 border border-slate-200 rounded-lg px-2.5 py-1.5 text-xs text-slate-800 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                class="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-slate-400/20 focus:border-slate-400 focus:bg-white"
                 data-testid="responses-url-input"
               />
             </div>
           </div>
-          <div v-else-if="hasCustomUrls" class="pt-1 text-3xs text-slate-400 space-y-0.5 font-mono">
-            <div v-if="provider.chat_url">Chat 端点: {{ provider.chat_url }}</div>
-            <div v-if="provider.messages_url">Messages 端点: {{ provider.messages_url }}</div>
-            <div v-if="provider.responses_url">Responses 端点: {{ provider.responses_url }}</div>
+          <div v-else-if="hasCustomUrls" class="pt-1.5 text-xs text-slate-500 space-y-1 font-mono">
+            <div v-if="provider.chat_url" class="truncate" :title="provider.chat_url">Chat 端点: {{ provider.chat_url }}</div>
+            <div v-if="provider.messages_url" class="truncate" :title="provider.messages_url">Messages 端点: {{ provider.messages_url }}</div>
+            <div v-if="provider.responses_url" class="truncate" :title="provider.responses_url">Responses 端点: {{ provider.responses_url }}</div>
           </div>
         </div>
 
         <!-- 密钥子区域 (默认折叠) -->
-        <div class="bg-white rounded-xl p-4 shadow-2xs">
+        <div class="bg-white rounded-xl p-4.5 border border-slate-200/80 shadow-2xs">
           <KeySubSection
             :provider-name="provider.name"
             :keys="keys"
@@ -394,7 +401,7 @@ function handleBatchTest() {
         </div>
 
         <!-- 模型子区域 (默认折叠) -->
-        <div class="bg-white rounded-xl p-4 shadow-2xs">
+        <div class="bg-white rounded-xl p-4.5 border border-slate-200/80 shadow-2xs">
           <ModelSubSection
             :provider-name="provider.name"
             :models="models"

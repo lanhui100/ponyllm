@@ -22,8 +22,8 @@ const emit = defineEmits<{
         </h3>
       </div>
 
-      <div class="p-5 space-y-3 text-xs text-slate-600 leading-relaxed">
-        <div class="p-3 bg-rose-50 border border-rose-200 rounded-xl text-rose-700">
+      <div class="p-5 space-y-3 text-sm text-slate-600 leading-relaxed">
+        <div class="p-3 bg-rose-50 border border-rose-200 rounded-xl text-rose-700 text-xs leading-relaxed">
           <strong>并发写入拦截：</strong>
           当前网关配置已被其他管理终端修改。为防止覆盖他人变更，提交已被安全拦截。
         </div>

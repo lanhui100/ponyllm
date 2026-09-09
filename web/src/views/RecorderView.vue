@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue';
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
 import NavBar from '../components/NavBar.vue';
 import FrameDrawer from '../components/FrameDrawer.vue';
 import type { RecordedFrame } from '../types/telemetry';
@@ -71,6 +71,14 @@ const filteredFrames = computed(() => {
   });
 });
 
+watch(filteredFrames, (newList) => {
+  if (newList.length === 0) {
+    selectedIndex.value = -1;
+  } else if (selectedIndex.value >= newList.length) {
+    selectedIndex.value = newList.length - 1;
+  }
+});
+
 const totalHeight = computed(() => filteredFrames.value.length * ITEM_HEIGHT);
 
 const visibleIndices = computed(() => {
@@ -105,6 +113,16 @@ function closeDrawer() {
 }
 
 function handleKeyDown(e: KeyboardEvent) {
+  // 忽略系统修饰组合键 (如 Ctrl+J, Cmd+J)
+  if (e.ctrlKey || e.metaKey || e.altKey) {
+    return;
+  }
+
+  // 抽屉展开时挂起快捷键，防止穿透
+  if (isDrawerOpen.value) {
+    return;
+  }
+
   // If user is focusing an input, don't hijack j/k
   if (['INPUT', 'SELECT', 'TEXTAREA'].includes((e.target as HTMLElement)?.tagName)) {
     return;
@@ -262,9 +280,9 @@ onUnmounted(() => {
               </span>
             </div>
             <div class="col-latency">{{ item.frame.latency_ms }} ms</div>
-            <div class="col-endpoint font-mono">{{ item.frame.endpoint }}</div>
-            <div class="col-provider">{{ item.frame.provider || '--' }}</div>
-            <div class="col-key font-mono text-masked">
+            <div class="col-endpoint font-mono" :title="item.frame.endpoint">{{ item.frame.endpoint }}</div>
+            <div class="col-provider" :title="item.frame.provider || '--'">{{ item.frame.provider || '--' }}</div>
+            <div class="col-key font-mono text-masked" :title="maskKey(item.frame.sanitized_key)">
               {{ maskKey(item.frame.sanitized_key) }}
             </div>
             <div class="col-time">
@@ -309,31 +327,38 @@ onUnmounted(() => {
 }
 
 .page-title {
-  font-size: 20px;
+  font-size: 22px;
   font-weight: 700;
   color: #0f172a;
   margin: 0 0 4px 0;
+  letter-spacing: -0.01em;
 }
 
 .page-desc {
-  font-size: 13px;
+  font-size: 14px;
   color: #64748b;
   margin: 0;
 }
 
 .refresh-btn {
-  padding: 8px 16px;
-  background: #2563eb;
+  padding: 8px 18px;
+  background: #0f172a;
   color: #ffffff;
-  border: none;
+  border: 1px solid #0f172a;
   border-radius: 6px;
-  font-size: 13px;
-  font-weight: 500;
+  font-size: 14px;
+  font-weight: 600;
   cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.refresh-btn:hover:not(:disabled) {
+  background: #1e293b;
+  border-color: #1e293b;
 }
 
 .refresh-btn:disabled {
-  opacity: 0.6;
+  opacity: 0.5;
   cursor: not-allowed;
 }
 
@@ -342,46 +367,57 @@ onUnmounted(() => {
   align-items: center;
   gap: 20px;
   background: #ffffff;
-  padding: 12px 16px;
+  padding: 14px 18px;
   border-radius: 8px;
   border: 1px solid #e2e8f0;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.02);
   margin-bottom: 16px;
-  font-size: 13px;
+  font-size: 14px;
 }
 
 .filter-item {
   display: flex;
   align-items: center;
   gap: 8px;
-  color: #475569;
+  color: #334155;
+  font-weight: 500;
 }
 
 .input-search, .select-box {
-  padding: 6px 10px;
+  padding: 7px 12px;
   border: 1px solid #cbd5e1;
   border-radius: 6px;
-  font-size: 13px;
-  color: #1e293b;
+  font-size: 14px;
+  color: #0f172a;
   outline: none;
+  background-color: #ffffff;
+  transition: border-color 0.15s ease;
+}
+
+.input-search:focus, .select-box:focus {
+  border-color: #4f46e5;
+  box-shadow: 0 0 0 2px rgba(79, 70, 229, 0.1);
 }
 
 .filter-summary {
   margin-left: auto;
-  color: #94a3b8;
-  font-size: 12px;
+  color: #64748b;
+  font-size: 13px;
+  font-weight: 500;
 }
 
 .table-header {
   display: flex;
   align-items: center;
-  padding: 10px 16px;
-  background: #f1f5f9;
+  padding: 12px 16px;
+  background: #f8fafc;
   border: 1px solid #e2e8f0;
   border-bottom: none;
   border-radius: 8px 8px 0 0;
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 600;
-  color: #64748b;
+  color: #475569;
+  scrollbar-gutter: stable;
 }
 
 .virtual-viewport {
@@ -390,7 +426,8 @@ onUnmounted(() => {
   background: #ffffff;
   border: 1px solid #e2e8f0;
   border-radius: 0 0 8px 8px;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.02);
+  scrollbar-gutter: stable;
 }
 
 .scroll-phantom {
@@ -416,8 +453,11 @@ onUnmounted(() => {
   align-items: center;
   padding: 0 16px;
   border-bottom: 1px solid #f1f5f9;
-  font-size: 13px;
-  color: #334155;
+  border-left: 3px solid transparent;
+  font-size: 14px;
+  line-height: 48px;
+  overflow: hidden;
+  color: #1e293b;
   cursor: pointer;
   transition: background 0.1s ease;
   user-select: none;
@@ -428,29 +468,30 @@ onUnmounted(() => {
 }
 
 .table-row.selected {
-  background: #eff6ff;
-  border-left: 3px solid #2563eb;
+  background: #f1f5f9;
+  border-left-color: #0f172a;
 }
 
-.col-status { width: 80px; flex-shrink: 0; }
-.col-latency { width: 90px; flex-shrink: 0; }
-.col-endpoint { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.col-provider { width: 110px; flex-shrink: 0; }
-.col-key { width: 110px; flex-shrink: 0; }
-.col-time { width: 100px; flex-shrink: 0; text-align: right; color: #94a3b8; }
+.col-status { width: 85px; flex-shrink: 0; white-space: nowrap; }
+.col-latency { width: 95px; flex-shrink: 0; font-family: ui-monospace, SFMono-Regular, monospace; font-size: 13px; white-space: nowrap; }
+.col-endpoint { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.col-provider { width: 110px; flex-shrink: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.col-key { width: 110px; flex-shrink: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.col-time { width: 105px; flex-shrink: 0; text-align: right; color: #64748b; font-family: ui-monospace, SFMono-Regular, monospace; font-size: 13px; white-space: nowrap; }
 
-.font-mono { font-family: monospace; }
-.text-masked { color: #0284c7; font-weight: 500; }
+.font-mono { font-family: ui-monospace, SFMono-Regular, monospace; }
+.text-masked { color: #0284c7; font-weight: 600; }
 
 .badge {
-  font-size: 11px;
-  padding: 2px 6px;
+  font-size: 12px;
+  padding: 2px 7px;
   border-radius: 4px;
   font-weight: 600;
+  font-family: ui-monospace, SFMono-Regular, monospace;
 }
 
-.status-ok { background: #dcfce7; color: #166534; }
-.status-err { background: #fee2e2; color: #991b1b; }
+.status-ok { background: #dcfce7; color: #166534; border: 1px solid #bbf7d0; }
+.status-err { background: #fee2e2; color: #991b1b; border: 1px solid #fecaca; }
 
 .empty-state {
   display: flex;
