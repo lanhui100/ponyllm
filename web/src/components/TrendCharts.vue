@@ -442,7 +442,7 @@ watch(
           class="px-3.5 py-1.5 text-[13px] font-medium rounded-md transition-all duration-150 cursor-pointer"
           :class="[
             range === opt.key
-              ? 'bg-white text-slate-950 font-semibold shadow-2xs'
+              ? 'bg-white text-slate-950 font-semibold'
               : 'text-slate-600 hover:text-slate-900',
           ]"
           @click="emit('update:range', opt.key)"
@@ -500,7 +500,7 @@ watch(
             <button
               type="button"
               class="px-2.5 py-1 text-[13px] font-medium rounded transition-all cursor-pointer"
-              :class="tokenDimension === 'provider' ? 'bg-white text-slate-900 font-semibold shadow-2xs' : 'text-slate-600'"
+              :class="tokenDimension === 'provider' ? 'bg-white text-slate-900 font-semibold' : 'text-slate-600'"
               @click="tokenDimension = 'provider'"
             >
               按 Provider
@@ -508,7 +508,7 @@ watch(
             <button
               type="button"
               class="px-2.5 py-1 text-[13px] font-medium rounded transition-all cursor-pointer"
-              :class="tokenDimension === 'model' ? 'bg-white text-slate-900 font-semibold shadow-2xs' : 'text-slate-600'"
+              :class="tokenDimension === 'model' ? 'bg-white text-slate-900 font-semibold' : 'text-slate-600'"
               @click="tokenDimension = 'model'"
             >
               按模型

@@ -21,7 +21,7 @@ const emit = defineEmits<{
 <template>
   <div
     class="flex flex-wrap items-center justify-between gap-4 px-5 py-3.5 rounded-xl mb-6 transition-all duration-200"
-    :class="isDown ? 'bg-rose-50 border border-rose-200 text-rose-800' : 'swiss-card'"
+    :class="isDown ? 'bg-rose-100 text-rose-800' : 'bg-white'"
   >
     <div class="flex flex-wrap items-center gap-4 text-[14px]">
       <!-- 极简脉冲呼吸灯 -->
@@ -46,7 +46,7 @@ const emit = defineEmits<{
           网关状态: <strong class="font-bold text-slate-900">{{ health.toUpperCase() }}</strong>
         </span>
         <UiTooltip
-          content="展示最近 6 次调用的指标微柱（绿色畅通、黄色轻微延迟、红色异常），右侧展示最新耗时及 24 小时平均速度 (t/s)。"
+          content="展示最近 2 分钟的网关探测微柱（5s/柱，共24柱：绿色畅通、黄色轻微延迟、红色异常），右侧展示最新耗时及 24 小时平均速度 (t/s)。"
           wrap
         >
           <button
@@ -59,11 +59,11 @@ const emit = defineEmits<{
         </UiTooltip>
       </div>
 
-      <!-- 6 柱状态与调用流速图例 (Uptime Bars) -->
-      <div class="flex items-center pl-2 border-l border-slate-200">
+      <!-- 24 柱状态与调用流速图例 (Uptime Bars, 5s/柱, 最近2分钟) -->
+      <div class="flex items-center pl-2 bg-slate-100/70 rounded-lg px-2 py-1">
         <UptimeBars
           :slots="uptimeBars?.slots"
-          :slot-count="6"
+          :slot-count="24"
           :latest-latency-ms="uptimeBars?.latest_latency_ms"
           :speed-24h="speed24h"
           bar-height="h-4.5"
@@ -73,14 +73,14 @@ const emit = defineEmits<{
       <span class="text-slate-300">·</span>
 
       <span
-        class="px-2.5 py-0.5 rounded-md text-[13px] font-semibold border"
+        class="px-2.5 py-0.5 rounded-md text-[13px] font-semibold"
         :class="{
-          'bg-emerald-50 border-emerald-200 text-emerald-800': transport === 'sse',
-          'bg-slate-100 border-slate-200 text-slate-700': transport === 'polling',
-          'bg-rose-50 border-rose-200 text-rose-700': transport === 'offline',
+          'bg-emerald-100 text-emerald-800': transport === 'sse',
+          'bg-slate-200/70 text-slate-700': transport === 'polling',
+          'bg-rose-100 text-rose-700': transport === 'offline',
         }"
       >
-        {{ transport === 'sse' ? '实时流 (SSE)' : transport === 'polling' ? '轮询中 (1.5s)' : '服务离线' }}
+        {{ transport === 'sse' ? '实时流 (SSE)' : transport === 'polling' ? '轮询中 (5s)' : '服务离线' }}
       </span>
     </div>
 

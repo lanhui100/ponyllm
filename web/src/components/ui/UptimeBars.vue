@@ -96,15 +96,15 @@ function getSlotTooltip(slot: ConnectivitySlot): string {
     <div
       v-if="showLatency"
       data-testid="latest-latency"
-      class="text-[13px] font-mono font-medium px-2.5 py-0.5 rounded-md border"
+      class="text-[13px] font-mono font-medium px-2.5 py-0.5 rounded-md"
       :class="[
         !hasValidLatency
-          ? 'text-slate-400 bg-slate-100 border-slate-200'
+          ? 'text-slate-500 bg-slate-200/70'
           : latestLatencyMs! < 300
-          ? 'text-emerald-800 bg-emerald-50 border-emerald-200'
+          ? 'text-emerald-800 bg-emerald-100'
           : latestLatencyMs! < 1000
-          ? 'text-amber-800 bg-amber-50 border-amber-200'
-          : 'text-rose-800 bg-rose-50 border-rose-200',
+          ? 'text-amber-800 bg-amber-100'
+          : 'text-rose-800 bg-rose-100',
       ]"
     >
       {{ hasValidLatency ? `${latestLatencyMs!.toFixed(1)} ms` : '--' }}
@@ -114,7 +114,7 @@ function getSlotTooltip(slot: ConnectivitySlot): string {
     <div
       v-if="showSpeed24h && speed24h !== undefined"
       data-testid="speed-24h"
-      class="text-[13px] font-mono font-medium px-2.5 py-0.5 rounded-md text-sky-800 bg-sky-50 border border-sky-200 inline-flex items-center gap-1.5"
+      class="text-[13px] font-mono font-medium px-2.5 py-0.5 rounded-md text-sky-800 bg-sky-100 inline-flex items-center gap-1.5"
       :title="`24小时平均速度: ${hasValidSpeed24h ? speed24h!.toFixed(1) : '--'} t/s`"
     >
       <span class="text-xs text-sky-600 font-sans font-semibold">24h</span>

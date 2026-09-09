@@ -260,6 +260,7 @@ pub fn run_interactive_init(output_path: &str) -> Result<(), Box<dyn std::error:
             web_enabled: true,
             web_dist_dir: "web/dist".to_string(),
             admin_write_enabled: false,
+            telemetry_snapshot_path: None,
         },
         providers,
         config_version: 0,

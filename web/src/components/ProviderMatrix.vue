@@ -62,18 +62,18 @@ function formatTokens(n: number): string {
 </script>
 
 <template>
-  <div class="swiss-card p-6 mb-6 transition-all duration-200">
+  <div class="swiss-card bg-slate-50/60 p-6 mb-6 transition-all duration-200">
     <!-- 头部区域：标题与周期 Switch -->
-    <div class="flex flex-wrap items-center justify-between gap-3 pb-4 mb-4 border-b border-slate-100">
+    <div class="flex flex-wrap items-center justify-between gap-3 pb-4 mb-4 bg-white/60 rounded-lg px-3 pt-3">
       <div class="flex items-center gap-2.5">
-        <div class="w-8 h-8 rounded-lg bg-orange-50 border border-orange-200/60 text-orange-600 flex items-center justify-center">
+        <div class="w-8 h-8 rounded-lg bg-orange-100 text-orange-600 flex items-center justify-center">
           <Icons name="server" size="16" />
         </div>
         <div>
           <div class="flex items-center gap-2">
             <h2 class="text-base font-bold text-slate-900 tracking-tight">提供商状态</h2>
             <UiTooltip
-              content="展示系统挂载的各大模型上游供应商（如 Sense、OpenCode、BAI）最近 1 分钟的连通性切片、统计周期内的累计 Token 消耗与占比，以及平均首字延迟（TTFT）和平均生成速率（TPS）。"
+              content="展示各上游供应商最近调用的连通性微柱（每柱一次调用，最近40次，绿色畅通、黄色延迟、红色异常）、统计周期内的累计 Token 消耗与占比，以及平均首字延迟（TTFT）和平均生成速率（TPS）。数据经服务端持久化，重启后可恢复。"
               wrap
             >
               <button
@@ -91,16 +91,16 @@ function formatTokens(n: number): string {
 
       <!-- 24小时 / 7天 / 30天 Switch 选择器 -->
       <div class="segment-track inline-flex items-center">
-        <button
-          v-for="opt in rangeOptions"
-          :key="opt.key"
-          type="button"
-          class="px-3.5 py-1.5 text-[13px] font-medium rounded-md transition-all duration-150 cursor-pointer"
-          :class="[
-            range === opt.key
-              ? 'bg-white text-slate-950 font-semibold shadow-2xs'
-              : 'text-slate-600 hover:text-slate-900',
-          ]"
+          <button
+            v-for="opt in rangeOptions"
+            :key="opt.key"
+            type="button"
+            class="px-3.5 py-1.5 text-[13px] font-medium rounded-md transition-all duration-150 cursor-pointer"
+            :class="[
+              range === opt.key
+                ? 'bg-white text-slate-950 font-semibold'
+                : 'text-slate-600 hover:text-slate-900',
+            ]"
           @click="emit('update:range', opt.key)"
         >
           {{ opt.label }}
@@ -115,25 +115,25 @@ function formatTokens(n: number): string {
     <div v-else class="overflow-x-auto">
       <table class="w-full text-left text-[14px]">
         <thead>
-          <tr class="text-slate-500 border-b border-slate-200/80 font-medium text-[13px]">
-            <th class="pb-3 font-semibold whitespace-nowrap">提供商</th>
-            <th class="pb-3 font-semibold whitespace-nowrap">连通性状态 (最近1分钟)</th>
-            <th class="pb-3 font-semibold whitespace-nowrap">Token 总量</th>
-            <th class="pb-3 font-semibold whitespace-nowrap">流调用数</th>
-            <th class="pb-3 font-semibold whitespace-nowrap">平均 TTFT</th>
-            <th class="pb-3 font-semibold whitespace-nowrap">平均 TPS</th>
-            <th class="pb-3 font-semibold text-right whitespace-nowrap">错误数</th>
+          <tr class="text-slate-500 bg-white/60 font-medium text-[13px]">
+            <th class="pb-3 pt-2 px-2 font-semibold whitespace-nowrap rounded-l-lg">提供商</th>
+            <th class="pb-3 pt-2 font-semibold whitespace-nowrap">连通性状态 (最近调用)</th>
+            <th class="pb-3 pt-2 font-semibold whitespace-nowrap">Token 总量</th>
+            <th class="pb-3 pt-2 font-semibold whitespace-nowrap">流调用数</th>
+            <th class="pb-3 pt-2 font-semibold whitespace-nowrap">平均 TTFT</th>
+            <th class="pb-3 pt-2 font-semibold whitespace-nowrap">平均 TPS</th>
+            <th class="pb-3 pt-2 px-2 font-semibold text-right whitespace-nowrap rounded-r-lg">错误数</th>
           </tr>
         </thead>
-        <tbody class="divide-y divide-slate-100">
+        <tbody>
           <tr
             v-for="{ name, snapshot: p } in sortedProviders"
             :key="name"
-            class="hover:bg-slate-50/80 transition-colors group"
+            class="hover:bg-white/70 transition-colors group"
           >
             <!-- Provider 名称 -->
-            <td class="py-3.5 font-bold text-slate-900 whitespace-nowrap">
-              <span class="px-2.5 py-1 rounded-md bg-slate-100 border border-slate-200 text-slate-900 font-mono text-[13px] font-semibold">
+            <td class="py-3.5 px-2 font-bold text-slate-900 whitespace-nowrap">
+              <span class="px-2.5 py-1 rounded-md bg-slate-200/60 text-slate-900 font-mono text-[13px] font-semibold">
                 {{ name }}
               </span>
             </td>

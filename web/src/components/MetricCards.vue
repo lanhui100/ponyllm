@@ -45,10 +45,10 @@ const totalRequests = computed(() => {
 <template>
   <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
     <!-- QPS 卡片 -->
-    <div class="swiss-card p-5 hover:border-slate-300 transition-all duration-200">
+    <div class="swiss-card p-5 bg-orange-50/40 transition-all duration-200">
       <div class="flex items-center justify-between text-[13px] text-slate-500 mb-2.5">
         <span class="font-semibold text-slate-700">当前 QPS</span>
-        <div class="w-7.5 h-7.5 rounded-lg bg-orange-50 border border-orange-200/60 text-orange-600 flex items-center justify-center">
+        <div class="w-7.5 h-7.5 rounded-lg bg-orange-100 text-orange-600 flex items-center justify-center">
           <Icons name="activity" size="16" />
         </div>
       </div>
@@ -61,10 +61,10 @@ const totalRequests = computed(() => {
     </div>
 
     <!-- Token 吞吐量卡片 -->
-    <div class="swiss-card p-5 hover:border-slate-300 transition-all duration-200">
+    <div class="swiss-card p-5 bg-sky-50/50 transition-all duration-200">
       <div class="flex items-center justify-between text-[13px] text-slate-500 mb-2.5">
         <span class="font-semibold text-slate-700">Token 吞吐量</span>
-        <div class="w-7.5 h-7.5 rounded-lg bg-sky-50 border border-sky-200/60 text-sky-700 flex items-center justify-center">
+        <div class="w-7.5 h-7.5 rounded-lg bg-sky-100 text-sky-700 flex items-center justify-center">
           <Icons name="sparkles" size="16" />
         </div>
       </div>
@@ -78,10 +78,10 @@ const totalRequests = computed(() => {
     </div>
 
     <!-- 延迟与生成速率 -->
-    <div class="swiss-card p-5 hover:border-slate-300 transition-all duration-200">
+    <div class="swiss-card p-5 bg-amber-50/50 transition-all duration-200">
       <div class="flex items-center justify-between text-[13px] text-slate-500 mb-2.5">
         <span class="font-semibold text-slate-700">延迟与速率</span>
-        <div class="w-7.5 h-7.5 rounded-lg bg-amber-50 border border-amber-200/60 text-amber-600 flex items-center justify-center">
+        <div class="w-7.5 h-7.5 rounded-lg bg-amber-100 text-amber-600 flex items-center justify-center">
           <Icons name="zap" size="16" />
         </div>
       </div>
@@ -96,12 +96,12 @@ const totalRequests = computed(() => {
     </div>
 
     <!-- 故障率 -->
-    <div class="swiss-card p-5 hover:border-slate-300 transition-all duration-200">
+    <div class="swiss-card p-5 bg-slate-100/70 transition-all duration-200">
       <div class="flex items-center justify-between text-[13px] text-slate-500 mb-2.5">
         <span class="font-semibold text-slate-700">故障率</span>
         <div
-          class="w-7.5 h-7.5 rounded-lg flex items-center justify-center border"
-          :class="errorRate !== '0.0%' ? 'bg-rose-50 border-rose-200 text-rose-600' : 'bg-slate-100 border-slate-200 text-slate-500'"
+          class="w-7.5 h-7.5 rounded-lg flex items-center justify-center"
+          :class="errorRate !== '0.0%' ? 'bg-rose-100 text-rose-600' : 'bg-slate-200/70 text-slate-500'"
         >
           <Icons name="cross" size="15" />
         </div>
