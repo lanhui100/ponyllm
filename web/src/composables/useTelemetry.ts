@@ -221,7 +221,7 @@ export function useTelemetry(options: UseTelemetryOptions = {}) {
         latency_ms: undefined,
         status: 'down',
       });
-      if (gatewaySlots.value.length > 40) gatewaySlots.value.shift();
+      if (gatewaySlots.value.length > 24) gatewaySlots.value.shift();
     }
   }
 

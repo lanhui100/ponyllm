@@ -29,8 +29,9 @@ const normalizedSlots = computed<ConnectivitySlot[]>(() => {
     return input.slice(-count);
   }
   const paddingCount = count - input.length;
+  const stepMs = count <= 24 ? 5000 : 1500;
   const padding: ConnectivitySlot[] = Array.from({ length: paddingCount }, (_, i) => ({
-    timestamp_ms: Date.now() - (paddingCount - i) * 1500,
+    timestamp_ms: Date.now() - (paddingCount - i) * stepMs,
     status: 'empty',
   }));
   return [...padding, ...input];

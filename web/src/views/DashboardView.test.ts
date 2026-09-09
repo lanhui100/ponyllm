@@ -63,7 +63,7 @@ describe('DashboardView Full Feature Integration', () => {
           total_tokens: 6000,
           uptime_bars: {
             slots: Array.from({ length: 40 }, (_, i) => ({
-              timestamp_ms: 1000 + i * 1500,
+              timestamp_ms: 1000 + i * 5000,
               latency_ms: 120,
               status: 'ok',
             })),
@@ -72,8 +72,8 @@ describe('DashboardView Full Feature Integration', () => {
         },
       },
       gateway_uptime_bars: {
-        slots: Array.from({ length: 40 }, (_, i) => ({
-          timestamp_ms: 1000 + i * 1500,
+        slots: Array.from({ length: 24 }, (_, i) => ({
+          timestamp_ms: 1000 + i * 5000,
           latency_ms: 15,
           status: 'ok',
         })),
@@ -133,9 +133,9 @@ describe('DashboardView Full Feature Integration', () => {
     // 1. Verify Page Title
     expect(container.textContent).toContain('系统可观测大盘');
 
-    // 2. Verify Gateway status banner renders UptimeBars (40 bars)
+    // 2. Verify Gateway status banner renders UptimeBars (24 gateway + 40 provider)
     const allBars = container.querySelectorAll('[data-testid="uptime-bar"]');
-    expect(allBars.length).toBeGreaterThanOrEqual(40);
+    expect(allBars.length).toBeGreaterThanOrEqual(64);
 
     // 3. Verify Provider Status table
     expect(container.textContent).toContain('提供商状态');
