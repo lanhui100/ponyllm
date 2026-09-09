@@ -57,6 +57,10 @@ pub struct GatewaySection {
     /// Defaults to `false` for security; must be explicitly enabled.
     #[serde(default = "default_admin_write_enabled")]
     pub admin_write_enabled: bool,
+    /// Telemetry snapshot file for dashboard persistence. Empty = derive
+    /// `<config-dir>/telemetry-snapshot.json` in serve; set explicit path to override.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub telemetry_snapshot_path: Option<String>,
 }
 
 fn default_admin_write_enabled() -> bool {
@@ -143,6 +147,7 @@ impl Default for GatewaySection {
             web_enabled: true,
             web_dist_dir: default_web_dist_dir(),
             admin_write_enabled: false,
+            telemetry_snapshot_path: None,
         }
     }
 }

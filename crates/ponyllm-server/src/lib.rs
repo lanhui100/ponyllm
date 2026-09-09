@@ -9,6 +9,7 @@ pub mod extractors;
 pub mod frames;
 pub mod segments;
 pub mod admin_store;
+pub mod telemetry_snapshot;
 
 pub use config::{EffectiveProxy, GatewayConfig, ModelSpec, ProviderConfig};
 pub use state::AppState;

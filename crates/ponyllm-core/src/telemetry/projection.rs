@@ -115,6 +115,32 @@ impl StreamProjection {
             .map(|(k, v)| (k.clone(), v.flow_snapshot()))
             .collect()
     }
+
+    /// 导出可持久化的节点指标快照。
+    pub fn snapshot_nodes(
+        &self,
+    ) -> HashMap<String, crate::pool::NodeLatencySnapshot> {
+        self.nodes
+            .read()
+            .iter()
+            .map(|(k, v)| (k.clone(), v.snapshot()))
+            .collect()
+    }
+
+    /// 从快照恢复节点指标（仅启动时调用）。
+    pub fn restore_nodes(
+        &self,
+        snap: HashMap<String, crate::pool::NodeLatencySnapshot>,
+    ) {
+        let mut write = self.nodes.write();
+        for (name, ns) in snap {
+            let node = write
+                .entry(name)
+                .or_insert_with(|| Arc::new(NodeLatencyMetrics::default()))
+                .clone();
+            node.restore(&ns);
+        }
+    }
 }
 
 impl Projection for StreamProjection {

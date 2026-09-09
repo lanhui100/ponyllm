@@ -18,6 +18,48 @@ use crate::config::{GatewayConfig, ProviderConfig};
 use crate::frames::FrameConverter;
 use crate::routes::models::ParsedRequestModel;
 
+/// 空字符串视为禁用；显式路径优先，否则随 `event_log_dir`。
+fn resolve_snapshot_path(config: &GatewayConfig) -> Option<std::path::PathBuf> {
+    if let Some(p) = config.telemetry_snapshot_path.as_deref() {
+        if p.trim().is_empty() {
+            return None;
+        }
+        return Some(std::path::PathBuf::from(p));
+    }
+    if let Some(dir) = config.event_log_dir.as_deref() {
+        if !dir.trim().is_empty() {
+            return Some(std::path::PathBuf::from(dir).join("telemetry-snapshot.json"));
+        }
+    }
+    None
+}
+
+fn spawn_snapshot_saver(
+    path: std::path::PathBuf,
+    timeseries: Arc<TimeseriesProjection>,
+    metrics: Arc<MetricsCollector>,
+    connectivity: Arc<ConnectivitySampler>,
+    streams: Arc<StreamProjection>,
+) {
+    std::thread::Builder::new()
+        .name("ponyllm-telemetry-snapshot".to_string())
+        .spawn(move || loop {
+            std::thread::sleep(std::time::Duration::from_secs(30));
+            let snap = crate::telemetry_snapshot::TelemetrySnapshot {
+                version: crate::telemetry_snapshot::SNAPSHOT_VERSION,
+                saved_at_ms: 0,
+                timeseries: timeseries.snapshot_buckets(),
+                metrics: metrics.snapshot_counters(),
+                connectivity: connectivity.snapshot_state(),
+                streams: streams.snapshot_nodes(),
+            };
+            if let Err(e) = crate::telemetry_snapshot::save_snapshot(&path, &snap) {
+                tracing::warn!("telemetry snapshot save failed: {}", e);
+            }
+        })
+        .ok();
+}
+
 #[derive(Debug, Clone)]
 pub struct RoutedTarget {
     pub provider_name: String,
@@ -182,6 +224,8 @@ pub struct AppState {
     pub started_at: std::time::Instant,
     /// Write queue lock serializing admin config mutations (WEB-06).
     pub admin_write_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Dashboard telemetry snapshot path (`None` disables persistence).
+    pub telemetry_snapshot_path: Option<std::path::PathBuf>,
 }
 
 impl std::fmt::Debug for dyn crate::admin_store::ConfigStore {
@@ -256,6 +300,32 @@ impl AppState {
                 config.event_log_max_bytes,
             );
         }
+        let telemetry_snapshot_path = resolve_snapshot_path(&config);
+        if let Some(ref path) = telemetry_snapshot_path {
+            if path.is_file() {
+                match crate::telemetry_snapshot::load_snapshot(path) {
+                    Some(snap) => {
+                        timeseries_proj.restore_buckets(snap.timeseries);
+                        metrics.restore_counters(&snap.metrics);
+                        connectivity_sampler.restore_state(snap.connectivity);
+                        stream_proj.restore_nodes(snap.streams);
+                        tracing::info!("telemetry snapshot restored from {:?}", path);
+                    }
+                    None => {
+                        tracing::warn!("telemetry snapshot at {:?} unreadable, starting fresh", path);
+                    }
+                }
+            }
+        }
+        if let Some(ref path) = telemetry_snapshot_path {
+            spawn_snapshot_saver(
+                path.clone(),
+                timeseries_proj.clone(),
+                metrics.clone(),
+                connectivity_sampler.clone(),
+                stream_proj.clone(),
+            );
+        }
         Self {
             config: RwLock::new(config),
             pools: RwLock::new(HashMap::new()),
@@ -274,7 +344,30 @@ impl AppState {
             config_store: None,
             started_at: std::time::Instant::now(),
             admin_write_lock: Arc::new(tokio::sync::Mutex::new(())),
+            telemetry_snapshot_path,
         }
+    }
+
+    /// Best-effort immediate snapshot save (shutdown/test hooks).
+    pub fn save_telemetry_snapshot(&self) -> std::io::Result<()> {
+        let path = match &self.telemetry_snapshot_path {
+            Some(p) => p.clone(),
+            None => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "telemetry snapshot disabled",
+                ))
+            }
+        };
+        let snap = crate::telemetry_snapshot::TelemetrySnapshot {
+            version: crate::telemetry_snapshot::SNAPSHOT_VERSION,
+            saved_at_ms: 0,
+            timeseries: self.timeseries_proj.snapshot_buckets(),
+            metrics: self.metrics.snapshot_counters(),
+            connectivity: self.connectivity_sampler.snapshot_state(),
+            streams: self.stream_proj.snapshot_nodes(),
+        };
+        crate::telemetry_snapshot::save_snapshot(&path, &snap)
     }
 
 

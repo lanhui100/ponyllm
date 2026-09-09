@@ -206,6 +206,55 @@ pub struct ProviderFlowSnapshot {
     pub total_stalls: u64,
 }
 
+/// 可持久化的节点指标快照（原子计数直接导出，恢复时覆盖）。
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct NodeLatencySnapshot {
+    #[serde(default)]
+    pub ewma_ttft_us: u64,
+    #[serde(default)]
+    pub ewma_tps_milli: u64,
+    #[serde(default)]
+    pub total_requests: u64,
+    #[serde(default)]
+    pub successful_requests: u64,
+    #[serde(default)]
+    pub stream_count: u64,
+    #[serde(default)]
+    pub ewma_gap_us: u64,
+    #[serde(default)]
+    pub total_stalls: u64,
+    #[serde(default)]
+    pub max_gap_us: u64,
+}
+
+impl NodeLatencyMetrics {
+    /// 导出可持久化快照。
+    pub fn snapshot(&self) -> NodeLatencySnapshot {
+        NodeLatencySnapshot {
+            ewma_ttft_us: self.ewma_ttft_us.load(Ordering::Relaxed),
+            ewma_tps_milli: self.ewma_tps_milli.load(Ordering::Relaxed),
+            total_requests: self.total_requests.load(Ordering::Relaxed),
+            successful_requests: self.successful_requests.load(Ordering::Relaxed),
+            stream_count: self.stream_count.load(Ordering::Relaxed),
+            ewma_gap_us: self.ewma_gap_us.load(Ordering::Relaxed),
+            total_stalls: self.total_stalls.load(Ordering::Relaxed),
+            max_gap_us: self.max_gap_us.load(Ordering::Relaxed),
+        }
+    }
+
+    /// 从快照恢复（仅启动时调用）。
+    pub fn restore(&self, snap: &NodeLatencySnapshot) {
+        self.ewma_ttft_us.store(snap.ewma_ttft_us, Ordering::Relaxed);
+        self.ewma_tps_milli.store(snap.ewma_tps_milli, Ordering::Relaxed);
+        self.total_requests.store(snap.total_requests, Ordering::Relaxed);
+        self.successful_requests.store(snap.successful_requests, Ordering::Relaxed);
+        self.stream_count.store(snap.stream_count, Ordering::Relaxed);
+        self.ewma_gap_us.store(snap.ewma_gap_us, Ordering::Relaxed);
+        self.total_stalls.store(snap.total_stalls, Ordering::Relaxed);
+        self.max_gap_us.store(snap.max_gap_us, Ordering::Relaxed);
+    }
+}
+
 /// Economy Scorer ranking candidates by cost tiers
 pub struct EconomyScorer;
 

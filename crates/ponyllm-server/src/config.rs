@@ -359,6 +359,11 @@ pub struct GatewayConfig {
     /// Defaults to `true` to allow web console management out of the box.
     #[serde(default = "default_true")]
     pub admin_write_enabled: bool,
+    /// Telemetry snapshot file for dashboard persistence across restarts.
+    /// `None` (default) derives `<config-dir>/telemetry-snapshot.json` in serve;
+    /// empty string disables snapshot persistence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub telemetry_snapshot_path: Option<String>,
 }
 
 impl Default for GatewayConfig {
@@ -379,6 +384,7 @@ impl Default for GatewayConfig {
             web_enabled: true,
             web_dist_dir: default_web_dist_dir(),
             admin_write_enabled: true,
+            telemetry_snapshot_path: None,
         }
     }
 }

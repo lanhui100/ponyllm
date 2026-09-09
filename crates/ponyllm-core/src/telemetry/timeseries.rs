@@ -7,17 +7,26 @@ use super::event::{EventEnvelope, GatewayEvent, Projection};
 const HOUR_MS: u64 = 3_600_000;
 const MAX_HOURLY_BUCKETS: usize = 720; // 30 days * 24 hours
 
-#[derive(Debug, Clone, Default)]
-struct HourlyBucket {
-    _start_ms: u64,
-    total_requests: u64,
-    failed_requests: u64,
-    prompt_tokens: u64,
-    completion_tokens: u64,
-    latency_sum_ms: f64,
-    latency_count: u64,
-    tokens_by_provider: HashMap<String, u64>,
-    tokens_by_model: HashMap<String, u64>,
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct HourlyBucket {
+    #[serde(default)]
+    pub start_ms: u64,
+    #[serde(default)]
+    pub total_requests: u64,
+    #[serde(default)]
+    pub failed_requests: u64,
+    #[serde(default)]
+    pub prompt_tokens: u64,
+    #[serde(default)]
+    pub completion_tokens: u64,
+    #[serde(default)]
+    pub latency_sum_ms: f64,
+    #[serde(default)]
+    pub latency_count: u64,
+    #[serde(default)]
+    pub tokens_by_provider: HashMap<String, u64>,
+    #[serde(default)]
+    pub tokens_by_model: HashMap<String, u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -56,6 +65,21 @@ impl TimeseriesProjection {
         Self::default()
     }
 
+    /// 导出可持久化快照（最近30天小时桶）。
+    pub fn snapshot_buckets(&self) -> BTreeMap<u64, HourlyBucket> {
+        self.buckets.read().clone()
+    }
+
+    /// 从快照恢复（启动时调用；超长按保留策略截断）。
+    pub fn restore_buckets(&self, snap: BTreeMap<u64, HourlyBucket>) {
+        let mut buckets = self.buckets.write();
+        *buckets = snap;
+        while buckets.len() > MAX_HOURLY_BUCKETS {
+            let oldest = *buckets.keys().next().unwrap();
+            buckets.remove(&oldest);
+        }
+    }
+
     pub fn record_metric(
         &self,
         wall_ms: u64,
@@ -77,7 +101,7 @@ impl TimeseriesProjection {
         }
 
         let bucket = buckets.entry(bucket_start).or_insert_with(|| HourlyBucket {
-            _start_ms: bucket_start,
+            start_ms: bucket_start,
             ..Default::default()
         });
 

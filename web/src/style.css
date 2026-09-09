@@ -47,18 +47,18 @@
   }
 }
 
-/* 瑞士极简精密卡片 (1px 微边框 + 极微硬朗投影) */
+/* 扁平浅底卡片 (无边框无阴影，仅用背景色区分层级) */
 .swiss-card {
   background: #ffffff;
-  border: 1px solid #e2e8f0;
+  border: none;
   border-radius: 12px;
-  box-shadow: 0 1px 2px 0 rgba(15, 23, 42, 0.04);
+  box-shadow: none;
 }
 
-/* 下沉嵌套层 (带微边框的平坦浅灰底) */
+/* 下沉嵌套层 (平坦浅灰底，无边框) */
 .surface-inset {
-  background-color: #f8fafc;
-  border: 1px solid #e2e8f0;
+  background-color: #eef2f7;
+  border: none;
   border-radius: 8px;
 }
 
@@ -69,10 +69,10 @@
   padding-left: 1rem;
 }
 
-/* 按钮组基座凹槽 */
+/* 按钮组基座凹槽 (无边框浅灰底) */
 .segment-track {
-  background-color: #f1f5f9;
-  border: 1px solid #e2e8f0;
+  background-color: #e8edf3;
+  border: none;
   padding: 3px;
   border-radius: 8px;
 }

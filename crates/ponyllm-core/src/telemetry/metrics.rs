@@ -202,4 +202,87 @@ impl MetricsCollector {
             },
         }
     }
+
+    /// 导出可持久化快照（启动恢复用；均值以和/样本数形式保留精度）。
+    pub fn snapshot_counters(&self) -> MetricsCounterSnapshot {
+        MetricsCounterSnapshot {
+            total_requests: self.total_requests.load(Ordering::Relaxed),
+            successful_requests: self.successful_requests.load(Ordering::Relaxed),
+            failed_requests: self.failed_requests.load(Ordering::Relaxed),
+            failover_count: self.failover_count.load(Ordering::Relaxed),
+            prompt_tokens: self.prompt_tokens.load(Ordering::Relaxed),
+            completion_tokens: self.completion_tokens.load(Ordering::Relaxed),
+            total_tokens: self.total_tokens.load(Ordering::Relaxed),
+            stream_count: self.stream_count.load(Ordering::Relaxed),
+            ttft_sum_ms: self.ttft_sum_ms.load(Ordering::Relaxed),
+            ttft_samples: self.ttft_samples.load(Ordering::Relaxed),
+            ttlb_sum_ms: self.ttlb_sum_ms.load(Ordering::Relaxed),
+            chunks_sum: self.chunks_sum.load(Ordering::Relaxed),
+            bytes_sum: self.bytes_sum.load(Ordering::Relaxed),
+            stalls_sum: self.stalls_sum.load(Ordering::Relaxed),
+            max_gap_ms: self.max_gap_ms.load(Ordering::Relaxed),
+            tps_sum_milli: self.tps_sum_milli.load(Ordering::Relaxed),
+            tps_samples: self.tps_samples.load(Ordering::Relaxed),
+        }
+    }
+
+    /// 从快照恢复（仅启动时调用；不做合并，直接覆盖）。
+    pub fn restore_counters(&self, snap: &MetricsCounterSnapshot) {
+        self.total_requests.store(snap.total_requests, Ordering::Relaxed);
+        self.successful_requests.store(snap.successful_requests, Ordering::Relaxed);
+        self.failed_requests.store(snap.failed_requests, Ordering::Relaxed);
+        self.failover_count.store(snap.failover_count, Ordering::Relaxed);
+        self.prompt_tokens.store(snap.prompt_tokens, Ordering::Relaxed);
+        self.completion_tokens.store(snap.completion_tokens, Ordering::Relaxed);
+        self.total_tokens.store(snap.total_tokens, Ordering::Relaxed);
+        self.stream_count.store(snap.stream_count, Ordering::Relaxed);
+        self.ttft_sum_ms.store(snap.ttft_sum_ms, Ordering::Relaxed);
+        self.ttft_samples.store(snap.ttft_samples, Ordering::Relaxed);
+        self.ttlb_sum_ms.store(snap.ttlb_sum_ms, Ordering::Relaxed);
+        self.chunks_sum.store(snap.chunks_sum, Ordering::Relaxed);
+        self.bytes_sum.store(snap.bytes_sum, Ordering::Relaxed);
+        self.stalls_sum.store(snap.stalls_sum, Ordering::Relaxed);
+        self.max_gap_ms.store(snap.max_gap_ms, Ordering::Relaxed);
+        self.tps_sum_milli.store(snap.tps_sum_milli, Ordering::Relaxed);
+        self.tps_samples.store(snap.tps_samples, Ordering::Relaxed);
+    }
+}
+
+/// 可持久化的计数器快照（与 `MetricsSummary` 不同：保留和/样本以无损恢复均值）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MetricsCounterSnapshot {
+    #[serde(default)]
+    pub total_requests: u64,
+    #[serde(default)]
+    pub successful_requests: u64,
+    #[serde(default)]
+    pub failed_requests: u64,
+    #[serde(default)]
+    pub failover_count: u64,
+    #[serde(default)]
+    pub prompt_tokens: u64,
+    #[serde(default)]
+    pub completion_tokens: u64,
+    #[serde(default)]
+    pub total_tokens: u64,
+    #[serde(default)]
+    pub stream_count: u64,
+    #[serde(default)]
+    pub ttft_sum_ms: u64,
+    #[serde(default)]
+    pub ttft_samples: u64,
+    #[serde(default)]
+    pub ttlb_sum_ms: u64,
+    #[serde(default)]
+    pub chunks_sum: u64,
+    #[serde(default)]
+    pub bytes_sum: u64,
+    #[serde(default)]
+    pub stalls_sum: u64,
+    #[serde(default)]
+    pub max_gap_ms: u64,
+    #[serde(default)]
+    pub tps_sum_milli: u64,
+    #[serde(default)]
+    pub tps_samples: u64,
 }
