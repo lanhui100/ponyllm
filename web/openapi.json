@@ -10,7 +10,7 @@
       "name": "MIT OR Apache-2.0",
       "identifier": "MIT OR Apache-2.0"
     },
-    "version": "0.2.38"
+    "version": "0.2.39"
   },
   "paths": {
     "/api/admin/auth/rotate": {
