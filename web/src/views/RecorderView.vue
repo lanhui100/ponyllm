@@ -310,7 +310,6 @@ onUnmounted(() => {
 .recorder-page {
   min-height: 100vh;
   background: transparent;
-  font-family: system-ui, -apple-system, sans-serif;
 }
 
 .page-content {
@@ -479,13 +478,12 @@ onUnmounted(() => {
 }
 
 .col-status { width: 85px; flex-shrink: 0; white-space: nowrap; }
-.col-latency { width: 95px; flex-shrink: 0; font-family: ui-monospace, SFMono-Regular, monospace; font-size: 13px; white-space: nowrap; }
+.col-latency { width: 95px; flex-shrink: 0; font-size: 13px; white-space: nowrap; }
 .col-endpoint { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .col-provider { width: 110px; flex-shrink: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .col-key { width: 110px; flex-shrink: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.col-time { width: 105px; flex-shrink: 0; text-align: right; color: #64748b; font-family: ui-monospace, SFMono-Regular, monospace; font-size: 13px; white-space: nowrap; }
+.col-time { width: 105px; flex-shrink: 0; text-align: right; color: #64748b; font-size: 13px; white-space: nowrap; }
 
-.font-mono { font-family: ui-monospace, SFMono-Regular, monospace; }
 .text-masked { color: #0284c7; font-weight: 600; }
 
 .badge {
@@ -493,7 +491,6 @@ onUnmounted(() => {
   padding: 2px 7px;
   border-radius: 4px;
   font-weight: 600;
-  font-family: ui-monospace, SFMono-Regular, monospace;
 }
 
 .status-ok { background: #dcfce7; color: #166534; border: 1px solid #bbf7d0; }

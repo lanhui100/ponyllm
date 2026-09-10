@@ -241,7 +241,6 @@ watch(
 
 .req-id {
   font-size: 13px;
-  font-family: ui-monospace, SFMono-Regular, monospace;
   color: #64748b;
 }
 
@@ -312,10 +311,6 @@ watch(
   overflow-wrap: anywhere;
 }
 
-.font-mono {
-  font-family: ui-monospace, SFMono-Regular, monospace;
-}
-
 .text-masked {
   color: #0284c7;
   font-weight: 600;
@@ -328,7 +323,6 @@ watch(
   padding: 2px 7px;
   border-radius: 4px;
   font-weight: 600;
-  font-family: ui-monospace, SFMono-Regular, monospace;
 }
 
 .status-ok {
@@ -367,7 +361,6 @@ watch(
 .stream-item .val {
   font-size: 14px;
   font-weight: 600;
-  font-family: ui-monospace, SFMono-Regular, monospace;
   color: #0f172a;
 }
 
@@ -378,7 +371,6 @@ watch(
   border-radius: 6px;
   font-size: 13px;
   line-height: 1.5;
-  font-family: ui-monospace, SFMono-Regular, monospace;
   overflow-x: auto;
   white-space: pre-wrap;
   word-break: break-all;

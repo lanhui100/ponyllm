@@ -294,7 +294,7 @@ async function handleDelete(name: string) {
 }
 
 .code-cell {
-  font-family: monospace;
+  font-family: var(--font-mono-family, monospace);
   font-size: 12px;
   color: #2563eb;
 }

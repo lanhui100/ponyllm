@@ -197,13 +197,13 @@ function updateCharts() {
             totalTokens += val;
             html += `<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;font-size:12px">
               <span>${item.marker} ${item.seriesName}</span>
-              <span style="font-weight:600;font-family:monospace">${val.toLocaleString()} tok</span>
+              <span style="font-weight:600;font-family:var(--font-mono-family, monospace);font-variant-numeric:tabular-nums">${val.toLocaleString()} tok</span>
             </div>`;
           }
           if (params.length > 1) {
             html += `<div style="border-top:1px solid #334155;margin-top:4px;padding-top:4px;display:flex;justify-content:space-between;font-size:12px;font-weight:600">
               <span>合计</span>
-              <span style="font-family:monospace">${totalTokens.toLocaleString()} tok</span>
+              <span style="font-family:var(--font-mono-family, monospace);font-variant-numeric:tabular-nums">${totalTokens.toLocaleString()} tok</span>
             </div>`;
           }
           return html;

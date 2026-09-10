@@ -85,7 +85,6 @@ const speed24h = computed<number | undefined>(() => {
 .dashboard-page {
   min-height: 100vh;
   background: transparent;
-  font-family: system-ui, -apple-system, sans-serif;
 }
 
 .page-content {

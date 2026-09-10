@@ -8,6 +8,5 @@
 <style scoped>
 .nf {
   padding: 48px;
-  font-family: system-ui, sans-serif;
 }
 </style>

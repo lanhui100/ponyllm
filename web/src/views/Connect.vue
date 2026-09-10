@@ -174,6 +174,6 @@ async function submit(): Promise<void> {
 
 <style scoped>
 .connect-page {
-  font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  /* Inherit global modern typography */
 }
 </style>
