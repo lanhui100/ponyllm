@@ -230,12 +230,15 @@ async function handleDeleteProvider() {
       <!-- 右侧：概览徽标与一等纯图标操作组 -->
       <div class="flex items-center gap-2.5 shrink-0" @click.stop>
         <div class="hidden sm:flex items-center gap-2 mr-2">
-          <UiBadge variant="default" class="text-[13px] font-semibold">
+          <span class="inline-flex items-center px-2.5 py-0.5 rounded-md text-[13px] font-medium bg-slate-100/90 text-slate-700 select-none">
             {{ models.length }} 模型
-          </UiBadge>
-          <UiBadge :variant="activeKeysCount > 0 ? 'success' : 'secondary'" class="text-[13px] font-semibold">
+          </span>
+          <span
+            class="inline-flex items-center px-2.5 py-0.5 rounded-md text-[13px] font-medium select-none"
+            :class="activeKeysCount > 0 ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-100/90 text-slate-600'"
+          >
             {{ activeKeysCount }}/{{ keys.length }} 密钥可用
-          </UiBadge>
+          </span>
         </div>
 
         <!-- 🗑 删除服务商 -->

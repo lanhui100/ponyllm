@@ -87,6 +87,17 @@ describe('ProviderCard UI and Phase 2 Requirements', () => {
     expect(container.textContent).not.toContain('密钥凭证');
     expect(container.textContent).not.toContain('挂载模型');
 
+    // 6. Header badges: light background with dark text, borderless
+    const modelBadge = Array.from(container.querySelectorAll('span')).find((el) => el.textContent?.includes('模型') && el.textContent?.includes('1'));
+    expect(modelBadge?.className).toContain('bg-slate-100/90');
+    expect(modelBadge?.className).toContain('text-slate-700');
+    expect(modelBadge?.className).not.toContain('border');
+
+    const keyBadge = Array.from(container.querySelectorAll('span')).find((el) => el.textContent?.includes('密钥可用'));
+    expect(keyBadge?.className).toContain('bg-emerald-50');
+    expect(keyBadge?.className).toContain('text-emerald-700');
+    expect(keyBadge?.className).not.toContain('border');
+
     app.unmount();
     document.body.removeChild(container);
   });
