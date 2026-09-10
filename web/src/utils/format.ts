@@ -61,3 +61,15 @@ export function formatKeyState(state?: string | null): string {
       return state;
   }
 }
+
+/**
+ * 统一格式化上下文窗口展示字符串，彻底消除大小写混用（如 128k -> 128K, 1m -> 1M）
+ */
+export function formatContextWindow(ctx?: string | null): string {
+  if (!ctx) return '256K';
+  const trimmed = ctx.trim();
+  if (!trimmed) return '256K';
+  // 匹配类似 128k, 256k, 1m, 200k 等后缀单位并大写转换
+  return trimmed.replace(/([0-9]+)\s*([kKmMgGtT])/g, (_, num, unit) => `${num}${unit.toUpperCase()}`);
+}
+

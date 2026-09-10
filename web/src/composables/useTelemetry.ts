@@ -27,6 +27,54 @@ export interface UseTelemetryOptions {
 }
 
 export const PUBLIC_GATEWAY_PROBE_URL = 'https://tokens.ponyjob.top/health';
+export const GATEWAY_SLOTS_STORAGE_KEY = 'ponyllm_gateway_slots_v1';
+export const GATEWAY_MAX_SLOTS = 24;
+
+interface PersistedGatewayData {
+  slots: ConnectivitySlot[];
+  latestLatencyMs?: number;
+  timestamp: number;
+}
+
+function loadPersistedGatewaySlots(): { slots: ConnectivitySlot[]; latestLatency?: number } {
+  if (typeof window === 'undefined' || !window.localStorage) {
+    return { slots: [] };
+  }
+  try {
+    const raw = window.localStorage.getItem(GATEWAY_SLOTS_STORAGE_KEY);
+    if (!raw) return { slots: [] };
+    const data = JSON.parse(raw) as PersistedGatewayData;
+    if (data && Array.isArray(data.slots)) {
+      // 过滤非法的时隙数据并按时间排序，截取最多 24 根
+      const validSlots = data.slots
+        .filter((s) => s && typeof s.timestamp_ms === 'number' && typeof s.status === 'string')
+        .slice(-GATEWAY_MAX_SLOTS);
+      return {
+        slots: validSlots,
+        latestLatency: typeof data.latestLatencyMs === 'number' ? data.latestLatencyMs : undefined,
+      };
+    }
+  } catch (e) {
+    console.warn('[PonyLLM] failed to load persisted gateway slots:', e);
+  }
+  return { slots: [] };
+}
+
+function savePersistedGatewaySlots(slots: ConnectivitySlot[], latestLatency?: number) {
+  if (typeof window === 'undefined' || !window.localStorage) {
+    return;
+  }
+  try {
+    const data: PersistedGatewayData = {
+      slots: slots.slice(-GATEWAY_MAX_SLOTS),
+      latestLatencyMs: latestLatency,
+      timestamp: Date.now(),
+    };
+    window.localStorage.setItem(GATEWAY_SLOTS_STORAGE_KEY, JSON.stringify(data));
+  } catch (e) {
+    console.warn('[PonyLLM] failed to save persisted gateway slots:', e);
+  }
+}
 
 export function useTelemetry(options: UseTelemetryOptions = {}) {
   const {
@@ -44,8 +92,9 @@ export function useTelemetry(options: UseTelemetryOptions = {}) {
   const isDown = ref(false);
   const selectedRange = ref<'24h' | '7d' | '30d'>('24h');
   const historyData = ref<TimeseriesHistoryResponse | null>(null);
-  const gatewaySlots = ref<ConnectivitySlot[]>([]);
-  const latestGatewayLatency = ref<number | undefined>(undefined);
+  const initialPersisted = loadPersistedGatewaySlots();
+  const gatewaySlots = ref<ConnectivitySlot[]>(initialPersisted.slots);
+  const latestGatewayLatency = ref<number | undefined>(initialPersisted.latestLatency);
   const lastReqCount = ref<number | null>(null);
   const lastTokenCount = ref<number | null>(null);
   const lastTickTime = ref<number>(Date.now());
@@ -188,7 +237,8 @@ export function useTelemetry(options: UseTelemetryOptions = {}) {
           latency_ms: rtt,
           status: rtt < 300 ? 'ok' : rtt < 1000 ? 'degraded' : 'down',
         });
-        if (gatewaySlots.value.length > 28) gatewaySlots.value.shift();
+        if (gatewaySlots.value.length > GATEWAY_MAX_SLOTS) gatewaySlots.value.shift();
+        savePersistedGatewaySlots(gatewaySlots.value, latestGatewayLatency.value);
       } else if (isHealthy) {
         health.value = 'ok';
         isDown.value = false;
@@ -198,7 +248,8 @@ export function useTelemetry(options: UseTelemetryOptions = {}) {
           latency_ms: rtt,
           status: rtt < 300 ? 'ok' : rtt < 1000 ? 'degraded' : 'down',
         });
-        if (gatewaySlots.value.length > 28) gatewaySlots.value.shift();
+        if (gatewaySlots.value.length > GATEWAY_MAX_SLOTS) gatewaySlots.value.shift();
+        savePersistedGatewaySlots(gatewaySlots.value, latestGatewayLatency.value);
       } else {
         health.value = 'down';
         isDown.value = true;
@@ -208,7 +259,8 @@ export function useTelemetry(options: UseTelemetryOptions = {}) {
           latency_ms: undefined,
           status: 'down',
         });
-        if (gatewaySlots.value.length > 28) gatewaySlots.value.shift();
+        if (gatewaySlots.value.length > GATEWAY_MAX_SLOTS) gatewaySlots.value.shift();
+        savePersistedGatewaySlots(gatewaySlots.value, latestGatewayLatency.value);
         return;
       }
 
@@ -218,6 +270,14 @@ export function useTelemetry(options: UseTelemetryOptions = {}) {
 
       if (sRes.status === 'fulfilled' && sRes.value.ok) {
         stream.value = (await sRes.value.json()) as StreamTelemetrySnapshot;
+        // 若本地持久化无历史数据，但服务端下发了 gateway_uptime_bars，使用后端恢复时隙初始化
+        if (gatewaySlots.value.length === 0 && stream.value.gateway_uptime_bars?.slots) {
+          gatewaySlots.value = stream.value.gateway_uptime_bars.slots.slice(-GATEWAY_MAX_SLOTS);
+          if (stream.value.gateway_uptime_bars.latest_latency_ms !== undefined) {
+            latestGatewayLatency.value = stream.value.gateway_uptime_bars.latest_latency_ms;
+          }
+          savePersistedGatewaySlots(gatewaySlots.value, latestGatewayLatency.value);
+        }
       }
 
       appendHistoryPoint(metrics.value);
@@ -231,7 +291,8 @@ export function useTelemetry(options: UseTelemetryOptions = {}) {
         latency_ms: undefined,
         status: 'down',
       });
-      if (gatewaySlots.value.length > 28) gatewaySlots.value.shift();
+      if (gatewaySlots.value.length > GATEWAY_MAX_SLOTS) gatewaySlots.value.shift();
+      savePersistedGatewaySlots(gatewaySlots.value, latestGatewayLatency.value);
     }
   }
 

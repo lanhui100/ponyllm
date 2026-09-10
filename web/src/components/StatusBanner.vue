@@ -44,7 +44,7 @@ const emit = defineEmits<{
       <div class="flex items-center gap-1.5">
         <span class="text-slate-700 font-medium">网关状态</span>
         <UiTooltip
-          content="展示最近 2 分钟的网关探测微柱（5s/柱，共28柱：绿色畅通、黄色轻微延迟、红色异常），右侧展示最新耗时。"
+          content="展示最近 2 分钟的网关探测微柱（5s/柱，共24柱：绿色畅通、黄色轻微延迟、红色异常），右侧展示最新耗时。"
           wrap
         >
           <button
@@ -57,11 +57,11 @@ const emit = defineEmits<{
         </UiTooltip>
       </div>
 
-      <!-- 28 柱状态图例 (Uptime Bars, 5s/柱, 最近2分钟) -->
+      <!-- 24 柱状态图例 (Uptime Bars, 5s/柱, 最近2分钟) -->
       <div class="flex items-center pl-2 bg-slate-100/70 rounded-lg px-2 py-1">
         <UptimeBars
           :slots="uptimeBars?.slots"
-          :slot-count="28"
+          :slot-count="24"
           :latest-latency-ms="uptimeBars?.latest_latency_ms"
           :show-speed-24h="false"
           bar-height="h-4.5"

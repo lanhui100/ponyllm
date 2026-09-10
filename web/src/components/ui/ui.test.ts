@@ -95,7 +95,7 @@ describe('UI Primitives & Modern Design System', () => {
     await new Promise((r) => setTimeout(r, 150));
     await nextTick();
 
-    const tip = container.querySelector('[data-testid="ui-tooltip"]');
+    const tip = document.body.querySelector('[data-testid="ui-tooltip"]') || container.querySelector('[data-testid="ui-tooltip"]');
     expect(tip).not.toBeNull();
     expect(tip?.textContent?.trim()).toBe('测速探针说明');
     app.unmount();

@@ -194,10 +194,10 @@ describe('Modern Minimalist UI/UX System-Wide E2E Verification Suite (WEB-07)', 
     await nextTick();
     await new Promise((r) => setTimeout(r, 20));
 
-    // 验证常用参数一等常显 (模型名、分级中文、上下文)
+    // 验证常用参数一等常显 (模型名、分级中文、规范大写上下文)
     expect(container.textContent).toContain('gpt-4o');
     expect(container.textContent).toContain('主力');
-    expect(container.textContent).toContain('128k');
+    expect(container.textContent).toContain('128K');
 
     // 点击该模型的编辑按钮
     const editModelBtn = container.querySelector('[data-testid="edit-model-btn"]') as HTMLButtonElement;
@@ -205,9 +205,9 @@ describe('Modern Minimalist UI/UX System-Wide E2E Verification Suite (WEB-07)', 
     editModelBtn.click();
     await nextTick();
 
-    // 1. 验证模型分级 (Tier) 按钮选项组使用暖黄色底色 (200 色阶)
+    // 1. 验证模型分级 (Tier) 按钮选项组使用精致中性浅灰底色分段控制器 (消除与上下文 Switch 的配色割裂)
     const tierButtons = container.querySelector('[data-testid="model-tier-buttons"]') as HTMLElement;
-    expect(tierButtons.className).toContain('bg-amber-200');
+    expect(tierButtons.className).toContain('bg-slate-100/90');
     const tierLargeBtn = container.querySelector('[data-testid="tier-btn-large"]') as HTMLButtonElement;
     expect(tierLargeBtn).not.toBeNull();
     tierLargeBtn.click();

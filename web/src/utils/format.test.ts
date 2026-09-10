@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { formatStrategyLabel, formatTierLabel, formatKeyState } from './format';
+import { formatStrategyLabel, formatTierLabel, formatKeyState, formatContextWindow } from './format';
 
 describe('format utility', () => {
   it('formats strategies into colloquial Chinese', () => {
@@ -31,4 +31,15 @@ describe('format utility', () => {
     expect(formatKeyState('cooling_down')).toBe('冷却中');
     expect(formatKeyState('disabled')).toBe('已禁用');
   });
+
+  it('formats context window uniformly with uppercase units', () => {
+    expect(formatContextWindow('128k')).toBe('128K');
+    expect(formatContextWindow('256k')).toBe('256K');
+    expect(formatContextWindow('1m')).toBe('1M');
+    expect(formatContextWindow('200k')).toBe('200K');
+    expect(formatContextWindow('1M')).toBe('1M');
+    expect(formatContextWindow('')).toBe('256K');
+    expect(formatContextWindow(null)).toBe('256K');
+  });
 });
+

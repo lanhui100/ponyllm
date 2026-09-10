@@ -194,7 +194,7 @@ function handleBatchTest() {
 
 <template>
   <div
-    class="swiss-card mb-4 overflow-hidden"
+    class="swiss-card mb-4"
     data-testid="provider-row"
   >
     <!-- 服务商一级卡片头部 (一等常显) -->

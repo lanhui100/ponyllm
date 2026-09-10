@@ -6,10 +6,12 @@ import { useTelemetry } from './useTelemetry';
 describe('useTelemetry composable (WEB-02 telemetry dual-link & degradation)', () => {
   beforeEach(() => {
     setActivePinia(createPinia());
+    window.localStorage?.clear();
     vi.useFakeTimers();
   });
 
   afterEach(() => {
+    window.localStorage?.clear();
     vi.restoreAllMocks();
     vi.useRealTimers();
   });
@@ -105,5 +107,39 @@ describe('useTelemetry composable (WEB-02 telemetry dual-link & degradation)', (
 
     expect(history.value.length).toBeLessThanOrEqual(20);
     stop();
+  });
+
+  it('persists gateway slots in localStorage and restores them seamlessly across instances/refreshes', async () => {
+    const mockHealth = { status: 'ok', version: '0.1.0' };
+    globalThis.fetch = vi.fn().mockImplementation((url: string) => {
+      if (url.includes('/health')) {
+        return Promise.resolve(new Response(JSON.stringify(mockHealth), { status: 200 }));
+      }
+      return Promise.resolve(new Response(JSON.stringify({}), { status: 200 }));
+    });
+
+    // 1. First session records gateway slots
+    const t1 = useTelemetry({ autoStart: false, pollingInterval: 1000 });
+    await t1.start();
+    expect(t1.gatewayUptimeBars.value.slots.length).toBe(1);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(t1.gatewayUptimeBars.value.slots.length).toBe(2);
+    t1.stop();
+
+    // Verify localStorage has persisted data
+    const raw = window.localStorage.getItem('ponyllm_gateway_slots_v1');
+    expect(raw).not.toBeNull();
+    const parsed = JSON.parse(raw!);
+    expect(parsed.slots.length).toBe(2);
+
+    // 2. Simulating page refresh by creating a new composable instance
+    const t2 = useTelemetry({ autoStart: false, pollingInterval: 1000 });
+    // Without waiting for new fetch, initial state immediately has the 2 persisted slots
+    expect(t2.gatewayUptimeBars.value.slots.length).toBe(2);
+
+    // Continuing updates on next tick
+    await t2.start();
+    expect(t2.gatewayUptimeBars.value.slots.length).toBe(3);
+    t2.stop();
   });
 });

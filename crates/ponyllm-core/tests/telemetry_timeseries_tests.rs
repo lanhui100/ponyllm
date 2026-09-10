@@ -203,18 +203,18 @@ fn test_timeseries_clock_skew_resilience() {
 }
 
 #[test]
-fn test_gateway_default_is_28_slots_5s_covering_2min() {
-    assert_eq!(GATEWAY_SLOT_COUNT, 28);
+fn test_gateway_default_is_24_slots_5s_covering_2min() {
+    assert_eq!(GATEWAY_SLOT_COUNT, 24);
     assert_eq!(GATEWAY_STEP_MS, 5000);
-    assert_eq!(GATEWAY_SLOT_COUNT as u64 * GATEWAY_STEP_MS, 140_000);
+    assert_eq!(GATEWAY_SLOT_COUNT as u64 * GATEWAY_STEP_MS, 120_000);
 
     let sampler = ConnectivitySampler::default();
-    assert_eq!(sampler.gateway_slot_count(), 28);
+    assert_eq!(sampler.gateway_slot_count(), 24);
     assert_eq!(sampler.gateway_step_ms(), 5000);
     let now = 1_700_000_000_000u64;
     sampler.record("gateway", now, Some(20.0), true);
     let series = sampler.get_series("gateway", now);
-    assert_eq!(series.slots.len(), 28);
+    assert_eq!(series.slots.len(), 24);
     assert_eq!(series.slots.last().unwrap().status, ConnectivityStatus::Ok);
     // 间隔应为5s
     let n = series.slots.len();
@@ -263,7 +263,7 @@ fn test_connectivity_snapshot_restore_preserves_calls() {
     assert_eq!(tail[1].status, ConnectivityStatus::Down);
 
     let g = restored.get_series("gateway", base + 2000);
-    assert_eq!(g.slots.len(), 28);
+    assert_eq!(g.slots.len(), 24);
 }
 
 #[test]

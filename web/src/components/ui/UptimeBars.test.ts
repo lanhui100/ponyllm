@@ -77,18 +77,18 @@ describe('UptimeBars Component', () => {
     app.unmount();
   });
 
-  it('renders exactly 28 bars when slotCount is 28, displaying call metrics in tooltip and 24h speed in t/s', async () => {
-    const slots: ConnectivitySlot[] = Array.from({ length: 28 }, (_, i) => ({
+  it('renders exactly 24 bars when slotCount is 24, displaying call metrics in tooltip and 24h speed in t/s', async () => {
+    const slots: ConnectivitySlot[] = Array.from({ length: 24 }, (_, i) => ({
       timestamp_ms: 1000 + i * 5000,
-      latency_ms: i === 27 ? 90 : 80 + i,
+      latency_ms: i === 23 ? 90 : 80 + i,
       tps: 45 + i,
-      status: i === 24 ? 'degraded' : i === 25 ? 'down' : 'ok',
+      status: i === 20 ? 'degraded' : i === 21 ? 'down' : 'ok',
     }));
 
     const app = createApp({
       render: () => h(UptimeBars, {
         slots,
-        slotCount: 28,
+        slotCount: 24,
         latestLatencyMs: 90,
         speed24h: 48.6,
       }),
@@ -96,11 +96,11 @@ describe('UptimeBars Component', () => {
     app.mount(container);
     await nextTick();
 
-    // Exactly 28 bars (5s/柱, 最近约2分钟)
+    // Exactly 24 bars (5s/柱, 最近2分钟)
     const bars = container.querySelectorAll('[data-testid="uptime-bar"]');
-    expect(bars.length).toBe(28);
+    expect(bars.length).toBe(24);
 
-    // Verify 28-bar width is narrow (w-1)
+    // Verify 24-bar width is narrow (w-1)
     expect(bars[0].className).toContain('w-1');
 
     // Tooltip includes status, latency, and speed in integer t/s

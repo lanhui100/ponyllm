@@ -37,7 +37,7 @@ function selectEffort(val: string) {
   <div class="space-y-2 text-sm">
     <div class="flex items-center justify-between">
       <label class="font-medium text-slate-800 flex items-center gap-1.5 text-[13px]">
-        <Icons name="brain" size="14" class="text-indigo-600" />
+        <Icons name="brain" size="14" class="text-purple-600" />
         思考强度 (Thinking Effort)
         <UiTooltip content="设置模型推理思考深度的预设档位，按需开启深度认知">
           <Icons name="info" size="13" class="text-slate-400 hover:text-slate-600 cursor-pointer" />
@@ -48,7 +48,7 @@ function selectEffort(val: string) {
 
     <!-- 纯按钮分段选项器 (无最大上限) -->
     <div
-      class="grid grid-cols-4 gap-1.5 p-1 bg-slate-100/90 rounded-md border border-slate-200/80 select-none"
+      class="grid grid-cols-4 gap-1.5 p-1 bg-slate-100/90 rounded-lg border border-slate-200/70 select-none"
       data-testid="thinking-effort-segment"
     >
       <UiTooltip
@@ -60,18 +60,18 @@ function selectEffort(val: string) {
           type="button"
           :disabled="disabled"
           :data-testid="`thinking-btn-${t.value.toLowerCase()}`"
-          class="w-full py-2 px-1 rounded text-[13px] font-medium transition-all duration-150 flex flex-col items-center justify-center gap-0.5 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+          class="w-full py-2 px-1 rounded-md text-[13px] font-medium transition-all duration-150 flex flex-col items-center justify-center gap-0.5 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
           :class="[
             defaultEffort === t.value
-              ? 'bg-white text-indigo-700 shadow-2xs font-semibold'
-              : 'text-slate-600 hover:text-slate-900 hover:bg-white/60'
+              ? 'bg-white text-slate-900 shadow-2xs font-semibold'
+              : 'text-slate-600 hover:text-slate-900 hover:bg-white/50'
           ]"
           @click="selectEffort(t.value)"
         >
           <span>{{ t.label }}</span>
           <span
             class="text-xs font-mono"
-            :class="defaultEffort === t.value ? 'text-indigo-600 font-semibold' : 'text-slate-500'"
+            :class="defaultEffort === t.value ? 'text-purple-600 font-semibold' : 'text-slate-500'"
           >
             {{ t.sub }}
           </span>

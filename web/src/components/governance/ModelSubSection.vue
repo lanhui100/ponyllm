@@ -9,7 +9,7 @@ import UiTooltip from '../ui/UiTooltip.vue';
 import UiCollapsible from '../ui/UiCollapsible.vue';
 import ThinkingEffortSelect from './ThinkingEffortSelect.vue';
 import UpstreamModelPicker from './UpstreamModelPicker.vue';
-import { formatTierLabel } from '../../utils/format';
+import { formatTierLabel, formatContextWindow } from '../../utils/format';
 
 const props = defineProps<{
   providerName: string;
@@ -362,7 +362,7 @@ function getTierBadgeVariant(tier?: string) {
       @click="isExpanded = !isExpanded"
     >
       <div class="flex items-center gap-1.5 text-xs font-semibold text-slate-700">
-        <Icons name="sparkles" size="14" class="text-indigo-500" />
+        <Icons name="sparkles" size="14" class="text-slate-500" />
         模型 ({{ models.length }})
         <UiTooltip content="该服务商对外暴露的可路由模型字典及其上下文与思考强度参数">
           <Icons name="info" size="12" class="text-slate-400 cursor-pointer" />
@@ -443,11 +443,11 @@ function getTierBadgeVariant(tier?: string) {
             />
           </div>
 
-          <!-- 模型分级 (Tier) 按钮选项组 (暖黄色底色 200 色阶) -->
+          <!-- 模型分级 (Tier) 按钮选项组 (统一为精致中性浅灰分段底色) -->
           <div>
             <label class="block text-slate-600 font-medium mb-1.5 text-xs">模型分级 (Tier)</label>
             <div
-              class="grid grid-cols-3 gap-1.5 p-1 bg-amber-200/90 rounded-lg select-none border border-amber-300/50"
+              class="grid grid-cols-3 gap-1.5 p-1 bg-slate-100/90 rounded-lg select-none border border-slate-200/70"
               data-testid="model-tier-buttons"
             >
               <button
@@ -458,8 +458,8 @@ function getTierBadgeVariant(tier?: string) {
                 class="py-1.5 px-2 rounded-md text-xs font-medium transition-all cursor-pointer text-center"
                 :class="[
                   form.tier === t.value
-                    ? 'bg-white text-amber-950 shadow-xs font-semibold'
-                    : 'text-amber-900/80 hover:text-amber-950 hover:bg-amber-300/60'
+                    ? 'bg-white text-slate-900 shadow-2xs font-semibold'
+                    : 'text-slate-600 hover:text-slate-900 hover:bg-white/50'
                 ]"
                 @click="form.tier = t.value"
               >
@@ -472,7 +472,7 @@ function getTierBadgeVariant(tier?: string) {
           <div>
             <label class="block text-slate-600 font-medium mb-1.5 text-xs">上下文窗口 (Context Window)</label>
             <div
-              class="flex flex-wrap items-center gap-1.5 p-1 bg-slate-200/60 rounded-lg select-none mb-1.5"
+              class="flex flex-wrap items-center gap-1.5 p-1 bg-slate-100/90 rounded-lg select-none mb-1.5 border border-slate-200/70"
               data-testid="context-window-buttons"
             >
               <button
@@ -483,8 +483,8 @@ function getTierBadgeVariant(tier?: string) {
                 class="flex-1 py-1.5 px-2 rounded-md text-xs font-medium transition-all cursor-pointer text-center"
                 :class="[
                   !isCustomContext && form.context_window?.toLowerCase() === p.toLowerCase()
-                    ? 'bg-white text-indigo-700 shadow-2xs font-semibold'
-                    : 'text-slate-600 hover:text-slate-900 hover:bg-white/40'
+                    ? 'bg-white text-slate-900 shadow-2xs font-semibold'
+                    : 'text-slate-600 hover:text-slate-900 hover:bg-white/50'
                 ]"
                 @click="setContextPreset(p)"
               >
@@ -496,8 +496,8 @@ function getTierBadgeVariant(tier?: string) {
                 class="py-1.5 px-3 rounded-md text-xs font-medium transition-all cursor-pointer text-center"
                 :class="[
                   isCustomContext
-                    ? 'bg-white text-indigo-700 shadow-2xs font-semibold'
-                    : 'text-slate-600 hover:text-slate-900 hover:bg-white/40'
+                    ? 'bg-white text-slate-900 shadow-2xs font-semibold'
+                    : 'text-slate-600 hover:text-slate-900 hover:bg-white/50'
                 ]"
                 @click="selectCustomContext"
               >
@@ -729,7 +729,7 @@ function getTierBadgeVariant(tier?: string) {
       <div
         v-for="m in models"
         :key="m.name"
-        class="bg-transparent hover:bg-white/35 rounded-lg border-none transition-colors text-xs overflow-hidden"
+        class="bg-transparent hover:bg-white/35 rounded-lg border-none transition-colors text-xs"
         data-testid="model-row"
       >
         <!-- 一等常显行 -->
@@ -737,26 +737,46 @@ function getTierBadgeVariant(tier?: string) {
           <div class="flex items-center gap-2.5 min-w-0">
             <span class="font-semibold text-slate-800 text-sm truncate" :title="m.display_name ? `${m.display_name} (${m.name})` : m.name">{{ m.display_name || m.name }}</span>
             <span v-if="m.display_name" class="text-slate-400 text-xs font-mono truncate" :title="m.name">{{ m.name }}</span>
+            <!-- 模型分级与思考强度核心徽标组 (位置统一紧邻排列) -->
             <UiBadge :variant="getTierBadgeVariant(m.tier)">
               {{ formatTierLabel(m.tier) }}
             </UiBadge>
-            <span class="text-slate-400 text-xs font-mono">{{ m.context_window }}</span>
 
-            <!-- 多模态简明纯图标常显指示 (输入与输出分开) -->
-            <div class="hidden sm:flex items-center gap-1.5 text-slate-400" data-testid="model-row-modalities">
-              <span class="text-3xs text-slate-400 font-mono">入:</span>
-              <span v-for="t in (m.input_types && m.input_types.length > 0 ? m.input_types : ['text'])" :key="`row-in-${t}`" class="inline-flex items-center">
-                <UiTooltip :content="`输入支持: ${getModalityName(t)}`">
-                  <Icons :name="getModalityIcon(t)" size="12" class="text-slate-500" />
-                </UiTooltip>
-              </span>
-              <span class="text-slate-300 text-3xs">/</span>
-              <span class="text-3xs text-slate-400 font-mono">出:</span>
-              <span v-for="t in (m.output_types && m.output_types.length > 0 ? m.output_types : ['text'])" :key="`row-out-${t}`" class="inline-flex items-center">
-                <UiTooltip :content="`输出支持: ${getModalityName(t)}`">
-                  <Icons :name="getModalityIcon(t)" size="12" class="text-emerald-600" />
-                </UiTooltip>
-              </span>
+            <!-- 思考强度简明标记 (紧随模型分级，当非 Off 时展示微标) -->
+            <UiTooltip
+              v-if="m.thinking_default && m.thinking_default !== 'Off'"
+              :content="`思考强度预设: ${m.thinking_default}`"
+            >
+              <UiBadge variant="purple" class="inline-flex items-center gap-1 cursor-help">
+                <Icons name="brain" size="12" />
+                {{ m.thinking_default }}
+              </UiBadge>
+            </UiTooltip>
+
+            <!-- 统一规范化上下文容量 (消除大小写混用) -->
+            <span class="inline-flex items-center px-2 py-0.5 rounded-md bg-slate-100/90 text-slate-700 text-xs font-mono font-medium border border-slate-200/60 shadow-2xs">
+              {{ formatContextWindow(m.context_window) }}
+            </span>
+
+            <!-- 多模态简明纯图标常显指示 (输入与输出分开，统一图标尺寸与胶囊高度) -->
+            <div class="hidden sm:inline-flex items-center gap-1.5 px-2 py-0.5 bg-slate-100/80 rounded-md border border-slate-200/60 shadow-2xs text-slate-500" data-testid="model-row-modalities">
+              <span class="text-3xs text-slate-500 font-medium select-none">入:</span>
+              <div class="inline-flex items-center gap-1">
+                <span v-for="t in (m.input_types && m.input_types.length > 0 ? m.input_types : ['text'])" :key="`row-in-${t}`" class="inline-flex items-center">
+                  <UiTooltip :content="`输入支持: ${getModalityName(t)}`">
+                    <Icons :name="getModalityIcon(t)" size="14" class="text-slate-600 hover:text-slate-900 transition-colors" />
+                  </UiTooltip>
+                </span>
+              </div>
+              <span class="text-slate-300 text-xs select-none">|</span>
+              <span class="text-3xs text-slate-500 font-medium select-none">出:</span>
+              <div class="inline-flex items-center gap-1">
+                <span v-for="t in (m.output_types && m.output_types.length > 0 ? m.output_types : ['text'])" :key="`row-out-${t}`" class="inline-flex items-center">
+                  <UiTooltip :content="`输出支持: ${getModalityName(t)}`">
+                    <Icons :name="getModalityIcon(t)" size="14" class="text-slate-600 hover:text-slate-900 transition-colors" />
+                  </UiTooltip>
+                </span>
+              </div>
             </div>
 
             <!-- 底层协议标签 (若有定制) -->
@@ -784,17 +804,6 @@ function getTierBadgeVariant(tier?: string) {
             >
               <UiBadge variant="secondary" class="hidden md:inline-flex items-center text-3xs font-mono font-normal cursor-help">
                 ￥定制
-              </UiBadge>
-            </UiTooltip>
-
-            <!-- 思考强度简明标记 (当非 Off 时展示微标) -->
-            <UiTooltip
-              v-if="m.thinking_default && m.thinking_default !== 'Off'"
-              :content="`思考强度预设: ${m.thinking_default}`"
-            >
-              <UiBadge variant="purple" class="inline-flex items-center gap-1 cursor-help">
-                <Icons name="brain" size="11" />
-                {{ m.thinking_default }}
               </UiBadge>
             </UiTooltip>
           </div>
@@ -865,11 +874,11 @@ function getTierBadgeVariant(tier?: string) {
                 />
               </div>
 
-              <!-- 模型分级 (Tier) 按钮选项组 (暖黄色底色 200 色阶) -->
+              <!-- 模型分级 (Tier) 按钮选项组 (统一为精致中性浅灰分段底色) -->
               <div>
                 <label class="block text-slate-600 font-medium mb-1.5 text-xs">模型分级 (Tier)</label>
                 <div
-                  class="grid grid-cols-3 gap-1.5 p-1 bg-amber-200/90 rounded-lg select-none border border-amber-300/50"
+                  class="grid grid-cols-3 gap-1.5 p-1 bg-slate-100/90 rounded-lg select-none border border-slate-200/70"
                   data-testid="model-tier-buttons"
                 >
                   <button
@@ -880,8 +889,8 @@ function getTierBadgeVariant(tier?: string) {
                     class="py-1.5 px-2 rounded-md text-xs font-medium transition-all cursor-pointer text-center"
                     :class="[
                       form.tier === t.value
-                        ? 'bg-white text-amber-950 shadow-xs font-semibold'
-                        : 'text-amber-900/80 hover:text-amber-950 hover:bg-amber-300/60'
+                        ? 'bg-white text-slate-900 shadow-2xs font-semibold'
+                        : 'text-slate-600 hover:text-slate-900 hover:bg-white/50'
                     ]"
                     @click="form.tier = t.value"
                   >
@@ -894,7 +903,7 @@ function getTierBadgeVariant(tier?: string) {
               <div>
                 <label class="block text-slate-600 font-medium mb-1.5 text-xs">上下文窗口 (Context Window)</label>
                 <div
-                  class="flex flex-wrap items-center gap-1.5 p-1 bg-slate-100 rounded-lg select-none mb-1.5"
+                  class="flex flex-wrap items-center gap-1.5 p-1 bg-slate-100/90 rounded-lg select-none mb-1.5 border border-slate-200/70"
                   data-testid="context-window-buttons"
                 >
                   <button
@@ -905,8 +914,8 @@ function getTierBadgeVariant(tier?: string) {
                     class="flex-1 py-1.5 px-2 rounded-md text-xs font-medium transition-all cursor-pointer text-center"
                     :class="[
                       !isCustomContext && form.context_window?.toLowerCase() === p.toLowerCase()
-                        ? 'bg-white text-indigo-700 shadow-2xs font-semibold'
-                        : 'text-slate-600 hover:text-slate-900 hover:bg-white/40'
+                        ? 'bg-white text-slate-900 shadow-2xs font-semibold'
+                        : 'text-slate-600 hover:text-slate-900 hover:bg-white/50'
                     ]"
                     @click="setContextPreset(p)"
                   >
@@ -918,8 +927,8 @@ function getTierBadgeVariant(tier?: string) {
                     class="py-1.5 px-3 rounded-md text-xs font-medium transition-all cursor-pointer text-center"
                     :class="[
                       isCustomContext
-                        ? 'bg-white text-indigo-700 shadow-2xs font-semibold'
-                        : 'text-slate-600 hover:text-slate-900 hover:bg-white/40'
+                        ? 'bg-white text-slate-900 shadow-2xs font-semibold'
+                        : 'text-slate-600 hover:text-slate-900 hover:bg-white/50'
                     ]"
                     @click="selectCustomContext"
                   >

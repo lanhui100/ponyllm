@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_SLOT_COUNT: usize = 40;
 pub const DEFAULT_STEP_MS: u64 = 1500; // legacy compat; gateway default is 5s below
-pub const GATEWAY_SLOT_COUNT: usize = 28; // 28 * 5s = 140s (~2分钟)
+pub const GATEWAY_SLOT_COUNT: usize = 24; // 24 * 5s = 120s (最近2分钟)
 pub const GATEWAY_STEP_MS: u64 = 5000;
 pub const PROVIDER_SLOT_COUNT: usize = 40; // 每柱一次调用，最近40次
 
@@ -227,7 +227,7 @@ impl ConnectivitySampler {
     }
 
     /// Query the series up to `now_ms`.
-    /// gateway 返回时间环（28柱/5s/~2分钟）；provider 返回最近调用的连续队列。
+    /// gateway 返回时间环（24柱/5s/2分钟）；provider 返回最近调用的连续队列。
     pub fn get_series(&self, provider: &str, now_ms: u64) -> ConnectivityBarSeries {
         if provider == "gateway" {
             return self.get_gateway_series(now_ms);
