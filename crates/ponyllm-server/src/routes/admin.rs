@@ -17,7 +17,10 @@ use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::IntoResponse;
 use axum::Json;
 use ponyllm_config::{ConfigFile, KeySection, ModelConfig, ProviderSection};
-use ponyllm_core::pool::{ApiKeyEntry, BillingMode, KeyPool, ModelTier, RoutingStrategy, UpstreamProtocol};
+use ponyllm_core::pool::{
+    ApiKeyEntry, BillingMode, KeyPool, ModelTier, PricingMode, PricingPeriod, RoutingStrategy,
+    UpstreamProtocol,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use utoipa::ToSchema;
@@ -61,6 +64,68 @@ pub struct ProviderView {
     pub messages_url: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AdminPricingMode {
+    #[default]
+    Uniform,
+    PeakValley,
+}
+
+impl From<PricingMode> for AdminPricingMode {
+    fn from(m: PricingMode) -> Self {
+        match m {
+            PricingMode::Uniform => AdminPricingMode::Uniform,
+            PricingMode::PeakValley => AdminPricingMode::PeakValley,
+        }
+    }
+}
+
+impl From<AdminPricingMode> for PricingMode {
+    fn from(m: AdminPricingMode) -> Self {
+        match m {
+            AdminPricingMode::Uniform => PricingMode::Uniform,
+            AdminPricingMode::PeakValley => PricingMode::PeakValley,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, ToSchema)]
+pub struct AdminPricingPeriod {
+    pub name: String,
+    pub start_time: String,
+    pub end_time: String,
+    pub input_price: f64,
+    pub cached_price: f64,
+    pub output_price: f64,
+}
+
+impl From<PricingPeriod> for AdminPricingPeriod {
+    fn from(p: PricingPeriod) -> Self {
+        Self {
+            name: p.name,
+            start_time: p.start_time,
+            end_time: p.end_time,
+            input_price: p.input_price,
+            cached_price: p.cached_price,
+            output_price: p.output_price,
+        }
+    }
+}
+
+impl From<AdminPricingPeriod> for PricingPeriod {
+    fn from(p: AdminPricingPeriod) -> Self {
+        Self {
+            name: p.name,
+            start_time: p.start_time,
+            end_time: p.end_time,
+            input_price: p.input_price,
+            cached_price: p.cached_price,
+            output_price: p.output_price,
+        }
+    }
+}
+
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ModelView {
     pub provider: String,
@@ -83,6 +148,10 @@ pub struct ModelView {
     pub cached_price: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_price: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pricing_mode: Option<AdminPricingMode>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pricing_periods: Vec<AdminPricingPeriod>,
     /// Model-level default sampling (`None` keeps the request value).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
@@ -218,6 +287,10 @@ pub struct CreateModelPayload {
     #[serde(default)]
     pub output_price: Option<f64>,
     #[serde(default)]
+    pub pricing_mode: Option<AdminPricingMode>,
+    #[serde(default)]
+    pub pricing_periods: Option<Vec<AdminPricingPeriod>>,
+    #[serde(default)]
     pub temperature: Option<f32>,
     #[serde(default)]
     pub top_p: Option<f32>,
@@ -255,6 +328,10 @@ pub struct UpdateModelPayload {
     pub cached_price: Option<f64>,
     #[serde(default)]
     pub output_price: Option<f64>,
+    #[serde(default)]
+    pub pricing_mode: Option<AdminPricingMode>,
+    #[serde(default)]
+    pub pricing_periods: Option<Vec<AdminPricingPeriod>>,
     #[serde(default)]
     pub temperature: Option<f32>,
     #[serde(default)]
@@ -1015,6 +1092,8 @@ pub async fn handle_admin_provider_models(
                 input_price: m.input_price,
                 cached_price: m.cached_price,
                 output_price: m.output_price,
+                pricing_mode: m.pricing_mode.map(Into::into),
+                pricing_periods: m.pricing_periods.iter().cloned().map(Into::into).collect(),
                 temperature: m.temperature,
                 top_p: m.top_p,
                 display_name: m.display_name.clone(),
@@ -1053,6 +1132,8 @@ pub async fn handle_admin_models(State(state): State<Arc<AppState>>) -> impl Int
                 input_price: m.input_price,
                 cached_price: m.cached_price,
                 output_price: m.output_price,
+                pricing_mode: m.pricing_mode.map(Into::into),
+                pricing_periods: m.pricing_periods.iter().cloned().map(Into::into).collect(),
                 temperature: m.temperature,
                 top_p: m.top_p,
                 display_name: m.display_name.clone(),
@@ -1118,16 +1199,15 @@ pub async fn handle_admin_create_model(
         )
             .into_response();
     }
-    if let Err(msg) = ponyllm_config::validate_model_pricing(
-        payload.input_price,
-        payload.cached_price,
-        payload.output_price,
-    ) {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": {"message": msg, "code": "invalid_model_pricing"}})),
-        )
-            .into_response();
+    if let Some(ref periods) = payload.pricing_periods {
+        let converted: Vec<PricingPeriod> = periods.iter().cloned().map(Into::into).collect();
+        if let Err(msg) = ponyllm_config::validate_pricing_periods(&converted) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": {"message": msg, "code": "invalid_pricing_periods"}})),
+            )
+                .into_response();
+        }
     }
     if let Err(msg) = ponyllm_config::validate_model_sampling(payload.temperature, payload.top_p) {
         return (
@@ -1174,6 +1254,14 @@ pub async fn handle_admin_create_model(
         input_price: payload.input_price,
         cached_price: payload.cached_price,
         output_price: payload.output_price,
+        pricing_mode: payload.pricing_mode.map(Into::into),
+        pricing_periods: payload
+            .pricing_periods
+            .clone()
+            .unwrap_or_default()
+            .into_iter()
+            .map(Into::into)
+            .collect(),
         display_name: display_name.clone(),
         temperature: payload.temperature,
         top_p: payload.top_p,
@@ -1202,6 +1290,14 @@ pub async fn handle_admin_create_model(
         input_price: payload.input_price,
         cached_price: payload.cached_price,
         output_price: payload.output_price,
+        pricing_mode: payload.pricing_mode.map(Into::into),
+        pricing_periods: payload
+            .pricing_periods
+            .clone()
+            .unwrap_or_default()
+            .into_iter()
+            .map(Into::into)
+            .collect(),
         display_name: display_name.clone(),
         temperature: payload.temperature,
         top_p: payload.top_p,
@@ -1246,6 +1342,8 @@ pub async fn handle_admin_create_model(
             input_price: payload.input_price,
             cached_price: payload.cached_price,
             output_price: payload.output_price,
+            pricing_mode: payload.pricing_mode,
+            pricing_periods: payload.pricing_periods.clone().unwrap_or_default(),
             display_name,
             temperature: payload.temperature,
             top_p: payload.top_p,
@@ -1314,6 +1412,16 @@ pub async fn handle_admin_update_model(
         )
             .into_response();
     }
+    if let Some(ref periods) = payload.pricing_periods {
+        let converted: Vec<PricingPeriod> = periods.iter().cloned().map(Into::into).collect();
+        if let Err(msg) = ponyllm_config::validate_pricing_periods(&converted) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": {"message": msg, "code": "invalid_pricing_periods"}})),
+            )
+                .into_response();
+        }
+    }
     if let Err(msg) = ponyllm_config::validate_model_sampling(payload.temperature, payload.top_p) {
         return (
             StatusCode::BAD_REQUEST,
@@ -1338,6 +1446,8 @@ pub async fn handle_admin_update_model(
             input_price: None,
             cached_price: None,
             output_price: None,
+            pricing_mode: None,
+            pricing_periods: Vec::new(),
             display_name: None,
             temperature: None,
             top_p: None,
@@ -1391,6 +1501,12 @@ pub async fn handle_admin_update_model(
     if payload.output_price.is_some() {
         existing_config.output_price = payload.output_price;
     }
+    if payload.pricing_mode.is_some() {
+        existing_config.pricing_mode = payload.pricing_mode.map(Into::into);
+    }
+    if let Some(ref periods) = payload.pricing_periods {
+        existing_config.pricing_periods = periods.iter().cloned().map(Into::into).collect();
+    }
     if payload.temperature.is_some() {
         existing_config.temperature = payload.temperature;
     }
@@ -1427,6 +1543,8 @@ pub async fn handle_admin_update_model(
         input_price: existing_config.input_price,
         cached_price: existing_config.cached_price,
         output_price: existing_config.output_price,
+        pricing_mode: existing_config.pricing_mode,
+        pricing_periods: existing_config.pricing_periods.clone(),
         display_name: existing_config.display_name.clone(),
         temperature: existing_config.temperature,
         top_p: existing_config.top_p,
@@ -1469,6 +1587,8 @@ pub async fn handle_admin_update_model(
         input_price: existing_config.input_price,
         cached_price: existing_config.cached_price,
         output_price: existing_config.output_price,
+        pricing_mode: existing_config.pricing_mode.map(Into::into),
+        pricing_periods: existing_config.pricing_periods.into_iter().map(Into::into).collect(),
         display_name: existing_config.display_name,
         temperature: existing_config.temperature,
         top_p: existing_config.top_p,

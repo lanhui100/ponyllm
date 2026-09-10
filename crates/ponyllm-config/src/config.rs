@@ -4,7 +4,8 @@ use std::io::Write;
 use std::path::Path;
 use ponyllm_core::pool::{
     default_cached_price, default_input_price, default_output_price, BillingMode,
-    GatewayRoutingStrategy, ModelTier, ModelThinkingSpec, PricingConfig, UpstreamProtocol,
+    GatewayRoutingStrategy, ModelTier, ModelThinkingSpec, PricingConfig, PricingMode, PricingPeriod,
+    UpstreamProtocol,
 };
 use ponyllm_protocol::common::ReasoningEffort;
 
@@ -173,6 +174,12 @@ pub struct ModelConfig {
     pub cached_price: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_price: Option<f64>,
+    /// Optional pricing mode override: uniform or peak_valley
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pricing_mode: Option<PricingMode>,
+    /// Optional peak-valley / time-of-use periods for this model
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pricing_periods: Vec<PricingPeriod>,
     /// Optional display name for consoles (cosmetic only; routing always uses `name`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
@@ -221,6 +228,8 @@ impl Default for ModelConfig {
             input_price: None,
             cached_price: None,
             output_price: None,
+            pricing_mode: None,
+            pricing_periods: Vec::new(),
             display_name: None,
             temperature: None,
             top_p: None,
@@ -246,6 +255,8 @@ impl ModelConfig {
             input_price: None,
             cached_price: None,
             output_price: None,
+            pricing_mode: None,
+            pricing_periods: Vec::new(),
             display_name: None,
             temperature: None,
             top_p: None,
@@ -302,9 +313,11 @@ pub struct ProviderSection {
 impl ProviderSection {
     pub fn pricing(&self) -> PricingConfig {
         PricingConfig {
+            mode: PricingMode::Uniform,
             input_price: self.input_price,
             cached_price: self.cached_price,
             output_price: self.output_price,
+            pricing_periods: Vec::new(),
         }
     }
 
@@ -332,10 +345,15 @@ impl ProviderSection {
                 default_pricing.cached_price.min(in_p)
             };
 
+            let mode = cfg.pricing_mode.unwrap_or(PricingMode::Uniform);
+            let periods = cfg.pricing_periods.clone();
+
             PricingConfig {
+                mode,
                 input_price: in_p,
                 cached_price: ca_p,
                 output_price: out_p,
+                pricing_periods: periods,
             }
         } else {
             default_pricing
@@ -497,6 +515,22 @@ pub fn validate_model_pricing(
                     label, p
                 ));
             }
+        }
+    }
+    Ok(())
+}
+
+/// Strict validation for time-of-use pricing periods.
+pub fn validate_pricing_periods(periods: &[PricingPeriod]) -> Result<(), String> {
+    for p in periods {
+        if p.input_price.is_nan() || p.input_price < 0.0 {
+            return Err(format!("时段 {} 输入价格必须为 >= 0 的数值", p.name));
+        }
+        if p.cached_price.is_nan() || p.cached_price < 0.0 {
+            return Err(format!("时段 {} 缓存命中价格必须为 >= 0 的数值", p.name));
+        }
+        if p.output_price.is_nan() || p.output_price < 0.0 {
+            return Err(format!("时段 {} 输出价格必须为 >= 0 的数值", p.name));
         }
     }
     Ok(())

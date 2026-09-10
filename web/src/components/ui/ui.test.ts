@@ -6,6 +6,8 @@ import UiTooltip from './UiTooltip.vue';
 import UiButton from './UiButton.vue';
 import UiBadge from './UiBadge.vue';
 import UiCollapsible from './UiCollapsible.vue';
+import UiToast from './UiToast.vue';
+import { toast, useToast } from '../../composables/useToast';
 
 describe('UI Primitives & Modern Design System', () => {
   let container: HTMLDivElement;
@@ -116,6 +118,83 @@ describe('UI Primitives & Modern Design System', () => {
     const inner = container.querySelector('#inner');
     expect(inner).not.toBeNull();
     expect(inner?.textContent).toBe('Inner Content');
+    app.unmount();
+  });
+
+  it('renders center glassmorphism toast with semantic colors and icons', async () => {
+    const app = createApp({
+      render: () => h(UiToast),
+    });
+    app.mount(container);
+    await nextTick();
+
+    toast.success('配置同步成功');
+    await nextTick();
+
+    const toastEl = container.querySelector('[data-testid="ui-toast"]');
+    expect(toastEl).not.toBeNull();
+    // 居中定位类
+    expect(toastEl?.className).toContain('top-1/2');
+    expect(toastEl?.className).toContain('left-1/2');
+    expect(toastEl?.className).toContain('-translate-x-1/2');
+    expect(toastEl?.className).toContain('-translate-y-1/2');
+
+    // 文本与图标
+    const msgEl = container.querySelector('[data-testid="toast-message"]');
+    expect(msgEl?.textContent?.trim()).toBe('配置同步成功');
+    const iconWrap = container.querySelector('[data-testid="toast-icon-wrap"]');
+    expect(iconWrap?.className).toContain('text-emerald-700');
+
+    // 手动关闭
+    const closeBtn = container.querySelector('[data-testid="toast-close-btn"]') as HTMLButtonElement;
+    expect(closeBtn).not.toBeNull();
+    closeBtn.click();
+    await nextTick();
+
+    const { currentToast } = useToast();
+    expect(currentToast.value).toBeNull();
+    app.unmount();
+  });
+
+  it('handles confirm dialog mode with secondary confirmation promise resolution', async () => {
+    const app = createApp({
+      render: () => h(UiToast),
+    });
+    app.mount(container);
+    await nextTick();
+
+    let confirmResult: boolean | null = null;
+    const confirmPromise = toast.confirm({
+      title: '确认删除密钥',
+      message: '确定要删除该密钥吗？',
+      confirmText: '彻底删除',
+      variant: 'destructive',
+    }).then((res) => {
+      confirmResult = res;
+      return res;
+    });
+
+    await nextTick();
+
+    // 遮罩层出现
+    const overlay = container.querySelector('[data-testid="toast-overlay"]');
+    expect(overlay).not.toBeNull();
+
+    // 检查按钮与文案
+    const titleEl = container.querySelector('[data-testid="toast-title"]');
+    expect(titleEl?.textContent).toContain('确认删除密钥');
+    const okBtn = container.querySelector('[data-testid="toast-ok-btn"]') as HTMLButtonElement;
+    expect(okBtn).not.toBeNull();
+    expect(okBtn.textContent).toContain('彻底删除');
+
+    // 点击确定
+    okBtn.click();
+    await confirmPromise;
+    expect(confirmResult).toBe(true);
+
+    await nextTick();
+    const { currentToast } = useToast();
+    expect(currentToast.value).toBeNull();
     app.unmount();
   });
 });

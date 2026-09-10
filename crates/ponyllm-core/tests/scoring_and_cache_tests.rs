@@ -1,6 +1,6 @@
 use std::time::Duration;
 use ponyllm_core::pool::{
-    BillingMode, EconomyScorer, HotCacheTracker, NodeLatencyMetrics, PricingConfig,
+    BillingMode, EconomyScorer, HotCacheTracker, NodeLatencyMetrics, PricingConfig, PricingMode,
     SpeedScorer, parse_retry_after_header,
 };
 
@@ -31,15 +31,15 @@ fn test_hot_cache_tracker_threshold_and_probe() {
 #[test]
 fn test_economy_scorer_hierarchy() {
     // 1. Free provider (0元免费节点)
-    let free_pricing = PricingConfig { input_price: 0.0, cached_price: 0.0, output_price: 0.0 };
+    let free_pricing = PricingConfig { mode: PricingMode::Uniform, input_price: 0.0, cached_price: 0.0, output_price: 0.0, pricing_periods: Vec::new() };
     let free_score = EconomyScorer::score_candidate(&free_pricing, BillingMode::Metered, false, 100_000, 1000);
 
     // 2. Plan node with quota
-    let plan_pricing = PricingConfig { input_price: 1.0, cached_price: 0.5, output_price: 2.0 };
+    let plan_pricing = PricingConfig { mode: PricingMode::Uniform, input_price: 1.0, cached_price: 0.5, output_price: 2.0, pricing_periods: Vec::new() };
     let plan_score = EconomyScorer::score_candidate(&plan_pricing, BillingMode::Plan, false, 100_000, 1000);
 
     // 3. Cache hit metered node
-    let metered_pricing = PricingConfig { input_price: 0.14, cached_price: 0.014, output_price: 0.28 };
+    let metered_pricing = PricingConfig { mode: PricingMode::Uniform, input_price: 0.14, cached_price: 0.014, output_price: 0.28, pricing_periods: Vec::new() };
     let cache_hit_score = EconomyScorer::score_candidate(&metered_pricing, BillingMode::Metered, true, 100_000, 1000);
 
     // 4. Normal cache miss metered node

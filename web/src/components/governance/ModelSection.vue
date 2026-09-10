@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref } from 'vue';
 import type { ModelView, ProviderView, CreateModelPayload, UpdateModelPayload } from '../../types/admin';
+import { toast } from '../../composables/useToast';
 
 const props = defineProps<{
   models: ModelView[];
@@ -113,13 +114,21 @@ async function handleSubmit() {
 }
 
 async function handleDelete(name: string) {
-  if (!confirm(`确定删除模型 "${name}" 吗？该操作不会中断当前正在处理的在途请求。`)) {
+  const confirmed = await toast.confirm({
+    title: '删除模型',
+    message: `确定删除模型 "${name}" 吗？该操作不会中断当前正在处理的在途请求。`,
+    confirmText: '确认删除',
+    cancelText: '取消',
+    variant: 'destructive',
+  });
+  if (!confirmed) {
     return;
   }
   try {
     await emit('delete', name);
+    toast.success(`模型 "${name}" 已删除`);
   } catch (err: unknown) {
-    alert(`删除失败: ${err instanceof Error ? err.message : String(err)}`);
+    toast.error(`删除失败: ${err instanceof Error ? err.message : String(err)}`);
   }
 }
 </script>

@@ -18,6 +18,7 @@ import UiCollapsible from '../ui/UiCollapsible.vue';
 import KeySubSection from './KeySubSection.vue';
 import ModelSubSection from './ModelSubSection.vue';
 import { formatStrategyLabel } from '../../utils/format';
+import { toast } from '../../composables/useToast';
 
 const props = defineProps<{
   provider: ProviderView;
@@ -135,15 +136,15 @@ async function handleSaveProtocols() {
   const responsesVal = customUrls.value.responses.trim();
 
   if (activeProtocols.value.includes('chat') && chatVal && !urlRegex.test(chatVal)) {
-    alert('OpenAI Chat 专属 Base URL 必须以 http:// 或 https:// 开头');
+    toast.warning('OpenAI Chat 专属 Base URL 必须以 http:// 或 https:// 开头');
     return;
   }
   if (activeProtocols.value.includes('messages') && messagesVal && !urlRegex.test(messagesVal)) {
-    alert('Anthropic Messages 专属 Base URL 必须以 http:// 或 https:// 开头');
+    toast.warning('Anthropic Messages 专属 Base URL 必须以 http:// 或 https:// 开头');
     return;
   }
   if (activeProtocols.value.includes('responses') && responsesVal && !urlRegex.test(responsesVal)) {
-    alert('OpenAI Responses 专属 Base URL 必须以 http:// 或 https:// 开头');
+    toast.warning('OpenAI Responses 专属 Base URL 必须以 http:// 或 https:// 开头');
     return;
   }
 
@@ -156,8 +157,9 @@ async function handleSaveProtocols() {
       responses_url: activeProtocols.value.includes('responses') ? responsesVal : '',
     });
     isEditingProtocols.value = false;
+    toast.success('协议配置已保存');
   } catch (err: unknown) {
-    alert(`保存协议配置失败: ${err instanceof Error ? err.message : String(err)}`);
+    toast.error(`保存协议配置失败: ${err instanceof Error ? err.message : String(err)}`);
   } finally {
     protocolsSaving.value = false;
   }
@@ -172,17 +174,21 @@ const activeKeysCount = computed(() => {
 });
 
 async function handleDeleteProvider() {
-  if (
-    !confirm(
-      `确定删除服务商 "${props.provider.name}" 吗？该操作将级联清理下属模型与密钥，在途请求不受影响。`
-    )
-  ) {
+  const confirmed = await toast.confirm({
+    title: '删除服务商',
+    message: `确定删除服务商 "${props.provider.name}" 吗？该操作将级联清理下属模型与密钥，在途请求不受影响。`,
+    confirmText: '确认删除',
+    cancelText: '取消',
+    variant: 'destructive',
+  });
+  if (!confirmed) {
     return;
   }
   try {
     await emit('delete-provider', props.provider.name);
+    toast.success(`服务商 "${props.provider.name}" 已成功删除`);
   } catch (err: unknown) {
-    alert(`删除失败: ${err instanceof Error ? err.message : String(err)}`);
+    toast.error(`删除失败: ${err instanceof Error ? err.message : String(err)}`);
   }
 }
 </script>
@@ -199,8 +205,8 @@ async function handleDeleteProvider() {
     >
       <!-- 左侧：厂商标识与摘要 -->
       <div class="flex items-center gap-3.5 min-w-0">
-        <!-- 暖橙色图标 -->
-        <div class="w-10.5 h-10.5 rounded-xl bg-orange-50 text-orange-600 border border-orange-200/60 flex items-center justify-center shrink-0 font-bold text-base shadow-2xs">
+        <!-- 暖橙色图标 (无边框极简风格) -->
+        <div class="w-10.5 h-10.5 rounded-xl bg-orange-50 text-orange-600 flex items-center justify-center shrink-0 font-bold text-base shadow-2xs">
           <Icons name="server" size="22" />
         </div>
 

@@ -300,6 +300,8 @@ fn test_model_config_crud_and_params() {
         input_price: None,
         cached_price: None,
         output_price: None,
+        pricing_mode: None,
+        pricing_periods: Vec::new(),
         display_name: None,
         temperature: None,
         top_p: None,

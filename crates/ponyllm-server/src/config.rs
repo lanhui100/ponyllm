@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 use ponyllm_core::pool::{
     default_cached_price, default_input_price, default_output_price, BillingMode,
-    GatewayRoutingStrategy, ModelTier, ModelThinkingSpec, PricingConfig, UpstreamProtocol,
+    GatewayRoutingStrategy, ModelTier, ModelThinkingSpec, PricingConfig, PricingMode, PricingPeriod,
+    UpstreamProtocol,
 };
 use ponyllm_protocol::common::ReasoningEffort;
 use serde::{Deserialize, Serialize};
@@ -27,6 +28,10 @@ pub struct ModelSpec {
     pub cached_price: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_price: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pricing_mode: Option<PricingMode>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pricing_periods: Vec<PricingPeriod>,
     /// Cosmetic display name for consoles; routing always uses `name`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
@@ -84,6 +89,8 @@ impl Default for ModelSpec {
             input_price: None,
             cached_price: None,
             output_price: None,
+            pricing_mode: None,
+            pricing_periods: Vec::new(),
             display_name: None,
             temperature: None,
             top_p: None,
@@ -159,9 +166,11 @@ impl Default for ProviderConfig {
 impl ProviderConfig {
     pub fn pricing(&self) -> PricingConfig {
         PricingConfig {
+            mode: PricingMode::Uniform,
             input_price: self.input_price,
             cached_price: self.cached_price,
             output_price: self.output_price,
+            pricing_periods: Vec::new(),
         }
     }
 
@@ -190,10 +199,15 @@ impl ProviderConfig {
                 default_pricing.cached_price.min(in_p)
             };
 
+            let mode = spec.pricing_mode.unwrap_or(PricingMode::Uniform);
+            let periods = spec.pricing_periods.clone();
+
             PricingConfig {
+                mode,
                 input_price: in_p,
                 cached_price: ca_p,
                 output_price: out_p,
+                pricing_periods: periods,
             }
         } else {
             default_pricing
@@ -223,6 +237,8 @@ impl ProviderConfig {
             input_price: None,
             cached_price: None,
             output_price: None,
+            pricing_mode: None,
+            pricing_periods: Vec::new(),
             display_name: None,
             temperature: None,
             top_p: None,

@@ -29,6 +29,17 @@ export interface ProviderView {
   messages_url?: string | null;
 }
 
+export type PricingMode = 'uniform' | 'peak_valley';
+
+export interface PricingPeriod {
+  name: string;
+  start_time: string;
+  end_time: string;
+  input_price: number;
+  cached_price: number;
+  output_price: number;
+}
+
 export interface ModelView {
   provider?: string;
   name: string;
@@ -43,6 +54,8 @@ export interface ModelView {
   input_price?: number | null;
   cached_price?: number | null;
   output_price?: number | null;
+  pricing_mode?: PricingMode | null;
+  pricing_periods?: PricingPeriod[] | null;
   temperature?: number | null;
   top_p?: number | null;
   display_name?: string | null;
@@ -158,6 +171,8 @@ export interface CreateModelPayload {
   input_price?: number | null;
   cached_price?: number | null;
   output_price?: number | null;
+  pricing_mode?: PricingMode | null;
+  pricing_periods?: PricingPeriod[] | null;
   temperature?: number | null;
   top_p?: number | null;
   display_name?: string | null;
@@ -178,6 +193,8 @@ export interface UpdateModelPayload {
   input_price?: number | null;
   cached_price?: number | null;
   output_price?: number | null;
+  pricing_mode?: PricingMode | null;
+  pricing_periods?: PricingPeriod[] | null;
   temperature?: number | null;
   top_p?: number | null;
   display_name?: string | null;

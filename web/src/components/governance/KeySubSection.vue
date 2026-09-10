@@ -7,6 +7,7 @@ import UiBadge from '../ui/UiBadge.vue';
 import UiTooltip from '../ui/UiTooltip.vue';
 import UiCollapsible from '../ui/UiCollapsible.vue';
 import { formatKeyState } from '../../utils/format';
+import { toast } from '../../composables/useToast';
 
 const props = defineProps<{
   providerName: string;
@@ -186,13 +187,21 @@ async function handleSubmit() {
 
 async function handleDelete(id: string) {
   if (!props.adminWriteEnabled) return;
-  if (!confirm(`确定移除密钥 "${id}" 吗？该操作将热同步连接池。`)) {
+  const confirmed = await toast.confirm({
+    title: '移除密钥',
+    message: `确定移除密钥 "${id}" 吗？该操作将热同步连接池。`,
+    confirmText: '确认移除',
+    cancelText: '取消',
+    variant: 'destructive',
+  });
+  if (!confirmed) {
     return;
   }
   try {
     await emit('delete', id);
+    toast.success(`密钥 "${id}" 已成功移除`);
   } catch (err: unknown) {
-    alert(`删除失败: ${err instanceof Error ? err.message : String(err)}`);
+    toast.error(`删除失败: ${err instanceof Error ? err.message : String(err)}`);
   }
 }
 </script>

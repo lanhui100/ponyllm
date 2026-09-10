@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref } from 'vue';
-import type { ModelView, CreateModelPayload, UpdateModelPayload } from '../../types/admin';
+import type { ModelView, CreateModelPayload, UpdateModelPayload, PricingMode, PricingPeriod } from '../../types/admin';
 import { adminApi } from '../../lib/adminApi';
 import Icons from '../ui/Icons.vue';
 import UiButton from '../ui/UiButton.vue';
@@ -10,6 +10,7 @@ import UiCollapsible from '../ui/UiCollapsible.vue';
 import ThinkingEffortSelect from './ThinkingEffortSelect.vue';
 import UpstreamModelPicker from './UpstreamModelPicker.vue';
 import { formatTierLabel, formatContextWindow } from '../../utils/format';
+import { toast } from '../../composables/useToast';
 
 const props = defineProps<{
   providerName: string;
@@ -61,6 +62,15 @@ const formError = ref<string | null>(null);
 const showAdvanced = ref(false);
 const isCustomContext = ref(false);
 
+interface EditablePricingPeriod {
+  name: string;
+  start_time: string;
+  end_time: string;
+  input_price: string;
+  cached_price: string;
+  output_price: string;
+}
+
 const form = ref({
   name: '',
   display_name: '',
@@ -73,10 +83,27 @@ const form = ref({
   base_url: '',
   temperature: '',
   top_p: '',
+  pricing_mode: 'uniform' as PricingMode,
   input_price: '',
   cached_price: '',
   output_price: '',
+  pricing_periods: [] as EditablePricingPeriod[],
 });
+
+function addPricingPeriod() {
+  form.value.pricing_periods.push({
+    name: `时段 ${form.value.pricing_periods.length + 1}`,
+    start_time: '00:00',
+    end_time: '08:00',
+    input_price: '',
+    cached_price: '',
+    output_price: '',
+  });
+}
+
+function removePricingPeriod(index: number) {
+  form.value.pricing_periods.splice(index, 1);
+}
 
 const pickerOpen = ref(false);
 const pickerModels = ref<{ id: string }[]>([]);
@@ -142,9 +169,11 @@ function openAddInline() {
     base_url: '',
     temperature: '',
     top_p: '',
+    pricing_mode: 'uniform',
     input_price: '',
     cached_price: '',
     output_price: '',
+    pricing_periods: [],
   };
   isCustomContext.value = false;
   formError.value = null;
@@ -161,6 +190,15 @@ function openEditInline(model: ModelView) {
   const isPreset = (CONTEXT_PRESETS as readonly string[]).includes(cw.toLowerCase());
   isCustomContext.value = !isPreset;
 
+  const periods: EditablePricingPeriod[] = (model.pricing_periods || []).map((p) => ({
+    name: p.name,
+    start_time: p.start_time,
+    end_time: p.end_time,
+    input_price: String(p.input_price),
+    cached_price: String(p.cached_price),
+    output_price: String(p.output_price),
+  }));
+
   form.value = {
     name: model.name,
     display_name: model.display_name || '',
@@ -173,9 +211,11 @@ function openEditInline(model: ModelView) {
     base_url: model.base_url || '',
     temperature: model.temperature != null ? String(model.temperature) : '',
     top_p: model.top_p != null ? String(model.top_p) : '',
+    pricing_mode: (model.pricing_mode as PricingMode) || 'uniform',
     input_price: model.input_price != null ? String(model.input_price) : '',
     cached_price: model.cached_price != null ? String(model.cached_price) : '',
     output_price: model.output_price != null ? String(model.output_price) : '',
+    pricing_periods: periods,
   };
   formError.value = null;
   showAdvanced.value = Boolean(
@@ -184,6 +224,7 @@ function openEditInline(model: ModelView) {
       model.display_name ||
       model.temperature != null ||
       model.top_p != null ||
+      model.pricing_mode === 'peak_valley' ||
       model.input_price != null ||
       model.cached_price != null ||
       model.output_price != null,
@@ -298,6 +339,28 @@ async function handleSubmit() {
       submitting.value = false;
       return;
     }
+    let validPeriods: PricingPeriod[] = [];
+    if (form.value.pricing_mode === 'peak_valley') {
+      for (const p of form.value.pricing_periods) {
+        const inP = parseOptionalNumber(p.input_price) ?? 0;
+        const caP = parseOptionalNumber(p.cached_price) ?? 0;
+        const outP = parseOptionalNumber(p.output_price) ?? 0;
+        if (!Number.isFinite(inP) || !Number.isFinite(caP) || !Number.isFinite(outP) || inP < 0 || caP < 0 || outP < 0) {
+          formError.value = `峰谷时段「${p.name}」的价格必须为大于等于 0 的有效数值`;
+          submitting.value = false;
+          return;
+        }
+        validPeriods.push({
+          name: p.name.trim() || '分时时段',
+          start_time: p.start_time.trim() || '00:00',
+          end_time: p.end_time.trim() || '24:00',
+          input_price: inP,
+          cached_price: caP,
+          output_price: outP,
+        });
+      }
+    }
+
     const payloadData = {
       provider: props.providerName,
       tier: form.value.tier,
@@ -309,6 +372,8 @@ async function handleSubmit() {
       protocol: form.value.protocol ? form.value.protocol.trim() : '',
       base_url: form.value.base_url ? form.value.base_url.trim() : '',
       display_name: form.value.display_name ? form.value.display_name.trim() : '',
+      pricing_mode: form.value.pricing_mode,
+      pricing_periods: form.value.pricing_mode === 'peak_valley' ? validPeriods : [],
       ...(temperature !== undefined ? { temperature } : {}),
       ...(topP !== undefined ? { top_p: topP } : {}),
       ...(inputPrice !== undefined ? { input_price: inputPrice } : {}),
@@ -334,13 +399,21 @@ async function handleSubmit() {
 
 async function handleDelete(name: string) {
   if (!props.adminWriteEnabled) return;
-  if (!confirm(`确定删除模型 "${name}" 吗？该操作不会中断当前在途请求。`)) {
+  const confirmed = await toast.confirm({
+    title: '删除模型',
+    message: `确定删除模型 "${name}" 吗？该操作不会中断当前在途请求。`,
+    confirmText: '确认删除',
+    cancelText: '取消',
+    variant: 'destructive',
+  });
+  if (!confirmed) {
     return;
   }
   try {
     await emit('delete', name);
+    toast.success(`模型 "${name}" 已成功删除`);
   } catch (err: unknown) {
-    alert(`删除失败: ${err instanceof Error ? err.message : String(err)}`);
+    toast.error(`删除失败: ${err instanceof Error ? err.message : String(err)}`);
   }
 }
 
@@ -348,7 +421,7 @@ function getTierBadgeVariant(tier?: string) {
   switch (tier?.toLowerCase()) {
     case 'fast': return 'success';
     case 'smart': return 'default';
-    case 'large': return 'purple';
+    case 'large': return 'secondary';
     default: return 'secondary';
   }
 }
@@ -375,7 +448,7 @@ function getTierBadgeVariant(tier?: string) {
           size="sm"
           :disabled="!adminWriteEnabled || isAdding || pickerLoading"
           data-testid="add-model-btn"
-          class="text-indigo-600 hover:text-indigo-700 hover:bg-indigo-50/60 font-medium px-2.5 py-1 text-xs"
+          class="text-slate-800 hover:text-slate-950 hover:bg-slate-100/70 font-medium px-2.5 py-1 text-xs"
           @click="handleAddClick"
         >
           <Icons name="plus" size="13" />
@@ -399,326 +472,456 @@ function getTierBadgeVariant(tier?: string) {
       <div class="pt-2 space-y-2">
         <!-- 行内平滑展开新建模型表单 -->
         <UiCollapsible :open="isAdding">
-          <div class="p-4 bg-slate-50/90 rounded-xl mb-3 text-xs space-y-3">
-            <div class="flex items-center justify-between">
+          <div class="p-5 bg-white/70 backdrop-blur-md border border-white/60 shadow-xs rounded-xl mb-3 text-xs space-y-4">
+            <div class="flex items-center justify-between pb-2 border-b border-slate-200/50">
               <span class="font-semibold text-slate-800 text-sm">新建模型配置</span>
-          <button
-            type="button"
-            class="text-slate-400 hover:text-slate-600 cursor-pointer"
-            @click="cancelForm"
-          >
-            <Icons name="cross" size="14" />
-          </button>
-        </div>
-
-        <div v-if="formError" class="p-2.5 bg-rose-50 text-rose-600 rounded-lg text-xs font-medium">
-          {{ formError }}
-        </div>
-
-        <form class="space-y-3" @submit.prevent="handleSubmit">
-          <!-- 模型 ID 输入 -->
-          <div>
-            <label class="block text-slate-600 font-medium mb-1 text-xs">模型 ID *</label>
-            <input
-              v-model="form.name"
-              type="text"
-              placeholder="例如: gpt-4o，必须与上游模型标识一致"
-              required
-              autocomplete="off"
-              class="w-full bg-white border border-slate-200/80 rounded-lg px-3 py-2 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
-              data-testid="model-name-input"
-            />
-          </div>
-
-          <!-- 模型显示名称 (选填) -->
-          <div>
-            <label class="block text-slate-600 font-medium mb-1 text-xs">显示名称 (选填)</label>
-            <input
-              v-model="form.display_name"
-              type="text"
-              placeholder="控制台展示用，留空则显示模型 ID"
-              autocomplete="off"
-              class="w-full bg-white border border-slate-200/80 rounded-lg px-3 py-2 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
-              data-testid="model-display-name-input"
-            />
-          </div>
-
-          <!-- 模型分级 (Tier) 按钮选项组 (统一为精致中性浅灰分段底色) -->
-          <div>
-            <label class="block text-slate-600 font-medium mb-1.5 text-xs">模型分级 (Tier)</label>
-            <div
-              class="grid grid-cols-3 gap-1.5 p-1 bg-slate-100/90 rounded-lg select-none border border-slate-200/70"
-              data-testid="model-tier-buttons"
-            >
-              <button
-                v-for="t in MODEL_TIERS"
-                :key="t.value"
-                type="button"
-                :data-testid="`tier-btn-${t.value.toLowerCase()}`"
-                class="py-1.5 px-2 rounded-md text-xs font-medium transition-all cursor-pointer text-center"
-                :class="[
-                  form.tier === t.value
-                    ? 'bg-white text-slate-900 shadow-2xs font-semibold'
-                    : 'text-slate-600 hover:text-slate-900 hover:bg-white/50'
-                ]"
-                @click="form.tier = t.value"
-              >
-                {{ t.label }}
-              </button>
-            </div>
-          </div>
-
-          <!-- 上下文窗口 (Context Window) 按钮选项组 (仅保留 256K, 512K, 1M) -->
-          <div>
-            <label class="block text-slate-600 font-medium mb-1.5 text-xs">上下文窗口 (Context Window)</label>
-            <div
-              class="flex flex-wrap items-center gap-1.5 p-1 bg-slate-100/90 rounded-lg select-none mb-1.5 border border-slate-200/70"
-              data-testid="context-window-buttons"
-            >
-              <button
-                v-for="p in CONTEXT_PRESETS"
-                :key="p"
-                type="button"
-                :data-testid="`context-btn-${p}`"
-                class="flex-1 py-1.5 px-2 rounded-md text-xs font-medium transition-all cursor-pointer text-center"
-                :class="[
-                  !isCustomContext && form.context_window?.toLowerCase() === p.toLowerCase()
-                    ? 'bg-white text-slate-900 shadow-2xs font-semibold'
-                    : 'text-slate-600 hover:text-slate-900 hover:bg-white/50'
-                ]"
-                @click="setContextPreset(p)"
-              >
-                {{ p.toUpperCase() }}
-              </button>
               <button
                 type="button"
-                data-testid="context-btn-custom"
-                class="py-1.5 px-3 rounded-md text-xs font-medium transition-all cursor-pointer text-center"
-                :class="[
-                  isCustomContext
-                    ? 'bg-white text-slate-900 shadow-2xs font-semibold'
-                    : 'text-slate-600 hover:text-slate-900 hover:bg-white/50'
-                ]"
-                @click="selectCustomContext"
+                class="text-slate-400 hover:text-slate-600 cursor-pointer"
+                @click="cancelForm"
               >
-                自定义
+                <Icons name="cross" size="14" />
               </button>
             </div>
 
-            <UiCollapsible :open="isCustomContext">
-              <input
-                v-model="form.context_window"
-                type="text"
-                placeholder="输入自定义上下文容量，例如: 256k"
-                class="w-full bg-white border border-slate-200/80 rounded-lg px-3 py-1.5 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 mt-1"
-                data-testid="model-context-window-input"
-              />
-            </UiCollapsible>
-          </div>
-
-          <!-- 思考强度按钮组 (无最大上限) -->
-          <ThinkingEffortSelect
-            v-model:default-effort="form.thinking_default"
-          />
-
-          <!-- 支持模态类型拆解：输入模态与输出模态独立选择器 -->
-          <div class="space-y-2.5 p-2.5 bg-white/70 rounded-lg border border-slate-200/70" data-testid="model-modalities-section">
-            <div>
-              <label class="block text-slate-600 font-medium mb-1.5 text-xs flex items-center gap-1.5">
-                <span>输入模态 (Input)</span>
-                <UiTooltip content="该模型支持接收的输入模态能力 (点击纯图标切换)">
-                  <Icons name="info" size="12" class="text-slate-400 cursor-pointer" />
-                </UiTooltip>
-              </label>
-              <div class="flex items-center gap-2" data-testid="model-input-modalities">
-                <UiTooltip
-                  v-for="m in MODALITIES"
-                  :key="`in-${m.id}`"
-                  :content="`输入支持: ${m.label} (点击切换)`"
-                >
-                  <button
-                    type="button"
-                    :data-testid="`input-modality-btn-${m.id}`"
-                    class="h-8 w-8 rounded-lg flex items-center justify-center transition-all cursor-pointer"
-                    :class="[
-                      form.input_types.includes(m.id)
-                        ? 'bg-indigo-50 text-indigo-600 ring-1 ring-indigo-300 shadow-2xs'
-                        : 'bg-slate-100 text-slate-400 hover:text-slate-600 hover:bg-slate-200/60'
-                    ]"
-                    @click="toggleInputModality(m.id)"
-                  >
-                    <Icons :name="m.icon" size="15" />
-                  </button>
-                </UiTooltip>
-              </div>
+            <div v-if="formError" class="p-2.5 bg-rose-50 text-rose-600 rounded-lg text-xs font-medium">
+              {{ formError }}
             </div>
 
-            <div>
-              <label class="block text-slate-600 font-medium mb-1.5 text-xs flex items-center gap-1.5">
-                <span>输出模态 (Output)</span>
-                <UiTooltip content="该模型能够生成的输出模态能力 (点击纯图标切换)">
-                  <Icons name="info" size="12" class="text-slate-400 cursor-pointer" />
-                </UiTooltip>
-              </label>
-              <div class="flex items-center gap-2" data-testid="model-output-modalities">
-                <UiTooltip
-                  v-for="m in MODALITIES"
-                  :key="`out-${m.id}`"
-                  :content="`输出支持: ${m.label} (点击切换)`"
-                >
-                  <button
-                    type="button"
-                    :data-testid="`output-modality-btn-${m.id}`"
-                    class="h-8 w-8 rounded-lg flex items-center justify-center transition-all cursor-pointer"
-                    :class="[
-                      form.output_types.includes(m.id)
-                        ? 'bg-emerald-50 text-emerald-600 ring-1 ring-emerald-300 shadow-2xs'
-                        : 'bg-slate-100 text-slate-400 hover:text-slate-600 hover:bg-slate-200/60'
-                    ]"
-                    @click="toggleOutputModality(m.id)"
-                  >
-                    <Icons :name="m.icon" size="15" />
-                  </button>
-                </UiTooltip>
-              </div>
-            </div>
-          </div>
-
-          <!-- 下级折叠层级：标题直接是“高级” -->
-          <div class="pt-1">
-            <button
-              type="button"
-              class="text-xs font-semibold text-slate-600 hover:text-indigo-600 inline-flex items-center gap-1 cursor-pointer py-1 select-none"
-              data-testid="toggle-advanced-btn"
-              @click="showAdvanced = !showAdvanced"
-            >
-              <Icons :name="showAdvanced ? 'chevron-down' : 'chevron-right'" size="12" />
-              高级
-            </button>
-
-            <UiCollapsible :open="showAdvanced">
-              <div class="p-3 bg-slate-100/70 rounded-lg space-y-3 mt-1.5">
-                <!-- 3 种底层协议选项 -->
-                <div>
-                  <label class="block text-slate-600 font-medium mb-1.5 text-xs">底层协议覆盖 (选填)</label>
-                  <div class="flex flex-wrap gap-1.5" data-testid="model-protocol-options">
-                    <button
-                      v-for="opt in PROTOCOL_OPTIONS"
-                      :key="opt.value"
-                      type="button"
-                      :data-testid="`model-proto-${opt.value}`"
-                      class="px-2.5 py-1 rounded-md text-xs font-medium transition-all cursor-pointer border"
-                      :class="[
-                        form.protocol === opt.value
-                          ? 'bg-indigo-600 text-white border-indigo-600 shadow-2xs font-semibold'
-                          : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300'
-                      ]"
-                      @click="selectProtocol(opt.value)"
-                    >
-                      {{ opt.label }}
-                    </button>
-                  </div>
-                  <p class="text-3xs text-slate-400 mt-1">未选中时继承服务商默认协议；点击已选协议可取消选择。</p>
-                </div>
-
-                <!-- 专属 base_url 输入框 -->
-                <div>
-                  <label class="block text-slate-600 font-medium mb-1 text-xs">模型专属 Base URL (选填)</label>
+            <form class="space-y-3.5" @submit.prevent="handleSubmit">
+              <!-- 模型 ID 输入 (同一行2列) -->
+              <div class="grid grid-cols-1 sm:grid-cols-12 gap-2 sm:gap-4 items-center">
+                <label class="sm:col-span-3 text-slate-700 font-medium text-xs">模型 ID *</label>
+                <div class="sm:col-span-9">
                   <input
-                    v-model="form.base_url"
+                    v-model="form.name"
                     type="text"
-                    placeholder="例如: https://api.openai.com/v1 或留空继承服务商配置"
-                    class="w-full bg-white border border-slate-200/80 rounded-lg px-2.5 py-1.5 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
-                    data-testid="model-base-url-input"
+                    placeholder="例如: gpt-4o，必须与上游模型标识一致"
+                    required
+                    autocomplete="off"
+                    class="w-full bg-white border border-slate-200/80 rounded-lg px-3 py-1.5 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-slate-400/20 focus:border-slate-500"
+                    data-testid="model-name-input"
                   />
                 </div>
+              </div>
 
-                <!-- 默认采样参数 (请求未传时生效) -->
-                <div class="grid grid-cols-2 gap-2">
-                  <div>
-                    <label class="block text-slate-600 font-medium mb-1 text-xs">默认 Temperature (选填)</label>
-                    <input
-                      v-model="form.temperature"
-                      type="text"
-                      inputmode="decimal"
-                      placeholder="留空继承，如 0.7"
-                      class="w-full bg-white border border-slate-200/80 rounded-lg px-2.5 py-1.5 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
-                      data-testid="model-temperature-input"
-                    />
-                  </div>
-                  <div>
-                    <label class="block text-slate-600 font-medium mb-1 text-xs">默认 Top P (选填)</label>
-                    <input
-                      v-model="form.top_p"
-                      type="text"
-                      inputmode="decimal"
-                      placeholder="留空继承，如 0.9"
-                      class="w-full bg-white border border-slate-200/80 rounded-lg px-2.5 py-1.5 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
-                      data-testid="model-top-p-input"
-                    />
-                  </div>
+              <!-- 模型显示名称 (选填，同一行2列) -->
+              <div class="grid grid-cols-1 sm:grid-cols-12 gap-2 sm:gap-4 items-center">
+                <label class="sm:col-span-3 text-slate-700 font-medium text-xs">显示名称 (选填)</label>
+                <div class="sm:col-span-9">
+                  <input
+                    v-model="form.display_name"
+                    type="text"
+                    placeholder="控制台展示用，留空则显示模型 ID"
+                    autocomplete="off"
+                    class="w-full bg-white border border-slate-200/80 rounded-lg px-3 py-1.5 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-slate-400/20 focus:border-slate-500"
+                    data-testid="model-display-name-input"
+                  />
                 </div>
-                <p class="text-3xs text-slate-400 -mt-2">请求里显式传了 temperature/top_p 时，以请求值为准。</p>
+              </div>
 
-                <!-- 模型专属价格 ($/1M tokens，留空继承服务商) -->
-                <div>
-                  <label class="block text-slate-600 font-medium mb-1.5 text-xs">模型专属价格 (选填，留空继承服务商)</label>
-                  <div class="grid grid-cols-3 gap-2">
-                    <div>
-                      <label class="block text-slate-500 mb-1 text-3xs">输入</label>
-                      <input
-                        v-model="form.input_price"
-                        type="text"
-                        inputmode="decimal"
-                        placeholder="如 0.50"
-                        class="w-full bg-white border border-slate-200/80 rounded-lg px-2.5 py-1.5 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
-                        data-testid="model-input-price-input"
-                      />
-                    </div>
-                    <div>
-                      <label class="block text-slate-500 mb-1 text-3xs">缓存命中</label>
-                      <input
-                        v-model="form.cached_price"
-                        type="text"
-                        inputmode="decimal"
-                        placeholder="如 0.25"
-                        class="w-full bg-white border border-slate-200/80 rounded-lg px-2.5 py-1.5 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
-                        data-testid="model-cached-price-input"
-                      />
-                    </div>
-                    <div>
-                      <label class="block text-slate-500 mb-1 text-3xs">输出</label>
-                      <input
-                        v-model="form.output_price"
-                        type="text"
-                        inputmode="decimal"
-                        placeholder="如 1.00"
-                        class="w-full bg-white border border-slate-200/80 rounded-lg px-2.5 py-1.5 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
-                        data-testid="model-output-price-input"
-                      />
-                    </div>
+              <!-- 模型分级 (Tier) 按钮选项组 (同一行2列) -->
+              <div class="grid grid-cols-1 sm:grid-cols-12 gap-2 sm:gap-4 items-center">
+                <label class="sm:col-span-3 text-slate-700 font-medium text-xs">模型分级 (Tier)</label>
+                <div class="sm:col-span-9">
+                  <div
+                    class="grid grid-cols-3 gap-1.5 p-1 bg-slate-100/90 rounded-lg select-none border border-slate-200/70"
+                    data-testid="model-tier-buttons"
+                  >
+                    <button
+                      v-for="t in MODEL_TIERS"
+                      :key="t.value"
+                      type="button"
+                      :data-testid="`tier-btn-${t.value.toLowerCase()}`"
+                      class="py-1 px-2 rounded-md text-xs font-medium transition-all cursor-pointer text-center"
+                      :class="[
+                        form.tier === t.value
+                          ? 'bg-slate-900 text-white shadow-2xs font-semibold'
+                          : 'text-slate-600 hover:text-slate-900 hover:bg-white/50'
+                      ]"
+                      @click="form.tier = t.value"
+                    >
+                      {{ t.label }}
+                    </button>
                   </div>
                 </div>
               </div>
-            </UiCollapsible>
-          </div>
 
-          <div class="flex items-center justify-end gap-2 pt-2 border-t border-slate-200/60">
-            <UiButton variant="ghost" size="sm" @click="cancelForm">
-              取消
-            </UiButton>
-            <UiButton
-              type="submit"
-              size="sm"
-              :disabled="submitting || !adminWriteEnabled"
-              data-testid="submit-model-btn"
-            >
-              {{ submitting ? '保存中...' : '保存模型' }}
-            </UiButton>
+              <!-- 上下文窗口 (Context Window) 按钮选项组 (同一行2列) -->
+              <div class="grid grid-cols-1 sm:grid-cols-12 gap-2 sm:gap-4 items-center">
+                <label class="sm:col-span-3 text-slate-700 font-medium text-xs">上下文窗口</label>
+                <div class="sm:col-span-9">
+                  <div
+                    class="flex flex-wrap items-center gap-1.5 p-1 bg-slate-100/90 rounded-lg select-none border border-slate-200/70"
+                    data-testid="context-window-buttons"
+                  >
+                    <button
+                      v-for="p in CONTEXT_PRESETS"
+                      :key="p"
+                      type="button"
+                      :data-testid="`context-btn-${p}`"
+                      class="flex-1 py-1 px-2 rounded-md text-xs font-medium transition-all cursor-pointer text-center"
+                      :class="[
+                        !isCustomContext && form.context_window?.toLowerCase() === p.toLowerCase()
+                          ? 'bg-slate-900 text-white shadow-2xs font-semibold'
+                          : 'text-slate-600 hover:text-slate-900 hover:bg-white/50'
+                      ]"
+                      @click="setContextPreset(p)"
+                    >
+                      {{ p.toUpperCase() }}
+                    </button>
+                    <button
+                      type="button"
+                      data-testid="context-btn-custom"
+                      class="py-1 px-3 rounded-md text-xs font-medium transition-all cursor-pointer text-center"
+                      :class="[
+                        isCustomContext
+                          ? 'bg-slate-900 text-white shadow-2xs font-semibold'
+                          : 'text-slate-600 hover:text-slate-900 hover:bg-white/50'
+                      ]"
+                      @click="selectCustomContext"
+                    >
+                      自定义
+                    </button>
+                  </div>
+
+                  <UiCollapsible :open="isCustomContext">
+                    <input
+                      v-model="form.context_window"
+                      type="text"
+                      placeholder="输入自定义上下文容量，例如: 256k"
+                      class="w-full bg-white border border-slate-200/80 rounded-lg px-3 py-1.5 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-slate-400/20 focus:border-slate-500 mt-1"
+                      data-testid="model-context-window-input"
+                    />
+                  </UiCollapsible>
+                </div>
+              </div>
+
+              <!-- 思考强度 (同一行2列) -->
+              <div class="grid grid-cols-1 sm:grid-cols-12 gap-2 sm:gap-4 items-center">
+                <label class="sm:col-span-3 text-slate-700 font-medium text-xs flex items-center gap-1">
+                  <span>思考强度</span>
+                  <UiTooltip content="设置模型推理思考深度的预设档位，按需开启深度认知">
+                    <Icons name="info" size="12" class="text-slate-400 cursor-pointer" />
+                  </UiTooltip>
+                </label>
+                <div class="sm:col-span-9">
+                  <ThinkingEffortSelect
+                    v-model:default-effort="form.thinking_default"
+                  />
+                </div>
+              </div>
+
+              <!-- 输入模态与输出模态 (同一行2列) -->
+              <div class="grid grid-cols-1 sm:grid-cols-12 gap-2 sm:gap-4 items-center" data-testid="model-modalities-section">
+                <label class="sm:col-span-3 text-slate-700 font-medium text-xs">模态支持</label>
+                <div class="sm:col-span-9 flex flex-wrap items-center gap-4 p-2 bg-slate-100/60 rounded-lg border border-slate-200/60">
+                  <div class="flex items-center gap-1.5" data-testid="model-input-modalities">
+                    <span class="text-3xs text-slate-500 font-medium select-none">入:</span>
+                    <UiTooltip
+                      v-for="m in MODALITIES"
+                      :key="`in-${m.id}`"
+                      :content="`输入支持: ${m.label} (点击切换)`"
+                    >
+                      <button
+                        type="button"
+                        :data-testid="`input-modality-btn-${m.id}`"
+                        class="h-7 w-7 rounded-md flex items-center justify-center transition-all cursor-pointer"
+                        :class="[
+                          form.input_types.includes(m.id)
+                            ? 'bg-slate-900 text-white shadow-2xs font-semibold'
+                            : 'bg-white text-slate-400 hover:text-slate-700 hover:bg-slate-50 border border-slate-200/60'
+                        ]"
+                        @click="toggleInputModality(m.id)"
+                      >
+                        <Icons :name="m.icon" size="14" />
+                      </button>
+                    </UiTooltip>
+                  </div>
+                  <span class="text-slate-300">|</span>
+                  <div class="flex items-center gap-1.5" data-testid="model-output-modalities">
+                    <span class="text-3xs text-slate-500 font-medium select-none">出:</span>
+                    <UiTooltip
+                      v-for="m in MODALITIES"
+                      :key="`out-${m.id}`"
+                      :content="`输出支持: ${m.label} (点击切换)`"
+                    >
+                      <button
+                        type="button"
+                        :data-testid="`output-modality-btn-${m.id}`"
+                        class="h-7 w-7 rounded-md flex items-center justify-center transition-all cursor-pointer"
+                        :class="[
+                          form.output_types.includes(m.id)
+                            ? 'bg-slate-900 text-white shadow-2xs font-semibold'
+                            : 'bg-white text-slate-400 hover:text-slate-700 hover:bg-slate-50 border border-slate-200/60'
+                        ]"
+                        @click="toggleOutputModality(m.id)"
+                      >
+                        <Icons :name="m.icon" size="14" />
+                      </button>
+                    </UiTooltip>
+                  </div>
+                </div>
+              </div>
+
+              <!-- 下级折叠层级：标题直接是“高级” -->
+              <div class="pt-1">
+                <button
+                  type="button"
+                  class="text-xs font-semibold text-slate-600 hover:text-slate-900 inline-flex items-center gap-1 cursor-pointer py-1 select-none"
+                  data-testid="toggle-advanced-btn"
+                  @click="showAdvanced = !showAdvanced"
+                >
+                  <Icons :name="showAdvanced ? 'chevron-down' : 'chevron-right'" size="12" />
+                  高级
+                </button>
+
+                <UiCollapsible :open="showAdvanced">
+                  <div class="p-3.5 bg-slate-100/70 backdrop-blur-xs rounded-lg space-y-3.5 mt-1.5 border border-slate-200/60">
+                    <!-- 3 种底层协议选项 (同一行2列) -->
+                    <div class="grid grid-cols-1 sm:grid-cols-12 gap-2 sm:gap-4 items-center">
+                      <label class="sm:col-span-3 text-slate-600 font-medium text-xs">协议覆盖</label>
+                      <div class="sm:col-span-9">
+                        <div class="flex flex-wrap gap-1.5" data-testid="model-protocol-options">
+                          <button
+                            v-for="opt in PROTOCOL_OPTIONS"
+                            :key="opt.value"
+                            type="button"
+                            :data-testid="`model-proto-${opt.value}`"
+                            class="px-2.5 py-1 rounded-md text-xs font-medium transition-all cursor-pointer border"
+                            :class="[
+                              form.protocol === opt.value
+                                ? 'bg-slate-900 text-white border-slate-900 shadow-2xs font-semibold'
+                                : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300'
+                            ]"
+                            @click="selectProtocol(opt.value)"
+                          >
+                            {{ opt.label }}
+                          </button>
+                        </div>
+                        <p class="text-3xs text-slate-400 mt-1">未选中时继承服务商默认协议；点击已选协议可取消选择。</p>
+                      </div>
+                    </div>
+
+                    <!-- 专属 base_url 输入框 (同一行2列) -->
+                    <div class="grid grid-cols-1 sm:grid-cols-12 gap-2 sm:gap-4 items-center">
+                      <label class="sm:col-span-3 text-slate-600 font-medium text-xs">Base URL</label>
+                      <div class="sm:col-span-9">
+                        <input
+                          v-model="form.base_url"
+                          type="text"
+                          placeholder="例如: https://api.openai.com/v1 或留空继承服务商配置"
+                          class="w-full bg-white border border-slate-200/80 rounded-lg px-2.5 py-1.5 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-slate-400/20 focus:border-slate-500"
+                          data-testid="model-base-url-input"
+                        />
+                      </div>
+                    </div>
+
+                    <!-- 默认采样参数 (请求未传时生效，同一行2列) -->
+                    <div class="grid grid-cols-1 sm:grid-cols-12 gap-2 sm:gap-4 items-center">
+                      <label class="sm:col-span-3 text-slate-600 font-medium text-xs">默认采样</label>
+                      <div class="sm:col-span-9 grid grid-cols-2 gap-2">
+                        <div>
+                          <input
+                            v-model="form.temperature"
+                            type="text"
+                            inputmode="decimal"
+                            placeholder="Temperature 如 0.7"
+                            class="w-full bg-white border border-slate-200/80 rounded-lg px-2.5 py-1.5 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-slate-400/20 focus:border-slate-500"
+                            data-testid="model-temperature-input"
+                          />
+                        </div>
+                        <div>
+                          <input
+                            v-model="form.top_p"
+                            type="text"
+                            inputmode="decimal"
+                            placeholder="Top P 如 0.9"
+                            class="w-full bg-white border border-slate-200/80 rounded-lg px-2.5 py-1.5 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-slate-400/20 focus:border-slate-500"
+                            data-testid="model-top-p-input"
+                          />
+                        </div>
+                      </div>
+                    </div>
+
+                    <!-- 价格与峰谷模式 (同一行2列，默认统一价格，可选择峰谷模式) -->
+                    <div class="grid grid-cols-1 sm:grid-cols-12 gap-2 sm:gap-4 items-start pt-1">
+                      <div class="sm:col-span-3 text-slate-600 font-medium text-xs pt-1.5">
+                        <span>价格</span>
+                        <p class="text-3xs text-slate-400 font-normal mt-0.5">$/1M tokens</p>
+                      </div>
+                      <div class="sm:col-span-9 space-y-2.5">
+                        <!-- 价格模式切换胶囊 (统一价格 vs 峰谷模式) -->
+                        <div class="inline-flex p-0.5 bg-slate-200/80 rounded-md border border-slate-300/60 select-none">
+                          <button
+                            type="button"
+                            class="px-2.5 py-1 text-xs font-medium rounded transition-all cursor-pointer"
+                            :class="[
+                              form.pricing_mode === 'uniform'
+                                ? 'bg-slate-900 text-white shadow-2xs font-semibold'
+                                : 'text-slate-600 hover:text-slate-900'
+                            ]"
+                            @click="form.pricing_mode = 'uniform'"
+                          >
+                            统一价格
+                          </button>
+                          <button
+                            type="button"
+                            class="px-2.5 py-1 text-xs font-medium rounded transition-all cursor-pointer"
+                            :class="[
+                              form.pricing_mode === 'peak_valley'
+                                ? 'bg-slate-900 text-white shadow-2xs font-semibold'
+                                : 'text-slate-600 hover:text-slate-900'
+                            ]"
+                            @click="() => {
+                              form.pricing_mode = 'peak_valley';
+                              if (form.pricing_periods.length === 0) {
+                                addPricingPeriod();
+                              }
+                            }"
+                          >
+                            峰谷模式
+                          </button>
+                        </div>
+
+                        <!-- 统一价格模式字段 -->
+                        <div v-if="form.pricing_mode === 'uniform'" class="grid grid-cols-3 gap-2">
+                          <div>
+                            <label class="block text-slate-500 mb-1 text-3xs">输入 (留空继承)</label>
+                            <input
+                              v-model="form.input_price"
+                              type="text"
+                              inputmode="decimal"
+                              placeholder="如 0.50"
+                              class="w-full bg-white border border-slate-200/80 rounded-lg px-2.5 py-1.5 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-slate-400/20 focus:border-slate-500"
+                              data-testid="model-input-price-input"
+                            />
+                          </div>
+                          <div>
+                            <label class="block text-slate-500 mb-1 text-3xs">缓存命中</label>
+                            <input
+                              v-model="form.cached_price"
+                              type="text"
+                              inputmode="decimal"
+                              placeholder="如 0.25"
+                              class="w-full bg-white border border-slate-200/80 rounded-lg px-2.5 py-1.5 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-slate-400/20 focus:border-slate-500"
+                              data-testid="model-cached-price-input"
+                            />
+                          </div>
+                          <div>
+                            <label class="block text-slate-500 mb-1 text-3xs">输出</label>
+                            <input
+                              v-model="form.output_price"
+                              type="text"
+                              inputmode="decimal"
+                              placeholder="如 1.00"
+                              class="w-full bg-white border border-slate-200/80 rounded-lg px-2.5 py-1.5 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-slate-400/20 focus:border-slate-500"
+                              data-testid="model-output-price-input"
+                            />
+                          </div>
+                        </div>
+
+                        <!-- 峰谷多时段列表配置 -->
+                        <div v-else class="space-y-2">
+                          <div
+                            v-for="(period, pIdx) in form.pricing_periods"
+                            :key="`period-${pIdx}`"
+                            class="p-2.5 bg-white/80 rounded-lg border border-slate-200/70 space-y-2 text-xs"
+                          >
+                            <div class="flex items-center justify-between gap-2">
+                              <div class="flex items-center gap-1.5 flex-1">
+                                <input
+                                  v-model="period.name"
+                                  type="text"
+                                  placeholder="时段名称 (如 低谷/高峰)"
+                                  class="w-32 bg-slate-50 border border-slate-200 rounded px-2 py-1 text-xs text-slate-800 font-medium"
+                                />
+                                <input
+                                  v-model="period.start_time"
+                                  type="text"
+                                  placeholder="00:00"
+                                  class="w-16 bg-slate-50 border border-slate-200 rounded px-1.5 py-1 text-xs text-center font-mono"
+                                />
+                                <span class="text-slate-400">至</span>
+                                <input
+                                  v-model="period.end_time"
+                                  type="text"
+                                  placeholder="08:00"
+                                  class="w-16 bg-slate-50 border border-slate-200 rounded px-1.5 py-1 text-xs text-center font-mono"
+                                />
+                              </div>
+                              <button
+                                type="button"
+                                class="text-slate-400 hover:text-rose-600 p-1 cursor-pointer"
+                                title="删除时段"
+                                @click="removePricingPeriod(pIdx)"
+                              >
+                                <Icons name="trash" size="13" />
+                              </button>
+                            </div>
+
+                            <div class="grid grid-cols-3 gap-2">
+                              <div>
+                                <label class="block text-slate-500 mb-0.5 text-3xs">输入单价</label>
+                                <input
+                                  v-model="period.input_price"
+                                  type="text"
+                                  placeholder="0.00"
+                                  class="w-full bg-white border border-slate-200 rounded px-2 py-1 text-xs text-slate-800"
+                                />
+                              </div>
+                              <div>
+                                <label class="block text-slate-500 mb-0.5 text-3xs">缓存单价</label>
+                                <input
+                                  v-model="period.cached_price"
+                                  type="text"
+                                  placeholder="0.00"
+                                  class="w-full bg-white border border-slate-200 rounded px-2 py-1 text-xs text-slate-800"
+                                />
+                              </div>
+                              <div>
+                                <label class="block text-slate-500 mb-0.5 text-3xs">输出单价</label>
+                                <input
+                                  v-model="period.output_price"
+                                  type="text"
+                                  placeholder="0.00"
+                                  class="w-full bg-white border border-slate-200 rounded px-2 py-1 text-xs text-slate-800"
+                                />
+                              </div>
+                            </div>
+                          </div>
+
+                          <button
+                            type="button"
+                            class="w-full py-1.5 border border-dashed border-slate-300 hover:border-slate-400 rounded-lg text-xs text-slate-600 hover:text-slate-900 flex items-center justify-center gap-1 cursor-pointer bg-slate-50/50"
+                            @click="addPricingPeriod"
+                          >
+                            <Icons name="plus" size="13" />
+                            添加分时时段
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </UiCollapsible>
+              </div>
+
+              <div class="flex items-center justify-end gap-2 pt-2 border-t border-slate-200/60">
+                <UiButton variant="ghost" size="sm" @click="cancelForm">
+                  取消
+                </UiButton>
+                <UiButton
+                  type="submit"
+                  size="sm"
+                  :disabled="submitting || !adminWriteEnabled"
+                  data-testid="submit-model-btn"
+                >
+                  {{ submitting ? '保存中...' : '保存模型' }}
+                </UiButton>
+              </div>
+            </form>
           </div>
-        </form>
-      </div>
-    </UiCollapsible>
+        </UiCollapsible>
 
     <!-- 模型条目列表 (彻底去除第三层边框与背景，平滑轻盈) -->
     <div v-if="models.length === 0" class="py-3 text-center text-xs text-slate-400 bg-transparent border-none rounded-lg">
@@ -747,7 +950,7 @@ function getTierBadgeVariant(tier?: string) {
               v-if="m.thinking_default && m.thinking_default !== 'Off'"
               :content="`思考强度预设: ${m.thinking_default}`"
             >
-              <UiBadge variant="purple" class="inline-flex items-center gap-1 cursor-help">
+              <UiBadge variant="secondary" class="inline-flex items-center gap-1 cursor-help">
                 <Icons name="brain" size="12" />
                 {{ m.thinking_default }}
               </UiBadge>
@@ -799,11 +1002,11 @@ function getTierBadgeVariant(tier?: string) {
               </UiBadge>
             </UiTooltip>
             <UiTooltip
-              v-if="m.input_price != null || m.cached_price != null || m.output_price != null"
-              :content="`专属价格($/1M): 入${m.input_price ?? '继承'} / 缓${m.cached_price ?? '继承'} / 出${m.output_price ?? '继承'}`"
+              v-if="m.pricing_mode === 'peak_valley' || m.input_price != null || m.cached_price != null || m.output_price != null"
+              :content="m.pricing_mode === 'peak_valley' ? `峰谷价格(${m.pricing_periods?.length || 0}时段)` : `价格($/1M): 入${m.input_price ?? '继承'} / 缓${m.cached_price ?? '继承'} / 出${m.output_price ?? '继承'}`"
             >
               <UiBadge variant="secondary" class="hidden md:inline-flex items-center text-3xs font-mono font-normal cursor-help">
-                ￥定制
+                {{ m.pricing_mode === 'peak_valley' ? '峰谷定价' : '￥定制' }}
               </UiBadge>
             </UiTooltip>
           </div>
@@ -817,7 +1020,7 @@ function getTierBadgeVariant(tier?: string) {
                 :aria-label="`编辑模型 ${m.name}`"
                 :disabled="!adminWriteEnabled"
                 data-testid="edit-model-btn"
-                class="text-slate-500 hover:text-indigo-600 hover:bg-indigo-50"
+                class="text-slate-500 hover:text-slate-900 hover:bg-slate-100"
                 @click="openEditInline(m)"
               >
                 <Icons name="edit" size="14" />
@@ -843,8 +1046,8 @@ function getTierBadgeVariant(tier?: string) {
 
         <!-- 当前模型的平滑内联编辑区 -->
         <UiCollapsible :open="editingModelName === m.name">
-          <div class="p-4 bg-white border-t border-slate-100 text-xs space-y-3">
-            <div class="flex items-center justify-between gap-3 min-w-0">
+          <div class="p-5 bg-white/70 backdrop-blur-md border border-white/60 shadow-xs rounded-xl text-xs space-y-4 my-2">
+            <div class="flex items-center justify-between gap-3 min-w-0 pb-2 border-b border-slate-200/50">
               <span class="font-semibold text-slate-800 text-sm truncate" :title="m.name">编辑模型: {{ m.name }}</span>
               <button
                 type="button"
@@ -860,109 +1063,121 @@ function getTierBadgeVariant(tier?: string) {
               {{ formError }}
             </div>
 
-            <form class="space-y-3" @submit.prevent="handleSubmit">
-              <!-- 显示名称 (选填，仅控制台展示) -->
-              <div>
-                <label class="block text-slate-600 font-medium mb-1 text-xs">显示名称 (选填)</label>
-                <input
-                  v-model="form.display_name"
-                  type="text"
-                  placeholder="留空则显示模型 ID"
-                  autocomplete="off"
-                  class="w-full bg-white border border-slate-200/80 rounded-lg px-3 py-1.5 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
-                  data-testid="model-display-name-input"
-                />
-              </div>
-
-              <!-- 模型分级 (Tier) 按钮选项组 (统一为精致中性浅灰分段底色) -->
-              <div>
-                <label class="block text-slate-600 font-medium mb-1.5 text-xs">模型分级 (Tier)</label>
-                <div
-                  class="grid grid-cols-3 gap-1.5 p-1 bg-slate-100/90 rounded-lg select-none border border-slate-200/70"
-                  data-testid="model-tier-buttons"
-                >
-                  <button
-                    v-for="t in MODEL_TIERS"
-                    :key="t.value"
-                    type="button"
-                    :data-testid="`tier-btn-${t.value.toLowerCase()}`"
-                    class="py-1.5 px-2 rounded-md text-xs font-medium transition-all cursor-pointer text-center"
-                    :class="[
-                      form.tier === t.value
-                        ? 'bg-white text-slate-900 shadow-2xs font-semibold'
-                        : 'text-slate-600 hover:text-slate-900 hover:bg-white/50'
-                    ]"
-                    @click="form.tier = t.value"
-                  >
-                    {{ t.label }}
-                  </button>
-                </div>
-              </div>
-
-              <!-- 上下文窗口 (Context Window) 按钮选项组 (仅保留 256K, 512K, 1M) -->
-              <div>
-                <label class="block text-slate-600 font-medium mb-1.5 text-xs">上下文窗口 (Context Window)</label>
-                <div
-                  class="flex flex-wrap items-center gap-1.5 p-1 bg-slate-100/90 rounded-lg select-none mb-1.5 border border-slate-200/70"
-                  data-testid="context-window-buttons"
-                >
-                  <button
-                    v-for="p in CONTEXT_PRESETS"
-                    :key="p"
-                    type="button"
-                    :data-testid="`context-btn-${p}`"
-                    class="flex-1 py-1.5 px-2 rounded-md text-xs font-medium transition-all cursor-pointer text-center"
-                    :class="[
-                      !isCustomContext && form.context_window?.toLowerCase() === p.toLowerCase()
-                        ? 'bg-white text-slate-900 shadow-2xs font-semibold'
-                        : 'text-slate-600 hover:text-slate-900 hover:bg-white/50'
-                    ]"
-                    @click="setContextPreset(p)"
-                  >
-                    {{ p.toUpperCase() }}
-                  </button>
-                  <button
-                    type="button"
-                    data-testid="context-btn-custom"
-                    class="py-1.5 px-3 rounded-md text-xs font-medium transition-all cursor-pointer text-center"
-                    :class="[
-                      isCustomContext
-                        ? 'bg-white text-slate-900 shadow-2xs font-semibold'
-                        : 'text-slate-600 hover:text-slate-900 hover:bg-white/50'
-                    ]"
-                    @click="selectCustomContext"
-                  >
-                    自定义
-                  </button>
-                </div>
-
-                <UiCollapsible :open="isCustomContext">
+            <form class="space-y-3.5" @submit.prevent="handleSubmit">
+              <!-- 显示名称 (选填，仅控制台展示，同一行2列) -->
+              <div class="grid grid-cols-1 sm:grid-cols-12 gap-2 sm:gap-4 items-center">
+                <label class="sm:col-span-3 text-slate-700 font-medium text-xs">显示名称 (选填)</label>
+                <div class="sm:col-span-9">
                   <input
-                    v-model="form.context_window"
+                    v-model="form.display_name"
                     type="text"
-                    placeholder="输入自定义上下文容量，例如: 256k"
-                    class="w-full bg-white border border-slate-200/80 rounded-lg px-3 py-1.5 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 mt-1"
-                    data-testid="model-context-window-input"
+                    placeholder="留空则显示模型 ID"
+                    autocomplete="off"
+                    class="w-full bg-white border border-slate-200/80 rounded-lg px-3 py-1.5 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-slate-400/20 focus:border-slate-500"
+                    data-testid="model-display-name-input"
                   />
-                </UiCollapsible>
+                </div>
               </div>
 
-              <!-- 思考强度按钮组 (无最大上限) -->
-              <ThinkingEffortSelect
-                v-model:default-effort="form.thinking_default"
-                :disabled="!adminWriteEnabled"
-              />
+              <!-- 模型分级 (Tier) 按钮选项组 (同一行2列) -->
+              <div class="grid grid-cols-1 sm:grid-cols-12 gap-2 sm:gap-4 items-center">
+                <label class="sm:col-span-3 text-slate-700 font-medium text-xs">模型分级 (Tier)</label>
+                <div class="sm:col-span-9">
+                  <div
+                    class="grid grid-cols-3 gap-1.5 p-1 bg-slate-100/90 rounded-lg select-none border border-slate-200/70"
+                    data-testid="model-tier-buttons"
+                  >
+                    <button
+                      v-for="t in MODEL_TIERS"
+                      :key="t.value"
+                      type="button"
+                      :data-testid="`tier-btn-${t.value.toLowerCase()}`"
+                      class="py-1 px-2 rounded-md text-xs font-medium transition-all cursor-pointer text-center"
+                      :class="[
+                        form.tier === t.value
+                          ? 'bg-slate-900 text-white shadow-2xs font-semibold'
+                          : 'text-slate-600 hover:text-slate-900 hover:bg-white/50'
+                      ]"
+                      @click="form.tier = t.value"
+                    >
+                      {{ t.label }}
+                    </button>
+                  </div>
+                </div>
+              </div>
 
-              <!-- 支持模态类型拆解：输入模态与输出模态独立选择器 -->
-              <div class="space-y-2.5 p-2.5 bg-slate-50/80 rounded-lg border border-slate-200/60" data-testid="model-modalities-section">
-                <div>
-                  <label class="block text-slate-600 font-medium mb-1.5 text-xs flex items-center gap-1.5">
-                    <span>输入模态 (Input)</span>
-                    <UiTooltip content="该模型支持接收的输入模态能力 (点击纯图标切换)">
-                      <Icons name="info" size="12" class="text-slate-400 cursor-pointer" />
-                    </UiTooltip>
-                  </label>
-                  <div class="flex items-center gap-2" data-testid="model-input-modalities">
+              <!-- 上下文窗口 (Context Window) 按钮选项组 (同一行2列) -->
+              <div class="grid grid-cols-1 sm:grid-cols-12 gap-2 sm:gap-4 items-center">
+                <label class="sm:col-span-3 text-slate-700 font-medium text-xs">上下文窗口</label>
+                <div class="sm:col-span-9">
+                  <div
+                    class="flex flex-wrap items-center gap-1.5 p-1 bg-slate-100/90 rounded-lg select-none border border-slate-200/70"
+                    data-testid="context-window-buttons"
+                  >
+                    <button
+                      v-for="p in CONTEXT_PRESETS"
+                      :key="p"
+                      type="button"
+                      :data-testid="`context-btn-${p}`"
+                      class="flex-1 py-1 px-2 rounded-md text-xs font-medium transition-all cursor-pointer text-center"
+                      :class="[
+                        !isCustomContext && form.context_window?.toLowerCase() === p.toLowerCase()
+                          ? 'bg-slate-900 text-white shadow-2xs font-semibold'
+                          : 'text-slate-600 hover:text-slate-900 hover:bg-white/50'
+                      ]"
+                      @click="setContextPreset(p)"
+                    >
+                      {{ p.toUpperCase() }}
+                    </button>
+                    <button
+                      type="button"
+                      data-testid="context-btn-custom"
+                      class="py-1 px-3 rounded-md text-xs font-medium transition-all cursor-pointer text-center"
+                      :class="[
+                        isCustomContext
+                          ? 'bg-slate-900 text-white shadow-2xs font-semibold'
+                          : 'text-slate-600 hover:text-slate-900 hover:bg-white/50'
+                      ]"
+                      @click="selectCustomContext"
+                    >
+                      自定义
+                    </button>
+                  </div>
+
+                  <UiCollapsible :open="isCustomContext">
+                    <input
+                      v-model="form.context_window"
+                      type="text"
+                      placeholder="输入自定义上下文容量，例如: 256k"
+                      class="w-full bg-white border border-slate-200/80 rounded-lg px-3 py-1.5 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-slate-400/20 focus:border-slate-500 mt-1"
+                      data-testid="model-context-window-input"
+                    />
+                  </UiCollapsible>
+                </div>
+              </div>
+
+              <!-- 思考强度按钮组 (同一行2列) -->
+              <div class="grid grid-cols-1 sm:grid-cols-12 gap-2 sm:gap-4 items-center">
+                <label class="sm:col-span-3 text-slate-700 font-medium text-xs flex items-center gap-1">
+                  <span>思考强度</span>
+                  <UiTooltip content="设置模型推理思考深度的预设档位，按需开启深度认知">
+                    <Icons name="info" size="12" class="text-slate-400 cursor-pointer" />
+                  </UiTooltip>
+                </label>
+                <div class="sm:col-span-9">
+                  <ThinkingEffortSelect
+                    v-model:default-effort="form.thinking_default"
+                    :disabled="!adminWriteEnabled"
+                  />
+                </div>
+              </div>
+
+              <!-- 支持模态类型拆解 (同一行2列) -->
+              <div class="grid grid-cols-1 sm:grid-cols-12 gap-2 sm:gap-4 items-center" data-testid="model-modalities-section">
+                <label class="sm:col-span-3 text-slate-700 font-medium text-xs">模态支持</label>
+                <div class="sm:col-span-9 flex flex-wrap items-center gap-4 p-2 bg-slate-100/60 rounded-lg border border-slate-200/60">
+                  <div class="flex items-center gap-1.5" data-testid="model-input-modalities">
+                    <span class="text-3xs text-slate-500 font-medium select-none">入:</span>
                     <UiTooltip
                       v-for="m in MODALITIES"
                       :key="`in-${m.id}`"
@@ -971,28 +1186,21 @@ function getTierBadgeVariant(tier?: string) {
                       <button
                         type="button"
                         :data-testid="`input-modality-btn-${m.id}`"
-                        class="h-8 w-8 rounded-lg flex items-center justify-center transition-all cursor-pointer"
+                        class="h-7 w-7 rounded-md flex items-center justify-center transition-all cursor-pointer"
                         :class="[
                           form.input_types.includes(m.id)
-                            ? 'bg-indigo-50 text-indigo-600 ring-1 ring-indigo-300 shadow-2xs'
-                            : 'bg-slate-100 text-slate-400 hover:text-slate-600 hover:bg-slate-200/60'
+                            ? 'bg-slate-900 text-white shadow-2xs font-semibold'
+                            : 'bg-white text-slate-400 hover:text-slate-700 hover:bg-slate-50 border border-slate-200/60'
                         ]"
                         @click="toggleInputModality(m.id)"
                       >
-                        <Icons :name="m.icon" size="15" />
+                        <Icons :name="m.icon" size="14" />
                       </button>
                     </UiTooltip>
                   </div>
-                </div>
-
-                <div>
-                  <label class="block text-slate-600 font-medium mb-1.5 text-xs flex items-center gap-1.5">
-                    <span>输出模态 (Output)</span>
-                    <UiTooltip content="该模型能够生成的输出模态能力 (点击纯图标切换)">
-                      <Icons name="info" size="12" class="text-slate-400 cursor-pointer" />
-                    </UiTooltip>
-                  </label>
-                  <div class="flex items-center gap-2" data-testid="model-output-modalities">
+                  <span class="text-slate-300">|</span>
+                  <div class="flex items-center gap-1.5" data-testid="model-output-modalities">
+                    <span class="text-3xs text-slate-500 font-medium select-none">出:</span>
                     <UiTooltip
                       v-for="m in MODALITIES"
                       :key="`out-${m.id}`"
@@ -1001,15 +1209,15 @@ function getTierBadgeVariant(tier?: string) {
                       <button
                         type="button"
                         :data-testid="`output-modality-btn-${m.id}`"
-                        class="h-8 w-8 rounded-lg flex items-center justify-center transition-all cursor-pointer"
+                        class="h-7 w-7 rounded-md flex items-center justify-center transition-all cursor-pointer"
                         :class="[
                           form.output_types.includes(m.id)
-                            ? 'bg-emerald-50 text-emerald-600 ring-1 ring-emerald-300 shadow-2xs'
-                            : 'bg-slate-100 text-slate-400 hover:text-slate-600 hover:bg-slate-200/60'
+                            ? 'bg-slate-900 text-white shadow-2xs font-semibold'
+                            : 'bg-white text-slate-400 hover:text-slate-700 hover:bg-slate-50 border border-slate-200/60'
                         ]"
                         @click="toggleOutputModality(m.id)"
                       >
-                        <Icons :name="m.icon" size="15" />
+                        <Icons :name="m.icon" size="14" />
                       </button>
                     </UiTooltip>
                   </div>
@@ -1020,7 +1228,7 @@ function getTierBadgeVariant(tier?: string) {
               <div class="pt-1">
                 <button
                   type="button"
-                  class="text-xs font-semibold text-slate-600 hover:text-indigo-600 inline-flex items-center gap-1 cursor-pointer py-1 select-none"
+                  class="text-xs font-semibold text-slate-600 hover:text-slate-900 inline-flex items-center gap-1 cursor-pointer py-1 select-none"
                   data-testid="toggle-advanced-btn"
                   @click="showAdvanced = !showAdvanced"
                 >
@@ -1029,105 +1237,228 @@ function getTierBadgeVariant(tier?: string) {
                 </button>
 
                 <UiCollapsible :open="showAdvanced">
-                  <div class="p-3 bg-slate-100/70 rounded-lg space-y-3 mt-1.5">
-                    <!-- 3 种底层协议选项 -->
-                    <div>
-                      <label class="block text-slate-600 font-medium mb-1.5 text-xs">底层协议覆盖 (选填)</label>
-                      <div class="flex flex-wrap gap-1.5" data-testid="model-protocol-options">
-                        <button
-                          v-for="opt in PROTOCOL_OPTIONS"
-                          :key="opt.value"
-                          type="button"
-                          :data-testid="`model-proto-${opt.value}`"
-                          class="px-2.5 py-1 rounded-md text-xs font-medium transition-all cursor-pointer border"
-                          :class="[
-                            form.protocol === opt.value
-                              ? 'bg-indigo-600 text-white border-indigo-600 shadow-2xs font-semibold'
-                              : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300'
-                          ]"
-                          @click="selectProtocol(opt.value)"
-                        >
-                          {{ opt.label }}
-                        </button>
+                  <div class="p-3.5 bg-slate-100/70 backdrop-blur-xs rounded-lg space-y-3.5 mt-1.5 border border-slate-200/60">
+                    <!-- 3 种底层协议选项 (同一行2列) -->
+                    <div class="grid grid-cols-1 sm:grid-cols-12 gap-2 sm:gap-4 items-center">
+                      <label class="sm:col-span-3 text-slate-600 font-medium text-xs">协议覆盖</label>
+                      <div class="sm:col-span-9">
+                        <div class="flex flex-wrap gap-1.5" data-testid="model-protocol-options">
+                          <button
+                            v-for="opt in PROTOCOL_OPTIONS"
+                            :key="opt.value"
+                            type="button"
+                            :data-testid="`model-proto-${opt.value}`"
+                            class="px-2.5 py-1 rounded-md text-xs font-medium transition-all cursor-pointer border"
+                            :class="[
+                              form.protocol === opt.value
+                                ? 'bg-slate-900 text-white border-slate-900 shadow-2xs font-semibold'
+                                : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300'
+                            ]"
+                            @click="selectProtocol(opt.value)"
+                          >
+                            {{ opt.label }}
+                          </button>
+                        </div>
+                        <p class="text-3xs text-slate-400 mt-1">未选中时继承服务商默认协议；点击已选协议可取消选择。</p>
                       </div>
-                      <p class="text-3xs text-slate-400 mt-1">未选中时继承服务商默认协议；点击已选协议可取消选择。</p>
                     </div>
 
-                    <!-- 专属 base_url 输入框 -->
-                    <div>
-                      <label class="block text-slate-600 font-medium mb-1 text-xs">模型专属 Base URL (选填)</label>
-                      <input
-                        v-model="form.base_url"
-                        type="text"
-                        placeholder="例如: https://api.openai.com/v1 或留空继承服务商配置"
-                        class="w-full bg-white border border-slate-200/80 rounded-lg px-2.5 py-1.5 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
-                        data-testid="model-base-url-input"
-                      />
-                    </div>
-
-                    <!-- 默认采样参数 (请求未传时生效) -->
-                    <div class="grid grid-cols-2 gap-2">
-                      <div>
-                        <label class="block text-slate-600 font-medium mb-1 text-xs">默认 Temperature (选填)</label>
+                    <!-- 专属 base_url 输入框 (同一行2列) -->
+                    <div class="grid grid-cols-1 sm:grid-cols-12 gap-2 sm:gap-4 items-center">
+                      <label class="sm:col-span-3 text-slate-600 font-medium text-xs">Base URL</label>
+                      <div class="sm:col-span-9">
                         <input
-                          v-model="form.temperature"
+                          v-model="form.base_url"
                           type="text"
-                          inputmode="decimal"
-                          placeholder="留空继承，如 0.7"
-                          class="w-full bg-white border border-slate-200/80 rounded-lg px-2.5 py-1.5 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
-                          data-testid="model-temperature-input"
-                        />
-                      </div>
-                      <div>
-                        <label class="block text-slate-600 font-medium mb-1 text-xs">默认 Top P (选填)</label>
-                        <input
-                          v-model="form.top_p"
-                          type="text"
-                          inputmode="decimal"
-                          placeholder="留空继承，如 0.9"
-                          class="w-full bg-white border border-slate-200/80 rounded-lg px-2.5 py-1.5 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
-                          data-testid="model-top-p-input"
+                          placeholder="例如: https://api.openai.com/v1 或留空继承服务商配置"
+                          class="w-full bg-white border border-slate-200/80 rounded-lg px-2.5 py-1.5 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-slate-400/20 focus:border-slate-500"
+                          data-testid="model-base-url-input"
                         />
                       </div>
                     </div>
-                    <p class="text-3xs text-slate-400 -mt-2">请求里显式传了 temperature/top_p 时，以请求值为准。</p>
 
-                    <!-- 模型专属价格 ($/1M tokens，留空继承服务商) -->
-                    <div>
-                      <label class="block text-slate-600 font-medium mb-1.5 text-xs">模型专属价格 (选填，留空继承服务商)</label>
-                      <div class="grid grid-cols-3 gap-2">
+                    <!-- 默认采样参数 (请求未传时生效，同一行2列) -->
+                    <div class="grid grid-cols-1 sm:grid-cols-12 gap-2 sm:gap-4 items-center">
+                      <label class="sm:col-span-3 text-slate-600 font-medium text-xs">默认采样</label>
+                      <div class="sm:col-span-9 grid grid-cols-2 gap-2">
                         <div>
-                          <label class="block text-slate-500 mb-1 text-3xs">输入</label>
                           <input
-                            v-model="form.input_price"
+                            v-model="form.temperature"
                             type="text"
                             inputmode="decimal"
-                            placeholder="如 0.50"
-                            class="w-full bg-white border border-slate-200/80 rounded-lg px-2.5 py-1.5 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
-                            data-testid="model-input-price-input"
+                            placeholder="Temperature 如 0.7"
+                            class="w-full bg-white border border-slate-200/80 rounded-lg px-2.5 py-1.5 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-slate-400/20 focus:border-slate-500"
+                            data-testid="model-temperature-input"
                           />
                         </div>
                         <div>
-                          <label class="block text-slate-500 mb-1 text-3xs">缓存命中</label>
                           <input
-                            v-model="form.cached_price"
+                            v-model="form.top_p"
                             type="text"
                             inputmode="decimal"
-                            placeholder="如 0.25"
-                            class="w-full bg-white border border-slate-200/80 rounded-lg px-2.5 py-1.5 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
-                            data-testid="model-cached-price-input"
+                            placeholder="Top P 如 0.9"
+                            class="w-full bg-white border border-slate-200/80 rounded-lg px-2.5 py-1.5 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-slate-400/20 focus:border-slate-500"
+                            data-testid="model-top-p-input"
                           />
                         </div>
-                        <div>
-                          <label class="block text-slate-500 mb-1 text-3xs">输出</label>
-                          <input
-                            v-model="form.output_price"
-                            type="text"
-                            inputmode="decimal"
-                            placeholder="如 1.00"
-                            class="w-full bg-white border border-slate-200/80 rounded-lg px-2.5 py-1.5 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
-                            data-testid="model-output-price-input"
-                          />
+                      </div>
+                    </div>
+
+                    <!-- 价格与峰谷模式 (同一行2列，默认统一价格，可选择峰谷模式) -->
+                    <div class="grid grid-cols-1 sm:grid-cols-12 gap-2 sm:gap-4 items-start pt-1">
+                      <div class="sm:col-span-3 text-slate-600 font-medium text-xs pt-1.5">
+                        <span>价格</span>
+                        <p class="text-3xs text-slate-400 font-normal mt-0.5">$/1M tokens</p>
+                      </div>
+                      <div class="sm:col-span-9 space-y-2.5">
+                        <!-- 价格模式切换胶囊 (统一价格 vs 峰谷模式) -->
+                        <div class="inline-flex p-0.5 bg-slate-200/80 rounded-md border border-slate-300/60 select-none">
+                          <button
+                            type="button"
+                            class="px-2.5 py-1 text-xs font-medium rounded transition-all cursor-pointer"
+                            :class="[
+                              form.pricing_mode === 'uniform'
+                                ? 'bg-slate-900 text-white shadow-2xs font-semibold'
+                                : 'text-slate-600 hover:text-slate-900'
+                            ]"
+                            @click="form.pricing_mode = 'uniform'"
+                          >
+                            统一价格
+                          </button>
+                          <button
+                            type="button"
+                            class="px-2.5 py-1 text-xs font-medium rounded transition-all cursor-pointer"
+                            :class="[
+                              form.pricing_mode === 'peak_valley'
+                                ? 'bg-slate-900 text-white shadow-2xs font-semibold'
+                                : 'text-slate-600 hover:text-slate-900'
+                            ]"
+                            @click="() => {
+                              form.pricing_mode = 'peak_valley';
+                              if (form.pricing_periods.length === 0) {
+                                addPricingPeriod();
+                              }
+                            }"
+                          >
+                            峰谷模式
+                          </button>
+                        </div>
+
+                        <!-- 统一价格模式字段 -->
+                        <div v-if="form.pricing_mode === 'uniform'" class="grid grid-cols-3 gap-2">
+                          <div>
+                            <label class="block text-slate-500 mb-1 text-3xs">输入 (留空继承)</label>
+                            <input
+                              v-model="form.input_price"
+                              type="text"
+                              inputmode="decimal"
+                              placeholder="如 0.50"
+                              class="w-full bg-white border border-slate-200/80 rounded-lg px-2.5 py-1.5 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-slate-400/20 focus:border-slate-500"
+                              data-testid="model-input-price-input"
+                            />
+                          </div>
+                          <div>
+                            <label class="block text-slate-500 mb-1 text-3xs">缓存命中</label>
+                            <input
+                              v-model="form.cached_price"
+                              type="text"
+                              inputmode="decimal"
+                              placeholder="如 0.25"
+                              class="w-full bg-white border border-slate-200/80 rounded-lg px-2.5 py-1.5 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-slate-400/20 focus:border-slate-500"
+                              data-testid="model-cached-price-input"
+                            />
+                          </div>
+                          <div>
+                            <label class="block text-slate-500 mb-1 text-3xs">输出</label>
+                            <input
+                              v-model="form.output_price"
+                              type="text"
+                              inputmode="decimal"
+                              placeholder="如 1.00"
+                              class="w-full bg-white border border-slate-200/80 rounded-lg px-2.5 py-1.5 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-slate-400/20 focus:border-slate-500"
+                              data-testid="model-output-price-input"
+                            />
+                          </div>
+                        </div>
+
+                        <!-- 峰谷多时段列表配置 -->
+                        <div v-else class="space-y-2">
+                          <div
+                            v-for="(period, pIdx) in form.pricing_periods"
+                            :key="`period-${pIdx}`"
+                            class="p-2.5 bg-white/80 rounded-lg border border-slate-200/70 space-y-2 text-xs"
+                          >
+                            <div class="flex items-center justify-between gap-2">
+                              <div class="flex items-center gap-1.5 flex-1">
+                                <input
+                                  v-model="period.name"
+                                  type="text"
+                                  placeholder="时段名称 (如 低谷/高峰)"
+                                  class="w-32 bg-slate-50 border border-slate-200 rounded px-2 py-1 text-xs text-slate-800 font-medium"
+                                />
+                                <input
+                                  v-model="period.start_time"
+                                  type="text"
+                                  placeholder="00:00"
+                                  class="w-16 bg-slate-50 border border-slate-200 rounded px-1.5 py-1 text-xs text-center font-mono"
+                                />
+                                <span class="text-slate-400">至</span>
+                                <input
+                                  v-model="period.end_time"
+                                  type="text"
+                                  placeholder="08:00"
+                                  class="w-16 bg-slate-50 border border-slate-200 rounded px-1.5 py-1 text-xs text-center font-mono"
+                                />
+                              </div>
+                              <button
+                                type="button"
+                                class="text-slate-400 hover:text-rose-600 p-1 cursor-pointer"
+                                title="删除时段"
+                                @click="removePricingPeriod(pIdx)"
+                              >
+                                <Icons name="trash" size="13" />
+                              </button>
+                            </div>
+
+                            <div class="grid grid-cols-3 gap-2">
+                              <div>
+                                <label class="block text-slate-500 mb-0.5 text-3xs">输入单价</label>
+                                <input
+                                  v-model="period.input_price"
+                                  type="text"
+                                  placeholder="0.00"
+                                  class="w-full bg-white border border-slate-200 rounded px-2 py-1 text-xs text-slate-800"
+                                />
+                              </div>
+                              <div>
+                                <label class="block text-slate-500 mb-0.5 text-3xs">缓存单价</label>
+                                <input
+                                  v-model="period.cached_price"
+                                  type="text"
+                                  placeholder="0.00"
+                                  class="w-full bg-white border border-slate-200 rounded px-2 py-1 text-xs text-slate-800"
+                                />
+                              </div>
+                              <div>
+                                <label class="block text-slate-500 mb-0.5 text-3xs">输出单价</label>
+                                <input
+                                  v-model="period.output_price"
+                                  type="text"
+                                  placeholder="0.00"
+                                  class="w-full bg-white border border-slate-200 rounded px-2 py-1 text-xs text-slate-800"
+                                />
+                              </div>
+                            </div>
+                          </div>
+
+                          <button
+                            type="button"
+                            class="w-full py-1.5 border border-dashed border-slate-300 hover:border-slate-400 rounded-lg text-xs text-slate-600 hover:text-slate-900 flex items-center justify-center gap-1 cursor-pointer bg-slate-50/50"
+                            @click="addPricingPeriod"
+                          >
+                            <Icons name="plus" size="13" />
+                            添加分时时段
+                          </button>
                         </div>
                       </div>
                     </div>

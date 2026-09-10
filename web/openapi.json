@@ -612,6 +612,47 @@
   },
   "components": {
     "schemas": {
+      "AdminPricingMode": {
+        "type": "string",
+        "enum": [
+          "uniform",
+          "peak_valley"
+        ]
+      },
+      "AdminPricingPeriod": {
+        "type": "object",
+        "required": [
+          "name",
+          "start_time",
+          "end_time",
+          "input_price",
+          "cached_price",
+          "output_price"
+        ],
+        "properties": {
+          "cached_price": {
+            "type": "number",
+            "format": "double"
+          },
+          "end_time": {
+            "type": "string"
+          },
+          "input_price": {
+            "type": "number",
+            "format": "double"
+          },
+          "name": {
+            "type": "string"
+          },
+          "output_price": {
+            "type": "number",
+            "format": "double"
+          },
+          "start_time": {
+            "type": "string"
+          }
+        }
+      },
       "AntigravityAuthUrlView": {
         "type": "object",
         "required": [
@@ -1005,6 +1046,25 @@
               "type": "string"
             }
           },
+          "pricing_mode": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/AdminPricingMode"
+              }
+            ]
+          },
+          "pricing_periods": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/AdminPricingPeriod"
+            }
+          },
           "protocol": {
             "type": [
               "string",
@@ -1269,6 +1329,22 @@
             "type": "array",
             "items": {
               "type": "string"
+            }
+          },
+          "pricing_mode": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/AdminPricingMode"
+              }
+            ]
+          },
+          "pricing_periods": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AdminPricingPeriod"
             }
           },
           "protocol": {
@@ -1612,6 +1688,25 @@
             ],
             "items": {
               "type": "string"
+            }
+          },
+          "pricing_mode": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/AdminPricingMode"
+              }
+            ]
+          },
+          "pricing_periods": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/AdminPricingPeriod"
             }
           },
           "protocol": {

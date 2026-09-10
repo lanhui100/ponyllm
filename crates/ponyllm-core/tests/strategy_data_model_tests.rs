@@ -1,6 +1,6 @@
 use ponyllm_core::pool::{
     is_context_capacity_compatible, parse_context_capacity_tokens, BillingMode,
-    GatewayRoutingStrategy, ModelTier, PricingConfig, QuotaLease,
+    GatewayRoutingStrategy, ModelTier, PricingConfig, PricingMode, QuotaLease,
 };
 use std::str::FromStr;
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -92,17 +92,21 @@ fn test_pricing_config_and_is_free_precision() {
     assert!(!default_pricing.is_free());
 
     let free_pricing = PricingConfig {
+        mode: PricingMode::Uniform,
         input_price: 0.0,
         cached_price: 0.0,
         output_price: 0.0,
+        pricing_periods: Vec::new(),
     };
     assert!(free_pricing.is_free());
     assert_eq!(free_pricing.estimate_cost(100_000, true, 1_000), 0.0);
 
     let paid_pricing = PricingConfig {
+        mode: PricingMode::Uniform,
         input_price: 0.14,
         cached_price: 0.014,
         output_price: 0.28,
+        pricing_periods: Vec::new(),
     };
     // 1M input cache miss (0.14) + 1M output (0.28) = 0.42
     let cost_miss = paid_pricing.estimate_cost(1_000_000, false, 1_000_000);

@@ -29,7 +29,7 @@ const variantClasses = computed(() => {
     case 'ghost':
       return 'bg-transparent text-slate-600 hover:text-slate-900 hover:bg-slate-100/80';
     case 'destructive':
-      return 'bg-rose-50 text-rose-600 hover:bg-rose-100/80 hover:text-rose-700 border border-rose-200/50';
+      return 'bg-rose-600 text-white hover:bg-rose-700 shadow-2xs border-0';
     case 'secondary':
       return 'bg-slate-100 text-slate-700 hover:bg-slate-200/80 border border-slate-200/50';
     case 'default':

@@ -102,7 +102,57 @@ describe('ModelSubSection model form', () => {
     expect(created.top_p).toBe(0.9);
     expect(created.input_price).toBe(0.15);
     expect(created.output_price).toBe(0.6);
+    expect(created.pricing_mode).toBe('uniform');
     expect('cached_price' in created).toBe(false);
+
+    app.unmount();
+    document.body.removeChild(container);
+  });
+
+  it('supports peak-valley pricing mode with custom time periods', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    let created: any = null;
+    const app = createApp(ModelSubSection, {
+      providerName: 'openai',
+      models: [],
+      adminWriteEnabled: true,
+      onCreate: async (payload: any) => {
+        created = payload;
+      },
+    });
+    app.mount(container);
+    await nextTick();
+
+    (container.querySelector('[data-testid="add-model-btn"]') as HTMLButtonElement).click();
+    await nextTick();
+    await nextTick();
+
+    const setVal = (testid: string, v: string) => {
+      const el = container.querySelector(`[data-testid="${testid}"]`) as HTMLInputElement;
+      el.value = v;
+      el.dispatchEvent(new Event('input'));
+    };
+    setVal('model-name-input', 'deepseek-pv');
+    (container.querySelector('[data-testid="toggle-advanced-btn"]') as HTMLButtonElement).click();
+    await nextTick();
+
+    // Click 峰谷模式
+    const buttons = Array.from(container.querySelectorAll('button'));
+    const pvBtn = buttons.find((b) => b.textContent?.trim() === '峰谷模式');
+    expect(pvBtn).toBeDefined();
+    pvBtn?.click();
+    await nextTick();
+
+    (container.querySelector('[data-testid="submit-model-btn"]') as HTMLButtonElement).click();
+    await nextTick();
+    await nextTick();
+
+    expect(created).not.toBeNull();
+    expect(created.name).toBe('deepseek-pv');
+    expect(created.pricing_mode).toBe('peak_valley');
+    expect(Array.isArray(created.pricing_periods)).toBe(true);
+    expect(created.pricing_periods.length).toBeGreaterThan(0);
 
     app.unmount();
     document.body.removeChild(container);

@@ -1,3 +1,7 @@
+<script setup lang="ts">
+import UiToast from './components/ui/UiToast.vue';
+</script>
+
 <template>
   <div class="relative min-h-screen">
     <!-- 全局多色彩撞色渐变底图层 (高饱和紧凑撞色：暖日橙/珊瑚橙 + 板岩青/湖水绿) -->
@@ -13,5 +17,8 @@
     <div class="relative z-1 min-h-screen">
       <router-view />
     </div>
+
+    <!-- 全局居中毛玻璃通用 Toast / 二次确认通知组件 -->
+    <UiToast />
   </div>
 </template>

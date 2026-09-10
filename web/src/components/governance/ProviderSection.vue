@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref } from 'vue';
 import type { ProviderView, CreateProviderPayload } from '../../types/admin';
+import { toast } from '../../composables/useToast';
 
 const props = defineProps<{
   providers: ProviderView[];
@@ -76,13 +77,21 @@ async function handleSubmit() {
 }
 
 async function handleDelete(name: string) {
-  if (!confirm(`确定删除 Provider "${name}" 吗？该操作将级联影响下属 Model 与 Key，在途请求不受影响。`)) {
+  const confirmed = await toast.confirm({
+    title: '删除 Provider',
+    message: `确定删除 Provider "${name}" 吗？该操作将级联影响下属 Model 与 Key，在途请求不受影响。`,
+    confirmText: '确认删除',
+    cancelText: '取消',
+    variant: 'destructive',
+  });
+  if (!confirmed) {
     return;
   }
   try {
     await emit('delete', name);
+    toast.success(`Provider "${name}" 已删除`);
   } catch (err: unknown) {
-    alert(`删除失败: ${err instanceof Error ? err.message : String(err)}`);
+    toast.error(`删除失败: ${err instanceof Error ? err.message : String(err)}`);
   }
 }
 </script>

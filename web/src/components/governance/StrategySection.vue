@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue';
 import Icons from '../ui/Icons.vue';
+import { toast } from '../../composables/useToast';
 import UiBadge from '../ui/UiBadge.vue';
 
 const props = defineProps<{
@@ -55,8 +56,9 @@ async function handleSelect(id: string) {
   saving.value = true;
   try {
     await emit('update', id);
+    toast.success('全局调度策略已生效');
   } catch (err: unknown) {
-    alert(`切换策略失败: ${err instanceof Error ? err.message : String(err)}`);
+    toast.error(`切换策略失败: ${err instanceof Error ? err.message : String(err)}`);
     selected.value = props.currentStrategy;
   } finally {
     saving.value = false;

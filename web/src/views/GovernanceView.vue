@@ -11,9 +11,9 @@ import UiButton from '../components/ui/UiButton.vue';
 import UiBadge from '../components/ui/UiBadge.vue';
 import UiTooltip from '../components/ui/UiTooltip.vue';
 import UiCollapsible from '../components/ui/UiCollapsible.vue';
-import UiToast from '../components/ui/UiToast.vue';
 import { resolveBaseURL } from '../lib/alova';
 import type { CreateProviderPayload } from '../types/admin';
+import { toast } from '../composables/useToast';
 
 const {
   providers,
@@ -53,16 +53,9 @@ const {
 type TabType = 'providers' | 'strategy';
 const currentTab = ref<TabType>('providers');
 
-/** 轻量 toast（单条，自动消失）。 */
-const toastMessage = ref<string | null>(null);
-let toastTimer: ReturnType<typeof setTimeout> | null = null;
+/** 轻量 toast（单条，自动消失，接入全局中央毛玻璃 Toast）。 */
 function showToast(message: string, ms = 3500) {
-  toastMessage.value = message;
-  if (toastTimer) clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => {
-    toastMessage.value = null;
-    toastTimer = null;
-  }, ms);
+  toast.info(message, { duration: ms });
 }
 
 /** 上游名单批量添加：逐个复用 saveModel（版本控制内聚），409 记为跳过。 */
@@ -461,7 +454,6 @@ async function handleRefresh() {
 
 onUnmounted(() => {
   cleanupOAuthSession();
-  if (toastTimer) clearTimeout(toastTimer);
 });
 </script>
 
@@ -971,7 +963,5 @@ onUnmounted(() => {
       @refresh="handleRefresh"
       @close="clearConflict"
     />
-
-    <UiToast :message="toastMessage" />
   </div>
 </template>
