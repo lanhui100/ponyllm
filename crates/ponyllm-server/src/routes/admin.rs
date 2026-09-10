@@ -1651,6 +1651,18 @@ pub async fn handle_admin_delete_model(
     p_sec.models.retain(|m| m != &name);
     p_sec.model_configs.retain(|m| m.name != name);
 
+    // If the deleted model was the provider's default_model, clear or reassign it
+    let mut updated_default_model: Option<String> = None;
+    if p_sec.default_model == name {
+        p_sec.default_model = p_sec
+            .models
+            .first()
+            .cloned()
+            .or_else(|| p_sec.model_configs.first().map(|m| m.name.clone()))
+            .unwrap_or_default();
+        updated_default_model = Some(p_sec.default_model.clone());
+    }
+
     let new_ver = match save_store_config(&state, &mut file) {
         Ok(v) => v,
         Err(resp) => return resp,
@@ -1659,6 +1671,9 @@ pub async fn handle_admin_delete_model(
     if let Some(p_cfg) = state.config.write().providers.get_mut(&target_provider_name) {
         p_cfg.models.retain(|m| m != &name);
         p_cfg.model_specs.retain(|m| m.name != name);
+        if let Some(ref new_def) = updated_default_model {
+            p_cfg.default_model = new_def.clone();
+        }
     }
 
     tracing::info!(provider = %target_provider_name, model = %name, "admin deleted model");

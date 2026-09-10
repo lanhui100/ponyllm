@@ -18,6 +18,7 @@ const props = defineProps<{
   models: ModelView[];
   adminWriteEnabled: boolean;
   defaultExpanded?: boolean;
+  onDeleteModel?: (name: string, provider?: string) => Promise<void>;
   /** 批量添加执行器（由视图层注入，内部复用带版本控制的 saveModel 循环）。 */
   onBatchCreate?: (
     provider: string,
@@ -413,7 +414,11 @@ async function handleDelete(name: string) {
     return;
   }
   try {
-    await emit('delete', name);
+    if (props.onDeleteModel) {
+      await props.onDeleteModel(name, props.providerName);
+    } else {
+      emit('delete', name);
+    }
     toast.success(`模型 "${name}" 已成功删除`);
   } catch (err: unknown) {
     toast.error(`删除失败: ${err instanceof Error ? err.message : String(err)}`);

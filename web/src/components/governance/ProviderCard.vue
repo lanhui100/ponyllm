@@ -28,6 +28,7 @@ const props = defineProps<{
   keyTestResults: Record<string, KeyTestView>;
   testingKeyIds: Set<string>;
   defaultExpanded?: boolean;
+  onDeleteModel?: (name: string, provider?: string) => Promise<void>;
   onBatchCreate?: (
     provider: string,
     ids: string[],
@@ -412,6 +413,7 @@ async function handleDeleteProvider() {
           <ModelSubSection
             :provider-name="provider.name"
             :models="models"
+            :on-delete-model="onDeleteModel"
             :on-batch-create="onBatchCreate"
             :admin-write-enabled="adminWriteEnabled"
             @create="(payload) => emit('create-model', payload)"

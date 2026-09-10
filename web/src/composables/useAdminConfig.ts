@@ -159,9 +159,9 @@ export function useAdminConfig(options: UseAdminConfigOptions = {}) {
     });
   }
 
-  async function removeModel(name: string): Promise<void> {
+  async function removeModel(name: string, provider?: string): Promise<void> {
     return runWithConflictCheck(async () => {
-      await adminApi.deleteModel(name, configVersion.value).send();
+      await adminApi.deleteModel(name, configVersion.value, provider).send();
       await fetchAll();
     });
   }

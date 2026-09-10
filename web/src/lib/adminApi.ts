@@ -100,9 +100,10 @@ export const adminApi = {
     });
   },
 
-  deleteModel(name: string, ifMatchVersion?: number | string) {
+  deleteModel(name: string, ifMatchVersion?: number | string, provider?: string) {
+    const qs = provider ? `?provider=${encodeURIComponent(provider)}` : '';
     return alova.Delete<{ ok: boolean; config_version: number }>(
-      `/api/admin/models/${encodeURIComponent(name)}`,
+      `/api/admin/models/${encodeURIComponent(name)}${qs}`,
       undefined,
       {
         headers: ifMatchHeaders(ifMatchVersion),

@@ -922,6 +922,7 @@ onUnmounted(() => {
             :provider="p"
             :models="models.filter((m) => m.provider ? m.provider === p.name : true)"
             :keys="keys.filter((k) => k.provider === p.name)"
+            :on-delete-model="removeModel"
             :on-batch-create="batchCreateModels"
             @notice="showToast"
             :admin-write-enabled="adminWriteEnabled"

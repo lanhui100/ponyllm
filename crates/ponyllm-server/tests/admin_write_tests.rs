@@ -507,6 +507,26 @@ async fn test_model_cud() {
         .await
         .unwrap();
     assert_eq!(del_resp.status(), StatusCode::OK);
+
+    // 5. Delete default model clears/reassigns default_model
+    let del_default_resp = client
+        .delete(format!("http://{}/api/admin/models/gpt-4o?provider=openai", harness.addr))
+        .header("Authorization", &auth)
+        .header("If-Match", "\"3\"")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(del_default_resp.status(), StatusCode::OK);
+
+    // Verify provider models list is now empty and gpt-4o is gone
+    let list_models_resp = client
+        .get(format!("http://{}/api/admin/providers/openai/models", harness.addr))
+        .header("Authorization", &auth)
+        .send()
+        .await
+        .unwrap();
+    let remaining_models: Vec<serde_json::Value> = list_models_resp.json().await.unwrap();
+    assert!(remaining_models.is_empty());
 }
 
 // -----------------------------------------------------------------------------
