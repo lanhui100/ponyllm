@@ -13,6 +13,7 @@ export default defineConfig({
       '/v1': 'http://127.0.0.1:8080',
       '/models': 'http://127.0.0.1:8080',
       '/health': 'http://127.0.0.1:8080',
+      '/oauth2callback': 'http://127.0.0.1:8080',
       '/telemetry': 'http://127.0.0.1:8080',
       // Reserved for M3 (Admin API contract, /api/admin/*).
       '/api': 'http://127.0.0.1:8080',

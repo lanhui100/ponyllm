@@ -12,6 +12,7 @@ import UiBadge from '../components/ui/UiBadge.vue';
 import UiTooltip from '../components/ui/UiTooltip.vue';
 import UiCollapsible from '../components/ui/UiCollapsible.vue';
 import UiToast from '../components/ui/UiToast.vue';
+import { resolveBaseURL } from '../lib/alova';
 import type { CreateProviderPayload } from '../types/admin';
 
 const {
@@ -162,6 +163,38 @@ async function copyPproxyOn() {
   }
 }
 
+function getEffectiveOAuthCallbackUri(): string | undefined {
+  if (typeof window === 'undefined') return undefined;
+  const baseUrl = resolveBaseURL();
+  if (baseUrl) {
+    return `${baseUrl}/oauth2callback`;
+  }
+  return `${window.location.origin}/oauth2callback`;
+}
+
+async function checkClipboardForOAuthCode() {
+  if (!oauthWaiting.value) return;
+  if (antigravityForm.value.code_or_url.trim()) return;
+  try {
+    if (typeof navigator !== 'undefined' && navigator.clipboard && typeof navigator.clipboard.readText === 'function') {
+      const clipText = (await navigator.clipboard.readText()).trim();
+      if (!clipText) return;
+      // If clipboard contains code parameter or oauth2callback url
+      if (clipText.includes('oauth2callback') || clipText.includes('code=') || (clipText.startsWith('4/') && clipText.length > 20)) {
+        antigravityForm.value.code_or_url = clipText;
+        showToast('已自动从剪贴板捕获授权凭据，正在换票...');
+        void handleAuthorizeAntigravity();
+      }
+    }
+  } catch {
+    // Clipboard permission denied or unavailable - ignore silently
+  }
+}
+
+function handleWindowFocus() {
+  void checkClipboardForOAuthCode();
+}
+
 function cleanupOAuthSession() {
   oauthWaiting.value = false;
   oauthState.value = null;
@@ -172,6 +205,7 @@ function cleanupOAuthSession() {
   }
   if (typeof window !== 'undefined') {
     window.removeEventListener('message', handleWindowMessage);
+    window.removeEventListener('focus', handleWindowFocus);
   }
 }
 
@@ -179,12 +213,13 @@ function handleWindowMessage(event: MessageEvent) {
   if (!event.data || event.data.type !== 'antigravity:oauth_callback') {
     return;
   }
-  // 安全校验 1: 严格校验消息来源 Origin
-  if (typeof window !== 'undefined' && event.origin !== window.location.origin) {
-    console.warn('[PonyLLM OAuth] 拒绝跨源消息:', event.origin);
+  // 安全校验 1: 严格校验消息来源 Origin (允许同源，或后端配置的 target_origin)
+  const expectedOrigin = getEffectiveOAuthCallbackUri() ? new URL(getEffectiveOAuthCallbackUri()!).origin : window.location.origin;
+  if (typeof window !== 'undefined' && event.origin !== window.location.origin && event.origin !== expectedOrigin) {
+    console.warn('[PonyLLM OAuth] 拒绝未授信跨源消息:', event.origin);
     return;
   }
-  // 安全校验 2: 校验消息发送源 Window 引用
+  // 安全校验 2: 校验消息发送源 Window 引用 (若有)
   if (oauthPopupRef.value && event.source && event.source !== oauthPopupRef.value) {
     console.warn('[PonyLLM OAuth] 拒绝来自未知弹窗窗口的消息');
     return;
@@ -197,6 +232,7 @@ function handleWindowMessage(event: MessageEvent) {
 
   if (event.data.success && event.data.code) {
     antigravityForm.value.code_or_url = event.data.code;
+    showToast('已成功接收 Google 授权回调，正在自动保存...');
     void handleAuthorizeAntigravity();
   } else if (event.data.error) {
     providerFormError.value = `Google 授权失败: ${event.data.error}`;
@@ -207,7 +243,7 @@ function handleWindowMessage(event: MessageEvent) {
 async function loadAntigravityAuthUrl() {
   fetchingAuthUrl.value = true;
   try {
-    const originUri = typeof window !== 'undefined' ? `${window.location.origin}/oauth2callback` : undefined;
+    const originUri = getEffectiveOAuthCallbackUri();
     const res = await getAntigravityAuthUrl(originUri);
     antigravityAuthUrl.value = res.auth_url;
     oauthState.value = res.state;
@@ -231,7 +267,7 @@ async function fetchAndOpenAuthUrl() {
   fetchingAuthUrl.value = true;
   providerFormError.value = null;
   try {
-    const originUri = typeof window !== 'undefined' ? `${window.location.origin}/oauth2callback` : undefined;
+    const originUri = getEffectiveOAuthCallbackUri();
     const res = await getAntigravityAuthUrl(originUri);
     antigravityAuthUrl.value = res.auth_url;
     oauthState.value = res.state;
@@ -239,6 +275,7 @@ async function fetchAndOpenAuthUrl() {
     if (typeof window !== 'undefined') {
       oauthWaiting.value = true;
       window.addEventListener('message', handleWindowMessage);
+      window.addEventListener('focus', handleWindowFocus);
 
       const width = 600;
       const height = 720;
@@ -266,6 +303,7 @@ async function fetchAndOpenAuthUrl() {
             if (pending.ready) {
               if (pending.code) {
                 antigravityForm.value.code_or_url = pending.code;
+                showToast('已检测到授权完成，正在自动换票...');
                 void handleAuthorizeAntigravity();
               } else if (pending.error) {
                 providerFormError.value = `Google 授权失败: ${pending.error}`;
@@ -379,7 +417,7 @@ async function handleAuthorizeAntigravity() {
   providerSubmitting.value = true;
   providerFormError.value = null;
   try {
-    const originUri = typeof window !== 'undefined' ? `${window.location.origin}/oauth2callback` : undefined;
+    const originUri = getEffectiveOAuthCallbackUri();
     await authorizeAntigravity({
       code_or_url: codeOrUrl,
       provider: antigravityForm.value.provider.trim() || 'antigravity',
@@ -391,6 +429,7 @@ async function handleAuthorizeAntigravity() {
     });
     cleanupOAuthSession();
     isAddingProvider.value = false;
+    showToast(`Google Antigravity 账号已成功接入`);
   } catch (err: unknown) {
     providerFormError.value = err instanceof Error ? err.message : String(err);
   } finally {

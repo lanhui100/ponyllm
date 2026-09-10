@@ -475,4 +475,104 @@ describe('GovernanceView End-to-End User Flow (WEB-04)', () => {
     openSpy.mockRestore();
 
   });
+
+  it('Flow 6: Antigravity clipboard auto-detection on window focus triggers authorization', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+
+    vi.spyOn(adminApi, 'getOverview').mockReturnValue({
+      send: () => Promise.resolve(mockOverviewWritable),
+    } as any);
+    vi.spyOn(adminApi, 'getProviders').mockReturnValue({
+      send: () => Promise.resolve(mockProviders),
+    } as any);
+    vi.spyOn(adminApi, 'getModels').mockReturnValue({
+      send: () => Promise.resolve(mockModels),
+    } as any);
+    vi.spyOn(adminApi, 'getKeys').mockReturnValue({
+      send: () => Promise.resolve(mockKeys),
+    } as any);
+    vi.spyOn(adminApi, 'getStrategy').mockReturnValue({
+      send: () => Promise.resolve(mockStrategy),
+    } as any);
+    vi.spyOn(adminApi, 'getProxyStatus').mockReturnValue({
+      send: () => Promise.resolve({
+        available: true,
+        proxy_url: 'http://127.0.0.1:8899',
+        proxy_type: 'pproxy',
+        description: '本地 pproxy 智能出海代理 (127.0.0.1:8899) 运行中',
+        latency_ms: 120,
+        hint: '已自动接管',
+      }),
+    } as any);
+
+    const getAuthUrlSpy = vi.spyOn(adminApi, 'getAntigravityAuthUrl').mockReturnValue({
+      send: () => Promise.resolve({
+        auth_url: 'https://accounts.google.com/o/oauth2/v2/auth?state=auto-test-state-focus',
+        redirect_uri: 'http://localhost:3000/oauth2callback',
+        state: 'auto-test-state-focus',
+      }),
+    } as any);
+
+    const authorizeSpy = vi.spyOn(adminApi, 'authorizeAntigravity').mockReturnValue({
+      send: () => Promise.resolve({
+        provider: 'antigravity',
+        id: 'ag-focus@gmail.com',
+        email: 'focus@gmail.com',
+        config_version: 13,
+      }),
+    } as any);
+
+    const openSpy = vi.spyOn(window, 'open').mockImplementation(() => null);
+
+    const app = createApp(GovernanceView);
+    app.use(router);
+    app.use(pinia);
+    app.mount(container);
+
+    await nextTick();
+    await new Promise((r) => setTimeout(r, 10));
+
+    // Open Add Provider & switch to Antigravity mode
+    const addBtn = container.querySelector('[data-testid="add-provider-btn"]') as HTMLButtonElement;
+    addBtn.click();
+    await nextTick();
+
+    const agModeBtn = container.querySelector('[data-testid="mode-antigravity-btn"]') as HTMLButtonElement;
+    agModeBtn.click();
+    await nextTick();
+    await new Promise((r) => setTimeout(r, 10));
+
+    const fetchUrlBtn = container.querySelector('[data-testid="ag-fetch-url-btn"]') as HTMLButtonElement;
+    fetchUrlBtn.click();
+    await nextTick();
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(container.querySelector('[data-testid="ag-waiting-indicator"]')).not.toBeNull();
+
+    // Mock navigator.clipboard.readText before mounting or focus
+    Object.defineProperty(window.navigator, 'clipboard', {
+      value: {
+        readText: vi.fn().mockResolvedValue('http://localhost:51121/oauth2callback?code=4/0A-auto-clipboard-code&state=auto-test-state-focus'),
+      },
+      writable: true,
+      configurable: true,
+    });
+
+    // Simulate user switching back to window
+    window.dispatchEvent(new Event('focus'));
+    await nextTick();
+    await new Promise((r) => setTimeout(r, 100));
+
+    expect(authorizeSpy).toHaveBeenCalledWith(expect.objectContaining({
+      code_or_url: 'http://localhost:51121/oauth2callback?code=4/0A-auto-clipboard-code&state=auto-test-state-focus',
+      provider: 'antigravity',
+    }));
+
+    openSpy.mockRestore();
+    getAuthUrlSpy.mockRestore();
+    authorizeSpy.mockRestore();
+    app.unmount();
+    container.remove();
+  });
 });
