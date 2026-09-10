@@ -20,8 +20,8 @@ const emit = defineEmits<{
 
 <template>
   <div
-    class="flex flex-wrap items-center justify-between gap-4 px-5 py-3.5 rounded-xl mb-6 transition-all duration-200"
-    :class="isDown ? 'bg-rose-100 text-rose-800' : 'bg-white'"
+    class="flex flex-wrap items-center justify-between gap-4 px-5 py-3.5 rounded-xl mb-6 transition-all duration-200 border border-white/40 shadow-xs backdrop-blur-xs"
+    :class="isDown ? 'bg-rose-100/80 text-rose-800 border-rose-300' : 'bg-white/45'"
   >
     <div class="flex flex-wrap items-center gap-4 text-[14px]">
       <!-- 极简脉冲呼吸灯 -->

@@ -30,8 +30,8 @@ async function handleCopy() {
 </script>
 
 <template>
-  <div v-if="keyResult" class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-xs">
-    <div class="bg-white rounded-2xl shadow-xl w-full max-w-lg overflow-hidden border border-slate-100">
+  <div v-if="keyResult" class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-md">
+    <div class="bg-white/95 backdrop-blur-xl rounded-2xl shadow-2xl w-full max-w-lg overflow-hidden border border-slate-200/80">
       <div class="p-5 border-b border-slate-100 flex items-center justify-between">
         <h3 class="text-sm font-bold text-slate-900 flex items-center gap-2">
           <Icons name="key" size="16" class="text-amber-500" />

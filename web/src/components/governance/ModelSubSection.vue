@@ -720,16 +720,16 @@ function getTierBadgeVariant(tier?: string) {
       </div>
     </UiCollapsible>
 
-    <!-- 模型条目列表 -->
-    <div v-if="models.length === 0" class="py-3 text-center text-xs text-slate-400 bg-slate-50/50 rounded-lg">
+    <!-- 模型条目列表 (彻底去除第三层边框与背景，平滑轻盈) -->
+    <div v-if="models.length === 0" class="py-3 text-center text-xs text-slate-400 bg-transparent border-none rounded-lg">
       暂未注册模型，点击上方「+ 模型」快速挂载
     </div>
 
-    <div v-else class="space-y-2">
+    <div v-else class="space-y-1">
       <div
         v-for="m in models"
         :key="m.name"
-        class="bg-slate-50/70 hover:bg-slate-100/70 rounded-xl transition-colors text-xs overflow-hidden"
+        class="bg-transparent hover:bg-white/35 rounded-lg border-none transition-colors text-xs overflow-hidden"
         data-testid="model-row"
       >
         <!-- 一等常显行 -->

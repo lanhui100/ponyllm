@@ -85,11 +85,11 @@ async function handleSelect(id: string) {
       <div
         v-for="s in strategies"
         :key="s.id"
-        class="p-4.5 rounded-xl transition-all duration-200 cursor-pointer select-none flex flex-col justify-between"
+        class="p-4.5 rounded-xl transition-all duration-200 cursor-pointer select-none flex flex-col justify-between border"
         :class="[
           selected === s.id
-            ? 'bg-indigo-50/70 ring-2 ring-indigo-500/70 shadow-2xs'
-            : 'bg-slate-50/70 hover:bg-white hover:shadow-xs',
+            ? 'bg-indigo-50/80 border-indigo-400 ring-2 ring-indigo-500/50 shadow-xs'
+            : 'bg-white/40 border-white/50 backdrop-blur-xs hover:bg-white/60 hover:shadow-xs',
           { 'opacity-60 cursor-not-allowed': !adminWriteEnabled },
         ]"
         data-testid="strategy-card"

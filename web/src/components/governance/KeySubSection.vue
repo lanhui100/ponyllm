@@ -260,16 +260,16 @@ async function handleDelete(id: string) {
           </div>
         </UiCollapsible>
 
-        <!-- 密钥条目列表 -->
-        <div v-if="keys.length === 0" class="py-3 text-center text-sm text-slate-500 bg-slate-50/60 border border-slate-200/60 rounded-md">
+        <!-- 密钥条目列表 (彻底去除第三层边框与背景，仅靠微交互区分) -->
+        <div v-if="keys.length === 0" class="py-3 text-center text-sm text-slate-500 bg-transparent border-none rounded-md">
           暂未配置密钥，点击上方「+ 密钥」快速添加
         </div>
 
-        <div v-else class="space-y-2">
+        <div v-else class="space-y-1">
           <div
             v-for="k in keys"
             :key="k.id"
-            class="bg-white hover:bg-slate-50/70 rounded-md border border-slate-200/80 transition-colors text-sm p-3.5 space-y-2.5"
+            class="bg-transparent hover:bg-white/35 rounded-lg border-none transition-colors text-sm p-2.5 space-y-2"
             data-testid="key-row"
           >
             <div class="flex items-center justify-between">

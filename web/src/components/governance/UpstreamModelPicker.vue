@@ -58,11 +58,11 @@ function handleConfirm() {
 
 <template>
   <div
-    class="fixed inset-0 z-40 flex items-center justify-center bg-slate-900/40 p-4"
+    class="fixed inset-0 z-40 flex items-center justify-center bg-slate-900/40 backdrop-blur-md p-4"
     data-testid="upstream-model-picker"
     @click.self="emit('close')"
   >
-    <div class="w-full max-w-lg max-h-[80vh] flex flex-col bg-white rounded-2xl shadow-xl overflow-hidden">
+    <div class="w-full max-w-lg max-h-[80vh] flex flex-col bg-white/95 backdrop-blur-xl rounded-2xl shadow-2xl overflow-hidden border border-slate-200/80">
       <div class="flex items-center justify-between px-4 py-3 border-b border-slate-100">
         <div class="min-w-0">
           <div class="font-semibold text-slate-800 text-sm">从上游添加模型</div>

@@ -6,7 +6,7 @@ defineProps<{
 
 <template>
   <div
-    class="bg-white rounded-xl transition-shadow duration-200"
+    class="bg-white/45 backdrop-blur-xs rounded-xl transition-shadow duration-200 border border-white/40 shadow-xs"
     :class="$props.class"
   >
     <slot />

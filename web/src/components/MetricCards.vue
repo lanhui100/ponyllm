@@ -49,7 +49,7 @@ const errorRate = computed(() => {
 <template>
   <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4 mb-6">
     <!-- 1. 调用次数 -->
-    <div class="swiss-card p-5 bg-orange-50/40 transition-all duration-200">
+    <div class="swiss-card p-5 bg-orange-50/25 backdrop-blur-xs transition-all duration-200 border border-white/40">
       <div class="flex items-center justify-between text-[13px] text-slate-500 mb-2.5">
         <span class="font-semibold text-slate-700">调用次数</span>
         <div class="w-7.5 h-7.5 rounded-lg bg-orange-100 text-orange-600 flex items-center justify-center">
@@ -65,7 +65,7 @@ const errorRate = computed(() => {
     </div>
 
     <!-- 2. Token总计 (token生成的数量) -->
-    <div class="swiss-card p-5 bg-sky-50/50 transition-all duration-200">
+    <div class="swiss-card p-5 bg-sky-50/30 backdrop-blur-xs transition-all duration-200 border border-white/40">
       <div class="flex items-center justify-between text-[13px] text-slate-500 mb-2.5">
         <span class="font-semibold text-slate-700">Token 总计</span>
         <div class="w-7.5 h-7.5 rounded-lg bg-sky-100 text-sky-700 flex items-center justify-center">
@@ -82,7 +82,7 @@ const errorRate = computed(() => {
     </div>
 
     <!-- 3. 延迟 -->
-    <div class="swiss-card p-5 bg-amber-50/50 transition-all duration-200">
+    <div class="swiss-card p-5 bg-amber-50/30 backdrop-blur-xs transition-all duration-200 border border-white/40">
       <div class="flex items-center justify-between text-[13px] text-slate-500 mb-2.5">
         <span class="font-semibold text-slate-700">延迟</span>
         <div class="w-7.5 h-7.5 rounded-lg bg-amber-100 text-amber-600 flex items-center justify-center">
@@ -98,7 +98,7 @@ const errorRate = computed(() => {
     </div>
 
     <!-- 4. 速率 -->
-    <div class="swiss-card p-5 bg-teal-50/50 transition-all duration-200">
+    <div class="swiss-card p-5 bg-teal-50/30 backdrop-blur-xs transition-all duration-200 border border-white/40">
       <div class="flex items-center justify-between text-[13px] text-slate-500 mb-2.5">
         <span class="font-semibold text-slate-700">速率</span>
         <div class="w-7.5 h-7.5 rounded-lg bg-teal-100 text-teal-700 flex items-center justify-center">
@@ -114,7 +114,7 @@ const errorRate = computed(() => {
     </div>
 
     <!-- 5. 故障率 -->
-    <div class="swiss-card p-5 bg-slate-100/70 transition-all duration-200">
+    <div class="swiss-card p-5 bg-slate-100/40 backdrop-blur-xs transition-all duration-200 border border-white/40">
       <div class="flex items-center justify-between text-[13px] text-slate-500 mb-2.5">
         <span class="font-semibold text-slate-700">故障率</span>
         <div

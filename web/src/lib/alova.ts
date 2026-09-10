@@ -84,6 +84,7 @@ export function resolveBaseURL(): string {
 export const alova = createAlova({
   baseURL: resolveBaseURL(),
   requestAdapter: fetchAdapter(),
+  cacheFor: null,
   beforeRequest(method: Method) {
     const session = useSessionStore();
     Object.assign(method.config.headers ??= {}, authHeaders(session.token));

@@ -76,9 +76,9 @@ function getProviderTps(p: any): string {
 </script>
 
 <template>
-  <div class="swiss-card bg-slate-50/60 p-6 mb-6 transition-all duration-200">
+  <div class="swiss-card bg-white/45 backdrop-blur-xs p-6 mb-6 transition-all duration-200 border border-white/40">
     <!-- 头部区域：标题与周期 Switch -->
-    <div class="flex flex-wrap items-center justify-between gap-3 pb-4 mb-4 bg-white/60 rounded-lg px-3 pt-3">
+    <div class="flex flex-wrap items-center justify-between gap-3 pb-4 mb-4 bg-white/35 rounded-lg px-3 pt-3">
       <div class="flex items-center gap-2.5">
         <div class="w-8 h-8 rounded-lg bg-orange-100 text-orange-600 flex items-center justify-center">
           <Icons name="server" size="16" />

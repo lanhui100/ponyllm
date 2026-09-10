@@ -281,9 +281,9 @@ function handleBatchTest() {
 
     <!-- 二级折叠展开区域 (包含模型协议、密钥及模型) -->
     <UiCollapsible :open="expanded">
-      <div class="px-5 pb-5 pt-3 border-t border-slate-200/80 bg-slate-50/60 space-y-4">
-        <!-- 模型协议选择器与专属端点 (同级非下拉多选) -->
-        <div class="bg-white rounded-xl p-4.5 border border-slate-200/80 shadow-2xs space-y-3" data-testid="protocol-section">
+      <div class="px-5 pb-5 pt-3 border-t border-white/40 bg-white/20 backdrop-blur-xs space-y-4">
+        <!-- 模型协议选择器与专属端点 (去除生硬边框与高厚度背景) -->
+        <div class="p-3.5 space-y-3" data-testid="protocol-section">
           <div class="flex items-center justify-between">
             <div class="flex items-center gap-1.5 text-[14px] font-semibold text-slate-800">
               <Icons name="activity" size="16" class="text-amber-600" />
@@ -298,7 +298,7 @@ function handleBatchTest() {
                 v-if="!isEditingProtocols"
                 variant="ghost"
                 size="sm"
-                class="text-slate-700 hover:text-slate-900 hover:bg-slate-100 text-[13px] py-1"
+                class="text-slate-700 hover:text-slate-900 hover:bg-white/40 text-[13px] py-1"
                 data-testid="edit-protocols-btn"
                 @click="isEditingProtocols = true"
               >
@@ -379,7 +379,7 @@ function handleBatchTest() {
                 v-model="customUrls.responses"
                 type="url"
                 placeholder="未单独覆盖时统一走 Base URL"
-                class="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-slate-400/20 focus:border-slate-400 focus:bg-white"
+                class="w-full bg-white/60 border border-white/50 rounded-lg px-3 py-2 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-slate-400/20 focus:border-slate-400 focus:bg-white/90"
                 data-testid="responses-url-input"
               />
             </div>
@@ -391,8 +391,8 @@ function handleBatchTest() {
           </div>
         </div>
 
-        <!-- 密钥子区域 (默认折叠) -->
-        <div class="bg-white rounded-xl p-4.5 border border-slate-200/80 shadow-2xs">
+        <!-- 密钥子区域 (默认折叠，去除多层背景嵌套，融入父层) -->
+        <div class="pt-1">
           <KeySubSection
             :provider-name="provider.name"
             :keys="keys"
@@ -406,8 +406,8 @@ function handleBatchTest() {
           />
         </div>
 
-        <!-- 模型子区域 (默认折叠) -->
-        <div class="bg-white rounded-xl p-4.5 border border-slate-200/80 shadow-2xs">
+        <!-- 模型子区域 (默认折叠，去除多层背景嵌套，融入父层) -->
+        <div class="pt-1">
           <ModelSubSection
             :provider-name="provider.name"
             :models="models"

@@ -1,7 +1,7 @@
 <template>
-  <div class="connect-page flex min-h-screen flex-col justify-center py-12 sm:px-6 lg:px-8 bg-slate-50 relative overflow-hidden select-none">
-    <!-- Ambient background gradient -->
-    <div class="pointer-events-none absolute -top-40 left-1/2 -translate-x-1/2 w-[700px] h-[350px] bg-gradient-to-b from-orange-100/60 via-slate-100/30 to-transparent blur-3xl" />
+  <div class="connect-page flex min-h-screen flex-col justify-center py-12 sm:px-6 lg:px-8 bg-transparent relative overflow-hidden select-none">
+    <!-- Ambient background gradient overlay -->
+    <div class="pointer-events-none absolute -top-40 left-1/2 -translate-x-1/2 w-[700px] h-[350px] bg-gradient-to-b from-orange-200/40 via-indigo-100/20 to-transparent blur-3xl" />
 
     <div class="sm:mx-auto sm:w-full sm:max-w-md relative z-10">
       <!-- Brand icon & title -->
@@ -20,7 +20,7 @@
     </div>
 
     <div class="mt-8 sm:mx-auto sm:w-full sm:max-w-[420px] px-4 sm:px-0 relative z-10">
-      <UiCard class="p-6 sm:p-8 shadow-sm border border-slate-200/80 bg-white/95 backdrop-blur-sm">
+      <UiCard class="p-6 sm:p-8 shadow-sm border border-white/50 bg-white/55 backdrop-blur-xs">
         <div v-if="openMode" class="text-center py-4 space-y-4">
           <div class="w-12 h-12 rounded-full bg-emerald-50 text-emerald-600 flex items-center justify-center mx-auto border border-emerald-100">
             <Icons name="check" size="22" />

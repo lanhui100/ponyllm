@@ -309,7 +309,7 @@ onUnmounted(() => {
 <style scoped>
 .recorder-page {
   min-height: 100vh;
-  background: #f8fafc;
+  background: transparent;
   font-family: system-ui, -apple-system, sans-serif;
 }
 
@@ -366,11 +366,13 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   gap: 20px;
-  background: #ffffff;
+  background: rgba(255, 255, 255, 0.8);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
   padding: 14px 18px;
-  border-radius: 8px;
-  border: 1px solid #e2e8f0;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.02);
+  border-radius: 12px;
+  border: 1px solid rgba(226, 232, 240, 0.85);
+  box-shadow: 0 4px 20px -2px rgba(15, 23, 42, 0.04);
   margin-bottom: 16px;
   font-size: 14px;
 }
@@ -410,10 +412,12 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   padding: 12px 16px;
-  background: #f8fafc;
-  border: 1px solid #e2e8f0;
+  background: rgba(248, 250, 252, 0.85);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(226, 232, 240, 0.85);
   border-bottom: none;
-  border-radius: 8px 8px 0 0;
+  border-radius: 12px 12px 0 0;
   font-size: 13px;
   font-weight: 600;
   color: #475569;
@@ -423,10 +427,12 @@ onUnmounted(() => {
 .virtual-viewport {
   position: relative;
   overflow-y: auto;
-  background: #ffffff;
-  border: 1px solid #e2e8f0;
-  border-radius: 0 0 8px 8px;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.02);
+  background: rgba(255, 255, 255, 0.85);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(226, 232, 240, 0.85);
+  border-radius: 0 0 12px 12px;
+  box-shadow: 0 4px 20px -2px rgba(15, 23, 42, 0.04);
   scrollbar-gutter: stable;
 }
 

@@ -427,7 +427,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="min-h-screen bg-slate-50/50 text-slate-900 pb-16">
+  <div class="min-h-screen bg-transparent text-slate-900 pb-16">
     <NavBar />
 
     <main class="max-w-6xl mx-auto px-4 sm:px-6 py-8">
@@ -534,11 +534,11 @@ onUnmounted(() => {
           </div>
 
           <!-- 服务商类型切换 -->
-          <div class="flex items-center gap-2 p-1 bg-slate-100 rounded-lg w-fit mb-5 border border-slate-200/80">
+          <div class="flex items-center gap-2 p-1 bg-white/40 rounded-lg w-fit mb-5 border border-white/50 backdrop-blur-xs">
             <button
               type="button"
               class="px-3.5 py-1.5 text-[13px] font-medium rounded-md transition-all cursor-pointer"
-              :class="newProviderMode === 'standard' ? 'bg-white text-slate-950 shadow-2xs font-semibold' : 'text-slate-600 hover:text-slate-900'"
+              :class="newProviderMode === 'standard' ? 'bg-white/80 text-slate-950 shadow-2xs font-semibold' : 'text-slate-600 hover:text-slate-900'"
               data-testid="mode-standard-btn"
               @click="newProviderMode = 'standard'"
             >
@@ -547,7 +547,7 @@ onUnmounted(() => {
             <button
               type="button"
               class="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-[13px] font-medium rounded-md transition-all cursor-pointer"
-              :class="newProviderMode === 'antigravity' ? 'bg-white text-slate-950 shadow-2xs font-semibold' : 'text-slate-600 hover:text-slate-900'"
+              :class="newProviderMode === 'antigravity' ? 'bg-white/80 text-slate-950 shadow-2xs font-semibold' : 'text-slate-600 hover:text-slate-900'"
               data-testid="mode-antigravity-btn"
               @click="switchToAntigravityMode"
             >
@@ -566,7 +566,7 @@ onUnmounted(() => {
                   type="text"
                   placeholder="例如: openai / deepseek"
                   required
-                  class="w-full bg-slate-50 border border-slate-200 rounded-lg px-3.5 py-2 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-slate-400/20 focus:border-slate-400 focus:bg-white"
+                  class="w-full bg-white/60 border border-white/50 rounded-lg px-3.5 py-2 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-slate-400/20 focus:border-slate-400 focus:bg-white/90"
                   data-testid="provider-name-input"
                 />
               </div>
@@ -578,7 +578,7 @@ onUnmounted(() => {
                   type="url"
                   placeholder="https://tokens.ponyjob.top/v1"
                   required
-                  class="w-full bg-slate-50 border border-slate-200 rounded-lg px-3.5 py-2 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-slate-400/20 focus:border-slate-400 focus:bg-white"
+                  class="w-full bg-white/60 border border-white/50 rounded-lg px-3.5 py-2 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-slate-400/20 focus:border-slate-400 focus:bg-white/90"
                   data-testid="provider-base-url-input"
                 />
               </div>
@@ -591,7 +591,7 @@ onUnmounted(() => {
                   v-model="newProviderForm.default_model"
                   type="text"
                   placeholder="gpt-4o"
-                  class="w-full bg-slate-50 border border-slate-200 rounded-lg px-3.5 py-2 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-slate-400/20 focus:border-slate-400 focus:bg-white"
+                  class="w-full bg-white/60 border border-white/50 rounded-lg px-3.5 py-2 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-slate-400/20 focus:border-slate-400 focus:bg-white/90"
                   data-testid="provider-default-model-input"
                 />
               </div>
@@ -600,7 +600,7 @@ onUnmounted(() => {
                 <label class="block text-[13px] font-medium text-slate-700 mb-1.5">路由调度算法</label>
                 <select
                   v-model="newProviderForm.strategy"
-                  class="w-full bg-slate-50 border border-slate-200 rounded-lg px-3.5 py-2 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-slate-400/20 focus:border-slate-400 focus:bg-white"
+                  class="w-full bg-white/60 border border-white/50 rounded-lg px-3.5 py-2 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-slate-400/20 focus:border-slate-400 focus:bg-white/90"
                 >
                   <option value="round_robin">轮询 (Round Robin)</option>
                   <option value="priority">主备优先级 (Priority)</option>
@@ -627,8 +627,8 @@ onUnmounted(() => {
                   type="button"
                   class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[13px] font-medium transition-all border select-none cursor-pointer"
                   :class="newProviderProtocols.includes(proto.id)
-                    ? 'bg-amber-100 text-amber-900 border-amber-300 font-semibold shadow-2xs'
-                    : 'bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100'"
+                    ? 'bg-amber-100/90 text-amber-900 border-amber-300 font-semibold shadow-2xs'
+                    : 'bg-white/60 text-slate-600 border-white/50 hover:bg-white/80'"
                   @click="
                     newProviderProtocols.includes(proto.id)
                       ? (newProviderProtocols.length > 1 && newProviderProtocols.splice(newProviderProtocols.indexOf(proto.id), 1))
@@ -892,11 +892,11 @@ onUnmounted(() => {
       </UiCollapsible>
 
       <!-- 视图与导航微标签 (兼具分类过滤与测试兼容) -->
-      <div class="flex items-center gap-2 mb-6 border-b border-slate-200 pb-2">
+      <div class="flex items-center gap-2 mb-6 border-b border-white/50 pb-2">
         <button
           type="button"
           class="px-4 py-2 text-[14px] font-medium rounded-lg transition-colors cursor-pointer"
-          :class="currentTab === 'providers' ? 'bg-white shadow-2xs text-slate-950 font-semibold border border-slate-200' : 'text-slate-600 hover:text-slate-900'"
+          :class="currentTab === 'providers' ? 'bg-white/70 shadow-2xs text-slate-950 font-semibold border border-white/60 backdrop-blur-xs' : 'text-slate-600 hover:text-slate-900 hover:bg-white/30'"
           data-testid="tab-providers"
           @click="currentTab = 'providers'"
         >
@@ -906,7 +906,7 @@ onUnmounted(() => {
         <button
           type="button"
           class="px-4 py-2 text-[14px] font-medium rounded-lg transition-colors cursor-pointer"
-          :class="currentTab === 'strategy' ? 'bg-white shadow-2xs text-slate-950 font-semibold border border-slate-200' : 'text-slate-600 hover:text-slate-900'"
+          :class="currentTab === 'strategy' ? 'bg-white/70 shadow-2xs text-slate-950 font-semibold border border-white/60 backdrop-blur-xs' : 'text-slate-600 hover:text-slate-900 hover:bg-white/30'"
           data-testid="tab-strategy"
           @click="currentTab = 'strategy'"
         >

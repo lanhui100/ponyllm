@@ -24,11 +24,12 @@
     --ring: 24 95% 53%;
     --radius: 0.625rem;
 
-    /* 瑞士极简风格 (Minimalism & Swiss Style) 骨架规范 */
+    /* 现代毛玻璃与高质感极简骨架规范 */
     --surface-canvas: #f8fafc;
-    --surface-card: #ffffff;
-    --surface-inset: #f8fafc;
-    --surface-track: #f1f5f9;
+    --surface-card: rgba(255, 255, 255, 0.82);
+    --surface-card-border: rgba(226, 232, 240, 0.8);
+    --surface-inset: rgba(238, 242, 247, 0.7);
+    --surface-track: rgba(232, 237, 243, 0.8);
   }
 
   body {
@@ -47,12 +48,114 @@
   }
 }
 
-/* 扁平浅底卡片 (无边框无阴影，仅用背景色区分层级) */
+/* 全局多色彩撞色渐变背景容器 */
+.global-gradient-container {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  overflow: hidden;
+  background-color: #f1f5f9;
+}
+
+/* 撞色漫反射渐变光球 (Aurora Orbs) - 纯 CSS 紧凑交织交融，禁止紫色，强化橙色与青色(Teal) */
+.ambient-orb {
+  position: absolute;
+  border-radius: 9999px;
+  filter: blur(75px);
+  transform: translateZ(0);
+}
+
+/* 主暖橙光球 (Solar / Coral Orange) - 位于视口中央偏右上，向中心延伸，与 Teal 形成直接撞色交界 */
+.ambient-orb-orange-main {
+  top: 2%;
+  left: 36%;
+  width: 52vw;
+  height: 52vw;
+  min-width: 480px;
+  min-height: 480px;
+  max-width: 820px;
+  max-height: 820px;
+  background: radial-gradient(circle at 45% 45%, rgba(249, 115, 22, 0.58) 0%, rgba(251, 146, 60, 0.42) 40%, rgba(253, 186, 116, 0.15) 65%, transparent 80%);
+}
+
+/* 主板岩青/湖水绿光球 (Cyan / Teal) - 紧邻橙色左侧与下方，两者中心在大屏上仅相距 20%~25% */
+.ambient-orb-teal-main {
+  top: 8%;
+  left: 12%;
+  width: 48vw;
+  height: 48vw;
+  min-width: 440px;
+  min-height: 440px;
+  max-width: 760px;
+  max-height: 760px;
+  background: radial-gradient(circle at 55% 50%, rgba(13, 148, 136, 0.52) 0%, rgba(20, 184, 166, 0.38) 45%, rgba(45, 212, 191, 0.14) 68%, transparent 82%);
+}
+
+/* 辅橙光球 (Luminous Amber/Orange) - 补充在视口中下方偏左，形成上下呼应 */
+.ambient-orb-orange-soft {
+  top: 48%;
+  left: 20%;
+  width: 46vw;
+  height: 46vw;
+  min-width: 420px;
+  min-height: 420px;
+  max-width: 720px;
+  max-height: 720px;
+  background: radial-gradient(circle at 50% 50%, rgba(245, 158, 11, 0.46) 0%, rgba(249, 115, 22, 0.30) 42%, transparent 75%);
+}
+
+/* 深海青光球 (Deep Slate Teal) - 补充在视口中下方偏右，与辅橙交错撞色 */
+.ambient-orb-teal-deep {
+  top: 42%;
+  left: 45%;
+  width: 50vw;
+  height: 50vw;
+  min-width: 450px;
+  min-height: 450px;
+  max-width: 780px;
+  max-height: 780px;
+  background: radial-gradient(circle at 45% 55%, rgba(15, 118, 110, 0.50) 0%, rgba(14, 165, 233, 0.28) 46%, transparent 78%);
+}
+
+/* 微细噪点纹理增加磨砂质感 */
+.ambient-noise-layer {
+  position: absolute;
+  inset: 0;
+  opacity: 0.035;
+  pointer-events: none;
+  background-image: radial-gradient(#0f172a 1px, transparent 1px);
+  background-size: 24px 24px;
+}
+
+/* 现代毛玻璃卡片（瑞士结构 + 高透磨砂微折射，减弱白底，blur降至sm级别） */
 .swiss-card {
-  background: #ffffff;
-  border: none;
-  border-radius: 12px;
-  box-shadow: none;
+  background: rgba(255, 255, 255, 0.45);
+  backdrop-filter: blur(4px) saturate(140%);
+  -webkit-backdrop-filter: blur(4px) saturate(140%);
+  border: 1px solid rgba(255, 255, 255, 0.4);
+  border-radius: 14px;
+  box-shadow: 0 4px 20px -2px rgba(15, 23, 42, 0.04), 0 1px 3px 0 rgba(15, 23, 42, 0.02);
+}
+
+/* 增强毛玻璃面板类（更高透光与微模糊） */
+.glass-panel {
+  background: rgba(255, 255, 255, 0.40);
+  backdrop-filter: blur(4px) saturate(145%);
+  -webkit-backdrop-filter: blur(4px) saturate(145%);
+  border: 1px solid rgba(255, 255, 255, 0.45);
+  box-shadow: 0 6px 24px -4px rgba(15, 23, 42, 0.05), 0 1px 3px 0 rgba(15, 23, 42, 0.02);
+}
+
+/* 减弱透明度偏好 (Accessibility fallback) */
+@media (prefers-reduced-transparency: reduce) {
+  .swiss-card,
+  .glass-panel {
+    background: #ffffff !important;
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+    border-color: #e2e8f0 !important;
+  }
 }
 
 /* 下沉嵌套层 (平坦浅灰底，无边框) */
