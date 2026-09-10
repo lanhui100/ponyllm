@@ -32,12 +32,13 @@ export interface ProviderView {
 export type PricingMode = 'uniform' | 'peak_valley';
 
 export interface PricingPeriod {
-  name: string;
+  name?: string;
   start_time: string;
   end_time: string;
   input_price: number;
   cached_price: number;
   output_price: number;
+  include_weekends?: boolean;
 }
 
 export interface ModelView {

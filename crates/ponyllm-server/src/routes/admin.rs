@@ -92,12 +92,15 @@ impl From<AdminPricingMode> for PricingMode {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, ToSchema)]
 pub struct AdminPricingPeriod {
+    #[serde(default)]
     pub name: String,
     pub start_time: String,
     pub end_time: String,
     pub input_price: f64,
     pub cached_price: f64,
     pub output_price: f64,
+    #[serde(default)]
+    pub include_weekends: bool,
 }
 
 impl From<PricingPeriod> for AdminPricingPeriod {
@@ -109,6 +112,7 @@ impl From<PricingPeriod> for AdminPricingPeriod {
             input_price: p.input_price,
             cached_price: p.cached_price,
             output_price: p.output_price,
+            include_weekends: p.include_weekends,
         }
     }
 }
@@ -122,6 +126,7 @@ impl From<AdminPricingPeriod> for PricingPeriod {
             input_price: p.input_price,
             cached_price: p.cached_price,
             output_price: p.output_price,
+            include_weekends: p.include_weekends,
         }
     }
 }

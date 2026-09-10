@@ -85,12 +85,20 @@ interface CompactModelQuota {
   weekly?: CompactBucketQuota;
 }
 
-function extractCompactQuotas(keyResult?: KeyTestView): { gemini: CompactModelQuota; claude: CompactModelQuota } {
+function extractCompactQuotas(keyResult?: KeyTestView, isCoolingDown?: boolean): { gemini: CompactModelQuota; claude: CompactModelQuota } {
   const res: { gemini: CompactModelQuota; claude: CompactModelQuota } = {
     gemini: {},
     claude: {},
   };
-  if (!keyResult) return res;
+  if (!keyResult) {
+    if (isCoolingDown) {
+      return {
+        gemini: { h5: { fraction: 0, timeUntilReset: '冷却保护中' } },
+        claude: { h5: { fraction: 0, timeUntilReset: '冷却保护中' } },
+      };
+    }
+    return res;
+  }
 
   // 1. Check quota_groups (from retrieveUserQuotaSummary)
   if (keyResult.quota_groups && keyResult.quota_groups.length > 0) {
@@ -109,7 +117,7 @@ function extractCompactQuotas(keyResult?: KeyTestView): { gemini: CompactModelQu
         const isWeekly = win === 'weekly' || bId.includes('week') || bDesc.includes('week') || bDisp.includes('周') || bId.includes('7d');
         const is5h = win === '5h' || win.includes('5') || bId.includes('5h') || bId.includes('hour') || bDesc.includes('5') || bDisp.includes('5小时') || bDisp.includes('session');
         const qData: CompactBucketQuota = {
-          fraction: bucket.remaining_fraction,
+          fraction: bucket.remaining_fraction ?? 0,
           timeUntilReset: bucket.time_until_reset || bucket.reset_time_beijing || '已就绪',
         };
 
@@ -122,7 +130,6 @@ function extractCompactQuotas(keyResult?: KeyTestView): { gemini: CompactModelQu
         }
       }
     }
-    return res;
   }
 
   // 2. Fallback to models in quota list (from fetchAvailableModels)
@@ -133,7 +140,7 @@ function extractCompactQuotas(keyResult?: KeyTestView): { gemini: CompactModelQu
       const target = isClaude ? res.claude : res.gemini;
 
       const qData: CompactBucketQuota = {
-        fraction: q.remaining_fraction,
+        fraction: q.remaining_fraction ?? 0,
         timeUntilReset: q.time_until_reset || q.reset_time_beijing || '已就绪',
       };
 
@@ -141,15 +148,23 @@ function extractCompactQuotas(keyResult?: KeyTestView): { gemini: CompactModelQu
       // If the model ID or reset window contains weekly indicators, record as weekly; otherwise 5h.
       const isWeeklyModel = mId.includes('week') || mId.includes('7d') || (q.time_until_reset && (q.time_until_reset.includes('天') || q.time_until_reset.includes('d')));
       if (isWeeklyModel) {
-        if (!target.weekly || target.weekly.fraction > q.remaining_fraction) {
+        if (!target.weekly || target.weekly.fraction > (q.remaining_fraction ?? 0)) {
           target.weekly = qData;
         }
       } else {
-        if (!target.h5 || target.h5.fraction > q.remaining_fraction) {
+        if (!target.h5 || target.h5.fraction > (q.remaining_fraction ?? 0)) {
           target.h5 = qData;
         }
       }
     }
+  }
+
+  // 3. 即使额度为0，或探测响应成功但某些窗口未下发，只要已探测即保证有 5h 默认展示，确保进度条稳定呈现
+  if (!res.gemini.h5) {
+    res.gemini.h5 = { fraction: isCoolingDown ? 0 : 0, timeUntilReset: isCoolingDown ? '冷却保护中' : '已就绪' };
+  }
+  if (!res.claude.h5) {
+    res.claude.h5 = { fraction: isCoolingDown ? 0 : 0, timeUntilReset: isCoolingDown ? '冷却保护中' : '已就绪' };
   }
 
   return res;
@@ -204,6 +219,26 @@ async function handleDelete(id: string) {
     toast.error(`删除失败: ${err instanceof Error ? err.message : String(err)}`);
   }
 }
+const isRefreshingAll = ref(false);
+
+const isRefreshingAny = computed(() => {
+  if (isRefreshingAll.value) return true;
+  return props.keys.some((k) => props.testingKeyIds.has(k.id));
+});
+
+async function handleRefreshAllQuotas() {
+  if (!props.adminWriteEnabled || isRefreshingAny.value || props.keys.length === 0) return;
+  isRefreshingAll.value = true;
+  try {
+    const promises = props.keys.map((k) => emit('test-single', k.id));
+    await Promise.allSettled(promises);
+    toast.success('已刷新全部账号配额用量');
+  } catch (err: unknown) {
+    toast.error(`刷新失败: ${err instanceof Error ? err.message : String(err)}`);
+  } finally {
+    isRefreshingAll.value = false;
+  }
+}
 </script>
 
 <template>
@@ -222,6 +257,25 @@ async function handleDelete(id: string) {
       </div>
 
       <div class="flex items-center gap-1.5" @click.stop>
+        <!-- Antigravity 统一刷新配额用量按钮 (仅在有密钥时提供) -->
+        <UiTooltip v-if="isAntigravity && keys.length > 0" :content="isRefreshingAny ? '正在刷新配额用量...' : '刷新全部账号配额用量'">
+          <UiButton
+            variant="ghost"
+            size="icon"
+            aria-label="刷新全部账号配额用量"
+            :disabled="!adminWriteEnabled || isRefreshingAny"
+            data-testid="refresh-antigravity-quota-btn"
+            class="text-amber-600 hover:text-amber-700 hover:bg-amber-50/60"
+            @click="handleRefreshAllQuotas"
+          >
+            <Icons
+              name="refresh"
+              size="14"
+              :class="isRefreshingAny ? 'animate-spin text-amber-600' : ''"
+            />
+          </UiButton>
+        </UiTooltip>
+
         <UiButton
           v-if="isAntigravity"
           variant="ghost"
@@ -376,7 +430,11 @@ async function handleDelete(id: string) {
               <div class="flex items-center gap-2.5 min-w-0">
                 <span class="font-mono text-slate-900 font-semibold text-sm truncate">{{ k.id }}</span>
                 <span class="font-mono text-slate-500 text-[13px]">{{ k.masked_key }}</span>
-                <UiBadge :variant="k.state === 'active' ? 'success' : 'warning'">
+                <!-- 仅在非 active 状态（如 cooling_down / disabled）下显示状态徽标，正常可用时不显示“就绪” -->
+                <UiBadge
+                  v-if="k.state !== 'active'"
+                  :variant="k.state === 'cooling_down' ? 'warning' : 'destructive'"
+                >
                   {{ formatKeyState(k.state) }}
                 </UiBadge>
               </div>
@@ -388,40 +446,41 @@ async function handleDelete(id: string) {
                   class="flex items-center gap-2"
                   data-testid="antigravity-quota-container"
                 >
-                  <!-- 未探测时展示占位提示 -->
+                  <!-- 未探测且非冷却状态时展示占位提示 -->
                   <div
-                    v-if="!keyTestResults[k.id]"
+                    v-if="!keyTestResults[k.id] && k.state !== 'cooling_down'"
                     class="text-[11px] text-slate-400 font-normal select-none"
                   >
-                    点击右侧刷新查看用量
+                    点击上方刷新查看用量
                   </div>
 
-                  <!-- 探测结果：Gemini 胶囊双进度条 (G: 5h / 周) -->
+                  <!-- 探测结果或冷却保护状态：Gemini 胶囊双进度条 (G: 5h / 周) -->
                   <div
-                    v-if="extractCompactQuotas(keyTestResults[k.id]).gemini.h5 || extractCompactQuotas(keyTestResults[k.id]).gemini.weekly"
+                    v-if="keyTestResults[k.id] || k.state === 'cooling_down'"
                     class="flex items-center gap-1.5 px-2 py-1 bg-white/60 hover:bg-white/90 rounded-md border border-slate-200/80 text-[11px] shadow-2xs transition-colors"
                     data-testid="quota-capsule-gemini"
                   >
-                    <span class="font-bold text-slate-700 tracking-tight">G</span>
+                    <UiTooltip content="Gemini 系列模型">
+                      <span class="font-bold text-slate-700 tracking-tight cursor-help">G</span>
+                    </UiTooltip>
                     <!-- Gemini 5h -->
                     <UiTooltip
-                      v-if="extractCompactQuotas(keyTestResults[k.id]).gemini.h5"
-                      :content="`Gemini 5小时用量剩余 ${formatQuotaPercent(extractCompactQuotas(keyTestResults[k.id]).gemini.h5?.fraction)}% (${extractCompactQuotas(keyTestResults[k.id]).gemini.h5?.timeUntilReset})`"
+                      :content="`Gemini 5小时用量剩余 ${formatQuotaPercent(extractCompactQuotas(keyTestResults[k.id], k.state === 'cooling_down').gemini.h5?.fraction)}% (${extractCompactQuotas(keyTestResults[k.id], k.state === 'cooling_down').gemini.h5?.timeUntilReset || '已就绪'})`"
                     >
                       <div class="flex items-center gap-1 cursor-default">
                         <span class="text-[10px] text-slate-500 font-mono">5h</span>
-                        <div class="w-12 bg-slate-200 rounded-full h-1.5 overflow-hidden">
+                        <div class="w-12 bg-slate-200 rounded-full h-1 overflow-hidden">
                           <div
                             class="h-full rounded-full transition-all duration-300"
-                            :class="getQuotaProgressColor(extractCompactQuotas(keyTestResults[k.id]).gemini.h5?.fraction).bar"
-                            :style="{ width: `${formatQuotaPercent(extractCompactQuotas(keyTestResults[k.id]).gemini.h5?.fraction)}%` }"
+                            :class="getQuotaProgressColor(extractCompactQuotas(keyTestResults[k.id], k.state === 'cooling_down').gemini.h5?.fraction).bar"
+                            :style="{ width: `${formatQuotaPercent(extractCompactQuotas(keyTestResults[k.id], k.state === 'cooling_down').gemini.h5?.fraction)}%` }"
                           />
                         </div>
                         <span
                           class="font-mono text-[10px] font-semibold"
-                          :class="getQuotaProgressColor(extractCompactQuotas(keyTestResults[k.id]).gemini.h5?.fraction).text"
+                          :class="getQuotaProgressColor(extractCompactQuotas(keyTestResults[k.id], k.state === 'cooling_down').gemini.h5?.fraction).text"
                         >
-                          {{ formatQuotaPercent(extractCompactQuotas(keyTestResults[k.id]).gemini.h5?.fraction) }}%
+                          {{ formatQuotaPercent(extractCompactQuotas(keyTestResults[k.id], k.state === 'cooling_down').gemini.h5?.fraction) }}%
                         </span>
                       </div>
                     </UiTooltip>
@@ -429,55 +488,56 @@ async function handleDelete(id: string) {
                     <!-- Gemini 周用量 (若无真实周数据，默认展示 100% / 未受限状态) -->
                     <span class="text-slate-300">|</span>
                     <UiTooltip
-                      :content="extractCompactQuotas(keyTestResults[k.id]).gemini.weekly
-                        ? `Gemini 周用量剩余 ${formatQuotaPercent(extractCompactQuotas(keyTestResults[k.id]).gemini.weekly?.fraction)}% (${extractCompactQuotas(keyTestResults[k.id]).gemini.weekly?.timeUntilReset})`
+                      :content="extractCompactQuotas(keyTestResults[k.id], k.state === 'cooling_down').gemini.weekly
+                        ? `Gemini 周用量剩余 ${formatQuotaPercent(extractCompactQuotas(keyTestResults[k.id], k.state === 'cooling_down').gemini.weekly?.fraction)}% (${extractCompactQuotas(keyTestResults[k.id], k.state === 'cooling_down').gemini.weekly?.timeUntilReset})`
                         : 'Gemini 周配额未达阈值或已就绪 (100%)'"
                     >
                       <div class="flex items-center gap-1 cursor-default">
                         <span class="text-[10px] text-slate-500 font-mono">周</span>
-                        <div class="w-12 bg-slate-200 rounded-full h-1.5 overflow-hidden">
+                        <div class="w-12 bg-slate-200 rounded-full h-1 overflow-hidden">
                           <div
                             class="h-full rounded-full transition-all duration-300"
-                            :class="getQuotaProgressColor(extractCompactQuotas(keyTestResults[k.id]).gemini.weekly?.fraction ?? 1.0).bar"
-                            :style="{ width: `${formatQuotaPercent(extractCompactQuotas(keyTestResults[k.id]).gemini.weekly?.fraction ?? 1.0)}%` }"
+                            :class="getQuotaProgressColor(extractCompactQuotas(keyTestResults[k.id], k.state === 'cooling_down').gemini.weekly?.fraction ?? 1.0).bar"
+                            :style="{ width: `${formatQuotaPercent(extractCompactQuotas(keyTestResults[k.id], k.state === 'cooling_down').gemini.weekly?.fraction ?? 1.0)}%` }"
                           />
                         </div>
                         <span
                           class="font-mono text-[10px] font-semibold"
-                          :class="getQuotaProgressColor(extractCompactQuotas(keyTestResults[k.id]).gemini.weekly?.fraction ?? 1.0).text"
+                          :class="getQuotaProgressColor(extractCompactQuotas(keyTestResults[k.id], k.state === 'cooling_down').gemini.weekly?.fraction ?? 1.0).text"
                         >
-                          {{ formatQuotaPercent(extractCompactQuotas(keyTestResults[k.id]).gemini.weekly?.fraction ?? 1.0) }}%
+                          {{ formatQuotaPercent(extractCompactQuotas(keyTestResults[k.id], k.state === 'cooling_down').gemini.weekly?.fraction ?? 1.0) }}%
                         </span>
                       </div>
                     </UiTooltip>
                   </div>
 
-                  <!-- 探测结果：Claude 胶囊双进度条 (C: 5h / 周) -->
+                  <!-- 探测结果或冷却保护状态：Claude 胶囊双进度条 (C: 5h / 周) -->
                   <div
-                    v-if="extractCompactQuotas(keyTestResults[k.id]).claude.h5 || extractCompactQuotas(keyTestResults[k.id]).claude.weekly"
+                    v-if="keyTestResults[k.id] || k.state === 'cooling_down'"
                     class="flex items-center gap-1.5 px-2 py-1 bg-white/60 hover:bg-white/90 rounded-md border border-slate-200/80 text-[11px] shadow-2xs transition-colors"
                     data-testid="quota-capsule-claude"
                   >
-                    <span class="font-bold text-slate-700 tracking-tight">C</span>
+                    <UiTooltip content="Claude 系列模型">
+                      <span class="font-bold text-slate-700 tracking-tight cursor-help">C</span>
+                    </UiTooltip>
                     <!-- Claude 5h -->
                     <UiTooltip
-                      v-if="extractCompactQuotas(keyTestResults[k.id]).claude.h5"
-                      :content="`Claude 5小时用量剩余 ${formatQuotaPercent(extractCompactQuotas(keyTestResults[k.id]).claude.h5?.fraction)}% (${extractCompactQuotas(keyTestResults[k.id]).claude.h5?.timeUntilReset})`"
+                      :content="`Claude 5小时用量剩余 ${formatQuotaPercent(extractCompactQuotas(keyTestResults[k.id], k.state === 'cooling_down').claude.h5?.fraction)}% (${extractCompactQuotas(keyTestResults[k.id], k.state === 'cooling_down').claude.h5?.timeUntilReset || '已就绪'})`"
                     >
                       <div class="flex items-center gap-1 cursor-default">
                         <span class="text-[10px] text-slate-500 font-mono">5h</span>
-                        <div class="w-12 bg-slate-200 rounded-full h-1.5 overflow-hidden">
+                        <div class="w-12 bg-slate-200 rounded-full h-1 overflow-hidden">
                           <div
                             class="h-full rounded-full transition-all duration-300"
-                            :class="getQuotaProgressColor(extractCompactQuotas(keyTestResults[k.id]).claude.h5?.fraction).bar"
-                            :style="{ width: `${formatQuotaPercent(extractCompactQuotas(keyTestResults[k.id]).claude.h5?.fraction)}%` }"
+                            :class="getQuotaProgressColor(extractCompactQuotas(keyTestResults[k.id], k.state === 'cooling_down').claude.h5?.fraction).bar"
+                            :style="{ width: `${formatQuotaPercent(extractCompactQuotas(keyTestResults[k.id], k.state === 'cooling_down').claude.h5?.fraction)}%` }"
                           />
                         </div>
                         <span
                           class="font-mono text-[10px] font-semibold"
-                          :class="getQuotaProgressColor(extractCompactQuotas(keyTestResults[k.id]).claude.h5?.fraction).text"
+                          :class="getQuotaProgressColor(extractCompactQuotas(keyTestResults[k.id], k.state === 'cooling_down').claude.h5?.fraction).text"
                         >
-                          {{ formatQuotaPercent(extractCompactQuotas(keyTestResults[k.id]).claude.h5?.fraction) }}%
+                          {{ formatQuotaPercent(extractCompactQuotas(keyTestResults[k.id], k.state === 'cooling_down').claude.h5?.fraction) }}%
                         </span>
                       </div>
                     </UiTooltip>
@@ -485,38 +545,38 @@ async function handleDelete(id: string) {
                     <!-- Claude 周用量 (若无真实周数据，默认展示 100% / 未受限状态) -->
                     <span class="text-slate-300">|</span>
                     <UiTooltip
-                      :content="extractCompactQuotas(keyTestResults[k.id]).claude.weekly
-                        ? `Claude 周用量剩余 ${formatQuotaPercent(extractCompactQuotas(keyTestResults[k.id]).claude.weekly?.fraction)}% (${extractCompactQuotas(keyTestResults[k.id]).claude.weekly?.timeUntilReset})`
+                      :content="extractCompactQuotas(keyTestResults[k.id], k.state === 'cooling_down').claude.weekly
+                        ? `Claude 周用量剩余 ${formatQuotaPercent(extractCompactQuotas(keyTestResults[k.id], k.state === 'cooling_down').claude.weekly?.fraction)}% (${extractCompactQuotas(keyTestResults[k.id], k.state === 'cooling_down').claude.weekly?.timeUntilReset})`
                         : 'Claude 周配额未达阈值或已就绪 (100%)'"
                     >
                       <div class="flex items-center gap-1 cursor-default">
                         <span class="text-[10px] text-slate-500 font-mono">周</span>
-                        <div class="w-12 bg-slate-200 rounded-full h-1.5 overflow-hidden">
+                        <div class="w-12 bg-slate-200 rounded-full h-1 overflow-hidden">
                           <div
                             class="h-full rounded-full transition-all duration-300"
-                            :class="getQuotaProgressColor(extractCompactQuotas(keyTestResults[k.id]).claude.weekly?.fraction ?? 1.0).bar"
-                            :style="{ width: `${formatQuotaPercent(extractCompactQuotas(keyTestResults[k.id]).claude.weekly?.fraction ?? 1.0)}%` }"
+                            :class="getQuotaProgressColor(extractCompactQuotas(keyTestResults[k.id], k.state === 'cooling_down').claude.weekly?.fraction ?? 1.0).bar"
+                            :style="{ width: `${formatQuotaPercent(extractCompactQuotas(keyTestResults[k.id], k.state === 'cooling_down').claude.weekly?.fraction ?? 1.0)}%` }"
                           />
                         </div>
                         <span
                           class="font-mono text-[10px] font-semibold"
-                          :class="getQuotaProgressColor(extractCompactQuotas(keyTestResults[k.id]).claude.weekly?.fraction ?? 1.0).text"
+                          :class="getQuotaProgressColor(extractCompactQuotas(keyTestResults[k.id], k.state === 'cooling_down').claude.weekly?.fraction ?? 1.0).text"
                         >
-                          {{ formatQuotaPercent(extractCompactQuotas(keyTestResults[k.id]).claude.weekly?.fraction ?? 1.0) }}%
+                          {{ formatQuotaPercent(extractCompactQuotas(keyTestResults[k.id], k.state === 'cooling_down').claude.weekly?.fraction ?? 1.0) }}%
                         </span>
                       </div>
                     </UiTooltip>
                   </div>
                 </div>
 
-                <!-- 刷新用量按钮 (Antigravity 专享或通用拨测) -->
-                <UiTooltip :content="isAntigravity ? '刷新该账号配额用量' : '测试密钥连通性'">
+                <!-- 非 Antigravity 专享通用拨测按钮 (Antigravity 已在标题行统一刷新) -->
+                <UiTooltip v-if="!isAntigravity" content="测试密钥连通性">
                   <UiButton
                     variant="ghost"
                     size="icon"
-                    :aria-label="`刷新密钥 ${k.id} 用量`"
+                    :aria-label="`测试密钥 ${k.id} 连通性`"
                     :disabled="testingKeyIds.has(k.id) || !adminWriteEnabled"
-                    :data-testid="`refresh-key-quota-${k.id}`"
+                    :data-testid="`test-key-${k.id}`"
                     class="text-slate-500 hover:text-amber-600 hover:bg-amber-50"
                     @click="emit('test-single', k.id)"
                   >

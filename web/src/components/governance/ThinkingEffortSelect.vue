@@ -34,18 +34,7 @@ function selectEffort(val: string) {
 </script>
 
 <template>
-  <div class="space-y-2 text-sm">
-    <div class="flex items-center justify-between">
-      <label class="font-medium text-slate-800 flex items-center gap-1.5 text-[13px]">
-        <Icons name="brain" size="14" class="text-slate-700" />
-        思考强度 (Thinking Effort)
-        <UiTooltip content="设置模型推理思考深度的预设档位，按需开启深度认知">
-          <Icons name="info" size="13" class="text-slate-400 hover:text-slate-600 cursor-pointer" />
-        </UiTooltip>
-      </label>
-      <span class="text-slate-500 text-xs font-mono">当前: {{ defaultEffort || 'Off' }}</span>
-    </div>
-
+  <div class="text-sm">
     <!-- 纯按钮分段选项器 (无最大上限) -->
     <div
       class="grid grid-cols-4 gap-1.5 p-1 bg-slate-100/90 rounded-lg border border-slate-200/70 select-none"
@@ -60,7 +49,7 @@ function selectEffort(val: string) {
           type="button"
           :disabled="disabled"
           :data-testid="`thinking-btn-${t.value.toLowerCase()}`"
-          class="w-full py-2 px-1 rounded-md text-[13px] font-medium transition-all duration-150 flex flex-col items-center justify-center gap-0.5 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+          class="w-full py-1.5 px-1 rounded-md text-[13px] font-medium transition-all duration-150 flex flex-col items-center justify-center gap-0.5 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
           :class="[
             defaultEffort === t.value
               ? 'bg-slate-900 text-white shadow-2xs font-semibold'

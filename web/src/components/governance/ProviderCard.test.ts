@@ -167,8 +167,11 @@ describe('ProviderCard UI and Phase 2 Requirements', () => {
     toggleKeysBtn.click();
     await nextTick();
 
-    // Verify refresh button exists
-    const refreshBtn = container.querySelector('[data-testid="refresh-key-quota-ag-key-1"]') as HTMLButtonElement;
+    // Verify individual key refresh button does NOT exist anymore
+    expect(container.querySelector('[data-testid="refresh-key-quota-ag-key-1"]')).toBeNull();
+
+    // Verify unified refresh button exists in the keys header row
+    const refreshBtn = container.querySelector('[data-testid="refresh-antigravity-quota-btn"]') as HTMLButtonElement;
     expect(refreshBtn).not.toBeNull();
     refreshBtn.click();
     await nextTick();
@@ -184,6 +187,150 @@ describe('ProviderCard UI and Phase 2 Requirements', () => {
     expect(geminiCapsule?.textContent).toContain('85%');
     expect(geminiCapsule?.textContent).toContain('周');
     expect(geminiCapsule?.textContent).toContain('62%');
+
+    // Verify progress bar has h-1 class for slimmer height
+    const progressBar = geminiCapsule?.querySelector('.h-1');
+    expect(progressBar).not.toBeNull();
+
+    // Verify Claude capsule renders
+    const claudeCapsule = container.querySelector('[data-testid="quota-capsule-claude"]');
+    expect(claudeCapsule).not.toBeNull();
+    expect(claudeCapsule?.textContent).toContain('C');
+
+    // Verify "就绪" badge is NOT displayed for active key
+    expect(container.textContent).not.toContain('就绪');
+
+    app.unmount();
+    document.body.removeChild(container);
+  });
+
+  it('renders quota progress bars even when remaining fraction is zero', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+
+    const antigravityProvider = {
+      ...mockProvider,
+      name: 'antigravity',
+      default_protocol: 'antigravity',
+    };
+    const antigravityKeys = [
+      {
+        id: 'ag-key-zero',
+        provider: 'antigravity',
+        masked_key: 'ya29.***',
+        state: 'active' as const,
+        priority: 1,
+        weight: 10,
+      },
+    ];
+
+    const mockKeyTestResults = {
+      'ag-key-zero': {
+        success: true,
+        latency_ms: 100,
+        message: 'probe ok',
+        quota_groups: [
+          {
+            display_name: 'Gemini Models',
+            description: 'Gemini 2.5 & 3 series',
+            buckets: [
+              {
+                bucket_id: 'gemini-5h',
+                window: '5h',
+                remaining_fraction: 0,
+                reset_time_beijing: '2026-09-10 20:00:00',
+                time_until_reset: '4小时后',
+                display_name: '5小时用量',
+                description: '5-hour quota',
+              },
+            ],
+          },
+        ],
+      },
+    };
+
+    const app = createApp(ProviderCard, {
+      provider: antigravityProvider,
+      models: [],
+      keys: antigravityKeys,
+      adminWriteEnabled: true,
+      keyTestResults: mockKeyTestResults,
+      testingKeyIds: new Set<string>(),
+      defaultExpanded: true,
+    });
+    app.mount(container);
+    await nextTick();
+
+    // Toggle keys to expand
+    const toggleKeysBtn = container.querySelector('[data-testid="toggle-keys-btn"]') as HTMLButtonElement;
+    toggleKeysBtn?.click();
+    await nextTick();
+
+    // Verify Gemini capsule and 0% text are displayed
+    const geminiCapsule = container.querySelector('[data-testid="quota-capsule-gemini"]');
+    expect(geminiCapsule).not.toBeNull();
+    expect(geminiCapsule?.textContent).toContain('G');
+    expect(geminiCapsule?.textContent).toContain('0%');
+
+    // Verify Claude capsule is also stably displayed
+    const claudeCapsule = container.querySelector('[data-testid="quota-capsule-claude"]');
+    expect(claudeCapsule).not.toBeNull();
+    expect(claudeCapsule?.textContent).toContain('C');
+
+    app.unmount();
+    document.body.removeChild(container);
+  });
+
+  it('renders quota progress bars and cooling badge for cooling_down keys even without prior probe results', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+
+    const antigravityProvider = {
+      ...mockProvider,
+      name: 'antigravity',
+      default_protocol: 'antigravity',
+    };
+    const coolingKeys = [
+      {
+        id: 'ag-key-cooling',
+        provider: 'antigravity',
+        masked_key: 'ya29.***',
+        state: 'cooling_down' as const,
+        priority: 1,
+        weight: 10,
+      },
+    ];
+
+    const app = createApp(ProviderCard, {
+      provider: antigravityProvider,
+      models: [],
+      keys: coolingKeys,
+      adminWriteEnabled: true,
+      keyTestResults: {},
+      testingKeyIds: new Set<string>(),
+      defaultExpanded: true,
+    });
+    app.mount(container);
+    await nextTick();
+
+    // Toggle keys to expand
+    const toggleKeysBtn = container.querySelector('[data-testid="toggle-keys-btn"]') as HTMLButtonElement;
+    toggleKeysBtn?.click();
+    await nextTick();
+
+    // Verify "冷却中" badge is displayed
+    expect(container.textContent).toContain('冷却中');
+
+    // Verify quota progress capsules are automatically displayed with 0% and cooling indicators
+    const geminiCapsule = container.querySelector('[data-testid="quota-capsule-gemini"]');
+    expect(geminiCapsule).not.toBeNull();
+    expect(geminiCapsule?.textContent).toContain('G');
+    expect(geminiCapsule?.textContent).toContain('0%');
+
+    const claudeCapsule = container.querySelector('[data-testid="quota-capsule-claude"]');
+    expect(claudeCapsule).not.toBeNull();
+    expect(claudeCapsule?.textContent).toContain('C');
+    expect(claudeCapsule?.textContent).toContain('0%');
 
     app.unmount();
     document.body.removeChild(container);

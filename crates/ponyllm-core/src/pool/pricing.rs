@@ -9,16 +9,21 @@ pub enum PricingMode {
     PeakValley,
 }
 
-/// Time-of-use pricing period with start/end time in "HH:MM" 24h format.
-/// Times are interpreted in local time (or Beijing Time UTC+8 if unspecified).
+/// Peak pricing period with start/end time in "HH:MM" 24h format,
+/// and an option to include weekends (Saturdays & Sundays).
+/// Times are interpreted in Beijing Time (UTC+8).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PricingPeriod {
+    #[serde(default)]
     pub name: String,
     pub start_time: String,
     pub end_time: String,
     pub input_price: f64,
     pub cached_price: f64,
     pub output_price: f64,
+    /// Whether peak pricing applies on weekends. If false, weekends use valley baseline.
+    #[serde(default)]
+    pub include_weekends: bool,
 }
 
 impl PricingPeriod {
@@ -33,6 +38,18 @@ impl PricingPeriod {
         } else {
             cur >= start || cur < end
         }
+    }
+
+    /// Check whether this peak period applies at the given Beijing datetime
+    pub fn matches_datetime(&self, bj_dt: &chrono::DateTime<chrono::FixedOffset>) -> bool {
+        use chrono::Datelike;
+        let weekday = bj_dt.weekday();
+        let is_weekend = weekday == chrono::Weekday::Sat || weekday == chrono::Weekday::Sun;
+        if is_weekend && !self.include_weekends {
+            return false;
+        }
+        let cur_hm = bj_dt.format("%H:%M").to_string();
+        self.matches_time(&cur_hm)
     }
 }
 
@@ -95,20 +112,16 @@ impl PricingConfig {
         self.input_price.abs() < 1e-6 && self.cached_price.abs() < 1e-6 && self.output_price.abs() < 1e-6
     }
 
-    /// Resolve effective prices (input, cached, output) for the current moment or fallback to baseline
+    /// Resolve effective prices (input, cached, output) for the current moment or fallback to baseline (valley price)
     pub fn resolve_current_prices(&self) -> (f64, f64, f64) {
         if self.mode == PricingMode::PeakValley && !self.pricing_periods.is_empty() {
             // Use Beijing time UTC+8 as standard convention for peak/valley tariffs
-            let now_utc = chrono::Utc::now();
-            let bj_dt = now_utc + chrono::Duration::hours(8);
-            let cur_hm = bj_dt.format("%H:%M").to_string();
-            if let Some(period) = self.pricing_periods.iter().find(|p| p.matches_time(&cur_hm)) {
+            let tz_offset = chrono::FixedOffset::east_opt(8 * 3600).unwrap();
+            let bj_dt = chrono::Utc::now().with_timezone(&tz_offset);
+            if let Some(period) = self.pricing_periods.iter().find(|p| p.matches_datetime(&bj_dt)) {
                 return (period.input_price, period.cached_price, period.output_price);
             }
-            // If no period matches current time, fall back to the first period or uniform baseline
-            if let Some(first) = self.pricing_periods.first() {
-                return (first.input_price, first.cached_price, first.output_price);
-            }
+            // During off-peak (valley) or non-peak weekends, baseline (uniform input/cached/output) applies
         }
         (self.input_price, self.cached_price, self.output_price)
     }

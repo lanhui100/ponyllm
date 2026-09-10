@@ -58,26 +58,22 @@ fn test_model_spec_pricing_inheritance_and_override() {
     assert_eq!(r1_pricing.cached_price, 0.14);
     assert_eq!(r1_pricing.output_price, 2.19);
 
-    // 3. Peak valley pricing model test
+    // 3. Peak valley pricing model test: default baseline is valley, peak period can exclude/include weekends
     let pv_model = ModelSpec {
         name: "deepseek-pv".to_string(),
+        input_price: Some(0.05), // 谷价输入
+        cached_price: Some(0.01),
+        output_price: Some(0.10),
         pricing_mode: Some(PricingMode::PeakValley),
         pricing_periods: vec![
             PricingPeriod {
-                name: "night-discount".to_string(),
-                start_time: "00:00".to_string(),
-                end_time: "08:30".to_string(),
-                input_price: 0.05,
-                cached_price: 0.01,
-                output_price: 0.10,
-            },
-            PricingPeriod {
-                name: "day-standard".to_string(),
-                start_time: "08:30".to_string(),
+                name: "".to_string(),
+                start_time: "08:00".to_string(),
                 end_time: "24:00".to_string(),
-                input_price: 0.20,
+                input_price: 0.20, // 峰价输入
                 cached_price: 0.05,
                 output_price: 0.40,
+                include_weekends: false, // 周末依然走谷价
             },
         ],
         ..Default::default()
@@ -86,10 +82,11 @@ fn test_model_spec_pricing_inheritance_and_override() {
     pv_provider.model_specs.push(pv_model);
     let pv_pricing = pv_provider.get_model_pricing("deepseek-pv");
     assert_eq!(pv_pricing.mode, PricingMode::PeakValley);
-    assert_eq!(pv_pricing.pricing_periods.len(), 2);
-    assert!(pv_pricing.pricing_periods[0].matches_time("02:00"));
-    assert!(!pv_pricing.pricing_periods[0].matches_time("09:00"));
-    assert!(pv_pricing.pricing_periods[1].matches_time("09:00"));
+    assert_eq!(pv_pricing.input_price, 0.05); // 基础谷价
+    assert_eq!(pv_pricing.pricing_periods.len(), 1);
+    assert!(pv_pricing.pricing_periods[0].matches_time("10:00"));
+    assert!(!pv_pricing.pricing_periods[0].matches_time("02:00"));
+    assert!(!pv_pricing.pricing_periods[0].include_weekends);
 
     // 3. Unconfigured model should fallback to provider default
     let unconfigured_pricing = provider.get_model_pricing("non-configured-model");

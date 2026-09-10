@@ -622,7 +622,6 @@
       "AdminPricingPeriod": {
         "type": "object",
         "required": [
-          "name",
           "start_time",
           "end_time",
           "input_price",
@@ -636,6 +635,9 @@
           },
           "end_time": {
             "type": "string"
+          },
+          "include_weekends": {
+            "type": "boolean"
           },
           "input_price": {
             "type": "number",
