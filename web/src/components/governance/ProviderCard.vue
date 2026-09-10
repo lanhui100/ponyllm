@@ -44,7 +44,6 @@ const emit = defineEmits<{
   (e: 'create-key', payload: CreateKeyPayload): Promise<void>;
   (e: 'delete-key', id: string): Promise<void>;
   (e: 'test-single-key', id: string): Promise<void>;
-  (e: 'test-provider-keys', providerName: string): Promise<void>;
   (e: 'oauth-antigravity', providerName: string): void;
 }>();
 
@@ -186,10 +185,6 @@ async function handleDeleteProvider() {
     alert(`删除失败: ${err instanceof Error ? err.message : String(err)}`);
   }
 }
-
-function handleBatchTest() {
-  emit('test-provider-keys', props.provider.name);
-}
 </script>
 
 <template>
@@ -236,20 +231,6 @@ function handleBatchTest() {
             {{ activeKeysCount }}/{{ keys.length }} 密钥可用
           </UiBadge>
         </div>
-
-        <!-- ⚡ 一键测速该服务商全部 Key -->
-        <UiTooltip content="一键测试该服务商下所有密钥的连通性与延迟">
-          <UiButton
-            variant="ghost"
-            size="icon"
-            aria-label="一键测试该服务商下所有密钥"
-            :disabled="keys.length === 0 || !adminWriteEnabled"
-            class="text-amber-500 hover:text-amber-600 hover:bg-amber-50"
-            @click="handleBatchTest"
-          >
-            <Icons name="zap" size="15" />
-          </UiButton>
-        </UiTooltip>
 
         <!-- 🗑 删除服务商 -->
         <UiTooltip content="删除该服务商">

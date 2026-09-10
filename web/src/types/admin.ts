@@ -75,6 +75,23 @@ export interface AntigravityQuotaItemView {
   time_until_reset?: string | null;
 }
 
+export interface AntigravityQuotaBucketView {
+  bucket_id: string;
+  window: string;
+  remaining_fraction: number;
+  reset_time?: string | null;
+  reset_time_beijing?: string | null;
+  time_until_reset?: string | null;
+  display_name?: string | null;
+  description?: string | null;
+}
+
+export interface AntigravityQuotaGroupView {
+  display_name: string;
+  description?: string | null;
+  buckets: AntigravityQuotaBucketView[];
+}
+
 export interface KeyTestView {
   success: boolean;
   latency_ms: number;
@@ -82,6 +99,7 @@ export interface KeyTestView {
   http_status?: number | null;
   error_code?: string | null;
   quota?: AntigravityQuotaItemView[] | null;
+  quota_groups?: AntigravityQuotaGroupView[] | null;
 }
 
 export interface StrategyView {
@@ -216,6 +234,7 @@ export interface AuthorizeAntigravityResponse {
   email?: string | null;
   config_version: number;
   quota?: AntigravityQuotaItemView[] | null;
+  quota_groups?: AntigravityQuotaGroupView[] | null;
 }
 
 export interface ProxyStatusView {

@@ -330,12 +330,15 @@ pub async fn handle_responses(
                         },
                     );
 
+                    let est_prompt_tokens = serde_json::to_string(&req.input).map(|s| (s.len() as u64 / 4).max(1)).unwrap_or(1);
+
                     let failure_ctx = StreamFailureContext {
                         bus: state.event_bus.clone(),
                         ctx: ctx.clone(),
                         provider: provider_name.clone(),
                         stages: stages.clone(),
                         request_snippet: req_snippet.clone(),
+                        estimated_prompt_tokens: est_prompt_tokens,
                     };
                     // Same-protocol upstreams stream through untouched;
                     // mismatched natives are translated into Responses events.
@@ -446,7 +449,7 @@ pub async fn handle_responses(
                     }
                 };
                 let latency = start_time.elapsed();
-                let (prompt_tokens, completion_tokens) = extract_usage_tokens(&resp_val);
+                let (prompt_tokens, completion_tokens, cached_tokens) = extract_usage_tokens(&resp_val);
                 let tps = if latency.as_secs_f64() > 0.05 && completion_tokens > 0 {
                     Some((completion_tokens as f64 / latency.as_secs_f64()).max(1.0))
                 } else {
@@ -463,6 +466,7 @@ pub async fn handle_responses(
                         latency_ms: latency.as_secs_f64() * 1000.0,
                         prompt_tokens,
                         completion_tokens,
+                        cached_tokens,
                         tps,
                         request_snippet: req_snippet.clone(),
                         response_snippet: Some(resp_val.to_string()),

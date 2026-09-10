@@ -91,6 +91,104 @@ describe('ProviderCard UI and Phase 2 Requirements', () => {
     document.body.removeChild(container);
   });
 
+  it('renders refresh quota button and quota progress bars for antigravity provider keys', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+
+    let testedKeyId: string | null = null;
+    const antigravityProvider = {
+      ...mockProvider,
+      name: 'antigravity',
+      default_protocol: 'antigravity',
+    };
+    const antigravityKeys = [
+      {
+        id: 'ag-key-1',
+        provider: 'antigravity',
+        masked_key: 'ya29.***',
+        state: 'active' as const,
+        priority: 1,
+        weight: 10,
+      },
+    ];
+
+    const mockKeyTestResults = {
+      'ag-key-1': {
+        success: true,
+        latency_ms: 120,
+        message: 'probe ok',
+        quota_groups: [
+          {
+            display_name: 'Gemini Models',
+            description: 'Gemini 2.5 & 3 series',
+            buckets: [
+              {
+                bucket_id: 'gemini-5h',
+                window: '5h',
+                remaining_fraction: 0.85,
+                reset_time_beijing: '2026-09-10 16:00:00',
+                time_until_reset: '3小时40分后',
+                display_name: '5小时用量',
+                description: '5-hour quota',
+              },
+              {
+                bucket_id: 'gemini-weekly',
+                window: 'weekly',
+                remaining_fraction: 0.62,
+                reset_time_beijing: '2026-09-14 08:00:00',
+                time_until_reset: '3天后',
+                display_name: '周用量',
+                description: 'Weekly quota',
+              },
+            ],
+          },
+        ],
+      },
+    };
+
+    const app = createApp(ProviderCard, {
+      provider: antigravityProvider,
+      models: [],
+      keys: antigravityKeys,
+      adminWriteEnabled: true,
+      keyTestResults: mockKeyTestResults,
+      testingKeyIds: new Set<string>(),
+      defaultExpanded: true,
+      'onTest-single-key': (id: string) => {
+        testedKeyId = id;
+      },
+    });
+    app.mount(container);
+    await nextTick();
+
+    // Toggle keys to expand
+    const toggleKeysBtn = container.querySelector('[data-testid="toggle-keys-btn"]') as HTMLButtonElement;
+    expect(toggleKeysBtn).not.toBeNull();
+    toggleKeysBtn.click();
+    await nextTick();
+
+    // Verify refresh button exists
+    const refreshBtn = container.querySelector('[data-testid="refresh-key-quota-ag-key-1"]') as HTMLButtonElement;
+    expect(refreshBtn).not.toBeNull();
+    refreshBtn.click();
+    await nextTick();
+    expect(testedKeyId).toBe('ag-key-1');
+
+    // Verify quota container and compact capsule progress bars
+    const quotaContainer = container.querySelector('[data-testid="antigravity-quota-container"]');
+    expect(quotaContainer).not.toBeNull();
+    const geminiCapsule = container.querySelector('[data-testid="quota-capsule-gemini"]');
+    expect(geminiCapsule).not.toBeNull();
+    expect(geminiCapsule?.textContent).toContain('G');
+    expect(geminiCapsule?.textContent).toContain('5h');
+    expect(geminiCapsule?.textContent).toContain('85%');
+    expect(geminiCapsule?.textContent).toContain('周');
+    expect(geminiCapsule?.textContent).toContain('62%');
+
+    app.unmount();
+    document.body.removeChild(container);
+  });
+
   it('handles protocol configuration, toggling pills, and emits update-provider with validation', async () => {
     const container = document.createElement('div');
     document.body.appendChild(container);

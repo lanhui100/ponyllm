@@ -38,12 +38,14 @@ impl Projection for MetricsProjection {
                 } else {
                     flow.chunks.max(1)
                 };
+                let cached = flow.cached_tokens;
                 self.inner.record_stream(flow);
                 self.inner.record_request(
                     &env.endpoint,
                     ms(flow.ttlb_ms),
                     prompt,
                     completion,
+                    cached,
                     true,
                 );
             }
@@ -55,27 +57,30 @@ impl Projection for MetricsProjection {
                     } else {
                         sample.chunks.max(1)
                     };
+                    let cached = sample.cached_tokens;
                     self.inner.record_stream(sample);
                     self.inner.record_request(
                         &env.endpoint,
                         ms(sample.ttlb_ms),
                         prompt,
                         completion,
+                        cached,
                         false,
                     );
                 } else {
-                    self.inner.record_request(&env.endpoint, ms(0.0), 0, 0, false);
+                    self.inner.record_request(&env.endpoint, ms(0.0), 0, 0, 0, false);
                 }
             }
             GatewayEvent::StreamCancelled { chunks, ttlb_ms, .. } => {
                 self.inner
-                    .record_request(&env.endpoint, ms(*ttlb_ms), 0, *chunks, false);
+                    .record_request(&env.endpoint, ms(*ttlb_ms), 0, *chunks, 0, false);
             }
             GatewayEvent::RequestCompleted {
                 status_code,
                 latency_ms,
                 prompt_tokens,
                 completion_tokens,
+                cached_tokens,
                 ..
             } => {
                 self.inner.record_request(
@@ -83,12 +88,13 @@ impl Projection for MetricsProjection {
                     ms(*latency_ms),
                     *prompt_tokens,
                     *completion_tokens,
+                    *cached_tokens,
                     (200..300).contains(status_code),
                 );
             }
             GatewayEvent::RequestFailed { latency_ms, .. } => {
                 self.inner
-                    .record_request(&env.endpoint, ms(*latency_ms), 0, 0, false);
+                    .record_request(&env.endpoint, ms(*latency_ms), 0, 0, 0, false);
             }
             GatewayEvent::UpstreamAttemptFailed { failover: true, .. } => {
                 self.inner.record_failover();

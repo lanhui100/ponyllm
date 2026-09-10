@@ -902,6 +902,22 @@ pub fn antigravity_to_chat_response(
         );
     }
 
+    let cached_tokens = target.get("usageMetadata")
+        .and_then(|u| u.get("cachedContentTokenCount"))
+        .and_then(|t| t.as_u64())
+        .unwrap_or(0);
+
+    let mut usage_json = json!({
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": total_tokens
+    });
+    if cached_tokens > 0 {
+        usage_json["prompt_tokens_details"] = json!({
+            "cached_tokens": cached_tokens
+        });
+    }
+
     json!({
         "id": format!("chatcmpl-{}", Uuid::new_v4().simple()),
         "object": "chat.completion",
@@ -914,11 +930,7 @@ pub fn antigravity_to_chat_response(
                 "finish_reason": finish_reason
             }
         ],
-        "usage": {
-            "prompt_tokens": prompt_tokens,
-            "completion_tokens": completion_tokens,
-            "total_tokens": total_tokens
-        }
+        "usage": usage_json
     })
 }
 
@@ -1022,6 +1034,19 @@ pub fn antigravity_to_messages_response(
         );
     }
 
+    let cached_tokens = target.get("usageMetadata")
+        .and_then(|u| u.get("cachedContentTokenCount"))
+        .and_then(|t| t.as_u64())
+        .unwrap_or(0);
+
+    let mut usage_json = json!({
+        "input_tokens": prompt_tokens,
+        "output_tokens": completion_tokens
+    });
+    if cached_tokens > 0 {
+        usage_json["cache_read_input_tokens"] = json!(cached_tokens);
+    }
+
     json!({
         "id": format!("msg_{}", Uuid::new_v4().simple()),
         "type": "message",
@@ -1030,10 +1055,7 @@ pub fn antigravity_to_messages_response(
         "content": content_blocks,
         "stop_reason": stop_reason,
         "stop_sequence": null,
-        "usage": {
-            "input_tokens": prompt_tokens,
-            "output_tokens": completion_tokens
-        }
+        "usage": usage_json
     })
 }
 
@@ -1117,11 +1139,16 @@ pub fn antigravity_chunk_to_chat_chunk(
         let prompt_tokens = u.get("promptTokenCount").and_then(|t| t.as_u64()).unwrap_or(0) as u32;
         let completion_tokens = u.get("candidatesTokenCount").and_then(|t| t.as_u64()).unwrap_or(0) as u32;
         let total_tokens = u.get("totalTokenCount").and_then(|t| t.as_u64()).unwrap_or((prompt_tokens + completion_tokens) as u64) as u32;
+        let cached_tokens = u.get("cachedContentTokenCount").and_then(|t| t.as_u64()).map(|c| c as u32);
+        let prompt_tokens_details = cached_tokens.map(|c| crate::openai::chat::PromptTokensDetails {
+            cached_tokens: Some(c),
+            audio_tokens: None,
+        });
         Usage {
             prompt_tokens,
             completion_tokens,
             total_tokens,
-            prompt_tokens_details: None,
+            prompt_tokens_details,
             completion_tokens_details: None,
         }
     });

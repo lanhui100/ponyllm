@@ -299,14 +299,12 @@ describe('Modern Minimalist UI/UX System-Wide E2E Verification Suite (WEB-07)', 
     await nextTick();
     await new Promise((r) => setTimeout(r, 20));
 
-    // 验证纯图标测速按钮与删除按钮
-    const testSingleKeyBtn = container.querySelector('[data-testid="test-single-key-btn"]') as HTMLButtonElement;
+    // 验证纯图标操作按钮 (如删除按钮)
     const deleteKeyBtn = container.querySelector('[data-testid="delete-key-btn"]') as HTMLButtonElement;
-    expect(testSingleKeyBtn).not.toBeNull();
     expect(deleteKeyBtn).not.toBeNull();
+    expect(container.querySelector('[data-testid="test-single-key-btn"]')).toBeNull();
 
     // 验证内部包含对应 SVG 图标
-    expect(testSingleKeyBtn.querySelector('svg')).not.toBeNull();
     expect(deleteKeyBtn.querySelector('svg')).not.toBeNull();
 
     app.unmount();
@@ -352,7 +350,9 @@ describe('Modern Minimalist UI/UX System-Wide E2E Verification Suite (WEB-07)', 
 
     expect(container.textContent).toContain('系统可观测大盘');
     expect(container.textContent).toContain('网关状态');
-    expect(container.textContent).toContain('25,000'); // total tokens
+    expect(container.textContent).toContain('5,000 tok'); // output tokens
+    expect(container.textContent).toContain('输入: 20K');
+    expect(container.textContent).toContain('输出: 5K');
     expect(container.textContent).toContain('115 ms'); // ttft rounded
     expect(container.textContent).toContain('68 tok/s'); // tps rounded
 

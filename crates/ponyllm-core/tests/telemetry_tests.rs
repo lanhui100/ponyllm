@@ -110,14 +110,15 @@ fn test_flight_recorder_ring_buffer_capacity() {
 fn test_metrics_collector() {
     let metrics = MetricsCollector::new();
 
-    metrics.record_request("/v1/chat/completions", Duration::from_millis(100), 50, 20, true);
-    metrics.record_request("/v1/chat/completions", Duration::from_millis(200), 30, 10, false);
+    metrics.record_request("/v1/chat/completions", Duration::from_millis(100), 50, 20, 10, true);
+    metrics.record_request("/v1/chat/completions", Duration::from_millis(200), 30, 10, 5, false);
 
     let summary = metrics.get_summary();
     assert_eq!(summary.total_requests, 2);
     assert_eq!(summary.failed_requests, 1);
     assert_eq!(summary.prompt_tokens, 80);
     assert_eq!(summary.completion_tokens, 30);
+    assert_eq!(summary.cached_tokens, 15);
     assert_eq!(summary.total_tokens, 110);
 }
 
@@ -137,6 +138,7 @@ fn test_stream_flow_aggregate_reusable() {
         tpot_mean_ms: Some(45.0),
         prompt_tokens: 0,
         completion_tokens: 100,
+        cached_tokens: 0,
     });
     metrics.record_stream(&StreamFlowSample {
         ttft_ms: Some(1000.0),
@@ -151,6 +153,7 @@ fn test_stream_flow_aggregate_reusable() {
         tpot_mean_ms: Some(35.0),
         prompt_tokens: 0,
         completion_tokens: 200,
+        cached_tokens: 0,
     });
     let summary = metrics.get_summary();
     assert_eq!(summary.stream.stream_count, 2);

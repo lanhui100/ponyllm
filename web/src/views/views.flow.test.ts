@@ -165,7 +165,9 @@ describe('WEB-02 End-to-End User Flow (Connect -> Dashboard -> Recorder)', () =>
 
     expect(container.textContent).toContain('系统可观测大盘');
     expect(container.textContent).toContain('网关状态');
-    expect(container.textContent).toContain('15,000'); // total tokens
+    expect(container.textContent).toContain('3,000 tok'); // output tokens
+    expect(container.textContent).toContain('输入: 12K');
+    expect(container.textContent).toContain('输出: 3K');
     expect(container.textContent).toContain('146 ms'); // ttft rounded
     expect(container.textContent).toContain('52 tok/s'); // tps rounded
     expect(container.textContent).toContain('deepseek');

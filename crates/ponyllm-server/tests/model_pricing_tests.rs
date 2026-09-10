@@ -221,9 +221,10 @@ fn test_anthropic_usage_extraction_includes_cached_tokens() {
         }
     });
 
-    let (prompt, completion) = extract_usage_tokens(&ant_usage);
+    let (prompt, completion, cached) = extract_usage_tokens(&ant_usage);
     assert_eq!(prompt, 8600); // 100 + 8000 + 500
     assert_eq!(completion, 250);
+    assert_eq!(cached, 8000);
 }
 
 #[test]

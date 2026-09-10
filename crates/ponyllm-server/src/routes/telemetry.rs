@@ -27,6 +27,12 @@ pub struct ProviderSnapshotWithBars {
     pub inner: ProviderFlowSnapshot,
     pub uptime_bars: ConnectivityBarSeries,
     pub total_tokens: u64,
+    #[serde(default)]
+    pub prompt_tokens: u64,
+    #[serde(default)]
+    pub completion_tokens: u64,
+    #[serde(default)]
+    pub cached_tokens: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -73,12 +79,30 @@ pub async fn handle_get_stream(State(state): State<Arc<AppState>>) -> impl IntoR
             .get(&name)
             .copied()
             .unwrap_or(0);
+        let prompt_tokens = history_24h
+            .provider_prompt_tokens
+            .get(&name)
+            .copied()
+            .unwrap_or(0);
+        let completion_tokens = history_24h
+            .provider_completion_tokens
+            .get(&name)
+            .copied()
+            .unwrap_or(0);
+        let cached_tokens = history_24h
+            .provider_cached_tokens
+            .get(&name)
+            .copied()
+            .unwrap_or(0);
         providers.insert(
             name,
             ProviderSnapshotWithBars {
                 inner: snap,
                 uptime_bars,
                 total_tokens,
+                prompt_tokens,
+                completion_tokens,
+                cached_tokens,
             },
         );
     }

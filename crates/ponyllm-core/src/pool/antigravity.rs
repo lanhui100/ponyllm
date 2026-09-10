@@ -107,12 +107,33 @@ pub struct ModelQuotaInfo {
     pub reset_time_raw: Option<String>,
 }
 
+/// Bucket for RetrieveUserQuotaSummary (e.g. 5h / weekly windows)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QuotaSummaryBucket {
+    pub bucket_id: String,
+    pub window: String,
+    pub remaining_fraction: f64,
+    pub reset_time: Option<DateTime<Utc>>,
+    pub reset_time_raw: Option<String>,
+    pub display_name: Option<String>,
+    pub description: Option<String>,
+}
+
+/// Group for RetrieveUserQuotaSummary (e.g. "Gemini Models", "Claude and GPT models")
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QuotaSummaryGroup {
+    pub display_name: String,
+    pub description: Option<String>,
+    pub buckets: Vec<QuotaSummaryBucket>,
+}
+
 /// Snapshot of an account's quota across models
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AccountQuotaSnapshot {
     pub key_id: String,
     pub project_id: String,
     pub models: HashMap<String, ModelQuotaInfo>,
+    pub quota_groups: Option<Vec<QuotaSummaryGroup>>,
     pub fetched_at: DateTime<Utc>,
 }
 
@@ -412,6 +433,112 @@ impl AntigravityTokenManager {
         Ok(access_token)
     }
 
+    /// Fetch grouped quota summary (weekly + 5h windows) via retrieveUserQuotaSummary.
+    /// Returns None on any error so caller can fallback to fetchAvailableModels.
+    pub async fn fetch_quota_summary(&self, endpoint: Option<&str>) -> Option<Vec<QuotaSummaryGroup>> {
+        let access_token = self.get_valid_token().await.ok()?;
+        let base = endpoint.unwrap_or(DEFAULT_ANTIGRAVITY_ENDPOINT).trim_end_matches('/');
+        let url = format!("{}/v1internal:retrieveUserQuotaSummary", base);
+        let project = self.project_id();
+        let payload = if project.trim().is_empty() {
+            serde_json::json!({})
+        } else {
+            serde_json::json!({ "project": project })
+        };
+
+        let req = self
+            .client
+            .post(&url)
+            .header(reqwest::header::USER_AGENT, ANTIGRAVITY_USER_AGENT)
+            .header("x-goog-api-client", ANTIGRAVITY_GOOG_API_CLIENT)
+            .header(reqwest::header::AUTHORIZATION, format!("Bearer {}", access_token))
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .header(reqwest::header::ACCEPT, "application/json")
+            .header("requestType", "agent")
+            .json(&payload)
+            .timeout(Duration::from_secs(10));
+
+        let resp = req.send().await.ok()?;
+        if !resp.status().is_success() {
+            return None;
+        }
+
+        let json_val: serde_json::Value = resp.json().await.ok()?;
+        let groups_arr = json_val.get("groups")?.as_array()?;
+
+        let mut groups = Vec::new();
+        for g_val in groups_arr {
+            let display_name = g_val
+                .get("displayName")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let description = g_val
+                .get("description")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+
+            let mut buckets = Vec::new();
+            if let Some(b_arr) = g_val.get("buckets").and_then(|v| v.as_array()) {
+                for b_val in b_arr {
+                    let bucket_id = b_val
+                        .get("bucketId")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    let window = b_val
+                        .get("window")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    let rem_frac = b_val
+                        .get("remainingFraction")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(1.0);
+                    let reset_raw = b_val
+                        .get("resetTime")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+                    let parsed_utc = reset_raw.as_deref().and_then(|s| {
+                        DateTime::parse_from_rfc3339(s)
+                            .map(|dt| dt.with_timezone(&Utc))
+                            .ok()
+                    });
+                    let b_display = b_val
+                        .get("displayName")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+                    let b_desc = b_val
+                        .get("description")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+
+                    buckets.push(QuotaSummaryBucket {
+                        bucket_id,
+                        window,
+                        remaining_fraction: rem_frac,
+                        reset_time: parsed_utc,
+                        reset_time_raw: reset_raw,
+                        display_name: b_display,
+                        description: b_desc,
+                    });
+                }
+            }
+
+            groups.push(QuotaSummaryGroup {
+                display_name,
+                description,
+                buckets,
+            });
+        }
+
+        if groups.is_empty() {
+            None
+        } else {
+            Some(groups)
+        }
+    }
+
     /// Fetch available models and quota info from Antigravity PA endpoint
     pub async fn fetch_quota(&self, endpoint: Option<&str>) -> Result<AccountQuotaSnapshot> {
         let access_token = self.get_valid_token().await?;
@@ -482,10 +609,13 @@ impl AntigravityTokenManager {
             }
         }
 
+        let summary_res = self.fetch_quota_summary(endpoint).await;
+
         Ok(AccountQuotaSnapshot {
             key_id: self.key_id.clone(),
             project_id: self.project_id(),
             models: models_map,
+            quota_groups: summary_res,
             fetched_at: Utc::now(),
         })
     }

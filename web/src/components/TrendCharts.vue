@@ -34,8 +34,6 @@ const rangeOptions: Array<{ key: '24h' | '7d' | '30d'; label: string }> = [
   { key: '30d', label: '30天' },
 ];
 
-const tokenDimension = ref<'provider' | 'model'>('provider');
-
 const qpsChartRef = ref<HTMLDivElement | null>(null);
 const tokenChartRef = ref<HTMLDivElement | null>(null);
 const latencyChartRef = ref<HTMLDivElement | null>(null);
@@ -85,8 +83,8 @@ const COLOR_TEAL = '#0d9488';
 const COLOR_ROSE = '#e11d48';
 
 function formatAxisNumber(val: number): string {
-  if (val >= 1_000_000) return `${(val / 1_000_000).toFixed(1)}M`;
-  if (val >= 1_000) return `${(val / 1_000).toFixed(1)}k`;
+  if (val >= 1_000_000) return `${Math.round(val / 1_000_000)}M`;
+  if (val >= 1_000) return `${Math.round(val / 1_000)}K`;
   return Math.round(val).toString();
 }
 
@@ -142,42 +140,34 @@ function updateCharts() {
     ],
   });
 
-  // 2. Token 吞吐量 柱状分布图 (Bar Chart with Provider / Model dimension switch)
+  // 2. Token 吞吐量 柱状分布图 (全量类型堆叠图: 输入 / 输出 / 缓存命中)
   if (useHistorical) {
-    // Extract top keys for selected dimension
-    const keysSet = new Set<string>();
-    points.forEach((p) => {
-      const dict = tokenDimension.value === 'provider' ? p.tokens_by_provider : p.tokens_by_model;
-      if (dict) {
-        Object.keys(dict).forEach((k) => keysSet.add(k));
-      }
-    });
-    const seriesKeys = Array.from(keysSet).slice(0, 5); // top 5 series
-    const palette = ['#0284c7', '#f97316', '#0d9488', '#8b5cf6', '#ca8a04'];
-
-    const barSeries = seriesKeys.map((key, idx) => ({
-      name: key,
-      type: 'bar' as const,
-      stack: 'total',
-      barMaxWidth: 18,
-      itemStyle: { color: palette[idx % palette.length], borderRadius: [2, 2, 0, 0] },
-      data: points.map((p) => {
-        const dict = tokenDimension.value === 'provider' ? p.tokens_by_provider : p.tokens_by_model;
-        return dict?.[key] || 0;
-      }),
-    }));
-
-    // Fallback single total bar if no sub-dimensions yet
-    if (barSeries.length === 0) {
-      barSeries.push({
-        name: 'Token 总量',
+    const barSeries = [
+      {
+        name: '输入 Token',
         type: 'bar' as const,
         stack: 'total',
         barMaxWidth: 18,
-        itemStyle: { color: COLOR_SLATE_CYAN, borderRadius: [3, 3, 0, 0] },
-        data: points.map((p) => p.total_tokens),
-      });
-    }
+        itemStyle: { color: '#64748b', borderRadius: [0, 0, 0, 0] },
+        data: points.map((p) => p.prompt_tokens ?? 0),
+      },
+      {
+        name: '输出 Token',
+        type: 'bar' as const,
+        stack: 'total',
+        barMaxWidth: 18,
+        itemStyle: { color: '#0284c7', borderRadius: [0, 0, 0, 0] },
+        data: points.map((p) => p.completion_tokens ?? 0),
+      },
+      {
+        name: '缓存命中',
+        type: 'bar' as const,
+        stack: 'total',
+        barMaxWidth: 18,
+        itemStyle: { color: '#10b981', borderRadius: [2, 2, 0, 0] },
+        data: points.map((p) => p.cached_tokens ?? 0),
+      },
+    ];
 
     tokenChart?.setOption({
       tooltip: {
@@ -195,29 +185,39 @@ function updateCharts() {
           for (const item of params) {
             const val = Number(item.value) || 0;
             totalTokens += val;
+            const formattedInt = formatAxisNumber(val);
+            let pctSuffix = '';
+            if (item.seriesName === '缓存命中' && pt) {
+              const promptVal = pt.prompt_tokens ?? 0;
+              const cachedVal = pt.cached_tokens ?? val;
+              if (promptVal + cachedVal > 0) {
+                const pct = Math.round((cachedVal / (promptVal + cachedVal)) * 100);
+                pctSuffix = ` [${pct}%]`;
+              }
+            }
             html += `<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;font-size:12px">
               <span>${item.marker} ${item.seriesName}</span>
-              <span style="font-weight:600;font-family:var(--font-mono-family, monospace);font-variant-numeric:tabular-nums">${val.toLocaleString()} tok</span>
+              <span style="font-weight:600;font-family:var(--font-mono-family, monospace);font-variant-numeric:tabular-nums">${formattedInt}${pctSuffix} (${val.toLocaleString()} tok)</span>
             </div>`;
           }
           if (params.length > 1) {
             html += `<div style="border-top:1px solid #334155;margin-top:4px;padding-top:4px;display:flex;justify-content:space-between;font-size:12px;font-weight:600">
               <span>合计</span>
-              <span style="font-family:var(--font-mono-family, monospace);font-variant-numeric:tabular-nums">${totalTokens.toLocaleString()} tok</span>
+              <span style="font-family:var(--font-mono-family, monospace);font-variant-numeric:tabular-nums">${formatAxisNumber(totalTokens)} (${totalTokens.toLocaleString()} tok)</span>
             </div>`;
           }
           return html;
         },
       },
       legend: {
-        show: seriesKeys.length > 1,
+        show: true,
         top: 0,
         right: 0,
         textStyle: { fontSize: 12, color: '#64748b' },
         itemWidth: 10,
         itemHeight: 10,
       },
-      grid: { ...commonGrid, top: seriesKeys.length > 1 ? 32 : 20 },
+      grid: { ...commonGrid, top: 32 },
       xAxis: {
         type: 'category',
         data: timestamps,
@@ -239,11 +239,21 @@ function updateCharts() {
       series: barSeries,
     }, { notMerge: true });
   } else {
-    // Realtime fallback single series
-    const tokenData = props.history.map((h) => h.tokenThroughput);
+    // Realtime fallback multi-series (Prompt / Completion / Cached)
+    const promptData = props.history.map((h) => h.promptThroughput ?? 0);
+    const compData = props.history.map((h) => h.completionThroughput ?? (h.tokenThroughput ?? 0));
+    const cachedData = props.history.map((h) => h.cachedThroughput ?? 0);
     tokenChart?.setOption({
       tooltip: commonTooltip,
-      grid: commonGrid,
+      legend: {
+        show: true,
+        top: 0,
+        right: 0,
+        textStyle: { fontSize: 12, color: '#64748b' },
+        itemWidth: 10,
+        itemHeight: 10,
+      },
+      grid: { ...commonGrid, top: 32 },
       xAxis: {
         type: 'category',
         data: timestamps,
@@ -264,11 +274,28 @@ function updateCharts() {
       },
       series: [
         {
-          name: 'Tokens/s',
+          name: '输入 (tok/s)',
           type: 'bar',
+          stack: 'realtime',
           barMaxWidth: 16,
-          itemStyle: { color: COLOR_SLATE_CYAN, borderRadius: [2, 2, 0, 0] },
-          data: tokenData,
+          itemStyle: { color: '#64748b' },
+          data: promptData,
+        },
+        {
+          name: '输出 (tok/s)',
+          type: 'bar',
+          stack: 'realtime',
+          barMaxWidth: 16,
+          itemStyle: { color: '#0284c7' },
+          data: compData,
+        },
+        {
+          name: '缓存 (tok/s)',
+          type: 'bar',
+          stack: 'realtime',
+          barMaxWidth: 16,
+          itemStyle: { color: '#10b981', borderRadius: [2, 2, 0, 0] },
+          data: cachedData,
         },
       ],
     }, { notMerge: true });
@@ -419,7 +446,7 @@ onUnmounted(() => {
 });
 
 watch(
-  [() => props.history, () => props.historyData, () => tokenDimension.value],
+  [() => props.history, () => props.historyData],
   () => {
     updateCharts();
   },
@@ -494,13 +521,13 @@ watch(
         <div ref="qpsChartRef" class="w-full h-44" />
       </div>
 
-      <!-- 2. Token 吞吐量 (带 Provider / Model 切换 switch) -->
+      <!-- 2. Token 吞吐量 (全量输入/输出/缓存命中堆叠) -->
       <div class="swiss-card p-5">
         <div class="flex items-center justify-between mb-2">
           <div class="flex items-center gap-1.5">
             <div class="text-[15px] font-semibold text-slate-900">Token 吞吐量分布</div>
             <UiTooltip
-              content="展示各时间切片内消耗的 Token 总量，支持按“提供商（Provider）”或“模型（Model）”维度进行堆叠拆解，直观掌握算力与费用分布。"
+              content="展示各时间切片内消耗的 Token 总量，按「输入 Token」、「输出 Token」和「缓存命中」三维度进行堆叠拆解，直观掌握算力与费用分布。"
               wrap
             >
               <button
@@ -512,25 +539,7 @@ watch(
               </button>
             </UiTooltip>
           </div>
-          <!-- 维度切换 switch -->
-          <div class="segment-track inline-flex items-center">
-            <button
-              type="button"
-              class="px-2.5 py-1 text-[13px] font-medium rounded transition-all cursor-pointer"
-              :class="tokenDimension === 'provider' ? 'bg-white text-slate-900 font-semibold' : 'text-slate-600'"
-              @click="tokenDimension = 'provider'"
-            >
-              按 Provider
-            </button>
-            <button
-              type="button"
-              class="px-2.5 py-1 text-[13px] font-medium rounded transition-all cursor-pointer"
-              :class="tokenDimension === 'model' ? 'bg-white text-slate-900 font-semibold' : 'text-slate-600'"
-              @click="tokenDimension = 'model'"
-            >
-              按模型
-            </button>
-          </div>
+          <span class="text-[13px] text-slate-500 font-mono">tokens</span>
         </div>
         <div ref="tokenChartRef" class="w-full h-44" />
       </div>

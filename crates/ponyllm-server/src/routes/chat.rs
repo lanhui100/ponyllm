@@ -361,6 +361,8 @@ pub async fn handle_chat_completions(
                     // Stream the upstream SSE body. Mismatched native protocols
                     // are translated into OpenAI chat chunks.
                     let raw_stream = upstream_resp.bytes_stream();
+                    let est_prompt_tokens = serde_json::to_string(&req.messages).map(|s| (s.len() as u64 / 4).max(1)).unwrap_or(1);
+
                     // Mid-stream failures (after this started event) are appended
                     // by the telemetry wrapper with the same request_id.
                     let failure_ctx = StreamFailureContext {
@@ -369,6 +371,7 @@ pub async fn handle_chat_completions(
                         provider: target.provider_name.clone(),
                         stages: stages.clone(),
                         request_snippet: req_snippet.clone(),
+                        estimated_prompt_tokens: est_prompt_tokens,
                     };
                     let body = match target.upstream_protocol {
                         ponyllm_core::pool::UpstreamProtocol::Anthropic => {
@@ -511,7 +514,7 @@ pub async fn handle_chat_completions(
                         obj.insert("model".to_string(), serde_json::json!(requested_raw_model));
                     }
 
-                    let (prompt_tokens, completion_tokens) = extract_usage_tokens(&final_val);
+                    let (prompt_tokens, completion_tokens, cached_tokens) = extract_usage_tokens(&final_val);
                     let tps = if latency.as_secs_f64() > 0.05 && completion_tokens > 0 {
                         Some((completion_tokens as f64 / latency.as_secs_f64()).max(1.0))
                     } else {
@@ -530,6 +533,7 @@ pub async fn handle_chat_completions(
                             latency_ms: latency.as_secs_f64() * 1000.0,
                             prompt_tokens,
                             completion_tokens,
+                            cached_tokens,
                             tps: tps_for_event,
                             request_snippet: req_snippet,
                             response_snippet: Some(final_val.to_string()),

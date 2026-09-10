@@ -12,6 +12,7 @@ const props = withDefaults(
     speed24h?: number;
     showSpeed24h?: boolean;
     isProvider?: boolean;
+    flat?: boolean;
   }>(),
   {
     slots: () => [],
@@ -21,6 +22,7 @@ const props = withDefaults(
     speed24h: undefined,
     showSpeed24h: true,
     isProvider: false,
+    flat: false,
   }
 );
 
@@ -45,6 +47,28 @@ const hasValidLatency = computed(() => {
 
 const hasValidSpeed24h = computed(() => {
   return typeof props.speed24h === 'number' && !isNaN(props.speed24h) && props.speed24h >= 0;
+});
+
+// 无背景（flat）模式：图例后面的指标只保留文字色，去掉胶囊背景与内边距
+const latencyClasses = computed(() => {
+  const thresholdColor = !hasValidLatency.value
+    ? 'text-slate-500'
+    : props.latestLatencyMs! < (props.isProvider ? 3000 : 300)
+    ? 'text-emerald-800'
+    : props.latestLatencyMs! < (props.isProvider ? 5000 : 1000)
+    ? 'text-amber-800'
+    : 'text-rose-800';
+  const chip = props.flat ? '' : 'px-2.5 py-0.5 rounded-md';
+  const bgColor = props.flat
+    ? ''
+    : !hasValidLatency.value
+    ? 'bg-slate-200/70'
+    : props.latestLatencyMs! < (props.isProvider ? 3000 : 300)
+    ? 'bg-emerald-100'
+    : props.latestLatencyMs! < (props.isProvider ? 5000 : 1000)
+    ? 'bg-amber-100'
+    : 'bg-rose-100';
+  return [chip, thresholdColor, bgColor];
 });
 
 function formatTime(ts: number): string {
@@ -88,14 +112,14 @@ function getSlotTooltip(slot: ConnectivitySlot): string {
         class="shrink-0 transition-all duration-150 cursor-pointer"
         :class="[
           barHeight,
-          slotCount <= 10 ? 'w-2 rounded-[2px]' : 'w-1 rounded-[1px]',
+          'w-1 rounded-[1px]',
           slot.status === 'ok'
             ? 'bg-emerald-500 hover:scale-y-125 hover:brightness-110'
             : slot.status === 'degraded'
             ? 'bg-amber-400 hover:scale-y-125 hover:brightness-110'
             : slot.status === 'down'
             ? 'bg-rose-500 hover:scale-y-125 hover:brightness-110'
-            : 'bg-slate-200 hover:bg-slate-300',
+            : 'bg-slate-400 hover:bg-slate-500',
         ]"
       />
     </div>
@@ -104,22 +128,8 @@ function getSlotTooltip(slot: ConnectivitySlot): string {
     <div
       v-if="showLatency"
       data-testid="latest-latency"
-      class="text-[13px] font-mono font-medium px-2.5 py-0.5 rounded-md"
-      :class="[
-        !hasValidLatency
-          ? 'text-slate-500 bg-slate-200/70'
-          : isProvider
-          ? latestLatencyMs! < 3000
-            ? 'text-emerald-800 bg-emerald-100'
-            : latestLatencyMs! < 5000
-            ? 'text-amber-800 bg-amber-100'
-            : 'text-rose-800 bg-rose-100'
-          : latestLatencyMs! < 300
-          ? 'text-emerald-800 bg-emerald-100'
-          : latestLatencyMs! < 1000
-          ? 'text-amber-800 bg-amber-100'
-          : 'text-rose-800 bg-rose-100',
-      ]"
+      class="text-[13px] font-mono font-medium"
+      :class="latencyClasses"
     >
       {{ hasValidLatency ? `${latestLatencyMs!.toFixed(1)} ms` : '--' }}
     </div>
@@ -128,7 +138,8 @@ function getSlotTooltip(slot: ConnectivitySlot): string {
     <div
       v-if="showSpeed24h && speed24h !== undefined"
       data-testid="speed-24h"
-      class="text-[13px] font-mono font-medium px-2.5 py-0.5 rounded-md text-sky-800 bg-sky-100 inline-flex items-center gap-1.5"
+      class="text-[13px] font-mono font-medium inline-flex items-center gap-1.5 text-sky-800"
+      :class="!flat && 'px-2.5 py-0.5 rounded-md bg-sky-100'"
       :title="`24小时平均速度: ${hasValidSpeed24h ? Math.round(speed24h!) : '--'} t/s`"
     >
       <span class="text-xs text-sky-600 font-sans font-semibold">24h</span>

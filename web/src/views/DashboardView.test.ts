@@ -137,19 +137,19 @@ describe('DashboardView Full Feature Integration', () => {
     const allBars = container.querySelectorAll('[data-testid="uptime-bar"]');
     expect(allBars.length).toBeGreaterThanOrEqual(64);
 
-    // 3. Verify Provider Status table
+    // 3. Verify Provider Status table with 3 Token dimensions
     expect(container.textContent).toContain('提供商状态');
     expect(container.textContent).toContain('24小时');
     expect(container.textContent).toContain('7天');
     expect(container.textContent).toContain('30天');
     expect(container.textContent).toContain('deepseek');
-    expect(container.textContent).toContain('Token 总量');
+    expect(container.textContent).toContain('输入 Token');
+    expect(container.textContent).toContain('输出 Token');
+    expect(container.textContent).toContain('缓存命中');
 
     // 4. Verify Trend Charts presence
     expect(container.textContent).toContain('QPS 并发洪峰');
     expect(container.textContent).toContain('Token 吞吐量分布');
-    expect(container.textContent).toContain('按 Provider');
-    expect(container.textContent).toContain('按模型');
     expect(container.textContent).toContain('延迟与速率起伏');
     expect(container.textContent).toContain('故障率异常波动');
 

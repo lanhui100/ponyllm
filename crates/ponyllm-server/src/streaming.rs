@@ -1022,6 +1022,7 @@ pub struct StreamFailureContext {
     pub provider: String,
     pub stages: Arc<Mutex<StageTimings>>,
     pub request_snippet: Option<String>,
+    pub estimated_prompt_tokens: u64,
 }
 
 /// Telemetry wrapper stream tracking TTFT on first emitted chunk and measuring TPS on completion.
@@ -1037,6 +1038,8 @@ pub struct TelemetryStream<S> {
     bytes_emitted: u64,
     content_chars_emitted: u64,
     usage_completion_tokens: Option<u64>,
+    usage_prompt_tokens: Option<u64>,
+    usage_cached_tokens: Option<u64>,
     has_error: bool,
     completed: bool,
     last_error: Option<String>,
@@ -1061,6 +1064,8 @@ impl<S> TelemetryStream<S> {
             bytes_emitted: 0,
             content_chars_emitted: 0,
             usage_completion_tokens: None,
+            usage_prompt_tokens: None,
+            usage_cached_tokens: None,
             has_error: false,
             completed: false,
             last_error: None,
@@ -1086,10 +1091,16 @@ impl<S> TelemetryStream<S> {
         self.bytes_emitted += item_bytes.len() as u64;
 
         // Inspect SSE payload to extract real content characters and usage output_tokens
-        let (chars, usage_tokens) = estimate_tokens_from_sse_bytes(item_bytes);
+        let (chars, usage_comp, usage_prompt, usage_cached) = estimate_tokens_from_sse_bytes(item_bytes);
         self.content_chars_emitted += chars as u64;
-        if let Some(toks) = usage_tokens {
+        if let Some(toks) = usage_comp {
             self.usage_completion_tokens = Some(toks);
+        }
+        if let Some(toks) = usage_prompt {
+            self.usage_prompt_tokens = Some(toks);
+        }
+        if let Some(toks) = usage_cached {
+            self.usage_cached_tokens = Some(toks);
         }
     }
 
@@ -1144,8 +1155,9 @@ impl<S> TelemetryStream<S> {
             tpot_p50_ms: p50,
             tpot_p95_ms: p95,
             tpot_mean_ms: avg_gap,
-            prompt_tokens: 0,
+            prompt_tokens: self.usage_prompt_tokens.unwrap_or(self.failure_ctx.estimated_prompt_tokens),
             completion_tokens,
+            cached_tokens: self.usage_cached_tokens.unwrap_or(0),
         };
         (sample, avg_gap)
     }
@@ -1270,16 +1282,18 @@ impl<S> Drop for TelemetryStream<S> {
     }
 }
 
-/// Quick extraction of real content characters and usage completion tokens from SSE chunk bytes.
+/// Quick extraction of real content characters and usage tokens from SSE chunk bytes.
 /// Inspects `data:` lines for delta text and usage objects to prevent wire JSON boilerplate
 /// from inflating completion token counts and distorting TPS.
-fn estimate_tokens_from_sse_bytes(raw: &[u8]) -> (usize, Option<u64>) {
+fn estimate_tokens_from_sse_bytes(raw: &[u8]) -> (usize, Option<u64>, Option<u64>, Option<u64>) {
     let Ok(text) = std::str::from_utf8(raw) else {
-        return (0, None);
+        return (0, None, None, None);
     };
 
     let mut content_chars = 0;
-    let mut usage_tokens = None;
+    let mut usage_completion = None;
+    let mut usage_prompt = None;
+    let mut usage_cached = None;
 
     for line in text.split('\n') {
         let line = line.strip_suffix('\r').unwrap_or(line).trim();
@@ -1297,17 +1311,11 @@ fn estimate_tokens_from_sse_bytes(raw: &[u8]) -> (usize, Option<u64>) {
 
         if let Some(obj) = val.as_object() {
             // 1. Inspect usage if present
-            let usage = obj.get("usage")
-                .or_else(|| obj.get("response").and_then(|r| r.get("usage")))
-                .or_else(|| obj.get("message").and_then(|m| m.get("usage")));
-            if let Some(u) = usage {
-                let comp = u.get("completion_tokens")
-                    .or_else(|| u.get("output_tokens"))
-                    .or_else(|| u.get("candidatesTokenCount"))
-                    .and_then(parse_lenient_u64);
-                if let Some(toks) = comp {
-                    usage_tokens = Some(toks);
-                }
+            let (prompt, completion, cached) = extract_usage_tokens(&val);
+            if prompt > 0 || completion > 0 || cached > 0 {
+                usage_prompt = Some(prompt);
+                usage_completion = Some(completion);
+                usage_cached = Some(cached);
             }
 
             // 2. OpenAI Choices delta
@@ -1338,7 +1346,7 @@ fn estimate_tokens_from_sse_bytes(raw: &[u8]) -> (usize, Option<u64>) {
         }
     }
 
-    (content_chars, usage_tokens)
+    (content_chars, usage_completion, usage_prompt, usage_cached)
 }
 
 pub fn wrap_telemetry_stream<S, E>(
@@ -1358,28 +1366,47 @@ fn parse_lenient_u64(v: &serde_json::Value) -> Option<u64> {
         .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
 }
 
-/// Extract prompt_tokens and completion_tokens from OpenAI/Anthropic JSON usage object
-pub fn extract_usage_tokens(val: &serde_json::Value) -> (u64, u64) {
-    if let Some(usage) = val.get("usage") {
-        let prompt = if let Some(p) = usage.get("prompt_tokens").and_then(parse_lenient_u64) {
-            p
-        } else {
+/// Extract prompt_tokens, completion_tokens, and cached_tokens from OpenAI/Anthropic/Antigravity JSON usage object
+pub fn extract_usage_tokens(val: &serde_json::Value) -> (u64, u64, u64) {
+    let usage_opt = val.get("usage")
+        .or_else(|| val.get("response").and_then(|r| r.get("usage")))
+        .or_else(|| val.get("message").and_then(|m| m.get("usage")))
+        .or_else(|| val.get("usageMetadata"));
+
+    if let Some(usage) = usage_opt {
+        let (prompt, cached) = if let Some(p) = usage.get("prompt_tokens").and_then(parse_lenient_u64) {
+            let cached = usage
+                .get("prompt_tokens_details")
+                .and_then(|d| d.get("cached_tokens"))
+                .or_else(|| usage.get("cached_tokens"))
+                .or_else(|| usage.get("prompt_cache_hit_tokens"))
+                .and_then(parse_lenient_u64)
+                .unwrap_or(0);
+            (p, cached)
+        } else if let Some(input) = usage.get("input_tokens").and_then(parse_lenient_u64) {
             // Anthropic 兼容处理：总 Prompt = input + cache_read + cache_creation
-            let input = usage.get("input_tokens").and_then(parse_lenient_u64).unwrap_or(0);
             let cached_read = usage.get("cache_read_input_tokens").and_then(parse_lenient_u64).unwrap_or(0);
             let cached_create = usage.get("cache_creation_input_tokens").and_then(parse_lenient_u64).unwrap_or(0);
-            input.saturating_add(cached_read).saturating_add(cached_create)
+            let total_prompt = input.saturating_add(cached_read).saturating_add(cached_create);
+            (total_prompt, cached_read)
+        } else if let Some(ptc) = usage.get("promptTokenCount").and_then(parse_lenient_u64) {
+            // Gemini / Antigravity
+            let cached = usage.get("cachedContentTokenCount").and_then(parse_lenient_u64).unwrap_or(0);
+            (ptc, cached)
+        } else {
+            (0, 0)
         };
 
         let completion = usage
             .get("completion_tokens")
             .or_else(|| usage.get("output_tokens"))
+            .or_else(|| usage.get("candidatesTokenCount"))
             .and_then(parse_lenient_u64)
             .unwrap_or(0);
 
-        (prompt, completion)
+        (prompt, completion, cached)
     } else {
-        (0, 0)
+        (0, 0, 0)
     }
 }
 
@@ -1571,6 +1598,7 @@ mod tests {
             provider: "opencode-zen".to_string(),
             stages: Arc::new(Mutex::new(StageTimings::default())),
             request_snippet: None,
+            estimated_prompt_tokens: 10,
         };
         let s = bytes_stream(vec![
             Bytes::from_static(b"data: one\n\n"),
@@ -2021,6 +2049,7 @@ mod tests {
             provider: "test-provider".to_string(),
             stages: Arc::new(Mutex::new(StageTimings::default())),
             request_snippet: None,
+            estimated_prompt_tokens: 10,
         };
 
         // Two chunks containing real content: total 20 characters (~6-7 tokens)

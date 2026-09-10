@@ -19,6 +19,8 @@ pub struct StreamFlowSample {
     pub prompt_tokens: u64,
     #[serde(default)]
     pub completion_tokens: u64,
+    #[serde(default)]
+    pub cached_tokens: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -59,6 +61,8 @@ pub struct MetricsSummary {
     pub total_failover: u64,
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
+    #[serde(default)]
+    pub cached_tokens: u64,
     pub total_tokens: u64,
     #[serde(default)]
     pub stream: StreamFlowSummary,
@@ -72,6 +76,7 @@ pub struct MetricsCollector {
     failover_count: AtomicU64,
     prompt_tokens: AtomicU64,
     completion_tokens: AtomicU64,
+    cached_tokens: AtomicU64,
     total_tokens: AtomicU64,
     stream_count: AtomicU64,
     ttft_sum_ms: AtomicU64,
@@ -96,6 +101,7 @@ impl MetricsCollector {
         _latency: Duration,
         prompt_tokens: u64,
         completion_tokens: u64,
+        cached_tokens: u64,
         is_success: bool,
     ) {
         self.total_requests.fetch_add(1, Ordering::Relaxed);
@@ -107,6 +113,7 @@ impl MetricsCollector {
 
         self.prompt_tokens.fetch_add(prompt_tokens, Ordering::Relaxed);
         self.completion_tokens.fetch_add(completion_tokens, Ordering::Relaxed);
+        self.cached_tokens.fetch_add(cached_tokens, Ordering::Relaxed);
         self.total_tokens.fetch_add(prompt_tokens + completion_tokens, Ordering::Relaxed);
     }
 
@@ -173,6 +180,7 @@ impl MetricsCollector {
             total_failover: self.failover_count.load(Ordering::Relaxed),
             prompt_tokens: self.prompt_tokens.load(Ordering::Relaxed),
             completion_tokens: self.completion_tokens.load(Ordering::Relaxed),
+            cached_tokens: self.cached_tokens.load(Ordering::Relaxed),
             total_tokens: self.total_tokens.load(Ordering::Relaxed),
             stream: StreamFlowSummary {
                 stream_count,
@@ -216,6 +224,7 @@ impl MetricsCollector {
             failover_count: self.failover_count.load(Ordering::Relaxed),
             prompt_tokens: self.prompt_tokens.load(Ordering::Relaxed),
             completion_tokens: self.completion_tokens.load(Ordering::Relaxed),
+            cached_tokens: self.cached_tokens.load(Ordering::Relaxed),
             total_tokens: self.total_tokens.load(Ordering::Relaxed),
             stream_count: self.stream_count.load(Ordering::Relaxed),
             ttft_sum_ms: self.ttft_sum_ms.load(Ordering::Relaxed),
@@ -238,6 +247,7 @@ impl MetricsCollector {
         self.failover_count.store(snap.failover_count, Ordering::Relaxed);
         self.prompt_tokens.store(snap.prompt_tokens, Ordering::Relaxed);
         self.completion_tokens.store(snap.completion_tokens, Ordering::Relaxed);
+        self.cached_tokens.store(snap.cached_tokens, Ordering::Relaxed);
         self.total_tokens.store(snap.total_tokens, Ordering::Relaxed);
         self.stream_count.store(snap.stream_count, Ordering::Relaxed);
         self.ttft_sum_ms.store(snap.ttft_sum_ms, Ordering::Relaxed);
@@ -273,6 +283,8 @@ pub struct MetricsCounterSnapshot {
     pub prompt_tokens: u64,
     #[serde(default)]
     pub completion_tokens: u64,
+    #[serde(default)]
+    pub cached_tokens: u64,
     #[serde(default)]
     pub total_tokens: u64,
     #[serde(default)]

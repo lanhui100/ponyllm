@@ -26,7 +26,7 @@ describe('UptimeBars Component', () => {
     const bars = container.querySelectorAll('[data-testid="uptime-bar"]');
     expect(bars.length).toBe(40);
     // All empty bars should have neutral/slate color
-    expect(bars[0].className).toContain('bg-slate-200');
+    expect(bars[0].className).toContain('bg-slate-400');
     app.unmount();
   });
 

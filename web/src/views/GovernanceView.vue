@@ -473,20 +473,6 @@ onUnmounted(() => {
             </UiButton>
           </UiTooltip>
 
-          <!-- 批量拨测 -->
-          <UiTooltip content="并发测试所有服务商全部密钥连通性">
-            <UiButton
-              variant="outline"
-              size="sm"
-              :disabled="batchTesting.running || keys.length === 0 || !adminWriteEnabled"
-              data-testid="test-all-keys-btn"
-              @click="batchTestAllKeys"
-            >
-              <Icons name="zap" size="14" class="text-amber-500" />
-              {{ batchTesting.running ? `测速 (${batchTesting.current}/${batchTesting.total})` : '全量测速' }}
-            </UiButton>
-          </UiTooltip>
-
           <!-- 新建服务商 (纯行内平滑展开，无抽屉) -->
           <UiButton
             size="sm"
@@ -942,9 +928,6 @@ onUnmounted(() => {
             @create-key="addKey"
             @delete-key="removeKey"
             @test-single-key="testSingleKey"
-            @test-provider-keys="(pName) => {
-              keys.filter(k => k.provider === pName).forEach(k => testSingleKey(k.id));
-            }"
             @oauth-antigravity="handleOpenAntigravityForProvider"
           />
         </template>

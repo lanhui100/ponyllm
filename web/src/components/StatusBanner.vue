@@ -57,14 +57,15 @@ const emit = defineEmits<{
         </UiTooltip>
       </div>
 
-      <!-- 24 柱状态图例 (Uptime Bars, 5s/柱, 最近2分钟) -->
-      <div class="flex items-center pl-2 bg-slate-100/70 rounded-lg px-2 py-1">
+      <!-- 24 柱状态图例 (Uptime Bars, 5s/柱, 最近2分钟)，无背景平铺 -->
+      <div class="flex items-center">
         <UptimeBars
           :slots="uptimeBars?.slots"
           :slot-count="24"
           :latest-latency-ms="uptimeBars?.latest_latency_ms"
           :show-speed-24h="false"
           bar-height="h-4.5"
+          flat
         />
       </div>
     </div>

@@ -10,6 +10,9 @@ const props = withDefaults(
     providers: Record<string, ProviderFlowSnapshot> | undefined;
     range?: '24h' | '7d' | '30d';
     providerTokens?: Record<string, number>;
+    providerPromptTokens?: Record<string, number>;
+    providerCompletionTokens?: Record<string, number>;
+    providerCachedTokens?: Record<string, number>;
   }>(),
   {
     range: '24h',
@@ -54,10 +57,39 @@ function getProviderTokens(name: string, p: ProviderFlowSnapshot): number {
   return p.total_tokens || 0;
 }
 
+function getProviderPromptTokens(name: string, p: ProviderFlowSnapshot): number {
+  if (props.providerPromptTokens && props.providerPromptTokens[name] !== undefined) {
+    return props.providerPromptTokens[name];
+  }
+  return p.prompt_tokens || 0;
+}
+
+function getProviderCompletionTokens(name: string, p: ProviderFlowSnapshot): number {
+  if (props.providerCompletionTokens && props.providerCompletionTokens[name] !== undefined) {
+    return props.providerCompletionTokens[name];
+  }
+  return p.completion_tokens || 0;
+}
+
+function getProviderCachedTokens(name: string, p: ProviderFlowSnapshot): number {
+  if (props.providerCachedTokens && props.providerCachedTokens[name] !== undefined) {
+    return props.providerCachedTokens[name];
+  }
+  return p.cached_tokens || 0;
+}
+
+function getProviderCachedPercent(name: string, p: ProviderFlowSnapshot): string {
+  const prompt = getProviderPromptTokens(name, p);
+  const cached = getProviderCachedTokens(name, p);
+  if (prompt + cached === 0) return '0%';
+  const rate = Math.round((cached / (prompt + cached)) * 100);
+  return `${rate}%`;
+}
+
 function formatTokens(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
-  return n.toLocaleString();
+  if (n >= 1_000_000) return `${Math.round(n / 1_000_000)}M`;
+  if (n >= 1_000) return `${Math.round(n / 1_000)}K`;
+  return Math.round(n).toString();
 }
 
 function getProviderTtft(p: any): string {
@@ -132,7 +164,9 @@ function getProviderTps(p: any): string {
           <tr class="text-slate-500 bg-white/60 font-medium text-[13px]">
             <th class="pb-3 pt-2 px-2 font-semibold whitespace-nowrap rounded-l-lg">提供商</th>
             <th class="pb-3 pt-2 font-semibold whitespace-nowrap">连通性状态 (最近调用)</th>
-            <th class="pb-3 pt-2 font-semibold whitespace-nowrap">Token 总量</th>
+            <th class="pb-3 pt-2 font-semibold whitespace-nowrap text-slate-700">输入 Token</th>
+            <th class="pb-3 pt-2 font-semibold whitespace-nowrap text-sky-700">输出 Token</th>
+            <th class="pb-3 pt-2 font-semibold whitespace-nowrap text-emerald-700">缓存命中</th>
             <th class="pb-3 pt-2 font-semibold whitespace-nowrap">流调用数</th>
             <th class="pb-3 pt-2 font-semibold whitespace-nowrap">平均 TTFT</th>
             <th class="pb-3 pt-2 font-semibold whitespace-nowrap">平均 TPS</th>
@@ -162,17 +196,31 @@ function getProviderTps(p: any): string {
               />
             </td>
 
-            <!-- Token 总量与占比 -->
+            <!-- 输入 Token -->
             <td class="py-3.5 whitespace-nowrap">
-              <div class="flex items-baseline gap-2">
-                <span class="font-mono font-bold text-slate-900">
-                  {{ formatTokens(getProviderTokens(name, p)) }}
+              <span class="font-mono font-semibold text-slate-800">
+                {{ formatTokens(getProviderPromptTokens(name, p)) }}
+              </span>
+            </td>
+
+            <!-- 输出 Token -->
+            <td class="py-3.5 whitespace-nowrap">
+              <span class="font-mono font-bold text-sky-700">
+                {{ formatTokens(getProviderCompletionTokens(name, p)) }}
+              </span>
+            </td>
+
+            <!-- 缓存命中 -->
+            <td class="py-3.5 whitespace-nowrap">
+              <div class="flex items-baseline gap-1.5">
+                <span class="font-mono font-semibold text-emerald-700">
+                  {{ formatTokens(getProviderCachedTokens(name, p)) }}
                 </span>
                 <span
-                  v-if="totalAllTokens > 0"
-                  class="text-xs font-mono text-slate-500"
+                  v-if="getProviderCachedTokens(name, p) > 0"
+                  class="text-xs font-mono font-bold text-emerald-600"
                 >
-                  ({{ ((getProviderTokens(name, p) / totalAllTokens) * 100).toFixed(0) }}%)
+                  ({{ getProviderCachedPercent(name, p) }})
                 </span>
               </div>
             </td>

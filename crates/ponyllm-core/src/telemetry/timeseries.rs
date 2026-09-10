@@ -20,6 +20,8 @@ pub struct HourlyBucket {
     #[serde(default)]
     pub completion_tokens: u64,
     #[serde(default)]
+    pub cached_tokens: u64,
+    #[serde(default)]
     pub latency_sum_ms: f64,
     #[serde(default)]
     pub latency_count: u64,
@@ -27,6 +29,12 @@ pub struct HourlyBucket {
     pub tokens_by_provider: HashMap<String, u64>,
     #[serde(default)]
     pub tokens_by_model: HashMap<String, u64>,
+    #[serde(default)]
+    pub prompt_tokens_by_provider: HashMap<String, u64>,
+    #[serde(default)]
+    pub completion_tokens_by_provider: HashMap<String, u64>,
+    #[serde(default)]
+    pub cached_tokens_by_provider: HashMap<String, u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -34,9 +42,17 @@ pub struct MetricBucket {
     pub timestamp_ms: u64,
     pub qps: f64,
     pub token_throughput: f64,
+    #[serde(default)]
+    pub prompt_throughput: f64,
+    #[serde(default)]
+    pub completion_throughput: f64,
+    #[serde(default)]
+    pub cached_throughput: f64,
     pub total_tokens: u64,
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
+    #[serde(default)]
+    pub cached_tokens: u64,
     pub avg_latency_ms: f64,
     pub error_rate: f64,
     pub total_requests: u64,
@@ -51,7 +67,19 @@ pub struct TimeseriesHistoryResponse {
     pub points: Vec<MetricBucket>,
     pub total_requests: u64,
     pub total_tokens: u64,
+    #[serde(default)]
+    pub prompt_tokens: u64,
+    #[serde(default)]
+    pub completion_tokens: u64,
+    #[serde(default)]
+    pub cached_tokens: u64,
     pub provider_tokens: HashMap<String, u64>,
+    #[serde(default)]
+    pub provider_prompt_tokens: HashMap<String, u64>,
+    #[serde(default)]
+    pub provider_completion_tokens: HashMap<String, u64>,
+    #[serde(default)]
+    pub provider_cached_tokens: HashMap<String, u64>,
     pub model_tokens: HashMap<String, u64>,
 }
 
@@ -87,6 +115,7 @@ impl TimeseriesProjection {
         model: Option<&str>,
         prompt_tokens: u64,
         completion_tokens: u64,
+        cached_tokens: u64,
         latency_ms: f64,
         is_success: bool,
     ) {
@@ -111,6 +140,7 @@ impl TimeseriesProjection {
         }
         bucket.prompt_tokens = bucket.prompt_tokens.saturating_add(prompt_tokens);
         bucket.completion_tokens = bucket.completion_tokens.saturating_add(completion_tokens);
+        bucket.cached_tokens = bucket.cached_tokens.saturating_add(cached_tokens);
 
         let valid_latency = if latency_ms.is_finite() && latency_ms > 0.0 {
             latency_ms
@@ -123,10 +153,22 @@ impl TimeseriesProjection {
         }
 
         let total_tokens = prompt_tokens.saturating_add(completion_tokens);
-        if total_tokens > 0 {
+        if total_tokens > 0 || cached_tokens > 0 {
             if let Some(p) = provider {
                 let entry = bucket.tokens_by_provider.entry(p.to_string()).or_insert(0);
                 *entry = entry.saturating_add(total_tokens);
+                if prompt_tokens > 0 {
+                    let pe = bucket.prompt_tokens_by_provider.entry(p.to_string()).or_insert(0);
+                    *pe = pe.saturating_add(prompt_tokens);
+                }
+                if completion_tokens > 0 {
+                    let ce = bucket.completion_tokens_by_provider.entry(p.to_string()).or_insert(0);
+                    *ce = ce.saturating_add(completion_tokens);
+                }
+                if cached_tokens > 0 {
+                    let cke = bucket.cached_tokens_by_provider.entry(p.to_string()).or_insert(0);
+                    *cke = cke.saturating_add(cached_tokens);
+                }
             }
             if let Some(m) = model {
                 let entry = bucket.tokens_by_model.entry(m.to_string()).or_insert(0);
@@ -166,7 +208,13 @@ impl TimeseriesProjection {
         let mut points = Vec::with_capacity(total_buckets);
         let mut total_requests = 0u64;
         let mut total_tokens = 0u64;
+        let mut total_prompt_tokens = 0u64;
+        let mut total_completion_tokens = 0u64;
+        let mut total_cached_tokens = 0u64;
         let mut provider_tokens: HashMap<String, u64> = HashMap::new();
+        let mut provider_prompt_tokens: HashMap<String, u64> = HashMap::new();
+        let mut provider_completion_tokens: HashMap<String, u64> = HashMap::new();
+        let mut provider_cached_tokens: HashMap<String, u64> = HashMap::new();
         let mut model_tokens: HashMap<String, u64> = HashMap::new();
 
         for i in 0..total_buckets {
@@ -177,6 +225,7 @@ impl TimeseriesProjection {
             let mut b_fails = 0u64;
             let mut b_prompt = 0u64;
             let mut b_comp = 0u64;
+            let mut b_cached = 0u64;
             let mut b_lat_sum = 0.0f64;
             let mut b_lat_count = 0u64;
             let mut b_prov_tokens: HashMap<String, u64> = HashMap::new();
@@ -187,6 +236,7 @@ impl TimeseriesProjection {
                 b_fails = b_fails.saturating_add(h.failed_requests);
                 b_prompt = b_prompt.saturating_add(h.prompt_tokens);
                 b_comp = b_comp.saturating_add(h.completion_tokens);
+                b_cached = b_cached.saturating_add(h.cached_tokens);
                 if h.latency_sum_ms.is_finite() {
                     b_lat_sum += h.latency_sum_ms;
                 }
@@ -196,6 +246,25 @@ impl TimeseriesProjection {
                     *b_entry = (*b_entry).saturating_add(*v);
                     let tot_entry = provider_tokens.entry(k.clone()).or_insert(0);
                     *tot_entry = (*tot_entry).saturating_add(*v);
+                }
+                for (k, v) in &h.prompt_tokens_by_provider {
+                    let tot_entry = provider_prompt_tokens.entry(k.clone()).or_insert(0);
+                    *tot_entry = (*tot_entry).saturating_add(*v);
+                }
+                for (k, v) in &h.completion_tokens_by_provider {
+                    let tot_entry = provider_completion_tokens.entry(k.clone()).or_insert(0);
+                    *tot_entry = (*tot_entry).saturating_add(*v);
+                }
+                for (k, v) in &h.cached_tokens_by_provider {
+                    let tot_entry = provider_cached_tokens.entry(k.clone()).or_insert(0);
+                    *tot_entry = (*tot_entry).saturating_add(*v);
+                }
+                // Fallback for historical snapshot buckets where prompt/completion/cached weren't segmented per provider
+                if h.prompt_tokens_by_provider.is_empty() && h.completion_tokens_by_provider.is_empty() {
+                    for (k, v) in &h.tokens_by_provider {
+                        let tot_entry = provider_completion_tokens.entry(k.clone()).or_insert(0);
+                        *tot_entry = (*tot_entry).saturating_add(*v);
+                    }
                 }
                 for (k, v) in &h.tokens_by_model {
                     let b_entry = b_mod_tokens.entry(k.clone()).or_insert(0);
@@ -208,6 +277,9 @@ impl TimeseriesProjection {
             let b_tokens = b_prompt.saturating_add(b_comp);
             total_requests = total_requests.saturating_add(b_reqs);
             total_tokens = total_tokens.saturating_add(b_tokens);
+            total_prompt_tokens = total_prompt_tokens.saturating_add(b_prompt);
+            total_completion_tokens = total_completion_tokens.saturating_add(b_comp);
+            total_cached_tokens = total_cached_tokens.saturating_add(b_cached);
 
             let bucket_sec = (bucket_span_ms / 1000) as f64;
             let qps = if bucket_sec > 0.0 {
@@ -222,6 +294,36 @@ impl TimeseriesProjection {
             };
             let token_throughput = if bucket_sec > 0.0 {
                 let val = b_tokens as f64 / bucket_sec;
+                if val.is_finite() {
+                    (val * 10.0).round() / 10.0
+                } else {
+                    0.0
+                }
+            } else {
+                0.0
+            };
+            let prompt_throughput = if bucket_sec > 0.0 {
+                let val = b_prompt as f64 / bucket_sec;
+                if val.is_finite() {
+                    (val * 10.0).round() / 10.0
+                } else {
+                    0.0
+                }
+            } else {
+                0.0
+            };
+            let completion_throughput = if bucket_sec > 0.0 {
+                let val = b_comp as f64 / bucket_sec;
+                if val.is_finite() {
+                    (val * 10.0).round() / 10.0
+                } else {
+                    0.0
+                }
+            } else {
+                0.0
+            };
+            let cached_throughput = if bucket_sec > 0.0 {
+                let val = b_cached as f64 / bucket_sec;
                 if val.is_finite() {
                     (val * 10.0).round() / 10.0
                 } else {
@@ -255,9 +357,13 @@ impl TimeseriesProjection {
                 timestamp_ms: b_start,
                 qps,
                 token_throughput,
+                prompt_throughput,
+                completion_throughput,
+                cached_throughput,
                 total_tokens: b_tokens,
                 prompt_tokens: b_prompt,
                 completion_tokens: b_comp,
+                cached_tokens: b_cached,
                 avg_latency_ms: avg_lat,
                 error_rate,
                 total_requests: b_reqs,
@@ -272,7 +378,13 @@ impl TimeseriesProjection {
             points,
             total_requests,
             total_tokens,
+            prompt_tokens: total_prompt_tokens,
+            completion_tokens: total_completion_tokens,
+            cached_tokens: total_cached_tokens,
             provider_tokens,
+            provider_prompt_tokens,
+            provider_completion_tokens,
+            provider_cached_tokens,
             model_tokens,
         }
     }
@@ -286,6 +398,7 @@ impl Projection for TimeseriesProjection {
                 latency_ms,
                 prompt_tokens,
                 completion_tokens,
+                cached_tokens,
                 ..
             } => {
                 self.record_metric(
@@ -294,6 +407,7 @@ impl Projection for TimeseriesProjection {
                     env.model.as_deref(),
                     *prompt_tokens,
                     *completion_tokens,
+                    *cached_tokens,
                     *latency_ms,
                     (200..300).contains(status_code),
                 );
@@ -305,18 +419,20 @@ impl Projection for TimeseriesProjection {
                 } else {
                     flow.chunks.max(1)
                 };
+                let cached = flow.cached_tokens;
                 self.record_metric(
                     env.wall_ms,
                     env.provider.as_deref(),
                     env.model.as_deref(),
                     prompt,
                     completion,
+                    cached,
                     flow.ttlb_ms,
                     true,
                 );
             }
             GatewayEvent::StreamFailed { flow, .. } => {
-                let (prompt, completion, latency) = match flow {
+                let (prompt, completion, cached, latency) = match flow {
                     Some(s) => {
                         let p = s.prompt_tokens;
                         let c = if s.completion_tokens > 0 {
@@ -324,9 +440,9 @@ impl Projection for TimeseriesProjection {
                         } else {
                             s.chunks.max(1)
                         };
-                        (p, c, s.ttlb_ms)
+                        (p, c, s.cached_tokens, s.ttlb_ms)
                     }
-                    None => (0, 0, 0.0),
+                    None => (0, 0, 0, 0.0),
                 };
                 self.record_metric(
                     env.wall_ms,
@@ -334,6 +450,7 @@ impl Projection for TimeseriesProjection {
                     env.model.as_deref(),
                     prompt,
                     completion,
+                    cached,
                     latency,
                     false,
                 );
@@ -343,6 +460,7 @@ impl Projection for TimeseriesProjection {
                     env.wall_ms,
                     env.provider.as_deref(),
                     env.model.as_deref(),
+                    0,
                     0,
                     0,
                     *latency_ms,

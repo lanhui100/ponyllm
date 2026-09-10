@@ -45,6 +45,7 @@ export interface MetricsSummary {
   total_failover: number;
   prompt_tokens: number;
   completion_tokens: number;
+  cached_tokens?: number;
   total_tokens: number;
   stream: StreamFlowSummary;
 }
@@ -58,6 +59,9 @@ export interface ProviderFlowSnapshot {
   status: 'healthy' | 'degraded' | 'unhealthy';
   uptime_bars?: ConnectivityBarSeries;
   total_tokens?: number;
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  cached_tokens?: number;
 }
 
 export interface StreamTelemetrySnapshot {
@@ -90,9 +94,13 @@ export interface MetricBucket {
   timestamp_ms: number;
   qps: number;
   token_throughput: number;
+  prompt_throughput?: number;
+  completion_throughput?: number;
+  cached_throughput?: number;
   total_tokens: number;
   prompt_tokens: number;
   completion_tokens: number;
+  cached_tokens?: number;
   avg_latency_ms: number;
   error_rate: number;
   total_requests: number;
@@ -106,7 +114,13 @@ export interface TimeseriesHistoryResponse {
   points: MetricBucket[];
   total_requests: number;
   total_tokens: number;
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  cached_tokens?: number;
   provider_tokens: Record<string, number>;
+  provider_prompt_tokens?: Record<string, number>;
+  provider_completion_tokens?: Record<string, number>;
+  provider_cached_tokens?: Record<string, number>;
   model_tokens: Record<string, number>;
 }
 

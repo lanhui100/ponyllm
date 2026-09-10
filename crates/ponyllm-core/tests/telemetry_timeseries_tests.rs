@@ -59,6 +59,7 @@ fn test_timeseries_projection_aggregation_and_model_breakdown() {
             latency_ms: 250.0,
             prompt_tokens: 100,
             completion_tokens: 50,
+            cached_tokens: 25,
             tps: Some(40.0),
             request_snippet: None,
             response_snippet: None,
@@ -77,6 +78,7 @@ fn test_timeseries_projection_aggregation_and_model_breakdown() {
             latency_ms: 400.0,
             prompt_tokens: 200,
             completion_tokens: 100,
+            cached_tokens: 50,
             tps: Some(30.0),
             request_snippet: None,
             response_snippet: None,
@@ -171,6 +173,7 @@ fn test_timeseries_float_safety_and_serialization() {
             latency_ms: f64::NAN,
             prompt_tokens: 10,
             completion_tokens: 10,
+            cached_tokens: 5,
             tps: Some(f64::INFINITY),
             request_snippet: None,
             response_snippet: None,
@@ -190,11 +193,11 @@ fn test_timeseries_clock_skew_resilience() {
     let base_now = 1_700_000_000_000u64;
 
     // Record legitimate sample
-    timeseries_proj.record_metric(base_now, Some("prov"), Some("model"), 100, 50, 150.0, true);
+    timeseries_proj.record_metric(base_now, Some("prov"), Some("model"), 100, 50, 20, 150.0, true);
 
     // Try to record extreme future sample (e.g. +10 years)
     let future_time = base_now + 10 * 365 * 24 * 3600 * 1000;
-    timeseries_proj.record_metric(future_time, Some("prov"), Some("model"), 500, 500, 150.0, true);
+    timeseries_proj.record_metric(future_time, Some("prov"), Some("model"), 500, 500, 100, 150.0, true);
 
     // Past legitimate bucket must NOT be evicted
     let resp = timeseries_proj.query_history("24h", base_now + 1000);
@@ -271,21 +274,23 @@ fn test_timeseries_and_metrics_snapshot_restore() {
     use ponyllm_core::telemetry::MetricsCollector;
     let ts = TimeseriesProjection::default();
     let now = 1_700_000_000_000u64;
-    ts.record_metric(now, Some("p"), Some("m"), 100, 50, 150.0, true);
+    ts.record_metric(now, Some("p"), Some("m"), 100, 50, 20, 150.0, true);
     let buckets = ts.snapshot_buckets();
     let ts2 = TimeseriesProjection::default();
     ts2.restore_buckets(buckets);
     let resp = ts2.query_history("24h", now + 1000);
     assert_eq!(resp.total_requests, 1);
     assert_eq!(resp.total_tokens, 150);
+    assert_eq!(resp.cached_tokens, 20);
 
     let m = MetricsCollector::new();
-    m.record_request("/v1/chat", std::time::Duration::from_millis(100), 10, 20, true);
+    m.record_request("/v1/chat", std::time::Duration::from_millis(100), 10, 20, 5, true);
     let snap = m.snapshot_counters();
     let m2 = MetricsCollector::new();
     m2.restore_counters(&snap);
     let summary = m2.get_summary();
     assert_eq!(summary.total_requests, 1);
     assert_eq!(summary.total_tokens, 30);
+    assert_eq!(summary.cached_tokens, 5);
 }
 

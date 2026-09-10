@@ -15,6 +15,9 @@ export interface TelemetryPoint {
   timestamp: number;
   qps: number;
   tokenThroughput: number;
+  promptThroughput?: number;
+  completionThroughput?: number;
+  cachedThroughput?: number;
   latencyMs: number;
   errorRate: number;
 }
@@ -97,6 +100,9 @@ export function useTelemetry(options: UseTelemetryOptions = {}) {
   const latestGatewayLatency = ref<number | undefined>(initialPersisted.latestLatency);
   const lastReqCount = ref<number | null>(null);
   const lastTokenCount = ref<number | null>(null);
+  const lastPromptCount = ref<number | null>(null);
+  const lastCompCount = ref<number | null>(null);
+  const lastCachedCount = ref<number | null>(null);
   const lastTickTime = ref<number>(Date.now());
 
   let pollTimer: ReturnType<typeof setInterval> | null = null;
@@ -125,6 +131,9 @@ export function useTelemetry(options: UseTelemetryOptions = {}) {
 
     let qps = 0;
     let tokenRate = 0;
+    let promptRate = 0;
+    let compRate = 0;
+    let cachedRate = 0;
     let latency = 0;
     let errorRate = 0;
 
@@ -141,6 +150,25 @@ export function useTelemetry(options: UseTelemetryOptions = {}) {
       }
       lastTokenCount.value = m.total_tokens;
 
+      if (lastPromptCount.value !== null) {
+        const deltaPrompt = Math.max(0, m.prompt_tokens - lastPromptCount.value);
+        promptRate = Math.round(deltaPrompt / elapsedSec);
+      }
+      lastPromptCount.value = m.prompt_tokens;
+
+      if (lastCompCount.value !== null) {
+        const deltaComp = Math.max(0, m.completion_tokens - lastCompCount.value);
+        compRate = Math.round(deltaComp / elapsedSec);
+      }
+      lastCompCount.value = m.completion_tokens;
+
+      const cachedTokens = m.cached_tokens ?? 0;
+      if (lastCachedCount.value !== null) {
+        const deltaCached = Math.max(0, cachedTokens - lastCachedCount.value);
+        cachedRate = Math.round(deltaCached / elapsedSec);
+      }
+      lastCachedCount.value = cachedTokens;
+
       latency = m.stream?.avg_ttft_ms ?? m.stream?.avg_ttlb_ms ?? 0;
       errorRate = m.total_requests > 0
         ? Number(((m.failed_requests / m.total_requests) * 100).toFixed(1))
@@ -151,6 +179,9 @@ export function useTelemetry(options: UseTelemetryOptions = {}) {
       timestamp: now,
       qps,
       tokenThroughput: tokenRate,
+      promptThroughput: promptRate,
+      completionThroughput: compRate,
+      cachedThroughput: cachedRate,
       latencyMs: latency,
       errorRate,
     };

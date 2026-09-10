@@ -48,6 +48,7 @@ fn script() -> Vec<(Option<String>, GatewayEvent)> {
                     tpot_mean_ms: Some(20.0),
                     prompt_tokens: 0,
                     completion_tokens: 50,
+                    cached_tokens: 0,
                 },
                 stages: StageTimings {
                     routing_ms: Some(2.0),
@@ -93,6 +94,7 @@ fn script() -> Vec<(Option<String>, GatewayEvent)> {
                 latency_ms: 300.0,
                 prompt_tokens: 100,
                 completion_tokens: 20,
+                cached_tokens: 15,
                 tps: Some(66.0),
                 request_snippet: None,
                 response_snippet: None,
@@ -136,6 +138,7 @@ fn test_replay_is_deterministic() {
     assert_eq!(a.stream.total_chunks, 50);
     assert_eq!(a.prompt_tokens, 100);
     assert_eq!(a.completion_tokens, 70); // 50 stream chunks + 20 json
+    assert_eq!(a.cached_tokens, 15);
     assert_eq!(a.failed_requests, 1);
     assert_eq!(a.successful_requests, 2);
 }

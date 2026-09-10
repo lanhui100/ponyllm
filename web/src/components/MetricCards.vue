@@ -17,6 +17,12 @@ const successfulRequests = computed(() => {
   return props.metrics?.successful_requests ?? 0;
 });
 
+function formatTokensInt(n: number): string {
+  if (n >= 1_000_000) return `${Math.round(n / 1_000_000)}M`;
+  if (n >= 1_000) return `${Math.round(n / 1_000)}K`;
+  return Math.round(n).toString();
+}
+
 const completionTokens = computed(() => {
   return props.metrics?.completion_tokens ?? 0;
 });
@@ -25,8 +31,20 @@ const promptTokens = computed(() => {
   return props.metrics?.prompt_tokens ?? 0;
 });
 
+const cachedTokens = computed(() => {
+  return props.metrics?.cached_tokens ?? 0;
+});
+
 const totalTokens = computed(() => {
   return props.metrics?.total_tokens ?? 0;
+});
+
+const cacheHitRate = computed(() => {
+  const prompt = promptTokens.value;
+  const cached = cachedTokens.value;
+  if (prompt + cached === 0) return '0%';
+  const rate = Math.round((cached / (prompt + cached)) * 100);
+  return `${rate}%`;
 });
 
 const ttft = computed(() => {
@@ -64,20 +82,26 @@ const errorRate = computed(() => {
       </div>
     </div>
 
-    <!-- 2. Token总计 (token生成的数量) -->
+    <!-- 2. Token量 (主数字输出总计，下方输入/输出/缓存三维度) -->
     <div class="swiss-card p-5 bg-sky-50/30 backdrop-blur-xs transition-all duration-200 border border-white/40">
-      <div class="flex items-center justify-between text-[13px] text-slate-500 mb-2.5">
-        <span class="font-semibold text-slate-700">Token 总计</span>
+      <div class="flex items-center justify-between text-[13px] text-slate-500 mb-1.5">
+        <span class="font-semibold text-slate-700">Token量</span>
         <div class="w-7.5 h-7.5 rounded-lg bg-sky-100 text-sky-700 flex items-center justify-center">
           <Icons name="sparkles" size="16" />
         </div>
       </div>
-      <div class="text-3xl font-bold tracking-tight text-slate-900 mb-1 flex items-baseline gap-1.5 font-mono tabular-nums">
+      <!-- 主数字：输出总计 -->
+      <div class="text-3xl font-bold tracking-tight text-slate-900 mb-1.5 flex items-baseline gap-1.5 font-mono tabular-nums">
         {{ completionTokens.toLocaleString() }}
         <span class="text-sm font-normal text-slate-500 font-sans">tok</span>
       </div>
-      <div class="text-[13px] text-slate-500 font-medium truncate" :title="`输入: ${promptTokens.toLocaleString()} · 总消耗: ${totalTokens.toLocaleString()}`">
-        输入: <span class="font-mono text-slate-700">{{ promptTokens.toLocaleString() }}</span> · 总消耗: <span class="font-mono text-slate-700">{{ totalTokens.toLocaleString() }}</span>
+      <!-- 下方：输入、输出、缓存三个维度 (以K/M整数单位呈现，缓存附带百分比) -->
+      <div class="text-[12px] text-slate-600 font-medium flex flex-wrap items-center gap-x-2 gap-y-0.5" :title="`输入: ${promptTokens.toLocaleString()} · 输出: ${completionTokens.toLocaleString()} · 缓存: ${cachedTokens.toLocaleString()} (${cacheHitRate})`">
+        <span>输入: <span class="font-mono text-slate-800 font-semibold">{{ formatTokensInt(promptTokens) }}</span></span>
+        <span class="text-slate-300">·</span>
+        <span>输出: <span class="font-mono text-slate-800 font-semibold">{{ formatTokensInt(completionTokens) }}</span></span>
+        <span class="text-slate-300">·</span>
+        <span>缓存: <span class="font-mono text-emerald-700 font-semibold">{{ formatTokensInt(cachedTokens) }}</span> <span class="text-3xs font-mono text-emerald-600 font-bold ml-0.5">({{ cacheHitRate }})</span></span>
       </div>
     </div>
 

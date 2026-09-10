@@ -75,6 +75,9 @@ const speed24h = computed<number | undefined>(() => {
         :providers="stream?.providers"
         :range="selectedRange"
         :provider-tokens="historyData?.provider_tokens"
+        :provider-prompt-tokens="historyData?.provider_prompt_tokens"
+        :provider-completion-tokens="historyData?.provider_completion_tokens"
+        :provider-cached-tokens="historyData?.provider_cached_tokens"
         @update:range="setRange"
       />
     </main>

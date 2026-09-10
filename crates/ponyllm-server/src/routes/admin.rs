@@ -311,6 +311,25 @@ pub struct AntigravityQuotaItemView {
     pub time_until_reset: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct AntigravityQuotaBucketView {
+    pub bucket_id: String,
+    pub window: String,
+    pub remaining_fraction: f64,
+    pub reset_time: Option<String>,
+    pub reset_time_beijing: Option<String>,
+    pub time_until_reset: Option<String>,
+    pub display_name: Option<String>,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct AntigravityQuotaGroupView {
+    pub display_name: String,
+    pub description: Option<String>,
+    pub buckets: Vec<AntigravityQuotaBucketView>,
+}
+
 #[derive(Debug, Serialize, ToSchema)]
 pub struct KeyTestView {
     pub success: bool,
@@ -320,6 +339,8 @@ pub struct KeyTestView {
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub quota: Option<Vec<AntigravityQuotaItemView>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quota_groups: Option<Vec<AntigravityQuotaGroupView>>,
 }
 
 #[derive(Debug, Deserialize, utoipa::IntoParams)]
@@ -397,6 +418,8 @@ pub struct AuthorizeAntigravityResponse {
     pub config_version: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub quota: Option<Vec<AntigravityQuotaItemView>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quota_groups: Option<Vec<AntigravityQuotaGroupView>>,
 }
 
 // ---------- helpers ----------
@@ -1784,6 +1807,7 @@ pub async fn handle_admin_test_key(
                     error_code: Some("invalid_credential".to_string()),
                     message: format!("Invalid Antigravity credential: {}", e),
                     quota: None,
+                    quota_groups: None,
                 })
                 .into_response();
             }
@@ -1828,7 +1852,7 @@ pub async fn handle_admin_test_key(
                     .unwrap_or(0);
                 tokio::time::sleep(std::time::Duration::from_millis(jitter_ms as u64)).await;
                 let quota_res = mgr.fetch_quota(Some(&base_url)).await;
-                let (quota_view, quota_msg) = match quota_res {
+                let (quota_view, quota_groups_view, quota_msg) = match quota_res {
                     Ok(snapshot) => {
                         let mut list = Vec::new();
                         let mut models: Vec<_> = snapshot.models.values().collect();
@@ -1856,9 +1880,54 @@ pub async fn handle_admin_test_key(
                                 time_until_reset: remaining_desc,
                             });
                         }
-                        (Some(list), format!("probe ok (quota fetched for {} models)", snapshot.models.len()))
+
+                        let groups_view = snapshot.quota_groups.map(|groups| {
+                            groups
+                                .into_iter()
+                                .map(|g| AntigravityQuotaGroupView {
+                                    display_name: g.display_name,
+                                    description: g.description,
+                                    buckets: g
+                                        .buckets
+                                        .into_iter()
+                                        .map(|b| {
+                                            let (bj_time, rem_desc) = match b.reset_time {
+                                                Some(utc_dt) => {
+                                                    let bj_dt = utc_dt + chrono::Duration::hours(8);
+                                                    let now = chrono::Utc::now();
+                                                    let diff = if utc_dt > now {
+                                                        let dur = utc_dt - now;
+                                                        format!("{}小时{}分后", dur.num_hours(), dur.num_minutes() % 60)
+                                                    } else {
+                                                        "已就绪".to_string()
+                                                    };
+                                                    (Some(bj_dt.format("%Y-%m-%d %H:%M:%S").to_string()), Some(diff))
+                                                }
+                                                None => (None, None),
+                                            };
+                                            AntigravityQuotaBucketView {
+                                                bucket_id: b.bucket_id,
+                                                window: b.window,
+                                                remaining_fraction: b.remaining_fraction,
+                                                reset_time: b.reset_time.map(|t| t.to_rfc3339()),
+                                                reset_time_beijing: bj_time,
+                                                time_until_reset: rem_desc,
+                                                display_name: b.display_name,
+                                                description: b.description,
+                                            }
+                                        })
+                                        .collect(),
+                                })
+                                .collect()
+                        });
+
+                        (
+                            Some(list),
+                            groups_view,
+                            format!("probe ok (quota fetched for {} models)", snapshot.models.len()),
+                        )
                     }
-                    Err(e) => (None, format!("probe ok (quota fetch error: {})", e)),
+                    Err(e) => (None, None, format!("probe ok (quota fetch error: {})", e)),
                 };
 
                 KeyTestView {
@@ -1868,6 +1937,7 @@ pub async fn handle_admin_test_key(
                     error_code: None,
                     message: quota_msg,
                     quota: quota_view,
+                    quota_groups: quota_groups_view,
                 }
             }
             Err(e) => KeyTestView {
@@ -1877,6 +1947,7 @@ pub async fn handle_admin_test_key(
                 error_code: Some("auth_failed".to_string()),
                 message: format!("OAuth token refresh failed: {}", e),
                 quota: None,
+                quota_groups: None,
             },
         };
 
@@ -1927,6 +1998,7 @@ pub async fn handle_admin_test_key(
                     error_code: None,
                     message: "probe ok".to_string(),
                     quota: None,
+                    quota_groups: None,
                 }
             } else if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
                 KeyTestView {
@@ -1936,6 +2008,7 @@ pub async fn handle_admin_test_key(
                     error_code: Some("unauthorized".to_string()),
                     message: "upstream authentication failed".to_string(),
                     quota: None,
+                    quota_groups: None,
                 }
             } else if status == StatusCode::TOO_MANY_REQUESTS {
                 KeyTestView {
@@ -1945,6 +2018,7 @@ pub async fn handle_admin_test_key(
                     error_code: Some("rate_limited".to_string()),
                     message: "upstream rate limit exceeded".to_string(),
                     quota: None,
+                    quota_groups: None,
                 }
             } else {
                 KeyTestView {
@@ -1954,6 +2028,7 @@ pub async fn handle_admin_test_key(
                     error_code: Some("upstream_error".to_string()),
                     message: format!("upstream returned HTTP {}", status.as_u16()),
                     quota: None,
+                    quota_groups: None,
                 }
             }
         }
@@ -1966,6 +2041,7 @@ pub async fn handle_admin_test_key(
                     error_code: Some("timeout".to_string()),
                     message: "dial test timed out after 3s".to_string(),
                     quota: None,
+                    quota_groups: None,
                 }
             } else {
                 KeyTestView {
@@ -1975,6 +2051,7 @@ pub async fn handle_admin_test_key(
                     error_code: Some("connect_error".to_string()),
                     message: "upstream connection error".to_string(),
                     quota: None,
+                    quota_groups: None,
                 }
             }
         }
@@ -2701,7 +2778,7 @@ pub async fn handle_admin_authorize_antigravity(
     }
 
     // Best-effort quota fetch using the ready token manager
-    let quota = match tokio::time::timeout(
+    let (quota, quota_groups) = match tokio::time::timeout(
         std::time::Duration::from_secs(4),
         mgr.fetch_quota(Some(&provider_base_url)),
     )
@@ -2734,9 +2811,50 @@ pub async fn handle_admin_authorize_antigravity(
                     time_until_reset: remaining_desc,
                 });
             }
-            Some(list)
+
+            let groups_view = snapshot.quota_groups.map(|groups| {
+                groups
+                    .into_iter()
+                    .map(|g| AntigravityQuotaGroupView {
+                        display_name: g.display_name,
+                        description: g.description,
+                        buckets: g
+                            .buckets
+                            .into_iter()
+                            .map(|b| {
+                                let (bj_time, rem_desc) = match b.reset_time {
+                                    Some(utc_dt) => {
+                                        let bj_dt = utc_dt + chrono::Duration::hours(8);
+                                        let now = chrono::Utc::now();
+                                        let diff = if utc_dt > now {
+                                            let dur = utc_dt - now;
+                                            format!("{}小时{}分后", dur.num_hours(), dur.num_minutes() % 60)
+                                        } else {
+                                            "已就绪".to_string()
+                                        };
+                                        (Some(bj_dt.format("%Y-%m-%d %H:%M:%S").to_string()), Some(diff))
+                                    }
+                                    None => (None, None),
+                                };
+                                AntigravityQuotaBucketView {
+                                    bucket_id: b.bucket_id,
+                                    window: b.window,
+                                    remaining_fraction: b.remaining_fraction,
+                                    reset_time: b.reset_time.map(|t| t.to_rfc3339()),
+                                    reset_time_beijing: bj_time,
+                                    time_until_reset: rem_desc,
+                                    display_name: b.display_name,
+                                    description: b.description,
+                                }
+                            })
+                            .collect(),
+                    })
+                    .collect()
+            });
+
+            (Some(list), groups_view)
         }
-        _ => None,
+        _ => (None, None),
     };
 
     let mut resp = (
@@ -2747,6 +2865,7 @@ pub async fn handle_admin_authorize_antigravity(
             email: auth_res.email,
             config_version: new_ver,
             quota,
+            quota_groups,
         }),
     )
         .into_response();
@@ -2999,6 +3118,8 @@ pub async fn handle_admin_provider_upstream_models(
         AuthorizeAntigravityPayload,
         AuthorizeAntigravityResponse,
         AntigravityQuotaItemView,
+        AntigravityQuotaBucketView,
+        AntigravityQuotaGroupView,
         ProxyStatusView
     ))
 )]

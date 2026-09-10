@@ -25,6 +25,7 @@ async fn test_telemetry_history_and_stream_uptime_bars() {
             latency_ms: 150.0,
             prompt_tokens: 120,
             completion_tokens: 80,
+            cached_tokens: 30,
             tps: Some(50.0),
             request_snippet: None,
             response_snippet: None,

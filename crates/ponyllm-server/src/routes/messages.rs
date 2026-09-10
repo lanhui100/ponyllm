@@ -401,6 +401,8 @@ pub async fn handle_messages(
                     // Stream the raw upstream SSE body. For an OpenAI upstream,
                     // translate OpenAI chat chunks into Anthropic SSE events.
                     let raw_stream = upstream_resp.bytes_stream();
+                    let est_prompt_tokens = serde_json::to_string(&req.messages).map(|s| (s.len() as u64 / 4).max(1)).unwrap_or(1);
+
                     // Mid-stream failures (after this started event) are appended
                     // by the telemetry wrapper with the same request_id.
                     let failure_ctx = StreamFailureContext {
@@ -409,6 +411,7 @@ pub async fn handle_messages(
                         provider: target.provider_name.clone(),
                         stages: stages.clone(),
                         request_snippet: req_snippet.clone(),
+                        estimated_prompt_tokens: est_prompt_tokens,
                     };
                     let body = match target.upstream_protocol {
                         ponyllm_core::pool::UpstreamProtocol::Anthropic => {
@@ -556,6 +559,7 @@ pub async fn handle_messages(
                     let prompt_tokens = (ant_resp.usage.input_tokens as u64)
                         .saturating_add(cached_read)
                         .saturating_add(cached_create);
+                    let cached_tokens = cached_read;
                     let completion_tokens = ant_resp.usage.output_tokens as u64;
                     let tps = if latency.as_secs_f64() > 0.05 && completion_tokens > 0 {
                         Some((completion_tokens as f64 / latency.as_secs_f64()).max(1.0))
@@ -574,6 +578,7 @@ pub async fn handle_messages(
                             latency_ms: latency.as_secs_f64() * 1000.0,
                             prompt_tokens,
                             completion_tokens,
+                            cached_tokens,
                             tps,
                             request_snippet: req_snippet,
                             response_snippet: serde_json::to_string(&ant_resp).ok(),

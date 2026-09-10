@@ -85,6 +85,8 @@ pub enum GatewayEvent {
         latency_ms: f64,
         prompt_tokens: u64,
         completion_tokens: u64,
+        #[serde(default)]
+        cached_tokens: u64,
         tps: Option<f64>,
         request_snippet: Option<String>,
         response_snippet: Option<String>,
