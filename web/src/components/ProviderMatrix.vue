@@ -81,8 +81,8 @@ function getProviderCachedTokens(name: string, p: ProviderFlowSnapshot): number 
 function getProviderCachedPercent(name: string, p: ProviderFlowSnapshot): string {
   const prompt = getProviderPromptTokens(name, p);
   const cached = getProviderCachedTokens(name, p);
-  if (prompt + cached === 0) return '0%';
-  const rate = Math.round((cached / (prompt + cached)) * 100);
+  if (prompt <= 0) return '0%';
+  const rate = Math.min(100, Math.round((cached / prompt) * 100));
   return `${rate}%`;
 }
 

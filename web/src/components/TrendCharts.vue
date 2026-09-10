@@ -153,36 +153,41 @@ function updateCharts() {
   // 2. Token 吞吐量 柱状分布图 (支持「类型 / 提供商 / 模型」三维切换)
   if (useHistorical) {
     if (tokenDimension.value === 'type') {
+      const totalPrompt = points.reduce((acc, p) => acc + (p.prompt_tokens ?? 0), 0);
+      const totalCached = points.reduce((acc, p) => acc + (p.cached_tokens ?? 0), 0);
+      const totalFresh = Math.max(0, totalPrompt - totalCached);
+      const totalComp = points.reduce((acc, p) => acc + (p.completion_tokens ?? 0), 0);
+
       activeLegendItems.value = [
-        { key: '输入 Token', color: '#64748b', total: points.reduce((acc, p) => acc + (p.prompt_tokens ?? 0), 0) },
-        { key: '输出 Token', color: '#0284c7', total: points.reduce((acc, p) => acc + (p.completion_tokens ?? 0), 0) },
-        { key: '缓存命中', color: '#10b981', total: points.reduce((acc, p) => acc + (p.cached_tokens ?? 0), 0) },
+        { key: '未命中输入', color: '#64748b', total: totalFresh },
+        { key: '缓存命中', color: '#10b981', total: totalCached },
+        { key: '输出 Token', color: '#0284c7', total: totalComp },
       ];
 
       const barSeries = [
         {
-          name: '输入 Token',
+          name: '未命中输入',
           type: 'bar' as const,
           stack: 'total',
           barMaxWidth: 18,
           itemStyle: { color: '#64748b', borderRadius: [0, 0, 0, 0] },
-          data: points.map((p) => p.prompt_tokens ?? 0),
-        },
-        {
-          name: '输出 Token',
-          type: 'bar' as const,
-          stack: 'total',
-          barMaxWidth: 18,
-          itemStyle: { color: '#0284c7', borderRadius: [0, 0, 0, 0] },
-          data: points.map((p) => p.completion_tokens ?? 0),
+          data: points.map((p) => Math.max(0, (p.prompt_tokens ?? 0) - (p.cached_tokens ?? 0))),
         },
         {
           name: '缓存命中',
           type: 'bar' as const,
           stack: 'total',
           barMaxWidth: 18,
-          itemStyle: { color: '#10b981', borderRadius: [2, 2, 0, 0] },
+          itemStyle: { color: '#10b981', borderRadius: [0, 0, 0, 0] },
           data: points.map((p) => p.cached_tokens ?? 0),
+        },
+        {
+          name: '输出 Token',
+          type: 'bar' as const,
+          stack: 'total',
+          barMaxWidth: 18,
+          itemStyle: { color: '#0284c7', borderRadius: [2, 2, 0, 0] },
+          data: points.map((p) => p.completion_tokens ?? 0),
         },
       ];
 
@@ -207,8 +212,8 @@ function updateCharts() {
               if (item.seriesName === '缓存命中' && pt) {
                 const promptVal = pt.prompt_tokens ?? 0;
                 const cachedVal = pt.cached_tokens ?? val;
-                if (promptVal + cachedVal > 0) {
-                  const pct = Math.round((cachedVal / (promptVal + cachedVal)) * 100);
+                if (promptVal > 0) {
+                  const pct = Math.min(100, Math.round((cachedVal / promptVal) * 100));
                   pctSuffix = ` [${pct}%]`;
                 }
               }
