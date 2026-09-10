@@ -71,15 +71,17 @@ describe('ProviderCard UI and Phase 2 Requirements', () => {
     // 3. Removed "计费单价与服务商高级参数"
     expect(container.textContent).not.toContain('计费单价与服务商高级参数');
 
-    // 4. Protocols selector (non-dropdown pills)
+    // 4. Protocols selector (non-dropdown pills: standard provider shows chat, messages, responses, but NOT antigravity)
     const protocolSection = container.querySelector('[data-testid="protocol-section"]');
     expect(protocolSection).not.toBeNull();
     const chatPill = container.querySelector('[data-testid="protocol-pill-chat"]');
     const messagesPill = container.querySelector('[data-testid="protocol-pill-messages"]');
     const responsesPill = container.querySelector('[data-testid="protocol-pill-responses"]');
+    const antigravityPill = container.querySelector('[data-testid="protocol-pill-antigravity"]');
     expect(chatPill).not.toBeNull();
     expect(messagesPill).not.toBeNull();
     expect(responsesPill).not.toBeNull();
+    expect(antigravityPill).toBeNull();
 
     // 5. Renamed to "密钥" and "模型"
     expect(container.textContent).toContain('密钥 (1)');
@@ -207,6 +209,13 @@ describe('ProviderCard UI and Phase 2 Requirements', () => {
     const claudeCapsule = container.querySelector('[data-testid="quota-capsule-claude"]');
     expect(claudeCapsule).not.toBeNull();
     expect(claudeCapsule?.textContent).toContain('C');
+
+    // Verify Antigravity provider only displays Antigravity protocol pill
+    const agPill = container.querySelector('[data-testid="protocol-pill-antigravity"]');
+    expect(agPill).not.toBeNull();
+    expect(container.querySelector('[data-testid="protocol-pill-chat"]')).toBeNull();
+    expect(container.querySelector('[data-testid="protocol-pill-messages"]')).toBeNull();
+    expect(container.querySelector('[data-testid="protocol-pill-responses"]')).toBeNull();
 
     // Verify "就绪" badge is NOT displayed for active key
     expect(container.textContent).not.toContain('就绪');

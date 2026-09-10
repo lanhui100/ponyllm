@@ -50,21 +50,32 @@ const emit = defineEmits<{
 
 const expanded = ref(props.defaultExpanded ?? true);
 
-const PROTOCOL_OPTIONS = [
-  { id: 'chat', label: 'OpenAI Chat' },
-  { id: 'messages', label: 'Anthropic Messages' },
-  { id: 'responses', label: 'OpenAI Responses' },
+const isAntigravity = computed(() => {
+  return (
+    props.provider.default_protocol === 'antigravity' ||
+    props.provider.name.toLowerCase().includes('antigravity')
+  );
+});
+
+const ANTIGRAVITY_PROTOCOL_OPTIONS = [
   { id: 'antigravity', label: 'Antigravity' },
 ] as const;
 
+const STANDARD_PROTOCOL_OPTIONS = [
+  { id: 'chat', label: 'OpenAI Chat' },
+  { id: 'messages', label: 'Anthropic Messages' },
+  { id: 'responses', label: 'OpenAI Responses' },
+] as const;
+
+const availableProtocols = computed(() => {
+  return isAntigravity.value ? ANTIGRAVITY_PROTOCOL_OPTIONS : STANDARD_PROTOCOL_OPTIONS;
+});
+
 function getInitialProtocols(): string[] {
-  const list: string[] = [];
-  if (
-    props.provider.default_protocol === 'antigravity' ||
-    props.provider.name.toLowerCase().includes('antigravity')
-  ) {
-    list.push('antigravity');
+  if (isAntigravity.value) {
+    return ['antigravity'];
   }
+  const list: string[] = [];
   if (props.provider.chat_url || props.provider.default_protocol === 'chat') {
     list.push('chat');
   }
@@ -319,7 +330,7 @@ async function handleDeleteProvider() {
           <!-- 非下拉多选协议药丸胶囊 -->
           <div class="flex flex-wrap gap-2 items-center">
             <button
-              v-for="proto in PROTOCOL_OPTIONS"
+              v-for="proto in availableProtocols"
               :key="proto.id"
               type="button"
               :disabled="!isEditingProtocols"
