@@ -247,8 +247,14 @@ impl MetricsCollector {
         self.bytes_sum.store(snap.bytes_sum, Ordering::Relaxed);
         self.stalls_sum.store(snap.stalls_sum, Ordering::Relaxed);
         self.max_gap_ms.store(snap.max_gap_ms, Ordering::Relaxed);
-        self.tps_sum_milli.store(snap.tps_sum_milli, Ordering::Relaxed);
-        self.tps_samples.store(snap.tps_samples, Ordering::Relaxed);
+        // Safeguard: clamp historical corrupted average TPS (> 800 tok/s) on restore
+        let (safe_tps_sum, safe_tps_samples) = if snap.tps_samples > 0 && (snap.tps_sum_milli / 1000 / snap.tps_samples) > 800 {
+            (40_000 * snap.tps_samples, snap.tps_samples)
+        } else {
+            (snap.tps_sum_milli, snap.tps_samples)
+        };
+        self.tps_sum_milli.store(safe_tps_sum, Ordering::Relaxed);
+        self.tps_samples.store(safe_tps_samples, Ordering::Relaxed);
     }
 }
 

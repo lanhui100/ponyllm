@@ -265,7 +265,14 @@ impl NodeLatencyMetrics {
     /// 从快照恢复（仅启动时调用）。
     pub fn restore(&self, snap: &NodeLatencySnapshot) {
         self.ewma_ttft_us.store(snap.ewma_ttft_us, Ordering::Relaxed);
-        self.ewma_tps_milli.store(snap.ewma_tps_milli, Ordering::Relaxed);
+        // Safeguard against legacy corrupted snapshot with excessive TPS (> 800 tok/s):
+        // Clamps down to default cold TPS to prevent warped dashboard metrics.
+        let safe_tps_milli = if snap.ewma_tps_milli > 800_000 {
+            (DEFAULT_COLD_TPS * 1000.0) as u64
+        } else {
+            snap.ewma_tps_milli
+        };
+        self.ewma_tps_milli.store(safe_tps_milli, Ordering::Relaxed);
         self.total_requests.store(snap.total_requests, Ordering::Relaxed);
         self.successful_requests.store(snap.successful_requests, Ordering::Relaxed);
         self.stream_count.store(snap.stream_count, Ordering::Relaxed);

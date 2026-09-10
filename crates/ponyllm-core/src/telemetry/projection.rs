@@ -36,7 +36,7 @@ impl Projection for MetricsProjection {
                 let completion = if flow.completion_tokens > 0 {
                     flow.completion_tokens
                 } else {
-                    (flow.bytes / 3).max(flow.chunks)
+                    flow.chunks.max(1)
                 };
                 self.inner.record_stream(flow);
                 self.inner.record_request(
@@ -53,7 +53,7 @@ impl Projection for MetricsProjection {
                     let completion = if sample.completion_tokens > 0 {
                         sample.completion_tokens
                     } else {
-                        (sample.bytes / 3).max(sample.chunks)
+                        sample.chunks.max(1)
                     };
                     self.inner.record_stream(sample);
                     self.inner.record_request(

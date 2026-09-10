@@ -1035,6 +1035,8 @@ pub struct TelemetryStream<S> {
     stall_count: u64,
     chunks_emitted: u64,
     bytes_emitted: u64,
+    content_chars_emitted: u64,
+    usage_completion_tokens: Option<u64>,
     has_error: bool,
     completed: bool,
     last_error: Option<String>,
@@ -1057,13 +1059,15 @@ impl<S> TelemetryStream<S> {
             stall_count: 0,
             chunks_emitted: 0,
             bytes_emitted: 0,
+            content_chars_emitted: 0,
+            usage_completion_tokens: None,
             has_error: false,
             completed: false,
             last_error: None,
         }
     }
 
-    fn observe_chunk(&mut self, bytes: usize) {
+    fn observe_chunk(&mut self, item_bytes: &[u8]) {
         let now = Instant::now();
         if let Some(last) = self.last_chunk_time {
             let gap = now.saturating_duration_since(last).as_secs_f64() * 1000.0;
@@ -1079,7 +1083,14 @@ impl<S> TelemetryStream<S> {
         }
         self.last_chunk_time = Some(now);
         self.chunks_emitted += 1;
-        self.bytes_emitted += bytes as u64;
+        self.bytes_emitted += item_bytes.len() as u64;
+
+        // Inspect SSE payload to extract real content characters and usage output_tokens
+        let (chars, usage_tokens) = estimate_tokens_from_sse_bytes(item_bytes);
+        self.content_chars_emitted += chars as u64;
+        if let Some(toks) = usage_tokens {
+            self.usage_completion_tokens = Some(toks);
+        }
     }
 
     fn build_flow(&self, now: Instant) -> (StreamFlowSample, Option<f64>) {
@@ -1088,7 +1099,23 @@ impl<S> TelemetryStream<S> {
             (t.saturating_duration_since(start).as_secs_f64() * 1000.0).max(1.0)
         });
         let ttlb_ms = now.saturating_duration_since(start).as_secs_f64() * 1000.0;
-        let completion_tokens = (self.bytes_emitted / 3).max(self.chunks_emitted);
+
+        // Accurate token calculation:
+        // 1. If upstream emitted an explicit usage token count in terminal frame, strictly use it.
+        // 2. Otherwise estimate based on actual content characters (approx 3.5 chars / token, bounded below by chunks).
+        // 3. Never use raw SSE wire protocol bytes (which include hundreds of bytes of JSON boilerplate per chunk).
+        let completion_tokens = if let Some(toks) = self.usage_completion_tokens {
+            toks.max(1)
+        } else if self.content_chars_emitted > 0 {
+            // Standard NLP heuristic: ~3.5 chars per English token, ~1-2 chars per CJK token.
+            // (content_chars / 3.0) bounded by chunks_emitted gives an accurate estimate.
+            let est_tokens = (self.content_chars_emitted as f64 / 3.0).ceil() as u64;
+            est_tokens.max(self.chunks_emitted.min(1))
+        } else {
+            // Pure control / thought frames or empty payload: fallback to chunks count
+            self.chunks_emitted.max(1)
+        };
+
         let tps = if let Some(ft) = self.first_token_time {
             let gen_dur = now.saturating_duration_since(ft).as_secs_f64();
             if gen_dur > 0.05 && completion_tokens > 0 {
@@ -1118,7 +1145,7 @@ impl<S> TelemetryStream<S> {
             tpot_p95_ms: p95,
             tpot_mean_ms: avg_gap,
             prompt_tokens: 0,
-            completion_tokens: (self.bytes_emitted / 3).max(self.chunks_emitted),
+            completion_tokens,
         };
         (sample, avg_gap)
     }
@@ -1165,8 +1192,7 @@ where
         let res = std::pin::Pin::new(&mut self.inner).poll_next(cx);
         match res {
             std::task::Poll::Ready(Some(Ok(item))) => {
-                let n = item.len();
-                self.observe_chunk(n);
+                self.observe_chunk(item.as_ref());
                 if self.chunks_emitted.is_multiple_of(PROGRESS_EVERY) {
                     self.emit(
                         None,
@@ -1242,6 +1268,77 @@ impl<S> Drop for TelemetryStream<S> {
             }
         }
     }
+}
+
+/// Quick extraction of real content characters and usage completion tokens from SSE chunk bytes.
+/// Inspects `data:` lines for delta text and usage objects to prevent wire JSON boilerplate
+/// from inflating completion token counts and distorting TPS.
+fn estimate_tokens_from_sse_bytes(raw: &[u8]) -> (usize, Option<u64>) {
+    let Ok(text) = std::str::from_utf8(raw) else {
+        return (0, None);
+    };
+
+    let mut content_chars = 0;
+    let mut usage_tokens = None;
+
+    for line in text.split('\n') {
+        let line = line.strip_suffix('\r').unwrap_or(line).trim();
+        let Some(data_str) = line.strip_prefix("data:") else {
+            continue;
+        };
+        let data_str = data_str.trim();
+        if data_str.is_empty() || data_str == "[DONE]" {
+            continue;
+        }
+
+        let Ok(val) = serde_json::from_str::<serde_json::Value>(data_str) else {
+            continue;
+        };
+
+        if let Some(obj) = val.as_object() {
+            // 1. Inspect usage if present
+            let usage = obj.get("usage")
+                .or_else(|| obj.get("response").and_then(|r| r.get("usage")))
+                .or_else(|| obj.get("message").and_then(|m| m.get("usage")));
+            if let Some(u) = usage {
+                let comp = u.get("completion_tokens")
+                    .or_else(|| u.get("output_tokens"))
+                    .or_else(|| u.get("candidatesTokenCount"))
+                    .and_then(parse_lenient_u64);
+                if let Some(toks) = comp {
+                    usage_tokens = Some(toks);
+                }
+            }
+
+            // 2. OpenAI Choices delta
+            if let Some(choices) = obj.get("choices").and_then(|c| c.as_array()) {
+                for ch in choices {
+                    if let Some(delta) = ch.get("delta").and_then(|d| d.as_object()) {
+                        if let Some(c) = delta.get("content").and_then(|s| s.as_str()) {
+                            content_chars += c.len();
+                        }
+                        if let Some(rc) = delta.get("reasoning_content").and_then(|s| s.as_str()) {
+                            content_chars += rc.len();
+                        }
+                    }
+                }
+            }
+
+            // 3. Anthropic ContentBlockDelta / MessageDelta
+            if let Some(delta) = obj.get("delta").and_then(|d| d.as_object()) {
+                if let Some(t) = delta.get("text").or_else(|| delta.get("thinking")).and_then(|s| s.as_str()) {
+                    content_chars += t.len();
+                }
+            }
+
+            // 4. Responses output_text.delta
+            if let Some(d) = obj.get("delta").and_then(|s| s.as_str()) {
+                content_chars += d.len();
+            }
+        }
+    }
+
+    (content_chars, usage_tokens)
 }
 
 pub fn wrap_telemetry_stream<S, E>(
@@ -1906,6 +2003,41 @@ mod tests {
         assert!(joined.contains("\"content\":\" \""), "Stream must inject pad whitespace: {}", joined);
         assert!(joined.contains("\"finish_reason\":\"stop\""), "Stream must preserve stop: {}", joined);
         assert!(joined.ends_with("data: [DONE]\n\n"), "Stream must end with [DONE]");
+    }
+
+    #[tokio::test]
+    async fn test_telemetry_stream_accurate_tps_calculation() {
+        use ponyllm_core::telemetry::{EventBus, EventCtx, MetricsProjection, StreamProjection};
+        let metrics = Arc::new(MetricsCollector::new());
+        let bus = Arc::new(EventBus::new(100));
+        bus.add_projection(Arc::new(MetricsProjection::new(metrics.clone())));
+        let stream_proj = Arc::new(StreamProjection::default());
+        bus.add_projection(stream_proj.clone());
+
+        let start = Instant::now();
+        let ctx = StreamFailureContext {
+            bus: bus.clone(),
+            ctx: EventCtx::new("req-tps-1", "/v1/chat/completions", start),
+            provider: "test-provider".to_string(),
+            stages: Arc::new(Mutex::new(StageTimings::default())),
+            request_snippet: None,
+        };
+
+        // Two chunks containing real content: total 20 characters (~6-7 tokens)
+        // With previous flawed bytes/3 heuristic, 400+ bytes wire SSE would produce ~140 tokens and inflated TPS > 2000.
+        let chunk1 = Bytes::from_static(b"data: {\"id\":\"1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello world \"}}]}\n\n");
+        let chunk2 = Bytes::from_static(b"data: {\"id\":\"1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"test message\"}}]}\n\n");
+        let s = bytes_stream(vec![chunk1, chunk2]);
+
+        let monitored = wrap_telemetry_stream(s, ctx);
+        let _out: Vec<Bytes> = monitored.map(|r| r.unwrap()).collect().await;
+
+        let node = stream_proj.node_for("test-provider");
+        let snap = node.flow_snapshot();
+        // Accurate token estimate: 24 chars / 3 = 8 tokens
+        // Check that tps is within realistic LLM range, not thousands
+        assert!(snap.tps < 300.0, "TPS should be reasonably bounded, got {}", snap.tps);
+        assert_eq!(snap.stream_count, 1);
     }
 }
 

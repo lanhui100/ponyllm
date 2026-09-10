@@ -303,7 +303,7 @@ impl Projection for TimeseriesProjection {
                 let completion = if flow.completion_tokens > 0 {
                     flow.completion_tokens
                 } else {
-                    (flow.bytes / 3).max(flow.chunks)
+                    flow.chunks.max(1)
                 };
                 self.record_metric(
                     env.wall_ms,
@@ -322,7 +322,7 @@ impl Projection for TimeseriesProjection {
                         let c = if s.completion_tokens > 0 {
                             s.completion_tokens
                         } else {
-                            (s.bytes / 3).max(s.chunks)
+                            s.chunks.max(1)
                         };
                         (p, c, s.ttlb_ms)
                     }
