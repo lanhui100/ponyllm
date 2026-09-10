@@ -131,7 +131,7 @@ describe('DashboardView Full Feature Integration', () => {
     await nextTick();
 
     // 1. Verify Page Title
-    expect(container.textContent).toContain('系统可观测大盘');
+    expect(container.textContent).toContain('系统仪表盘');
 
     // 2. Verify Gateway status banner renders UptimeBars (24 gateway + 40 provider)
     const allBars = container.querySelectorAll('[data-testid="uptime-bar"]');
@@ -147,9 +147,15 @@ describe('DashboardView Full Feature Integration', () => {
     expect(container.textContent).toContain('输出 Token');
     expect(container.textContent).toContain('缓存命中');
 
-    // 4. Verify Trend Charts presence
+    // 4. Verify Trend Charts presence and Token 3-dimension switch (without '按')
     expect(container.textContent).toContain('QPS 并发洪峰');
     expect(container.textContent).toContain('Token 吞吐量分布');
+    expect(container.textContent).toContain('类型');
+    expect(container.textContent).toContain('提供商');
+    expect(container.textContent).toContain('模型');
+    expect(container.textContent).not.toContain('按 Provider');
+    expect(container.textContent).not.toContain('按模型');
+    expect(container.textContent).not.toContain('tokens');
     expect(container.textContent).toContain('延迟与速率起伏');
     expect(container.textContent).toContain('故障率异常波动');
 

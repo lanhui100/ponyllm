@@ -163,7 +163,7 @@ describe('WEB-02 End-to-End User Flow (Connect -> Dashboard -> Recorder)', () =>
     await new Promise((resolve) => setTimeout(resolve, 50));
     await nextTick();
 
-    expect(container.textContent).toContain('系统可观测大盘');
+    expect(container.textContent).toContain('系统仪表盘');
     expect(container.textContent).toContain('网关状态');
     expect(container.textContent).toContain('3,000 tok'); // output tokens
     expect(container.textContent).toContain('输入: 12K');

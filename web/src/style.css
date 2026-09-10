@@ -146,23 +146,25 @@
   background-size: 24px 24px;
 }
 
-/* 现代毛玻璃卡片（瑞士结构 + 高透磨砂微折射，减弱白底，blur降至sm级别） */
-.swiss-card {
-  background: rgba(255, 255, 255, 0.45);
-  backdrop-filter: blur(4px) saturate(140%);
-  -webkit-backdrop-filter: blur(4px) saturate(140%);
-  border: 1px solid rgba(255, 255, 255, 0.4);
-  border-radius: 14px;
-  box-shadow: 0 4px 20px -2px rgba(15, 23, 42, 0.04), 0 1px 3px 0 rgba(15, 23, 42, 0.02);
-}
+@layer components {
+  /* 现代毛玻璃卡片（瑞士结构 + 高透磨砂微折射，减弱白底，blur降至sm级别） */
+  .swiss-card {
+    background: rgba(255, 255, 255, 0.45);
+    backdrop-filter: blur(4px) saturate(140%);
+    -webkit-backdrop-filter: blur(4px) saturate(140%);
+    border: 1px solid rgba(255, 255, 255, 0.4);
+    border-radius: 14px;
+    box-shadow: 0 4px 20px -2px rgba(15, 23, 42, 0.04), 0 1px 3px 0 rgba(15, 23, 42, 0.02);
+  }
 
-/* 增强毛玻璃面板类（更高透光与微模糊） */
-.glass-panel {
-  background: rgba(255, 255, 255, 0.40);
-  backdrop-filter: blur(4px) saturate(145%);
-  -webkit-backdrop-filter: blur(4px) saturate(145%);
-  border: 1px solid rgba(255, 255, 255, 0.45);
-  box-shadow: 0 6px 24px -4px rgba(15, 23, 42, 0.05), 0 1px 3px 0 rgba(15, 23, 42, 0.02);
+  /* 增强毛玻璃面板类（更高透光与微模糊） */
+  .glass-panel {
+    background: rgba(255, 255, 255, 0.40);
+    backdrop-filter: blur(4px) saturate(145%);
+    -webkit-backdrop-filter: blur(4px) saturate(145%);
+    border: 1px solid rgba(255, 255, 255, 0.45);
+    box-shadow: 0 6px 24px -4px rgba(15, 23, 42, 0.05), 0 1px 3px 0 rgba(15, 23, 42, 0.02);
+  }
 }
 
 /* 减弱透明度偏好 (Accessibility fallback) */

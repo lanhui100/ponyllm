@@ -67,12 +67,12 @@ const errorRate = computed(() => {
 <template>
   <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4 mb-6">
     <!-- 1. 调用次数 -->
-    <div class="swiss-card p-5 bg-orange-50/25 backdrop-blur-xs transition-all duration-200 border border-white/40">
+    <div class="swiss-card p-5 bg-white/45 backdrop-blur-xs transition-all duration-200 border border-white/40">
       <div class="flex items-center justify-between text-[13px] text-slate-500 mb-2.5">
-        <span class="font-semibold text-slate-700">调用次数</span>
-        <div class="w-7.5 h-7.5 rounded-lg bg-orange-100 text-orange-600 flex items-center justify-center">
-          <Icons name="activity" size="16" />
-        </div>
+        <span class="font-semibold text-slate-700 inline-flex items-center gap-1.5">
+          <Icons name="activity" size="16" class="text-orange-600" />
+          调用次数
+        </span>
       </div>
       <div class="text-3xl font-bold tracking-tight text-slate-900 mb-1 font-mono tabular-nums">
         {{ totalRequests.toLocaleString() }}
@@ -83,12 +83,12 @@ const errorRate = computed(() => {
     </div>
 
     <!-- 2. Token量 (主数字输出总计，下方输入/输出/缓存三维度) -->
-    <div class="swiss-card p-5 bg-sky-50/30 backdrop-blur-xs transition-all duration-200 border border-white/40">
+    <div class="swiss-card p-5 bg-white/45 backdrop-blur-xs transition-all duration-200 border border-white/40">
       <div class="flex items-center justify-between text-[13px] text-slate-500 mb-1.5">
-        <span class="font-semibold text-slate-700">Token量</span>
-        <div class="w-7.5 h-7.5 rounded-lg bg-sky-100 text-sky-700 flex items-center justify-center">
-          <Icons name="sparkles" size="16" />
-        </div>
+        <span class="font-semibold text-slate-700 inline-flex items-center gap-1.5">
+          <Icons name="sparkles" size="16" class="text-sky-700" />
+          Token量
+        </span>
       </div>
       <!-- 主数字：输出总计 -->
       <div class="text-3xl font-bold tracking-tight text-slate-900 mb-1.5 flex items-baseline gap-1.5 font-mono tabular-nums">
@@ -106,12 +106,12 @@ const errorRate = computed(() => {
     </div>
 
     <!-- 3. 延迟 -->
-    <div class="swiss-card p-5 bg-amber-50/30 backdrop-blur-xs transition-all duration-200 border border-white/40">
+    <div class="swiss-card p-5 bg-white/45 backdrop-blur-xs transition-all duration-200 border border-white/40">
       <div class="flex items-center justify-between text-[13px] text-slate-500 mb-2.5">
-        <span class="font-semibold text-slate-700">延迟</span>
-        <div class="w-7.5 h-7.5 rounded-lg bg-amber-100 text-amber-600 flex items-center justify-center">
-          <Icons name="zap" size="16" />
-        </div>
+        <span class="font-semibold text-slate-700 inline-flex items-center gap-1.5">
+          <Icons name="zap" size="16" class="text-amber-600" />
+          延迟
+        </span>
       </div>
       <div class="text-3xl font-bold tracking-tight text-slate-900 mb-1 font-mono tabular-nums">
         {{ ttft }}
@@ -122,12 +122,12 @@ const errorRate = computed(() => {
     </div>
 
     <!-- 4. 速率 -->
-    <div class="swiss-card p-5 bg-teal-50/30 backdrop-blur-xs transition-all duration-200 border border-white/40">
+    <div class="swiss-card p-5 bg-white/45 backdrop-blur-xs transition-all duration-200 border border-white/40">
       <div class="flex items-center justify-between text-[13px] text-slate-500 mb-2.5">
-        <span class="font-semibold text-slate-700">速率</span>
-        <div class="w-7.5 h-7.5 rounded-lg bg-teal-100 text-teal-700 flex items-center justify-center">
-          <Icons name="sparkles" size="16" />
-        </div>
+        <span class="font-semibold text-slate-700 inline-flex items-center gap-1.5">
+          <Icons name="sparkles" size="16" class="text-teal-700" />
+          速率
+        </span>
       </div>
       <div class="text-3xl font-bold tracking-tight text-slate-900 mb-1 font-mono tabular-nums">
         {{ avgTps }}
@@ -138,15 +138,16 @@ const errorRate = computed(() => {
     </div>
 
     <!-- 5. 故障率 -->
-    <div class="swiss-card p-5 bg-slate-100/40 backdrop-blur-xs transition-all duration-200 border border-white/40">
+    <div class="swiss-card p-5 bg-white/45 backdrop-blur-xs transition-all duration-200 border border-white/40">
       <div class="flex items-center justify-between text-[13px] text-slate-500 mb-2.5">
-        <span class="font-semibold text-slate-700">故障率</span>
-        <div
-          class="w-7.5 h-7.5 rounded-lg flex items-center justify-center"
-          :class="errorRate !== '0.0%' ? 'bg-rose-100 text-rose-600' : 'bg-slate-200/70 text-slate-500'"
-        >
-          <Icons name="warning" size="15" />
-        </div>
+        <span class="font-semibold text-slate-700 inline-flex items-center gap-1.5">
+          <Icons
+            name="warning"
+            size="15"
+            :class="errorRate !== '0.0%' ? 'text-rose-600' : 'text-slate-500'"
+          />
+          故障率
+        </span>
       </div>
       <div
         class="text-3xl font-bold tracking-tight mb-1 font-mono tabular-nums"

@@ -45,7 +45,7 @@ const speed24h = computed<number | undefined>(() => {
     <main class="page-content" :class="{ 'is-down': isDown }">
       <div class="header-row">
         <div>
-          <h1 class="page-title">系统可观测大盘</h1>
+          <h1 class="page-title">系统仪表盘</h1>
           <p class="page-desc">实时遥测流、上游节点连通性微柱与多周期指标分析</p>
         </div>
       </div>

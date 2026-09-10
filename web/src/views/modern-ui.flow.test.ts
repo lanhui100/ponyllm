@@ -348,7 +348,7 @@ describe('Modern Minimalist UI/UX System-Wide E2E Verification Suite (WEB-07)', 
     await new Promise((r) => setTimeout(r, 50));
     await nextTick();
 
-    expect(container.textContent).toContain('系统可观测大盘');
+    expect(container.textContent).toContain('系统仪表盘');
     expect(container.textContent).toContain('网关状态');
     expect(container.textContent).toContain('5,000 tok'); // output tokens
     expect(container.textContent).toContain('输入: 20K');

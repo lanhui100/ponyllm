@@ -2,7 +2,7 @@
 import { ref, computed } from 'vue';
 
 const props = defineProps<{
-  content: string;
+  content?: string;
   position?: 'top' | 'bottom';
   wrap?: boolean;
 }>();
@@ -62,7 +62,7 @@ const tooltipStyle = computed(() => {
     <Teleport to="body">
       <Transition name="fade-tooltip">
         <div
-          v-if="visible && content"
+          v-if="visible && (content || $slots.content)"
           role="tooltip"
           class="fixed z-[9999] px-3 py-2 text-[13px] font-medium text-white bg-slate-900/95 backdrop-blur-xs rounded-lg shadow-2xl pointer-events-none border border-slate-700/60"
           :class="[
@@ -71,7 +71,7 @@ const tooltipStyle = computed(() => {
           :style="tooltipStyle"
           data-testid="ui-tooltip"
         >
-          {{ content }}
+          <slot name="content">{{ content }}</slot>
         </div>
       </Transition>
     </Teleport>
