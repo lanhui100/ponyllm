@@ -137,11 +137,11 @@ describe('ModelSubSection model form', () => {
     (container.querySelector('[data-testid="toggle-advanced-btn"]') as HTMLButtonElement).click();
     await nextTick();
 
-    // Click 峰谷模式
+    // Click 添加峰价特别时段
     const buttons = Array.from(container.querySelectorAll('button'));
-    const pvBtn = buttons.find((b) => b.textContent?.trim() === '峰谷模式');
-    expect(pvBtn).toBeDefined();
-    pvBtn?.click();
+    const addPvBtn = buttons.find((b) => b.textContent?.trim().includes('添加峰价特别时段'));
+    expect(addPvBtn).toBeDefined();
+    addPvBtn?.click();
     await nextTick();
 
     (container.querySelector('[data-testid="submit-model-btn"]') as HTMLButtonElement).click();

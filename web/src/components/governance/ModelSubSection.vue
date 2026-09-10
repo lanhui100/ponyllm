@@ -344,26 +344,24 @@ async function handleSubmit() {
       return;
     }
     let validPeriods: PricingPeriod[] = [];
-    if (form.value.pricing_mode === 'peak_valley') {
-      for (const p of form.value.pricing_periods) {
-        const inP = parseOptionalNumber(p.input_price) ?? 0;
-        const caP = parseOptionalNumber(p.cached_price) ?? 0;
-        const outP = parseOptionalNumber(p.output_price) ?? 0;
-        if (!Number.isFinite(inP) || !Number.isFinite(caP) || !Number.isFinite(outP) || inP < 0 || caP < 0 || outP < 0) {
-          formError.value = `峰价时段的价格必须为大于等于 0 的有效数值`;
-          submitting.value = false;
-          return;
-        }
-        validPeriods.push({
-          name: '',
-          start_time: p.start_time.trim() || '08:00',
-          end_time: p.end_time.trim() || '24:00',
-          input_price: inP,
-          cached_price: caP,
-          output_price: outP,
-          include_weekends: Boolean(p.include_weekends),
-        });
+    for (const p of form.value.pricing_periods) {
+      const inP = parseOptionalNumber(p.input_price) ?? 0;
+      const caP = parseOptionalNumber(p.cached_price) ?? 0;
+      const outP = parseOptionalNumber(p.output_price) ?? 0;
+      if (!Number.isFinite(inP) || !Number.isFinite(caP) || !Number.isFinite(outP) || inP < 0 || caP < 0 || outP < 0) {
+        formError.value = `峰价时段的价格必须为大于等于 0 的有效数值`;
+        submitting.value = false;
+        return;
       }
+      validPeriods.push({
+        name: '',
+        start_time: p.start_time.trim() || '08:00',
+        end_time: p.end_time.trim() || '24:00',
+        input_price: inP,
+        cached_price: caP,
+        output_price: outP,
+        include_weekends: Boolean(p.include_weekends),
+      });
     }
 
     const payloadData = {
@@ -377,8 +375,8 @@ async function handleSubmit() {
       protocol: form.value.protocol ? form.value.protocol.trim() : '',
       base_url: form.value.base_url ? form.value.base_url.trim() : '',
       display_name: form.value.display_name ? form.value.display_name.trim() : '',
-      pricing_mode: form.value.pricing_mode,
-      pricing_periods: form.value.pricing_mode === 'peak_valley' ? validPeriods : [],
+      pricing_mode: (validPeriods.length > 0 ? 'peak_valley' : 'uniform') as PricingMode,
+      pricing_periods: validPeriods,
       ...(temperature !== undefined ? { temperature } : {}),
       ...(topP !== undefined ? { top_p: topP } : {}),
       ...(inputPrice !== undefined ? { input_price: inputPrice } : {}),
@@ -755,183 +753,147 @@ function getTierBadgeVariant(tier?: string) {
                       </div>
                     </div>
 
-                    <!-- 价格与峰谷模式 (同一行2列，默认统一价格，可选择峰谷模式) -->
+                    <!-- 价格与峰谷模式 (同一行2列：默认价格为谷价，可添加峰价时段) -->
                     <div class="grid grid-cols-1 sm:grid-cols-12 gap-2 sm:gap-4 items-start pt-1">
                       <div class="sm:col-span-3 text-slate-600 font-medium text-xs pt-1.5">
                         <span>价格</span>
                         <p class="text-3xs text-slate-400 font-normal mt-0.5">￥/M tokens</p>
                       </div>
-                      <div class="sm:col-span-9 space-y-2.5">
-                        <!-- 价格模式切换胶囊 (统一价格 vs 峰谷模式) -->
-                        <div class="inline-flex p-0.5 bg-slate-200/80 rounded-md border border-slate-300/60 select-none">
-                          <button
-                            type="button"
-                            class="px-2.5 py-1 text-xs font-medium rounded transition-all cursor-pointer"
-                            :class="[
-                              form.pricing_mode === 'uniform'
-                                ? 'bg-slate-900 text-white shadow-2xs font-semibold'
-                                : 'text-slate-600 hover:text-slate-900'
-                            ]"
-                            @click="form.pricing_mode = 'uniform'"
-                          >
-                            统一价格 (谷价)
-                          </button>
-                          <button
-                            type="button"
-                            class="px-2.5 py-1 text-xs font-medium rounded transition-all cursor-pointer"
-                            :class="[
-                              form.pricing_mode === 'peak_valley'
-                                ? 'bg-slate-900 text-white shadow-2xs font-semibold'
-                                : 'text-slate-600 hover:text-slate-900'
-                            ]"
-                            @click="() => {
-                              form.pricing_mode = 'peak_valley';
-                              if (form.pricing_periods.length === 0) {
-                                addPricingPeriod();
-                              }
-                            }"
-                          >
-                            峰谷模式
-                          </button>
+                      <div class="sm:col-span-9 space-y-3">
+                        <!-- 默认价格 (谷价) 基础价格卡片 -->
+                        <div class="p-3 bg-slate-100/60 rounded-lg border border-slate-200/60">
+                          <div class="flex items-center justify-between mb-2">
+                            <span class="text-xs font-semibold text-slate-800 flex items-center gap-1">
+                              <span>默认价格（谷价）</span>
+                              <UiTooltip content="未进入峰价特别时段或非峰价周末时，统一按此单价计费">
+                                <Icons name="info" size="12" class="text-slate-400 cursor-pointer" />
+                              </UiTooltip>
+                            </span>
+                            <span class="text-3xs text-slate-400 font-mono">常规/非高峰</span>
+                          </div>
+                          <div class="grid grid-cols-3 gap-2.5">
+                            <div>
+                              <label class="block text-slate-500 mb-0.5 text-3xs">输入单价</label>
+                              <input
+                                v-model="form.input_price"
+                                type="text"
+                                inputmode="decimal"
+                                placeholder="0.00"
+                                class="w-full bg-white border border-slate-200/80 rounded px-2.5 py-1 text-xs text-slate-800 font-mono focus:outline-none focus:ring-2 focus:ring-slate-400/20 focus:border-slate-500"
+                                data-testid="model-input-price-input"
+                              />
+                            </div>
+                            <div>
+                              <label class="block text-slate-500 mb-0.5 text-3xs">缓存单价</label>
+                              <input
+                                v-model="form.cached_price"
+                                type="text"
+                                inputmode="decimal"
+                                placeholder="0.00"
+                                class="w-full bg-white border border-slate-200/80 rounded px-2.5 py-1 text-xs text-slate-800 font-mono focus:outline-none focus:ring-2 focus:ring-slate-400/20 focus:border-slate-500"
+                                data-testid="model-cached-price-input"
+                              />
+                            </div>
+                            <div>
+                              <label class="block text-slate-500 mb-0.5 text-3xs">输出单价</label>
+                              <input
+                                v-model="form.output_price"
+                                type="text"
+                                inputmode="decimal"
+                                placeholder="0.00"
+                                class="w-full bg-white border border-slate-200/80 rounded px-2.5 py-1 text-xs text-slate-800 font-mono focus:outline-none focus:ring-2 focus:ring-slate-400/20 focus:border-slate-500"
+                                data-testid="model-output-price-input"
+                              />
+                            </div>
+                          </div>
                         </div>
 
-                        <!-- 峰谷模式配置：默认价格作为统一谷价，下方配置特别标注的峰价时段 -->
-                        <div class="space-y-3">
-                          <!-- 统一谷价 (基础价格) -->
-                          <div class="p-2.5 bg-slate-100/60 rounded-lg border border-slate-200/60">
-                            <div class="flex items-center justify-between mb-1.5">
-                              <span class="text-xs font-semibold text-slate-800 flex items-center gap-1">
-                                <span>谷时基准价 (默认价格)</span>
-                                <UiTooltip content="未进入峰价时段及非峰价周末时，统一走此基准单价">
-                                  <Icons name="info" size="12" class="text-slate-400 cursor-pointer" />
-                                </UiTooltip>
-                              </span>
-                              <span class="text-3xs text-slate-400 font-mono">常规/非高峰</span>
-                            </div>
-                            <div class="grid grid-cols-3 gap-2">
-                              <div>
-                                <label class="block text-slate-500 mb-0.5 text-3xs">输入单价</label>
-                                <input
-                                  v-model="form.input_price"
-                                  type="text"
-                                  inputmode="decimal"
-                                  placeholder="留空继承"
-                                  class="w-full bg-white border border-slate-200/80 rounded px-2 py-1 text-xs text-slate-800 font-mono focus:outline-none focus:ring-2 focus:ring-slate-400/20 focus:border-slate-500"
-                                  data-testid="model-input-price-input"
-                                />
-                              </div>
-                              <div>
-                                <label class="block text-slate-500 mb-0.5 text-3xs">缓存单价</label>
-                                <input
-                                  v-model="form.cached_price"
-                                  type="text"
-                                  inputmode="decimal"
-                                  placeholder="留空继承"
-                                  class="w-full bg-white border border-slate-200/80 rounded px-2 py-1 text-xs text-slate-800 font-mono focus:outline-none focus:ring-2 focus:ring-slate-400/20 focus:border-slate-500"
-                                  data-testid="model-cached-price-input"
-                                />
-                              </div>
-                              <div>
-                                <label class="block text-slate-500 mb-0.5 text-3xs">输出单价</label>
-                                <input
-                                  v-model="form.output_price"
-                                  type="text"
-                                  inputmode="decimal"
-                                  placeholder="留空继承"
-                                  class="w-full bg-white border border-slate-200/80 rounded px-2 py-1 text-xs text-slate-800 font-mono focus:outline-none focus:ring-2 focus:ring-slate-400/20 focus:border-slate-500"
-                                  data-testid="model-output-price-input"
-                                />
-                              </div>
-                            </div>
+                        <!-- 峰价特别时段列表与添加按钮 (无空白行，用户点击添加时增加) -->
+                        <div class="space-y-2.5">
+                          <div v-if="form.pricing_periods.length > 0" class="flex items-center justify-between text-xs text-slate-700 font-medium">
+                            <span class="flex items-center gap-1">
+                              <span class="w-1.5 h-1.5 rounded-full bg-amber-500"></span>
+                              峰价特别时段
+                            </span>
+                            <span class="text-3xs text-slate-400">仅在指定时段执行以下单价</span>
                           </div>
 
-                          <!-- 峰价时段列表 (仅在峰谷模式下展示与配置) -->
-                          <div v-if="form.pricing_mode === 'peak_valley'" class="space-y-2">
-                            <div class="flex items-center justify-between text-xs text-slate-700 font-medium">
-                              <span class="flex items-center gap-1">
-                                <span class="w-1.5 h-1.5 rounded-full bg-amber-500"></span>
-                                峰价特别时段
-                              </span>
-                              <span class="text-3xs text-slate-400">仅在指定时段执行以下单价</span>
-                            </div>
-
-                            <div
-                              v-for="(period, pIdx) in form.pricing_periods"
-                              :key="`period-${pIdx}`"
-                              class="p-2.5 bg-white/80 rounded-lg border border-slate-200/70 text-xs space-y-2"
-                            >
-                              <div class="flex flex-wrap items-center gap-2.5 justify-between">
-                                <!-- 0-23整点时段选择器与包含周末勾选 -->
-                                <div class="flex items-center gap-2 shrink-0">
-                                  <span class="text-xs text-amber-700 font-medium bg-amber-50 px-1.5 py-0.5 rounded border border-amber-200/60">峰时</span>
-                                  <HourRangePicker
-                                    v-model:start-time="period.start_time"
-                                    v-model:end-time="period.end_time"
+                          <div
+                            v-for="(period, pIdx) in form.pricing_periods"
+                            :key="`period-${pIdx}`"
+                            class="p-2.5 bg-white/80 rounded-lg border border-slate-200/70 text-xs space-y-2"
+                          >
+                            <div class="flex flex-wrap items-center gap-2.5 justify-between">
+                              <!-- 0-23整点时段选择器与包含周末勾选 -->
+                              <div class="flex items-center gap-2 shrink-0">
+                                <span class="text-xs text-amber-700 font-medium bg-amber-50 px-1.5 py-0.5 rounded border border-amber-200/60">峰时</span>
+                                <HourRangePicker
+                                  v-model:start-time="period.start_time"
+                                  v-model:end-time="period.end_time"
+                                />
+                                <label class="inline-flex items-center gap-1 text-xs text-slate-600 select-none cursor-pointer">
+                                  <input
+                                    v-model="period.include_weekends"
+                                    type="checkbox"
+                                    class="rounded border-slate-300 text-slate-900 focus:ring-0 cursor-pointer"
                                   />
-                                  <label class="inline-flex items-center gap-1 text-xs text-slate-600 select-none cursor-pointer">
-                                    <input
-                                      v-model="period.include_weekends"
-                                      type="checkbox"
-                                      class="rounded border-slate-300 text-slate-900 focus:ring-0 cursor-pointer"
-                                    />
-                                    <span>包含周末</span>
-                                  </label>
+                                  <span>包含周末</span>
+                                </label>
+                              </div>
+
+                              <!-- 紧凑单价输入框 (输入、缓存、输出单价并排一行) -->
+                              <div class="flex items-center gap-2.5 grow sm:grow-0 justify-end">
+                                <div class="flex items-center gap-1">
+                                  <span class="text-3xs text-slate-500 shrink-0 font-medium">输入:</span>
+                                  <input
+                                    v-model="period.input_price"
+                                    type="text"
+                                    inputmode="decimal"
+                                    placeholder="0.00"
+                                    class="w-16 bg-white border border-slate-200 rounded px-1.5 py-1 text-xs text-slate-800 font-mono text-right"
+                                  />
+                                </div>
+                                <div class="flex items-center gap-1">
+                                  <span class="text-3xs text-slate-500 shrink-0 font-medium">缓存:</span>
+                                  <input
+                                    v-model="period.cached_price"
+                                    type="text"
+                                    inputmode="decimal"
+                                    placeholder="0.00"
+                                    class="w-16 bg-white border border-slate-200 rounded px-1.5 py-1 text-xs text-slate-800 font-mono text-right"
+                                  />
+                                </div>
+                                <div class="flex items-center gap-1">
+                                  <span class="text-3xs text-slate-500 shrink-0 font-medium">输出:</span>
+                                  <input
+                                    v-model="period.output_price"
+                                    type="text"
+                                    inputmode="decimal"
+                                    placeholder="0.00"
+                                    class="w-16 bg-white border border-slate-200 rounded px-1.5 py-1 text-xs text-slate-800 font-mono text-right"
+                                  />
                                 </div>
 
-                                <!-- 紧凑单价输入框 (输入、缓存、输出单价并排一行) -->
-                                <div class="flex items-center gap-2.5 grow sm:grow-0 justify-end">
-                                  <div class="flex items-center gap-1">
-                                    <span class="text-3xs text-slate-500 shrink-0 font-medium">输入:</span>
-                                    <input
-                                      v-model="period.input_price"
-                                      type="text"
-                                      inputmode="decimal"
-                                      placeholder="0.00"
-                                      class="w-16 bg-white border border-slate-200 rounded px-1.5 py-1 text-xs text-slate-800 font-mono text-right"
-                                    />
-                                  </div>
-                                  <div class="flex items-center gap-1">
-                                    <span class="text-3xs text-slate-500 shrink-0 font-medium">缓存:</span>
-                                    <input
-                                      v-model="period.cached_price"
-                                      type="text"
-                                      inputmode="decimal"
-                                      placeholder="0.00"
-                                      class="w-16 bg-white border border-slate-200 rounded px-1.5 py-1 text-xs text-slate-800 font-mono text-right"
-                                    />
-                                  </div>
-                                  <div class="flex items-center gap-1">
-                                    <span class="text-3xs text-slate-500 shrink-0 font-medium">输出:</span>
-                                    <input
-                                      v-model="period.output_price"
-                                      type="text"
-                                      inputmode="decimal"
-                                      placeholder="0.00"
-                                      class="w-16 bg-white border border-slate-200 rounded px-1.5 py-1 text-xs text-slate-800 font-mono text-right"
-                                    />
-                                  </div>
-
-                                  <button
-                                    type="button"
-                                    class="text-slate-400 hover:text-rose-600 p-1 cursor-pointer ml-0.5 shrink-0"
-                                    title="删除峰价时段"
-                                    @click="removePricingPeriod(pIdx)"
-                                  >
-                                    <Icons name="trash" size="13" />
-                                  </button>
-                                </div>
+                                <button
+                                  type="button"
+                                  class="text-slate-400 hover:text-rose-600 p-1 cursor-pointer ml-0.5 shrink-0"
+                                  title="删除峰价时段"
+                                  @click="removePricingPeriod(pIdx)"
+                                >
+                                  <Icons name="trash" size="13" />
+                                </button>
                               </div>
                             </div>
-
-                            <button
-                              type="button"
-                              class="w-full py-1.5 border border-dashed border-slate-300 hover:border-slate-400 rounded-lg text-xs text-slate-600 hover:text-slate-900 flex items-center justify-center gap-1 cursor-pointer bg-slate-50/50"
-                              @click="addPricingPeriod"
-                            >
-                              <Icons name="plus" size="13" />
-                              添加峰价特别时段
-                            </button>
                           </div>
+
+                          <button
+                            type="button"
+                            class="w-full py-1.5 border border-dashed border-slate-300 hover:border-slate-400 rounded-lg text-xs text-slate-600 hover:text-slate-900 flex items-center justify-center gap-1 cursor-pointer bg-slate-50/50"
+                            @click="addPricingPeriod"
+                          >
+                            <Icons name="plus" size="13" />
+                            添加峰价特别时段
+                          </button>
                         </div>
                       </div>
                     </div>
@@ -1343,183 +1305,147 @@ function getTierBadgeVariant(tier?: string) {
                       </div>
                     </div>
 
-                    <!-- 价格与峰谷模式 (同一行2列，默认统一价格，可选择峰谷模式) -->
+                    <!-- 价格与峰谷模式 (同一行2列：默认价格为谷价，可添加峰价时段) -->
                     <div class="grid grid-cols-1 sm:grid-cols-12 gap-2 sm:gap-4 items-start pt-1">
                       <div class="sm:col-span-3 text-slate-600 font-medium text-xs pt-1.5">
                         <span>价格</span>
                         <p class="text-3xs text-slate-400 font-normal mt-0.5">￥/M tokens</p>
                       </div>
-                      <div class="sm:col-span-9 space-y-2.5">
-                        <!-- 价格模式切换胶囊 (统一价格 vs 峰谷模式) -->
-                        <div class="inline-flex p-0.5 bg-slate-200/80 rounded-md border border-slate-300/60 select-none">
-                          <button
-                            type="button"
-                            class="px-2.5 py-1 text-xs font-medium rounded transition-all cursor-pointer"
-                            :class="[
-                              form.pricing_mode === 'uniform'
-                                ? 'bg-slate-900 text-white shadow-2xs font-semibold'
-                                : 'text-slate-600 hover:text-slate-900'
-                            ]"
-                            @click="form.pricing_mode = 'uniform'"
-                          >
-                            统一价格 (谷价)
-                          </button>
-                          <button
-                            type="button"
-                            class="px-2.5 py-1 text-xs font-medium rounded transition-all cursor-pointer"
-                            :class="[
-                              form.pricing_mode === 'peak_valley'
-                                ? 'bg-slate-900 text-white shadow-2xs font-semibold'
-                                : 'text-slate-600 hover:text-slate-900'
-                            ]"
-                            @click="() => {
-                              form.pricing_mode = 'peak_valley';
-                              if (form.pricing_periods.length === 0) {
-                                addPricingPeriod();
-                              }
-                            }"
-                          >
-                            峰谷模式
-                          </button>
+                      <div class="sm:col-span-9 space-y-3">
+                        <!-- 默认价格 (谷价) 基础价格卡片 -->
+                        <div class="p-3 bg-slate-100/60 rounded-lg border border-slate-200/60">
+                          <div class="flex items-center justify-between mb-2">
+                            <span class="text-xs font-semibold text-slate-800 flex items-center gap-1">
+                              <span>默认价格（谷价）</span>
+                              <UiTooltip content="未进入峰价特别时段或非峰价周末时，统一按此单价计费">
+                                <Icons name="info" size="12" class="text-slate-400 cursor-pointer" />
+                              </UiTooltip>
+                            </span>
+                            <span class="text-3xs text-slate-400 font-mono">常规/非高峰</span>
+                          </div>
+                          <div class="grid grid-cols-3 gap-2.5">
+                            <div>
+                              <label class="block text-slate-500 mb-0.5 text-3xs">输入单价</label>
+                              <input
+                                v-model="form.input_price"
+                                type="text"
+                                inputmode="decimal"
+                                placeholder="0.00"
+                                class="w-full bg-white border border-slate-200/80 rounded px-2.5 py-1 text-xs text-slate-800 font-mono focus:outline-none focus:ring-2 focus:ring-slate-400/20 focus:border-slate-500"
+                                data-testid="model-input-price-input"
+                              />
+                            </div>
+                            <div>
+                              <label class="block text-slate-500 mb-0.5 text-3xs">缓存单价</label>
+                              <input
+                                v-model="form.cached_price"
+                                type="text"
+                                inputmode="decimal"
+                                placeholder="0.00"
+                                class="w-full bg-white border border-slate-200/80 rounded px-2.5 py-1 text-xs text-slate-800 font-mono focus:outline-none focus:ring-2 focus:ring-slate-400/20 focus:border-slate-500"
+                                data-testid="model-cached-price-input"
+                              />
+                            </div>
+                            <div>
+                              <label class="block text-slate-500 mb-0.5 text-3xs">输出单价</label>
+                              <input
+                                v-model="form.output_price"
+                                type="text"
+                                inputmode="decimal"
+                                placeholder="0.00"
+                                class="w-full bg-white border border-slate-200/80 rounded px-2.5 py-1 text-xs text-slate-800 font-mono focus:outline-none focus:ring-2 focus:ring-slate-400/20 focus:border-slate-500"
+                                data-testid="model-output-price-input"
+                              />
+                            </div>
+                          </div>
                         </div>
 
-                        <!-- 峰谷模式配置：默认价格作为统一谷价，下方配置特别标注的峰价时段 -->
-                        <div class="space-y-3">
-                          <!-- 统一谷价 (基础价格) -->
-                          <div class="p-2.5 bg-slate-100/60 rounded-lg border border-slate-200/60">
-                            <div class="flex items-center justify-between mb-1.5">
-                              <span class="text-xs font-semibold text-slate-800 flex items-center gap-1">
-                                <span>谷时基准价 (默认价格)</span>
-                                <UiTooltip content="未进入峰价时段及非峰价周末时，统一走此基准单价">
-                                  <Icons name="info" size="12" class="text-slate-400 cursor-pointer" />
-                                </UiTooltip>
-                              </span>
-                              <span class="text-3xs text-slate-400 font-mono">常规/非高峰</span>
-                            </div>
-                            <div class="grid grid-cols-3 gap-2">
-                              <div>
-                                <label class="block text-slate-500 mb-0.5 text-3xs">输入单价</label>
-                                <input
-                                  v-model="form.input_price"
-                                  type="text"
-                                  inputmode="decimal"
-                                  placeholder="留空继承"
-                                  class="w-full bg-white border border-slate-200/80 rounded px-2 py-1 text-xs text-slate-800 font-mono focus:outline-none focus:ring-2 focus:ring-slate-400/20 focus:border-slate-500"
-                                  data-testid="model-input-price-input"
-                                />
-                              </div>
-                              <div>
-                                <label class="block text-slate-500 mb-0.5 text-3xs">缓存单价</label>
-                                <input
-                                  v-model="form.cached_price"
-                                  type="text"
-                                  inputmode="decimal"
-                                  placeholder="留空继承"
-                                  class="w-full bg-white border border-slate-200/80 rounded px-2 py-1 text-xs text-slate-800 font-mono focus:outline-none focus:ring-2 focus:ring-slate-400/20 focus:border-slate-500"
-                                  data-testid="model-cached-price-input"
-                                />
-                              </div>
-                              <div>
-                                <label class="block text-slate-500 mb-0.5 text-3xs">输出单价</label>
-                                <input
-                                  v-model="form.output_price"
-                                  type="text"
-                                  inputmode="decimal"
-                                  placeholder="留空继承"
-                                  class="w-full bg-white border border-slate-200/80 rounded px-2 py-1 text-xs text-slate-800 font-mono focus:outline-none focus:ring-2 focus:ring-slate-400/20 focus:border-slate-500"
-                                  data-testid="model-output-price-input"
-                                />
-                              </div>
-                            </div>
+                        <!-- 峰价特别时段列表与添加按钮 (无空白行，用户点击添加时增加) -->
+                        <div class="space-y-2.5">
+                          <div v-if="form.pricing_periods.length > 0" class="flex items-center justify-between text-xs text-slate-700 font-medium">
+                            <span class="flex items-center gap-1">
+                              <span class="w-1.5 h-1.5 rounded-full bg-amber-500"></span>
+                              峰价特别时段
+                            </span>
+                            <span class="text-3xs text-slate-400">仅在指定时段执行以下单价</span>
                           </div>
 
-                          <!-- 峰价时段列表 (仅在峰谷模式下展示与配置) -->
-                          <div v-if="form.pricing_mode === 'peak_valley'" class="space-y-2">
-                            <div class="flex items-center justify-between text-xs text-slate-700 font-medium">
-                              <span class="flex items-center gap-1">
-                                <span class="w-1.5 h-1.5 rounded-full bg-amber-500"></span>
-                                峰价特别时段
-                              </span>
-                              <span class="text-3xs text-slate-400">仅在指定时段执行以下单价</span>
-                            </div>
-
-                            <div
-                              v-for="(period, pIdx) in form.pricing_periods"
-                              :key="`period-${pIdx}`"
-                              class="p-2.5 bg-white/80 rounded-lg border border-slate-200/70 text-xs space-y-2"
-                            >
-                              <div class="flex flex-wrap items-center gap-2.5 justify-between">
-                                <!-- 0-23整点时段选择器与包含周末勾选 -->
-                                <div class="flex items-center gap-2 shrink-0">
-                                  <span class="text-xs text-amber-700 font-medium bg-amber-50 px-1.5 py-0.5 rounded border border-amber-200/60">峰时</span>
-                                  <HourRangePicker
-                                    v-model:start-time="period.start_time"
-                                    v-model:end-time="period.end_time"
+                          <div
+                            v-for="(period, pIdx) in form.pricing_periods"
+                            :key="`period-${pIdx}`"
+                            class="p-2.5 bg-white/80 rounded-lg border border-slate-200/70 text-xs space-y-2"
+                          >
+                            <div class="flex flex-wrap items-center gap-2.5 justify-between">
+                              <!-- 0-23整点时段选择器与包含周末勾选 -->
+                              <div class="flex items-center gap-2 shrink-0">
+                                <span class="text-xs text-amber-700 font-medium bg-amber-50 px-1.5 py-0.5 rounded border border-amber-200/60">峰时</span>
+                                <HourRangePicker
+                                  v-model:start-time="period.start_time"
+                                  v-model:end-time="period.end_time"
+                                />
+                                <label class="inline-flex items-center gap-1 text-xs text-slate-600 select-none cursor-pointer">
+                                  <input
+                                    v-model="period.include_weekends"
+                                    type="checkbox"
+                                    class="rounded border-slate-300 text-slate-900 focus:ring-0 cursor-pointer"
                                   />
-                                  <label class="inline-flex items-center gap-1 text-xs text-slate-600 select-none cursor-pointer">
-                                    <input
-                                      v-model="period.include_weekends"
-                                      type="checkbox"
-                                      class="rounded border-slate-300 text-slate-900 focus:ring-0 cursor-pointer"
-                                    />
-                                    <span>包含周末</span>
-                                  </label>
+                                  <span>包含周末</span>
+                                </label>
+                              </div>
+
+                              <!-- 紧凑单价输入框 (输入、缓存、输出单价并排一行) -->
+                              <div class="flex items-center gap-2.5 grow sm:grow-0 justify-end">
+                                <div class="flex items-center gap-1">
+                                  <span class="text-3xs text-slate-500 shrink-0 font-medium">输入:</span>
+                                  <input
+                                    v-model="period.input_price"
+                                    type="text"
+                                    inputmode="decimal"
+                                    placeholder="0.00"
+                                    class="w-16 bg-white border border-slate-200 rounded px-1.5 py-1 text-xs text-slate-800 font-mono text-right"
+                                  />
+                                </div>
+                                <div class="flex items-center gap-1">
+                                  <span class="text-3xs text-slate-500 shrink-0 font-medium">缓存:</span>
+                                  <input
+                                    v-model="period.cached_price"
+                                    type="text"
+                                    inputmode="decimal"
+                                    placeholder="0.00"
+                                    class="w-16 bg-white border border-slate-200 rounded px-1.5 py-1 text-xs text-slate-800 font-mono text-right"
+                                  />
+                                </div>
+                                <div class="flex items-center gap-1">
+                                  <span class="text-3xs text-slate-500 shrink-0 font-medium">输出:</span>
+                                  <input
+                                    v-model="period.output_price"
+                                    type="text"
+                                    inputmode="decimal"
+                                    placeholder="0.00"
+                                    class="w-16 bg-white border border-slate-200 rounded px-1.5 py-1 text-xs text-slate-800 font-mono text-right"
+                                  />
                                 </div>
 
-                                <!-- 紧凑单价输入框 (输入、缓存、输出单价并排一行) -->
-                                <div class="flex items-center gap-2.5 grow sm:grow-0 justify-end">
-                                  <div class="flex items-center gap-1">
-                                    <span class="text-3xs text-slate-500 shrink-0 font-medium">输入:</span>
-                                    <input
-                                      v-model="period.input_price"
-                                      type="text"
-                                      inputmode="decimal"
-                                      placeholder="0.00"
-                                      class="w-16 bg-white border border-slate-200 rounded px-1.5 py-1 text-xs text-slate-800 font-mono text-right"
-                                    />
-                                  </div>
-                                  <div class="flex items-center gap-1">
-                                    <span class="text-3xs text-slate-500 shrink-0 font-medium">缓存:</span>
-                                    <input
-                                      v-model="period.cached_price"
-                                      type="text"
-                                      inputmode="decimal"
-                                      placeholder="0.00"
-                                      class="w-16 bg-white border border-slate-200 rounded px-1.5 py-1 text-xs text-slate-800 font-mono text-right"
-                                    />
-                                  </div>
-                                  <div class="flex items-center gap-1">
-                                    <span class="text-3xs text-slate-500 shrink-0 font-medium">输出:</span>
-                                    <input
-                                      v-model="period.output_price"
-                                      type="text"
-                                      inputmode="decimal"
-                                      placeholder="0.00"
-                                      class="w-16 bg-white border border-slate-200 rounded px-1.5 py-1 text-xs text-slate-800 font-mono text-right"
-                                    />
-                                  </div>
-
-                                  <button
-                                    type="button"
-                                    class="text-slate-400 hover:text-rose-600 p-1 cursor-pointer ml-0.5 shrink-0"
-                                    title="删除峰价时段"
-                                    @click="removePricingPeriod(pIdx)"
-                                  >
-                                    <Icons name="trash" size="13" />
-                                  </button>
-                                </div>
+                                <button
+                                  type="button"
+                                  class="text-slate-400 hover:text-rose-600 p-1 cursor-pointer ml-0.5 shrink-0"
+                                  title="删除峰价时段"
+                                  @click="removePricingPeriod(pIdx)"
+                                >
+                                  <Icons name="trash" size="13" />
+                                </button>
                               </div>
                             </div>
-
-                            <button
-                              type="button"
-                              class="w-full py-1.5 border border-dashed border-slate-300 hover:border-slate-400 rounded-lg text-xs text-slate-600 hover:text-slate-900 flex items-center justify-center gap-1 cursor-pointer bg-slate-50/50"
-                              @click="addPricingPeriod"
-                            >
-                              <Icons name="plus" size="13" />
-                              添加峰价特别时段
-                            </button>
                           </div>
+
+                          <button
+                            type="button"
+                            class="w-full py-1.5 border border-dashed border-slate-300 hover:border-slate-400 rounded-lg text-xs text-slate-600 hover:text-slate-900 flex items-center justify-center gap-1 cursor-pointer bg-slate-50/50"
+                            @click="addPricingPeriod"
+                          >
+                            <Icons name="plus" size="13" />
+                            添加峰价特别时段
+                          </button>
                         </div>
                       </div>
                     </div>
