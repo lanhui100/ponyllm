@@ -21,6 +21,7 @@ const props = withDefaults(
       | 'key'
       | 'activity'
       | 'cross'
+      | 'warning'
       | 'file-text'
       | 'image'
       | 'video'
@@ -120,6 +121,12 @@ const pxSize = computed(() => (typeof props.size === 'number' ? `${props.size}px
     <path v-else-if="name === 'activity'" d="M22 12h-4l-3 9L9 3l-3 9H2" />
     <!-- cross -->
     <path v-else-if="name === 'cross'" d="M18 6 6 18M6 6l12 12" />
+    <!-- warning (triangle alert) -->
+    <g v-else-if="name === 'warning'">
+      <path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z" />
+      <path d="M12 9v4" />
+      <path d="M12 17h.01" />
+    </g>
     <!-- file-text (text modality) -->
     <g v-else-if="name === 'file-text'">
       <path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z" />

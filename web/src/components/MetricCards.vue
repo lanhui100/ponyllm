@@ -145,7 +145,7 @@ const errorRate = computed(() => {
           class="w-7.5 h-7.5 rounded-lg flex items-center justify-center"
           :class="errorRate !== '0.0%' ? 'bg-rose-100 text-rose-600' : 'bg-slate-200/70 text-slate-500'"
         >
-          <Icons name="cross" size="15" />
+          <Icons name="warning" size="15" />
         </div>
       </div>
       <div
