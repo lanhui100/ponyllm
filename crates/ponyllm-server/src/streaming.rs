@@ -906,6 +906,13 @@ where
             usage = ?usage_metadata,
             "Antigravity SSE stream completed with ZERO content bytes! (Model produced only thoughts or hit max_tokens/safety stop)"
         );
+        // Transparent Gateway Retry: If upstream terminated with STOP but produced zero
+        // text and zero tool calls, this is a transient upstream anomaly (empty completion).
+        // Returning an error here triggers the gateway's automatic failover/retry loop,
+        // preventing downstream clients (Claude Code, Codex, pi-ai) from receiving an empty completion.
+        if final_finish_reason == "STOP" {
+            return Err("Antigravity stream completed with zero text and zero tool calls (transient empty STOP)".to_string());
+        }
     } else {
         tracing::debug!(
             total_frames = frame_count,
@@ -1916,6 +1923,35 @@ mod tests {
         );
         assert_eq!(json_val["candidates"][0]["finishReason"], "MAX_TOKENS");
         assert_eq!(json_val["usageMetadata"]["candidatesTokenCount"], 2048);
+    }
+
+    #[tokio::test]
+    async fn test_collect_antigravity_sse_zero_content_stop_returns_err() {
+        // When upstream sends a STOP finishReason with zero text and zero tool calls,
+        // collect_antigravity_sse_to_json returns an Err to trigger transparent gateway-side retry.
+        let chunk1 = format!(
+            "data: {}\n\n",
+            serde_json::json!({
+                "response": {
+                    "candidates": [{
+                        "content": {
+                            "role": "model",
+                            "parts": []
+                        },
+                        "finishReason": "STOP"
+                    }]
+                }
+            })
+        );
+        let s = bytes_stream(vec![
+            Bytes::from(chunk1),
+            Bytes::from_static(b"data: [DONE]\n\n"),
+        ]);
+
+        let res = collect_antigravity_sse_to_json(s).await;
+        assert!(res.is_err(), "Must return Err on transient empty STOP to trigger gateway retry");
+        let err_msg = res.unwrap_err();
+        assert!(err_msg.contains("transient empty STOP"), "Error message must indicate transient empty STOP: {}", err_msg);
     }
 
     #[tokio::test]

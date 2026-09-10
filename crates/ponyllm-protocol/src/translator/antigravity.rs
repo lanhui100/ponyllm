@@ -184,8 +184,8 @@ pub fn antigravity_thinking_config(model: &str, thinking: Option<ReasoningEffort
 
 /// Ensure `generationConfig.maxOutputTokens` can accommodate an explicit or
 /// implicit thinking budget: the backend couples the two and truncates the answer
-/// (early `max_tokens` stop) when the budget exceeds the output cap.
-/// Only raises an explicitly-set cap; absent caps keep backend defaults.
+/// (early `max_tokens` stop) when the budget exceeds or consumes the output cap.
+/// Guaranteed headroom ensures thinking tokens never crowd out requested visible tokens.
 fn clamp_max_output_for_thinking_budget(
     gen_config: &mut Value,
     thinking_cfg: &Value,
@@ -221,8 +221,14 @@ fn clamp_max_output_for_thinking_budget(
         .get_mut("maxOutputTokens")
         .and_then(|v| v.as_u64())
     {
-        if cap <= budget {
-            gen_config["maxOutputTokens"] = json!(budget + 1024);
+        // Headroom guarantee: thinking budget consumes from maxOutputTokens.
+        // If the requested cap would be crowded out by the budget, expand maxOutputTokens
+        // to (budget + cap) or at least (budget + 8192) so agent tool calls and text
+        // never suffer early truncation. Max cap clamped at Gemini's 65,536 limit.
+        let requested_headroom = cap.max(8192);
+        let expanded = (budget + requested_headroom).min(65536);
+        if cap < expanded {
+            gen_config["maxOutputTokens"] = json!(expanded);
         }
     }
 }
@@ -1302,13 +1308,13 @@ mod tests {
             extra: Default::default(),
         };
 
-        // High budget (16384) exceeds the 500 cap → raised to budget + 1024 (17408) to satisfy maxOutputTokens > thinkingBudget.
+        // High budget (16384) with 500 cap → raised to budget + requested_headroom.max(8192) = 16384 + 8192 = 24576.
         let env = messages_to_antigravity_request(&req, "gemini-2.5-flash", "aicode-consumers", Some(ReasoningEffort::High), "").unwrap();
-        assert_eq!(env["request"]["generationConfig"]["maxOutputTokens"], 17408);
+        assert_eq!(env["request"]["generationConfig"]["maxOutputTokens"], 24576);
 
-        // Low budget (1024) exceeds the 500 cap → raised to 2048.
+        // Low budget (1024) with 500 cap → raised to 1024 + 8192 = 9216.
         let env = messages_to_antigravity_request(&req, "gemini-2.5-flash", "aicode-consumers", Some(ReasoningEffort::Low), "").unwrap();
-        assert_eq!(env["request"]["generationConfig"]["maxOutputTokens"], 2048);
+        assert_eq!(env["request"]["generationConfig"]["maxOutputTokens"], 9216);
 
         // No thinking → caller's cap preserved verbatim (legacy).
         let env = messages_to_antigravity_request(&req, "gemini-2.5-flash", "aicode-consumers", None, "").unwrap();
@@ -1336,7 +1342,7 @@ mod tests {
             "thinkingBudget": 1024
         });
         clamp_max_output_for_thinking_budget(&mut gen_cfg, &thinking_cfg, "claude-sonnet-4-6", Some(ReasoningEffort::Low));
-        assert_eq!(gen_cfg["maxOutputTokens"], 2048);
+        assert_eq!(gen_cfg["maxOutputTokens"], 1024 + 8192);
     }
 
     #[test]
