@@ -174,6 +174,13 @@ pub struct KeyView {
     pub priority: u32,
     pub weight: u32,
     pub state: String,
+    /// Seconds left in the current cooldown (only while `cooling_down`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cooldown_remaining_secs: Option<u64>,
+    /// Wall-clock instant the key is expected to recover, RFC 3339 UTC. Lets
+    /// the Web badge show the upstream-advertised quota reset verbatim.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cooldown_reset_at: Option<String>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -1706,6 +1713,7 @@ pub async fn handle_admin_keys(State(state): State<Arc<AppState>>) -> impl IntoR
                 .find(|k| k.id == id)
                 .map(|k| k.api_key.clone())
                 .unwrap_or_default();
+            let (cooldown_remaining, cooldown_reset_at) = pool.key_cooldown(&id);
             views.push(KeyView {
                 provider: provider.clone(),
                 id,
@@ -1713,6 +1721,9 @@ pub async fn handle_admin_keys(State(state): State<Arc<AppState>>) -> impl IntoR
                 priority,
                 weight,
                 state: key_state_name(key_state).to_string(),
+                cooldown_remaining_secs: cooldown_remaining.map(|d| d.as_secs()),
+                cooldown_reset_at: cooldown_reset_at
+                    .map(|t| chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339()),
             });
         }
     }

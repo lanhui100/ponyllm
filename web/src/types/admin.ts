@@ -79,6 +79,10 @@ export interface KeyView {
   priority: number;
   weight: number;
   state: string;
+  /** Seconds left in the current cooldown (only while `cooling_down`). */
+  cooldown_remaining_secs?: number | null;
+  /** RFC 3339 UTC instant the key is expected to recover after a cooldown. */
+  cooldown_reset_at?: string | null;
 }
 
 export interface AntigravityQuotaItemView {

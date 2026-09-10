@@ -1246,6 +1246,22 @@
           "state"
         ],
         "properties": {
+          "cooldown_remaining_secs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Seconds left in the current cooldown (only while `cooling_down`).",
+            "minimum": 0
+          },
+          "cooldown_reset_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Wall-clock instant the key is expected to recover, RFC 3339 UTC. Lets\nthe Web badge show the upstream-advertised quota reset verbatim."
+          },
           "id": {
             "type": "string"
           },

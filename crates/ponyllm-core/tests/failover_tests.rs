@@ -1,11 +1,85 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use axum::{routing::post, Router, Json};
 use axum::response::IntoResponse;
 use serde_json::json;
 use ponyllm_core::error::CoreError;
 use ponyllm_core::pool::*;
 use ponyllm_core::executor::*;
+
+/// Antigravity/Google quota exhaustion arrives as HTTP 429 with
+/// RESOURCE_EXHAUSTED and the reset embedded in the message. The key must be
+/// frozen for that window and the gateway must not hammer it in-request.
+#[tokio::test]
+async fn test_executor_quota_429_cools_key_for_advertised_reset() {
+    let call_count = Arc::new(AtomicUsize::new(0));
+    let cc = call_count.clone();
+
+    let app = Router::new().route("/v1/chat/completions", post(move |_headers: axum::http::HeaderMap, _body: String| {
+        let cc = cc.clone();
+        async move {
+            cc.fetch_add(1, Ordering::SeqCst);
+            (axum::http::StatusCode::TOO_MANY_REQUESTS, Json(json!({
+                "error": {
+                    "code": 429,
+                    "message": "Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 15h21m26s.",
+                    "status": "RESOURCE_EXHAUSTED",
+                    "details": [{
+                        "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+                        "reason": "QUOTA_EXHAUSTED",
+                        "domain": "cloudcode-pa.googleapis.com",
+                        "metadata": {"uiMessage": "true", "model": "gemini-3.8-flash-high"}
+                    }]
+                }
+            }))).into_response()
+        }
+    }));
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let endpoint = format!("http://{}/v1/chat/completions", addr);
+    let pool = Arc::new(KeyPool::new("antigravity", RoutingStrategy::RoundRobin));
+    pool.add_key(ApiKeyEntry::new("ag-solo", "ag-token-1", 1, 10));
+
+    let executor = UpstreamExecutor::new(pool.clone(), 3);
+    let payload = json!({
+        "model": "gemini-3.8-flash-high",
+        "messages": [{"role": "user", "content": "hello"}]
+    });
+
+    let err = executor
+        .execute_json_request(&endpoint, &payload)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            CoreError::AllRetriesFailed {
+                kind: ponyllm_core::error::GatewayErrorKind::QuotaExhausted,
+                ..
+            }
+        ),
+        "expected QuotaExhausted, got {:?}",
+        err
+    );
+
+    assert_eq!(pool.get_key_status("ag-solo"), Some(KeyState::CoolingDown));
+    let (remaining, reset_at) = pool.key_cooldown("ag-solo");
+    let remaining = remaining.expect("cooling key must report remaining");
+    assert!(
+        remaining >= Duration::from_secs(15 * 3600 + 21 * 60),
+        "expected ~15h21m freeze, got {:?}",
+        remaining
+    );
+    assert!(reset_at.is_some(), "wall-clock reset must be exposed");
+    // Exactly one upstream call: the closed window was never retried.
+    assert_eq!(call_count.load(Ordering::SeqCst), 1);
+}
 
 #[tokio::test]
 async fn test_executor_transparent_failover_on_429() {

@@ -1,4 +1,5 @@
-use std::time::Duration;
+use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 use ponyllm_core::pool::*;
 
 #[test]
@@ -81,6 +82,98 @@ fn test_all_keys_cooling_still_exhausts_pool() {
     assert_eq!(pool.get_key_status("k1"), Some(KeyState::CoolingDown));
     let res = pool.select_key();
     assert!(res.is_err());
+}
+
+#[test]
+fn test_quota_cooldown_exposes_advertised_reset() {
+    let pool = KeyPool::new("antigravity", RoutingStrategy::RoundRobin);
+    pool.add_key(ApiKeyEntry::new("ag-solo", "sk-1", 1, 10));
+
+    // 429 quota body advertised "Resets in 15h21m26s".
+    let reset = Duration::from_secs(15 * 3600 + 21 * 60 + 26);
+    pool.record_error(
+        "ag-solo",
+        PoolErrorType::QuotaExhausted {
+            retry_after: Some(reset),
+        },
+    );
+    assert_eq!(pool.get_key_status("ag-solo"), Some(KeyState::CoolingDown));
+
+    let (remaining, reset_at) = pool.key_cooldown("ag-solo");
+    let remaining = remaining.expect("cooling key must report remaining");
+    assert!(
+        remaining >= reset - Duration::from_secs(5) && remaining <= reset,
+        "expected ~{:?} remaining, got {:?}",
+        reset,
+        remaining
+    );
+    assert!(
+        reset_at.is_some(),
+        "wall-clock reset must be exposed for the Web badge"
+    );
+
+    // Unknown key / healthy key expose nothing.
+    assert_eq!(pool.key_cooldown("nope"), (None, None));
+}
+
+#[test]
+fn test_cooldown_never_shortened_by_later_transient_error() {
+    let entry = ApiKeyEntry::new("ag-1", "sk-1", 1, 10);
+    let reset = Duration::from_secs(15 * 3600 + 21 * 60 + 26);
+
+    entry.record_failure(PoolErrorType::QuotaExhausted {
+        retry_after: Some(reset),
+    });
+    // An in-flight request failing with a short transient error must not
+    // shorten the advertised quota window, or traffic resumes mid-window.
+    entry.record_failure(PoolErrorType::RateLimit { retry_after: None });
+
+    let remaining = entry.cooldown_remaining().expect("still cooling");
+    assert!(
+        remaining >= reset - Duration::from_secs(5),
+        "quota window was shortened to {:?}",
+        remaining
+    );
+    assert_eq!(entry.current_state(), KeyState::CoolingDown);
+}
+
+#[test]
+fn test_concurrent_cooldowns_keep_mirror_in_sync() {
+    // Regression guard for the two-field race: a longer deadline installed by
+    // one thread must never coexist with an older wall-clock mirror, or the
+    // Web badge under-reports and hides the hint while the key still cools.
+    let entry = Arc::new(ApiKeyEntry::new("ag-1", "sk-1", 1, 10));
+    let durations = [3600u64, 5400, 7200, 9000, 10800, 12600, 14400, 15 * 3600 + 21 * 60];
+    let mut handles = Vec::new();
+    for secs in durations {
+        let e = entry.clone();
+        handles.push(std::thread::spawn(move || {
+            for _ in 0..200 {
+                e.record_failure(PoolErrorType::QuotaExhausted {
+                    retry_after: Some(Duration::from_secs(secs)),
+                });
+            }
+        }));
+    }
+    for h in handles {
+        h.join().unwrap();
+    }
+
+    let remaining = entry.cooldown_remaining().expect("still cooling");
+    let reset_at = entry
+        .cooldown_reset_at()
+        .expect("mirror must be present while cooling");
+    let mirror_remaining = reset_at
+        .duration_since(SystemTime::now())
+        .expect("mirror must be in the future while cooling");
+    let drift = remaining.abs_diff(mirror_remaining);
+    assert!(
+        drift <= Duration::from_secs(2),
+        "mirror drifted from the deadline by {:?} (deadline {:?}, mirror {:?})",
+        drift,
+        remaining,
+        mirror_remaining
+    );
 }
 
 #[test]

@@ -85,6 +85,52 @@ interface CompactModelQuota {
   weekly?: CompactBucketQuota;
 }
 
+/**
+ * Remaining cooldown seconds for a key. Prefers the server-computed relative
+ * value (free of browser/server clock skew); falls back to the absolute reset
+ * instant only when the relative field is absent.
+ */
+function cooldownRemainingSecs(k: KeyView): number | null {
+  if (k.cooldown_remaining_secs != null) {
+    return Math.max(0, k.cooldown_remaining_secs);
+  }
+  if (k.cooldown_reset_at) {
+    const resetMs = new Date(k.cooldown_reset_at).getTime();
+    if (!Number.isNaN(resetMs)) {
+      return Math.max(0, Math.floor((resetMs - Date.now()) / 1000));
+    }
+  }
+  return null;
+}
+
+function formatCooldownDuration(secs: number | null): string {
+  if (secs == null || secs <= 0) return '';
+  const days = Math.floor(secs / 86400);
+  const hours = Math.floor((secs % 86400) / 3600);
+  const minutes = Math.floor((secs % 3600) / 60);
+  if (days > 0) return `${days}天${hours}小时`;
+  if (hours > 0) return `${hours}小时${minutes}分`;
+  if (minutes > 0) return `${minutes}分`;
+  return `${secs}秒`;
+}
+
+/** Inline reset hint rendered right after the cooling badge. */
+function cooldownResetHint(k: KeyView): string {
+  const label = formatCooldownDuration(cooldownRemainingSecs(k));
+  return label ? `${label}后解冻` : '';
+}
+
+function cooldownResetTooltip(k: KeyView): string {
+  const label = formatCooldownDuration(cooldownRemainingSecs(k));
+  const abs = k.cooldown_reset_at ? new Date(k.cooldown_reset_at).toLocaleString() : '';
+  if (label && abs) {
+    return `配额已耗尽，上游提示将于 ${abs} 重置（约 ${label}后解冻），冷冻期内不再向该密钥发送请求`;
+  }
+  if (label) return `配额已耗尽，约 ${label}后解冻，冷冻期内不再向该密钥发送请求`;
+  if (abs) return `配额已耗尽，预计 ${abs} 重置，冷冻期内不再向该密钥发送请求`;
+  return '配额已耗尽，冷却保护中';
+}
+
 function extractCompactQuotas(keyResult?: KeyTestView, isCoolingDown?: boolean): { gemini: CompactModelQuota; claude: CompactModelQuota } {
   const res: { gemini: CompactModelQuota; claude: CompactModelQuota } = {
     gemini: {},
@@ -437,6 +483,18 @@ async function handleRefreshAllQuotas() {
                 >
                   {{ formatKeyState(k.state) }}
                 </UiBadge>
+                <!-- 冷冻徽标后直出上游告知的重置/解冻时间：冷冻期内不再向该密钥发请求 -->
+                <UiTooltip
+                  v-if="k.state === 'cooling_down' && cooldownResetHint(k)"
+                  :content="cooldownResetTooltip(k)"
+                >
+                  <span
+                    class="text-[11px] font-medium text-amber-700/90 whitespace-nowrap select-none"
+                    data-testid="key-cooldown-reset"
+                  >
+                    {{ cooldownResetHint(k) }}
+                  </span>
+                </UiTooltip>
               </div>
 
               <div class="flex items-center gap-3 shrink-0">

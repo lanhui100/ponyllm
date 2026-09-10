@@ -1,5 +1,6 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 use parking_lot::RwLock;
 use crate::error::{CoreError, Result};
 use super::entry::{ApiKeyEntry, KeyState, PoolErrorType};
@@ -186,6 +187,17 @@ impl KeyPool {
     pub fn earliest_unlock(&self) -> Option<std::time::Duration> {
         let keys = self.keys.read();
         keys.iter().filter_map(|k| k.cooldown_remaining()).min()
+    }
+
+    /// Cooldown snapshot for admin/observability surfaces: remaining time plus
+    /// the wall-clock reset instant. Both are `None` unless the key is still
+    /// cooling; the key id is not exposed raw, only looked up.
+    pub fn key_cooldown(&self, key_id: &str) -> (Option<Duration>, Option<SystemTime>) {
+        let keys = self.keys.read();
+        match keys.iter().find(|k| k.id == key_id) {
+            Some(k) => (k.cooldown_remaining(), k.cooldown_reset_at()),
+            None => (None, None),
+        }
     }
 
     /// Total keys in pool

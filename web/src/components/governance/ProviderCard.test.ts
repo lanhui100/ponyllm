@@ -318,6 +318,9 @@ describe('ProviderCard UI and Phase 2 Requirements', () => {
         state: 'cooling_down' as const,
         priority: 1,
         weight: 10,
+        // 15h21m26s from the upstream quota body, as the admin API exposes it.
+        cooldown_remaining_secs: 15 * 3600 + 21 * 60 + 26,
+        cooldown_reset_at: new Date(Date.now() + (15 * 3600 + 21 * 60 + 26) * 1000).toISOString(),
       },
     ];
 
@@ -340,6 +343,13 @@ describe('ProviderCard UI and Phase 2 Requirements', () => {
 
     // Verify "冷却中" badge is displayed
     expect(container.textContent).toContain('冷却中');
+
+    // Verify the freeze badge is followed by the upstream-advertised reset
+    // time, so a cooling key shows its recovery window instead of a bare label.
+    const resetHint = container.querySelector('[data-testid="key-cooldown-reset"]');
+    expect(resetHint).not.toBeNull();
+    expect(resetHint?.textContent).toContain('后解冻');
+    expect(resetHint?.textContent).toContain('15小时');
 
     // Verify quota progress capsules are automatically displayed with 0% and cooling indicators
     const geminiCapsule = container.querySelector('[data-testid="quota-capsule-gemini"]');

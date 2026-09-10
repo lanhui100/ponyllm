@@ -234,6 +234,102 @@ fn classify_forbidden(
     }
 }
 
+/// Parse the human-readable reset hint Google embeds in quota bodies,
+/// e.g. `"Resets in 15h21m26s."`. Compact `<d>d<hh>h<mm>m<ss>s` groups are
+/// accepted in any combination/order; a bare number without a unit is not a
+/// match (it is some other "resets in 5 ..." sentence), and only the compact
+/// ASCII form is recognised — word forms ("2 days") and full-width digits are
+/// intentionally not parsed, so callers fall back to the conservative default
+/// instead of guessing.
+pub fn parse_reset_duration(body: &str) -> Option<Duration> {
+    let lower = body.to_ascii_lowercase();
+    let marker = "resets in";
+    let start = lower.find(marker)? + marker.len();
+    let tail = &lower[start..];
+    let mut chars = tail.chars().peekable();
+    let mut total_secs: u64 = 0;
+    let mut matched = false;
+    loop {
+        while matches!(chars.peek(), Some(c) if c.is_whitespace() || *c == ',') {
+            chars.next();
+        }
+        let mut digits = String::new();
+        while matches!(chars.peek(), Some(c) if c.is_ascii_digit()) {
+            digits.push(chars.next().expect("peeked digit"));
+        }
+        if digits.is_empty() {
+            break;
+        }
+        let unit = match chars.peek().copied() {
+            Some('d') => 86_400u64,
+            Some('h') => 3_600,
+            Some('m') => 60,
+            Some('s') => 1,
+            // Number not followed by a unit: not the Google reset shape.
+            _ => break,
+        };
+        chars.next();
+        // A garbled later group invalidates the whole hint: a partial value
+        // (e.g. "1h999999999999999999999s") must not become a real cooldown.
+        let value: u64 = digits.parse().ok()?;
+        total_secs = total_secs.saturating_add(value.saturating_mul(unit));
+        matched = true;
+    }
+    if matched && total_secs > 0 {
+        Some(Duration::from_secs(total_secs))
+    } else {
+        None
+    }
+}
+
+/// Whether a 429 body is account/model quota exhaustion rather than a
+/// transient rate limit. Google's cloudcode-pa returns
+/// `"status": "RESOURCE_EXHAUSTED"` / `reason: "QUOTA_EXHAUSTED"` with
+/// `"Individual quota reached. ... Resets in 15h21m26s."`, and treating that
+/// as a 3-second rate-limit blip is what keeps hammering a closed window.
+///
+/// Deliberately narrow: per-minute TPM/RPM bodies ("TPM quota exceeded") carry
+/// neither the reason code nor a long reset window and must keep the short
+/// rate-limit path. Only a quota body with an advertised reset of 5+ minutes
+/// is treated as a windowed quota even without the explicit reason code.
+pub fn is_quota_exhausted_body(body: &str) -> bool {
+    let lower = body.to_ascii_lowercase();
+    lower.contains("quota_exhausted")
+        || lower.contains("individual quota")
+        || (lower.contains("quota")
+            && parse_reset_duration(body)
+                .map(|d| d >= Duration::from_secs(300))
+                .unwrap_or(false))
+}
+
+/// Classify a 429 into (gateway kind, pool action).
+///
+/// - Quota wording → `QuotaExhausted` cooling for the advertised reset (body
+///   `Resets in ...` first, then the `Retry-After` header, then the pool's
+///   conservative default). No same-key transient retry: the window is closed.
+/// - Anything else → `RateLimit`, preserving the legacy short
+///   exponential/jittered cooldown and the singleton transient retry.
+fn classify_too_many_requests(
+    err_body: &str,
+    retry_after: Option<Duration>,
+) -> (GatewayErrorKind, PoolErrorType) {
+    let body_reset = parse_reset_duration(err_body);
+    if is_quota_exhausted_body(err_body) {
+        (
+            GatewayErrorKind::QuotaExhausted,
+            PoolErrorType::QuotaExhausted {
+                retry_after: body_reset.or(retry_after),
+            },
+        )
+    } else {
+        let retry_after = retry_after.or(body_reset);
+        (
+            GatewayErrorKind::RateLimitExceeded { retry_after },
+            PoolErrorType::RateLimit { retry_after },
+        )
+    }
+}
+
 /// Outcome of the stale-token recovery attempt for an Antigravity 401.
 enum StaleTokenRecovery {
     /// Forced refresh healed the token: caller must retry the same key.
@@ -793,13 +889,23 @@ impl UpstreamExecutor {
                     last_error = format!("HTTP {} from {}: {}", status_code, key.id, err_body);
 
                     if status_code == 429 {
-                        last_kind = GatewayErrorKind::RateLimitExceeded { retry_after };
-                        self.pool.record_error(&key.id, PoolErrorType::RateLimit { retry_after });
-                        if let Some(delay) = transient_retry_delay(&self.pool, &key.id, attempt, max_attempts, retry_after) {
-                            attempted_keys.retain(|id| id != &key.id);
-                            self.emit_both(&key.id, attempt_idx, Some(status_code), last_kind.clone(), last_error.clone(), Some(err_body), attempt_start.elapsed());
-                            tokio::time::sleep(delay).await;
-                            continue;
+                        let (kind, pool_err) = classify_too_many_requests(&err_body, retry_after);
+                        last_kind = kind;
+                        let transient_retry_after = match &pool_err {
+                            PoolErrorType::RateLimit { retry_after } => *retry_after,
+                            _ => None,
+                        };
+                        let is_quota = matches!(&pool_err, PoolErrorType::QuotaExhausted { .. });
+                        self.pool.record_error(&key.id, pool_err);
+                        // Quota exhaustion closes the window: never retry the
+                        // same key in-request, let the pool fail over / fail fast.
+                        if !is_quota {
+                            if let Some(delay) = transient_retry_delay(&self.pool, &key.id, attempt, max_attempts, transient_retry_after) {
+                                attempted_keys.retain(|id| id != &key.id);
+                                self.emit_both(&key.id, attempt_idx, Some(status_code), last_kind.clone(), last_error.clone(), Some(err_body), attempt_start.elapsed());
+                                tokio::time::sleep(delay).await;
+                                continue;
+                            }
                         }
                     } else if status_code == 401 {
                         match self.recover_stale_antigravity_token(&key, &mut refreshed_keys).await {
@@ -955,13 +1061,23 @@ impl UpstreamExecutor {
                     last_error = format!("HTTP {} from {}: {}", status_code, key.id, err_body);
 
                     if status_code == 429 {
-                        last_kind = GatewayErrorKind::RateLimitExceeded { retry_after };
-                        self.pool.record_error(&key.id, PoolErrorType::RateLimit { retry_after });
-                        if let Some(delay) = transient_retry_delay(&self.pool, &key.id, attempt, max_attempts, retry_after) {
-                            attempted_keys.retain(|id| id != &key.id);
-                            self.emit_both(&key.id, attempt_idx, Some(status_code), last_kind.clone(), last_error.clone(), Some(err_body), attempt_start.elapsed());
-                            tokio::time::sleep(delay).await;
-                            continue;
+                        let (kind, pool_err) = classify_too_many_requests(&err_body, retry_after);
+                        last_kind = kind;
+                        let transient_retry_after = match &pool_err {
+                            PoolErrorType::RateLimit { retry_after } => *retry_after,
+                            _ => None,
+                        };
+                        let is_quota = matches!(&pool_err, PoolErrorType::QuotaExhausted { .. });
+                        self.pool.record_error(&key.id, pool_err);
+                        // Quota exhaustion closes the window: never retry the
+                        // same key in-request, let the pool fail over / fail fast.
+                        if !is_quota {
+                            if let Some(delay) = transient_retry_delay(&self.pool, &key.id, attempt, max_attempts, transient_retry_after) {
+                                attempted_keys.retain(|id| id != &key.id);
+                                self.emit_both(&key.id, attempt_idx, Some(status_code), last_kind.clone(), last_error.clone(), Some(err_body), attempt_start.elapsed());
+                                tokio::time::sleep(delay).await;
+                                continue;
+                            }
                         }
                     } else if status_code == 401 {
                         match self.recover_stale_antigravity_token(&key, &mut refreshed_keys).await {
@@ -1114,6 +1230,128 @@ mod session_header_tests {
             }
             other => panic!("expected 60s cooling, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn quota_429_body_cools_for_advertised_reset() {
+        // Exact shape observed from cloudcode-pa (Antigravity): HTTP 429,
+        // RESOURCE_EXHAUSTED / QUOTA_EXHAUSTED, reset embedded in the message.
+        let body = r#"{
+          "error": {
+            "code": 429,
+            "message": "Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 15h21m26s.",
+            "status": "RESOURCE_EXHAUSTED",
+            "details": [
+              {
+                "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+                "reason": "QUOTA_EXHAUSTED",
+                "domain": "cloudcode-pa.googleapis.com",
+                "metadata": {"uiMessage": "true", "model": "gemini-3.8-flash-high"}
+              }
+            ]
+          }
+        }"#;
+        let expected = Duration::from_secs(15 * 3600 + 21 * 60 + 26);
+        assert_eq!(parse_reset_duration(body), Some(expected));
+
+        let (kind, pool_err) = classify_too_many_requests(body, None);
+        assert_eq!(kind, GatewayErrorKind::QuotaExhausted);
+        match pool_err {
+            PoolErrorType::QuotaExhausted { retry_after } => {
+                assert_eq!(retry_after, Some(expected));
+            }
+            other => panic!("expected quota cooldown, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn quota_reset_prefers_body_over_shorter_header() {
+        // Without an explicit reset the pool falls back to its conservative
+        // default; with one, the advertised window must win over Retry-After.
+        let (kind, pool_err) = classify_too_many_requests("QUOTA_EXHAUSTED", None);
+        assert_eq!(kind, GatewayErrorKind::QuotaExhausted);
+        match pool_err {
+            PoolErrorType::QuotaExhausted { retry_after } => assert_eq!(retry_after, None),
+            other => panic!("expected quota cooldown, got {:?}", other),
+        }
+
+        let body = "Individual quota reached. Resets in 2h0m0s.";
+        match classify_too_many_requests(body, Some(Duration::from_secs(60))).1 {
+            PoolErrorType::QuotaExhausted { retry_after } => {
+                assert_eq!(retry_after, Some(Duration::from_secs(7200)));
+            }
+            other => panic!("expected quota cooldown, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn plain_429_stays_rate_limit_not_quota() {
+        let header = Some(Duration::from_secs(5));
+        let (kind, pool_err) = classify_too_many_requests(
+            r#"{"error": {"message": "Rate limit exceeded"}}"#,
+            header,
+        );
+        assert_eq!(
+            kind,
+            GatewayErrorKind::RateLimitExceeded { retry_after: header }
+        );
+        assert!(matches!(pool_err, PoolErrorType::RateLimit { .. }));
+
+        // Per-minute TPM quota wording is a transient rate limit, not a
+        // windowed account quota: keep the short path.
+        let (kind, pool_err) = classify_too_many_requests(
+            r#"{"error": {"message": "TPM quota exceeded"}}"#,
+            Some(Duration::from_secs(10)),
+        );
+        assert!(
+            matches!(kind, GatewayErrorKind::RateLimitExceeded { .. }),
+            "got {:?}",
+            kind
+        );
+        assert!(matches!(pool_err, PoolErrorType::RateLimit { .. }));
+    }
+
+    #[test]
+    fn quota_wording_with_long_reset_counts_as_quota() {
+        // No QUOTA_EXHAUSTED reason code, but a 15m+ advertised window: still a
+        // windowed quota and must not be knocked every few seconds.
+        let (kind, pool_err) =
+            classify_too_many_requests("Quota reached for this account. Resets in 15m0s.", None);
+        assert_eq!(kind, GatewayErrorKind::QuotaExhausted);
+        match pool_err {
+            PoolErrorType::QuotaExhausted { retry_after } => {
+                assert_eq!(retry_after, Some(Duration::from_secs(900)));
+            }
+            other => panic!("expected quota cooldown, got {:?}", other),
+        }
+
+        // Short window stays on the exact-duration rate-limit path.
+        let (kind, _) =
+            classify_too_many_requests("Quota reached for this account. Resets in 4m0s.", None);
+        assert!(
+            matches!(kind, GatewayErrorKind::RateLimitExceeded { .. }),
+            "got {:?}",
+            kind
+        );
+    }
+
+    #[test]
+    fn parse_reset_duration_accepts_compact_groups_and_rejects_noise() {
+        assert_eq!(
+            parse_reset_duration("Resets in 2d3h4m5s."),
+            Some(Duration::from_secs(2 * 86400 + 3 * 3600 + 4 * 60 + 5))
+        );
+        assert_eq!(
+            parse_reset_duration("resets in 30m"),
+            Some(Duration::from_secs(1800))
+        );
+        assert_eq!(parse_reset_duration("no hint here"), None);
+        assert_eq!(parse_reset_duration("Resets in soon"), None);
+        // A bare number without a unit is not a duration.
+        assert_eq!(parse_reset_duration("Resets in 5 requests"), None);
+        // A garbled later group invalidates the whole hint rather than
+        // yielding the valid prefix.
+        assert_eq!(parse_reset_duration("Resets in 1h999999999999999999999999s"), None);
     }
 
     #[test]

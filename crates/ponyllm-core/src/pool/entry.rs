@@ -1,6 +1,6 @@
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 use parking_lot::RwLock;
 use crate::pool::antigravity::AntigravityTokenManager;
 
@@ -8,6 +8,11 @@ use crate::pool::antigravity::AntigravityTokenManager;
 /// instances and synchronized retries desynchronize (B1). Not cryptographic,
 /// only backoff decorrelation.
 static JITTER_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Ceiling for any single cooldown: long enough to cover weekly quota windows
+/// (Antigravity exposes both 5h and weekly buckets), short enough to bound a
+/// garbled or hostile upstream reset hint.
+const MAX_COOLDOWN: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
 fn backoff_jitter_millis(spread: u64) -> u64 {
     let n = JITTER_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -51,6 +56,10 @@ pub struct KeyStats {
     pub consecutive_failures: AtomicUsize,
     pub policy_violations: AtomicUsize,
     pub cooldown_until: RwLock<Option<Instant>>,
+    /// Wall-clock mirror of `cooldown_until`, so observability surfaces
+    /// (admin API / Web badge) can render the advertised reset time without
+    /// reverse-engineering a monotonic clock.
+    pub cooldown_reset_at: RwLock<Option<SystemTime>>,
     pub disabled_reason: RwLock<Option<String>>,
 }
 
@@ -63,6 +72,7 @@ impl Default for KeyStats {
             consecutive_failures: AtomicUsize::new(0),
             policy_violations: AtomicUsize::new(0),
             cooldown_until: RwLock::new(None),
+            cooldown_reset_at: RwLock::new(None),
             disabled_reason: RwLock::new(None),
         }
     }
@@ -183,6 +193,7 @@ impl ApiKeyEntry {
         if let Some(until) = *cd_write {
             if Instant::now() >= until {
                 *cd_write = None;
+                *self.stats.cooldown_reset_at.write() = None;
                 self.stats.consecutive_failures.store(0, Ordering::SeqCst);
                 KeyState::Active
             } else {
@@ -210,6 +221,47 @@ impl ApiKeyEntry {
         } else {
             None
         }
+    }
+
+    /// Wall-clock instant the key is expected to recover, while still cooling.
+    pub fn cooldown_reset_at(&self) -> Option<SystemTime> {
+        let until = (*self.stats.cooldown_until.read())?;
+        if Instant::now() >= until {
+            return None;
+        }
+        *self.stats.cooldown_reset_at.read()
+    }
+
+    /// Apply a cooldown, keeping the monotonic deadline and its wall-clock
+    /// mirror in lockstep.
+    ///
+    /// A later deadline always wins: an in-flight request that fails with a
+    /// short transient error must never shorten a cooldown already advertised
+    /// by a quota reset, or the key starts receiving traffic again mid-window.
+    ///
+    /// Both fields are written inside one `cooldown_until` critical section so
+    /// concurrent failures cannot install a longer deadline and then lose the
+    /// matching mirror (the Web badge would under-report and hide the hint
+    /// while the key still cools). Lock order stays `until -> reset`, matching
+    /// `current_state()`, so there is no inversion. Durations are clamped to
+    /// [`MAX_COOLDOWN`]; if either clock addition fails the whole update is
+    /// skipped, so a garbled/hostile reset can neither panic nor desync.
+    fn set_cooldown(&self, duration: Duration) {
+        let duration = duration.min(MAX_COOLDOWN);
+        let Some(deadline) = Instant::now().checked_add(duration) else {
+            return;
+        };
+        let Some(reset_at) = SystemTime::now().checked_add(duration) else {
+            return;
+        };
+        let mut cd = self.stats.cooldown_until.write();
+        if let Some(existing) = *cd {
+            if existing >= deadline {
+                return;
+            }
+        }
+        *self.stats.cooldown_reset_at.write() = Some(reset_at);
+        *cd = Some(deadline);
     }
 
     /// Count a transient 429 without cooling, for singleton pools that
@@ -244,14 +296,16 @@ impl ApiKeyEntry {
                         Duration::from_millis(base_secs * 1000 + backoff_jitter_millis(500))
                     }
                 };
-                *self.stats.cooldown_until.write() = Some(Instant::now() + duration);
+                self.set_cooldown(duration);
             }
             PoolErrorType::QuotaExhausted { retry_after } => {
                 // Quota exhaustion is transient by nature (real quota
                 // recovers at resetTime; throttling clears on its own), so
                 // it cools down instead of permanently disabling the key.
+                // `retry_after` carries the upstream-advertised reset when
+                // available; the 15m default is a conservative fallback.
                 let duration = retry_after.unwrap_or(Duration::from_secs(15 * 60));
-                *self.stats.cooldown_until.write() = Some(Instant::now() + duration);
+                self.set_cooldown(duration);
             }
             PoolErrorType::AuthInvalid => {
                 *self.stats.disabled_reason.write() = Some("Authentication failed (invalid key)".to_string());
@@ -263,7 +317,7 @@ impl ApiKeyEntry {
                 if consecutive >= 3 {
                     let exp = (consecutive as u32).saturating_sub(3);
                     let secs = (1u64.saturating_mul(2u64.saturating_pow(exp))).min(30);
-                    *self.stats.cooldown_until.write() = Some(Instant::now() + Duration::from_secs(secs));
+                    self.set_cooldown(Duration::from_secs(secs));
                 }
             }
         }
