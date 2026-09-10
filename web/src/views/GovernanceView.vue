@@ -686,60 +686,41 @@ onUnmounted(() => {
 
           <!-- Google Antigravity OAuth 专属表单 -->
           <form v-else class="space-y-4" @submit.prevent="handleAuthorizeAntigravity">
-            <!-- 智能出海代理状态感知胶囊 -->
+            <!-- 极简本地代理状态检测：无背景无边框无注释，仅显示状态与重新探测 -->
             <div
-              class="flex items-center justify-between p-3.5 rounded-xl border transition-all text-[13px]"
-              :class="proxyStatus?.available ? 'bg-emerald-50/70 border-emerald-200/80 text-emerald-900' : 'bg-amber-50/70 border-amber-200/80 text-amber-900'"
+              class="flex items-center justify-between text-[13px] py-1"
               data-testid="proxy-status-capsule"
             >
-              <div class="flex items-center gap-2.5">
-                <span class="relative flex h-2.5 w-2.5">
+              <div class="flex items-center gap-2">
+                <span class="relative flex h-2 w-2">
                   <span
                     class="animate-ping absolute inline-flex h-full w-full rounded-full opacity-75"
                     :class="proxyStatus?.available ? 'bg-emerald-400' : 'bg-amber-400'"
                   ></span>
                   <span
-                    class="relative inline-flex rounded-full h-2.5 w-2.5"
+                    class="relative inline-flex rounded-full h-2 w-2"
                     :class="proxyStatus?.available ? 'bg-emerald-500' : 'bg-amber-500'"
                   ></span>
                 </span>
-                <div>
-                  <div class="font-semibold flex items-center gap-2">
-                    <span>{{ proxyStatus?.description || '出海代理状态探测中...' }}</span>
-                    <span v-if="proxyStatus?.latency_ms" class="text-xs px-2 py-0.5 rounded bg-emerald-100 text-emerald-700 font-mono">
-                      {{ proxyStatus.latency_ms }}ms
-                    </span>
-                  </div>
-                  <p class="text-xs opacity-80 mt-0.5">{{ proxyStatus?.hint || '自动感知本地 pproxy (127.0.0.1:8899)' }}</p>
-                </div>
+                <span class="font-medium text-slate-700">
+                  {{ proxyStatus?.description || '本地代理状态探测中...' }}
+                </span>
+                <span v-if="proxyStatus?.latency_ms" class="text-xs px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-700 font-mono">
+                  {{ proxyStatus.latency_ms }}ms
+                </span>
               </div>
-              <div class="flex items-center gap-2">
-                <UiButton
-                  v-if="!proxyStatus?.available"
-                  type="button"
-                  size="sm"
-                  variant="outline"
-                  class="text-amber-800 border-amber-300 hover:bg-amber-100/60 text-[13px] px-3 py-1"
-                  data-testid="copy-pproxy-btn"
-                  @click="copyPproxyOn"
-                >
-                  <Icons name="copy" size="13" />
-                  {{ copiedPproxyOn ? '已复制命令' : '复制 pproxy on' }}
-                </UiButton>
-                <UiButton
-                  type="button"
-                  size="sm"
-                  variant="ghost"
-                  :disabled="probingProxy"
-                  class="text-[13px] px-2.5 py-1"
-                  :class="proxyStatus?.available ? 'text-emerald-700 hover:bg-emerald-100/60' : 'text-amber-800 hover:bg-amber-100/60'"
-                  data-testid="probe-proxy-btn"
-                  @click="probeProxy"
-                >
-                  <Icons name="refresh" size="13" :class="{ 'animate-spin': probingProxy }" />
-                  {{ probingProxy ? '探测中' : '重新探测' }}
-                </UiButton>
-              </div>
+              <UiButton
+                type="button"
+                size="sm"
+                variant="ghost"
+                :disabled="probingProxy"
+                class="text-[12px] h-7 px-2 text-slate-600 hover:text-slate-900"
+                data-testid="probe-proxy-btn"
+                @click="probeProxy"
+              >
+                <Icons name="refresh" size="12" :class="{ 'animate-spin': probingProxy }" />
+                {{ probingProxy ? '探测中' : '重新探测' }}
+              </UiButton>
             </div>
 
             <div class="grid grid-cols-1 sm:grid-cols-3 gap-3.5">
@@ -766,31 +747,19 @@ onUnmounted(() => {
               </div>
             </div>
 
-            <!-- 内置模型与协议特性提示卡片 -->
-            <div class="bg-indigo-50/60 border border-indigo-100 rounded-xl p-3.5 text-sm space-y-1.5">
-              <div class="flex items-center gap-1.5 text-indigo-900 font-semibold">
-                <Icons name="info" size="15" class="text-indigo-600" />
-                内置特性与自动挂载
-              </div>
-              <p class="text-indigo-700/90 text-[13px] leading-relaxed">
-                接入后将自动启用 Antigravity 专用双向流式协议（支持 Claude 与 OpenAI 双向转译），并默认挂载官方基座模型：
-                <span class="font-mono font-medium text-indigo-900">claude-sonnet-4-6, claude-opus-4-6, gemini-2.5-flash, gemini-2.5-pro</span>。
-              </p>
-            </div>
-
             <!-- OAuth 2.0 授权引导步骤 -->
             <div class="bg-slate-50 border border-slate-200/90 rounded-xl p-4.5 space-y-3.5">
               <div class="flex items-center justify-between">
                 <span class="text-[14px] font-semibold text-slate-800 flex items-center gap-2">
                   <span class="flex items-center justify-center w-5 h-5 rounded-full bg-slate-900 text-white text-xs font-bold">1</span>
-                  前往 Google 授权（支持 SSH 隧道与本地自动闭环）
+                  前往 Google 授权
                 </span>
                 <div class="flex items-center gap-2">
                   <UiButton
                     type="button"
                     size="sm"
-                    variant="outline"
                     :disabled="fetchingAuthUrl"
+                    class="bg-indigo-600 hover:bg-indigo-700 text-white shadow-xs font-medium"
                     data-testid="ag-fetch-url-btn"
                     @click="fetchAndOpenAuthUrl"
                   >
@@ -830,17 +799,24 @@ onUnmounted(() => {
                 </button>
               </div>
 
-              <div v-if="antigravityAuthUrl" class="text-xs text-slate-600 bg-white p-2.5 rounded border border-slate-200 font-mono break-all line-clamp-2 select-all">
-                {{ antigravityAuthUrl }}
+              <!-- 自动生成的授权链接（多行展示，完全展现，只读禁止编辑） -->
+              <div v-if="antigravityAuthUrl" class="space-y-1">
+                <label class="block text-xs text-slate-500 font-medium">授权链接 (系统自动生成)</label>
+                <textarea
+                  :value="antigravityAuthUrl"
+                  readonly
+                  rows="3"
+                  class="w-full text-xs text-slate-600 bg-white p-2.5 rounded-lg border border-slate-200 font-mono break-all select-all resize-none focus:outline-none cursor-default"
+                ></textarea>
               </div>
 
               <div class="space-y-1.5 pt-1">
                 <div class="text-[14px] font-semibold text-slate-800 flex items-center gap-2">
                   <span class="flex items-center justify-center w-5 h-5 rounded-full bg-slate-900 text-white text-xs font-bold">2</span>
-                  重定向 URL 或 Code (弹窗自动闭环，亦可在此手动粘贴兜底) *
+                  重定向 URL 或 Code *
                 </div>
                 <p class="text-[13px] text-slate-500 leading-relaxed">
-                  提示：在 Google 授权页面选择账号并点击【允许】后，页面会自动通知控制台完成闭环。若浏览器禁用了弹窗通信，亦可直接将浏览器地址栏中的完整重定向 URL 或 Code 粘贴至下方：
+                  页面将在授权后自动完成授权并入池。如自动授权没有完成，请将浏览器地址栏中的完整重定向链接（以 <code>/oauth2callback</code> 结尾并带有参数）或授权码（<code>code=</code> 后的凭证）复制粘贴至下方输入框，点击“确认授权”。
                 </p>
                 <input
                   v-model="antigravityForm.code_or_url"
@@ -909,7 +885,7 @@ onUnmounted(() => {
                 :disabled="providerSubmitting || !adminWriteEnabled"
                 data-testid="submit-ag-provider-btn"
               >
-                {{ providerSubmitting ? '正在授权并兑换凭证...' : '确认授权并创建' }}
+                {{ providerSubmitting ? '正在授权...' : '确认授权' }}
               </UiButton>
             </div>
           </form>
