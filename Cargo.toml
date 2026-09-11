@@ -10,7 +10,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.40"
+version = "0.2.41"
 edition = "2021"
 authors = ["ponyllm team"]
 license = "MIT OR Apache-2.0"
