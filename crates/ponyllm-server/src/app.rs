@@ -193,6 +193,7 @@ fn build_web_router(web_enabled: bool, web_dist_dir: &str) -> Router<Arc<AppStat
         .fallback(ServeFile::new(index.clone()));
 
     let assets_dir = dist.join("assets");
+    let favicon_svg = dist.join("favicon.svg");
     let mut router = Router::new()
         .route("/", axum::routing::get_service(ServeFile::new(index.clone())))
         .route("/connect", axum::routing::get_service(ServeFile::new(index.clone())))
@@ -200,6 +201,12 @@ fn build_web_router(web_enabled: bool, web_dist_dir: &str) -> Router<Arc<AppStat
         .route("/recorder", axum::routing::get_service(ServeFile::new(index.clone())))
         .route("/governance", axum::routing::get_service(ServeFile::new(index.clone())))
         .nest_service("/app", serve);
+
+    if favicon_svg.is_file() {
+        router = router
+            .route("/favicon.svg", axum::routing::get_service(ServeFile::new(favicon_svg.clone())))
+            .route("/favicon.ico", axum::routing::get_service(ServeFile::new(favicon_svg)));
+    }
 
     if assets_dir.is_dir() {
         router = router.nest_service("/assets", ServeDir::new(assets_dir));

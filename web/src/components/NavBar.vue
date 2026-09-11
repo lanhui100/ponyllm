@@ -2,6 +2,7 @@
 import { useRouter, useRoute } from 'vue-router';
 import { useSessionStore } from '../stores/session';
 import Icons from './ui/Icons.vue';
+import PonyLogo from './ui/PonyLogo.vue';
 import UiButton from './ui/UiButton.vue';
 import UiTooltip from './ui/UiTooltip.vue';
 
@@ -19,9 +20,7 @@ function handleLogout() {
   <header class="h-15 bg-slate-900/5 backdrop-blur-md sticky top-0 z-40 px-4 sm:px-8 flex items-center justify-between border-b border-slate-900/5 transition-colors">
     <div class="flex items-center gap-8">
       <div class="flex items-center gap-2.5">
-        <div class="w-8.5 h-8.5 rounded-lg bg-slate-900 text-white flex items-center justify-center font-bold text-sm shadow-2xs">
-          P
-        </div>
+        <PonyLogo :size="34" />
         <span class="font-bold text-base tracking-tight text-slate-900">PonyLLM</span>
       </div>
 

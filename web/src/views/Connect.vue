@@ -6,9 +6,7 @@
     <div class="sm:mx-auto sm:w-full sm:max-w-md relative z-10">
       <!-- Brand icon & title -->
       <div class="flex items-center justify-center gap-2.5 mb-2">
-        <div class="w-10 h-10 rounded-xl bg-slate-900 text-white flex items-center justify-center font-bold text-base shadow-sm ring-1 ring-slate-900/10">
-          P
-        </div>
+        <PonyLogo :size="40" />
         <span class="font-bold text-xl tracking-tight text-slate-900">PonyLLM</span>
       </div>
       <h2 class="text-center text-xl font-bold tracking-tight text-slate-800">
@@ -100,6 +98,7 @@ import { PROBE_PATH, probeOpenMode } from '../router';
 import UiCard from '../components/ui/UiCard.vue';
 import UiButton from '../components/ui/UiButton.vue';
 import Icons from '../components/ui/Icons.vue';
+import PonyLogo from '../components/ui/PonyLogo.vue';
 
 const input = ref('');
 const error = ref('');
