@@ -319,7 +319,21 @@ pub fn sanitize_gemini_schema(schema: &Value) -> Value {
                 ),
                 other => other.clone(),
             },
-            "items" => sanitize_gemini_schema(value),
+            "items" => {
+                // If items is a JSON array (tuple validation syntax), pick the first schema
+                let normalized_items = match value {
+                    Value::Array(arr) => arr.first().cloned().unwrap_or_else(|| json!({"type": "string"})),
+                    other => other.clone(),
+                };
+                let mut sanitized = sanitize_gemini_schema(&normalized_items);
+                // If the items schema is an empty object or has no type and no properties/anyOf, default its type to "string"
+                if let Value::Object(ref mut item_obj) = sanitized {
+                    if item_obj.is_empty() {
+                        item_obj.insert("type".to_string(), Value::String("string".to_string()));
+                    }
+                }
+                sanitized
+            },
             "anyOf" => match value {
                 Value::Array(list) => {
                     Value::Array(list.iter().map(sanitize_gemini_schema).collect())
@@ -351,6 +365,32 @@ pub fn sanitize_gemini_schema(schema: &Value) -> Value {
 
     if let Some(enum_val) = effective_enum {
         out.insert("enum".to_string(), enum_val);
+    }
+
+    // 2. Post-processing for array types:
+    // Gemini Protobuf Schema requires that any schema with `type: "array"` MUST have an `items` field.
+    // If items is missing or empty on an array, backfill a permissive items: {"type": "string"}.
+    // Conversely, if type is explicitly NOT an array, remove the meaningless items field.
+    let is_array_type = out
+        .get("type")
+        .and_then(|t| t.as_str())
+        .map(|s| s.eq_ignore_ascii_case("array"))
+        .unwrap_or(false);
+
+    if is_array_type {
+        let needs_items_backfill = match out.get("items") {
+            None | Some(Value::Null) => true,
+            Some(Value::Object(items_obj)) => items_obj.is_empty(),
+            _ => false,
+        };
+        if needs_items_backfill {
+            out.insert("items".to_string(), json!({"type": "string"}));
+        }
+    } else if let Some(type_str) = out.get("type").and_then(|t| t.as_str()) {
+        // If type is explicitly string, integer, number, boolean, object, etc., strip items
+        if !type_str.eq_ignore_ascii_case("array") {
+            out.remove("items");
+        }
     }
 
     Value::Object(out)

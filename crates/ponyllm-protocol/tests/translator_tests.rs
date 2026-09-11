@@ -2312,4 +2312,76 @@ fn test_messages_to_antigravity_sanitizes_tools_end_to_end() {
     assert!(params["properties"]["foo"].get("propertyNames").is_none());
 }
 
+#[test]
+fn test_antigravity_nested_array_and_missing_items_backfill() {
+    use ponyllm_protocol::translator::antigravity::sanitize_gemini_schema;
+
+    // Reproduces the exact error:
+    // GenerateContentRequest.tools[0].function_declarations[1].parameters.properties[query].properties[where].items.items: missing field.
+    let schema = json!({
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "object",
+                "properties": {
+                    "where": {
+                        "type": "array",
+                        "items": {
+                            // where.items is itself an array, but its items is omitted!
+                            "type": "array"
+                        }
+                    },
+                    "tags": {
+                        // tags is an array with no items specified at all
+                        "type": "array"
+                    },
+                    "tuple_args": {
+                        // items as a JSON tuple array
+                        "type": "array",
+                        "items": [
+                            { "type": "number" },
+                            { "type": "string" }
+                        ]
+                    },
+                    "empty_items_obj": {
+                        "type": "array",
+                        "items": {}
+                    },
+                    "scalar_with_stray_items": {
+                        "type": "string",
+                        "items": { "type": "string" }
+                    }
+                }
+            }
+        }
+    });
+
+    let cleaned = sanitize_gemini_schema(&schema);
+    let query_props = &cleaned["properties"]["query"]["properties"];
+
+    // 1. where.items.items must be present and have a valid type
+    let where_prop = &query_props["where"];
+    assert_eq!(where_prop["type"], "array");
+    assert_eq!(where_prop["items"]["type"], "array");
+    assert_eq!(where_prop["items"]["items"]["type"], "string", "nested items.items must be backfilled");
+
+    // 2. tags.items must be backfilled
+    let tags_prop = &query_props["tags"];
+    assert_eq!(tags_prop["type"], "array");
+    assert_eq!(tags_prop["items"]["type"], "string", "missing items on array must be backfilled");
+
+    // 3. tuple_args: first element retained
+    let tuple_prop = &query_props["tuple_args"];
+    assert_eq!(tuple_prop["items"]["type"], "number");
+
+    // 4. empty items object normalized to string
+    let empty_items_prop = &query_props["empty_items_obj"];
+    assert_eq!(empty_items_prop["items"]["type"], "string");
+
+    // 5. non-array scalar must have stray items stripped
+    let scalar_prop = &query_props["scalar_with_stray_items"];
+    assert_eq!(scalar_prop["type"], "string");
+    assert!(scalar_prop.get("items").is_none(), "non-array type must strip items");
+}
+
 
