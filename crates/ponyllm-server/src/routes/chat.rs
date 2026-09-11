@@ -345,8 +345,8 @@ pub async fn handle_chat_completions(
             .with_event_sink(sink_ctx.clone(), state.event_sink(sink_ctx));
 
         if is_streaming {
-            match executor.execute_stream_request(&target_url, &req_val).await {
-                Ok(upstream_resp) => {
+            match executor.execute_stream_request_with_timing(&target_url, &req_val).await {
+                Ok((upstream_resp, attempt_start)) => {
                     if let Some(p) = prompt_hint.as_deref() {
                         state.hot_cache.record_dispatch(p, &target.provider_name);
                     }
@@ -372,6 +372,7 @@ pub async fn handle_chat_completions(
                         stages: stages.clone(),
                         request_snippet: req_snippet.clone(),
                         estimated_prompt_tokens: est_prompt_tokens,
+                        attempt_start: Some(attempt_start),
                     };
                     let body = match target.upstream_protocol {
                         ponyllm_core::pool::UpstreamProtocol::Anthropic => {
@@ -605,6 +606,12 @@ pub fn inject_telemetry_headers(
     }
     if let Some(t) = st.upstream_ttfb_ms {
         parts.push(format!("upstream-ttfb;dur={:.1}", t));
+    }
+    if let Some(ttft) = st.upstream_ttft_ms {
+        parts.push(format!("upstream-ttft;dur={:.1}", ttft));
+    }
+    if let Some(d_ttft) = st.downstream_ttft_ms {
+        parts.push(format!("downstream-ttft;dur={:.1}", d_ttft));
     }
     if !parts.is_empty() {
         if let Ok(v) = HeaderValue::from_str(&parts.join(", ")) {

@@ -317,8 +317,8 @@ pub async fn handle_responses(
 
         // Handle streaming request: pass through upstream SSE unchanged
         if is_streaming {
-            match executor.execute_stream_request(&target_url, &req_val).await {
-                Ok(upstream_resp) => {
+            match executor.execute_stream_request_with_timing(&target_url, &req_val).await {
+                Ok((upstream_resp, attempt_start)) => {
                     if let Some(p) = prompt_ref {
                         state.hot_cache.record_dispatch(p, &provider_name);
                     }
@@ -339,6 +339,7 @@ pub async fn handle_responses(
                         stages: stages.clone(),
                         request_snippet: req_snippet.clone(),
                         estimated_prompt_tokens: est_prompt_tokens,
+                        attempt_start: Some(attempt_start),
                     };
                     // Same-protocol upstreams stream through untouched;
                     // mismatched natives are translated into Responses events.

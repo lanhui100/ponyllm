@@ -56,6 +56,7 @@ impl Projection for FrameConverter {
                     completion_tokens: None,
                     cached_tokens: None,
                     ttft_ms: None,
+                    downstream_ttft_ms: None,
                     stream_flow: None,
                 }
             }
@@ -77,6 +78,7 @@ impl Projection for FrameConverter {
                     completion_tokens: None,
                     cached_tokens: None,
                     ttft_ms: None,
+                    downstream_ttft_ms: None,
                     stream_flow: None,
                 }
             }
@@ -114,6 +116,7 @@ impl Projection for FrameConverter {
                     completion_tokens: Some(flow.completion_tokens),
                     cached_tokens: Some(flow.cached_tokens),
                     ttft_ms: flow.ttft_ms,
+                    downstream_ttft_ms: flow.downstream_ttft_ms,
                     stream_flow: Some(detail),
                 }
             }
@@ -140,6 +143,7 @@ impl Projection for FrameConverter {
                     completion_tokens: flow.as_ref().map(|f| f.completion_tokens),
                     cached_tokens: flow.as_ref().map(|f| f.cached_tokens),
                     ttft_ms: flow.as_ref().and_then(|f| f.ttft_ms),
+                    downstream_ttft_ms: flow.as_ref().and_then(|f| f.downstream_ttft_ms),
                     stream_flow: flow.as_ref().map(StreamFlowDetail::from),
                 }
             }
@@ -169,6 +173,7 @@ impl Projection for FrameConverter {
                     completion_tokens: Some(*completion_tokens),
                     cached_tokens: Some(*cached_tokens),
                     ttft_ms: None,
+                    downstream_ttft_ms: None,
                     stream_flow: None,
                 }
             }
@@ -194,6 +199,7 @@ impl Projection for FrameConverter {
                     completion_tokens: None,
                     cached_tokens: None,
                     ttft_ms: None,
+                    downstream_ttft_ms: None,
                     stream_flow: None,
                 },
                 None => FlightFrame {
@@ -212,6 +218,7 @@ impl Projection for FrameConverter {
                     completion_tokens: None,
                     cached_tokens: None,
                     ttft_ms: None,
+                    downstream_ttft_ms: None,
                     stream_flow: None,
                 },
             },

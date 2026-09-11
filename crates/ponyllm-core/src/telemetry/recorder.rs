@@ -200,6 +200,8 @@ pub fn looks_like_secret(s: &str) -> bool {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct StreamFlowDetail {
     pub ttft_ms: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub downstream_ttft_ms: Option<f64>,
     pub ttlb_ms: Option<f64>,
     pub chunks: Option<u64>,
     pub bytes: Option<u64>,
@@ -220,6 +222,7 @@ impl From<&super::metrics::StreamFlowSample> for StreamFlowDetail {
     fn from(s: &super::metrics::StreamFlowSample) -> Self {
         Self {
             ttft_ms: s.ttft_ms,
+            downstream_ttft_ms: s.downstream_ttft_ms,
             ttlb_ms: Some(s.ttlb_ms),
             chunks: Some(s.chunks),
             bytes: Some(s.bytes),
@@ -255,6 +258,7 @@ pub struct FlightFrame {
     pub completion_tokens: Option<u64>,
     pub cached_tokens: Option<u64>,
     pub ttft_ms: Option<f64>,
+    pub downstream_ttft_ms: Option<f64>,
     pub stream_flow: Option<StreamFlowDetail>,
 }
 
@@ -285,6 +289,8 @@ pub struct RecordedFrame {
     pub cached_tokens: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ttft_ms: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub downstream_ttft_ms: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream_flow: Option<StreamFlowDetail>,
 }
@@ -346,6 +352,7 @@ impl FlightRecorder {
             completion_tokens: frame.completion_tokens,
             cached_tokens: frame.cached_tokens,
             ttft_ms: frame.ttft_ms,
+            downstream_ttft_ms: frame.downstream_ttft_ms,
             stream_flow: frame.stream_flow,
         };
 

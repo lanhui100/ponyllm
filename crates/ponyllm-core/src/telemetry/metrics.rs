@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct StreamFlowSample {
     pub ttft_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub downstream_ttft_ms: Option<f64>,
     pub ttlb_ms: f64,
     pub chunks: u64,
     pub bytes: u64,

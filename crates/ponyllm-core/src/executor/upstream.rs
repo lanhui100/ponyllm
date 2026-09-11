@@ -672,7 +672,12 @@ impl UpstreamExecutor {
     fn emit_headers(&self, key_id: &str, attempt: u32, ttfb: Duration) {
         let ttfb_ms = ttfb.as_secs_f64() * 1000.0;
         if let Some(ctx) = self.sink_ctx.as_ref() {
-            ctx.stages.lock().upstream_ttfb_ms = Some(ttfb_ms);
+            let mut st = ctx.stages.lock();
+            st.upstream_ttfb_ms = Some(ttfb_ms);
+            // Default upstream_ttft_ms to upstream_ttfb_ms until first stream token arrives
+            if st.upstream_ttft_ms.is_none() {
+                st.upstream_ttft_ms = Some(ttfb_ms);
+            }
         }
         self.emit_sink(GatewayEvent::UpstreamHeaders {
             key_id: key_id.to_string(),
@@ -980,8 +985,9 @@ impl UpstreamExecutor {
         })
     }
 
-    /// Execute a streaming request with failover before the first SSE chunk is yielded
-    pub async fn execute_stream_request(&self, url: &str, body: &Value) -> Result<reqwest::Response> {
+    /// Execute a streaming request with failover before the first SSE chunk is yielded.
+    /// Returns the response and the exact Instant when the winning attempt started.
+    pub async fn execute_stream_request_with_timing(&self, url: &str, body: &Value) -> Result<(reqwest::Response, Instant)> {
         let mut last_error = String::new();
         let mut last_kind = GatewayErrorKind::Internal;
         let mut attempted_keys = Vec::new();
@@ -1046,7 +1052,7 @@ impl UpstreamExecutor {
                     if status.is_success() {
                         self.pool.record_success(&key.id);
                         self.emit_headers(&key.id, attempt_idx, attempt_start.elapsed());
-                        return Ok(resp);
+                        return Ok((resp, attempt_start));
                     }
 
                     let status_code = status.as_u16();
@@ -1151,6 +1157,11 @@ impl UpstreamExecutor {
             last_error,
             kind: last_kind,
         })
+    }
+
+    /// Execute a streaming request with failover before the first SSE chunk is yielded
+    pub async fn execute_stream_request(&self, url: &str, body: &Value) -> Result<reqwest::Response> {
+        self.execute_stream_request_with_timing(url, body).await.map(|(resp, _)| resp)
     }
 }
 

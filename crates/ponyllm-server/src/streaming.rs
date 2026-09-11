@@ -950,6 +950,7 @@ pub struct StreamFailureContext {
     pub stages: Arc<Mutex<StageTimings>>,
     pub request_snippet: Option<String>,
     pub estimated_prompt_tokens: u64,
+    pub attempt_start: Option<Instant>,
 }
 
 /// Telemetry wrapper stream tracking TTFT on first emitted chunk and measuring TPS on completion.
@@ -1038,7 +1039,14 @@ impl<S> TelemetryStream<S> {
 
     fn build_flow(&self, now: Instant) -> (StreamFlowSample, Option<f64>) {
         let start = self.failure_ctx.ctx.start;
-        let ttft_ms = self.first_token_time.map(|t| {
+        let attempt_start = self.failure_ctx.attempt_start.unwrap_or(start);
+        
+        // Pure upstream TTFT: from successful attempt dispatch to first chunk received
+        let upstream_ttft_ms = self.first_token_time.map(|t| {
+            (t.saturating_duration_since(attempt_start).as_secs_f64() * 1000.0).max(1.0)
+        });
+        // End-to-end downstream TTFT: from client request start to first chunk yielded
+        let downstream_ttft_ms = self.first_token_time.map(|t| {
             (t.saturating_duration_since(start).as_secs_f64() * 1000.0).max(1.0)
         });
         let ttlb_ms = now.saturating_duration_since(start).as_secs_f64() * 1000.0;
@@ -1077,7 +1085,8 @@ impl<S> TelemetryStream<S> {
             Some(self.gaps_ms.iter().sum::<f64>() / self.gaps_ms.len() as f64)
         };
         let sample = StreamFlowSample {
-            ttft_ms,
+            ttft_ms: upstream_ttft_ms,
+            downstream_ttft_ms,
             ttlb_ms,
             chunks: self.chunks_emitted,
             bytes: self.bytes_emitted,
@@ -1099,9 +1108,12 @@ impl<S> TelemetryStream<S> {
         fctx.bus.append(&fctx.ctx, provider.or(Some(fctx.provider.clone())), event);
     }
 
-    fn finish_stages(&self, ttft_ms: Option<f64>) -> StageTimings {
+    fn finish_stages(&self, upstream_ttft: Option<f64>, downstream_ttft: Option<f64>) -> StageTimings {
         let mut stages = self.failure_ctx.stages.lock().clone();
-        stages.downstream_ttft_ms = ttft_ms;
+        if stages.upstream_ttft_ms.is_none() || upstream_ttft.is_some() {
+            stages.upstream_ttft_ms = upstream_ttft;
+        }
+        stages.downstream_ttft_ms = downstream_ttft;
         stages
     }
 
@@ -1158,7 +1170,7 @@ where
                     self.completed = true;
                     let now = Instant::now();
                     let (sample, _avg_gap) = self.build_flow(now);
-                    let stages = self.finish_stages(sample.ttft_ms);
+                    let stages = self.finish_stages(sample.ttft_ms, sample.downstream_ttft_ms);
                     if self.has_error {
                         self.emit_failure("stream terminated with error", Some(sample), stages);
                     } else {
@@ -1200,7 +1212,7 @@ impl<S> Drop for TelemetryStream<S> {
             // A client disconnect after chunks flowed is a cancel, not an error.
             if self.has_error || self.chunks_emitted == 0 {
                 let (sample, _avg_gap) = self.build_flow(now);
-                let stages = self.finish_stages(sample.ttft_ms);
+                let stages = self.finish_stages(sample.ttft_ms, sample.downstream_ttft_ms);
                 self.emit_failure("stream dropped before completion", Some(sample), stages);
             } else {
                 let ttlb_ms = now
@@ -1542,6 +1554,7 @@ mod tests {
             stages: Arc::new(Mutex::new(StageTimings::default())),
             request_snippet: None,
             estimated_prompt_tokens: 10,
+            attempt_start: Some(start),
         };
         let s = bytes_stream(vec![
             Bytes::from_static(b"data: one\n\n"),
@@ -2023,6 +2036,7 @@ mod tests {
             stages: Arc::new(Mutex::new(StageTimings::default())),
             request_snippet: None,
             estimated_prompt_tokens: 10,
+            attempt_start: Some(start),
         };
 
         // Two chunks containing real content: total 20 characters (~6-7 tokens)

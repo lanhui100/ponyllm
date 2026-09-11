@@ -37,6 +37,7 @@ fn script() -> Vec<(Option<String>, GatewayEvent)> {
             GatewayEvent::StreamCompleted {
                 flow: StreamFlowSample {
                     ttft_ms: Some(200.0),
+                    downstream_ttft_ms: Some(200.0),
                     ttlb_ms: 1000.0,
                     chunks: 50,
                     bytes: 2048,
@@ -57,6 +58,7 @@ fn script() -> Vec<(Option<String>, GatewayEvent)> {
                     downstream_ttft_ms: Some(200.0),
                 },
                 request_snippet: None,
+                response_snippet: None,
             },
         ),
         (

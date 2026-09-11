@@ -22,6 +22,7 @@ fn test_flight_recorder_record_and_sanitize() {
         completion_tokens: None,
         cached_tokens: None,
         ttft_ms: None,
+        downstream_ttft_ms: None,
         stream_flow: None,
     });
 
@@ -76,6 +77,7 @@ fn test_flight_recorder_snippet_truncation() {
         completion_tokens: None,
         cached_tokens: None,
         ttft_ms: None,
+        downstream_ttft_ms: None,
         stream_flow: None,
     });
 
@@ -106,6 +108,7 @@ fn test_flight_recorder_ring_buffer_capacity() {
             completion_tokens: None,
             cached_tokens: None,
             ttft_ms: None,
+            downstream_ttft_ms: None,
             stream_flow: None,
         });
     }
@@ -138,6 +141,7 @@ fn test_stream_flow_aggregate_reusable() {
     let metrics = MetricsCollector::new();
     metrics.record_stream(&StreamFlowSample {
         ttft_ms: Some(800.0),
+        downstream_ttft_ms: Some(800.0),
         ttlb_ms: 5000.0,
         chunks: 100,
         bytes: 4096,
@@ -153,6 +157,7 @@ fn test_stream_flow_aggregate_reusable() {
     });
     metrics.record_stream(&StreamFlowSample {
         ttft_ms: Some(1000.0),
+        downstream_ttft_ms: Some(1000.0),
         ttlb_ms: 6000.0,
         chunks: 200,
         bytes: 8192,
@@ -203,6 +208,7 @@ fn test_stream_flow_detail_survives_recorder() {
         response_snippet: Some("[STREAM_COMPLETED chunks=100]".to_string()),
         stream_flow: Some(StreamFlowDetail {
             ttft_ms: Some(900.0),
+            downstream_ttft_ms: Some(900.0),
             ttlb_ms: Some(5200.0),
             chunks: Some(100),
             bytes: Some(4096),
@@ -219,6 +225,7 @@ fn test_stream_flow_detail_survives_recorder() {
         completion_tokens: Some(300),
         cached_tokens: Some(50),
         ttft_ms: Some(900.0),
+        downstream_ttft_ms: Some(900.0),
     });
     let frames = recorder.get_recent_frames();
     let flow = frames[0].stream_flow.as_ref().expect("stream_flow kept");
