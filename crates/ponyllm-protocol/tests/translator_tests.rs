@@ -2164,3 +2164,152 @@ fn test_messages_to_antigravity_tools_and_multi_turn_history() {
     assert_eq!(contents[2]["parts"][0]["functionResponse"]["name"], "get_weather");
 }
 
+#[test]
+fn test_antigravity_tool_schema_sanitization_removes_unsupported_fields() {
+    use ponyllm_protocol::translator::antigravity::sanitize_gemini_schema;
+
+    // Simulate complex JSON Schema sent by Anthropic / OpenAI agent frameworks (e.g. Claude Code, Goose, LangChain)
+    let dirty_schema = json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "execute_command",
+        "description": "Execute a shell command",
+        "type": "object",
+        "additionalProperties": false,
+        "propertyNames": { "pattern": "^[a-z_]+$" },
+        "$defs": {
+            "CustomType": { "type": "string" }
+        },
+        "required": ["command"],
+        "properties": {
+            "command": {
+                "type": "string",
+                "description": "Command to run"
+            },
+            "timeout": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "minimum": 1
+            },
+            "mode": {
+                "const": "safe",
+                "description": "Execution mode"
+            },
+            "retries": {
+                "type": ["integer", "null"],
+                "default": 3
+            },
+            "nested_options": {
+                "type": "object",
+                "propertyNames": { "maxLength": 10 },
+                "properties": {
+                    "env": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "propertyNames": { "pattern": ".*" },
+                            "properties": {
+                                "action": {
+                                    "anyOf": [
+                                        { "const": "set" },
+                                        { "const": "unset" }
+                                    ]
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    });
+
+    let cleaned = sanitize_gemini_schema(&dirty_schema);
+
+    // Root level check
+    assert!(cleaned.get("$schema").is_none(), "$schema must be stripped");
+    assert!(cleaned.get("additionalProperties").is_none(), "additionalProperties must be stripped");
+    assert!(cleaned.get("propertyNames").is_none(), "propertyNames must be stripped");
+    assert!(cleaned.get("$defs").is_none(), "$defs must be stripped");
+    assert_eq!(cleaned["type"], "object");
+    assert_eq!(cleaned["title"], "execute_command");
+    assert_eq!(cleaned["description"], "Execute a shell command");
+
+    // Properties check
+    let props = &cleaned["properties"];
+    assert_eq!(props["command"]["type"], "string");
+
+    // timeout: exclusiveMinimum removed, minimum preserved
+    assert!(props["timeout"].get("exclusiveMinimum").is_none(), "exclusiveMinimum must be stripped");
+    assert_eq!(props["timeout"]["minimum"], 1);
+
+    // mode: const converted to enum
+    assert!(props["mode"].get("const").is_none(), "const must be removed");
+    assert_eq!(props["mode"]["enum"], json!(["safe"]), "const converted to enum array");
+
+    // retries: type ["integer", "null"] flattened to type integer + nullable true
+    assert_eq!(props["retries"]["type"], "integer");
+    assert_eq!(props["retries"]["nullable"], true);
+    assert_eq!(props["retries"]["default"], 3);
+
+    // nested checks
+    let nested = &props["nested_options"];
+    assert!(nested.get("propertyNames").is_none());
+    let item_props = &nested["properties"]["env"]["items"];
+    assert!(item_props.get("propertyNames").is_none());
+
+    let action_any_of = item_props["properties"]["action"]["anyOf"].as_array().unwrap();
+    assert_eq!(action_any_of[0]["enum"], json!(["set"]));
+    assert_eq!(action_any_of[1]["enum"], json!(["unset"]));
+    assert!(action_any_of[0].get("const").is_none());
+    assert!(action_any_of[1].get("const").is_none());
+}
+
+#[test]
+fn test_messages_to_antigravity_sanitizes_tools_end_to_end() {
+    let req = MessageRequest {
+        model: "gemini-3.8-flash[1m]".to_string(),
+        messages: vec![
+            AnthropicMessage {
+                role: AnthropicRole::User,
+                content: AnthropicContent::Text("run tool".into()),
+            },
+        ],
+        tools: Some(vec![AnthropicTool {
+            name: "test_tool".to_string(),
+            description: Some("Tool with dirty schema".to_string()),
+            input_schema: json!({
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "propertyNames": { "pattern": "^[a-z]+$" },
+                "properties": {
+                    "foo": {
+                        "const": "bar",
+                        "propertyNames": {}
+                    }
+                }
+            }),
+            cache_control: None,
+        }]),
+        max_tokens: 1024,
+        ..Default::default()
+    };
+
+    let env = messages_to_antigravity_request(
+        &req,
+        "gemini-3.8-flash",
+        "aicode-consumers",
+        None,
+        "",
+    ).unwrap();
+
+    let tools = env["request"]["tools"].as_array().unwrap();
+    let decls = tools[0]["functionDeclarations"].as_array().unwrap();
+    let params = &decls[0]["parameters"];
+
+    assert!(params.get("$schema").is_none());
+    assert!(params.get("propertyNames").is_none());
+    assert_eq!(params["properties"]["foo"]["enum"], json!(["bar"]));
+    assert!(params["properties"]["foo"].get("const").is_none());
+    assert!(params["properties"]["foo"].get("propertyNames").is_none());
+}
+
+

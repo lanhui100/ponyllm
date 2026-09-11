@@ -250,6 +250,112 @@ fn push_or_merge_turn(contents: &mut Vec<Value>, role: &str, mut parts: Vec<Valu
     }));
 }
 
+/// Gemini's `Schema` accepts a restricted OpenAPI 3.0 subset and hard-rejects
+/// unknown fields (`Invalid JSON payload received. Unknown name "$schema" …`),
+/// while Anthropic and OpenAI tool parameters are arbitrary JSON Schema — agents
+/// routinely ship `$schema`, `propertyNames`, `const`, `exclusiveMinimum`,
+/// `additionalProperties`, `$defs`, and similar.
+///
+/// Recursively keep only the fields Gemini's Protobuf Schema declares,
+/// converting `const` to single-element `enum`, normalizing type unions,
+/// and descending through `properties` / `items` / `anyOf`.
+pub fn sanitize_gemini_schema(schema: &Value) -> Value {
+    const KEEP: &[&str] = &[
+        "type",
+        "format",
+        "title",
+        "description",
+        "nullable",
+        "enum",
+        "maxItems",
+        "minItems",
+        "properties",
+        "required",
+        "items",
+        "minProperties",
+        "maxProperties",
+        "minLength",
+        "maxLength",
+        "pattern",
+        "example",
+        "anyOf",
+        "propertyOrdering",
+        "default",
+        "minimum",
+        "maximum",
+    ];
+
+    let Value::Object(obj) = schema else {
+        return schema.clone();
+    };
+
+    let mut out = serde_json::Map::new();
+
+    // 1. Convert `const: val` to `enum: [val]` if present
+    let mut effective_enum = obj.get("enum").cloned();
+    if effective_enum.is_none() {
+        if let Some(const_val) = obj.get("const") {
+            effective_enum = Some(Value::Array(vec![const_val.clone()]));
+        }
+    }
+
+    for (key, value) in obj {
+        if key == "const" {
+            // Already handled via effective_enum
+            continue;
+        }
+
+        if !KEEP.contains(&key.as_str()) {
+            continue;
+        }
+
+        let cleaned_value = match key.as_str() {
+            "properties" => match value {
+                Value::Object(props) => Value::Object(
+                    props
+                        .iter()
+                        .map(|(name, sub)| (name.clone(), sanitize_gemini_schema(sub)))
+                        .collect(),
+                ),
+                other => other.clone(),
+            },
+            "items" => sanitize_gemini_schema(value),
+            "anyOf" => match value {
+                Value::Array(list) => {
+                    Value::Array(list.iter().map(sanitize_gemini_schema).collect())
+                }
+                other => other.clone(),
+            },
+            "type" => match value {
+                Value::Array(types) => {
+                    if types.iter().any(|t| t == "null") {
+                        out.insert("nullable".to_string(), Value::Bool(true));
+                    }
+                    types
+                        .iter()
+                        .find(|t| *t != "null")
+                        .cloned()
+                        .unwrap_or_else(|| Value::String("string".to_string()))
+                }
+                other => other.clone(),
+            },
+            "enum" => {
+                // Skip here, handled below via effective_enum
+                continue;
+            }
+            _ => value.clone(),
+        };
+
+        out.insert(key.clone(), cleaned_value);
+    }
+
+    if let Some(enum_val) = effective_enum {
+        out.insert("enum".to_string(), enum_val);
+    }
+
+    Value::Object(out)
+}
+
 fn convert_tools_to_gemini(tools: &[crate::openai::chat::ToolDefinition]) -> Option<Value> {
     let mut decls = Vec::new();
     for t in tools {
@@ -261,7 +367,7 @@ fn convert_tools_to_gemini(tools: &[crate::openai::chat::ToolDefinition]) -> Opt
                 decl["description"] = json!(desc);
             }
             if let Some(ref params) = t.function.parameters {
-                decl["parameters"] = params.clone();
+                decl["parameters"] = sanitize_gemini_schema(params);
             }
             decls.push(decl);
         }
@@ -306,7 +412,7 @@ fn convert_anthropic_tools_to_gemini(tools: &[crate::anthropic::messages::Anthro
         let decl = json!({
             "name": t.name,
             "description": t.description,
-            "parameters": t.input_schema,
+            "parameters": sanitize_gemini_schema(&t.input_schema),
         });
         decls.push(decl);
     }
