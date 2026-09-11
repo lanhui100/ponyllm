@@ -97,6 +97,30 @@ export function useAdminConfig(options: UseAdminConfigOptions = {}) {
     }
   }
 
+  /**
+   * 静默刷新配置与资源列表：不在界面触发全局 loading 遮罩，适用于后台周期轮询与倒计时归零对齐
+   */
+  async function refreshSilent(): Promise<void> {
+    try {
+      const [ov, pv, mv, kv, st] = await Promise.all([
+        adminApi.getOverview().send(),
+        adminApi.getProviders().send(),
+        adminApi.getModels().send(),
+        adminApi.getKeys().send(),
+        adminApi.getStrategy().send(),
+      ]);
+
+      overview.value = ov;
+      providers.value = pv;
+      models.value = mv;
+      keys.value = kv;
+      strategy.value = st.strategy;
+      configVersion.value = ov.config_version;
+    } catch {
+      // 静默轮询忽略瞬态网络波动
+    }
+  }
+
   async function runWithConflictCheck<T>(fn: () => Promise<T>): Promise<T> {
     try {
       return await fn();
@@ -269,6 +293,7 @@ export function useAdminConfig(options: UseAdminConfigOptions = {}) {
     proxyStatus,
     batchTesting,
     fetchAll,
+    refreshSilent,
     fetchProxyStatus,
     saveProvider,
     editProvider,

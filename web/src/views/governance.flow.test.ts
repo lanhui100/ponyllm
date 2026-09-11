@@ -575,4 +575,44 @@ describe('GovernanceView End-to-End User Flow (WEB-04)', () => {
     app.unmount();
     container.remove();
   });
+
+  it('Flow 7: Background auto-sync periodically invokes refreshSilent without disturbing UI', async () => {
+    vi.useFakeTimers();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+
+    const overviewSpy = vi.spyOn(adminApi, 'getOverview').mockReturnValue({
+      send: () => Promise.resolve(mockOverviewWritable),
+    } as any);
+    vi.spyOn(adminApi, 'getProviders').mockReturnValue({
+      send: () => Promise.resolve(mockProviders),
+    } as any);
+    vi.spyOn(adminApi, 'getModels').mockReturnValue({
+      send: () => Promise.resolve(mockModels),
+    } as any);
+    vi.spyOn(adminApi, 'getKeys').mockReturnValue({
+      send: () => Promise.resolve(mockKeys),
+    } as any);
+    vi.spyOn(adminApi, 'getStrategy').mockReturnValue({
+      send: () => Promise.resolve(mockStrategy),
+    } as any);
+
+    const app = createApp(GovernanceView);
+    app.use(router);
+    app.use(pinia);
+    app.mount(container);
+
+    await nextTick();
+    expect(overviewSpy).toHaveBeenCalledTimes(1);
+
+    // Advance by 5s: triggers auto-sync
+    vi.advanceTimersByTime(5000);
+    await nextTick();
+
+    expect(overviewSpy).toHaveBeenCalledTimes(2);
+
+    app.unmount();
+    container.remove();
+    vi.useRealTimers();
+  });
 });

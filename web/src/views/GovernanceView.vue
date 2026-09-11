@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { ref, onUnmounted } from 'vue';
+import { ref, onMounted, onUnmounted } from 'vue';
 import { useAdminConfig } from '../composables/useAdminConfig';
+import { onStopPolling } from '../router';
 import NavBar from '../components/NavBar.vue';
 import ProviderCard from '../components/governance/ProviderCard.vue';
 import StrategySection from '../components/governance/StrategySection.vue';
@@ -31,6 +32,7 @@ const {
   proxyStatus,
   batchTesting,
   fetchAll,
+  refreshSilent,
   fetchProxyStatus,
   saveProvider,
   editProvider,
@@ -452,8 +454,49 @@ async function handleRefresh() {
   await fetchAll().catch(() => {});
 }
 
+// 自动周期轻量轮询 (5s)，在页面可见且无表单输入/弹窗占用时静默同步后端连接池
+let syncTimer: ReturnType<typeof setInterval> | null = null;
+let unregisterStopPolling: (() => void) | null = null;
+
+function canAutoSync(): boolean {
+  if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+    return false;
+  }
+  // 如果用户正在新建服务商或执行批量拨测，暂缓静默同步
+  if (isAddingProvider.value || batchTesting.value.running) {
+    return false;
+  }
+  return true;
+}
+
+function handleCooldownExpired() {
+  if (canAutoSync()) {
+    void refreshSilent();
+  }
+}
+
+onMounted(() => {
+  syncTimer = setInterval(() => {
+    if (canAutoSync()) {
+      void refreshSilent();
+    }
+  }, 5000);
+
+  unregisterStopPolling = onStopPolling(() => {
+    if (syncTimer) {
+      clearInterval(syncTimer);
+      syncTimer = null;
+    }
+  });
+});
+
 onUnmounted(() => {
   cleanupOAuthSession();
+  if (syncTimer) {
+    clearInterval(syncTimer);
+    syncTimer = null;
+  }
+  unregisterStopPolling?.();
 });
 </script>
 
@@ -937,6 +980,7 @@ onUnmounted(() => {
             @delete-key="removeKey"
             @test-single-key="testSingleKey"
             @oauth-antigravity="handleOpenAntigravityForProvider"
+            @cooldown-expired="handleCooldownExpired"
           />
         </template>
       </div>

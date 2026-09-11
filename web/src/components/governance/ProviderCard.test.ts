@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { createApp, nextTick } from 'vue';
 import ProviderCard from './ProviderCard.vue';
 import type { ProviderView, ModelView, KeyView } from '../../types/admin';
@@ -364,6 +364,67 @@ describe('ProviderCard UI and Phase 2 Requirements', () => {
 
     app.unmount();
     document.body.removeChild(container);
+  });
+
+  it('ticks cooldown countdown dynamically and emits cooldown-expired when countdown hits zero', async () => {
+    vi.useFakeTimers();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+
+    let expiredEmitted = false;
+    const antigravityProvider = {
+      ...mockProvider,
+      name: 'antigravity',
+      default_protocol: 'antigravity',
+    };
+    const expiringKey = [
+      {
+        id: 'ag-key-expiring',
+        provider: 'antigravity',
+        masked_key: 'ya29.***',
+        state: 'cooling_down' as const,
+        priority: 1,
+        weight: 10,
+        cooldown_remaining_secs: 2,
+        cooldown_reset_at: new Date(Date.now() + 2000).toISOString(),
+      },
+    ];
+
+    const app = createApp(ProviderCard, {
+      provider: antigravityProvider,
+      models: [],
+      keys: expiringKey,
+      adminWriteEnabled: true,
+      keyTestResults: {},
+      testingKeyIds: new Set<string>(),
+      defaultExpanded: true,
+      'onCooldown-expired': () => {
+        expiredEmitted = true;
+      },
+    });
+    app.mount(container);
+    await nextTick();
+
+    const toggleKeysBtn = container.querySelector('[data-testid="toggle-keys-btn"]') as HTMLButtonElement;
+    toggleKeysBtn?.click();
+    await nextTick();
+
+    const resetHint = container.querySelector('[data-testid="key-cooldown-reset"]');
+    expect(resetHint?.textContent).toContain('2秒后解冻');
+
+    // Advance by 1s
+    vi.advanceTimersByTime(1000);
+    await nextTick();
+    expect(resetHint?.textContent).toContain('1秒后解冻');
+
+    // Advance by another 1s: reaches 0, triggers cooldown-expired
+    vi.advanceTimersByTime(1000);
+    await nextTick();
+    expect(expiredEmitted).toBe(true);
+
+    app.unmount();
+    document.body.removeChild(container);
+    vi.useRealTimers();
   });
 
   it('handles protocol configuration, toggling pills, and emits update-provider with validation', async () => {

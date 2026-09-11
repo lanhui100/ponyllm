@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue';
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
 import type { KeyView, KeyTestView, CreateKeyPayload } from '../../types/admin';
 import Icons from '../ui/Icons.vue';
 import UiButton from '../ui/UiButton.vue';
@@ -23,6 +23,7 @@ const emit = defineEmits<{
   (e: 'delete', id: string): Promise<void>;
   (e: 'test-single', id: string): Promise<void>;
   (e: 'oauth-antigravity', providerName: string): void;
+  (e: 'cooldown-expired'): void;
 }>();
 
 const isAntigravity = computed(() => props.providerName.toLowerCase().includes('antigravity'));
@@ -32,6 +33,56 @@ const isAdding = ref(false);
 const showAdvanced = ref(false);
 const submitting = ref(false);
 const formError = ref<string | null>(null);
+
+// 客户端动态秒级时钟信号，驱动倒计时平滑递减
+const nowMs = ref(Date.now());
+let timer: ReturnType<typeof setInterval> | null = null;
+const recordedSnapshots = new Map<string, { remaining: number; fetchedAt: number }>();
+
+watch(
+  () => props.keys,
+  (newKeys) => {
+    const now = Date.now();
+    for (const k of newKeys) {
+      if (k.state === 'cooling_down' && k.cooldown_remaining_secs != null) {
+        recordedSnapshots.set(k.id, {
+          remaining: k.cooldown_remaining_secs,
+          fetchedAt: now,
+        });
+      } else {
+        recordedSnapshots.delete(k.id);
+      }
+    }
+  },
+  { immediate: true, deep: true }
+);
+
+function checkCooldownsAndTick() {
+  nowMs.value = Date.now();
+  let hasExpired = false;
+  for (const k of props.keys) {
+    if (k.state === 'cooling_down') {
+      const remaining = cooldownRemainingSecs(k);
+      if (remaining != null && remaining <= 0) {
+        hasExpired = true;
+      }
+    }
+  }
+  if (hasExpired) {
+    emit('cooldown-expired');
+  }
+}
+
+onMounted(() => {
+  timer = setInterval(checkCooldownsAndTick, 1000);
+});
+
+onUnmounted(() => {
+  if (timer) {
+    clearInterval(timer);
+    timer = null;
+  }
+});
 
 const form = ref<CreateKeyPayload>({
   id: '',
@@ -86,18 +137,24 @@ interface CompactModelQuota {
 }
 
 /**
- * Remaining cooldown seconds for a key. Prefers the server-computed relative
- * value (free of browser/server clock skew); falls back to the absolute reset
- * instant only when the relative field is absent.
+ * Remaining cooldown seconds for a key. Dynamically decreases as time elapses
+ * using the reactive nowMs tick. Prefers server-computed initial relative duration
+ * adjusted by elapsed local time; falls back to absolute reset instant.
  */
 function cooldownRemainingSecs(k: KeyView): number | null {
+  const currentNow = nowMs.value;
+  const snapshot = recordedSnapshots.get(k.id);
+  if (snapshot) {
+    const elapsedSecs = Math.floor((currentNow - snapshot.fetchedAt) / 1000);
+    return Math.max(0, snapshot.remaining - elapsedSecs);
+  }
   if (k.cooldown_remaining_secs != null) {
     return Math.max(0, k.cooldown_remaining_secs);
   }
   if (k.cooldown_reset_at) {
     const resetMs = new Date(k.cooldown_reset_at).getTime();
     if (!Number.isNaN(resetMs)) {
-      return Math.max(0, Math.floor((resetMs - Date.now()) / 1000));
+      return Math.max(0, Math.floor((resetMs - currentNow) / 1000));
     }
   }
   return null;

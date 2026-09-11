@@ -115,6 +115,50 @@ describe('useAdminConfig composable (WEB-04 Governance & Admin CUD)', () => {
     expect(config.adminWriteEnabled.value).toBe(true);
   });
 
+  it('refreshSilent updates state without mutating the loading flag', async () => {
+    const mockOverviewSilent: OverviewView = {
+      version: '0.2.35',
+      bind: '127.0.0.1:8080',
+      auth_mode: 'token',
+      providers: 1,
+      keys: 1,
+      keys_active: 1,
+      strategy: 'performance',
+      hot_reload_ms: 500,
+      admin_write_enabled: true,
+      config_version: 99,
+    };
+    const mockStrategySilent: StrategyView = {
+      strategy: 'performance',
+      config_version: 99,
+    };
+
+    vi.spyOn(adminApi, 'getOverview').mockReturnValue({
+      send: () => Promise.resolve(mockOverviewSilent),
+    } as any);
+    vi.spyOn(adminApi, 'getProviders').mockReturnValue({
+      send: () => Promise.resolve([]),
+    } as any);
+    vi.spyOn(adminApi, 'getModels').mockReturnValue({
+      send: () => Promise.resolve([]),
+    } as any);
+    vi.spyOn(adminApi, 'getKeys').mockReturnValue({
+      send: () => Promise.resolve([]),
+    } as any);
+    vi.spyOn(adminApi, 'getStrategy').mockReturnValue({
+      send: () => Promise.resolve(mockStrategySilent),
+    } as any);
+
+    const config = useAdminConfig({ autoFetch: false });
+    expect(config.loading.value).toBe(false);
+
+    await config.refreshSilent();
+
+    expect(config.loading.value).toBe(false);
+    expect(config.strategy.value).toBe('performance');
+    expect(config.configVersion.value).toBe(99);
+  });
+
   it('handles 412 PreconditionFailed by setting conflictDetected flag', async () => {
     vi.spyOn(adminApi, 'createProvider').mockReturnValue({
       send: () => Promise.reject(new PreconditionFailedError()),

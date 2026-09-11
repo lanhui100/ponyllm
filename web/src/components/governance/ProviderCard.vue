@@ -47,6 +47,7 @@ const emit = defineEmits<{
   (e: 'delete-key', id: string): Promise<void>;
   (e: 'test-single-key', id: string): Promise<void>;
   (e: 'oauth-antigravity', providerName: string): void;
+  (e: 'cooldown-expired'): void;
 }>();
 
 const expanded = ref(props.defaultExpanded ?? true);
@@ -405,6 +406,7 @@ async function handleDeleteProvider() {
             @delete="(id) => emit('delete-key', id)"
             @test-single="(id) => emit('test-single-key', id)"
             @oauth-antigravity="(name) => emit('oauth-antigravity', name)"
+            @cooldown-expired="emit('cooldown-expired')"
           />
         </div>
 
