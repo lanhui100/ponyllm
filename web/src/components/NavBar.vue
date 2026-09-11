@@ -45,7 +45,7 @@ function handleLogout() {
           class="px-3.5 py-1.5 rounded-lg transition-colors text-slate-700 hover:text-slate-950 hover:bg-slate-900/5"
           :class="{ '!text-slate-950 !bg-slate-900/10 font-semibold shadow-2xs': route.path === '/recorder' }"
         >
-          可观测性
+          轨迹
         </router-link>
       </nav>
     </div>

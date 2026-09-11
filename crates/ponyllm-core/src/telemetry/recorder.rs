@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
-pub const MAX_SNIPPET_CHARS: usize = 512;
+pub const MAX_SNIPPET_CHARS: usize = 10 * 1024 * 1024;
 
 /// Minimum byte length of an `sk-…` run before it is treated as a secret.
 /// Short `sk-` mentions in prose (e.g. "sk-abc") are left untouched to avoid
@@ -208,6 +208,12 @@ pub struct StreamFlowDetail {
     pub tps: Option<f64>,
     pub tpot_p50_ms: Option<f64>,
     pub tpot_p95_ms: Option<f64>,
+    #[serde(default)]
+    pub prompt_tokens: u64,
+    #[serde(default)]
+    pub completion_tokens: u64,
+    #[serde(default)]
+    pub cached_tokens: u64,
 }
 
 impl From<&super::metrics::StreamFlowSample> for StreamFlowDetail {
@@ -222,6 +228,9 @@ impl From<&super::metrics::StreamFlowSample> for StreamFlowDetail {
             tps: s.tps,
             tpot_p50_ms: s.tpot_p50_ms,
             tpot_p95_ms: s.tpot_p95_ms,
+            prompt_tokens: s.prompt_tokens,
+            completion_tokens: s.completion_tokens,
+            cached_tokens: s.cached_tokens,
         }
     }
 }
@@ -242,6 +251,10 @@ pub struct FlightFrame {
     pub error: Option<String>,
     pub request_snippet: Option<String>,
     pub response_snippet: Option<String>,
+    pub prompt_tokens: Option<u64>,
+    pub completion_tokens: Option<u64>,
+    pub cached_tokens: Option<u64>,
+    pub ttft_ms: Option<f64>,
     pub stream_flow: Option<StreamFlowDetail>,
 }
 
@@ -264,6 +277,14 @@ pub struct RecordedFrame {
     pub request_snippet: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub response_snippet: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completion_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cached_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ttft_ms: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream_flow: Option<StreamFlowDetail>,
 }
@@ -318,9 +339,13 @@ impl FlightRecorder {
             attempt: frame.attempt,
             status_code: frame.status_code,
             latency_ms: frame.latency.as_millis() as u64,
-            error: Self::truncate_snippet(frame.error.map(|e| scrub_secrets(&e))),
-            request_snippet: Self::truncate_snippet(frame.request_snippet.map(|s| scrub_secrets(&s))),
-            response_snippet: Self::truncate_snippet(frame.response_snippet.map(|s| scrub_secrets(&s))),
+            error: frame.error,
+            request_snippet: frame.request_snippet.map(|s| scrub_secrets(&s)),
+            response_snippet: frame.response_snippet,
+            prompt_tokens: frame.prompt_tokens,
+            completion_tokens: frame.completion_tokens,
+            cached_tokens: frame.cached_tokens,
+            ttft_ms: frame.ttft_ms,
             stream_flow: frame.stream_flow,
         };
 
@@ -349,6 +374,13 @@ impl FlightRecorder {
         }
 
         let mut buf = self.buffer.write();
+        // If an existing frame with the same request_id is already present (e.g. StreamStarted),
+        // update it in-place rather than leaving the incomplete initial marker.
+        if let Some(pos) = buf.iter().position(|f| f.request_id == recorded.request_id) {
+            buf[pos] = recorded;
+            return;
+        }
+
         if buf.len() >= self.capacity {
             buf.pop_front();
         }
@@ -358,6 +390,24 @@ impl FlightRecorder {
     pub fn get_recent_frames(&self) -> Vec<RecordedFrame> {
         let buf = self.buffer.read();
         buf.iter().cloned().collect()
+    }
+
+    pub fn get_recent_summaries(&self) -> Vec<RecordedFrame> {
+        let buf = self.buffer.read();
+        buf.iter()
+            .map(|f| {
+                let mut summary = f.clone();
+                // 列表摘要请求去除庞大的长文本 payload，秒级传输极速渲染
+                summary.request_snippet = None;
+                summary.response_snippet = None;
+                summary
+            })
+            .collect()
+    }
+
+    pub fn get_frame(&self, request_id: &str) -> Option<RecordedFrame> {
+        let buf = self.buffer.read();
+        buf.iter().find(|f| f.request_id == request_id).cloned()
     }
 
     pub fn sanitize_key(key: &str) -> String {

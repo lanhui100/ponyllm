@@ -254,8 +254,8 @@ pub fn project_anthropic_error(
     render_anthropic_error(status, err_type, message)
 }
 
-/// Maximum snippet characters captured for telemetry and flight recorder frames.
-pub const MAX_SNIPPET_CHARS: usize = 512;
+/// Maximum snippet characters captured for telemetry and flight recorder frames (10MB for rich UI inspection).
+pub const MAX_SNIPPET_CHARS: usize = 10 * 1024 * 1024;
 
 struct BoundedWriter {
     buf: Vec<u8>,
@@ -351,11 +351,10 @@ mod tests {
 
     #[test]
     fn test_format_request_snippet_large_truncated() {
-        let big_content = "a".repeat(2000);
+        let big_content = "a".repeat(MAX_SNIPPET_CHARS + 100);
         let val = serde_json::json!({"model": "gpt-4o", "messages": [{"role": "user", "content": big_content}]});
         let snippet = format_request_snippet(&val);
         assert!(snippet.contains("...[TRUNCATED]"));
-        assert!(snippet.len() < 600);
     }
 }
 

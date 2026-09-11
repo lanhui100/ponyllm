@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use axum::extract::{Query, State};
+use axum::extract::{Path, Query, State};
 use axum::response::IntoResponse;
 use axum::Json;
 use serde::{Deserialize, Serialize};
@@ -11,9 +11,38 @@ use ponyllm_core::telemetry::{
 };
 use crate::state::AppState;
 
-pub async fn handle_get_recorder(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let frames = state.flight_recorder.get_recent_frames();
+#[derive(Debug, Deserialize)]
+pub struct RecorderQuery {
+    #[serde(default)]
+    pub full: bool,
+}
+
+pub async fn handle_get_recorder(
+    Query(query): Query<RecorderQuery>,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let frames = if query.full {
+        state.flight_recorder.get_recent_frames()
+    } else {
+        state.flight_recorder.get_recent_summaries()
+    };
     Json(frames)
+}
+
+pub async fn handle_get_recorder_frame(
+    Path(request_id): Path<String>,
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    match state.flight_recorder.get_frame(&request_id) {
+        Some(frame) => (axum::http::StatusCode::OK, Json(serde_json::to_value(frame).unwrap())),
+        None => (
+            axum::http::StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": "frame_not_found",
+                "message": format!("Frame with request_id '{}' not found", request_id)
+            })),
+        ),
+    }
 }
 
 pub async fn handle_get_metrics(State(state): State<Arc<AppState>>) -> impl IntoResponse {

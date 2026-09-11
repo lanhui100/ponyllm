@@ -8,6 +8,9 @@ export interface StreamFlowDetail {
   tps?: number;
   tpot_p50_ms?: number;
   tpot_p95_ms?: number;
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  cached_tokens?: number;
 }
 
 export interface RecordedFrame {
@@ -23,6 +26,10 @@ export interface RecordedFrame {
   error?: string;
   request_snippet?: string;
   response_snippet?: string;
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  cached_tokens?: number;
+  ttft_ms?: number;
   stream_flow?: StreamFlowDetail;
 }
 

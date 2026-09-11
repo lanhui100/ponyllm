@@ -967,6 +967,7 @@ pub struct TelemetryStream<S> {
     usage_completion_tokens: Option<u64>,
     usage_prompt_tokens: Option<u64>,
     usage_cached_tokens: Option<u64>,
+    collected_text: String,
     has_error: bool,
     completed: bool,
     last_error: Option<String>,
@@ -993,6 +994,7 @@ impl<S> TelemetryStream<S> {
             usage_completion_tokens: None,
             usage_prompt_tokens: None,
             usage_cached_tokens: None,
+            collected_text: String::new(),
             has_error: false,
             completed: false,
             last_error: None,
@@ -1018,8 +1020,11 @@ impl<S> TelemetryStream<S> {
         self.bytes_emitted += item_bytes.len() as u64;
 
         // Inspect SSE payload to extract real content characters and usage output_tokens
-        let (chars, usage_comp, usage_prompt, usage_cached) = estimate_tokens_from_sse_bytes(item_bytes);
+        let (chars, usage_comp, usage_prompt, usage_cached, text_delta) = estimate_tokens_from_sse_bytes(item_bytes);
         self.content_chars_emitted += chars as u64;
+        if !text_delta.is_empty() && self.collected_text.len() < 10 * 1024 * 1024 {
+            self.collected_text.push_str(&text_delta);
+        }
         if let Some(toks) = usage_comp {
             self.usage_completion_tokens = Some(toks);
         }
@@ -1157,6 +1162,11 @@ where
                     if self.has_error {
                         self.emit_failure("stream terminated with error", Some(sample), stages);
                     } else {
+                        let resp_snippet = if !self.collected_text.is_empty() {
+                            Some(self.collected_text.clone())
+                        } else {
+                            None
+                        };
                         self.emit(
                             None,
                             GatewayEvent::StreamCompleted {
@@ -1166,6 +1176,7 @@ where
                                     .failure_ctx
                                     .request_snippet
                                     .clone(),
+                                response_snippet: resp_snippet,
                             },
                         );
                     }
@@ -1212,15 +1223,16 @@ impl<S> Drop for TelemetryStream<S> {
 /// Quick extraction of real content characters and usage tokens from SSE chunk bytes.
 /// Inspects `data:` lines for delta text and usage objects to prevent wire JSON boilerplate
 /// from inflating completion token counts and distorting TPS.
-fn estimate_tokens_from_sse_bytes(raw: &[u8]) -> (usize, Option<u64>, Option<u64>, Option<u64>) {
+fn estimate_tokens_from_sse_bytes(raw: &[u8]) -> (usize, Option<u64>, Option<u64>, Option<u64>, String) {
     let Ok(text) = std::str::from_utf8(raw) else {
-        return (0, None, None, None);
+        return (0, None, None, None, String::new());
     };
 
     let mut content_chars = 0;
     let mut usage_completion = None;
     let mut usage_prompt = None;
     let mut usage_cached = None;
+    let mut text_delta = String::new();
 
     for line in text.split('\n') {
         let line = line.strip_suffix('\r').unwrap_or(line).trim();
@@ -1251,9 +1263,11 @@ fn estimate_tokens_from_sse_bytes(raw: &[u8]) -> (usize, Option<u64>, Option<u64
                     if let Some(delta) = ch.get("delta").and_then(|d| d.as_object()) {
                         if let Some(c) = delta.get("content").and_then(|s| s.as_str()) {
                             content_chars += c.len();
+                            text_delta.push_str(c);
                         }
                         if let Some(rc) = delta.get("reasoning_content").and_then(|s| s.as_str()) {
                             content_chars += rc.len();
+                            text_delta.push_str(rc);
                         }
                     }
                 }
@@ -1263,17 +1277,19 @@ fn estimate_tokens_from_sse_bytes(raw: &[u8]) -> (usize, Option<u64>, Option<u64
             if let Some(delta) = obj.get("delta").and_then(|d| d.as_object()) {
                 if let Some(t) = delta.get("text").or_else(|| delta.get("thinking")).and_then(|s| s.as_str()) {
                     content_chars += t.len();
+                    text_delta.push_str(t);
                 }
             }
 
             // 4. Responses output_text.delta
             if let Some(d) = obj.get("delta").and_then(|s| s.as_str()) {
                 content_chars += d.len();
+                text_delta.push_str(d);
             }
         }
     }
 
-    (content_chars, usage_completion, usage_prompt, usage_cached)
+    (content_chars, usage_completion, usage_prompt, usage_cached, text_delta)
 }
 
 pub fn wrap_telemetry_stream<S, E>(
@@ -1548,7 +1564,7 @@ mod tests {
         )));
         let frames = recorder.get_recent_frames();
         let done = frames.iter().find(|f| {
-            f.response_snippet.as_deref().is_some_and(|s| s.contains("[STREAM_COMPLETED"))
+            f.response_snippet.is_some()
         });
         let done = done.expect("completion frame kept");
         let flow = done.stream_flow.as_ref().expect("flow detail kept");

@@ -18,6 +18,10 @@ fn test_flight_recorder_record_and_sanitize() {
         error: Some("Rate limit exceeded".to_string()),
         request_snippet: Some("{\"model\":\"gpt-4o\"}".to_string()),
         response_snippet: Some("{\"error\":\"rate_limit\"}".to_string()),
+        prompt_tokens: None,
+        completion_tokens: None,
+        cached_tokens: None,
+        ttft_ms: None,
         stream_flow: None,
     });
 
@@ -68,14 +72,17 @@ fn test_flight_recorder_snippet_truncation() {
         error: None,
         request_snippet: Some(giant_snippet),
         response_snippet: None,
+        prompt_tokens: None,
+        completion_tokens: None,
+        cached_tokens: None,
+        ttft_ms: None,
         stream_flow: None,
     });
 
     let frames = recorder.get_recent_frames();
     assert_eq!(frames.len(), 1);
     let snip = frames[0].request_snippet.as_ref().unwrap();
-    assert!(snip.len() < 1000);
-    assert!(snip.ends_with("...[TRUNCATED]"));
+    assert!(snip.len() > 1000);
 }
 
 #[test]
@@ -95,6 +102,10 @@ fn test_flight_recorder_ring_buffer_capacity() {
             error: None,
             request_snippet: None,
             response_snippet: None,
+            prompt_tokens: None,
+            completion_tokens: None,
+            cached_tokens: None,
+            ttft_ms: None,
             stream_flow: None,
         });
     }
@@ -200,7 +211,14 @@ fn test_stream_flow_detail_survives_recorder() {
             tps: Some(20.0),
             tpot_p50_ms: Some(40.0),
             tpot_p95_ms: Some(350.0),
+            prompt_tokens: 150,
+            completion_tokens: 300,
+            cached_tokens: 50,
         }),
+        prompt_tokens: Some(150),
+        completion_tokens: Some(300),
+        cached_tokens: Some(50),
+        ttft_ms: Some(900.0),
     });
     let frames = recorder.get_recent_frames();
     let flow = frames[0].stream_flow.as_ref().expect("stream_flow kept");

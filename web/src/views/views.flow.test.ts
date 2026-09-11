@@ -212,7 +212,8 @@ describe('WEB-02 End-to-End User Flow (Connect -> Dashboard -> Recorder)', () =>
     await new Promise((resolve) => setTimeout(resolve, 50));
     await nextTick();
 
-    expect(container.textContent).toContain('黑匣子录波');
+    expect(container.textContent).toContain('轨迹');
+    expect(container.textContent).toContain('保留 7 天');
     expect(container.textContent).toContain('共 50 / 50 帧');
 
     // Filter by 5xx status
@@ -228,8 +229,8 @@ describe('WEB-02 End-to-End User Flow (Connect -> Dashboard -> Recorder)', () =>
     select.dispatchEvent(new Event('change'));
     await nextTick();
 
-    // Test keyboard navigation: press j to select
-    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'j' }));
+    // Test keyboard navigation: press ArrowDown to select
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown' }));
     await nextTick();
 
     // Press Enter to open FrameDrawer
@@ -237,7 +238,7 @@ describe('WEB-02 End-to-End User Flow (Connect -> Dashboard -> Recorder)', () =>
     await nextTick();
 
     // Verify Drawer content
-    expect(container.textContent).toContain('录波帧详情');
+    expect(container.textContent).toContain('轨迹详情');
     expect(container.textContent).toContain('cURL 复现命令');
 
     // Verify all keys displayed are strictly sk-*** (zero leak of tails like sk-***tail0 or payload keys)

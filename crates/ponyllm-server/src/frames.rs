@@ -52,6 +52,10 @@ impl Projection for FrameConverter {
                     error: Some(summary.clone()),
                     request_snippet: request_snippet.clone(),
                     response_snippet: detail.clone(),
+                    prompt_tokens: None,
+                    completion_tokens: None,
+                    cached_tokens: None,
+                    ttft_ms: None,
                     stream_flow: None,
                 }
             }
@@ -69,24 +73,31 @@ impl Projection for FrameConverter {
                     error: None,
                     request_snippet: request_snippet.clone(),
                     response_snippet: Some("[STREAM_STARTED]".to_string()),
+                    prompt_tokens: None,
+                    completion_tokens: None,
+                    cached_tokens: None,
+                    ttft_ms: None,
                     stream_flow: None,
                 }
             }
             GatewayEvent::StreamCompleted {
                 flow,
                 request_snippet,
+                response_snippet,
                 ..
             } => {
                 let provider = env.provider.clone().unwrap_or_default();
                 let detail = StreamFlowDetail::from(flow);
-                let summary = format!(
-                    "[STREAM_COMPLETED chunks={} bytes={} ttlb_ms={:.0} max_gap_ms={:.0} stalls={}]",
-                    flow.chunks,
-                    flow.bytes,
-                    flow.ttlb_ms,
-                    flow.max_gap_ms.unwrap_or(0.0),
-                    flow.stall_count,
-                );
+                let summary = response_snippet.clone().unwrap_or_else(|| {
+                    format!(
+                        "[STREAM_COMPLETED chunks={} bytes={} ttlb_ms={:.0} max_gap_ms={:.0} stalls={}]",
+                        flow.chunks,
+                        flow.bytes,
+                        flow.ttlb_ms,
+                        flow.max_gap_ms.unwrap_or(0.0),
+                        flow.stall_count,
+                    )
+                });
                 FlightFrame {
                     request_id: env.request_id.clone(),
                     endpoint: env.endpoint.clone(),
@@ -99,6 +110,10 @@ impl Projection for FrameConverter {
                     error: None,
                     request_snippet: request_snippet.clone(),
                     response_snippet: Some(summary),
+                    prompt_tokens: Some(flow.prompt_tokens),
+                    completion_tokens: Some(flow.completion_tokens),
+                    cached_tokens: Some(flow.cached_tokens),
+                    ttft_ms: flow.ttft_ms,
                     stream_flow: Some(detail),
                 }
             }
@@ -121,11 +136,18 @@ impl Projection for FrameConverter {
                     error: Some(error.clone()),
                     request_snippet: request_snippet.clone(),
                     response_snippet: None,
+                    prompt_tokens: flow.as_ref().map(|f| f.prompt_tokens),
+                    completion_tokens: flow.as_ref().map(|f| f.completion_tokens),
+                    cached_tokens: flow.as_ref().map(|f| f.cached_tokens),
+                    ttft_ms: flow.as_ref().and_then(|f| f.ttft_ms),
                     stream_flow: flow.as_ref().map(StreamFlowDetail::from),
                 }
             }
             GatewayEvent::RequestCompleted {
                 status_code,
+                prompt_tokens,
+                completion_tokens,
+                cached_tokens,
                 request_snippet,
                 response_snippet,
                 ..
@@ -143,6 +165,10 @@ impl Projection for FrameConverter {
                     error: None,
                     request_snippet: request_snippet.clone(),
                     response_snippet: response_snippet.clone(),
+                    prompt_tokens: Some(*prompt_tokens),
+                    completion_tokens: Some(*completion_tokens),
+                    cached_tokens: Some(*cached_tokens),
+                    ttft_ms: None,
                     stream_flow: None,
                 }
             }
@@ -164,6 +190,10 @@ impl Projection for FrameConverter {
                     error: Some(error.clone()),
                     request_snippet: request_snippet.clone(),
                     response_snippet: None,
+                    prompt_tokens: None,
+                    completion_tokens: None,
+                    cached_tokens: None,
+                    ttft_ms: None,
                     stream_flow: None,
                 },
                 None => FlightFrame {
@@ -178,6 +208,10 @@ impl Projection for FrameConverter {
                     error: Some(error.clone()),
                     request_snippet: request_snippet.clone(),
                     response_snippet: None,
+                    prompt_tokens: None,
+                    completion_tokens: None,
+                    cached_tokens: None,
+                    ttft_ms: None,
                     stream_flow: None,
                 },
             },

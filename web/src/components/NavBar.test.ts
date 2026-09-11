@@ -10,7 +10,7 @@ describe('NavBar navigation order and links', () => {
     setActivePinia(createPinia());
   });
 
-  it('renders navigation links in order: Dashboard -> 模型管理 -> 可观测性', async () => {
+  it('renders navigation links in order: Dashboard -> 模型管理 -> 轨迹', async () => {
     const router = createRouter({
       history: createWebHistory(),
       routes: [
@@ -40,14 +40,14 @@ describe('NavBar navigation order and links', () => {
       href: a.getAttribute('href'),
     }));
 
-    // Verify exact order requirement: Dashboard -> 模型管理 -> 可观测性
+    // Verify exact order requirement: Dashboard -> 模型管理 -> 轨迹
     expect(linkData[0]).toEqual({ text: 'Dashboard', href: '/dashboard' });
     expect(linkData[1]).toEqual({ text: '模型管理', href: '/governance' });
-    expect(linkData[2]).toEqual({ text: '可观测性', href: '/recorder' });
+    expect(linkData[2]).toEqual({ text: '轨迹', href: '/recorder' });
 
-    // Verify 模型管理 is placed before 可观测性
+    // Verify 模型管理 is placed before 轨迹
     const govIndex = navLinks.findIndex((a) => a.textContent?.trim() === '模型管理');
-    const recIndex = navLinks.findIndex((a) => a.textContent?.trim() === '可观测性');
+    const recIndex = navLinks.findIndex((a) => a.textContent?.trim() === '轨迹');
     expect(govIndex).toBeGreaterThan(-1);
     expect(recIndex).toBeGreaterThan(-1);
     expect(govIndex).toBeLessThan(recIndex);

@@ -11,6 +11,7 @@ const props = withDefaults(
       | 'refresh'
       | 'chevron-down'
       | 'chevron-right'
+      | 'chevron-left'
       | 'copy'
       | 'check'
       | 'info'
@@ -78,6 +79,8 @@ const pxSize = computed(() => (typeof props.size === 'number' ? `${props.size}px
     <path v-else-if="name === 'chevron-down'" d="m6 9 6 6 6-6" />
     <!-- chevron-right -->
     <path v-else-if="name === 'chevron-right'" d="m9 18 6-6-6-6" />
+    <!-- chevron-left -->
+    <path v-else-if="name === 'chevron-left'" d="m15 18-6-6 6-6" />
     <!-- copy -->
     <g v-else-if="name === 'copy'">
       <rect width="14" height="14" x="8" y="8" rx="2" ry="2" />

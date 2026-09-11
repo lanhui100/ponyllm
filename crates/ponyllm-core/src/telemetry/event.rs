@@ -66,6 +66,8 @@ pub enum GatewayEvent {
         flow: StreamFlowSample,
         stages: StageTimings,
         request_snippet: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        response_snippet: Option<String>,
     },
     StreamFailed {
         error: String,
