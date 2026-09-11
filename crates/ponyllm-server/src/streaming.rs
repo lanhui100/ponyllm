@@ -598,6 +598,8 @@ where
     let model = fallback_model.to_string();
     let stopped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let stopped_flag = stopped.clone();
+    let has_emitted_chunks = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let has_emitted_chunks_flag = has_emitted_chunks.clone();
     let transport_errored = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let transport_errored_flag = transport_errored.clone();
 
@@ -619,6 +621,7 @@ where
                     // terminal / heartbeat frame: nothing to forward
                 } else if let Ok(val) = serde_json::from_str::<serde_json::Value>(data) {
                     if let Some(chunk) = antigravity_chunk_to_chat_chunk(&val, &model_stream, &response_id_stream) {
+                        has_emitted_chunks_flag.store(true, std::sync::atomic::Ordering::SeqCst);
                         if chunk.choices.iter().any(|ch| ch.finish_reason.is_some()) {
                             tracing::debug!(
                                 model = %model_stream,
@@ -651,9 +654,13 @@ where
         .chain(futures_util::stream::once(async move {
             let mut buf = Vec::new();
             // If the stream did not stop normally and no transport error occurred,
-            // synthesize the graceful Stop chunk. But if a transport error occurred,
-            // never synthesize a fake Stop chunk that masks the network error as a successful completion.
-            if !stopped.load(std::sync::atomic::Ordering::SeqCst) && !transport_errored.load(std::sync::atomic::Ordering::SeqCst) {
+            // synthesize the graceful Stop chunk ONLY if the stream actually emitted at least
+            // one response chunk. If the upstream ended abruptly with zero chunks emitted,
+            // never synthesize a fake Stop chunk that masks the empty termination.
+            if !stopped.load(std::sync::atomic::Ordering::SeqCst)
+                && !transport_errored.load(std::sync::atomic::Ordering::SeqCst)
+                && has_emitted_chunks.load(std::sync::atomic::Ordering::SeqCst)
+            {
                 let final_chunk = ChatCompletionChunk {
                     id: response_id.clone(),
                     object: "chat.completion.chunk".to_string(),
@@ -2017,6 +2024,23 @@ mod tests {
         assert!(!joined.contains("\"content\":\" \""), "Stream must NOT inject pad whitespace: {}", joined);
         assert!(joined.contains("\"finish_reason\":\"stop\""), "Stream must preserve stop: {}", joined);
         assert!(joined.ends_with("data: [DONE]\n\n"), "Stream must end with [DONE]");
+    }
+
+    #[tokio::test]
+    async fn test_antigravity_sse_to_openai_stream_abrupt_empty_eof_does_not_synthesize_stop() {
+        // When upstream terminates abruptly without emitting ANY chunk (e.g. immediate EOF),
+        // antigravity_sse_to_openai_stream must NOT synthesize a fake Stop chunk.
+        // It must cleanly end with [DONE] so downstream knows zero output was generated.
+        let s = bytes_stream(vec![]);
+
+        let out: Vec<String> = antigravity_sse_to_openai_stream(s, "gemini-3.8-flash-high")
+            .map(|r| String::from_utf8_lossy(&r.unwrap()).to_string())
+            .collect()
+            .await;
+
+        let joined = out.join("");
+        assert!(!joined.contains("\"finish_reason\":\"stop\""), "Must not synthesize fake stop chunk on empty stream: {}", joined);
+        assert_eq!(joined, "data: [DONE]\n\n", "Must only contain [DONE]");
     }
 
     #[tokio::test]
