@@ -656,7 +656,7 @@ where
                         }
                     }
 
-                    if let Some(chunk) = antigravity_chunk_to_chat_chunk(&val, &model_stream, &response_id_stream) {
+                    if let Some(mut chunk) = antigravity_chunk_to_chat_chunk(&val, &model_stream, &response_id_stream) {
                         has_emitted_chunks_flag.store(true, std::sync::atomic::Ordering::SeqCst);
                         for ch in &chunk.choices {
                             if let Some(ref text) = ch.delta.content {
@@ -668,11 +668,22 @@ where
                             if let Some(ref tc) = ch.delta.tool_calls {
                                 total_tool_calls_flag.fetch_add(tc.len() as u64, std::sync::atomic::Ordering::Relaxed);
                             }
+                        }
+
+                        let had_tools = total_tool_calls_flag.load(std::sync::atomic::Ordering::Relaxed) > 0;
+                        for ch in &mut chunk.choices {
+                            // If this or any prior frame contained tool calls, sticky-override Stop to ToolCalls.
+                            // Antigravity often outputs tool_calls in frame 1 without finishReason, then in frame 2
+                            // emits empty parts with finishReason: "STOP". Downstream clients require finish_reason: "tool_calls".
+                            if had_tools && matches!(ch.finish_reason, Some(ponyllm_protocol::openai::chat::FinishReason::Stop)) {
+                                ch.finish_reason = Some(ponyllm_protocol::openai::chat::FinishReason::ToolCalls);
+                            }
                             if let Some(ref fr) = ch.finish_reason {
                                 let mut w = latest_finish_reason_flag.write().unwrap();
                                 *w = Some(format!("{:?}", fr));
                             }
                         }
+
                         if chunk.choices.iter().any(|ch| ch.finish_reason.is_some()) {
                             tracing::debug!(
                                 model = %model_stream,
@@ -712,6 +723,12 @@ where
                 && !transport_errored.load(std::sync::atomic::Ordering::SeqCst)
                 && has_emitted_chunks.load(std::sync::atomic::Ordering::SeqCst)
             {
+                let had_tools = total_tool_calls.load(std::sync::atomic::Ordering::Relaxed) > 0;
+                let synth_finish = if had_tools {
+                    ponyllm_protocol::openai::chat::FinishReason::ToolCalls
+                } else {
+                    ponyllm_protocol::openai::chat::FinishReason::Stop
+                };
                 let final_chunk = ChatCompletionChunk {
                     id: response_id.clone(),
                     object: "chat.completion.chunk".to_string(),
@@ -723,7 +740,7 @@ where
                     choices: vec![ponyllm_protocol::openai::chat::ChatChunkChoice {
                         index: 0,
                         delta: ponyllm_protocol::openai::chat::ChatChunkDelta::default(),
-                        finish_reason: Some(ponyllm_protocol::openai::chat::FinishReason::Stop),
+                        finish_reason: Some(synth_finish),
                         logprobs: None,
                     }],
                     usage: None,
@@ -792,6 +809,8 @@ where
     let total_frames_flag = total_frames.clone();
     let total_content_events = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
     let total_content_events_flag = total_content_events.clone();
+    let has_tool_calls = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let has_tool_calls_flag = has_tool_calls.clone();
     let transport_errored = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let transport_errored_flag = transport_errored.clone();
 
@@ -837,7 +856,16 @@ where
                         }
                     }
 
-                    if let Some(chunk) = antigravity_chunk_to_chat_chunk(&val, &model_stream, &response_id_stream) {
+                    if let Some(mut chunk) = antigravity_chunk_to_chat_chunk(&val, &model_stream, &response_id_stream) {
+                        if chunk.choices.iter().any(|c| c.delta.tool_calls.is_some()) {
+                            has_tool_calls_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                        }
+                        let had_tools = has_tool_calls_flag.load(std::sync::atomic::Ordering::SeqCst);
+                        for ch in &mut chunk.choices {
+                            if had_tools && matches!(ch.finish_reason, Some(ponyllm_protocol::openai::chat::FinishReason::Stop)) {
+                                ch.finish_reason = Some(ponyllm_protocol::openai::chat::FinishReason::ToolCalls);
+                            }
+                        }
                         if let Ok(events) = fsm_flat.lock().process_chunk(chunk) {
                             for e in events {
                                 if matches!(
@@ -2209,6 +2237,62 @@ mod tests {
 
         // Clean finish without panic
         assert!(out.is_empty() || out.iter().all(|s| s.is_empty() || s.starts_with("event:")));
+    }
+
+    #[tokio::test]
+    async fn test_antigravity_sse_to_openai_stream_multiframe_tool_calls_stickiness() {
+        // Frame 1: emits functionCall without finishReason
+        let frame1 = format!(
+            "data: {}\n\n",
+            serde_json::json!({
+                "response": {
+                    "candidates": [{
+                        "content": {
+                            "role": "model",
+                            "parts": [{
+                                "functionCall": {
+                                    "name": "bash",
+                                    "args": {
+                                        "command": "ls"
+                                    }
+                                }
+                            }]
+                        }
+                    }]
+                }
+            })
+        );
+        // Frame 2: terminal frame with empty parts and finishReason STOP
+        let frame2 = format!(
+            "data: {}\n\n",
+            serde_json::json!({
+                "response": {
+                    "candidates": [{
+                        "content": {
+                            "role": "model",
+                            "parts": []
+                        },
+                        "finishReason": "STOP"
+                    }]
+                }
+            })
+        );
+        let s = bytes_stream(vec![
+            Bytes::from(frame1),
+            Bytes::from(frame2),
+            Bytes::from_static(b"data: [DONE]\n\n"),
+        ]);
+
+        let out: Vec<String> = antigravity_sse_to_openai_stream(s, "gemini-3.8-flash-high")
+            .map(|r| String::from_utf8_lossy(&r.unwrap()).to_string())
+            .collect()
+            .await;
+
+        let joined = out.join("");
+        // Must override Stop to tool_calls!
+        assert!(joined.contains("\"finish_reason\":\"tool_calls\""), "Stream must stickily preserve tool_calls finish reason: {}", joined);
+        assert!(!joined.contains("\"finish_reason\":\"stop\""), "Stream must NOT regress to stop when tool_calls were emitted: {}", joined);
+        assert!(joined.ends_with("data: [DONE]\n\n"), "Stream must end with [DONE]");
     }
 
     #[tokio::test]
