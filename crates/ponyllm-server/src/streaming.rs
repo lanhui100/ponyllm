@@ -603,6 +603,17 @@ where
     let transport_errored = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let transport_errored_flag = transport_errored.clone();
 
+    let total_frames = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let total_frames_flag = total_frames.clone();
+    let total_text_bytes = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let total_text_bytes_flag = total_text_bytes.clone();
+    let total_thought_bytes = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let total_thought_bytes_flag = total_thought_bytes.clone();
+    let total_tool_calls = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let total_tool_calls_flag = total_tool_calls.clone();
+    let latest_finish_reason = std::sync::Arc::new(std::sync::RwLock::new(None::<String>));
+    let latest_finish_reason_flag = latest_finish_reason.clone();
+
     let response_id_stream = response_id.clone();
     let model_stream = model.clone();
 
@@ -620,8 +631,48 @@ where
                 if data.is_empty() || data == "[DONE]" {
                     // terminal / heartbeat frame: nothing to forward
                 } else if let Ok(val) = serde_json::from_str::<serde_json::Value>(data) {
+                    total_frames_flag.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+                    // Upstream error or safety block inspection
+                    if let Some(err_obj) = val.get("error").or_else(|| val.get("response").and_then(|r| r.get("error"))) {
+                        let err_msg = err_obj.get("message").and_then(|m| m.as_str()).unwrap_or("unknown error");
+                        let err_code = err_obj.get("code").map(|c| c.to_string()).unwrap_or_else(|| "none".to_string());
+                        tracing::error!(
+                            model = %model_stream,
+                            response_id = %response_id_stream,
+                            error_code = %err_code,
+                            error_message = %err_msg,
+                            "Antigravity upstream returned error frame during OpenAI SSE streaming"
+                        );
+                    }
+                    if let Some(feedback) = val.get("promptFeedback").or_else(|| val.get("response").and_then(|r| r.get("promptFeedback"))) {
+                        if let Some(block_reason) = feedback.get("blockReason").and_then(|b| b.as_str()) {
+                            tracing::warn!(
+                                model = %model_stream,
+                                response_id = %response_id_stream,
+                                block_reason = %block_reason,
+                                "Antigravity prompt blocked by upstream safety/content filter"
+                            );
+                        }
+                    }
+
                     if let Some(chunk) = antigravity_chunk_to_chat_chunk(&val, &model_stream, &response_id_stream) {
                         has_emitted_chunks_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                        for ch in &chunk.choices {
+                            if let Some(ref text) = ch.delta.content {
+                                total_text_bytes_flag.fetch_add(text.len() as u64, std::sync::atomic::Ordering::Relaxed);
+                            }
+                            if let Some(ref reasoning) = ch.delta.reasoning_content {
+                                total_thought_bytes_flag.fetch_add(reasoning.len() as u64, std::sync::atomic::Ordering::Relaxed);
+                            }
+                            if let Some(ref tc) = ch.delta.tool_calls {
+                                total_tool_calls_flag.fetch_add(tc.len() as u64, std::sync::atomic::Ordering::Relaxed);
+                            }
+                            if let Some(ref fr) = ch.finish_reason {
+                                let mut w = latest_finish_reason_flag.write().unwrap();
+                                *w = Some(format!("{:?}", fr));
+                            }
+                        }
                         if chunk.choices.iter().any(|ch| ch.finish_reason.is_some()) {
                             tracing::debug!(
                                 model = %model_stream,
@@ -683,11 +734,36 @@ where
                     buf.extend_from_slice(format!("data: {}\n\n", json).as_bytes());
                 }
             }
-            tracing::debug!(
-                response_id = %response_id,
-                model = %model,
-                "Antigravity SSE to OpenAI stream finalized with [DONE]"
-            );
+
+            let frames = total_frames.load(std::sync::atomic::Ordering::Relaxed);
+            let text_bytes = total_text_bytes.load(std::sync::atomic::Ordering::Relaxed);
+            let thought_bytes = total_thought_bytes.load(std::sync::atomic::Ordering::Relaxed);
+            let tool_calls = total_tool_calls.load(std::sync::atomic::Ordering::Relaxed);
+            let finish_reason = latest_finish_reason.read().unwrap().clone();
+
+            if text_bytes == 0 && tool_calls == 0 && !transport_errored.load(std::sync::atomic::Ordering::SeqCst) {
+                tracing::warn!(
+                    model = %model,
+                    response_id = %response_id,
+                    total_frames = frames,
+                    thought_bytes = thought_bytes,
+                    text_bytes = 0,
+                    tool_calls = 0,
+                    finish_reason = ?finish_reason,
+                    "Antigravity SSE to OpenAI stream finalized with ZERO content bytes! (Model produced only thoughts or empty STOP)"
+                );
+            } else {
+                tracing::debug!(
+                    response_id = %response_id,
+                    model = %model,
+                    total_frames = frames,
+                    text_bytes = text_bytes,
+                    thought_bytes = thought_bytes,
+                    tool_calls = tool_calls,
+                    finish_reason = ?finish_reason,
+                    "Antigravity SSE to OpenAI stream finalized with [DONE]"
+                );
+            }
             buf.extend_from_slice(b"data: [DONE]\n\n");
             Ok::<_, E>(Bytes::from(buf))
         }))
@@ -712,7 +788,15 @@ where
     let stopped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let stopped_flag = stopped.clone();
 
+    let total_frames = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let total_frames_flag = total_frames.clone();
+    let total_content_events = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let total_content_events_flag = total_content_events.clone();
+    let transport_errored = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let transport_errored_flag = transport_errored.clone();
+
     let response_id_stream = response_id.clone();
+    let model_stream = model.clone();
 
     tracing::debug!(
         model = %model,
@@ -728,12 +812,44 @@ where
                 if data.is_empty() || data == "[DONE]" {
                     // terminal / heartbeat frame: nothing to forward
                 } else if let Ok(val) = serde_json::from_str::<serde_json::Value>(data) {
-                    if let Some(chunk) = antigravity_chunk_to_chat_chunk(&val, &model, &response_id_stream) {
+                    total_frames_flag.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+                    // Upstream error or safety block inspection
+                    if let Some(err_obj) = val.get("error").or_else(|| val.get("response").and_then(|r| r.get("error"))) {
+                        let err_msg = err_obj.get("message").and_then(|m| m.as_str()).unwrap_or("unknown error");
+                        let err_code = err_obj.get("code").map(|c| c.to_string()).unwrap_or_else(|| "none".to_string());
+                        tracing::error!(
+                            model = %model_stream,
+                            response_id = %response_id_stream,
+                            error_code = %err_code,
+                            error_message = %err_msg,
+                            "Antigravity upstream returned error frame during Anthropic SSE streaming"
+                        );
+                    }
+                    if let Some(feedback) = val.get("promptFeedback").or_else(|| val.get("response").and_then(|r| r.get("promptFeedback"))) {
+                        if let Some(block_reason) = feedback.get("blockReason").and_then(|b| b.as_str()) {
+                            tracing::warn!(
+                                model = %model_stream,
+                                response_id = %response_id_stream,
+                                block_reason = %block_reason,
+                                "Antigravity prompt blocked by upstream safety/content filter"
+                            );
+                        }
+                    }
+
+                    if let Some(chunk) = antigravity_chunk_to_chat_chunk(&val, &model_stream, &response_id_stream) {
                         if let Ok(events) = fsm_flat.lock().process_chunk(chunk) {
                             for e in events {
+                                if matches!(
+                                    e,
+                                    MessageStreamEvent::ContentBlockDelta { .. }
+                                        | MessageStreamEvent::ContentBlockStart { .. }
+                                ) {
+                                    total_content_events_flag.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                }
                                 if matches!(e, MessageStreamEvent::MessageStop) {
                                     tracing::debug!(
-                                        model = %model,
+                                        model = %model_stream,
                                         response_id = %response_id_stream,
                                         "Antigravity SSE to Anthropic stream reached MessageStop"
                                     );
@@ -749,6 +865,7 @@ where
             }
             Err(e) => {
                 tracing::warn!("Antigravity SSE to Anthropic stream transport error encountered");
+                transport_errored_flag.store(true, std::sync::atomic::Ordering::SeqCst);
                 stopped_flag.store(true, std::sync::atomic::Ordering::SeqCst);
                 out.push(Err(e));
             }
@@ -780,11 +897,27 @@ where
             } else {
                 Bytes::new()
             };
-            tracing::debug!(
-                response_id = %term_response_id,
-                model = %term_model,
-                "Antigravity SSE to Anthropic stream finalized"
-            );
+
+            let frames = total_frames.load(std::sync::atomic::Ordering::Relaxed);
+            let content_events = total_content_events.load(std::sync::atomic::Ordering::Relaxed);
+
+            if content_events == 0 && !transport_errored.load(std::sync::atomic::Ordering::SeqCst) {
+                tracing::warn!(
+                    response_id = %term_response_id,
+                    model = %term_model,
+                    total_frames = frames,
+                    content_events = 0,
+                    "Antigravity SSE to Anthropic stream finalized with ZERO content events! (Model produced no visible blocks)"
+                );
+            } else {
+                tracing::debug!(
+                    response_id = %term_response_id,
+                    model = %term_model,
+                    total_frames = frames,
+                    content_events = content_events,
+                    "Antigravity SSE to Anthropic stream finalized"
+                );
+            }
             Ok::<_, E>(synthetic)
         }))
         .boxed()
@@ -2024,6 +2157,58 @@ mod tests {
         assert!(!joined.contains("\"content\":\" \""), "Stream must NOT inject pad whitespace: {}", joined);
         assert!(joined.contains("\"finish_reason\":\"stop\""), "Stream must preserve stop: {}", joined);
         assert!(joined.ends_with("data: [DONE]\n\n"), "Stream must end with [DONE]");
+    }
+
+    #[tokio::test]
+    async fn test_antigravity_sse_to_openai_stream_upstream_error_frame_does_not_panic() {
+        let err_chunk = format!(
+            "data: {}\n\n",
+            serde_json::json!({
+                "error": {
+                    "code": 429,
+                    "message": "Resource has been exhausted (e.g. check quota)."
+                }
+            })
+        );
+        let s = bytes_stream(vec![
+            Bytes::from(err_chunk),
+            Bytes::from_static(b"data: [DONE]\n\n"),
+        ]);
+
+        let out: Vec<String> = antigravity_sse_to_openai_stream(s, "gemini-3.8-flash-high")
+            .map(|r| String::from_utf8_lossy(&r.unwrap()).to_string())
+            .collect()
+            .await;
+
+        let joined = out.join("");
+        assert_eq!(joined, "data: [DONE]\n\n", "Error frame must be logged without panicking or creating fake choices");
+    }
+
+    #[tokio::test]
+    async fn test_antigravity_sse_to_anthropic_stream_upstream_error_frame_does_not_panic() {
+        let err_chunk = format!(
+            "data: {}\n\n",
+            serde_json::json!({
+                "response": {
+                    "error": {
+                        "code": 500,
+                        "message": "Internal error encountered."
+                    }
+                }
+            })
+        );
+        let s = bytes_stream(vec![
+            Bytes::from(err_chunk),
+            Bytes::from_static(b"data: [DONE]\n\n"),
+        ]);
+
+        let out: Vec<String> = antigravity_sse_to_anthropic_stream(s, "claude-sonnet-4-6")
+            .map(|r| String::from_utf8_lossy(&r.unwrap()).to_string())
+            .collect()
+            .await;
+
+        // Clean finish without panic
+        assert!(out.is_empty() || out.iter().all(|s| s.is_empty() || s.starts_with("event:")));
     }
 
     #[tokio::test]
