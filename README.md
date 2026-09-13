@@ -25,6 +25,15 @@
 
 ## ⚡ 一键快速安装
 
+### 🤖 AI Coding 工具 / Agent 一键接管指引
+在任何 AI Coding Agent（如 DeepSeek Harness, Claude Code, Cursor, Windsurf, Cline 等）的提示词输入框中复制发送以下指令，让 Agent 自动读取操作手册完成安装、配置、启停与接口调用：
+
+```text
+请阅读并执行本项目中的 docs/AGENT_HARNESS.md 指引手册（若为远程仓库请通过 https://raw.githubusercontent.com/lanhui100/ponyllm/main/docs/AGENT_HARNESS.md 获取），完成 ponyllm 网关服务的环境检查、安装、配置接入与接口联通性验证。
+```
+
+---
+
 ### Linux / macOS
 ```bash
 curl -fsSL https://raw.githubusercontent.com/lanhui100/ponyllm/main/install.sh | bash
