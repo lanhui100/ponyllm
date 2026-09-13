@@ -343,6 +343,11 @@ const slotMatrix = computed<HeatSlotItem[]>(() => {
     const isWeeklyZero = quota.gemini.weeklyFraction <= 0 || quota.claude.weeklyFraction <= 0;
     const isCooling = k.state === 'cooling_down' || isWeeklyZero;
 
+    let email = k.id;
+    if (email.startsWith('ag-')) {
+      email = email.slice(3);
+    }
+
     if (isCooling) {
       const remaining = cooldownRemainingSecs(k);
       const label = formatCooldownDuration(remaining);
@@ -358,7 +363,7 @@ const slotMatrix = computed<HeatSlotItem[]>(() => {
         level: 'cooling',
         // 纯绿色阶体系中的冷冻态：清晰可见的柔青薄荷绿（加深，对比鲜明）
         heatClass: 'bg-[#a3e4a8]',
-        tooltipText: `账号 ${k.id} · 冷却保护中 · ${hint}`,
+        tooltipText: `账号: ${email}\n状态: 冷却保护中\n重置: ${hint}`,
         isCooling: true,
       };
     }
@@ -369,40 +374,45 @@ const slotMatrix = computed<HeatSlotItem[]>(() => {
         level: 'low',
         // 尚未探测或未持久化状态：采用低饱和沉静浅灰绿，提示等待刷新
         heatClass: 'bg-[#d0d7de]',
-        tooltipText: `账号 ${k.id} · 等待刷新配额`,
+        tooltipText: `账号: ${email}\n状态: 等待刷新配额`,
         isCooling: false,
       };
     }
 
-    const avg5h = (quota.gemini.h5Fraction + quota.claude.h5Fraction) / 2;
-    const g5h = Math.round(quota.gemini.h5Fraction * 100);
+    // 以 Gemini 配额为核心判断等级（兼顾 5h 即时爆发余量与周度余量）
+    const g5hFraction = quota.gemini.h5Fraction;
+    const g5h = Math.round(g5hFraction * 100);
     const c5h = Math.round(quota.claude.h5Fraction * 100);
+    const gWeekly = Math.round(quota.gemini.weeklyFraction * 100);
+    const cWeekly = Math.round(quota.claude.weeklyFraction * 100);
 
-    if (avg5h >= 0.75) {
+    const baseTooltip = `账号: ${email}\nGemini: 5h余量 ${g5h}% · 周余量 ${gWeekly}%\nClaude: 5h余量 ${c5h}% · 周余量 ${cWeekly}%`;
+
+    if (g5hFraction >= 0.75) {
       return {
         key: k,
         level: 'full',
         // 绿阶最高级 (≥75%): 浓郁高饱和深翠绿
         heatClass: 'bg-[#196127]',
-        tooltipText: `账号 ${k.id} · 额度充沛 · 5h 余量 G:${g5h}% C:${c5h}%`,
+        tooltipText: `${baseTooltip}\n状态: 额度充沛`,
         isCooling: false,
       };
-    } else if (avg5h >= 0.45) {
+    } else if (g5hFraction >= 0.45) {
       return {
         key: k,
         level: 'high',
         // 绿阶第3级 (45%~75%): 茂盛纯正经典绿
         heatClass: 'bg-[#239a3b]',
-        tooltipText: `账号 ${k.id} · 额度良好 · 5h 余量 G:${g5h}% C:${c5h}%`,
+        tooltipText: `${baseTooltip}\n状态: 额度良好`,
         isCooling: false,
       };
-    } else if (avg5h >= 0.15) {
+    } else if (g5hFraction >= 0.15) {
       return {
         key: k,
         level: 'medium',
         // 绿阶第2级 (15%~45%): 醒目草绿 (加深清晰度)
         heatClass: 'bg-[#3cc15e]',
-        tooltipText: `账号 ${k.id} · 额度中等 · 5h 余量 G:${g5h}% C:${c5h}%`,
+        tooltipText: `${baseTooltip}\n状态: 额度中等`,
         isCooling: false,
       };
     } else {
@@ -411,7 +421,7 @@ const slotMatrix = computed<HeatSlotItem[]>(() => {
         level: 'low',
         // 绿阶第1级 (<15%): 清新明朗浅绿 (提高辨识度，不发白)
         heatClass: 'bg-[#7bc96f]',
-        tooltipText: `账号 ${k.id} · 额度偏低 · 5h 余量 G:${g5h}% C:${c5h}%`,
+        tooltipText: `${baseTooltip}\n状态: 额度偏低（G 5h即将耗尽）`,
         isCooling: false,
       };
     }

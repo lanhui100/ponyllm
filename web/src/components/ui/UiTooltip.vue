@@ -64,9 +64,9 @@ const tooltipStyle = computed(() => {
         <div
           v-if="visible && (content || $slots.content)"
           role="tooltip"
-          class="fixed z-[9999] px-3 py-2 text-[13px] font-medium text-white bg-slate-900/95 backdrop-blur-xs rounded-lg shadow-2xl pointer-events-none border border-slate-700/60"
+          class="fixed z-[9999] px-3 py-2 text-[13px] font-medium text-white bg-slate-900/95 backdrop-blur-xs rounded-lg shadow-2xl pointer-events-none border border-slate-700/60 whitespace-pre-line"
           :class="[
-            wrap ? 'w-64 max-w-xs whitespace-normal leading-relaxed text-left' : 'whitespace-nowrap',
+            wrap ? 'w-64 max-w-xs whitespace-normal leading-relaxed text-left' : '',
           ]"
           :style="tooltipStyle"
           data-testid="ui-tooltip"
