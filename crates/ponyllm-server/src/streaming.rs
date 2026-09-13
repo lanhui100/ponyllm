@@ -583,6 +583,65 @@ fn uuid_simple() -> String {
     format!("{:x}", nanos)
 }
 
+/// Inspect an initial Antigravity candidate payload to see if it carries
+/// any content (text, thought, or functionCall), or if it is an empty STOP.
+pub fn is_antigravity_empty_stop_frame(val: &serde_json::Value) -> bool {
+    let target = val.get("response").unwrap_or(val);
+    let candidates = match target.get("candidates").and_then(|v| v.as_array()) {
+        Some(c) => c,
+        None => return false,
+    };
+    let first = match candidates.first() {
+        Some(f) => f,
+        None => return false,
+    };
+
+    let finish_reason = first.get("finishReason").and_then(|v| v.as_str());
+    if finish_reason != Some("STOP") {
+        return false;
+    }
+
+    // Check if there are any non-empty parts
+    if let Some(parts) = first.get("content").and_then(|c| c.get("parts")).and_then(|p| p.as_array()) {
+        for p in parts {
+            if let Some(t) = p.get("text").and_then(|v| v.as_str()) {
+                if !t.is_empty() {
+                    return false;
+                }
+            }
+            if p.get("functionCall").is_some() {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+pub fn has_antigravity_content(val: &serde_json::Value) -> bool {
+    let target = val.get("response").unwrap_or(val);
+    let candidates = match target.get("candidates").and_then(|v| v.as_array()) {
+        Some(c) => c,
+        None => return false,
+    };
+    let first = match candidates.first() {
+        Some(f) => f,
+        None => return false,
+    };
+    if let Some(parts) = first.get("content").and_then(|c| c.get("parts")).and_then(|p| p.as_array()) {
+        for p in parts {
+            if let Some(t) = p.get("text").and_then(|v| v.as_str()) {
+                if !t.is_empty() {
+                    return true;
+                }
+            }
+            if p.get("functionCall").is_some() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Translate an upstream **Antigravity** SSE byte stream into **OpenAI** SSE
 /// frames (`data: {chunk}\n\n`, terminating with `data: [DONE]`). Used by
 /// `/v1/chat/completions` when the routed upstream is Antigravity.
@@ -613,6 +672,8 @@ where
     let total_tool_calls_flag = total_tool_calls.clone();
     let latest_finish_reason = std::sync::Arc::new(std::sync::RwLock::new(None::<String>));
     let latest_finish_reason_flag = latest_finish_reason.clone();
+    let had_empty_stop_candidate = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let had_empty_stop_candidate_flag = had_empty_stop_candidate.clone();
 
     let response_id_stream = response_id.clone();
     let model_stream = model.clone();
@@ -657,6 +718,17 @@ where
                     }
 
                     if let Some(mut chunk) = antigravity_chunk_to_chat_chunk(&val, &model_stream, &response_id_stream) {
+                        // Suppress raw empty STOP chunks when no content has ever been emitted.
+                        // Upstream Google sometimes emits an initial frame with empty parts and finishReason STOP.
+                        // Transmitting this chunk immediately signals a successful completion of zero length,
+                        // triggering client EMPTY_RESPONSE assertions.
+                        let is_empty_stop = chunk.choices.iter().all(|c| {
+                            matches!(c.finish_reason, Some(ponyllm_protocol::openai::chat::FinishReason::Stop))
+                                && c.delta.content.as_deref().unwrap_or("").is_empty()
+                                && c.delta.reasoning_content.as_deref().unwrap_or("").is_empty()
+                                && c.delta.tool_calls.is_none()
+                        });
+
                         has_emitted_chunks_flag.store(true, std::sync::atomic::Ordering::SeqCst);
                         for ch in &chunk.choices {
                             if let Some(ref text) = ch.delta.content {
@@ -693,7 +765,20 @@ where
                             );
                             stopped_flag.store(true, std::sync::atomic::Ordering::SeqCst);
                         }
-                        if let Ok(json) = serde_json::to_string(&chunk) {
+
+                        let text_so_far = total_text_bytes_flag.load(std::sync::atomic::Ordering::Relaxed);
+                        let tools_so_far = total_tool_calls_flag.load(std::sync::atomic::Ordering::Relaxed);
+                        let thought_so_far = total_thought_bytes_flag.load(std::sync::atomic::Ordering::Relaxed);
+                        // If this chunk is an empty STOP and zero content has been emitted so far,
+                        // do NOT push the deceptive STOP chunk downstream!
+                        if is_empty_stop && text_so_far == 0 && tools_so_far == 0 && thought_so_far == 0 {
+                            had_empty_stop_candidate_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                            tracing::warn!(
+                                model = %model_stream,
+                                response_id = %response_id_stream,
+                                "Suppressing deceptive empty STOP chunk on zero-content stream"
+                            );
+                        } else if let Ok(json) = serde_json::to_string(&chunk) {
                             out.push(Ok(Bytes::from(format!("data: {}\n\n", json))));
                         }
                     }
@@ -767,8 +852,23 @@ where
                     text_bytes = 0,
                     tool_calls = 0,
                     finish_reason = ?finish_reason,
-                    "Antigravity SSE to OpenAI stream finalized with ZERO content bytes! (Model produced only thoughts or empty STOP)"
+                    "Antigravity SSE to OpenAI stream finalized with ZERO content bytes! Emitting stream error event to guide client retry."
                 );
+                // Only if the stream actually had an empty STOP candidate,
+                // emit the EMPTY_RESPONSE error frame to notify downstream of the failure.
+                if had_empty_stop_candidate.load(std::sync::atomic::Ordering::SeqCst) {
+                    let err_payload = serde_json::json!({
+                        "error": {
+                            "message": format!("model \"{}\" returned a completed response with no content (upstream transient empty STOP)", model),
+                            "type": "server_error",
+                            "param": null,
+                            "code": "EMPTY_RESPONSE"
+                        }
+                    });
+                    if let Ok(err_str) = serde_json::to_string(&err_payload) {
+                        buf.extend_from_slice(format!("data: {}\n\n", err_str).as_bytes());
+                    }
+                }
             } else {
                 tracing::debug!(
                     response_id = %response_id,
@@ -935,8 +1035,19 @@ where
                     model = %term_model,
                     total_frames = frames,
                     content_events = 0,
-                    "Antigravity SSE to Anthropic stream finalized with ZERO content events! (Model produced no visible blocks)"
+                    "Antigravity SSE to Anthropic stream finalized with ZERO content events! Emitting stream error event to guide client retry."
                 );
+                let err_event = MessageStreamEvent::Error {
+                    error: ponyllm_protocol::anthropic::AnthropicErrorDetail {
+                        r#type: "api_error".to_string(),
+                        message: format!("model \"{}\" returned a completed response with no content (upstream transient empty STOP)", term_model),
+                    },
+                };
+                let mut buf = Vec::new();
+                if let Some(b) = anthropic_event_to_sse_bytes(&err_event) {
+                    buf.extend_from_slice(&b);
+                }
+                Ok::<_, E>(Bytes::from(buf))
             } else {
                 tracing::debug!(
                     response_id = %term_response_id,
@@ -945,8 +1056,8 @@ where
                     content_events = content_events,
                     "Antigravity SSE to Anthropic stream finalized"
                 );
+                Ok::<_, E>(synthetic)
             }
-            Ok::<_, E>(synthetic)
         }))
         .boxed()
 }
@@ -2152,11 +2263,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_antigravity_sse_to_openai_stream_zero_content_emits_clean_finish() {
+    async fn test_antigravity_sse_to_openai_stream_zero_content_emits_error_frame() {
         // When upstream sends a candidate that has only empty parts or no content
-        // followed by finishReason STOP, antigravity_sse_to_openai_stream must NOT inject
-        // fake whitespace content; it should faithfully preserve the clean finish chunk
-        // so downstream client retry policies (e.g. EMPTY_RESPONSE in dsh/pi-ai) can engage.
+        // followed by finishReason STOP, antigravity_sse_to_openai_stream must NOT emit
+        // a deceptive empty stop chunk followed by [DONE]; it must emit an SSE error frame
+        // to clearly notify downstream clients of the upstream failure.
         let empty_chunk = format!(
             "data: {}\n\n",
             serde_json::json!({
@@ -2182,9 +2293,40 @@ mod tests {
             .await;
 
         let joined = out.join("");
-        assert!(!joined.contains("\"content\":\" \""), "Stream must NOT inject pad whitespace: {}", joined);
-        assert!(joined.contains("\"finish_reason\":\"stop\""), "Stream must preserve stop: {}", joined);
+        assert!(!joined.contains("\"finish_reason\":\"stop\""), "Stream must NOT emit deceptive stop on zero content: {}", joined);
+        assert!(joined.contains("\"code\":\"EMPTY_RESPONSE\""), "Stream must emit EMPTY_RESPONSE error frame: {}", joined);
         assert!(joined.ends_with("data: [DONE]\n\n"), "Stream must end with [DONE]");
+    }
+
+    #[tokio::test]
+    async fn test_antigravity_sse_to_anthropic_stream_zero_content_emits_error_frame() {
+        let empty_chunk = format!(
+            "data: {}\n\n",
+            serde_json::json!({
+                "response": {
+                    "candidates": [{
+                        "content": {
+                            "role": "model",
+                            "parts": []
+                        },
+                        "finishReason": "STOP"
+                    }]
+                }
+            })
+        );
+        let s = bytes_stream(vec![
+            Bytes::from(empty_chunk),
+            Bytes::from_static(b"data: [DONE]\n\n"),
+        ]);
+
+        let out: Vec<String> = antigravity_sse_to_anthropic_stream(s, "gemini-3.8-flash-high")
+            .map(|r| String::from_utf8_lossy(&r.unwrap()).to_string())
+            .collect()
+            .await;
+
+        let joined = out.join("");
+        assert!(joined.contains("api_error"), "Anthropic stream must emit error event: {}", joined);
+        assert!(joined.contains("returned a completed response with no content"), "Error message must indicate empty STOP: {}", joined);
     }
 
     #[tokio::test]

@@ -1,11 +1,65 @@
 <script setup lang="ts">
-import { computed } from 'vue';
+import { computed, ref, onMounted } from 'vue';
+import { useRouter } from 'vue-router';
 import { useTelemetry } from '../composables/useTelemetry';
+import { useAdminConfig } from '../composables/useAdminConfig';
 import NavBar from '../components/NavBar.vue';
 import StatusBanner from '../components/StatusBanner.vue';
 import MetricCards from '../components/MetricCards.vue';
+import AntigravityPoolCard from '../components/AntigravityPoolCard.vue';
 import TrendCharts from '../components/TrendCharts.vue';
 import ProviderMatrix from '../components/ProviderMatrix.vue';
+
+const router = useRouter();
+
+const {
+  keys,
+  keyTestResults,
+  adminWriteEnabled,
+  fetchAll: fetchAdminConfig,
+  testSingleKey,
+} = useAdminConfig({ autoFetch: true });
+
+const isRefreshingAntigravity = ref(false);
+
+const antigravityKeys = computed(() => {
+  return keys.value.filter((k) => k.provider.toLowerCase().includes('antigravity'));
+});
+
+async function handleRefreshAntigravityQuotas() {
+  if (antigravityKeys.value.length === 0 || isRefreshingAntigravity.value) return;
+  isRefreshingAntigravity.value = true;
+  try {
+    await Promise.allSettled(
+      antigravityKeys.value.map((k) => testSingleKey(k.id))
+    );
+    // 探测完成后重新拉取 Key 状态：若上游已恢复额度，后端已解除冷却并推入 Active 状态
+    await fetchAdminConfig();
+  } finally {
+    isRefreshingAntigravity.value = false;
+  }
+}
+
+// 页面初始化时刷新获取 Antigravity 最新配额
+onMounted(async () => {
+  // 若首次 fetch 尚未完成或已有 keys，等待配置就绪后触发配额刷新
+  if (antigravityKeys.value.length > 0) {
+    void handleRefreshAntigravityQuotas();
+  } else {
+    try {
+      await fetchAdminConfig();
+      if (antigravityKeys.value.length > 0) {
+        void handleRefreshAntigravityQuotas();
+      }
+    } catch {
+      // 忽略初始化波动
+    }
+  }
+});
+
+function handleNavigateGovernance() {
+  router.push('/governance');
+}
 
 const {
   health,
@@ -62,6 +116,17 @@ const speed24h = computed<number | undefined>(() => {
       <MetricCards
         :metrics="metrics"
         :latest-point="latestPoint"
+      />
+
+      <AntigravityPoolCard
+        v-if="antigravityKeys.length > 0"
+        :keys="antigravityKeys"
+        :key-test-results="keyTestResults"
+        :is-refreshing="isRefreshingAntigravity"
+        :admin-write-enabled="adminWriteEnabled"
+        @refresh-quotas="handleRefreshAntigravityQuotas"
+        @cooldown-expired="fetchAdminConfig"
+        @navigate-governance="handleNavigateGovernance"
       />
 
       <TrendCharts

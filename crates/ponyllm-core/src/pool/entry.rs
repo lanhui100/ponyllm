@@ -211,6 +211,14 @@ impl ApiKeyEntry {
         self.stats.consecutive_failures.store(0, Ordering::SeqCst);
     }
 
+    /// Clear any active cooldown, immediately returning the key to Active state.
+    pub fn clear_cooldown(&self) {
+        let mut cd = self.stats.cooldown_until.write();
+        *cd = None;
+        *self.stats.cooldown_reset_at.write() = None;
+        self.stats.consecutive_failures.store(0, Ordering::SeqCst);
+    }
+
     /// Remaining cooldown, if still cooling.
     pub fn cooldown_remaining(&self) -> Option<Duration> {
         let guard = self.stats.cooldown_until.read();

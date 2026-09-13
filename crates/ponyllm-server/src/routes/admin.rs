@@ -2072,6 +2072,14 @@ pub async fn handle_admin_test_key(
                                 .collect()
                         });
 
+                        let has_positive_quota = snapshot.models.values().any(|m| m.remaining_fraction > 0.0);
+                        if has_positive_quota {
+                            let pools = state.pools.read();
+                            if let Some(pool) = pools.get(&p_name) {
+                                pool.clear_key_cooldown(&key_sec.id);
+                            }
+                        }
+
                         (
                             Some(list),
                             groups_view,

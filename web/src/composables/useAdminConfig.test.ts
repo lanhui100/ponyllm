@@ -291,6 +291,16 @@ describe('useAdminConfig composable (WEB-04 Governance & Admin CUD)', () => {
     expect(config.batchTesting.value.total).toBe(2);
     expect(config.keyTestResults.value['k1'].success).toBe(true);
     expect(config.keyTestResults.value['k2'].success).toBe(false);
+
+    // Verify localStorage persistence
+    const persistedRaw = window.localStorage.getItem('ponyllm_antigravity_quota_results_v1');
+    expect(persistedRaw).not.toBeNull();
+    const persisted = JSON.parse(persistedRaw!);
+    expect(persisted['k1']).toEqual(mockKey1Result);
+
+    // New composable instance should restore from localStorage
+    const newConfig = useAdminConfig({ autoFetch: false });
+    expect(newConfig.keyTestResults.value['k1']).toEqual(mockKey1Result);
   });
 
   it('supports Antigravity OAuth URL generation and account authorization', async () => {

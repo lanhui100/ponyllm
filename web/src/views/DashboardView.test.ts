@@ -183,4 +183,64 @@ describe('DashboardView Full Feature Integration', () => {
     expect(formatTimestamp(ts, '30d')).toBe(monthDay);
     expect(formatTimestamp(ts, '24h')).toBe(hoursMinutes);
   });
+
+  it('renders AntigravityPoolCard when antigravity keys exist', async () => {
+    const mockOverview = {
+      version: '0.2.30',
+      config_version: 1,
+      admin_write_enabled: true,
+      auth_enabled: false,
+    };
+    const mockProviders = [{ name: 'antigravity', base_url: 'http://localhost' }];
+    const mockKeys = [
+      {
+        id: 'anti-key-1',
+        provider: 'antigravity',
+        state: 'active',
+        priority: 1,
+        weight: 10,
+      },
+    ];
+
+    globalThis.fetch = vi.fn().mockImplementation((url: string) => {
+      if (url.includes('/api/admin/overview')) {
+        return Promise.resolve(new Response(JSON.stringify(mockOverview), { status: 200 }));
+      }
+      if (url.includes('/api/admin/providers')) {
+        return Promise.resolve(new Response(JSON.stringify(mockProviders), { status: 200 }));
+      }
+      if (url.includes('/api/admin/models')) {
+        return Promise.resolve(new Response(JSON.stringify([]), { status: 200 }));
+      }
+      if (url.includes('/api/admin/keys')) {
+        return Promise.resolve(new Response(JSON.stringify(mockKeys), { status: 200 }));
+      }
+      if (url.includes('/api/admin/strategy')) {
+        return Promise.resolve(new Response(JSON.stringify({ strategy: 'economy', config_version: 1 }), { status: 200 }));
+      }
+      if (url.includes('/health')) {
+        return Promise.resolve(new Response(JSON.stringify({ status: 'ok' }), { status: 200 }));
+      }
+      return Promise.resolve(new Response(JSON.stringify({}), { status: 200 }));
+    });
+
+    await router.push('/dashboard');
+    const app = createApp(DashboardView);
+    app.use(router);
+    app.mount(container);
+
+    await new Promise((r) => setTimeout(r, 100));
+    await nextTick();
+
+    expect(container.textContent).toContain('Antigravity 算力池');
+    expect(container.textContent).toContain('1/1 账号就绪');
+
+    // Verify that key test was triggered on mounted initialization
+    const testKeyCalls = (globalThis.fetch as any).mock.calls.filter((c: any[]) =>
+      c[0].includes('/api/admin/keys/anti-key-1/test')
+    );
+    expect(testKeyCalls.length).toBeGreaterThanOrEqual(1);
+
+    app.unmount();
+  });
 });

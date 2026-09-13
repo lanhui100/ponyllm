@@ -25,6 +25,42 @@ export interface UseAdminConfigOptions {
   autoFetch?: boolean;
 }
 
+export const ANTIGRAVITY_QUOTA_STORAGE_KEY = 'ponyllm_antigravity_quota_results_v1';
+
+function loadPersistedQuotaResults(): Record<string, KeyTestView> {
+  if (typeof window === 'undefined' || !window.localStorage) {
+    return {};
+  }
+  try {
+    const raw = window.localStorage.getItem(ANTIGRAVITY_QUOTA_STORAGE_KEY);
+    if (!raw) return {};
+    const data = JSON.parse(raw);
+    if (data && typeof data === 'object' && !Array.isArray(data)) {
+      const valid: Record<string, KeyTestView> = {};
+      for (const [k, v] of Object.entries(data)) {
+        if (v && typeof v === 'object' && ('quota' in v || 'quota_groups' in v || 'success' in v)) {
+          valid[k] = v as KeyTestView;
+        }
+      }
+      return valid;
+    }
+  } catch (e) {
+    console.warn('[PonyLLM] failed to load persisted quota results:', e);
+  }
+  return {};
+}
+
+function savePersistedQuotaResults(results: Record<string, KeyTestView>) {
+  if (typeof window === 'undefined' || !window.localStorage) {
+    return;
+  }
+  try {
+    window.localStorage.setItem(ANTIGRAVITY_QUOTA_STORAGE_KEY, JSON.stringify(results));
+  } catch (e) {
+    console.warn('[PonyLLM] failed to save persisted quota results:', e);
+  }
+}
+
 export function useAdminConfig(options: UseAdminConfigOptions = {}) {
   const { autoFetch = true } = options;
 
@@ -40,7 +76,7 @@ export function useAdminConfig(options: UseAdminConfigOptions = {}) {
 
   const conflictDetected = ref<boolean>(false);
   const createdKeyResult = ref<CreateKeyResponse | null>(null);
-  const keyTestResults = ref<Record<string, KeyTestView>>({});
+  const keyTestResults = ref<Record<string, KeyTestView>>(loadPersistedQuotaResults());
   const testingKeyIds = ref<Set<string>>(new Set());
   const proxyStatus = ref<ProxyStatusView | null>(null);
   const batchTesting = ref<{ running: boolean; current: number; total: number }>({
@@ -204,6 +240,10 @@ export function useAdminConfig(options: UseAdminConfigOptions = {}) {
   async function removeKey(id: string): Promise<void> {
     return runWithConflictCheck(async () => {
       await adminApi.deleteKey(id, configVersion.value).send();
+      if (id in keyTestResults.value) {
+        delete keyTestResults.value[id];
+        savePersistedQuotaResults(keyTestResults.value);
+      }
       await fetchAll();
     });
   }
@@ -213,6 +253,7 @@ export function useAdminConfig(options: UseAdminConfigOptions = {}) {
     try {
       const res = await adminApi.testKey(id).send();
       keyTestResults.value[id] = res;
+      savePersistedQuotaResults(keyTestResults.value);
       return res;
     } finally {
       testingKeyIds.value.delete(id);
@@ -265,6 +306,16 @@ export function useAdminConfig(options: UseAdminConfigOptions = {}) {
 
   async function authorizeAntigravity(payload: AuthorizeAntigravityPayload): Promise<AuthorizeAntigravityResponse> {
     const res = await adminApi.authorizeAntigravity(payload).send();
+    if (res.id && (res.quota || res.quota_groups)) {
+      keyTestResults.value[res.id] = {
+        success: true,
+        latency_ms: 0,
+        message: 'ok',
+        quota: res.quota,
+        quota_groups: res.quota_groups,
+      };
+      savePersistedQuotaResults(keyTestResults.value);
+    }
     await fetchAll();
     return res;
   }

@@ -204,6 +204,17 @@ impl KeyPool {
     pub fn total_key_count(&self) -> usize {
         self.keys.read().len()
     }
+
+    /// Clear cooldown for a specific key, immediately restoring it to Active
+    pub fn clear_key_cooldown(&self, key_id: &str) -> bool {
+        let keys = self.keys.read();
+        if let Some(k) = keys.iter().find(|k| k.id == key_id) {
+            k.clear_cooldown();
+            true
+        } else {
+            false
+        }
+    }
 }
 
 #[cfg(test)]

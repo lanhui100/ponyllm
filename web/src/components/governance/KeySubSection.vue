@@ -684,8 +684,8 @@ async function handleRefreshAllQuotas() {
                   </div>
                 </div>
 
-                <!-- 非 Antigravity 专享通用拨测按钮 (Antigravity 已在标题行统一刷新) -->
-                <UiTooltip v-if="!isAntigravity" content="测试密钥连通性">
+                <!-- 拨测/刷新单 Key 按钮 (支持 Antigravity 在账号后单独复测/解冻) -->
+                <UiTooltip :content="isAntigravity ? '探测用量并更新状态 (若配额恢复将自动解除冷却)' : '测试密钥连通性'">
                   <UiButton
                     variant="ghost"
                     size="icon"
