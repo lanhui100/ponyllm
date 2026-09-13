@@ -15,6 +15,7 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 futures = { workspace = true }
 futures-util = { workspace = true }
+bytes = { workspace = true }
 reqwest = { workspace = true }
 tracing = { workspace = true }
 parking_lot = { workspace = true }

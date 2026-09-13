@@ -1336,6 +1336,7 @@ name = "ponyllm-core"
 version = "0.2.43"
 dependencies = [
  "axum",
+ "bytes",
  "chrono",
  "dashmap",
  "futures",

@@ -642,6 +642,124 @@ pub fn has_antigravity_content(val: &serde_json::Value) -> bool {
     false
 }
 
+/// Result of inspecting the initial preamble of an upstream Antigravity SSE stream.
+pub enum AntigravityPreambleResult<S> {
+    /// Preamble contains valid content or sufficient frames; ready to stream downstream.
+    Ready {
+        /// Buffered raw chunks received during preamble inspection.
+        buffered: Vec<Bytes>,
+        /// Live tail stream for remaining chunks.
+        tail: S,
+    },
+    /// Upstream completed with finishReason: "STOP" and 0 content bytes across preamble frames.
+    TransientEmptyStop {
+        frames: usize,
+    },
+    /// Upstream safety block or deterministic error frame.
+    DeterministicBlock {
+        reason: String,
+    },
+    /// Stream ended prematurely before yielding any content or terminal candidate.
+    AbruptTermination,
+}
+
+/// Bounded preamble verification for an Antigravity byte stream.
+///
+/// Inspects frames from the raw byte stream up to `max_frames` (default 8) or until
+/// valid content (`text`, `thought`, or `functionCall`) is confirmed.
+/// If an empty candidate with `finishReason == "STOP"` is encountered before any content
+/// has been emitted, returns `TransientEmptyStop` to allow transparent gateway-side retry.
+pub async fn verify_antigravity_stream_preamble<S, E>(
+    stream: S,
+    chunk_timeout: std::time::Duration,
+) -> Result<AntigravityPreambleResult<S>, E>
+where
+    S: Stream<Item = Result<Bytes, E>> + Send + Unpin + 'static,
+    E: Send + 'static,
+{
+    let mut inner = stream;
+    let mut buffered_bytes: Vec<Bytes> = Vec::new();
+    let mut frame_buf = BytesMut::new();
+    let mut frames_inspected = 0;
+    let max_frames = 8;
+    let max_buffered_bytes = 64 * 1024;
+
+    loop {
+        // First check if any full SSE event exists in the frame_buf
+        while let Some(len) = find_sse_boundary(&frame_buf) {
+            let frame_block = frame_buf.split_to(len);
+            let evt = parse_event_lines(&frame_block);
+            frames_inspected += 1;
+            let data = evt.data.trim();
+
+            if !data.is_empty() && data != "[DONE]" {
+                if let Ok(val) = serde_json::from_str::<serde_json::Value>(data) {
+                    // Check for safety filter block
+                    if let Some(feedback) = val.get("promptFeedback").or_else(|| val.get("response").and_then(|r| r.get("promptFeedback"))) {
+                        if let Some(block_reason) = feedback.get("blockReason").and_then(|b| b.as_str()) {
+                            return Ok(AntigravityPreambleResult::DeterministicBlock {
+                                reason: format!("safety block: {}", block_reason),
+                            });
+                        }
+                    }
+
+                    if has_antigravity_content(&val) {
+                        return Ok(AntigravityPreambleResult::Ready {
+                            buffered: buffered_bytes,
+                            tail: inner,
+                        });
+                    }
+
+                    if is_antigravity_empty_stop_frame(&val) {
+                        return Ok(AntigravityPreambleResult::TransientEmptyStop {
+                            frames: frames_inspected,
+                        });
+                    }
+                }
+            } else if data == "[DONE]" {
+                return Ok(AntigravityPreambleResult::TransientEmptyStop {
+                    frames: frames_inspected,
+                });
+            }
+
+            if frames_inspected >= max_frames {
+                return Ok(AntigravityPreambleResult::Ready {
+                    buffered: buffered_bytes,
+                    tail: inner,
+                });
+            }
+        }
+
+        if buffered_bytes.iter().map(|b| b.len()).sum::<usize>() >= max_buffered_bytes {
+            return Ok(AntigravityPreambleResult::Ready {
+                buffered: buffered_bytes,
+                tail: inner,
+            });
+        }
+
+        // Fetch next chunk from upstream with timeout
+        match tokio::time::timeout(chunk_timeout, inner.next()).await {
+            Ok(Some(Ok(bytes))) => {
+                frame_buf.extend_from_slice(&bytes);
+                buffered_bytes.push(bytes);
+            }
+            Ok(Some(Err(e))) => {
+                return Err(e);
+            }
+            Ok(None) => {
+                // Stream ended at EOF before seeing any content
+                return Ok(AntigravityPreambleResult::TransientEmptyStop {
+                    frames: frames_inspected,
+                });
+            }
+            Err(_) => {
+                // Stalled chunk timeout
+                return Ok(AntigravityPreambleResult::AbruptTermination);
+            }
+        }
+    }
+}
+
 /// Translate an upstream **Antigravity** SSE byte stream into **OpenAI** SSE
 /// frames (`data: {chunk}\n\n`, terminating with `data: [DONE]`). Used by
 /// `/v1/chat/completions` when the routed upstream is Antigravity.
@@ -2489,6 +2607,146 @@ mod tests {
         // Check that tps is within realistic LLM range, not thousands
         assert!(snap.tps < 300.0, "TPS should be reasonably bounded, got {}", snap.tps);
         assert_eq!(snap.stream_count, 1);
+    }
+
+    #[tokio::test]
+    async fn test_verify_antigravity_stream_preamble_content_ready() {
+        let comment = Bytes::from_static(b": keepalive\n\n");
+        let content_chunk = Bytes::from(format!(
+            "data: {}\n\n",
+            serde_json::json!({
+                "response": {
+                    "candidates": [{
+                        "content": {
+                            "role": "model",
+                            "parts": [{"text": "Hello world!"}]
+                        }
+                    }]
+                }
+            })
+        ));
+        let s = bytes_stream(vec![comment, content_chunk]);
+
+        let res = verify_antigravity_stream_preamble(s, std::time::Duration::from_secs(1))
+            .await
+            .expect("verification should succeed");
+
+        match res {
+            AntigravityPreambleResult::Ready { buffered, .. } => {
+                assert_eq!(buffered.len(), 2);
+            }
+            other => panic!("Expected Ready, got {:?}", match other {
+                AntigravityPreambleResult::TransientEmptyStop { .. } => "TransientEmptyStop",
+                AntigravityPreambleResult::DeterministicBlock { .. } => "DeterministicBlock",
+                AntigravityPreambleResult::AbruptTermination => "AbruptTermination",
+                _ => "Other",
+            }),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_verify_antigravity_stream_preamble_thought_ready() {
+        let thought_chunk = Bytes::from(format!(
+            "data: {}\n\n",
+            serde_json::json!({
+                "response": {
+                    "candidates": [{
+                        "content": {
+                            "role": "model",
+                            "parts": [{"thought": true, "text": "Thinking..."}]
+                        }
+                    }]
+                }
+            })
+        ));
+        let s = bytes_stream(vec![thought_chunk]);
+
+        let res = verify_antigravity_stream_preamble(s, std::time::Duration::from_secs(1))
+            .await
+            .expect("verification should succeed");
+
+        assert!(matches!(res, AntigravityPreambleResult::Ready { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_verify_antigravity_stream_preamble_tool_call_ready() {
+        let tool_chunk = Bytes::from(format!(
+            "data: {}\n\n",
+            serde_json::json!({
+                "response": {
+                    "candidates": [{
+                        "content": {
+                            "role": "model",
+                            "parts": [{
+                                "functionCall": {
+                                    "name": "bash",
+                                    "args": {"command": "ls"}
+                                }
+                            }]
+                        }
+                    }]
+                }
+            })
+        ));
+        let s = bytes_stream(vec![tool_chunk]);
+
+        let res = verify_antigravity_stream_preamble(s, std::time::Duration::from_secs(1))
+            .await
+            .expect("verification should succeed");
+
+        assert!(matches!(res, AntigravityPreambleResult::Ready { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_verify_antigravity_stream_preamble_empty_stop() {
+        let ping = Bytes::from_static(b": ping\n\n");
+        let empty_stop = Bytes::from(format!(
+            "data: {}\n\n",
+            serde_json::json!({
+                "response": {
+                    "candidates": [{
+                        "content": {
+                            "role": "model",
+                            "parts": []
+                        },
+                        "finishReason": "STOP"
+                    }]
+                }
+            })
+        ));
+        let s = bytes_stream(vec![ping, empty_stop]);
+
+        let res = verify_antigravity_stream_preamble(s, std::time::Duration::from_secs(1))
+            .await
+            .expect("verification should succeed");
+
+        assert!(matches!(res, AntigravityPreambleResult::TransientEmptyStop { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_verify_antigravity_stream_preamble_safety_block() {
+        let safety_chunk = Bytes::from(format!(
+            "data: {}\n\n",
+            serde_json::json!({
+                "response": {
+                    "promptFeedback": {
+                        "blockReason": "SAFETY"
+                    }
+                }
+            })
+        ));
+        let s = bytes_stream(vec![safety_chunk]);
+
+        let res = verify_antigravity_stream_preamble(s, std::time::Duration::from_secs(1))
+            .await
+            .expect("verification should succeed");
+
+        match res {
+            AntigravityPreambleResult::DeterministicBlock { reason } => {
+                assert!(reason.contains("safety block"));
+            }
+            _ => panic!("Expected DeterministicBlock"),
+        }
     }
 }
 

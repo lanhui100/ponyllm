@@ -4,6 +4,7 @@ use axum::extract::State;
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::IntoResponse;
 use axum::Json;
+use futures_util::StreamExt;
 use ponyllm_core::error::CoreError;
 use ponyllm_core::executor::{is_opencode_zen_target, EventSinkCtx, UpstreamExecutor};
 use ponyllm_core::pool::GatewayRoutingStrategy;
@@ -24,7 +25,8 @@ use crate::state::AppState;
 use crate::streaming::{
     antigravity_sse_to_anthropic_stream, collect_antigravity_sse_to_json,
     openai_sse_to_anthropic_stream, passthrough_sse,
-    responses_sse_to_anthropic_stream, wrap_telemetry_stream, StreamFailureContext,
+    responses_sse_to_anthropic_stream, verify_antigravity_stream_preamble,
+    wrap_telemetry_stream, AntigravityPreambleResult, StreamFailureContext,
 };
 use ponyllm_protocol::anthropic::messages::{AnthropicSystem, AnthropicSystemBlock};
 
@@ -240,10 +242,11 @@ pub async fn handle_messages(
                     resp_req.reasoning = Some(ponyllm_protocol::openai::responses::ResponseReasoningConfig {
                         effort: Some(effective_thinking),
                     });
+                    resp_req.sanitize_thinking_extra();
                 } else {
                     resp_req.reasoning_effort = None;
                     resp_req.reasoning = None;
-                    resp_req.extra.remove("reasoning_effort");
+                    resp_req.sanitize_thinking_extra();
                     resp_req.extra.remove("reasoning");
                 }
                 let input_has_content = match &resp_req.input {
@@ -385,83 +388,147 @@ pub async fn handle_messages(
             .with_event_sink(sink_ctx.clone(), state.event_sink(sink_ctx));
 
         if is_streaming {
-            match executor.execute_stream_request_with_timing(&target_url, &req_val).await {
-                Ok((upstream_resp, attempt_start)) => {
-                    if let Some(p) = prompt_hint.as_deref() {
-                        state.hot_cache.record_dispatch(p, &target.provider_name);
-                    }
-                    state.emit(
-                        &ctx,
-                        Some(target.provider_name.clone()),
-                        GatewayEvent::StreamStarted {
+            let current_executor = executor;
+            let mut stream_attempt = 0;
+            let max_stream_attempts = current_executor.max_retries.max(pool.total_key_count()).max(1);
+
+            loop {
+                stream_attempt += 1;
+                match current_executor.execute_stream_request_with_timing(&target_url, &req_val).await {
+                    Ok((upstream_resp, attempt_start)) => {
+                        let raw_stream = upstream_resp.bytes_stream();
+
+                        // For Antigravity upstream, verify preamble before committing downstream headers.
+                        let (final_raw_stream, is_empty_stop_retry) = if target.upstream_protocol == ponyllm_core::pool::UpstreamProtocol::Antigravity {
+                            match verify_antigravity_stream_preamble(raw_stream, std::time::Duration::from_secs(10)).await {
+                                Ok(AntigravityPreambleResult::Ready { buffered, tail }) => {
+                                    let head_stream = futures_util::stream::iter(buffered.into_iter().map(Ok));
+                                    let chained = head_stream.chain(tail);
+                                    let boxed: Box<dyn futures_util::Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Send + Unpin> = Box::new(chained);
+                                    (boxed, false)
+                                }
+                                Ok(AntigravityPreambleResult::TransientEmptyStop { frames }) => {
+                                    tracing::warn!(
+                                        provider = %target.provider_name,
+                                        frames,
+                                        stream_attempt,
+                                        max_stream_attempts,
+                                        "Antigravity stream preamble completed with empty STOP! Triggering transparent gateway retry."
+                                    );
+                                    let boxed: Box<dyn futures_util::Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Send + Unpin> = Box::new(futures_util::stream::empty());
+                                    (boxed, true)
+                                }
+                                Ok(AntigravityPreambleResult::DeterministicBlock { reason }) => {
+                                    tracing::warn!(
+                                        provider = %target.provider_name,
+                                        reason = %reason,
+                                        "Antigravity prompt blocked by upstream safety during preamble"
+                                    );
+                                    let boxed: Box<dyn futures_util::Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Send + Unpin> = Box::new(futures_util::stream::empty());
+                                    (boxed, false)
+                                }
+                                Ok(AntigravityPreambleResult::AbruptTermination) => {
+                                    tracing::warn!(
+                                        provider = %target.provider_name,
+                                        "Antigravity stream preamble terminated abruptly before content"
+                                    );
+                                    let boxed: Box<dyn futures_util::Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Send + Unpin> = Box::new(futures_util::stream::empty());
+                                    (boxed, true)
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        provider = %target.provider_name,
+                                        error = %e,
+                                        "Antigravity stream preamble transport error"
+                                    );
+                                    let boxed: Box<dyn futures_util::Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Send + Unpin> = Box::new(futures_util::stream::empty());
+                                    (boxed, true)
+                                }
+                            }
+                        } else {
+                            let boxed: Box<dyn futures_util::Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Send + Unpin> = Box::new(raw_stream);
+                            (boxed, false)
+                        };
+
+                        if is_empty_stop_retry && stream_attempt < max_stream_attempts {
+                            continue;
+                        }
+
+                        if let Some(p) = prompt_hint.as_deref() {
+                            state.hot_cache.record_dispatch(p, &target.provider_name);
+                        }
+                        state.emit(
+                            &ctx,
+                            Some(target.provider_name.clone()),
+                            GatewayEvent::StreamStarted {
+                                request_snippet: req_snippet.clone(),
+                            },
+                        );
+
+                        // Stream the raw upstream SSE body. For an OpenAI upstream,
+                        // translate OpenAI chat chunks into Anthropic SSE events.
+                        let est_prompt_tokens = serde_json::to_string(&req.messages).map(|s| (s.len() as u64 / 4).max(1)).unwrap_or(1);
+
+                        // Mid-stream failures (after this started event) are appended
+                        // by the telemetry wrapper with the same request_id.
+                        let failure_ctx = StreamFailureContext {
+                            bus: state.event_bus.clone(),
+                            ctx: ctx.clone(),
+                            provider: target.provider_name.clone(),
+                            stages: stages.clone(),
                             request_snippet: req_snippet.clone(),
-                        },
-                    );
+                            estimated_prompt_tokens: est_prompt_tokens,
+                            attempt_start: Some(attempt_start),
+                        };
+                        let body = match target.upstream_protocol {
+                            ponyllm_core::pool::UpstreamProtocol::Anthropic => {
+                                let stream = passthrough_sse(final_raw_stream);
+                                let monitored = wrap_telemetry_stream(stream, failure_ctx);
+                                axum::body::Body::from_stream(monitored)
+                            }
+                            ponyllm_core::pool::UpstreamProtocol::Responses => {
+                                let stream = responses_sse_to_anthropic_stream(
+                                    final_raw_stream,
+                                    &target.physical_model,
+                                );
+                                let monitored = wrap_telemetry_stream(stream, failure_ctx);
+                                axum::body::Body::from_stream(monitored)
+                            }
+                            ponyllm_core::pool::UpstreamProtocol::Chat => {
+                                let stream = openai_sse_to_anthropic_stream(
+                                    final_raw_stream,
+                                    &target.physical_model,
+                                );
+                                let monitored = wrap_telemetry_stream(stream, failure_ctx);
+                                axum::body::Body::from_stream(monitored)
+                            }
+                            ponyllm_core::pool::UpstreamProtocol::Antigravity => {
+                                let stream = antigravity_sse_to_anthropic_stream(
+                                    final_raw_stream,
+                                    &target.physical_model,
+                                );
+                                let monitored = wrap_telemetry_stream(stream, failure_ctx);
+                                axum::body::Body::from_stream(monitored)
+                            }
+                        };
 
-                    // Stream the raw upstream SSE body. For an OpenAI upstream,
-                    // translate OpenAI chat chunks into Anthropic SSE events.
-                    let raw_stream = upstream_resp.bytes_stream();
-                    let est_prompt_tokens = serde_json::to_string(&req.messages).map(|s| (s.len() as u64 / 4).max(1)).unwrap_or(1);
-
-                    // Mid-stream failures (after this started event) are appended
-                    // by the telemetry wrapper with the same request_id.
-                    let failure_ctx = StreamFailureContext {
-                        bus: state.event_bus.clone(),
-                        ctx: ctx.clone(),
-                        provider: target.provider_name.clone(),
-                        stages: stages.clone(),
-                        request_snippet: req_snippet.clone(),
-                        estimated_prompt_tokens: est_prompt_tokens,
-                        attempt_start: Some(attempt_start),
-                    };
-                    let body = match target.upstream_protocol {
-                        ponyllm_core::pool::UpstreamProtocol::Anthropic => {
-                            let stream = passthrough_sse(raw_stream);
-                            let monitored = wrap_telemetry_stream(stream, failure_ctx);
-                            axum::body::Body::from_stream(monitored)
-                        }
-                        ponyllm_core::pool::UpstreamProtocol::Responses => {
-                            let stream = responses_sse_to_anthropic_stream(
-                                raw_stream,
-                                &target.physical_model,
-                            );
-                            let monitored = wrap_telemetry_stream(stream, failure_ctx);
-                            axum::body::Body::from_stream(monitored)
-                        }
-                        ponyllm_core::pool::UpstreamProtocol::Chat => {
-                            let stream = openai_sse_to_anthropic_stream(
-                                raw_stream,
-                                &target.physical_model,
-                            );
-                            let monitored = wrap_telemetry_stream(stream, failure_ctx);
-                            axum::body::Body::from_stream(monitored)
-                        }
-                        ponyllm_core::pool::UpstreamProtocol::Antigravity => {
-                            let stream = antigravity_sse_to_anthropic_stream(
-                                raw_stream,
-                                &target.physical_model,
-                            );
-                            let monitored = wrap_telemetry_stream(stream, failure_ctx);
-                            axum::body::Body::from_stream(monitored)
-                        }
-                    };
-
-                    let mut resp = axum::response::Response::new(body);
-                    resp.headers_mut().insert(
-                        axum::http::header::CONTENT_TYPE,
-                        HeaderValue::from_static("text/event-stream"),
-                    );
-                    inject_routing_headers(&mut resp, &target);
-                    inject_telemetry_headers(&mut resp, &request_id, &stages);
-                    return resp;
-                }
-                Err(err) => {
-                    tracing::warn!("Provider '{}' stream failed ({}). Attempting fallback...", target.provider_name, err);
-                    last_kind = err.kind();
-                    last_pool_exhausted = matches!(err, CoreError::NoAvailableKey(_));
-                    last_retry_after = crate::extractors::retry_after_secs(&last_kind, pool.earliest_unlock());
-                    last_error = err.to_string();
-                    continue;
+                        let mut resp = axum::response::Response::new(body);
+                        resp.headers_mut().insert(
+                            axum::http::header::CONTENT_TYPE,
+                            HeaderValue::from_static("text/event-stream"),
+                        );
+                        inject_routing_headers(&mut resp, &target);
+                        inject_telemetry_headers(&mut resp, &request_id, &stages);
+                        return resp;
+                    }
+                    Err(err) => {
+                        tracing::warn!("Provider '{}' stream failed ({}). Attempting fallback...", target.provider_name, err);
+                        last_kind = err.kind();
+                        last_pool_exhausted = matches!(err, CoreError::NoAvailableKey(_));
+                        last_retry_after = crate::extractors::retry_after_secs(&last_kind, pool.earliest_unlock());
+                        last_error = err.to_string();
+                        break;
+                    }
                 }
             }
         } else {
