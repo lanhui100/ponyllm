@@ -54,7 +54,7 @@ export function formatKeyState(state?: string | null): string {
       return '就绪';
     case 'cooling_down':
     case 'coolingdown':
-      return '冷却中';
+      return '冷却';
     case 'disabled':
       return '已禁用';
     default:

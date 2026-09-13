@@ -215,6 +215,17 @@ impl KeyPool {
             false
         }
     }
+
+    /// Set cooldown for a specific key
+    pub fn set_key_cooldown(&self, key_id: &str, duration: Duration) -> bool {
+        let keys = self.keys.read();
+        if let Some(k) = keys.iter().find(|k| k.id == key_id) {
+            k.set_cooldown(duration);
+            true
+        } else {
+            false
+        }
+    }
 }
 
 #[cfg(test)]

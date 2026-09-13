@@ -2032,15 +2032,15 @@ pub async fn handle_admin_test_key(
                             });
                         }
 
-                        let groups_view = snapshot.quota_groups.map(|groups| {
+                        let groups_view = snapshot.quota_groups.as_ref().map(|groups| {
                             groups
-                                .into_iter()
+                                .iter()
                                 .map(|g| AntigravityQuotaGroupView {
-                                    display_name: g.display_name,
-                                    description: g.description,
+                                    display_name: g.display_name.clone(),
+                                    description: g.description.clone(),
                                     buckets: g
                                         .buckets
-                                        .into_iter()
+                                        .iter()
                                         .map(|b| {
                                             let (bj_time, rem_desc) = match b.reset_time {
                                                 Some(utc_dt) => {
@@ -2057,14 +2057,14 @@ pub async fn handle_admin_test_key(
                                                 None => (None, None),
                                             };
                                             AntigravityQuotaBucketView {
-                                                bucket_id: b.bucket_id,
-                                                window: b.window,
+                                                bucket_id: b.bucket_id.clone(),
+                                                window: b.window.clone(),
                                                 remaining_fraction: b.remaining_fraction,
                                                 reset_time: b.reset_time.map(|t| t.to_rfc3339()),
                                                 reset_time_beijing: bj_time,
                                                 time_until_reset: rem_desc,
-                                                display_name: b.display_name,
-                                                description: b.description,
+                                                display_name: b.display_name.clone(),
+                                                description: b.description.clone(),
                                             }
                                         })
                                         .collect(),
@@ -2072,10 +2072,37 @@ pub async fn handle_admin_test_key(
                                 .collect()
                         });
 
+                        let mut weekly_exhausted_reset: Option<std::time::Duration> = None;
+                        if let Some(ref groups) = snapshot.quota_groups {
+                            for g in groups {
+                                for b in &g.buckets {
+                                    let win = b.window.to_lowercase();
+                                    let b_id = b.bucket_id.to_lowercase();
+                                    let is_weekly = win == "weekly" || b_id.contains("week") || b_id.contains("7d");
+                                    if is_weekly && b.remaining_fraction <= 0.0 {
+                                        if let Some(reset_time) = b.reset_time {
+                                            let now = chrono::Utc::now();
+                                            if reset_time > now {
+                                                if let Ok(dur) = (reset_time - now).to_std() {
+                                                    weekly_exhausted_reset = Some(match weekly_exhausted_reset {
+                                                        Some(cur) => cur.max(dur),
+                                                        None => dur,
+                                                    });
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
                         let has_positive_quota = snapshot.models.values().any(|m| m.remaining_fraction > 0.0);
-                        if has_positive_quota {
-                            let pools = state.pools.read();
-                            if let Some(pool) = pools.get(&p_name) {
+                        let pools = state.pools.read();
+                        if let Some(pool) = pools.get(&p_name) {
+                            if let Some(exhausted_dur) = weekly_exhausted_reset {
+                                // 周配额耗尽，强制将该 Key 设为冷却并记录解冻时间
+                                pool.set_key_cooldown(&key_sec.id, exhausted_dur);
+                            } else if has_positive_quota {
                                 pool.clear_key_cooldown(&key_sec.id);
                             }
                         }

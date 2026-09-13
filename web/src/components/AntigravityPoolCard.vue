@@ -108,12 +108,22 @@ function formatCooldownDuration(secs: number | null): string {
 // 统计信息
 const totalAccounts = computed(() => props.keys.length);
 
+function isKeyCoolingDown(k: KeyView): boolean {
+  if (k.state === 'cooling_down') return true;
+  const testResult = props.keyTestResults[k.id];
+  if (!testResult) return false;
+  // 必须具有真实 quota_groups 或 quota 配额探测数据，才参与根据周限流判定冷却
+  if (!testResult.quota_groups && !testResult.quota) return false;
+  const q = extractKeyQuota(k, testResult);
+  return q.gemini.weeklyFraction <= 0 || q.claude.weeklyFraction <= 0;
+}
+
 const coolingKeys = computed(() => {
-  return props.keys.filter((k) => k.state === 'cooling_down');
+  return props.keys.filter((k) => isKeyCoolingDown(k));
 });
 
 const activeKeys = computed(() => {
-  return props.keys.filter((k) => k.state !== 'cooling_down');
+  return props.keys.filter((k) => !isKeyCoolingDown(k));
 });
 
 const availabilityRate = computed(() => {
@@ -128,6 +138,7 @@ const nextRecovery = computed(() => {
 
   let minSecs = Infinity;
   let targetKey: KeyView | null = null;
+  let fallbackHint = '';
 
   for (const k of cooling) {
     const secs = cooldownRemainingSecs(k);
@@ -135,15 +146,40 @@ const nextRecovery = computed(() => {
       minSecs = secs;
       targetKey = k;
     }
+    if (!fallbackHint) {
+      const testResult = props.keyTestResults[k.id];
+      if (testResult) {
+        const q = extractKeyQuota(k, testResult);
+        if (q.gemini.weeklyFraction <= 0 && q.gemini.weeklyResetHint && q.gemini.weeklyResetHint !== '已就绪' && q.gemini.weeklyResetHint !== '冷却保护中') {
+          fallbackHint = q.gemini.weeklyResetHint;
+          targetKey = k;
+        } else if (q.claude.weeklyFraction <= 0 && q.claude.weeklyResetHint && q.claude.weeklyResetHint !== '已就绪' && q.claude.weeklyResetHint !== '冷却保护中') {
+          fallbackHint = q.claude.weeklyResetHint;
+          targetKey = k;
+        }
+      }
+    }
   }
 
-  if (minSecs === Infinity || !targetKey) {
-    return { secs: null, label: '冷却保护中', key: null };
+  if (minSecs !== Infinity && targetKey) {
+    return {
+      secs: minSecs,
+      label: formatCooldownDuration(minSecs),
+      key: targetKey,
+    };
+  }
+
+  if (fallbackHint && targetKey) {
+    return {
+      secs: null,
+      label: fallbackHint,
+      key: targetKey,
+    };
   }
 
   return {
-    secs: minSecs,
-    label: formatCooldownDuration(minSecs),
+    secs: null,
+    label: '冷却保护中',
     key: targetKey,
   };
 });
@@ -301,19 +337,28 @@ export interface HeatSlotItem {
 
 const slotMatrix = computed<HeatSlotItem[]>(() => {
   return props.keys.map((k) => {
-    const isCooling = k.state === 'cooling_down';
     const testResult = props.keyTestResults[k.id];
     const quota = extractKeyQuota(k, testResult);
+    // 若后端标记为冷却，或当前探测结果中周限流/5h配额已耗尽归零，均视为冷却保护中
+    const isWeeklyZero = quota.gemini.weeklyFraction <= 0 || quota.claude.weeklyFraction <= 0;
+    const isCooling = k.state === 'cooling_down' || isWeeklyZero;
 
     if (isCooling) {
       const remaining = cooldownRemainingSecs(k);
       const label = formatCooldownDuration(remaining);
+      const hint = label
+        ? `预计 ${label} 后解冻`
+        : (quota.gemini.weeklyResetHint !== '冷却保护中' && quota.gemini.weeklyResetHint !== '已就绪'
+          ? `预计 ${quota.gemini.weeklyResetHint} 解冻`
+          : (quota.claude.weeklyResetHint !== '冷却保护中' && quota.claude.weeklyResetHint !== '已就绪'
+            ? `预计 ${quota.claude.weeklyResetHint} 解冻`
+            : '等待解冻'));
       return {
         key: k,
         level: 'cooling',
         // 纯绿色阶体系中的冷冻态：清晰可见的柔青薄荷绿（加深，对比鲜明）
         heatClass: 'bg-[#a3e4a8]',
-        tooltipText: `账号 ${k.id} · 冷却保护中 · ${label ? `预计 ${label} 后解冻` : '等待解冻'}`,
+        tooltipText: `账号 ${k.id} · 冷却保护中 · ${hint}`,
         isCooling: true,
       };
     }

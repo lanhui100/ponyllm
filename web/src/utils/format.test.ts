@@ -28,7 +28,7 @@ describe('format utility', () => {
 
   it('formats key state into Chinese', () => {
     expect(formatKeyState('active')).toBe('就绪');
-    expect(formatKeyState('cooling_down')).toBe('冷却中');
+    expect(formatKeyState('cooling_down')).toBe('冷却');
     expect(formatKeyState('disabled')).toBe('已禁用');
   });
 

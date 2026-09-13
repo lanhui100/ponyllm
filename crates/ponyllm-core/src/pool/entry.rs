@@ -254,7 +254,7 @@ impl ApiKeyEntry {
     /// `current_state()`, so there is no inversion. Durations are clamped to
     /// [`MAX_COOLDOWN`]; if either clock addition fails the whole update is
     /// skipped, so a garbled/hostile reset can neither panic nor desync.
-    fn set_cooldown(&self, duration: Duration) {
+    pub fn set_cooldown(&self, duration: Duration) {
         let duration = duration.min(MAX_COOLDOWN);
         let Some(deadline) = Instant::now().checked_add(duration) else {
             return;

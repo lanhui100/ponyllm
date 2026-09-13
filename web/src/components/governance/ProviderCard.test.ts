@@ -341,8 +341,8 @@ describe('ProviderCard UI and Phase 2 Requirements', () => {
     toggleKeysBtn?.click();
     await nextTick();
 
-    // Verify "冷却中" badge is displayed
-    expect(container.textContent).toContain('冷却中');
+    // Verify "冷却" badge is displayed
+    expect(container.textContent).toContain('冷却');
 
     // Verify the freeze badge is followed by the upstream-advertised reset
     // time, so a cooling key shows its recovery window instead of a bare label.

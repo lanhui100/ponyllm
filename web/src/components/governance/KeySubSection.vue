@@ -111,6 +111,23 @@ function cancelAdd() {
   formError.value = null;
 }
 
+function formatKeyDisplay(k: KeyView, isAntigravityProvider: boolean): { title: string; subtitle?: string } {
+  if (isAntigravityProvider) {
+    let email = k.id;
+    if (email.startsWith('ag-')) {
+      email = email.slice(3);
+    }
+    return {
+      title: email,
+      subtitle: undefined,
+    };
+  }
+  return {
+    title: k.id,
+    subtitle: k.masked_key,
+  };
+}
+
 function formatQuotaPercent(fraction?: number | null): number {
   return Math.max(0, Math.min(100, Math.round((fraction ?? 0) * 100)));
 }
@@ -531,8 +548,18 @@ async function handleRefreshAllQuotas() {
           >
             <div class="flex items-center justify-between">
               <div class="flex items-center gap-2.5 min-w-0">
-                <span class="font-mono text-slate-900 font-semibold text-sm truncate">{{ k.id }}</span>
-                <span class="font-mono text-slate-500 text-[13px]">{{ k.masked_key }}</span>
+                <span
+                  class="font-mono text-slate-900 font-semibold text-sm truncate max-w-[280px]"
+                  :title="formatKeyDisplay(k, isAntigravity).title"
+                >
+                  {{ formatKeyDisplay(k, isAntigravity).title }}
+                </span>
+                <span
+                  v-if="formatKeyDisplay(k, isAntigravity).subtitle"
+                  class="font-mono text-slate-500 text-[13px]"
+                >
+                  {{ formatKeyDisplay(k, isAntigravity).subtitle }}
+                </span>
                 <!-- 仅在非 active 状态（如 cooling_down / disabled）下显示状态徽标，正常可用时不显示“就绪” -->
                 <UiBadge
                   v-if="k.state !== 'active'"
