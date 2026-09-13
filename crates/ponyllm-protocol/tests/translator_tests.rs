@@ -1668,6 +1668,18 @@ fn test_chat_responses_reasoning_effort_bidirectional() {
     assert_eq!(resp_req.reasoning_effort, Some(ReasoningEffort::High));
     assert_eq!(resp_req.reasoning.as_ref().and_then(|r| r.effort), Some(ReasoningEffort::High));
 
+    // Responses request serialization should output `reasoning: {effort: ...}` and omit top-level `reasoning_effort`
+    let serialized = serde_json::to_value(&resp_req).unwrap();
+    assert_eq!(serialized["reasoning"]["effort"], "high");
+    assert!(serialized.get("reasoning_effort").is_none());
+
+    // Extra contamination test: even if extra has reasoning_effort, it is sanitized
+    let mut chat_req_with_dirty_extra = chat_req.clone();
+    chat_req_with_dirty_extra.extra.insert("reasoning_effort".to_string(), serde_json::json!("high"));
+    let resp_req_clean = chat_to_responses_request(&chat_req_with_dirty_extra).unwrap();
+    let serialized_clean = serde_json::to_value(&resp_req_clean).unwrap();
+    assert!(serialized_clean.get("reasoning_effort").is_none());
+
     // Responses -> Chat
     let back_chat = responses_to_chat_request(&resp_req).unwrap();
     assert_eq!(back_chat.reasoning_effort, Some(ReasoningEffort::High));

@@ -31,7 +31,7 @@ pub struct CreateResponseRequest {
     pub stream: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<HashMap<String, String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing)]
     pub reasoning_effort: Option<ReasoningEffort>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<ResponseReasoningConfig>,
@@ -55,6 +55,11 @@ impl CreateResponseRequest {
             }
         }
         None
+    }
+
+    pub fn sanitize_thinking_extra(&mut self) {
+        self.extra.remove("reasoning_effort");
+        self.extra.remove("thinking");
     }
 
     pub fn required_modalities(&self) -> Vec<&'static str> {

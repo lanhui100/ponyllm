@@ -484,3 +484,132 @@ async fn test_thinking_precedence_header_wins() {
     assert_eq!(reqs.len(), 1);
     assert_eq!(reqs[0]["reasoning_effort"], "high");
 }
+
+#[tokio::test]
+async fn test_responses_upstream_thinking_serialization_omits_top_level_reasoning_effort() {
+    let captured_requests = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
+    let captured_clone = captured_requests.clone();
+
+    let mock_upstream = Router::new().route(
+        "/v1/responses",
+        post(move |Json(req): Json<serde_json::Value>| {
+            let cap = captured_clone.clone();
+            async move {
+                cap.lock().push(req.clone());
+                axum::Json(json!({
+                    "id": "resp_test_123",
+                    "object": "response",
+                    "created_at": 1710000000,
+                    "status": "completed",
+                    "model": "fable-5.1",
+                    "output": [{
+                        "type": "message",
+                        "id": "msg_test",
+                        "role": "assistant",
+                        "status": "completed",
+                        "content": [{
+                            "type": "output_text",
+                            "text": "Hello world"
+                        }]
+                    }],
+                    "usage": {
+                        "input_tokens": 10,
+                        "output_tokens": 5,
+                        "total_tokens": 15
+                    }
+                }))
+            }
+        }),
+    );
+
+    let upstream_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_addr = upstream_listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(upstream_listener, mock_upstream).await.unwrap();
+    });
+
+    let pool = Arc::new(KeyPool::new("zen-provider", RoutingStrategy::Priority));
+    pool.add_key(ApiKeyEntry::new("test-key", "sk-test", 1, 10));
+
+    let mut config = GatewayConfig::default();
+    config.api_key = "sk-pony-test".to_string();
+    config.providers.insert(
+        "zen-provider".to_string(),
+        ProviderConfig {
+            base_url: format!("http://{}", upstream_addr),
+            default_model: "fable-5.1".to_string(),
+            strategy: "priority".to_string(),
+            billing_mode: BillingMode::Metered,
+            input_price: 0.0,
+            cached_price: 0.0,
+            output_price: 0.0,
+            models: vec!["fable-5.1".to_string()],
+            model_specs: vec![ModelSpec {
+                name: "fable-5.1".to_string(),
+                tier: ModelTier::Flagship,
+                thinking_default: Some(ReasoningEffort::High),
+                thinking_max: Some(ReasoningEffort::High),
+                ..Default::default()
+            }],
+            default_protocol: Some(UpstreamProtocol::Responses),
+            chat_url: None,
+            responses_url: None,
+            messages_url: None,
+            proxy: None,
+        },
+    );
+
+    let state = Arc::new(AppState::new(config));
+    state.register_pool("zen-provider", pool);
+
+    let gateway_app = create_app(state);
+    let gateway_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let gateway_addr = gateway_listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(gateway_listener, gateway_app).await.unwrap();
+    });
+
+    let client = reqwest::Client::new();
+
+    // 1. Send request with reasoning_effort in body to chat completions
+    let resp1 = client
+        .post(format!("http://{}/v1/chat/completions", gateway_addr))
+        .header("Authorization", "Bearer sk-pony-test")
+        .json(&json!({
+            "model": "fable-5.1",
+            "messages": [{"role": "user", "content": "Hi"}],
+            "reasoning_effort": "high"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp1.status(), 200);
+
+    // 2. Send request to /v1/responses directly with reasoning_effort
+    let resp2 = client
+        .post(format!("http://{}/v1/responses", gateway_addr))
+        .header("Authorization", "Bearer sk-pony-test")
+        .json(&json!({
+            "model": "fable-5.1",
+            "input": "Hi directly",
+            "reasoning_effort": "high"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp2.status(), 200);
+
+    let reqs = captured_requests.lock().clone();
+    assert_eq!(reqs.len(), 2);
+    for (i, req) in reqs.iter().enumerate() {
+        // Must contain standard reasoning object with effort: high
+        assert_eq!(req["reasoning"]["effort"], "high", "Request {} missing reasoning.effort", i);
+        // Must NEVER contain top-level reasoning_effort
+        assert!(
+            req.get("reasoning_effort").is_none(),
+            "Request {} must not contain top-level reasoning_effort: {:?}",
+            i,
+            req
+        );
+    }
+}

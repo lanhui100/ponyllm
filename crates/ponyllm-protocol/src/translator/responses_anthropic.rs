@@ -479,6 +479,10 @@ pub fn anthropic_to_responses_request(req: &MessageRequest) -> Result<CreateResp
         effort: Some(eff),
     });
 
+    let mut extra = req.extra.clone();
+    extra.remove("reasoning_effort");
+    extra.remove("thinking");
+
     Ok(CreateResponseRequest {
         model: req.model.clone(),
         input,
@@ -493,7 +497,7 @@ pub fn anthropic_to_responses_request(req: &MessageRequest) -> Result<CreateResp
         metadata: None,
         reasoning_effort,
         reasoning,
-        extra: req.extra.clone(),
+        extra,
     })
 }
 

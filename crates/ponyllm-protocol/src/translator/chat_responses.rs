@@ -141,6 +141,10 @@ pub fn chat_to_responses_request(req: &ChatCompletionRequest) -> Result<CreateRe
         effort: Some(eff),
     });
 
+    let mut extra = req.extra.clone();
+    extra.remove("reasoning_effort");
+    extra.remove("thinking");
+
     Ok(CreateResponseRequest {
         model: req.model.clone(),
         input,
@@ -155,7 +159,7 @@ pub fn chat_to_responses_request(req: &ChatCompletionRequest) -> Result<CreateRe
         metadata: None,
         reasoning_effort,
         reasoning,
-        extra: req.extra.clone(),
+        extra,
     })
 }
 

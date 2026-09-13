@@ -212,10 +212,11 @@ pub async fn handle_responses(
             target_req.reasoning = Some(ponyllm_protocol::openai::responses::ResponseReasoningConfig {
                 effort: Some(effective_thinking),
             });
+            target_req.sanitize_thinking_extra();
         } else {
             target_req.reasoning_effort = None;
             target_req.reasoning = None;
-            target_req.extra.remove("reasoning_effort");
+            target_req.sanitize_thinking_extra();
             target_req.extra.remove("reasoning");
         }
 
