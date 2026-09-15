@@ -180,9 +180,25 @@ impl ConnectivitySampler {
     /// Record a single connectivity probe or request result.
     /// gateway 按时间环聚合（5s/格，最近2分钟）；provider 按调用追加（每柱一次调用）。
     pub fn record(&self, provider: &str, timestamp_ms: u64, latency_ms: Option<f64>, is_success: bool) {
+        self.record_with_tps(provider, timestamp_ms, latency_ms, None, is_success);
+    }
+
+    /// Record a connectivity probe or request result with optional generation speed (tps).
+    pub fn record_with_tps(
+        &self,
+        provider: &str,
+        timestamp_ms: u64,
+        latency_ms: Option<f64>,
+        tps: Option<f64>,
+        is_success: bool,
+    ) {
         let state_arc = self.get_or_create_state(provider);
         let mut state = state_arc.write();
         let valid_latency = normalize_latency(latency_ms);
+        let valid_tps = match tps {
+            Some(v) if v.is_finite() && v >= 0.0 => Some((v * 10.0).round() / 10.0),
+            _ => None,
+        };
 
         if let Some(lat) = valid_latency {
             state.latest_latency_ms = Some(lat);
@@ -217,7 +233,7 @@ impl ConnectivitySampler {
             state.calls.push_back(ConnectivitySlot {
                 timestamp_ms,
                 latency_ms: valid_latency,
-                tps: None,
+                tps: valid_tps,
                 status,
             });
             while state.calls.len() > self.provider_slot_count {
@@ -379,25 +395,33 @@ impl ConnectivitySampler {
 
 impl super::event::Projection for ConnectivitySampler {
     fn apply(&self, env: &super::event::EventEnvelope) {
-        let (latency, is_success) = match &env.event {
-            super::event::GatewayEvent::RequestCompleted { latency_ms, status_code, .. } => {
-                (*latency_ms, (200..300).contains(status_code))
+        let (latency, tps, is_success) = match &env.event {
+            super::event::GatewayEvent::RequestCompleted { latency_ms, tps, status_code, .. } => {
+                (*latency_ms, *tps, (200..300).contains(status_code))
             }
             super::event::GatewayEvent::StreamCompleted { flow, .. } => {
-                (flow.ttlb_ms, true)
+                // Provider 与网关连通性优先采用首字延迟（TTFT），反映上游就绪度；无 TTFT 时优雅降级至整流耗时（TTLB）
+                let lat = flow.ttft_ms.unwrap_or(flow.ttlb_ms);
+                (lat, flow.tps, true)
             }
             super::event::GatewayEvent::StreamFailed { flow, .. } => {
-                (flow.as_ref().map(|f| f.ttlb_ms).unwrap_or(0.0), false)
+                let lat = flow
+                    .as_ref()
+                    .and_then(|f| f.ttft_ms)
+                    .or_else(|| flow.as_ref().map(|f| f.ttlb_ms))
+                    .unwrap_or(0.0);
+                let tps = flow.as_ref().and_then(|f| f.tps);
+                (lat, tps, false)
             }
             super::event::GatewayEvent::RequestFailed { latency_ms, .. } => {
-                (*latency_ms, false)
+                (*latency_ms, None, false)
             }
             _ => return,
         };
 
         if let Some(p) = &env.provider {
-            self.record(p, env.wall_ms, Some(latency), is_success);
+            self.record_with_tps(p, env.wall_ms, Some(latency), tps, is_success);
         }
-        self.record("gateway", env.wall_ms, Some(latency), is_success);
+        self.record_with_tps("gateway", env.wall_ms, Some(latency), tps, is_success);
     }
 }

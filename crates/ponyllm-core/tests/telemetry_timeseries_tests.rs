@@ -294,3 +294,55 @@ fn test_timeseries_and_metrics_snapshot_restore() {
     assert_eq!(summary.cached_tokens, 5);
 }
 
+#[test]
+fn test_connectivity_sampler_records_stream_ttft_instead_of_ttlb() {
+    use ponyllm_core::telemetry::{EventEnvelope, Projection, StreamFlowSample, StageTimings};
+
+    let sampler = ConnectivitySampler::default();
+    let now = 1_700_000_000_000u64;
+
+    // 构造一个长回复的 StreamCompleted 事件：
+    // TTFT = 800ms (< 3s 阈值，应判定为 Ok 畅通)
+    // TTLB = 15000ms (>= 5s，若错误取 TTLB 会被判定为 Down 异常/超时)
+    let env = EventEnvelope {
+        seq: 1,
+        request_id: "req-ttft-1".to_string(),
+        session_id: None,
+        wall_ms: now,
+        elapsed_ms: 800.0,
+        endpoint: "/v1/chat/completions".to_string(),
+        model: Some("deepseek-chat".to_string()),
+        provider: Some("deepseek".to_string()),
+        event: GatewayEvent::StreamCompleted {
+            flow: StreamFlowSample {
+                ttft_ms: Some(800.0),
+                downstream_ttft_ms: Some(820.0),
+                ttlb_ms: 15000.0,
+                chunks: 50,
+                bytes: 4096,
+                max_gap_ms: Some(50.0),
+                stall_count: 0,
+                tps: Some(60.0),
+                tpot_p50_ms: Some(15.0),
+                tpot_p95_ms: Some(30.0),
+                tpot_mean_ms: Some(16.0),
+                prompt_tokens: 10,
+                completion_tokens: 500,
+                cached_tokens: 0,
+            },
+            stages: StageTimings::default(),
+            request_snippet: None,
+            response_snippet: None,
+        },
+    };
+
+    sampler.apply(&env);
+
+    let series = sampler.get_series("deepseek", now);
+    assert_eq!(series.latest_latency_ms, Some(800.0), "最新延迟必须记录为 TTFT 800ms 而非 TTLB 15000ms");
+    let last_slot = series.slots.last().unwrap();
+    assert_eq!(last_slot.latency_ms, Some(800.0));
+    assert_eq!(last_slot.status, ConnectivityStatus::Ok, "800ms TTFT 必须为 Ok (绿)");
+    assert_eq!(last_slot.tps, Some(60.0), "必须记录该次流式调用的 TPS");
+}
+
