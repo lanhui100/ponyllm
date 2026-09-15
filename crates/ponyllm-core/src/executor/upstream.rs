@@ -441,6 +441,36 @@ pub fn create_upstream_http_client_with_options(
     }
 }
 
+/// Probe-only variant of the upstream client (H2 red-team B2): same proxy
+/// semantics as [`create_upstream_http_client_with_options`] (so the probe
+/// shares the data plane's egress IP — P0-7 consistency), but with NO
+/// redirect following and short timeouts. An attacker-controlled public
+/// `base_url` that passes the egress gate must not 302 to a
+/// metadata/private target afterwards; redirect attempts surface as errors
+/// instead of being followed.
+pub fn create_probe_http_client_with_options(proxy_url: Option<&str>) -> reqwest::Client {
+    let builder = reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .connect_timeout(Duration::from_secs(5))
+        .tcp_nodelay(true)
+        .redirect(reqwest::redirect::Policy::none());
+    let builder = match proxy_url.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(trimmed) => match reqwest::Proxy::all(trimmed) {
+            Ok(proxy) => {
+                let proxy =
+                    proxy.no_proxy(reqwest::NoProxy::from_string("localhost,127.0.0.1"));
+                builder.proxy(proxy)
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, proxy = %trimmed, "Invalid probe proxy, probing direct");
+                builder.no_proxy()
+            }
+        },
+        None => builder.no_proxy(),
+    };
+    builder.build().unwrap_or_default()
+}
+
 /// Detects system proxy settings dynamically without hardcoding ports.
 ///
 /// Priority order:

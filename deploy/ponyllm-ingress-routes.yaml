@@ -1,0 +1,75 @@
+# C2: IngressRoute split for tokens.ponyjob.top (redirect-safe).
+#
+# The existing Ingress ponyllm/ponyllm-ingress serves web+websecure on ONE
+# router, so attaching redirectScheme there would loop. These two
+# IngressRoutes replace it functionally:
+#   - ponyllm-http: web entrypoint only + https-redirect middleware
+#   - ponyllm-https: websecure only + security-headers middleware + TLS
+#
+# Cutover (rollback = delete these two files' objects, Ingress keeps working):
+#   1. kubectl apply -f this file   (alongside the existing Ingress — no conflict:
+#      IngressRoute and Ingress are separate router sources; the more specific
+#      host+entrypoint match wins deterministically per entrypoint)
+#   2. verify redirect + headers (commands in deploy/ponyllm-ingress-hardening.yaml)
+#   3. only then, optionally remove `web` from the Ingress entrypoints
+#      annotation (leaving websecure-only Ingress as a second anchor).
+#
+# NOTE (C2 acceptance P0): the old Ingress carried the
+# `cert-manager.io/cluster-issuer` annotation — the sole renewal trigger
+# (ingress-shim). It is deleted, so renewal now rests on the explicit
+# Certificate below (decoupled, permanent). Verify with
+# `kubectl get certificate -n ponyllm` READY=True.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: tokens-ponyjob-top-tls
+  namespace: ponyllm
+  labels:
+    app.kubernetes.io/name: ponyllm
+spec:
+  secretName: tokens-ponyjob-top-tls
+  dnsNames:
+    - tokens.ponyjob.top
+  issuerRef:
+    name: letsencrypt-prod
+    kind: ClusterIssuer
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: ponyllm-http
+  namespace: ponyllm
+  labels:
+    app.kubernetes.io/name: ponyllm
+spec:
+  entryPoints:
+    - web
+  routes:
+    - match: Host(`tokens.ponyjob.top`)
+      kind: Rule
+      middlewares:
+        - name: ponyllm-https-redirect
+      services:
+        - name: ponyllm-gateway
+          port: 8080
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: ponyllm-https
+  namespace: ponyllm
+  labels:
+    app.kubernetes.io/name: ponyllm
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - match: Host(`tokens.ponyjob.top`)
+      kind: Rule
+      middlewares:
+        - name: ponyllm-security-headers
+      services:
+        - name: ponyllm-gateway
+          port: 8080
+  tls:
+    secretName: tokens-ponyjob-top-tls

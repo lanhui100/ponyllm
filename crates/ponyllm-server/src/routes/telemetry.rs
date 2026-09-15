@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use axum::extract::{Path, Query, State};
+use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
 use serde::{Deserialize, Serialize};
@@ -10,6 +11,27 @@ use ponyllm_core::telemetry::{
     ConnectivityBarSeries, StreamFlowSummary, TimeseriesHistoryResponse,
 };
 use crate::state::AppState;
+
+/// H3: full request/response/error text is only served when the deployment
+/// opted into admin writes. A read-only gateway (`admin_write_enabled=false`,
+/// the default) answers 404 `telemetry_full_disabled` so any leaked/issued
+/// inference token cannot bulk-read other callers' prompts. Summaries and
+/// aggregate metrics stay available under the normal gateway token.
+fn require_full_telemetry(state: &AppState) -> Result<(), axum::response::Response> {
+    if !state.config.read().admin_write_enabled {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": {
+                    "message": "full telemetry frames are disabled (admin_write_enabled is false)",
+                    "code": "telemetry_full_disabled"
+                }
+            })),
+        )
+            .into_response());
+    }
+    Ok(())
+}
 
 #[derive(Debug, Deserialize)]
 pub struct RecorderQuery {
@@ -21,27 +43,31 @@ pub async fn handle_get_recorder(
     Query(query): Query<RecorderQuery>,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
-    let frames = if query.full {
-        state.flight_recorder.get_recent_frames()
-    } else {
-        state.flight_recorder.get_recent_summaries()
-    };
-    Json(frames)
+    if query.full {
+        if let Err(resp) = require_full_telemetry(&state) {
+            return resp.into_response();
+        }
+        return Json(state.flight_recorder.get_recent_frames()).into_response();
+    }
+    Json(state.flight_recorder.get_recent_summaries()).into_response()
 }
 
 pub async fn handle_get_recorder_frame(
     Path(request_id): Path<String>,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
+    if let Err(resp) = require_full_telemetry(&state) {
+        return resp;
+    }
     match state.flight_recorder.get_frame(&request_id) {
-        Some(frame) => (axum::http::StatusCode::OK, Json(serde_json::to_value(frame).unwrap())),
+        Some(frame) => (axum::http::StatusCode::OK, Json(serde_json::to_value(frame).unwrap())).into_response(),
         None => (
             axum::http::StatusCode::NOT_FOUND,
             Json(serde_json::json!({
                 "error": "frame_not_found",
                 "message": format!("Frame with request_id '{}' not found", request_id)
             })),
-        ),
+        ).into_response(),
     }
 }
 

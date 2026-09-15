@@ -65,7 +65,7 @@ pub struct GatewaySection {
 }
 
 fn default_admin_write_enabled() -> bool {
-    true
+    false
 }
 
 pub fn default_request_body_limit() -> usize {

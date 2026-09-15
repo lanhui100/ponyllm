@@ -829,6 +829,53 @@ pub async fn handle_admin_create_provider(
     };
     let default_proto = payload.default_protocol.as_deref().and_then(parse_protocol_opt);
 
+    // H2: same strict field validation as the CLI (scheme/format), plus an
+    // egress guard on every URL the gateway will later dial from admin
+    // probes. `proxy` gets its own policy (loopback allowed, private/
+    // metadata refused) — see check_proxy_url_fast.
+    if let Err(msg) = ponyllm_config::validate_provider_fields(
+        &payload.base_url,
+        &default_model,
+        &strategy,
+        &payload.billing_mode,
+        payload.chat_url.as_deref(),
+        payload.responses_url.as_deref(),
+        payload.messages_url.as_deref(),
+    ) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": {"message": msg, "code": "invalid_provider_fields"}})),
+        )
+            .into_response();
+    }
+    for (label, url) in [
+        ("base_url", Some(payload.base_url.as_str())),
+        ("chat_url", payload.chat_url.as_deref()),
+        ("responses_url", payload.responses_url.as_deref()),
+        ("messages_url", payload.messages_url.as_deref()),
+    ] {
+        if let Some(u) = url {
+            if let Err(reason) = crate::egress::check_probe_url_fast(u) {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": {"message": format!("{} blocked by egress policy: {}", label, reason), "code": "egress_blocked"}})),
+                )
+                    .into_response();
+            }
+        }
+    }
+    if let Some(ref proxy) = payload.proxy {
+        if !proxy.trim().is_empty() {
+            if let Err(reason) = crate::egress::check_proxy_url_fast(proxy) {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": {"message": format!("proxy blocked by egress policy: {}", reason), "code": "egress_blocked"}})),
+                )
+                    .into_response();
+            }
+        }
+    }
+
     let p_sec = ProviderSection {
         base_url: payload.base_url.clone(),
         default_model: default_model.clone(),
@@ -972,6 +1019,60 @@ pub async fn handle_admin_update_provider(
         } else {
             Some(proxy.trim().to_string())
         };
+    }
+
+    // H2: same format validation as create (strategy/billing/URLs), then the
+    // egress guard on the effective URLs. Field-level validation must run
+    // even when only a subset of fields is patched.
+    {
+        let strategy_check = payload.strategy.as_deref().unwrap_or(&p.strategy);
+        let billing_check = match p.billing_mode {
+            BillingMode::Free => "free",
+            BillingMode::Metered => "metered",
+            BillingMode::Plan => "plan",
+        };
+        if let Err(msg) = ponyllm_config::validate_provider_fields(
+            &p.base_url,
+            &p.default_model,
+            strategy_check,
+            billing_check,
+            p.chat_url.as_deref(),
+            p.responses_url.as_deref(),
+            p.messages_url.as_deref(),
+        ) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": {"message": msg, "code": "invalid_provider_fields"}})),
+            )
+                .into_response();
+        }
+    }
+    // H2: validate the effective URLs after mutation, before persisting
+    // (same policy as create; `proxy` uses its own loopback-tolerant policy).
+    for (label, url) in [
+        ("base_url", Some(p.base_url.as_str())),
+        ("chat_url", p.chat_url.as_deref()),
+        ("responses_url", p.responses_url.as_deref()),
+        ("messages_url", p.messages_url.as_deref()),
+    ] {
+        if let Some(u) = url {
+            if let Err(reason) = crate::egress::check_probe_url_fast(u) {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": {"message": format!("{} blocked by egress policy: {}", label, reason), "code": "egress_blocked"}})),
+                )
+                    .into_response();
+            }
+        }
+    }
+    if let Some(ref proxy) = p.proxy {
+        if let Err(reason) = crate::egress::check_proxy_url_fast(proxy) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": {"message": format!("proxy blocked by egress policy: {}", reason), "code": "egress_blocked"}})),
+            )
+                .into_response();
+        }
     }
 
     let updated_p = p.clone();
@@ -1255,6 +1356,29 @@ pub async fn handle_admin_create_model(
         .filter(|s| !s.is_empty())
         .map(str::to_string);
 
+    // H2: model-level base_url/proxy ride the same outbound path as the
+    // provider ones — gate them before persisting.
+    if let Some(ref bu) = base_url {
+        if let Err(reason) = crate::egress::check_probe_url_fast(bu) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": {"message": format!("base_url blocked by egress policy: {}", reason), "code": "egress_blocked"}})),
+            )
+                .into_response();
+        }
+    }
+    if let Some(ref proxy) = payload.proxy {
+        if !proxy.trim().is_empty() {
+            if let Err(reason) = crate::egress::check_proxy_url_fast(proxy) {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": {"message": format!("proxy blocked by egress policy: {}", reason), "code": "egress_blocked"}})),
+                )
+                    .into_response();
+            }
+        }
+    }
+
     let m_cfg = ModelConfig {
         name: model_name.clone(),
         tier,
@@ -1532,6 +1656,26 @@ pub async fn handle_admin_update_model(
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(str::to_string);
+    }
+
+    // H2: same URL/proxy gate as model create, on the effective values.
+    if let Some(ref bu) = existing_config.base_url {
+        if let Err(reason) = crate::egress::check_probe_url_fast(bu) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": {"message": format!("base_url blocked by egress policy: {}", reason), "code": "egress_blocked"}})),
+            )
+                .into_response();
+        }
+    }
+    if let Some(ref proxy) = existing_config.proxy {
+        if let Err(reason) = crate::egress::check_proxy_url_fast(proxy) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": {"message": format!("proxy blocked by egress policy: {}", reason), "code": "egress_blocked"}})),
+            )
+                .into_response();
+        }
     }
 
     p_sec.model_configs.retain(|m| m.name != name);
@@ -1948,6 +2092,21 @@ pub async fn handle_admin_test_key(
 
     let base_url = p_sec.base_url.clone();
     if key_sec.is_antigravity(p_sec.default_protocol, &p_name) {
+        // H2: the agy quota probe POSTs to {base_url}/v1internal:… with a
+        // Bearer token — a hostile base_url would exfiltrate it. Gate the
+        // endpoint the same way as the OpenAI probe below.
+        if let Err(reason) = crate::egress::check_probe_url(&base_url).await {
+            return Json(KeyTestView {
+                success: false,
+                latency_ms: 0,
+                http_status: None,
+                error_code: Some("egress_blocked".to_string()),
+                message: format!("probe target blocked by egress policy: {}", reason),
+                quota: None,
+                quota_groups: None,
+            })
+            .into_response();
+        }
         let cred = match key_sec.to_antigravity_credential() {
             Ok(c) => c,
             Err(e) => {
@@ -2002,7 +2161,16 @@ pub async fn handle_admin_test_key(
                     .map(|d| d.subsec_micros() % 1500)
                     .unwrap_or(0);
                 tokio::time::sleep(std::time::Duration::from_millis(jitter_ms as u64)).await;
-                let quota_res = mgr.fetch_quota(Some(&base_url)).await;
+                // H2 red-team B2: probe through a no-redirect client sharing
+                // the pool manager's credentials (same egress IP — P0-7 is
+                // preserved because only the redirect policy differs, not the
+                // proxy). A hostile base_url that passed the gate above must
+                // not 302 to a metadata/private target afterwards.
+                let probe_client = state.probe_http_client_for_provider(&p_name);
+                let quota_res = mgr
+                    .with_client(&probe_client)
+                    .fetch_quota(Some(&base_url))
+                    .await;
                 let (quota_view, quota_groups_view, quota_msg) = match quota_res {
                     Ok(snapshot) => {
                         let mut list = Vec::new();
@@ -2154,9 +2322,25 @@ pub async fn handle_admin_test_key(
         format!("{}/models", base_url.trim_end_matches('/'))
     };
 
+    // H2: resolve-then-check immediately before dialing (closes the
+    // write-time/use-time DNS-rebinding window as far as possible).
+    if let Err(reason) = crate::egress::check_probe_url(&probe_url).await {
+        return Json(KeyTestView {
+            success: false,
+            latency_ms: 0,
+            http_status: None,
+            error_code: Some("egress_blocked".to_string()),
+            message: format!("probe target blocked by egress policy: {}", reason),
+            quota: None,
+            quota_groups: None,
+        })
+        .into_response();
+    }
+
     let start = Instant::now();
-    let mut req = state
-        .http_client
+    // H2: probes use a dedicated no-redirect client: an attacker public URL
+    // must not 302 to a metadata/private target after the gate above passed.
+    let mut req = crate::egress::probe_http_client()
         .get(&probe_url)
         .timeout(std::time::Duration::from_secs(3))
         .header(header::USER_AGENT, "ponyllm-dialtest/0.1");
@@ -2274,6 +2458,9 @@ pub async fn handle_admin_put_strategy(
     headers: HeaderMap,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
+    if let Err(resp) = check_admin_write_enabled(&state) {
+        return resp;
+    }
     let _lock = state.admin_write_lock.lock().await;
     let Some(strategy_str) = body.get("strategy").and_then(|v| v.as_str()) else {
         return (
@@ -2294,26 +2481,11 @@ pub async fn handle_admin_put_strategy(
         Err(resp) => return resp,
     };
 
-    // If caller provided If-Match, enforce optimistic lock
-    if let Some(raw) = headers.get(header::IF_MATCH).and_then(|v| v.to_str().ok()) {
-        let trimmed = raw.trim().trim_matches('"');
-        if trimmed != "*" {
-            match trimmed.parse::<u64>() {
-                Ok(v) if v == file.config_version => {}
-                _ => {
-                    return (
-                        StatusCode::PRECONDITION_FAILED,
-                        Json(json!({
-                            "error": {
-                                "message": format!("config version conflict: current is {}, If-Match specified {}", file.config_version, raw),
-                                "code": "precondition_failed"
-                            }
-                        })),
-                    )
-                        .into_response();
-                }
-            }
-        }
+    // Strategy is a shared global mutation: always require an explicit
+    // If-Match version (same contract as the other CUD endpoints) so two
+    // concurrent writers cannot silently lost-update each other.
+    if let Err(resp) = check_if_match(&headers, file.config_version) {
+        return resp;
     }
 
     file.gateway.default_strategy = new_strategy;
@@ -2348,6 +2520,9 @@ pub async fn handle_admin_service_status(State(state): State<Arc<AppState>>) -> 
 
 #[utoipa::path(post, path = "/api/admin/auth/rotate", responses((status = 200, body = RotateView)))]
 pub async fn handle_admin_auth_rotate(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    if let Err(resp) = check_admin_write_enabled(&state) {
+        return resp;
+    }
     if auth_mode(&state) == "open" {
         return (
             StatusCode::CONFLICT,
@@ -2367,6 +2542,10 @@ pub async fn handle_admin_auth_rotate(State(state): State<Arc<AppState>>) -> imp
         Err(resp) => return resp,
     };
     state.config.write().api_key = new_token.clone();
+    tracing::info!(
+        config_version = new_version,
+        "admin rotated gateway token"
+    );
     let rotated_at = chrono::Utc::now().to_rfc3339();
     let mut resp = Json(RotateView { new_token, rotated_at, config_version: new_version }).into_response();
     resp.headers_mut().insert(
@@ -2704,6 +2883,12 @@ pub async fn handle_admin_antigravity_auth_url(
     State(state): State<Arc<AppState>>,
     Query(query): Query<AntigravityAuthUrlQuery>,
 ) -> impl IntoResponse {
+    // auth-url seeds the in-memory pending OAuth map: treat it as a write
+    // (same gate as authorize) so a read-only deployment cannot start new
+    // OAuth bindings.
+    if let Err(resp) = check_admin_write_enabled(&state) {
+        return resp.into_response();
+    }
     let redirect_uri = query.redirect_uri.unwrap_or_else(|| {
         format!(
             "http://localhost:{}/oauth2callback",
@@ -2748,6 +2933,7 @@ pub async fn handle_admin_antigravity_auth_url(
         redirect_uri,
         state: state_key,
     })
+    .into_response()
 }
 
 #[utoipa::path(post, path = "/api/admin/oauth/antigravity/authorize", request_body = AuthorizeAntigravityPayload, responses((status = 200, body = AuthorizeAntigravityResponse)))]
@@ -2780,6 +2966,19 @@ pub async fn handle_admin_authorize_antigravity(
         .or_else(|| store_provider_proxy.map(|s| s.to_string()))
         .or_else(|| gateway_proxy.map(|s| s.to_string()))
         .or(detected_proxy);
+
+    // H2: the winning proxy steers the OAuth code exchange (Bearer-bearing
+    // POST). Refuse hostile proxies here the same way provider writes do;
+    // loopback stays allowed (local pproxy is the documented shape).
+    if let Some(ref proxy_url) = effective_proxy {
+        if let Err(reason) = crate::egress::check_proxy_url_fast(proxy_url) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": {"message": format!("proxy blocked by egress policy: {}", reason), "code": "egress_blocked"}})),
+            )
+                .into_response();
+        }
+    }
 
     // 2. Parse OAuth input (extract code and potential redirect_uri, or catch Google error)
     let (code, inferred_redirect) = match ponyllm_core::pool::parse_oauth_callback_input(&payload.code_or_url) {
@@ -2963,10 +3162,24 @@ pub async fn handle_admin_authorize_antigravity(
         state.pending_antigravity_oauth.write().remove(st);
     }
 
-    // Best-effort quota fetch using the ready token manager
-    let (quota, quota_groups) = match tokio::time::timeout(
+    // Best-effort quota fetch using the ready token manager.
+    // H2: gate the endpoint first — a hostile provider base_url must not
+    // receive the fresh Bearer token. On block, skip quota (None) but keep
+    // the authorized key (the credential itself is already stored).
+    let quota_allowed = crate::egress::check_probe_url(&provider_base_url).await.is_ok();
+    if !quota_allowed {
+        tracing::warn!(
+            provider = %target_provider,
+            "skipping post-authorize quota fetch: endpoint blocked by egress policy"
+        );
+    }
+    let (quota, quota_groups) = if quota_allowed {
+        // H2 red-team B2: same no-redirect probe client as the dial paths.
+        let probe_client = state.probe_http_client_for_provider(&target_provider);
+        match tokio::time::timeout(
         std::time::Duration::from_secs(4),
-        mgr.fetch_quota(Some(&provider_base_url)),
+        mgr.with_client(&probe_client)
+            .fetch_quota(Some(&provider_base_url)),
     )
     .await
     {
@@ -3041,6 +3254,9 @@ pub async fn handle_admin_authorize_antigravity(
             (Some(list), groups_view)
         }
         _ => (None, None),
+    }
+    } else {
+        (None, None)
     };
 
     let mut resp = (
@@ -3124,6 +3340,15 @@ pub async fn handle_admin_provider_upstream_models(
 
     // Antigravity: available models come from the quota probe, not HTTP.
     if default_protocol == Some(UpstreamProtocol::Antigravity) {
+        // H2: same gate as the dial-test agy path — fetch_quota POSTs the
+        // Bearer token to {base_url}/v1internal:…
+        if let Err(reason) = crate::egress::check_probe_url(&base_url).await {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": {"message": format!("upstream target blocked by egress policy: {}", reason), "code": "egress_blocked"}})),
+            )
+                .into_response();
+        }
         let file = match load_store_config(&state) {
             Ok(f) => f,
             Err(resp) => return resp,
@@ -3158,7 +3383,10 @@ pub async fn handle_admin_provider_upstream_models(
             attach_rotation_hook(&state, &name, &m);
             m
         };
-        return match mgr.fetch_quota(Some(&base_url)).await {
+        return match mgr
+            .with_client(&state.probe_http_client_for_provider(&name))
+            .fetch_quota(Some(&base_url))
+            .await {
             Ok(snapshot) => {
                 let mut ids: Vec<String> = snapshot.models.keys().cloned().collect();
                 ids.sort();
@@ -3200,7 +3428,16 @@ pub async fn handle_admin_provider_upstream_models(
     };
 
     let url = upstream_models_url(&base_url);
-    let client = state.http_client_for_provider(&name);
+    // H2: same resolve-then-check as the dial-test above.
+    if let Err(reason) = crate::egress::check_probe_url(&url).await {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": {"message": format!("upstream target blocked by egress policy: {}", reason), "code": "egress_blocked"}})),
+        )
+            .into_response();
+    }
+    // H2: no-redirect probe client (see dial-test above).
+    let client = crate::egress::probe_http_client();
     let resp = match tokio::time::timeout(
         std::time::Duration::from_secs(10),
         client.get(&url).bearer_auth(raw_key).send(),

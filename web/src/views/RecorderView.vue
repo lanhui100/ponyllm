@@ -15,6 +15,8 @@ const loading = ref(false);
 const selectedIndex = ref<number>(-1);
 const activeFrame = ref<RecordedFrame | null>(null);
 const isDrawerOpen = ref(false);
+// H3: 只读部署下全文帧被门控（404 telemetry_full_disabled）时的显式提示。
+const fullDisabledNotice = ref<string | null>(null);
 
 const filterEndpoint = ref('');
 const filterStatus = ref('all');
@@ -110,6 +112,7 @@ async function openFrame(frame: RecordedFrame, idx: number) {
   selectedIndex.value = idx;
   activeFrame.value = frame;
   isDrawerOpen.value = true;
+  fullDisabledNotice.value = null;
 
   // 懒加载模式：如果当前只有摘要帧，异步按需拉取对应 request_id 的完整全量帧（含超大 payload 与全量 response）
   if (!frame.request_snippet && !frame.response_snippet) {
@@ -126,6 +129,13 @@ async function openFrame(frame: RecordedFrame, idx: number) {
         const listIdx = frames.value.findIndex((f) => f.request_id === frame.request_id);
         if (listIdx !== -1) {
           frames.value[listIdx] = full;
+        }
+      } else if (res.status === 404) {
+        // H3: 只读部署（admin_write_enabled=false）下全文帧被门控，
+        // 保留摘要并给出明确提示而非静默空白。
+        const errBody = (await res.json().catch(() => ({}))) as { error?: { code?: string } };
+        if (errBody?.error?.code === 'telemetry_full_disabled') {
+          fullDisabledNotice.value = '当前为只读部署，全文帧已禁用：仅展示摘要。如需取证全文，请在服务端显式开启 admin 写操作。';
         }
       }
     } catch {
@@ -466,6 +476,21 @@ onUnmounted(() => {
     </main>
 
     <!-- Frame Details Drawer -->
+    <div
+      v-if="fullDisabledNotice"
+      class="mx-8 mt-3 flex items-center gap-2 rounded-lg border border-amber-200 bg-amber-50 px-4 py-2.5 text-xs text-amber-800"
+      role="status"
+    >
+      <Icons name="info" size="14" class="shrink-0 opacity-70" />
+      <span>{{ fullDisabledNotice }}</span>
+      <button
+        type="button"
+        class="ml-auto shrink-0 underline underline-offset-2 hover:text-amber-900"
+        @click="fullDisabledNotice = null"
+      >
+        知道了
+      </button>
+    </div>
     <FrameDrawer
       :frame="activeFrame"
       :is-open="isDrawerOpen"

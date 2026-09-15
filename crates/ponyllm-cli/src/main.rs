@@ -178,6 +178,18 @@ async fn run_server(opts: ServerOptions) -> Result<(), Box<dyn std::error::Error
         .try_init()
         .ok();
 
+    // H2: the loopback egress hatch is test/dev-only. A production process
+    // with it set silently disables SSRF protection for 127/8 on admin
+    // probes — fail loud here so misconfiguration is impossible to miss.
+    if std::env::var("PONYLLM_ALLOW_LOOPBACK_PROBE").as_deref() == Ok("1") {
+        tracing::warn!(
+            "PONYLLM_ALLOW_LOOPBACK_PROBE=1 is set: admin-probe egress guard accepts loopback targets. Never enable in production."
+        );
+        eprintln!(
+            "⚠️ [安全警告] PONYLLM_ALLOW_LOOPBACK_PROBE=1 已设置：管理探针出站守卫放行回环地址，仅允许测试/本地开发使用，生产环境禁止设置！"
+        );
+    }
+
     let resolved_config = resolve_path(opts.config.as_deref());
     let mut config_file = ConfigFile::load_or_default(resolved_config.to_str())?;
 

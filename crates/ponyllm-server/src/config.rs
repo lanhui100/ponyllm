@@ -332,6 +332,10 @@ fn default_true() -> bool {
     true
 }
 
+fn default_false() -> bool {
+    false
+}
+
 fn default_web_dist_dir() -> String {
     "web/dist".to_string()
 }
@@ -372,8 +376,9 @@ pub struct GatewayConfig {
     #[serde(default = "default_web_dist_dir")]
     pub web_dist_dir: String,
     /// Whether admin write operations (CUD and dial-test) are enabled (WEB-06).
-    /// Defaults to `true` to allow web console management out of the box.
-    #[serde(default = "default_true")]
+    /// Defaults to `false` for security (fail-closed); set explicitly to
+    /// `true` to allow web console management.
+    #[serde(default = "default_false")]
     pub admin_write_enabled: bool,
     /// Telemetry snapshot file for dashboard persistence across restarts.
     /// `None` (default) derives `<config-dir>/telemetry-snapshot.json` in serve;
@@ -399,7 +404,7 @@ impl Default for GatewayConfig {
             use_system_proxy: false,
             web_enabled: true,
             web_dist_dir: default_web_dist_dir(),
-            admin_write_enabled: true,
+            admin_write_enabled: false,
             telemetry_snapshot_path: None,
         }
     }

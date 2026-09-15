@@ -121,6 +121,8 @@ impl TestHarness {
         config_file.gateway.default_strategy = strategy;
         config_file.gateway.web_enabled = true;
         config_file.gateway.web_dist_dir = "web/dist".to_string();
+        // Match the explicit write-open memory config below.
+        config_file.gateway.admin_write_enabled = true;
         config_file.providers = providers;
         config_file.config_version = 0;
 
@@ -133,6 +135,9 @@ impl TestHarness {
         gw_config.default_strategy = strategy;
         gw_config.web_enabled = true;
         gw_config.web_dist_dir = "web/dist".to_string();
+        // Contract tests exercise the write-open behavior; fail-closed is the
+        // default but these harnesses opt in explicitly.
+        gw_config.admin_write_enabled = true;
 
         let model_spec = ModelSpec {
             name: "gpt-4o".to_string(),
@@ -207,6 +212,9 @@ impl TestHarness {
         let mut gw_config = GatewayConfig::default();
         gw_config.bind_addr = "127.0.0.1:8080".to_string();
         gw_config.api_key = "sdk-test-token".to_string();
+        // This harness probes store absence, not the write gate: opt in to
+        // writes explicitly (fail-closed is the default).
+        gw_config.admin_write_enabled = true;
 
         let state = Arc::new(AppState::new(gw_config));
         let app = create_app(state.clone());
@@ -413,10 +421,11 @@ async fn test_strategy_put_bumps_config_version() {
     assert_eq!(initial["config_version"], 0);
     assert_eq!(initial["strategy"], "economy");
 
-    // Put new valid strategy
+    // Put new valid strategy (strategy PUT requires If-Match, same as other CUD)
     let put_resp = client
         .put(format!("http://{}/api/admin/strategy", harness.addr))
         .header("Authorization", format!("Bearer {}", harness.api_key))
+        .header("If-Match", "\"0\"")
         .json(&serde_json::json!({"strategy": "speed"}))
         .send()
         .await
@@ -450,6 +459,7 @@ async fn test_strategy_put_bumps_config_version() {
     let bad_put = client
         .put(format!("http://{}/api/admin/strategy", harness.addr))
         .header("Authorization", format!("Bearer {}", harness.api_key))
+        .header("If-Match", "\"1\"")
         .json(&serde_json::json!({"strategy": "teleportation"}))
         .send()
         .await
@@ -460,11 +470,22 @@ async fn test_strategy_put_bumps_config_version() {
     let missing_field_put = client
         .put(format!("http://{}/api/admin/strategy", harness.addr))
         .header("Authorization", format!("Bearer {}", harness.api_key))
+        .header("If-Match", "\"1\"")
         .json(&serde_json::json!({"other": "field"}))
         .send()
         .await
         .unwrap();
     assert_eq!(missing_field_put.status(), StatusCode::BAD_REQUEST);
+
+    // Missing If-Match yields 412 (strategy PUT enforces optimistic locking)
+    let no_match_put = client
+        .put(format!("http://{}/api/admin/strategy", harness.addr))
+        .header("Authorization", format!("Bearer {}", harness.api_key))
+        .json(&serde_json::json!({"strategy": "reliable"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(no_match_put.status(), StatusCode::PRECONDITION_FAILED);
 }
 
 // -----------------------------------------------------------------------------
@@ -656,10 +677,11 @@ async fn test_secured_mode_matrix() {
         .unwrap();
     assert_eq!(r5.status(), StatusCode::OK);
 
-    // 6. strategy PUT
+    // 6. strategy PUT (requires If-Match like other CUD endpoints)
     let r6 = client
         .put(format!("http://{}/api/admin/strategy", harness.addr))
         .header("Authorization", format!("Bearer {}", harness.api_key))
+        .header("If-Match", "*")
         .json(&serde_json::json!({"strategy": "reliable"}))
         .send()
         .await

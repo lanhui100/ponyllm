@@ -442,6 +442,34 @@ impl AppState {
         self.http_client_for_target(provider_name, "")
     }
 
+    /// Probe-only variant of [`Self::http_client_for_provider`] (H2 red-team
+    /// B2): resolves the SAME effective proxy (so the probe shares the data
+    /// plane's egress IP — P0-7 consistency is preserved; only the redirect
+    /// policy and timeouts differ), but never follows redirects. Used by the
+    /// admin quota/model-list probes whose target URL is operator-controlled.
+    pub fn probe_http_client_for_provider(&self, provider_name: &str) -> reqwest::Client {
+        let proxy_url = {
+            let cfg = self.config.read();
+            match cfg
+                .providers
+                .get(provider_name)
+                .map(|p| p.effective_proxy_for_model(""))
+                .unwrap_or(crate::config::EffectiveProxy::InheritGateway)
+            {
+                crate::config::EffectiveProxy::Custom(url) => Some(url.to_string()),
+                crate::config::EffectiveProxy::Direct => Some(String::new()),
+                crate::config::EffectiveProxy::InheritGateway => cfg.proxy.clone(),
+            }
+        };
+        // Empty string = explicit direct (mirrors create_upstream semantics:
+        // empty/None both mean "no proxy", and the probe builder treats them
+        // identically). Mirror the data-plane rule: no ambient system proxy
+        // unless the deployment opted in — the probe builder never inherits
+        // system proxy, matching the fail-closed posture.
+        let proxy_opt = proxy_url.as_deref().filter(|s| !s.is_empty());
+        ponyllm_core::executor::create_probe_http_client_with_options(proxy_opt)
+    }
+
     /// Best-effort Antigravity identity for envelope translation (P0-6, B7):
     /// `(project_id, key_id)` from the provider's pool. Prefers an Active
     /// key's manager so cooling/disabled credentials don't donate a stale
@@ -527,6 +555,14 @@ impl AppState {
         self.attach_antigravity_rotation_hooks_all();
     }
 
+    /// Persist a rotated Antigravity refresh token in the background.
+    ///
+    /// NOTE: this is a *system* write, intentionally NOT gated by
+    /// `admin_write_enabled`. The rotation hook fires on upstream token
+    /// refresh; gating it would let credentials rot in read-only
+    /// deployments. It only rewrites the single rotated key entry
+    /// (never adds/removes providers or keys) and serializes on the same
+    /// `admin_write_lock` as the admin CUD path.
     pub fn attach_antigravity_rotation_hook(
         &self,
         provider_name: &str,

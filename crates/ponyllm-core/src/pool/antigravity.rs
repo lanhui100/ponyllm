@@ -178,6 +178,21 @@ impl AntigravityTokenManager {
         *self.rotation_hook.write() = Some(hook);
     }
 
+    /// Probe-scoped clone sharing credential/token-cache/rotation hook but
+    /// sending through `client` (H2 red-team B2). Admin quota probes wrap
+    /// the pool manager with a no-redirect client so a hostile `base_url`
+    /// that passed the egress gate cannot 302 to a metadata/private target
+    /// afterwards; the data-plane manager itself is untouched.
+    pub fn with_client(&self, client: &reqwest::Client) -> Self {
+        Self {
+            key_id: self.key_id.clone(),
+            cred: self.cred.clone(),
+            client: client.clone(),
+            refresh_lock: self.refresh_lock.clone(),
+            rotation_hook: self.rotation_hook.clone(),
+        }
+    }
+
     pub fn credential_snapshot(&self) -> AntigravityCredential {
         self.cred.read().clone()
     }

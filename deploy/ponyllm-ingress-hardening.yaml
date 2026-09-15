@@ -1,0 +1,50 @@
+# C2: ponyllm (tokens.ponyjob.top) ingress hardening.
+#
+# Apply order (avoid redirect loops):
+#   1. kubectl apply -f this file
+#   2. annotate the existing Ingress ponyllm/ponyllm-ingress with:
+#        traefik.ingress.kubernetes.io/router.middlewares: ponyllm-ponyllm-https-redirect@kubernetescrd
+#      on a SEPARATE http-only IngressRoute/Ingress (see note below), and
+#        traefik.ingress.kubernetes.io/router.middlewares: ponyllm-ponyllm-security-headers@kubernetescrd
+#      on the websecure route.
+#   3. verify: curl -sI http://tokens.ponyjob.top/health -> 301 to https;
+#      curl -sI https://tokens.ponyjob.top/health -> strict-transport-security present.
+#
+# WARNING (H6 infra-team): redirectScheme MUST NOT be attached to a router
+# serving both web+websecure (infinite loop). The existing Ingress declares
+# `traefik.ingress.kubernetes.io/router.entrypoints: web,websecure` on ONE
+# router — split it (or move to IngressRoutes: http-only redirect route +
+# https-only app route) before attaching the redirect middleware.
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: ponyllm-security-headers
+  namespace: ponyllm
+  labels:
+    app.kubernetes.io/name: ponyllm
+spec:
+  headers:
+    customResponseHeaders:
+      # HSTS: start small for canary, raise to 31536000 after stability.
+      Strict-Transport-Security: max-age=86400; includeSubDomains
+      # SPA needs inline script/style; keep report-only until tuned, then enforce.
+      Content-Security-Policy-Report-Only: >-
+        default-src 'self'; script-src 'self' 'unsafe-inline';
+        style-src 'self' 'unsafe-inline'; img-src 'self' data: https:;
+        font-src 'self' data:; connect-src 'self' https: wss:;
+      Permissions-Policy: geolocation=(), microphone=(), camera=()
+      Referrer-Policy: no-referrer
+      X-Content-Type-Options: nosniff
+      X-Frame-Options: SAMEORIGIN
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: ponyllm-https-redirect
+  namespace: ponyllm
+  labels:
+    app.kubernetes.io/name: ponyllm
+spec:
+  redirectScheme:
+    scheme: https
+    permanent: true

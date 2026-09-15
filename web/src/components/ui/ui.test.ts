@@ -103,6 +103,88 @@ describe('UI Primitives & Modern Design System', () => {
     app.unmount();
   });
 
+  it('clamps tooltip inside viewport on left edge', async () => {
+    Object.defineProperty(window, 'innerWidth', { value: 1024, configurable: true });
+    const app = createApp({
+      render: () =>
+        h(
+          UiTooltip,
+          { content: '左边缘方块' },
+          () => h('button', { id: 'target-left' }, 'Hover target')
+        ),
+    });
+    app.mount(container);
+    await nextTick();
+
+    // 原型级分发 mock：锚点贴左（热力图最左一列），tooltip 宽 200px 居中会溢出左侧
+    const anchorRect = { top: 200, bottom: 214, left: 4, right: 18, width: 14, height: 14, x: 4, y: 200, toJSON: () => {} };
+    const tipRect = { top: 150, bottom: 190, left: -89, right: 111, width: 200, height: 40, x: -89, y: 150, toJSON: () => {} };
+    const orig = HTMLElement.prototype.getBoundingClientRect;
+    HTMLElement.prototype.getBoundingClientRect = function () {
+      if (this.getAttribute?.('data-testid') === 'ui-tooltip') return tipRect as DOMRect;
+      if (this.querySelector?.('#target-left')) return anchorRect as DOMRect;
+      return orig.call(this);
+    };
+    try {
+      const wrapper = container.firstElementChild as HTMLElement;
+      wrapper.dispatchEvent(new MouseEvent('mouseenter'));
+
+      await new Promise((r) => setTimeout(r, 150));
+      await nextTick();
+      await nextTick();
+
+      const tip = document.body.querySelector('[data-testid="ui-tooltip"]') as HTMLElement;
+      expect(tip).not.toBeNull();
+      // 左侧钳位：left 收敛到安全边距，且不再是居中 translate(-50%)
+      expect(tip.style.left).toBe('8px');
+      expect(tip.style.transform).toContain('translate(0');
+    } finally {
+      HTMLElement.prototype.getBoundingClientRect = orig;
+    }
+    app.unmount();
+  });
+
+  it('flips tooltip below anchor when top space is insufficient', async () => {
+    Object.defineProperty(window, 'innerWidth', { value: 1024, configurable: true });
+    const app = createApp({
+      render: () =>
+        h(
+          UiTooltip,
+          { content: '顶部方块' },
+          () => h('button', { id: 'target-top' }, 'Hover target')
+        ),
+    });
+    app.mount(container);
+    await nextTick();
+
+    // 模拟贴顶方块：顶部仅 20px，tooltip 高 60px 放不下
+    const anchorRect = { top: 20, bottom: 34, left: 500, right: 514, width: 14, height: 14, x: 500, y: 20, toJSON: () => {} };
+    const tipRect = { top: -46, bottom: 14, left: 457, right: 557, width: 100, height: 60, x: 457, y: -46, toJSON: () => {} };
+    const orig = HTMLElement.prototype.getBoundingClientRect;
+    HTMLElement.prototype.getBoundingClientRect = function () {
+      if (this.getAttribute?.('data-testid') === 'ui-tooltip') return tipRect as DOMRect;
+      if (this.querySelector?.('#target-top')) return anchorRect as DOMRect;
+      return orig.call(this);
+    };
+    try {
+      const wrapper = container.firstElementChild as HTMLElement;
+      wrapper.dispatchEvent(new MouseEvent('mouseenter'));
+
+      await new Promise((r) => setTimeout(r, 150));
+      await nextTick();
+      await nextTick();
+
+      const tip = document.body.querySelector('[data-testid="ui-tooltip"]') as HTMLElement;
+      expect(tip).not.toBeNull();
+      // 翻转到底部：top = anchor.bottom + 6 = 40px，且无 -100% 上移
+      expect(tip.style.top).toBe('40px');
+      expect(tip.style.transform).not.toContain('-100%');
+    } finally {
+      HTMLElement.prototype.getBoundingClientRect = orig;
+    }
+    app.unmount();
+  });
+
   it('renders collapsible container according to open prop', async () => {
     const app = createApp({
       render: () =>

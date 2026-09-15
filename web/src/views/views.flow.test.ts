@@ -249,4 +249,49 @@ describe('WEB-02 End-to-End User Flow (Connect -> Dashboard -> Recorder)', () =>
 
     app.unmount();
   });
+
+  it('Flow 3b: H3 read-only deployment shows full-disabled notice on frame open', async () => {
+    // List returns summaries; single-frame fetch answers 404
+    // telemetry_full_disabled (read-only deployment).
+    const summary = {
+      request_id: 'req-ro-1',
+      timestamp: new Date().toISOString(),
+      endpoint: '/v1/chat/completions',
+      provider: 'openai',
+      key_id: 'key-1',
+      sanitized_key: 'sk-***cdef',
+      status_code: 200,
+      latency_ms: 80,
+    };
+    globalThis.fetch = vi.fn().mockImplementation((url: string) => {
+      if (url === '/v1/telemetry/recorder') {
+        return Promise.resolve(new Response(JSON.stringify([summary]), { status: 200 }));
+      }
+      if (url.includes('/v1/telemetry/recorder/')) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ error: { code: 'telemetry_full_disabled' } }), { status: 404 }),
+        );
+      }
+      return Promise.reject(new Error('Unknown url'));
+    });
+
+    const app = createApp(RecorderView);
+    app.use(router);
+    app.use(pinia);
+    app.mount(container);
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await nextTick();
+
+    // Open the frame via keyboard: ArrowDown selects, Enter opens drawer.
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown' }));
+    await nextTick();
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await nextTick();
+
+    expect(container.textContent).toContain('全文帧已禁用');
+
+    app.unmount();
+  });
 });

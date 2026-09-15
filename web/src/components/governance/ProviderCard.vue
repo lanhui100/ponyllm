@@ -109,6 +109,7 @@ const protocolsSaving = ref(false);
 watch(
   () => props.provider,
   (p) => {
+    if (isEditingProtocols.value) return;
     activeProtocols.value = getInitialProtocols();
     customUrls.value = {
       chat: p.chat_url || '',

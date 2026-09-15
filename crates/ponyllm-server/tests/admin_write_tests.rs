@@ -45,6 +45,11 @@ struct WriteTestHarness {
 
 impl WriteTestHarness {
     async fn new(admin_write_enabled: bool) -> Self {
+        // H2: admin probes to 127.0.0.1 mocks (dial-test matrix,
+        // upstream-models) are legitimate test traffic. The egress guard
+        // blocks loopback by default; this process-global hatch re-allows
+        // loopback ONLY (private/metadata ranges stay blocked).
+        std::env::set_var("PONYLLM_ALLOW_LOOPBACK_PROBE", "1");
         let temp_dir = tempfile::tempdir().unwrap();
         let config_path = temp_dir.path().join("ponyllm.toml");
         let api_key = "admin-secret-token".to_string();
@@ -204,6 +209,9 @@ async fn test_admin_write_disabled_gate() {
         ("POST", "/api/admin/keys", serde_json::json!({"provider": "openai", "id": "k2", "api_key": "sec"})),
         ("DELETE", "/api/admin/keys/key-1", serde_json::json!({})),
         ("POST", "/api/admin/keys/key-1/test", serde_json::json!({})),
+        // C1 regression: strategy PUT and auth rotate must also honor the gate
+        ("PUT", "/api/admin/strategy", serde_json::json!({"strategy": "speed"})),
+        ("ROTATE", "/api/admin/auth/rotate", serde_json::json!({})),
     ];
 
     for (method, path, body) in endpoints {
@@ -211,6 +219,7 @@ async fn test_admin_write_disabled_gate() {
         let req = match method {
             "POST" => client.post(&url).json(&body),
             "PUT" => client.put(&url).json(&body),
+            "ROTATE" => client.post(&url).json(&body),
             "DELETE" => client.delete(&url),
             _ => unreachable!(),
         };
@@ -230,6 +239,44 @@ async fn test_admin_write_disabled_gate() {
         );
         let err: serde_json::Value = resp.json().await.unwrap();
         assert_eq!(err["error"]["code"], "admin_write_disabled");
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Test 1b: auth runs before the write gate (401 precedes 404)
+// -----------------------------------------------------------------------------
+#[tokio::test]
+async fn test_auth_precedes_write_gate_on_strategy_and_rotate() {
+    // Gate open or closed, an unauthenticated caller must see 401, never the
+    // gate's 404: auth_middleware wraps the whole api router.
+    for admin_write_enabled in [true, false] {
+        let harness = WriteTestHarness::new(admin_write_enabled).await;
+        let client = reqwest::Client::new();
+
+        let unauth_strategy = client
+            .put(format!("http://{}/api/admin/strategy", harness.addr))
+            .json(&serde_json::json!({"strategy": "speed"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            unauth_strategy.status(),
+            StatusCode::UNAUTHORIZED,
+            "expected 401 for unauthenticated PUT strategy (write={})",
+            admin_write_enabled
+        );
+
+        let unauth_rotate = client
+            .post(format!("http://{}/api/admin/auth/rotate", harness.addr))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            unauth_rotate.status(),
+            StatusCode::UNAUTHORIZED,
+            "expected 401 for unauthenticated POST rotate (write={})",
+            admin_write_enabled
+        );
     }
 }
 
@@ -1015,4 +1062,182 @@ async fn test_provider_upstream_models() {
         .await
         .unwrap();
     assert_eq!(gone.status(), StatusCode::NOT_FOUND);
+}
+
+// -----------------------------------------------------------------------------
+// Test 7b: H2 egress guard — provider write path rejects SSRF targets
+// -----------------------------------------------------------------------------
+#[tokio::test]
+async fn test_provider_write_rejects_ssrf_targets() {
+    let harness = WriteTestHarness::new(true).await;
+    let client = reqwest::Client::new();
+    let auth = format!("Bearer {}", harness.api_key);
+
+    for (name, base_url) in [
+        ("evil-meta", "http://169.254.169.254/latest/meta-data/"),
+        ("evil-priv", "http://10.0.0.5/v1"),
+        ("evil-svc", "http://api.svc:8080/"),
+        ("evil-file", "file:///etc/passwd"),
+    ] {
+        let resp = client
+            .post(format!("http://{}/api/admin/providers", harness.addr))
+            .header("Authorization", &auth)
+            .header("If-Match", "\"0\"")
+            .json(&serde_json::json!({ "name": name, "base_url": base_url }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "expected 400 for SSRF base_url {}",
+            base_url
+        );
+        let err: serde_json::Value = resp.json().await.unwrap();
+        let code = err["error"]["code"].as_str().unwrap_or("");
+        assert!(
+            code == "egress_blocked" || code == "invalid_provider_fields",
+            "unexpected code {} for {}",
+            code,
+            base_url
+        );
+    }
+
+    // H2 red-team: hostile proxy refused, local loopback proxy allowed.
+    let bad_proxy = client
+        .post(format!("http://{}/api/admin/providers", harness.addr))
+        .header("Authorization", &auth)
+        .header("If-Match", "\"0\"")
+        .json(&serde_json::json!({
+            "name": "evil-proxy",
+            "base_url": "https://api.openai.com/v1",
+            "proxy": "http://169.254.169.254:80"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bad_proxy.status(), StatusCode::BAD_REQUEST);
+    let bad_proxy_err: serde_json::Value = bad_proxy.json().await.unwrap();
+    assert_eq!(bad_proxy_err["error"]["code"], "egress_blocked");
+
+    // H2 red-team: model-level hostile proxy refused as well.
+    let bad_model_proxy = client
+        .post(format!("http://{}/api/admin/models", harness.addr))
+        .header("Authorization", &auth)
+        .header("If-Match", "\"0\"")
+        .json(&serde_json::json!({
+            "provider": "openai",
+            "name": "evil-model",
+            "proxy": "http://10.0.0.5:8080"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bad_model_proxy.status(), StatusCode::BAD_REQUEST);
+    let bad_model_err: serde_json::Value = bad_model_proxy.json().await.unwrap();
+    assert_eq!(bad_model_err["error"]["code"], "egress_blocked");
+}
+
+// -----------------------------------------------------------------------------
+// Test 7c: H2 egress guard — dial-test refuses to dial blocked targets
+// -----------------------------------------------------------------------------
+#[tokio::test]
+async fn test_dial_test_blocked_target_refused() {
+    // Bypass the write-path guard by seeding the config file directly, then
+    // verify the probe-time resolve-then-check still refuses to dial.
+    // NOTE: no PONYLLM_ALLOW_LOOPBACK_PROBE bypass here can save metadata IPs.
+    let temp_dir = tempfile::tempdir().unwrap();
+    let config_path = temp_dir.path().join("ponyllm.toml");
+    let api_key = "admin-secret-token".to_string();
+
+    let provider_sec = ProviderSection {
+        base_url: "http://169.254.169.254/".to_string(),
+        default_model: "m".to_string(),
+        strategy: "round_robin".to_string(),
+        billing_mode: BillingMode::Metered,
+        input_price: 0.0,
+        cached_price: 0.0,
+        output_price: 0.0,
+        models: vec!["m".to_string()],
+        model_configs: vec![],
+        keys: vec![KeySection {
+            id: "k-meta".to_string(),
+            api_key: "sk-test-1234567890".to_string(),
+            priority: 1,
+            weight: 10,
+        }],
+        default_protocol: None,
+        chat_url: None,
+        responses_url: None,
+        messages_url: None,
+        proxy: None,
+    };
+    let mut providers = HashMap::new();
+    providers.insert("meta".to_string(), provider_sec);
+
+    let mut config_file = ConfigFile::default();
+    config_file.gateway.bind = "127.0.0.1:8080".to_string();
+    config_file.gateway.api_key = api_key.clone();
+    config_file.gateway.admin_write_enabled = true;
+    config_file.providers = providers;
+    config_file.save_to_path(config_path.to_str().unwrap()).unwrap();
+
+    let mut gw_config = GatewayConfig::default();
+    gw_config.bind_addr = "127.0.0.1:8080".to_string();
+    gw_config.api_key = api_key.clone();
+    gw_config.admin_write_enabled = true;
+    gw_config.providers.insert(
+        "meta".to_string(),
+        ProviderConfig {
+            base_url: "http://169.254.169.254/".to_string(),
+            default_model: "m".to_string(),
+            strategy: "round_robin".to_string(),
+            billing_mode: BillingMode::Metered,
+            input_price: 0.0,
+            cached_price: 0.0,
+            output_price: 0.0,
+            models: vec!["m".to_string()],
+            model_specs: vec![],
+            default_protocol: None,
+            chat_url: None,
+            responses_url: None,
+            messages_url: None,
+            proxy: None,
+        },
+    );
+
+    let store = Arc::new(FileConfigStore::new(config_path.to_str().unwrap()));
+    let state = Arc::new(AppState::new(gw_config).with_config_store(store));
+    let pool = Arc::new(KeyPool::new("meta", RoutingStrategy::RoundRobin));
+    pool.add_key(ApiKeyEntry::new("k-meta", "sk-test-1234567890", 1, 10));
+    state.register_pool("meta", pool);
+    let app = create_app(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://{}/api/admin/keys/k-meta/test", addr))
+        .header("Authorization", format!("Bearer {}", api_key))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let view: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(view["success"], false);
+    assert_eq!(view["error_code"], "egress_blocked");
+
+    // upstream-models on the same seeded provider must also refuse.
+    let um = client
+        .get(format!("http://{}/api/admin/providers/meta/upstream-models", addr))
+        .header("Authorization", format!("Bearer {}", api_key))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(um.status(), StatusCode::BAD_REQUEST);
+    let um_err: serde_json::Value = um.json().await.unwrap();
+    assert_eq!(um_err["error"]["code"], "egress_blocked");
 }

@@ -6,6 +6,11 @@ use serde::{Deserialize, Serialize};
 
 pub const MAX_SNIPPET_CHARS: usize = 10 * 1024 * 1024;
 
+/// Independent bound for the `error` free-text field. Upstream error bodies
+/// (`HTTP <status> from <key>: <body>`) can carry multi-KB HTML pages; they
+/// need far less room than request/response snippets kept for UI inspection.
+pub const MAX_ERROR_CHARS: usize = 4 * 1024;
+
 /// Minimum byte length of an `sk-…` run before it is treated as a secret.
 /// Short `sk-` mentions in prose (e.g. "sk-abc") are left untouched to avoid
 /// over-scrubbing legitimate content.
@@ -311,15 +316,21 @@ impl FlightRecorder {
     }
 
     pub fn truncate_snippet(s: Option<String>) -> Option<String> {
-        s.map(|text| {
-            let char_count = text.chars().count();
-            if char_count > MAX_SNIPPET_CHARS {
-                let truncated: String = text.chars().take(MAX_SNIPPET_CHARS).collect();
-                format!("{}...[TRUNCATED]", truncated)
-            } else {
-                text
-            }
-        })
+        s.map(|text| Self::truncate_text(text, MAX_SNIPPET_CHARS))
+    }
+
+    fn truncate_text(text: String, limit: usize) -> String {
+        let char_count = text.chars().count();
+        if char_count > limit {
+            let truncated: String = text.chars().take(limit).collect();
+            format!("{}...[TRUNCATED]", truncated)
+        } else {
+            text
+        }
+    }
+
+    fn scrub_then_truncate(s: Option<String>, limit: usize) -> Option<String> {
+        s.map(|raw| Self::truncate_text(scrub_secrets(&raw), limit))
     }
 
     pub fn record(&self, frame: FlightFrame) {
@@ -331,10 +342,12 @@ impl FlightRecorder {
             frame.key_id
         };
         let sanitized_key = Self::sanitize_key(frame.raw_key.as_deref().unwrap_or(&key_id));
-        // Free-text fields are scrubbed for `sk-…` secrets BEFORE storage:
-        // upstream error bodies may echo the rejected credential and prompts
-        // may contain pasted secrets. Scrub-then-truncate keeps the stored
-        // text within MAX_SNIPPET_CHARS after masking.
+        // Free-text fields are scrubbed for secrets BEFORE storage:
+        // upstream error bodies may echo the rejected credential, prompts
+        // may contain pasted secrets, and responses may echo either.
+        // Scrub-then-truncate keeps the stored text within its bound
+        // (MAX_SNIPPET_CHARS for snippets, MAX_ERROR_CHARS for errors)
+        // after masking.
         let recorded = RecordedFrame {
             request_id: frame.request_id,
             timestamp: Utc::now(),
@@ -345,9 +358,9 @@ impl FlightRecorder {
             attempt: frame.attempt,
             status_code: frame.status_code,
             latency_ms: frame.latency.as_millis() as u64,
-            error: frame.error,
-            request_snippet: frame.request_snippet.map(|s| scrub_secrets(&s)),
-            response_snippet: frame.response_snippet,
+            error: Self::scrub_then_truncate(frame.error, MAX_ERROR_CHARS),
+            request_snippet: Self::scrub_then_truncate(frame.request_snippet, MAX_SNIPPET_CHARS),
+            response_snippet: Self::scrub_then_truncate(frame.response_snippet, MAX_SNIPPET_CHARS),
             prompt_tokens: frame.prompt_tokens,
             completion_tokens: frame.completion_tokens,
             cached_tokens: frame.cached_tokens,
@@ -489,5 +502,76 @@ mod scrub_tests {
         assert!(looks_like_secret("ya29.a0AdMD6Einf3FwekkOnCpHNv8u3_j2qDn2ADGX5t"));
         assert!(looks_like_secret("1//04mock_oauth_refresh_token_for_testing_00000000000000"));
         assert!(!looks_like_secret("my-key-id"));
+    }
+
+    #[test]
+    fn record_scrubs_error_and_response_snippets() {
+        // H4 regression: upstream error/response echoes of a credential must
+        // not land in the ring in plaintext (same guarantee request_snippet
+        // already had).
+        let rec = FlightRecorder::new(8);
+        let leaked = "sk-live-abcdef123456";
+        rec.record(FlightFrame {
+            request_id: "h4-test".to_string(),
+            endpoint: "/v1/chat/completions".to_string(),
+            provider: Some("openai".to_string()),
+            key_id: "key-1".to_string(),
+            raw_key: None,
+            attempt: Some(0),
+            status_code: Some(401),
+            latency: Duration::from_millis(5),
+            error: Some(format!("upstream rejected key {}", leaked)),
+            request_snippet: Some(format!("{{\"model\":\"x\",\"key\":\"{}\"}}", leaked)),
+            response_snippet: Some(format!("{{\"error\":\"bad key {}\"}}", leaked)),
+            prompt_tokens: None,
+            completion_tokens: None,
+            cached_tokens: None,
+            ttft_ms: None,
+            downstream_ttft_ms: None,
+            stream_flow: None,
+        });
+        let frame = rec.get_frame("h4-test").expect("frame recorded");
+        for field in [
+            frame.error.as_deref(),
+            frame.request_snippet.as_deref(),
+            frame.response_snippet.as_deref(),
+        ] {
+            let text = field.expect("field present");
+            assert!(!text.contains(leaked), "leaked secret persisted: {}", text);
+        }
+        assert!(frame.error.unwrap().contains("sk-***3456"));
+        assert!(frame.response_snippet.unwrap().contains("sk-***3456"));
+    }
+
+    #[test]
+    fn record_truncates_error_field_to_bound() {
+        // Scrub-then-truncate: error text beyond MAX_ERROR_CHARS is cut
+        // after masking, so multi-KB upstream HTML bodies cannot amplify
+        // ring memory.
+        let rec = FlightRecorder::new(8);
+        let big = "e".repeat(MAX_ERROR_CHARS + 100);
+        rec.record(FlightFrame {
+            request_id: "h4-trunc".to_string(),
+            endpoint: "/v1/chat/completions".to_string(),
+            provider: Some("openai".to_string()),
+            key_id: "key-1".to_string(),
+            raw_key: None,
+            attempt: Some(0),
+            status_code: Some(500),
+            latency: Duration::from_millis(5),
+            error: Some(big),
+            request_snippet: None,
+            response_snippet: None,
+            prompt_tokens: None,
+            completion_tokens: None,
+            cached_tokens: None,
+            ttft_ms: None,
+            downstream_ttft_ms: None,
+            stream_flow: None,
+        });
+        let frame = rec.get_frame("h4-trunc").expect("frame recorded");
+        let err = frame.error.expect("error present");
+        assert!(err.ends_with("...[TRUNCATED]"), "error not truncated: len {}", err.len());
+        assert!(err.chars().count() <= MAX_ERROR_CHARS + "...[TRUNCATED]".len());
     }
 }

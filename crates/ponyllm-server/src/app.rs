@@ -1,16 +1,92 @@
 use std::sync::Arc;
 use axum::extract::{DefaultBodyLimit, Request, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderValue, Method, StatusCode};
 use axum::middleware::{from_fn_with_state, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde_json::json;
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::CorsLayer;
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
 use crate::routes::*;
 use crate::state::AppState;
+
+/// Build the CORS layer (H6).
+///
+/// Default is same-origin-only: NO `Access-Control-Allow-Origin` header is
+/// emitted for cross-origin requests, so an arbitrary phishing page cannot
+/// read (or preflight) gateway responses with a stolen token. Operators that
+/// host the console on a separate origin set
+/// `PONYLLM_CORS_ALLOWLIST="https://console.example.com,https://app.example.com"`.
+/// `*` is accepted as an explicit opt-out (restores the old permissive
+/// behavior) and logs a loud warning at startup.
+fn build_cors() -> CorsLayer {
+    use tower_http::cors::AllowOrigin;
+    let raw = std::env::var("PONYLLM_CORS_ALLOWLIST").unwrap_or_default();
+    let origins: Vec<HeaderValue> = raw
+        .split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .filter_map(|s| s.parse().ok())
+        .collect();
+    if raw.trim() == "*" {
+        tracing::warn!(
+            "PONYLLM_CORS_ALLOWLIST='*': CORS allows any origin. Never enable in production."
+        );
+        eprintln!(
+            "⚠️ [安全警告] PONYLLM_CORS_ALLOWLIST='*' 已设置：CORS 放行任意源，仅允许临时调试使用，生产环境禁止设置！"
+        );
+        return CorsLayer::new()
+            .allow_origin(tower_http::cors::Any)
+            .allow_methods([
+                Method::GET,
+                Method::POST,
+                Method::PUT,
+                Method::DELETE,
+                Method::OPTIONS,
+            ])
+            .allow_headers(allowed_headers());
+    }
+    if origins.is_empty() {
+        // Same-origin-only: no allow-origin header for cross-site callers.
+        // (Same-origin browser traffic and non-browser clients are unaffected
+        // by CORS; vite dev uses a same-origin proxy — see web/vite.config.ts.)
+        return CorsLayer::new()
+            .allow_methods([
+                Method::GET,
+                Method::POST,
+                Method::PUT,
+                Method::DELETE,
+                Method::OPTIONS,
+            ])
+            .allow_headers(allowed_headers());
+    }
+    CorsLayer::new()
+        .allow_origin(AllowOrigin::list(origins))
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::DELETE,
+            Method::OPTIONS,
+        ])
+        .allow_headers(allowed_headers())
+}
+
+/// Headers a browser console is allowed to send cross-origin (minimal set:
+/// the two auth headers the gateway accepts, content negotiation, and the
+/// optimistic-concurrency headers the admin API requires).
+fn allowed_headers() -> Vec<axum::http::HeaderName> {
+    vec![
+        axum::http::header::AUTHORIZATION,
+        axum::http::HeaderName::from_static("x-api-key"),
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderName::from_static("anthropic-version"),
+        axum::http::header::IF_MATCH,
+        axum::http::header::IF_NONE_MATCH,
+    ]
+}
 
 /// Fixed warning emitted when the web console `dist` directory is missing.
 /// WEB-01 acceptance greps this exact string (stderr + log).
@@ -92,10 +168,7 @@ async fn auth_middleware(
 }
 
 pub fn create_app(state: Arc<AppState>) -> Router {
-    let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods(Any)
-        .allow_headers(Any);
+    let cors = build_cors();
 
     let body_limit = state.config.read().request_body_limit;
 
@@ -145,6 +218,23 @@ pub fn create_app(state: Arc<AppState>) -> Router {
             headers.insert(
                 axum::http::header::X_CONTENT_TYPE_OPTIONS,
                 axum::http::HeaderValue::from_static("nosniff"),
+            );
+        }
+        // H6/L2 follow-up: Referrer must never carry ?token= or ?code= to a
+        // third party; the console needs no privileged browser features.
+        // (HSTS/CSP stay at the ingress layer — see deploy notes.)
+        if !headers.contains_key(axum::http::header::REFERRER_POLICY) {
+            headers.insert(
+                axum::http::header::REFERRER_POLICY,
+                axum::http::HeaderValue::from_static("no-referrer"),
+            );
+        }
+        if !headers.contains_key("permissions-policy") {
+            headers.insert(
+                "permissions-policy",
+                axum::http::HeaderValue::from_static(
+                    "camera=(), microphone=(), geolocation=(), payment=()",
+                ),
             );
         }
         res

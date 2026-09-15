@@ -154,9 +154,18 @@ ponyllm auth --rotate                # 显式轮转生成新密钥并持久化
 ```toml
 [gateway]
 bind = "127.0.0.1:8080"
-api_key = "ponyllm"            # 网关接入凭证（见 §6 auth）
+api_key = "sk-pony-<至少32位随机字符>"  # 网关接入凭证（见 §6 auth；禁止弱口令；留空则无鉴权，仅限本地环回开发）
+admin_write_enabled = false             # 默认只读；Web 治理写操作需显式开启
 request_body_limit = 134217728 # 请求体上限字节数，默认 128MB；1M 长上下文/大提示词场景无需再调
 ```
+
+> **对外服务安全环境变量**（部署注记）：
+>
+> | 变量 | 默认 | 说明 |
+> |---|---|---|
+> | `PONYLLM_CORS_ALLOWLIST` | 空（仅同源） | 跨源浏览器控制台域名白名单，如 `https://console.example.com`；设为 `*` 恢复旧宽松行为，**生产禁止** |
+> | `PONYLLM_PROBE_ALLOWLIST` | 空 | 管理探针（拨测/upstream-models）放行的内网域名，如 `ollama.lan,models.corp`（精确或子域匹配） |
+> | `PONYLLM_ALLOW_LOOPBACK_PROBE` | 空（拦截回环） | 设为 `1` 放行回环探针，**仅测试/本地开发，生产禁止**（启动会双通道告警） |
 
 ---
 

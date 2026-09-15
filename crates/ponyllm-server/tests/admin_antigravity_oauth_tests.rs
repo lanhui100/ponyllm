@@ -89,6 +89,25 @@ async fn test_antigravity_auth_url_endpoint() {
 }
 
 #[tokio::test]
+async fn test_antigravity_auth_url_respects_write_gate() {
+    // auth-url seeds the pending OAuth map: a read-only deployment must
+    // refuse it with the same 404 admin_write_disabled as authorize.
+    let harness = OAuthHarness::new(false).await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .get(format!("http://{}/api/admin/oauth/antigravity/auth-url", harness.addr))
+        .header("Authorization", format!("Bearer {}", harness.api_key))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    let err: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(err["error"]["code"], "admin_write_disabled");
+}
+
+#[tokio::test]
 async fn test_antigravity_authorize_invalid_input() {
     let harness = OAuthHarness::new(true).await;
     let client = reqwest::Client::new();

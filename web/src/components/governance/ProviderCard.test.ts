@@ -485,4 +485,60 @@ describe('ProviderCard UI and Phase 2 Requirements', () => {
     app.unmount();
     document.body.removeChild(container);
   });
+
+  it('does not wipe draft protocols and custom URLs when provider prop updates during editing', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+
+    const { reactive } = await import('vue');
+    const reactiveProvider = reactive({ ...mockProvider });
+
+    const app = createApp(ProviderCard, {
+      provider: reactiveProvider,
+      models: mockModels,
+      keys: mockKeys,
+      adminWriteEnabled: true,
+      keyTestResults: {},
+      testingKeyIds: new Set<string>(),
+      defaultExpanded: true,
+    });
+    app.mount(container);
+    await nextTick();
+
+    // 1. Enter edit mode
+    const editBtn = container.querySelector('[data-testid="edit-protocols-btn"]') as HTMLButtonElement;
+    editBtn.click();
+    await nextTick();
+
+    // 2. Select Anthropic Messages protocol and enter custom URL
+    const messagesPill = container.querySelector('[data-testid="protocol-pill-messages"]') as HTMLButtonElement;
+    messagesPill.click();
+    await nextTick();
+
+    const messagesInput = container.querySelector('[data-testid="messages-url-input"]') as HTMLInputElement;
+    expect(messagesInput).not.toBeNull();
+    messagesInput.value = 'https://anthropic.direct.com/v1';
+    messagesInput.dispatchEvent(new Event('input'));
+    await nextTick();
+
+    // 3. Simulate background refresh updating provider prop (e.g. 5s silent sync)
+    Object.assign(reactiveProvider, {
+      models: 2,
+      // server state still has default chat
+      default_protocol: 'chat',
+      messages_url: null,
+    });
+    await nextTick();
+
+    // 4. Verify draft input and selection are preserved, not wiped
+    expect(container.querySelector('[data-testid="messages-url-input"]')).not.toBeNull();
+    const currentInput = container.querySelector('[data-testid="messages-url-input"]') as HTMLInputElement;
+    expect(currentInput.value).toBe('https://anthropic.direct.com/v1');
+
+    const activeMessagesPill = container.querySelector('[data-testid="protocol-pill-messages"]');
+    expect(activeMessagesPill?.className).toContain('bg-slate-900');
+
+    app.unmount();
+    document.body.removeChild(container);
+  });
 });
