@@ -109,6 +109,21 @@ describe('UptimeBars Component', () => {
     expect(firstBarTitle).toContain('45 t/s');
     expect(firstBarTitle).toContain('响应及时');
 
+    // Also test isProvider: true tooltips display '首字响应及时'
+    const providerApp = createApp({
+      render: () => h(UptimeBars, {
+        slots,
+        slotCount: 24,
+        isProvider: true,
+      }),
+    });
+    const providerContainer = document.createElement('div');
+    providerApp.mount(providerContainer);
+    await nextTick();
+    const providerBar = providerContainer.querySelector('[data-testid="uptime-bar"]');
+    expect(providerBar?.getAttribute('title')).toContain('首字响应及时 (<3s)');
+    providerApp.unmount();
+
     // 24h speed badge in t/s is present and rounded to integer
     const speedBadge = container.querySelector('[data-testid="speed-24h"]');
     expect(speedBadge).not.toBeNull();

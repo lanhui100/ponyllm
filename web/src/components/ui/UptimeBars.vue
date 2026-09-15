@@ -83,10 +83,10 @@ function getSlotTooltip(slot: ConnectivitySlot): string {
   const speed = typeof slot.tps === 'number' && !isNaN(slot.tps) && slot.tps >= 0 ? ` · ${Math.round(slot.tps)} t/s` : '';
   const statusLabel = props.isProvider
     ? slot.status === 'ok'
-      ? '响应及时 (<3s)'
+      ? '首字响应及时 (<3s)'
       : slot.status === 'degraded'
-      ? '响应一般 (3~5s)'
-      : '响应超时/慢 (≥5s 或异常)'
+      ? '首字响应一般 (3~5s)'
+      : '首字响应超时/慢 (≥5s 或异常)'
     : slot.status === 'ok'
     ? '响应及时 (<300ms)'
     : slot.status === 'degraded'
