@@ -301,10 +301,53 @@ pub struct ResponseObject {
     pub error: Option<ResponseError>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct ResponseError {
+    #[serde(default)]
     pub code: String,
+    #[serde(default)]
     pub message: String,
+}
+
+impl ResponseObject {
+    /// True when this object represents an upstream failure.
+    ///
+    /// The wire contract sets `status == "failed"` (and streaming triggers on
+    /// the `response.failed` event variant regardless of status text), so
+    /// non-streaming guards must not be stricter: a non-success status
+    /// carrying a non-empty error payload also counts. Known success /
+    /// in-flight statuses (`completed`, `incomplete`, `in_progress`,
+    /// `queued`) are never failures, even if an error object happens to be
+    /// attached.
+    pub fn is_failed(&self) -> bool {
+        if self.status == "failed" {
+            return true;
+        }
+        match self.status.as_str() {
+            "completed" | "incomplete" | "in_progress" | "queued" | "" => false,
+            _ => match &self.error {
+                Some(e) => !(e.code.trim().is_empty() && e.message.trim().is_empty()),
+                None => false,
+            },
+        }
+    }
+
+    /// Shared upstream-failure reason for Failed projections.
+    /// With an upstream error payload: `code=<code> message=<message>`;
+    /// missing/empty falls back to the response status/id:
+    /// `status=<status>[/<id>]`. Carries no credentials.
+    pub fn failed_reason(&self) -> String {
+        if let Some(err) = self.error.as_ref() {
+            if !(err.code.trim().is_empty() && err.message.trim().is_empty()) {
+                return format!("code={} message={}", err.code, err.message);
+            }
+        }
+        if self.id.trim().is_empty() {
+            format!("status={}", self.status)
+        } else {
+            format!("status={}/{}", self.status, self.id)
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

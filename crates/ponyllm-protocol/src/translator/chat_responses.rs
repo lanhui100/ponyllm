@@ -1,4 +1,4 @@
-use crate::error::Result;
+use crate::error::{ProtocolError, Result};
 use crate::openai::chat::*;
 use crate::openai::responses::*;
 
@@ -424,6 +424,13 @@ pub fn chat_to_responses_response(resp: &ChatCompletionResponse) -> Result<Respo
 
 /// Convert ResponseObject to ChatCompletionResponse
 pub fn responses_to_chat_response(resp: &ResponseObject) -> Result<ChatCompletionResponse> {
+    if resp.is_failed() {
+        return Err(ProtocolError::Conversion {
+            from: "responses",
+            to: "chat",
+            reason: resp.failed_reason(),
+        });
+    }
     let mut text_acc = String::new();
     let mut reasoning_acc = String::new();
     let mut tool_calls = Vec::new();

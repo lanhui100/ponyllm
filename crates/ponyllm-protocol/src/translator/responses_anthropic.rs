@@ -1,6 +1,6 @@
 use crate::anthropic::messages::*;
 use crate::common::ReasoningEffort;
-use crate::error::Result;
+use crate::error::{ProtocolError, Result};
 use crate::openai::responses::*;
 
 use serde_json::json;
@@ -505,6 +505,16 @@ pub fn anthropic_to_responses_request(req: &MessageRequest) -> Result<CreateResp
 /// Convert OpenAI Responses object to Anthropic Messages response.
 /// Reasoning parts become `Thinking` blocks; `FunctionCall` items become `ToolUse`.
 pub fn responses_to_anthropic_response(resp: &ResponseObject) -> Result<MessageResponse> {
+    // Mirror the chat projection: a failed upstream must surface as a
+    // Conversion error (failover-eligible) rather than an empty success
+    // message with `stop_reason: None`.
+    if resp.is_failed() {
+        return Err(ProtocolError::Conversion {
+            from: "responses",
+            to: "anthropic",
+            reason: resp.failed_reason(),
+        });
+    }
     let mut content = Vec::new();
     let mut tool_count = 0u32;
 

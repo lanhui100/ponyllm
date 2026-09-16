@@ -534,10 +534,17 @@ pub async fn handle_chat_completions(
                                         continue;
                                     }
                                 };
+                            // Upstream Responses failure (e.g. status=failed with an
+                            // upstream code/message) must fail over, not fall
+                            // through as a client error: project it as an
+                            // upstream transport fault (503, retryable) and try
+                            // the next routed target.
                             let chat_resp = match responses_to_chat_response(&resp_obj) {
                                 Ok(cr) => cr,
                                 Err(e) => {
-                                    last_error = format!("Translation error: {}", e);
+                                    last_kind = ponyllm_core::error::GatewayErrorKind::UpstreamUnavailable;
+                                    last_retry_after = crate::extractors::retry_after_secs(&last_kind, pool.earliest_unlock());
+                                    last_error = format!("Upstream {} response failed: {}", target.provider_name, e);
                                     continue;
                                 }
                             };

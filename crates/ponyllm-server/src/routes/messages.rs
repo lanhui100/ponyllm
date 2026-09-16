@@ -576,7 +576,14 @@ pub async fn handle_messages(
                             match responses_to_anthropic_response(&resp_obj) {
                                 Ok(ar) => ar,
                                 Err(e) => {
-                                    last_error = format!("Translation error: {}", e);
+                                    // Upstream Responses failure (status=failed with an
+                                    // upstream code/message) must fail over, not fall
+                                    // through as a success: project it as an
+                                    // upstream fault (503, retryable) and try the
+                                    // next routed target. Mirrors the chat route.
+                                    last_kind = ponyllm_core::error::GatewayErrorKind::UpstreamUnavailable;
+                                    last_retry_after = crate::extractors::retry_after_secs(&last_kind, pool.earliest_unlock());
+                                    last_error = format!("Upstream {} response failed: {}", target.provider_name, e);
                                     continue;
                                 }
                             }

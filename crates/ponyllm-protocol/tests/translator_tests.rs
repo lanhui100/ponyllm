@@ -2396,4 +2396,514 @@ fn test_antigravity_nested_array_and_missing_items_backfill() {
     assert!(scalar_prop.get("items").is_none(), "non-array type must strip items");
 }
 
+#[test]
+fn test_responses_failed_to_chat_response_returns_error() {
+    use ponyllm_protocol::error::ProtocolError;
+
+    // 1. Failed with upstream error payload: reason must carry code/message,
+    // and must NOT aggregate text/tools into Stop/ToolCalls.
+    let failed = ResponseObject {
+        id: "resp_fail_1".to_string(),
+        object: "response".to_string(),
+        status: "failed".to_string(),
+        model: "m".to_string(),
+        output: vec![
+            ResponseOutputItem::Message {
+                id: "msg_1".to_string(),
+                status: "completed".to_string(),
+                role: "assistant".to_string(),
+                content: vec![ResponseContentPart::Text {
+                    text: "should be ignored".to_string(),
+                }],
+            },
+            ResponseOutputItem::FunctionCall {
+                id: "fc_1".to_string(),
+                status: "completed".to_string(),
+                call_id: "call_1".to_string(),
+                name: "f".to_string(),
+                arguments: "{}".to_string(),
+            },
+        ],
+        usage: None,
+        error: Some(ResponseError {
+            code: "server_error".to_string(),
+            message: "boom gone".to_string(),
+        }),
+    };
+    let err = responses_to_chat_response(&failed).unwrap_err();
+    match err {
+        ProtocolError::Conversion { from, to, reason } => {
+            assert_eq!(from, "responses");
+            assert_eq!(to, "chat");
+            assert!(reason.contains("code=server_error"), "reason: {reason}");
+            assert!(reason.contains("message=boom gone"), "reason: {reason}");
+        }
+        other => panic!("expected Conversion error, got {other:?}"),
+    }
+
+    // 2. Failed without error payload: fall back to status.
+    let failed_no_error = ResponseObject {
+        id: "resp_fail_2".to_string(),
+        object: "response".to_string(),
+        status: "failed".to_string(),
+        model: "m".to_string(),
+        output: vec![],
+        usage: None,
+        error: None,
+    };
+    let err = responses_to_chat_response(&failed_no_error).unwrap_err();
+    match err {
+        ProtocolError::Conversion { from, to, reason } => {
+            assert_eq!(from, "responses");
+            assert_eq!(to, "chat");
+            assert!(reason.contains("status=failed"), "reason: {reason}");
+        }
+        other => panic!("expected Conversion error, got {other:?}"),
+    }
+
+    // 3. Failed with blank error payload: also falls back to status.
+    let failed_blank_error = ResponseObject {
+        id: "resp_fail_3".to_string(),
+        object: "response".to_string(),
+        status: "failed".to_string(),
+        model: "m".to_string(),
+        output: vec![],
+        usage: None,
+        error: Some(ResponseError {
+            code: "".to_string(),
+            message: "   ".to_string(),
+        }),
+    };
+    let err = responses_to_chat_response(&failed_blank_error).unwrap_err();
+    match err {
+        ProtocolError::Conversion { reason, .. } => {
+            assert!(reason.contains("status=failed"), "reason: {reason}");
+        }
+        other => panic!("expected Conversion error, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_responses_to_chat_stream_failed_returns_error() {
+    use ponyllm_protocol::error::ProtocolError;
+
+    // 1. Failed with error payload -> Err carrying code/message, done=true.
+    let mut fsm = ResponsesToChatFsm::new("m");
+    let failed = ResponseStreamEvent::Failed {
+        response: ResponseObject {
+            id: "resp_sf_1".to_string(),
+            object: "response".to_string(),
+            status: "failed".to_string(),
+            model: "m".to_string(),
+            output: vec![],
+            usage: None,
+            error: Some(ResponseError {
+                code: "server_error".to_string(),
+                message: "upstream blew up".to_string(),
+            }),
+        },
+    };
+    let err = fsm.process_event(failed).unwrap_err();
+    match err {
+        ProtocolError::Conversion { from, to, reason } => {
+            assert_eq!(from, "responses");
+            assert_eq!(to, "chat");
+            assert!(reason.contains("code=server_error"), "reason: {reason}");
+            assert!(reason.contains("message=upstream blew up"), "reason: {reason}");
+        }
+        other => panic!("expected Conversion error, got {other:?}"),
+    }
+    assert!(
+        fsm.finish_if_open().is_none(),
+        "done must be true after Failed so finish_if_open returns None"
+    );
+
+    // 2. Failed without error payload -> Err with status fallback.
+    let mut fsm2 = ResponsesToChatFsm::new("m");
+    let failed_no_error = ResponseStreamEvent::Failed {
+        response: ResponseObject {
+            id: "resp_sf_2".to_string(),
+            object: "response".to_string(),
+            status: "failed".to_string(),
+            model: "m".to_string(),
+            output: vec![],
+            usage: None,
+            error: None,
+        },
+    };
+    let err = fsm2.process_event(failed_no_error).unwrap_err();
+    match err {
+        ProtocolError::Conversion { reason, .. } => {
+            assert!(reason.contains("status=failed"), "reason: {reason}");
+        }
+        other => panic!("expected Conversion error, got {other:?}"),
+    }
+    assert!(fsm2.finish_if_open().is_none());
+
+    // 3. Failed after text deltas still errors (never synthesizes Other chunk).
+    let mut fsm3 = ResponsesToChatFsm::new("m");
+    let delta = ResponseStreamEvent::OutputTextDelta(ResponseTextDelta {
+        response_id: "resp_sf_3".to_string(),
+        item_id: "it_0".to_string(),
+        output_index: 0,
+        content_index: 0,
+        delta: "partial".to_string(),
+    });
+    let chunks = fsm3.process_event(delta).unwrap();
+    assert_eq!(chunks.len(), 1);
+    let failed_late = ResponseStreamEvent::Failed {
+        response: ResponseObject {
+            id: "resp_sf_3".to_string(),
+            object: "response".to_string(),
+            status: "failed".to_string(),
+            model: "m".to_string(),
+            output: vec![],
+            usage: None,
+            error: Some(ResponseError {
+                code: "c".to_string(),
+                message: "late failure".to_string(),
+            }),
+        },
+    };
+    assert!(fsm3.process_event(failed_late).is_err());
+    assert!(fsm3.finish_if_open().is_none());
+}
+
+#[test]
+fn test_responses_to_anthropic_stream_failed_passes_message_through() {
+    // 1. Real upstream message is passed through (not the hardcoded string).
+    let mut fsm = ResponsesToAnthropicFsm::new("m");
+    let failed = ResponseStreamEvent::Failed {
+        response: ResponseObject {
+            id: "resp_af_1".to_string(),
+            object: "response".to_string(),
+            status: "failed".to_string(),
+            model: "m".to_string(),
+            output: vec![],
+            usage: None,
+            error: Some(ResponseError {
+                code: "server_error".to_string(),
+                message: "upstream exploded".to_string(),
+            }),
+        },
+    };
+    let events = fsm.process_event(failed).unwrap();
+    assert!(
+        matches!(events.first(), Some(MessageStreamEvent::MessageStart { .. })),
+        "Failed must ensure_started so the client sees message_start first"
+    );
+    let err_event = events
+        .iter()
+        .find(|e| matches!(e, MessageStreamEvent::Error { .. }))
+        .expect("Failed must emit an Error event");
+    match err_event {
+        MessageStreamEvent::Error { error } => {
+            assert_eq!(error.message, "upstream exploded");
+        }
+        _ => unreachable!(),
+    }
+    assert!(
+        fsm.finish_if_open().is_none(),
+        "done must be true after Failed"
+    );
+
+    // 2. Missing error payload -> status fallback.
+    let mut fsm2 = ResponsesToAnthropicFsm::new("m");
+    let failed_no_error = ResponseStreamEvent::Failed {
+        response: ResponseObject {
+            id: "resp_af_2".to_string(),
+            object: "response".to_string(),
+            status: "failed".to_string(),
+            model: "m".to_string(),
+            output: vec![],
+            usage: None,
+            error: None,
+        },
+    };
+    let events = fsm2.process_event(failed_no_error).unwrap();
+    let msg = events
+        .iter()
+        .find_map(|e| match e {
+            MessageStreamEvent::Error { error } => Some(error.message.clone()),
+            _ => None,
+        })
+        .expect("must emit Error event");
+    assert!(msg.contains("status=failed"), "message: {msg}");
+    assert!(fsm2.finish_if_open().is_none());
+
+    // 3. Blank message with code -> status fallback carrying the code.
+    let mut fsm3 = ResponsesToAnthropicFsm::new("m");
+    let failed_code_only = ResponseStreamEvent::Failed {
+        response: ResponseObject {
+            id: "resp_af_3".to_string(),
+            object: "response".to_string(),
+            status: "failed".to_string(),
+            model: "m".to_string(),
+            output: vec![],
+            usage: None,
+            error: Some(ResponseError {
+                code: "timeout".to_string(),
+                message: "".to_string(),
+            }),
+        },
+    };
+    let events = fsm3.process_event(failed_code_only).unwrap();
+    let msg = events
+        .iter()
+        .find_map(|e| match e {
+            MessageStreamEvent::Error { error } => Some(error.message.clone()),
+            _ => None,
+        })
+        .expect("must emit Error event");
+    assert!(msg.contains("status=failed"), "message: {msg}");
+    assert!(msg.contains("timeout"), "message: {msg}");
+}
+
+#[test]
+fn test_responses_failed_paths_preserve_stop_length_toolcalls_and_other() {
+    // Non-streaming: completed text -> Stop, completed tool call -> ToolCalls.
+    let completed_text = ResponseObject {
+        id: "resp_ok_1".to_string(),
+        object: "response".to_string(),
+        status: "completed".to_string(),
+        model: "m".to_string(),
+        output: vec![ResponseOutputItem::Message {
+            id: "msg_1".to_string(),
+            status: "completed".to_string(),
+            role: "assistant".to_string(),
+            content: vec![ResponseContentPart::Text {
+                text: "hi".to_string(),
+            }],
+        }],
+        usage: None,
+        error: None,
+    };
+    let chat = responses_to_chat_response(&completed_text).unwrap();
+    assert_eq!(chat.choices[0].finish_reason, Some(FinishReason::Stop));
+
+    let completed_tool = ResponseObject {
+        id: "resp_ok_2".to_string(),
+        object: "response".to_string(),
+        status: "completed".to_string(),
+        model: "m".to_string(),
+        output: vec![ResponseOutputItem::FunctionCall {
+            id: "fc_1".to_string(),
+            status: "completed".to_string(),
+            call_id: "call_1".to_string(),
+            name: "f".to_string(),
+            arguments: "{}".to_string(),
+        }],
+        usage: None,
+        error: None,
+    };
+    let chat = responses_to_chat_response(&completed_tool).unwrap();
+    assert_eq!(chat.choices[0].finish_reason, Some(FinishReason::ToolCalls));
+
+    // Streaming: Completed -> Stop, Incomplete -> Length, tool path -> ToolCalls.
+    let mut fsm = ResponsesToChatFsm::new("m");
+    let done = ResponseStreamEvent::Completed {
+        response: ResponseObject {
+            id: "r".to_string(),
+            object: "response".to_string(),
+            status: "completed".to_string(),
+            model: "m".to_string(),
+            output: vec![],
+            usage: None,
+            error: None,
+        },
+    };
+    let chunks = fsm.process_event(done).unwrap();
+    assert_eq!(chunks[0].choices[0].finish_reason, Some(FinishReason::Stop));
+
+    let mut fsm_len = ResponsesToChatFsm::new("m");
+    let incomplete = ResponseStreamEvent::Incomplete {
+        response: ResponseObject {
+            id: "r".to_string(),
+            object: "response".to_string(),
+            status: "incomplete".to_string(),
+            model: "m".to_string(),
+            output: vec![],
+            usage: None,
+            error: None,
+        },
+    };
+    let chunks = fsm_len.process_event(incomplete).unwrap();
+    assert_eq!(
+        chunks[0].choices[0].finish_reason,
+        Some(FinishReason::Length)
+    );
+
+    let mut fsm_tool = ResponsesToChatFsm::new("m");
+    let added = ResponseStreamEvent::OutputItemAdded {
+        response_id: "r".to_string(),
+        output_index: 0,
+        item: ResponseOutputItem::FunctionCall {
+            id: "fc_1".to_string(),
+            status: "in_progress".to_string(),
+            call_id: "call_1".to_string(),
+            name: "f".to_string(),
+            arguments: String::new(),
+        },
+    };
+    let _ = fsm_tool.process_event(added).unwrap();
+    let done_tool = ResponseStreamEvent::Completed {
+        response: ResponseObject {
+            id: "r".to_string(),
+            object: "response".to_string(),
+            status: "completed".to_string(),
+            model: "m".to_string(),
+            output: vec![],
+            usage: None,
+            error: None,
+        },
+    };
+    let chunks = fsm_tool.process_event(done_tool).unwrap();
+    assert_eq!(
+        chunks[0].choices[0].finish_reason,
+        Some(FinishReason::ToolCalls)
+    );
+
+    // FinishReason::Other variant is retained as the serde `other` fallback.
+    let other: FinishReason = serde_json::from_value(json!("something_unknown")).unwrap();
+    assert_eq!(other, FinishReason::Other);
+}
+
+#[test]
+fn test_response_object_is_failed_and_reason_helpers() {
+    fn obj(status: &str, id: &str, error: Option<ResponseError>) -> ResponseObject {
+        ResponseObject {
+            id: id.to_string(),
+            object: "response".to_string(),
+            status: status.to_string(),
+            model: "m".to_string(),
+            output: vec![],
+            usage: None,
+            error,
+        }
+    }
+    // Canonical failed status.
+    assert!(obj("failed", "r1", None).is_failed());
+    // Non-success status WITH a non-empty error payload counts even when the
+    // status word is not the canonical "failed".
+    assert!(obj(
+        "error",
+        "r2",
+        Some(ResponseError { code: "e".to_string(), message: "boom".to_string() })
+    )
+    .is_failed());
+    // Success / in-flight statuses are never failures, even with an error attached.
+    for s in ["completed", "incomplete", "in_progress", "queued", ""] {
+        assert!(
+            !obj(
+                s,
+                "r3",
+                Some(ResponseError { code: "e".to_string(), message: "boom".to_string() })
+            )
+            .is_failed(),
+            "status={s} must not be failed"
+        );
+    }
+    // Unknown status without an error payload is not a failure (avoids
+    // misclassifying future success-like statuses).
+    assert!(!obj("weird", "r4", None).is_failed());
+    // Blank error payload does not count either.
+    assert!(!obj(
+        "weird",
+        "r5",
+        Some(ResponseError { code: "".to_string(), message: "  ".to_string() })
+    )
+    .is_failed());
+    // Reason helper: code/message first, then status/id fallback.
+    assert_eq!(
+        obj(
+            "failed",
+            "r1",
+            Some(ResponseError { code: "c".to_string(), message: "m".to_string() })
+        )
+        .failed_reason(),
+        "code=c message=m"
+    );
+    assert_eq!(obj("failed", "r1", None).failed_reason(), "status=failed/r1");
+    assert_eq!(obj("failed", "", None).failed_reason(), "status=failed");
+}
+
+#[test]
+fn test_response_error_tolerates_missing_fields() {
+    // P1-2: upstream error objects with missing fields must not break
+    // deserialization of the whole event (which would previously be
+    // silently dropped and EOF-synthesized into a Stop success).
+    let v: ResponseError =
+        serde_json::from_value(json!({})).expect("empty error object must deserialize");
+    assert_eq!(v.code, "");
+    assert_eq!(v.message, "");
+    let v: ResponseError =
+        serde_json::from_value(json!({"code": "c"})).expect("partial error must deserialize");
+    assert_eq!(v.code, "c");
+    assert_eq!(v.message, "");
+    let failed: ResponseStreamEvent = serde_json::from_value(json!({
+        "type": "response.failed",
+        "response": {
+            "id": "r", "object": "response", "status": "failed",
+            "model": "m", "output": [],
+            "error": {"message": "only message"}
+        }
+    }))
+    .expect("failed event with partial error must deserialize");
+    let mut fsm = ResponsesToChatFsm::new("m");
+    let err = fsm.process_event(failed).unwrap_err();
+    match err {
+        ponyllm_protocol::error::ProtocolError::Conversion { reason, .. } => {
+            assert!(reason.contains("only message"), "reason: {reason}");
+        }
+        other => panic!("expected Conversion error, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_responses_failed_to_anthropic_response_returns_error() {
+    use ponyllm_protocol::error::ProtocolError;
+    // P1-1: mirror of the chat projection — failed must Err, never an
+    // empty success message with stop_reason None.
+    let failed = ResponseObject {
+        id: "resp_af_ns".to_string(),
+        object: "response".to_string(),
+        status: "failed".to_string(),
+        model: "m".to_string(),
+        output: vec![ResponseOutputItem::Message {
+            id: "msg_1".to_string(),
+            status: "completed".to_string(),
+            role: "assistant".to_string(),
+            content: vec![ResponseContentPart::Text {
+                text: "should be ignored".to_string(),
+            }],
+        }],
+        usage: None,
+        error: Some(ResponseError {
+            code: "server_error".to_string(),
+            message: "boom gone".to_string(),
+        }),
+    };
+    let err = responses_to_anthropic_response(&failed).unwrap_err();
+    match err {
+        ProtocolError::Conversion { from, to, reason } => {
+            assert_eq!(from, "responses");
+            assert_eq!(to, "anthropic");
+            assert!(reason.contains("boom gone"), "reason: {reason}");
+        }
+        other => panic!("expected Conversion error, got {other:?}"),
+    }
+    // Completed still maps normally.
+    let ok = ResponseObject {
+        id: "resp_ok".to_string(),
+        object: "response".to_string(),
+        status: "completed".to_string(),
+        model: "m".to_string(),
+        output: vec![],
+        usage: None,
+        error: None,
+    };
+    let msg = responses_to_anthropic_response(&ok).unwrap();
+    assert_eq!(msg.stop_reason, Some(AnthropicStopReason::EndTurn));
+}
+
 

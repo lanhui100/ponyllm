@@ -1,5 +1,5 @@
 use crate::anthropic::messages::*;
-use crate::error::Result;
+use crate::error::{ProtocolError, Result};
 use crate::openai::chat::*;
 use crate::openai::responses::*;
 use std::collections::HashMap;
@@ -41,6 +41,17 @@ fn chat_text_chunk(id: &str, model: &str, created: u64, text: String) -> ChatCom
         usage: None,
         system_fingerprint: None,
         service_tier: None,
+    }
+}
+
+/// Failed Responses objects project to a Conversion error, never to a
+/// terminal chat chunk: swallowing failure as `FinishReason::Other` would
+/// surface a successful empty response to the client.
+fn failed_conversion_error(response: &ResponseObject) -> ProtocolError {
+    ProtocolError::Conversion {
+        from: "responses",
+        to: "chat",
+        reason: response.failed_reason(),
     }
 }
 
@@ -296,22 +307,8 @@ impl ResponsesToChatFsm {
                 self.done = true;
             }
             ResponseStreamEvent::Failed { response } => {
-                chunks.push(ChatCompletionChunk {
-                    id: response.id.clone(),
-                    object: "chat.completion.chunk".to_string(),
-                    created: self.created,
-                    model: self.model.clone(),
-                    choices: vec![ChatChunkChoice {
-                        index: 0,
-                        delta: ChatChunkDelta::default(),
-                        finish_reason: Some(FinishReason::Other),
-                        logprobs: None,
-                    }],
-                    usage: None,
-                    system_fingerprint: None,
-                    service_tier: None,
-                });
                 self.done = true;
+                return Err(failed_conversion_error(&response));
             }
             _ => {}
         }
@@ -782,12 +779,12 @@ impl ResponsesToAnthropicFsm {
                 };
                 self.close_and_finish(&mut events, stop, output_tokens);
             }
-            ResponseStreamEvent::Failed { .. } => {
+            ResponseStreamEvent::Failed { response } => {
                 self.ensure_started(&mut events);
                 events.push(MessageStreamEvent::Error {
                     error: AnthropicErrorDetail {
                         r#type: "api_error".to_string(),
-                        message: "upstream response failed".to_string(),
+                        message: upstream_failure_message(&response),
                     },
                 });
                 self.done = true;
@@ -810,6 +807,21 @@ impl ResponsesToAnthropicFsm {
         self.close_and_finish(&mut events, stop, 0);
         Some(events)
     }
+}
+
+/// Anthropic projection of a Failed response keeps the Ok+Error event
+/// shape but passes the real upstream message through. Missing/empty
+/// message falls back to the status (with code when present).
+fn upstream_failure_message(response: &ResponseObject) -> String {
+    if let Some(err) = response.error.as_ref() {
+        if !err.message.trim().is_empty() {
+            return err.message.clone();
+        }
+        if !err.code.trim().is_empty() {
+            return format!("upstream response failed: status={} code={}", response.status, err.code);
+        }
+    }
+    format!("upstream response failed: status={}", response.status)
 }
 
 /// FSM translating upstream Anthropic SSE into Responses SSE events.

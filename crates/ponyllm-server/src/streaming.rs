@@ -192,13 +192,53 @@ pub fn responses_event_to_sse_bytes(event: &ResponseStreamEvent) -> Option<Bytes
 
 /// Translate an upstream **Responses** SSE byte stream into **OpenAI Chat** SSE
 /// frames. Used by `/v1/chat/completions` with a Responses-native upstream.
+///
+/// Upstream `response.failed` handling: the protocol FSM projects the failure
+/// (with its upstream code/message) into `Err(ProtocolError::Conversion)` and
+/// latches itself done, so this bridge marks the stream stopped, pushes one
+/// stream error item retaining `e.to_string()` (which `wrap_telemetry_stream`
+/// records as `StreamFailed`), and emits no terminal stop chunk — the EOF tail
+/// then sends only `data: [DONE]`.
+///
+/// Constraint: this branch runs after response headers are already committed,
+/// so the gateway can no longer swap keys or fail over to another provider;
+/// surfacing the failure mid-stream (telemetry + truncated stream) is the only
+/// option, and retry relies on the client resending the request, which triggers
+/// a fresh route.
+///
+/// Transport errors (`E`) and FSM failures are projected into one concrete
+/// error type because the FSM failure carries no `E` value to forward.
+#[derive(Debug)]
+pub enum ResponsesChatStreamError {
+    /// Upstream transport error detail (the `Display` of the original `E`).
+    Transport(String),
+    /// Upstream `response.failed` detail (`ProtocolError::Conversion` display,
+    /// carrying the upstream code/message).
+    UpstreamFailed(String),
+}
+
+impl std::fmt::Display for ResponsesChatStreamError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ResponsesChatStreamError::Transport(detail) => {
+                write!(f, "upstream transport error: {}", detail)
+            }
+            ResponsesChatStreamError::UpstreamFailed(detail) => {
+                write!(f, "upstream response failed: {}", detail)
+            }
+        }
+    }
+}
+
+impl std::error::Error for ResponsesChatStreamError {}
+
 pub fn responses_sse_to_chat_stream<S, E>(
     stream: S,
     fallback_model: &str,
-) -> impl Stream<Item = Result<Bytes, E>>
+) -> impl Stream<Item = Result<Bytes, ResponsesChatStreamError>>
 where
     S: Stream<Item = Result<Bytes, E>> + Send + 'static,
-    E: Send + 'static,
+    E: std::fmt::Display + Send + 'static,
 {
     let fsm = std::sync::Arc::new(Mutex::new(ResponsesToChatFsm::new(fallback_model)));
     let fsm_flat = fsm.clone();
@@ -206,33 +246,44 @@ where
     let stopped_flag = stopped.clone();
 
     let translated = sse_event_stream(stream).flat_map(move |res| {
-        let mut out: Vec<Result<Bytes, E>> = Vec::new();
+        let mut out: Vec<Result<Bytes, ResponsesChatStreamError>> = Vec::new();
         match res {
             Ok(evt) => {
                 let data = evt.data.trim();
                 if data.is_empty() || data == "[DONE]" {
                     // terminal / heartbeat frame: nothing to forward
                 } else if let Ok(msge) = serde_json::from_str::<ResponseStreamEvent>(data) {
-                    if let Ok(chunks) = fsm_flat.lock().process_event(msge) {
-                        for c in chunks {
-                            if c.choices.iter().any(|ch| ch.finish_reason.is_some()) {
-                                stopped_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                    // Upstream `response.failed` surfaces here as
+                    // `Err(ProtocolError::Conversion)` carrying the upstream
+                    // code/message: mark stopped, push one stream error item
+                    // (never synthesize a stop chunk), EOF then sends only
+                    // `data: [DONE]`.
+                    match fsm_flat.lock().process_event(msge) {
+                        Ok(chunks) => {
+                            for c in chunks {
+                                if c.choices.iter().any(|ch| ch.finish_reason.is_some()) {
+                                    stopped_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                                }
+                                if let Ok(json) = serde_json::to_string(&c) {
+                                    out.push(Ok(Bytes::from(format!("data: {}\n\n", json))));
+                                }
                             }
-                            if let Ok(json) = serde_json::to_string(&c) {
-                                out.push(Ok(Bytes::from(format!("data: {}\n\n", json))));
-                            }
+                        }
+                        Err(e) => {
+                            stopped_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                            out.push(Err(ResponsesChatStreamError::UpstreamFailed(e.to_string())));
                         }
                     }
                 }
             }
             Err(e) => {
                 stopped_flag.store(true, std::sync::atomic::Ordering::SeqCst);
-                out.push(Err(e));
+                out.push(Err(ResponsesChatStreamError::Transport(e.to_string())));
             }
         }
         let iter = futures_util::stream::iter(out);
         futures_util::stream::BoxStream::from(Box::pin(iter)
-            as std::pin::Pin<Box<dyn futures_util::Stream<Item = Result<Bytes, E>> + Send>>)
+            as std::pin::Pin<Box<dyn futures_util::Stream<Item = Result<Bytes, ResponsesChatStreamError>> + Send>>)
     });
 
     translated
@@ -246,7 +297,7 @@ where
                 }
             }
             buf.extend_from_slice(b"data: [DONE]\n\n");
-            Ok::<_, E>(Bytes::from(buf))
+            Ok::<_, ResponsesChatStreamError>(Bytes::from(buf))
         }))
         .boxed()
 }
@@ -2160,6 +2211,177 @@ mod tests {
             "must synthesize finish_reason:stop at EOF so clients never fail with 'Stream ended without finish_reason': {joined}"
         );
         assert!(out.last().unwrap().contains("[DONE]"), "missing [DONE]: {out:?}");
+    }
+
+    #[tokio::test]
+    async fn test_responses_to_chat_failed_surfaces_stream_error_not_other() {
+        // Upstream `response.failed` must surface as a stream error item
+        // carrying the upstream code/message — never as a synthesized
+        // `finish_reason:"other"` success chunk.
+        let delta = format!(
+            "event: response.output_text.delta\ndata: {}\n\n",
+            serde_json::json!({
+                "type": "response.output_text.delta",
+                "response_id": "resp_f", "item_id": "it_f",
+                "output_index": 0, "content_index": 0, "delta": "partial"
+            })
+        );
+        let failed = format!(
+            "event: response.failed\ndata: {}\n\n",
+            serde_json::json!({
+                "type": "response.failed",
+                "response": {"id": "resp_f", "object": "response", "status": "failed",
+                    "model": "m", "output": [],
+                    "error": {"code": "server_error", "message": "upstream blew up"}}
+            })
+        );
+        let s = bytes_stream(vec![Bytes::from(delta), Bytes::from(failed)]);
+        let out: Vec<Result<Bytes, ResponsesChatStreamError>> =
+            responses_sse_to_chat_stream(s, "m").collect().await;
+        let ok_text: String = out
+            .iter()
+            .filter_map(|r| r.as_ref().ok())
+            .map(|b| String::from_utf8_lossy(b).into_owned())
+            .collect();
+        let err_text: String = out
+            .iter()
+            .filter_map(|r| r.as_ref().err())
+            .map(|e| e.to_string())
+            .collect();
+        assert!(
+            ok_text.contains("\"content\":\"partial\""),
+            "partial content before failure must still flow: {ok_text}"
+        );
+        assert!(
+            !ok_text.contains("\"finish_reason\":\"other\""),
+            "must never synthesize finish_reason:other for a failed upstream: {ok_text}"
+        );
+        assert!(
+            !ok_text.contains("\"finish_reason\":\"stop\""),
+            "must not synthesize a success stop chunk after failure: {ok_text}"
+        );
+        assert!(
+            err_text.contains("server_error") && err_text.contains("upstream blew up"),
+            "stream error must retain upstream code/message: {err_text}"
+        );
+        assert!(
+            ok_text.contains("[DONE]"),
+            "EOF tail still terminates the (truncated) stream: {ok_text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_responses_to_chat_failed_without_error_payload_still_errors() {
+        // `response.failed` with no error object falls back to the
+        // status/id reason — still a stream error, never `other`.
+        let failed = format!(
+            "event: response.failed\ndata: {}\n\n",
+            serde_json::json!({
+                "type": "response.failed",
+                "response": {"id": "resp_n", "object": "response", "status": "failed",
+                    "model": "m", "output": []}
+            })
+        );
+        let s = bytes_stream(vec![Bytes::from(failed)]);
+        let out: Vec<Result<Bytes, ResponsesChatStreamError>> =
+            responses_sse_to_chat_stream(s, "m").collect().await;
+        assert!(
+            out.iter().any(|r| r.is_err()),
+            "failed without error payload must still surface a stream error: {out:?}"
+        );
+        let ok_text: String = out
+            .iter()
+            .filter_map(|r| r.as_ref().ok())
+            .map(|b| String::from_utf8_lossy(b).into_owned())
+            .collect();
+        assert!(
+            !ok_text.contains("finish_reason"),
+            "no terminal finish chunk at all after failure: {ok_text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_responses_to_chat_transport_error_still_surfaces() {
+        // A mid-stream transport failure keeps flowing as a stream error item
+        // (and also suppresses the EOF success synthesis).
+        let delta = Bytes::from_static(b"data: {\"type\":\"response.output_text.delta\",\"response_id\":\"r\",\"item_id\":\"i\",\"output_index\":0,\"content_index\":0,\"delta\":\"hi\"}\n\n");
+        let s = futures_util::stream::iter(vec![
+            Ok::<Bytes, std::io::Error>(delta),
+            Err(std::io::Error::new(std::io::ErrorKind::ConnectionReset, "conn reset")),
+        ]);
+        let out: Vec<Result<Bytes, ResponsesChatStreamError>> =
+            responses_sse_to_chat_stream(s, "m").collect().await;
+        let errs: Vec<String> = out
+            .iter()
+            .filter_map(|r| r.as_ref().err())
+            .map(|e| e.to_string())
+            .collect();
+        assert_eq!(errs.len(), 1, "exactly one stream error expected: {out:?}");
+        assert!(
+            matches!(
+                out.iter().find(|r| r.is_err()),
+                Some(Err(ResponsesChatStreamError::Transport(_)))
+            ),
+            "transport failure must map to Transport: {out:?}"
+        );
+        assert!(errs[0].contains("conn reset"), "detail retained: {errs:?}");
+    }
+
+    #[tokio::test]
+    async fn test_responses_to_chat_failed_is_recorded_as_stream_failed() {
+        use ponyllm_core::telemetry::{EventBus, EventCtx, MetricsProjection, StreamProjection};
+        use crate::frames::FrameConverter;
+
+        let metrics = Arc::new(MetricsCollector::new());
+        let recorder = Arc::new(FlightRecorder::new(10));
+        let bus = Arc::new(EventBus::new(100));
+        bus.add_projection(Arc::new(MetricsProjection::new(metrics.clone())));
+        let stream_proj = Arc::new(StreamProjection::default());
+        bus.add_projection(stream_proj.clone());
+        bus.add_projection(Arc::new(FrameConverter::new(recorder.clone())));
+        let start = Instant::now();
+        let ctx = StreamFailureContext {
+            bus: bus.clone(),
+            ctx: EventCtx::new("req-failed-1", "/v1/chat/completions", start),
+            provider: "spark-fail".to_string(),
+            stages: Arc::new(Mutex::new(StageTimings::default())),
+            request_snippet: None,
+            estimated_prompt_tokens: 10,
+            attempt_start: Some(start),
+        };
+        let failed = format!(
+            "event: response.failed\ndata: {}\n\n",
+            serde_json::json!({
+                "type": "response.failed",
+                "response": {"id": "resp_f", "object": "response", "status": "failed",
+                    "model": "m", "output": [],
+                    "error": {"code": "server_error", "message": "upstream exploded"}}
+            })
+        );
+        let s = bytes_stream(vec![Bytes::from(failed)]);
+        let inner = responses_sse_to_chat_stream(s, "m");
+        let monitored = wrap_telemetry_stream(inner, ctx);
+        let out: Vec<Result<Bytes, ResponsesChatStreamError>> = monitored.collect().await;
+        assert!(
+            out.iter().any(|r| r.is_err()),
+            "failure must surface as a stream error item: {out:?}"
+        );
+        let trace = bus.trace_for("req-failed-1");
+        assert!(
+            trace.iter().any(|e| matches!(
+                e.event,
+                GatewayEvent::StreamFailed { .. }
+            )),
+            "telemetry must record StreamFailed (not Completed): {:?}",
+            trace.iter().map(|e| format!("{:?}", e.event)).collect::<Vec<_>>()
+        );
+        assert!(
+            !trace.iter().any(|e| matches!(
+                e.event,
+                GatewayEvent::StreamCompleted { .. }
+            )),
+            "a failed stream must never record StreamCompleted"
+        );
     }
 
     #[tokio::test]
