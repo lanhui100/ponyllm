@@ -234,6 +234,40 @@
   border-radius: 8px;
 }
 
+/* 骨架占位 shimmer：浅灰基底 + 扫过高光，与毛玻璃卡片体系同色 */
+.skeleton-block {
+  display: inline-block;
+  background-color: var(--surface-track);
+  background-image: linear-gradient(
+    100deg,
+    transparent 20%,
+    rgba(255, 255, 255, 0.75) 50%,
+    transparent 80%
+  );
+  background-size: 200% 100%;
+  background-repeat: no-repeat;
+  animation: skeleton-shimmer 1.6s linear infinite;
+  pointer-events: none;
+  user-select: none;
+}
+
+@keyframes skeleton-shimmer {
+  from {
+    background-position: 180% 0;
+  }
+  to {
+    background-position: -80% 0;
+  }
+}
+
+/* 减弱动效偏好：静态占位，不做扫光 */
+@media (prefers-reduced-motion: reduce) {
+  .skeleton-block {
+    animation: none;
+    background-image: none;
+  }
+}
+
 /* 平滑过渡动效 (物理弹性软阻尼) */
 .smooth-collapse-enter-active,
 .smooth-collapse-leave-active {

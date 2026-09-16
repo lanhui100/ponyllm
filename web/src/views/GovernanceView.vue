@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from 'vue';
+import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { useAdminConfig } from '../composables/useAdminConfig';
 import { onStopPolling } from '../router';
 import NavBar from '../components/NavBar.vue';
 import ProviderCard from '../components/governance/ProviderCard.vue';
 import StrategySection from '../components/governance/StrategySection.vue';
+import GovernanceSkeleton from '../components/GovernanceSkeleton.vue';
 import KeySecretModal from '../components/governance/KeySecretModal.vue';
 import ConflictModal from '../components/governance/ConflictModal.vue';
 import Icons from '../components/ui/Icons.vue';
@@ -54,6 +55,14 @@ const {
 
 type TabType = 'providers' | 'strategy';
 const currentTab = ref<TabType>('providers');
+
+/**
+ * 首屏骨架：首次加载且列表仍空、无错误时展示。
+ * 已有列表后的刷新走按钮 spinner，不閃骨架；error 时优先错误横幅。
+ */
+const showSkeleton = computed(() => {
+  return loading.value && providers.value.length === 0 && !error.value;
+});
 
 /** 轻量 toast（单条，自动消失，接入全局中央毛玻璃 Toast）。 */
 function showToast(message: string, ms = 3500) {
@@ -950,8 +959,11 @@ onUnmounted(() => {
         </button>
       </div>
 
+      <!-- 首屏骨架（仅初始加载且无数据时，避免误报空态） -->
+      <GovernanceSkeleton v-if="showSkeleton" />
+
       <!-- 主视图：按服务商一级卡片排列 (三合一架构) -->
-      <div v-if="currentTab === 'providers'" class="space-y-4">
+      <div v-else-if="currentTab === 'providers'" class="space-y-4">
         <div v-if="providers.length === 0" class="text-center py-16 swiss-card">
           <Icons name="server" size="36" class="text-slate-300 mx-auto mb-2.5" />
           <p class="text-base font-semibold text-slate-800">暂无模型服务商</p>

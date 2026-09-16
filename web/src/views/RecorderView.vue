@@ -2,6 +2,7 @@
 import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue';
 import NavBar from '../components/NavBar.vue';
 import FrameDrawer from '../components/FrameDrawer.vue';
+import RecorderSkeleton from '../components/RecorderSkeleton.vue';
 import Icons from '../components/ui/Icons.vue';
 import UiButton from '../components/ui/UiButton.vue';
 import UiTooltip from '../components/ui/UiTooltip.vue';
@@ -12,6 +13,8 @@ import { onStopPolling } from '../router';
 
 const frames = ref<RecordedFrame[]>([]);
 const loading = ref(false);
+/** 首屏是否已完成过一次拉取：区分首屏骨架与 2s 轮询，避免轮询闪烁。 */
+const hasLoadedOnce = ref(false);
 const selectedIndex = ref<number>(-1);
 const activeFrame = ref<RecordedFrame | null>(null);
 const isDrawerOpen = ref(false);
@@ -58,6 +61,7 @@ async function fetchFrames() {
     // network or backend failure
   } finally {
     loading.value = false;
+    hasLoadedOnce.value = true;
   }
 }
 
@@ -327,8 +331,11 @@ onUnmounted(() => {
         </div>
       </div>
 
+      <!-- 首屏骨架：首次拉取未完成且无帧时展示，轮询不闪烁；空列表仍走下方空态 -->
+      <RecorderSkeleton v-if="!hasLoadedOnce && frames.length === 0" />
+
       <!-- 主列表容器：毛玻璃卡片包裹，撑满视口剩余高度，可纵横滚动无右侧滚动条 -->
-      <div class="swiss-card flex-1 min-h-0 flex flex-col overflow-hidden border border-white/40 shadow-xs">
+      <div v-else class="swiss-card flex-1 min-h-0 flex flex-col overflow-hidden border border-white/40 shadow-xs">
         <!-- 宽表格容器：支持横向宽展铺开与无滚动条纵向滚动 -->
         <div
           ref="tableContainerRef"

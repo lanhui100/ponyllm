@@ -6,6 +6,7 @@ import { useAdminConfig } from '../composables/useAdminConfig';
 import NavBar from '../components/NavBar.vue';
 import StatusBanner from '../components/StatusBanner.vue';
 import MetricCards from '../components/MetricCards.vue';
+import DashboardSkeleton from '../components/DashboardSkeleton.vue';
 import AntigravityPoolCard from '../components/AntigravityPoolCard.vue';
 import TrendCharts from '../components/TrendCharts.vue';
 import ProviderMatrix from '../components/ProviderMatrix.vue';
@@ -79,6 +80,11 @@ const latestPoint = computed(() => {
   return history.value[history.value.length - 1];
 });
 
+/** 首屏骨架：三路遥测均未到达时展示，一旦有过数据则永不回骨架（避免轮询闪烁）。 */
+const showSkeleton = computed(() => {
+  return health.value === 'unknown' && metrics.value === null && stream.value === null;
+});
+
 const speed24h = computed<number | undefined>(() => {
   const points = historyData.value?.points;
   if (points && points.length > 0) {
@@ -104,6 +110,9 @@ const speed24h = computed<number | undefined>(() => {
         </div>
       </div>
 
+      <DashboardSkeleton v-if="showSkeleton" />
+
+      <template v-else>
       <StatusBanner
         :health="health"
         :transport="transport"
@@ -145,6 +154,7 @@ const speed24h = computed<number | undefined>(() => {
         :provider-cached-tokens="historyData?.provider_cached_tokens"
         @update:range="setRange"
       />
+      </template>
     </main>
   </div>
 </template>
