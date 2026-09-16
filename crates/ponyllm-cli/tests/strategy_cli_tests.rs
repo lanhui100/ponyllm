@@ -142,6 +142,29 @@ fn test_protocol_fields_toml_roundtrip() {
 }
 
 #[test]
+fn test_missing_strategy_field_deserializes_to_sticky_priority_default() {
+    // Regression guard for the sticky default: a provider TOML without a
+    // `strategy` field must deserialize to "priority", not round_robin,
+    // so old configs pin to the primary key (cache affinity + quota depth).
+    let toml_no_strategy = r#"
+[gateway]
+bind = "127.0.0.1:8080"
+max_retries = 3
+flight_recorder_capacity = 200
+api_key = "test-key"
+
+[providers.deepseek]
+base_url = "https://api.deepseek.com"
+default_model = "deepseek-chat"
+keys = [
+    { id = "k1", api_key = "sk-x", priority = 1, weight = 10 },
+]
+"#;
+    let cfg: ConfigFile = toml::from_str(toml_no_strategy).unwrap();
+    assert_eq!(cfg.providers["deepseek"].strategy, "priority");
+}
+
+#[test]
 fn test_validate_provider_fields_rejects_garbage() {
     assert!(validate_provider_fields(
         "https://api.example.com",

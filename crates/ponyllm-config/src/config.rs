@@ -415,7 +415,7 @@ impl ProviderSection {
 }
 
 fn default_strategy() -> String {
-    "round_robin".to_string()
+    "priority".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -793,7 +793,7 @@ keys = [
 [providers.openai]
 base_url = "https://api.openai.com"
 default_model = "gpt-4o"
-strategy = "round_robin"
+strategy = "priority"
 keys = [
     { id = "openai-main", api_key = "sk-proj-xxxx", priority = 1, weight = 10 },
 ]
@@ -802,7 +802,7 @@ keys = [
 [providers.anthropic]
 base_url = "https://api.anthropic.com"
 default_model = "claude-3-7-sonnet-20250219"
-strategy = "round_robin"
+strategy = "priority"
 keys = [
     { id = "anthropic-1", api_key = "sk-ant-xxxx", priority = 1, weight = 10 },
 ]

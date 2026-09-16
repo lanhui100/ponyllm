@@ -230,7 +230,7 @@ pub async fn handle_key_auth_agy(
             ProviderSection {
                 base_url: DEFAULT_ANTIGRAVITY_ENDPOINT.to_string(),
                 default_model: "claude-sonnet-4-6".to_string(),
-                strategy: "round_robin".to_string(),
+                strategy: "priority".to_string(),
                 billing_mode: ponyllm_core::pool::BillingMode::Metered,
                 input_price: 0.0,
                 cached_price: 0.0,

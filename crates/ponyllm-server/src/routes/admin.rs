@@ -18,7 +18,7 @@ use axum::response::IntoResponse;
 use axum::Json;
 use ponyllm_config::{ConfigFile, KeySection, ModelConfig, ProviderSection};
 use ponyllm_core::pool::{
-    ApiKeyEntry, BillingMode, KeyPool, ModelTier, PricingMode, PricingPeriod, RoutingStrategy,
+    ApiKeyEntry, BillingMode, KeyPool, ModelTier, PricingMode, PricingPeriod,
     UpstreamProtocol,
 };
 use serde::{Deserialize, Serialize};
@@ -242,7 +242,7 @@ fn default_model_str() -> String {
     "default".to_string()
 }
 fn default_strategy_str() -> String {
-    "round_robin".to_string()
+    "priority".to_string()
 }
 fn default_billing_mode_str() -> String {
     "metered".to_string()
@@ -674,7 +674,18 @@ fn parse_pool_strategy(s: &str) -> ponyllm_core::pool::RoutingStrategy {
     match s.trim().to_ascii_lowercase().as_str() {
         "priority" => ponyllm_core::pool::RoutingStrategy::Priority,
         "weighted_round_robin" | "weighted" => ponyllm_core::pool::RoutingStrategy::WeightedRoundRobin,
-        _ => ponyllm_core::pool::RoutingStrategy::RoundRobin,
+        "round_robin" => ponyllm_core::pool::RoutingStrategy::RoundRobin,
+        // Sticky default: unknown/empty values pin to the primary key so
+        // upstream prompt-cache affinity and quota depth are preserved.
+        // Warn loudly: a typo must not silently concentrate load.
+        unknown => {
+            tracing::warn!(
+                strategy = %s,
+                "unknown pool strategy '{unknown}', falling back to sticky priority; \
+                 use priority|round_robin|weighted explicitly"
+            );
+            ponyllm_core::pool::RoutingStrategy::Priority
+        }
     }
 }
 
@@ -819,7 +830,7 @@ pub async fn handle_admin_create_provider(
         payload.default_model.trim().to_string()
     };
     let strategy = if payload.strategy.trim().is_empty() {
-        "round_robin".to_string()
+        "priority".to_string()
     } else {
         payload.strategy.trim().to_string()
     };
@@ -3055,7 +3066,7 @@ pub async fn handle_admin_authorize_antigravity(
             ProviderSection {
                 base_url: ponyllm_core::pool::DEFAULT_ANTIGRAVITY_ENDPOINT.to_string(),
                 default_model: "claude-sonnet-4-6".to_string(),
-                strategy: "round_robin".to_string(),
+                strategy: "priority".to_string(),
                 billing_mode: BillingMode::Metered,
                 input_price: 0.0,
                 cached_price: 0.0,
@@ -3145,11 +3156,8 @@ pub async fn handle_admin_authorize_antigravity(
     {
         let mut pools = state.pools.write();
         let pool = pools.entry(target_provider.clone()).or_insert_with(|| {
-            let strat = match p_sec.strategy.as_str() {
-                "priority" => RoutingStrategy::Priority,
-                "weighted_round_robin" => RoutingStrategy::WeightedRoundRobin,
-                _ => RoutingStrategy::RoundRobin,
-            };
+            // Reuse the canonical mapping (sticky default + warn on unknown).
+            let strat = parse_pool_strategy(&p_sec.strategy);
             Arc::new(KeyPool::new(&target_provider, strat))
         });
         let entry = ApiKeyEntry::new_antigravity(&final_id, mgr.clone(), payload.priority, payload.weight);
@@ -3622,4 +3630,41 @@ pub fn admin_routes() -> axum::Router<Arc<AppState>> {
 pub fn openapi_json() -> serde_json::Value {
     serde_json::to_value(<AdminApiDoc as utoipa::OpenApi>::openapi())
         .expect("openapi serializes")
+}
+
+#[cfg(test)]
+mod pool_strategy_tests {
+    use super::parse_pool_strategy;
+    use ponyllm_core::pool::RoutingStrategy;
+
+    #[test]
+    fn explicit_round_robin_maps_to_round_robin() {
+        // Guard the opt-out: deleting the RR arm must turn this red.
+        assert_eq!(parse_pool_strategy("round_robin"), RoutingStrategy::RoundRobin);
+        // Normalization matches the CLI serve path (keep in sync).
+        assert_eq!(parse_pool_strategy(" Round_Robin "), RoutingStrategy::RoundRobin);
+        assert_eq!(parse_pool_strategy("ROUND_ROBIN"), RoutingStrategy::RoundRobin);
+    }
+
+    #[test]
+    fn priority_and_weighted_aliases() {
+        assert_eq!(parse_pool_strategy("priority"), RoutingStrategy::Priority);
+        assert_eq!(
+            parse_pool_strategy("weighted"),
+            RoutingStrategy::WeightedRoundRobin
+        );
+        assert_eq!(
+            parse_pool_strategy("weighted_round_robin"),
+            RoutingStrategy::WeightedRoundRobin
+        );
+    }
+
+    #[test]
+    fn unknown_and_empty_fall_back_to_sticky_priority() {
+        // Sticky default: typos pin to the primary key (with a warn),
+        // never silently rotate.
+        assert_eq!(parse_pool_strategy(""), RoutingStrategy::Priority);
+        assert_eq!(parse_pool_strategy("round-robin"), RoutingStrategy::Priority);
+        assert_eq!(parse_pool_strategy("random"), RoutingStrategy::Priority);
+    }
 }

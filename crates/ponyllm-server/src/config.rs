@@ -139,7 +139,7 @@ pub struct ProviderConfig {
 }
 
 fn default_strategy() -> String {
-    "round_robin".to_string()
+    "priority".to_string()
 }
 
 impl Default for ProviderConfig {

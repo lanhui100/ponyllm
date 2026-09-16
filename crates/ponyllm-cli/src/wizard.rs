@@ -104,14 +104,16 @@ pub fn run_interactive_init(output_path: &str) -> Result<(), Box<dyn std::error:
             .with_default(default_model)
             .prompt()?;
 
-        let strategy_options = vec!["priority (优先级主备)", "round_robin (多 Key 轮询)", "weighted (加权调度)"];
+        let strategy_options = vec!["priority (粘滞主备·默认推荐)", "round_robin (多 Key 轮询·分摊 RPM，伤缓存)", "weighted (加权调度)"];
         let strat_sel = Select::new("  多 Key 调度策略:", strategy_options).prompt()?;
         let strat = if strat_sel.starts_with("priority") {
             "priority"
         } else if strat_sel.starts_with("weighted") {
             "weighted"
-        } else {
+        } else if strat_sel.starts_with("round_robin") {
             "round_robin"
+        } else {
+            "priority"
         };
 
         let proto_options = vec![

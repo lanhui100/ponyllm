@@ -24,6 +24,29 @@ fn resolve_path(custom: Option<&str>) -> std::path::PathBuf {
     ConfigFile::resolve_path(custom)
 }
 
+/// Map a provider `strategy` string to the pool routing enum.
+///
+/// Normalizes case/whitespace (mirrors `parse_pool_strategy` in
+/// ponyllm-server; keep the two in sync). Unknown values fall back to
+/// sticky [`RoutingStrategy::Priority`] with a warn so a typo pins to the
+/// primary key loudly instead of silently rotating.
+fn parse_pool_strategy(raw: &str, provider_name: &str) -> RoutingStrategy {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "priority" => RoutingStrategy::Priority,
+        "weighted" | "weighted_round_robin" => RoutingStrategy::WeightedRoundRobin,
+        "round_robin" => RoutingStrategy::RoundRobin,
+        unknown => {
+            tracing::warn!(
+                provider = %provider_name,
+                strategy = %raw,
+                "unknown pool strategy '{unknown}', falling back to sticky priority; \
+                 use priority|round_robin|weighted explicitly"
+            );
+            RoutingStrategy::Priority
+        }
+    }
+}
+
 fn build_gateway_config_and_pools(
     config_file: &ConfigFile,
     bind_override: Option<String>,
@@ -98,11 +121,7 @@ fn build_gateway_config_and_pools(
             },
         );
 
-        let strat = match p_sec.strategy.as_str() {
-            "priority" => RoutingStrategy::Priority,
-            "weighted" => RoutingStrategy::WeightedRoundRobin,
-            _ => RoutingStrategy::RoundRobin,
-        };
+        let strat = parse_pool_strategy(&p_sec.strategy, p_name);
         let pool = Arc::new(KeyPool::new(p_name, strat));
         for k in &p_sec.keys {
             if k.is_antigravity(p_sec.default_protocol, p_name) {
@@ -1535,4 +1554,52 @@ async fn handle_test_keys(
         tested_count - success_count
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod pool_strategy_tests {
+    use super::parse_pool_strategy;
+    use ponyllm_core::pool::RoutingStrategy;
+
+    #[test]
+    fn explicit_round_robin_maps_to_round_robin() {
+        // Guard the opt-out: deleting the RR arm must turn this red.
+        assert_eq!(
+            parse_pool_strategy("round_robin", "p"),
+            RoutingStrategy::RoundRobin
+        );
+        // Normalization matches parse_pool_strategy in ponyllm-server.
+        assert_eq!(
+            parse_pool_strategy(" Round_Robin ", "p"),
+            RoutingStrategy::RoundRobin
+        );
+    }
+
+    #[test]
+    fn priority_and_weighted_aliases() {
+        assert_eq!(
+            parse_pool_strategy("priority", "p"),
+            RoutingStrategy::Priority
+        );
+        assert_eq!(
+            parse_pool_strategy("weighted", "p"),
+            RoutingStrategy::WeightedRoundRobin
+        );
+        assert_eq!(
+            parse_pool_strategy("weighted_round_robin", "p"),
+            RoutingStrategy::WeightedRoundRobin
+        );
+    }
+
+    #[test]
+    fn unknown_and_empty_fall_back_to_sticky_priority() {
+        // Sticky default: typos pin to the primary key (with a warn),
+        // never silently rotate.
+        assert_eq!(parse_pool_strategy("", "p"), RoutingStrategy::Priority);
+        assert_eq!(
+            parse_pool_strategy("round-robin", "p"),
+            RoutingStrategy::Priority
+        );
+        assert_eq!(parse_pool_strategy("random", "p"), RoutingStrategy::Priority);
+    }
 }

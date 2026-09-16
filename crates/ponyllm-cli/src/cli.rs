@@ -274,8 +274,8 @@ pub enum ProviderCommands {
         #[arg(short, long, default_value = "gpt-4o")]
         model: String,
 
-        /// Key balancing strategy (priority, round_robin, weighted)
-        #[arg(short, long, default_value = "round_robin")]
+        /// Key balancing strategy (priority [sticky failover, default], round_robin, weighted)
+        #[arg(short, long, default_value = "priority")]
         strategy: String,
 
         /// Billing mode: 'metered' (default) or 'plan' (periodic quota)

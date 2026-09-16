@@ -56,6 +56,48 @@ fn test_key_cooldown_on_429_and_automatic_failover() {
 }
 
 #[test]
+fn test_key_pool_priority_stickiness_failover_and_stick_back() {
+    use std::time::Duration;
+    // Sticky default: with all keys Active, Priority must pin to the
+    // lowest-priority-number key across many selections (no RR rotation),
+    // fail over only when the primary cools, and stick back on recovery.
+    let pool = KeyPool::new("openai", RoutingStrategy::Priority);
+    pool.add_key(ApiKeyEntry::new("primary", "sk-openai-1", 1, 10));
+    pool.add_key(ApiKeyEntry::new("backup", "sk-openai-2", 2, 10));
+
+    // 1. Sticky: 20 consecutive selections stay on primary.
+    for _ in 0..20 {
+        let k = pool.select_key_excluding(&[]).unwrap();
+        assert_eq!(k.id, "primary");
+    }
+
+    // 2. Failover: primary cools down -> backup serves.
+    pool.record_error(
+        "primary",
+        PoolErrorType::RateLimit {
+            retry_after: Some(Duration::from_secs(60)),
+        },
+    );
+    assert_eq!(pool.get_key_status("primary"), Some(KeyState::CoolingDown));
+    let k = pool.select_key_excluding(&[]).unwrap();
+    assert_eq!(k.id, "backup");
+
+    // 3. Stick back: primary recovers -> selections return to primary.
+    pool.clear_key_cooldown("primary");
+    assert_eq!(pool.get_key_status("primary"), Some(KeyState::Active));
+    for _ in 0..5 {
+        let k = pool.select_key_excluding(&[]).unwrap();
+        assert_eq!(k.id, "primary");
+    }
+
+    // 4. In-request retry exclusion still routes around the primary.
+    let k = pool
+        .select_key_excluding(&["primary".to_string()])
+        .unwrap();
+    assert_eq!(k.id, "backup");
+}
+
+#[test]
 fn test_key_cooling_on_quota_exhausted() {
     let pool = KeyPool::new("deepseek", RoutingStrategy::RoundRobin);
     pool.add_key(ApiKeyEntry::new("k1", "sk-ds-1", 1, 10));

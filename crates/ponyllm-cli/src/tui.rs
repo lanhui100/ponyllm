@@ -70,7 +70,7 @@ pub fn modality_key_to_short(k: &str) -> &'static str {
         _ => "其",
     }
 }
-pub const STRATEGIES: [&str; 3] = ["round_robin", "priority", "weighted"];
+pub const STRATEGIES: [&str; 3] = ["priority", "round_robin", "weighted"];
 pub const PROVIDER_BILLING_MODES: [&str; 3] = ["按量付费 (Metered)", "包月订阅 (Coding Plan)", "完全免费 (Free)"];
 pub const MODEL_BILLING_MODES: [&str; 4] = ["继承提供商", "按量计费 (Metered)", "包月套餐/Coding Plan (Plan)", "完全免费 (Free)"];
 
@@ -556,7 +556,7 @@ fn handle_key_event(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                         if let Some(p_name) = app.selected_provider_name() {
                             if let Some(p) = app.config.providers.get(&p_name) {
                                 let strat_idx = match p.strategy.as_str() {
-                                    "priority" => 1,
+                                    "round_robin" => 1,
                                     "weighted" => 2,
                                     _ => 0,
                                 };
