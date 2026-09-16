@@ -12,9 +12,10 @@ pub const PROVIDER_SLOT_COUNT: usize = 40; // 每柱一次调用，最近40次
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConnectivityStatus {
-    Ok,        // < 300ms 且成功
-    Degraded,  // 300ms .. 1000ms 且成功
-    Down,      // >= 1000ms 或失败
+    Ok,        // 网关 < 300ms 且成功；Provider TTFT < 5s 且成功
+    Degraded,  // 网关 300ms..1000ms 且成功；Provider TTFT 5s..10s 且成功
+    Slow,      // Provider TTFT 10s..60s 且成功
+    Down,      // 网关 >= 1000ms 或失败；Provider TTFT >= 60s 或失败
     Empty,     // 无数据/初始化
 }
 
@@ -27,6 +28,12 @@ pub struct ConnectivitySlot {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tps: Option<f64>,
     pub status: ConnectivityStatus,
+    /// 本次调用是否成功（2xx / 流式完整结束）。
+    /// 2026-09-16 引入：用于区分"慢成功"与"真失败"，使读取时可按最新阈值重算状态；
+    /// 历史快照缺失该字段时按旧阈值语义回推（见 `infer_legacy_success`）。
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub success: Option<bool>,
 }
 
 fn default_tps() -> Option<f64> {
@@ -117,10 +124,35 @@ fn classify_provider_status(latency_ms: Option<f64>, is_success: bool) -> Connec
         return ConnectivityStatus::Down;
     }
     match latency_ms {
-        Some(lat) if lat >= 5000.0 => ConnectivityStatus::Down,
-        Some(lat) if lat >= 3000.0 => ConnectivityStatus::Degraded,
+        Some(lat) if lat >= 60000.0 => ConnectivityStatus::Down,
+        Some(lat) if lat >= 10000.0 => ConnectivityStatus::Slow,
+        Some(lat) if lat >= 5000.0 => ConnectivityStatus::Degraded,
         _ => ConnectivityStatus::Ok,
     }
+}
+
+/// 历史快照（2026-09-16 之前）没有 `success` 字段时的成功性回推：
+/// 旧阈值为 Ok(<3s)/Degraded(3~5s)/Down(>=5s 或失败)。
+/// - 旧 Ok/Degraded：当时必为成功；
+/// - 旧 Down：可能是真失败，也可能是 >=5s 的慢成功误判 —— 无法区分，
+///   统一视为成功并交由新阈值重算（>=60s 仍为 Down；5~60s 纠正为 Degraded/Slow）。
+/// - 旧 Empty：无数据，保持 Empty。
+fn infer_legacy_success(slot: &ConnectivitySlot) -> bool {
+    match slot.status {
+        ConnectivityStatus::Ok | ConnectivityStatus::Degraded | ConnectivityStatus::Slow => true,
+        ConnectivityStatus::Down => true,
+        ConnectivityStatus::Empty => false,
+    }
+}
+
+/// 读取/恢复时统一重算 Provider 状态：用 `success`（新数据）或回推（历史快照）
+/// 结合当前阈值重新分类，使历史数据自动适配最新阈值方案。
+fn refresh_provider_slot_status(slot: &mut ConnectivitySlot) {
+    if slot.status == ConnectivityStatus::Empty {
+        return;
+    }
+    let is_success = slot.success.unwrap_or_else(|| infer_legacy_success(slot));
+    slot.status = classify_provider_status(slot.latency_ms, is_success);
 }
 
 fn normalize_latency(latency_ms: Option<f64>) -> Option<f64> {
@@ -235,6 +267,7 @@ impl ConnectivitySampler {
                 latency_ms: valid_latency,
                 tps: valid_tps,
                 status,
+                success: Some(is_success),
             });
             while state.calls.len() > self.provider_slot_count {
                 state.calls.pop_front();
@@ -297,12 +330,14 @@ impl ConnectivitySampler {
                     latency_ms: avg_lat,
                     tps: None,
                     status,
+                    success: None,
                 }),
                 None => slots.push(ConnectivitySlot {
                     timestamp_ms: slot_start,
                     latency_ms: None,
                     tps: None,
                     status: ConnectivityStatus::Empty,
+                    success: None,
                 }),
             }
         }
@@ -315,13 +350,17 @@ impl ConnectivitySampler {
 
     fn get_provider_series(&self, provider: &str, now_ms: u64) -> ConnectivityBarSeries {
         let state_arc = self.providers.read().get(provider).cloned();
-        let (calls, latest) = match &state_arc {
+        let (mut calls, latest) = match &state_arc {
             Some(arc) => {
                 let g = arc.read();
                 (g.calls.iter().cloned().collect::<Vec<_>>(), g.latest_latency_ms)
             }
             None => (Vec::new(), None),
         };
+        // 读取时统一按当前阈值重算：历史快照（无论是否经过 restore）的旧状态在此自愈。
+        for slot in calls.iter_mut() {
+            refresh_provider_slot_status(slot);
+        }
 
         let total = self.provider_slot_count;
         let mut out: Vec<ConnectivitySlot> = Vec::with_capacity(total);
@@ -338,6 +377,7 @@ impl ConnectivitySampler {
                     latency_ms: None,
                     tps: None,
                     status: ConnectivityStatus::Empty,
+                    success: None,
                 });
             }
             out.extend(calls);
@@ -381,8 +421,15 @@ impl ConnectivitySampler {
                 }
                 state.ring = ring;
             } else {
-                let mut calls: VecDeque<ConnectivitySlot> =
-                    ps.calls.into_iter().collect();
+                let mut calls: VecDeque<ConnectivitySlot> = ps
+                    .calls
+                    .into_iter()
+                    .map(|mut slot| {
+                        // 兼容历史快照：启动恢复时即用当前阈值重算（读取时还会再算一次，双保险）。
+                        refresh_provider_slot_status(&mut slot);
+                        slot
+                    })
+                    .collect();
                 while calls.len() > self.provider_slot_count {
                     calls.pop_front();
                 }

@@ -10,13 +10,15 @@ fn test_connectivity_sampler_thresholds_and_bar_count() {
     let sampler = ConnectivitySampler::new(40, 1500); // 40 slots, 1500ms step
     let now = 1_700_000_000_000u64;
 
-    // 1. Record fast success (<300ms) -> Ok
+    // 1. Record fast success (<5s) -> Ok
     sampler.record("deepseek", now, Some(120.0), true);
-    // 2. Record moderate success (3s..5s) -> Degraded
-    sampler.record("openai", now, Some(3500.0), true);
-    // 3. Record slow success (>=5s) -> Down
-    sampler.record("anthropic", now, Some(5500.0), true);
-    // 4. Record failure -> Down
+    // 2. Record moderate success (5s..10s) -> Degraded
+    sampler.record("openai", now, Some(6500.0), true);
+    // 3. Record slow success (10s..60s) -> Slow
+    sampler.record("anthropic", now, Some(25000.0), true);
+    // 4. Record very slow success (>=60s) -> Down
+    sampler.record("slowpoke", now, Some(65000.0), true);
+    // 5. Record failure -> Down
     sampler.record("fallback", now, Some(80.0), false);
 
     let ds_bars = sampler.get_series("deepseek", now);
@@ -26,14 +28,19 @@ fn test_connectivity_sampler_thresholds_and_bar_count() {
     assert_eq!(last_ds.status, ConnectivityStatus::Ok);
 
     let oa_bars = sampler.get_series("openai", now);
-    assert_eq!(oa_bars.latest_latency_ms, Some(3500.0));
+    assert_eq!(oa_bars.latest_latency_ms, Some(6500.0));
     let last_oa = oa_bars.slots.last().unwrap();
     assert_eq!(last_oa.status, ConnectivityStatus::Degraded);
 
     let an_bars = sampler.get_series("anthropic", now);
-    assert_eq!(an_bars.latest_latency_ms, Some(5500.0));
+    assert_eq!(an_bars.latest_latency_ms, Some(25000.0));
     let last_an = an_bars.slots.last().unwrap();
-    assert_eq!(last_an.status, ConnectivityStatus::Down);
+    assert_eq!(last_an.status, ConnectivityStatus::Slow);
+
+    let sp_bars = sampler.get_series("slowpoke", now);
+    assert_eq!(sp_bars.latest_latency_ms, Some(65000.0));
+    let last_sp = sp_bars.slots.last().unwrap();
+    assert_eq!(last_sp.status, ConnectivityStatus::Down);
 
     let fb_bars = sampler.get_series("fallback", now);
     let last_fb = fb_bars.slots.last().unwrap();
@@ -232,9 +239,9 @@ fn test_provider_bars_are_continuous_per_call_no_time_gaps() {
     let sampler = ConnectivitySampler::default();
     let base = 1_700_000_000_000u64;
     // 稀疏调用：间隔远大于5s，时间桶方案会在中间产生Empty
-    // Provider 阈值：< 3s 为 Ok，3s ~ 5s 为 Degraded，> 5s 或失败为 Down
+    // Provider 阈值：< 5s 为 Ok，5s ~ 10s 为 Degraded，10s ~ 60s 为 Slow，>= 60s 或失败为 Down
     sampler.record("prov-a", base, Some(100.0), true);
-    sampler.record("prov-a", base + 3600_000, Some(3500.0), true);
+    sampler.record("prov-a", base + 3600_000, Some(7500.0), true);
     sampler.record("prov-a", base + 7200_000, Some(50.0), false);
 
     let series = sampler.get_series("prov-a", base + 7200_000 + 1000);
@@ -252,7 +259,7 @@ fn test_connectivity_snapshot_restore_preserves_calls() {
     let sampler = ConnectivitySampler::default();
     let base = 1_700_000_000_000u64;
     sampler.record("prov-b", base, Some(120.0), true);
-    sampler.record("prov-b", base + 1000, Some(6000.0), true);
+    sampler.record("prov-b", base + 1000, Some(65000.0), true);
     sampler.record("gateway", base, Some(10.0), true);
 
     let snap = sampler.snapshot_state();
@@ -263,10 +270,41 @@ fn test_connectivity_snapshot_restore_preserves_calls() {
     assert_eq!(p.slots.len(), 40);
     let tail = &p.slots[38..];
     assert_eq!(tail[0].status, ConnectivityStatus::Ok);
-    assert_eq!(tail[1].status, ConnectivityStatus::Down);
+    assert_eq!(tail[1].status, ConnectivityStatus::Down); // 65000ms >= 60s 依然为 Down
 
     let g = restored.get_series("gateway", base + 2000);
     assert_eq!(g.slots.len(), 24);
+}
+
+#[test]
+fn test_legacy_snapshot_down_reclassified_under_new_thresholds() {
+    // 回归测试：2026-09-16 之前的快照没有 success 字段，且旧阈值把 >=5s 慢成功误判为 Down。
+    // 读取时必须按新阈值重算：7s -> Degraded（黄），25s -> Slow（橙），65s -> Down（红）。
+    use ponyllm_core::telemetry::ProviderConnectivitySnapshot;
+    let base = 1_700_000_000_000u64;
+    let legacy_json = serde_json::json!({
+        "latest_latency_ms": 7000.0,
+        "ring": [],
+        "calls": [
+            {"timestamp_ms": base, "latency_ms": 7000.0, "status": "down"},
+            {"timestamp_ms": base + 1000, "latency_ms": 25000.0, "status": "down"},
+            {"timestamp_ms": base + 2000, "latency_ms": 65000.0, "status": "down"}
+        ]
+    });
+    let snap_calls: ProviderConnectivitySnapshot =
+        serde_json::from_value(legacy_json).expect("legacy snapshot must deserialize");
+    assert!(snap_calls.calls.iter().all(|c| c.success.is_none()));
+
+    let mut snap = std::collections::HashMap::new();
+    snap.insert("prov-legacy".to_string(), snap_calls);
+    let restored = ConnectivitySampler::default();
+    restored.restore_state(snap);
+
+    let series = restored.get_series("prov-legacy", base + 3000);
+    let tail = &series.slots[37..];
+    assert_eq!(tail[0].status, ConnectivityStatus::Degraded, "7s 慢成功应纠正为 Degraded（黄）");
+    assert_eq!(tail[1].status, ConnectivityStatus::Slow, "25s 慢成功应纠正为 Slow（橙）");
+    assert_eq!(tail[2].status, ConnectivityStatus::Down, "65s 仍为 Down（红）");
 }
 
 #[test]
