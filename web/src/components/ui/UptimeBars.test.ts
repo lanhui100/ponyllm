@@ -121,7 +121,7 @@ describe('UptimeBars Component', () => {
     providerApp.mount(providerContainer);
     await nextTick();
     const providerBar = providerContainer.querySelector('[data-testid="uptime-bar"]');
-    expect(providerBar?.getAttribute('title')).toContain('首字响应及时 (<3s)');
+    expect(providerBar?.getAttribute('title')).toContain('首字响应及时 (<5s)');
     providerApp.unmount();
 
     // 24h speed badge in t/s is present and rounded to integer

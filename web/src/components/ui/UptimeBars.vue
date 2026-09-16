@@ -51,24 +51,45 @@ const hasValidSpeed24h = computed(() => {
 
 // 无背景（flat）模式：图例后面的指标只保留文字色，去掉胶囊背景与内边距
 const latencyClasses = computed(() => {
-  const thresholdColor = !hasValidLatency.value
-    ? 'text-slate-500'
-    : props.latestLatencyMs! < (props.isProvider ? 3000 : 300)
-    ? 'text-emerald-800'
-    : props.latestLatencyMs! < (props.isProvider ? 5000 : 1000)
-    ? 'text-amber-800'
-    : 'text-rose-800';
+  if (!hasValidLatency.value) {
+    const chip = props.flat ? '' : 'px-2.5 py-0.5 rounded-md';
+    return [chip, 'text-slate-500', props.flat ? '' : 'bg-slate-200/70'];
+  }
+  const ms = props.latestLatencyMs!;
+  let thresholdColor = 'text-emerald-800';
+  let bgColor = 'bg-emerald-100';
+
+  if (props.isProvider) {
+    // Provider TTFT: <5s 绿色, 5s~10s 黄色, 10s~60s 橙色, >=60s 红色
+    if (ms < 5000) {
+      thresholdColor = 'text-emerald-800';
+      bgColor = 'bg-emerald-100';
+    } else if (ms < 10000) {
+      thresholdColor = 'text-amber-800';
+      bgColor = 'bg-amber-100';
+    } else if (ms < 60000) {
+      thresholdColor = 'text-orange-800';
+      bgColor = 'bg-orange-100';
+    } else {
+      thresholdColor = 'text-rose-800';
+      bgColor = 'bg-rose-100';
+    }
+  } else {
+    // Gateway: <300ms 绿色, 300ms~1000ms 黄色, >=1000ms 红色
+    if (ms < 300) {
+      thresholdColor = 'text-emerald-800';
+      bgColor = 'bg-emerald-100';
+    } else if (ms < 1000) {
+      thresholdColor = 'text-amber-800';
+      bgColor = 'bg-amber-100';
+    } else {
+      thresholdColor = 'text-rose-800';
+      bgColor = 'bg-rose-100';
+    }
+  }
+
   const chip = props.flat ? '' : 'px-2.5 py-0.5 rounded-md';
-  const bgColor = props.flat
-    ? ''
-    : !hasValidLatency.value
-    ? 'bg-slate-200/70'
-    : props.latestLatencyMs! < (props.isProvider ? 3000 : 300)
-    ? 'bg-emerald-100'
-    : props.latestLatencyMs! < (props.isProvider ? 5000 : 1000)
-    ? 'bg-amber-100'
-    : 'bg-rose-100';
-  return [chip, thresholdColor, bgColor];
+  return [chip, thresholdColor, props.flat ? '' : bgColor];
 });
 
 function formatTime(ts: number): string {
@@ -83,10 +104,12 @@ function getSlotTooltip(slot: ConnectivitySlot): string {
   const speed = typeof slot.tps === 'number' && !isNaN(slot.tps) && slot.tps >= 0 ? ` · ${Math.round(slot.tps)} t/s` : '';
   const statusLabel = props.isProvider
     ? slot.status === 'ok'
-      ? '首字响应及时 (<3s)'
+      ? '首字响应及时 (<5s)'
       : slot.status === 'degraded'
-      ? '首字响应一般 (3~5s)'
-      : '首字响应超时/慢 (≥5s 或异常)'
+      ? '首字响应一般 (5~10s)'
+      : slot.status === 'slow'
+      ? '首字响应较慢 (10~60s)'
+      : '首字响应超时/服务异常 (≥60s 或异常)'
     : slot.status === 'ok'
     ? '响应及时 (<300ms)'
     : slot.status === 'degraded'
@@ -117,6 +140,8 @@ function getSlotTooltip(slot: ConnectivitySlot): string {
             ? 'bg-emerald-500 hover:scale-y-125 hover:brightness-110'
             : slot.status === 'degraded'
             ? 'bg-amber-400 hover:scale-y-125 hover:brightness-110'
+            : slot.status === 'slow'
+            ? 'bg-orange-500 hover:scale-y-125 hover:brightness-110'
             : slot.status === 'down'
             ? 'bg-rose-500 hover:scale-y-125 hover:brightness-110'
             : 'bg-slate-400 hover:bg-slate-500',

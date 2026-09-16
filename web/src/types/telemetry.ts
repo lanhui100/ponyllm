@@ -83,13 +83,15 @@ export interface HealthStatus {
   version?: string;
 }
 
-export type ConnectivityStatus = 'ok' | 'degraded' | 'down' | 'empty';
+export type ConnectivityStatus = 'ok' | 'degraded' | 'slow' | 'down' | 'empty';
 
 export interface ConnectivitySlot {
   timestamp_ms: number;
   latency_ms?: number;
   tps?: number;
   status: ConnectivityStatus;
+  /** 本次调用是否成功（后端写入；历史数据可能缺失，前端仅做透传展示，状态以后端重算为准） */
+  success?: boolean;
 }
 
 export interface ConnectivityBarSeries {

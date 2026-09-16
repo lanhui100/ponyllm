@@ -119,7 +119,7 @@ function getProviderTps(p: any): string {
           <div class="flex items-center gap-2">
             <h2 class="text-base font-bold text-slate-900 tracking-tight">提供商状态</h2>
             <UiTooltip
-              content="展示各上游供应商最近调用的连通性微柱（每柱一次调用，最近40次，绿色畅通、黄色延迟、红色异常）、统计周期内的累计 Token 消耗与占比，以及平均首字延迟（TTFT）和平均生成速率（TPS）。数据经服务端持久化，重启后可恢复。"
+              content="展示各上游供应商最近调用的连通性微柱（每柱一次调用，最近40次；绿色 <5s 畅通、黄色 5~10s 延迟、橙色 10~60s 较慢、红色 ≥60s 或失败）、统计周期内的累计 Token 消耗与占比，以及平均首字延迟（TTFT）和平均生成速率（TPS）。数据经服务端持久化，重启后可恢复。"
               wrap
             >
               <button
@@ -186,7 +186,7 @@ function getProviderTps(p: any): string {
               </span>
             </td>
 
-            <!-- 柱状连续排列的连通性图例 (Uptime Bars, 3s/5s 阈值) -->
+            <!-- 柱状连续排列的连通性图例 (Uptime Bars, 5s/10s/60s 阈值) -->
             <td class="py-3.5 whitespace-nowrap">
               <UptimeBars
                 :slots="p.uptime_bars?.slots"
