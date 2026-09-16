@@ -365,11 +365,11 @@ async function handleRefreshAllQuotas() {
   <div class="space-y-2">
     <!-- 标题与快捷添加按钮 (支持独立折叠) -->
     <div
-      class="flex items-center justify-between pb-1 cursor-pointer select-none"
+      class="flex items-center justify-between min-h-[32px] pb-1 cursor-pointer select-none"
       @click="isExpanded = !isExpanded"
     >
-      <div class="flex items-center gap-2 text-sm font-semibold text-slate-800">
-        <Icons name="key" size="14" class="text-amber-500" />
+      <div class="flex items-center gap-2 text-sm font-semibold text-slate-800 leading-6">
+        <Icons name="key" size="15" class="text-amber-600" />
         密钥 ({{ keys.length }})
         <UiTooltip content="网关向该厂商转发请求所使用的 API 密钥池，支持多 Key 负载均衡">
           <Icons name="info" size="13" class="text-slate-400 hover:text-slate-600 cursor-pointer" />

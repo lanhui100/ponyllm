@@ -286,14 +286,14 @@ async function handleDeleteProvider() {
     <!-- 二级折叠展开区域 (包含模型协议、密钥及模型) -->
     <UiCollapsible :open="expanded">
       <div class="px-5 pb-5 pt-3 border-t border-white/40 bg-white/20 backdrop-blur-xs space-y-4">
-        <!-- 模型协议选择器与专属端点 (去除生硬边框与高厚度背景) -->
-        <div class="p-3.5 space-y-3" data-testid="protocol-section">
-          <div class="flex items-center justify-between">
-            <div class="flex items-center gap-1.5 text-[14px] font-semibold text-slate-800">
-              <Icons name="activity" size="16" class="text-amber-600" />
+        <!-- 模型协议选择器与专属端点 (与密钥/模型平级：统一标题字号与左对齐) -->
+        <div class="pt-1 space-y-2" data-testid="protocol-section">
+          <div class="flex items-center justify-between min-h-[32px] pb-1">
+            <div class="flex items-center gap-2 text-sm font-semibold text-slate-800 leading-6">
+              <Icons name="activity" size="15" class="text-amber-600" />
               模型协议
               <UiTooltip content="该服务商默认提供的协议与端点，未覆盖时统一走 Base URL">
-                <Icons name="info" size="14" class="text-slate-400 cursor-pointer" />
+                <Icons name="info" size="13" class="text-slate-400 cursor-pointer" />
               </UiTooltip>
             </div>
 
@@ -302,7 +302,7 @@ async function handleDeleteProvider() {
                 v-if="!isEditingProtocols"
                 variant="ghost"
                 size="sm"
-                class="text-slate-700 hover:text-slate-900 hover:bg-white/40 text-[13px] py-1"
+                class="text-slate-700 hover:text-slate-900 hover:bg-white/40 font-medium px-2.5 py-1 text-[13px]"
                 data-testid="edit-protocols-btn"
                 @click="isEditingProtocols = true"
               >
@@ -312,14 +312,14 @@ async function handleDeleteProvider() {
                 <UiButton
                   variant="ghost"
                   size="sm"
-                  class="text-[13px] py-1"
+                  class="font-medium px-2.5 py-1 text-[13px]"
                   @click="cancelEditProtocols"
                 >
                   取消
                 </UiButton>
                 <UiButton
                   size="sm"
-                  class="text-[13px] py-1"
+                  class="font-medium px-2.5 py-1 text-[13px]"
                   :disabled="protocolsSaving || !adminWriteEnabled"
                   data-testid="save-protocols-btn"
                   @click="handleSaveProtocols"

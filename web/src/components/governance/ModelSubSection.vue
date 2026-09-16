@@ -439,27 +439,27 @@ function getTierBadgeVariant(tier?: string) {
   <div class="space-y-2">
     <!-- 标题与快捷添加按钮 (支持独立折叠) -->
     <div
-      class="flex items-center justify-between pb-1 cursor-pointer select-none"
+      class="flex items-center justify-between min-h-[32px] pb-1 cursor-pointer select-none"
       @click="isExpanded = !isExpanded"
     >
-      <div class="flex items-center gap-1.5 text-xs font-semibold text-slate-700">
-        <Icons name="sparkles" size="14" class="text-slate-500" />
+      <div class="flex items-center gap-2 text-sm font-semibold text-slate-800 leading-6">
+        <Icons name="sparkles" size="15" class="text-amber-600" />
         模型 ({{ models.length }})
         <UiTooltip content="该服务商对外暴露的可路由模型字典及其上下文与思考强度参数">
-          <Icons name="info" size="12" class="text-slate-400 cursor-pointer" />
+          <Icons name="info" size="13" class="text-slate-400 cursor-pointer" />
         </UiTooltip>
       </div>
 
-      <div class="flex items-center gap-1" @click.stop>
+      <div class="flex items-center gap-1.5" @click.stop>
         <UiButton
           variant="ghost"
           size="sm"
           :disabled="!adminWriteEnabled || isAdding || pickerLoading"
           data-testid="add-model-btn"
-          class="text-slate-800 hover:text-slate-950 hover:bg-slate-100/70 font-medium px-2.5 py-1 text-xs"
+          class="text-slate-800 hover:text-slate-950 hover:bg-slate-100/70 font-medium px-2.5 py-1 text-[13px]"
           @click="handleAddClick"
         >
-          <Icons name="plus" size="13" />
+          <Icons name="plus" size="14" />
           {{ pickerLoading ? '获取中…' : '模型' }}
         </UiButton>
         <UiButton
@@ -470,7 +470,7 @@ function getTierBadgeVariant(tier?: string) {
           data-testid="toggle-models-btn"
           @click="isExpanded = !isExpanded"
         >
-          <Icons :name="isExpanded ? 'chevron-down' : 'chevron-right'" size="14" />
+          <Icons :name="isExpanded ? 'chevron-down' : 'chevron-right'" size="15" />
         </UiButton>
       </div>
     </div>
