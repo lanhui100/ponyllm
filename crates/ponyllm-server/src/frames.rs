@@ -182,12 +182,20 @@ impl Projection for FrameConverter {
                 error,
                 request_snippet,
                 ..
-            } => match env.provider.clone() {
-                Some(provider) => FlightFrame {
+            } => {
+                let provider = env.provider.clone();
+                let key_id = match &provider {
+                    Some(p) => p.clone(),
+                    None => match &env.model {
+                        Some(m) => format!("exhausted:{m}"),
+                        None => "all_providers_failed".to_string(),
+                    },
+                };
+                FlightFrame {
                     request_id: env.request_id.clone(),
                     endpoint: env.endpoint.clone(),
-                    provider: Some(provider.clone()),
-                    key_id: provider,
+                    provider,
+                    key_id,
                     raw_key: None,
                     attempt: None,
                     status_code: Some(*status_code),
@@ -201,27 +209,8 @@ impl Projection for FrameConverter {
                     ttft_ms: None,
                     downstream_ttft_ms: None,
                     stream_flow: None,
-                },
-                None => FlightFrame {
-                    request_id: env.request_id.clone(),
-                    endpoint: env.endpoint.clone(),
-                    provider: None,
-                    key_id: "all_providers_failed".to_string(),
-                    raw_key: None,
-                    attempt: None,
-                    status_code: Some(*status_code),
-                    latency: latency_of(env),
-                    error: Some(error.clone()),
-                    request_snippet: request_snippet.clone(),
-                    response_snippet: None,
-                    prompt_tokens: None,
-                    completion_tokens: None,
-                    cached_tokens: None,
-                    ttft_ms: None,
-                    downstream_ttft_ms: None,
-                    stream_flow: None,
-                },
-            },
+                }
+            }
             _ => return,
         };
         self.recorder.record(frame);

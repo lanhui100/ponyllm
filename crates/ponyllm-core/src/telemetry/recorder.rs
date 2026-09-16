@@ -394,9 +394,20 @@ impl FlightRecorder {
         }
 
         let mut buf = self.buffer.write();
-        // If an existing frame with the same request_id is already present (e.g. StreamStarted),
+        // If an existing frame with the same (request_id, attempt) is already present
+        // (e.g. StreamStarted updating to StreamCompleted on the same attempt/request),
         // update it in-place rather than leaving the incomplete initial marker.
-        if let Some(pos) = buf.iter().position(|f| f.request_id == recorded.request_id) {
+        // For distinct attempts or failed upstream attempts, never overwrite - preserve each attempt trace!
+        let existing_pos = if recorded.attempt.is_some() {
+            buf.iter().position(|f| f.request_id == recorded.request_id && f.attempt == recorded.attempt)
+        } else {
+            // For top-level requests without attempt index:
+            // Only update in-place if the previous frame was also a top-level in-flight marker (like StreamStarted)
+            // and did NOT record an upstream attempt failure.
+            buf.iter().position(|f| f.request_id == recorded.request_id && f.attempt.is_none())
+        };
+
+        if let Some(pos) = existing_pos {
             buf[pos] = recorded;
             return;
         }

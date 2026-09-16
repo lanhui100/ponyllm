@@ -232,3 +232,57 @@ fn test_stream_flow_detail_survives_recorder() {
     assert_eq!(flow.stall_count, Some(1));
     assert_eq!(flow.chunks, Some(100));
 }
+
+#[test]
+fn test_flight_recorder_preserves_distinct_attempt_failures() {
+    let recorder = FlightRecorder::new(10);
+    // Attempt 0 failed (e.g. timeout or 500 on provider A)
+    recorder.record(FlightFrame {
+        request_id: "req_retry_test".to_string(),
+        endpoint: "/v1/chat/completions".to_string(),
+        provider: Some("provider_a".to_string()),
+        key_id: "key_a".to_string(),
+        raw_key: None,
+        attempt: Some(0),
+        status_code: Some(500),
+        latency: Duration::from_millis(500),
+        error: Some("Upstream error 500".to_string()),
+        request_snippet: Some("{\"model\":\"test\"}".to_string()),
+        response_snippet: None,
+        prompt_tokens: None,
+        completion_tokens: None,
+        cached_tokens: None,
+        ttft_ms: None,
+        downstream_ttft_ms: None,
+        stream_flow: None,
+    });
+
+    // Attempt 1 succeeded on provider B
+    recorder.record(FlightFrame {
+        request_id: "req_retry_test".to_string(),
+        endpoint: "/v1/chat/completions".to_string(),
+        provider: Some("provider_b".to_string()),
+        key_id: "key_b".to_string(),
+        raw_key: None,
+        attempt: Some(1),
+        status_code: Some(200),
+        latency: Duration::from_millis(800),
+        error: None,
+        request_snippet: Some("{\"model\":\"test\"}".to_string()),
+        response_snippet: Some("{\"content\":\"hello\"}".to_string()),
+        prompt_tokens: Some(10),
+        completion_tokens: Some(20),
+        cached_tokens: None,
+        ttft_ms: None,
+        downstream_ttft_ms: None,
+        stream_flow: None,
+    });
+
+    let frames = recorder.get_recent_frames();
+    // Both attempt 0 (failure) and attempt 1 (success) must be preserved in recorder!
+    assert_eq!(frames.len(), 2, "Both attempts should be recorded without being overwritten");
+    assert_eq!(frames[0].attempt, Some(0));
+    assert_eq!(frames[0].error, Some("Upstream error 500".to_string()));
+    assert_eq!(frames[1].attempt, Some(1));
+    assert_eq!(frames[1].status_code, Some(200));
+}
