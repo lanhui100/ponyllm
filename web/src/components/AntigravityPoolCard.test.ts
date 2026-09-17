@@ -168,4 +168,60 @@ describe('AntigravityPoolCard Component', () => {
     app.unmount();
     document.body.removeChild(container);
   });
+
+  it('treats active key with flat quota only (no quota_groups) as ready, not cooling', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+
+    // 实证回归：retrieveUserQuotaSummary 4s 超时缺席时，后端只回 fetchAvailableModels
+    // 平铺 33 模型（无周窗口标识）。此前 weeklyFraction 恒为初始 0，被误判冷却、
+    // 踢出聚合导致水位锁死；修复后未知周默认健康，冷却只跟随真实 state。
+    const keys: KeyView[] = [
+      {
+        id: 'ag-active-flat@gmail.com',
+        provider: 'antigravity',
+        masked_key: '1//***',
+        state: 'active',
+        priority: 1,
+        weight: 10,
+      },
+    ];
+
+    const keyTestResults: Record<string, KeyTestView> = {
+      'ag-active-flat@gmail.com': {
+        success: true,
+        latency_ms: 5000,
+        message: 'probe ok (quota fetched for 33 models)',
+        quota: [
+          { model_id: 'chat_20706', remaining_fraction: 1.0 },
+          { model_id: 'claude-sonnet-4-6', remaining_fraction: 1.0, time_until_reset: '4小时59分后' },
+          // 最小值证伪：末项故意放 50%，若实现退化为遍历覆盖/末值胜出则得 50% 而非 1%
+          { model_id: 'gemini-2.5-flash', remaining_fraction: 0.0068, time_until_reset: '1小时38分后' },
+          { model_id: 'gemini-3.8-flash-high', remaining_fraction: 0.5, time_until_reset: '1小时38分后' },
+        ],
+      },
+    };
+
+    const app = createApp(AntigravityPoolCard, {
+      keys,
+      keyTestResults,
+      adminWriteEnabled: true,
+    });
+
+    app.mount(container);
+    await nextTick();
+
+    // 未知周不再误判：active 账号必须计入就绪，而非“所有账号冷却中”
+    expect(container.textContent).toContain('1/1 账号就绪');
+    expect(container.textContent).not.toContain('所有账号冷却中');
+    // 5h 取同系列最小值（与模型管理页取最小值语义一致）：0.0068*100=0.68→1%
+    // 精确断言 testid，避免与可用率/周水位的 '100%' 混淆
+    expect(container.querySelector('[data-testid="gemini-h5-percent"]')?.textContent).toContain('1%');
+    expect(container.querySelector('[data-testid="claude-h5-percent"]')?.textContent).toContain('100%');
+    expect(container.querySelector('[data-testid="gemini-weekly-percent"]')?.textContent).toContain('100%');
+    expect(container.querySelector('[data-testid="claude-weekly-percent"]')?.textContent).toContain('100%');
+
+    app.unmount();
+    document.body.removeChild(container);
+  });
 });

@@ -217,44 +217,95 @@ function extractKeyQuota(k: KeyView, testResult?: KeyTestView): { gemini: Extrac
 
   // 1. Quota groups
   if (testResult.quota_groups && testResult.quota_groups.length > 0) {
+    // 记录每系列是否真实出现周窗口：摘要缺失 ≠ 耗尽（retrieveUserQuotaSummary
+    // 只有 4s 超时，冷建连下整组缺席时不做有罪推定；未知周默认健康，与模型管理页 ?? 1.0 对齐）
+    let geminiWeeklySeen = false;
+    let claudeWeeklySeen = false;
     for (const group of testResult.quota_groups) {
       const name = (group.display_name || '').toLowerCase();
-      const target = name.includes('claude') || name.includes('gpt') || name.includes('3p')
-        ? res.claude
-        : res.gemini;
+      const isClaudeGroup = name.includes('claude') || name.includes('gpt') || name.includes('3p');
+      const target = isClaudeGroup ? res.claude : res.gemini;
 
       for (const b of group.buckets || []) {
         const win = (b.window || '').toLowerCase();
         const bId = (b.bucket_id || '').toLowerCase();
-        const isWeekly = win === 'weekly' || bId.includes('week') || bId.includes('7d');
+        // 周识别与模型管理页 extractCompactQuotas 同口径（含 description/display_name 的
+        // week/周/7d 变体），避免 fail-open 后把“仅在描述中标注的周桶”误写入 5h 并漏报冷却
+        const bDesc = (b.description || '').toLowerCase();
+        const bDisp = (b.display_name || '').toLowerCase();
+        const isWeekly = win === 'weekly' || bId.includes('week') || bDesc.includes('week') || bDisp.includes('周') || bId.includes('7d');
         const fraction = b.remaining_fraction ?? 0;
         const resetHint = b.time_until_reset || b.reset_time_beijing || '已就绪';
 
         if (isWeekly) {
           target.weeklyFraction = fraction;
           target.weeklyResetHint = resetHint;
+          if (isClaudeGroup) claudeWeeklySeen = true;
+          else geminiWeeklySeen = true;
         } else {
           target.h5Fraction = fraction;
           target.h5ResetHint = resetHint;
         }
       }
     }
+    if (!geminiWeeklySeen) {
+      res.gemini.weeklyFraction = 1.0;
+      res.gemini.weeklyResetHint = '已就绪';
+    }
+    if (!claudeWeeklySeen) {
+      res.claude.weeklyFraction = 1.0;
+      res.claude.weeklyResetHint = '已就绪';
+    }
   } else if (testResult.quota && testResult.quota.length > 0) {
+    // 平铺 fetchAvailableModels 只表达 5h 滚动余量（33 个模型均无周窗口标识）：
+    // 按同系列最小值聚合为 5h 水位（与模型管理页 extractCompactQuotas 取最小值一致，
+    // 替代此前的遍历覆盖/末值胜出）；周水位无信号时记健康，冷却判定交还后端 state。
+    let geminiH5: { fraction: number; hint: string } | null = null;
+    let claudeH5: { fraction: number; hint: string } | null = null;
+    let geminiWeeklySeen = false;
+    let claudeWeeklySeen = false;
     for (const q of testResult.quota) {
       const mId = q.model_id.toLowerCase();
       const isClaude = mId.includes('claude') || mId.includes('gpt') || mId.includes('sonnet') || mId.includes('opus');
-      const target = isClaude ? res.claude : res.gemini;
-      const isWeekly = mId.includes('week') || mId.includes('7d') || (q.time_until_reset && (q.time_until_reset.includes('天') || q.time_until_reset.includes('d')));
       const fraction = q.remaining_fraction ?? 0;
       const resetHint = q.time_until_reset || q.reset_time_beijing || '已就绪';
+      const isWeekly = mId.includes('week') || mId.includes('7d') || (q.time_until_reset && (q.time_until_reset.includes('天') || q.time_until_reset.includes('d')));
 
       if (isWeekly) {
-        target.weeklyFraction = fraction;
-        target.weeklyResetHint = resetHint;
+        if (isClaude) {
+          claudeWeeklySeen = true;
+          res.claude.weeklyFraction = fraction;
+          res.claude.weeklyResetHint = resetHint;
+        } else {
+          geminiWeeklySeen = true;
+          res.gemini.weeklyFraction = fraction;
+          res.gemini.weeklyResetHint = resetHint;
+        }
+      } else if (isClaude) {
+        if (claudeH5 === null || fraction < claudeH5.fraction) {
+          claudeH5 = { fraction, hint: resetHint };
+        }
       } else {
-        target.h5Fraction = fraction;
-        target.h5ResetHint = resetHint;
+        if (geminiH5 === null || fraction < geminiH5.fraction) {
+          geminiH5 = { fraction, hint: resetHint };
+        }
       }
+    }
+    if (geminiH5 !== null) {
+      res.gemini.h5Fraction = geminiH5.fraction;
+      res.gemini.h5ResetHint = geminiH5.hint;
+    }
+    if (claudeH5 !== null) {
+      res.claude.h5Fraction = claudeH5.fraction;
+      res.claude.h5ResetHint = claudeH5.hint;
+    }
+    if (!geminiWeeklySeen) {
+      res.gemini.weeklyFraction = 1.0;
+      res.gemini.weeklyResetHint = '已就绪';
+    }
+    if (!claudeWeeklySeen) {
+      res.claude.weeklyFraction = 1.0;
+      res.claude.weeklyResetHint = '已就绪';
     }
   } else {
     // 探测结果不存在 quota / quota_groups 时（如测试失败或无配额信息）
@@ -625,7 +676,7 @@ function getProgressColor(percent: number): { bar: string; text: string; bg: str
           <div class="space-y-1.5 mb-3">
             <div class="flex items-center justify-between text-xs">
               <span class="font-medium text-slate-700">Gemini 系列</span>
-              <span class="font-mono font-semibold" :class="getProgressColor(aggregatedQuotas.gemini.h5Percent).text">
+              <span class="font-mono font-semibold" data-testid="gemini-h5-percent" :class="getProgressColor(aggregatedQuotas.gemini.h5Percent).text">
                 {{ aggregatedQuotas.gemini.h5Percent }}%
               </span>
             </div>
@@ -645,7 +696,7 @@ function getProgressColor(percent: number): { bar: string; text: string; bg: str
           <div class="space-y-1.5">
             <div class="flex items-center justify-between text-xs">
               <span class="font-medium text-slate-700">Claude 系列</span>
-              <span class="font-mono font-semibold" :class="getProgressColor(aggregatedQuotas.claude.h5Percent).text">
+              <span class="font-mono font-semibold" data-testid="claude-h5-percent" :class="getProgressColor(aggregatedQuotas.claude.h5Percent).text">
                 {{ aggregatedQuotas.claude.h5Percent }}%
               </span>
             </div>
@@ -684,7 +735,7 @@ function getProgressColor(percent: number): { bar: string; text: string; bg: str
           <div class="space-y-1.5 mb-3">
             <div class="flex items-center justify-between text-xs">
               <span class="font-medium text-slate-700">Gemini 系列</span>
-              <span class="font-mono font-semibold" :class="getProgressColor(aggregatedQuotas.gemini.weeklyPercent).text">
+              <span class="font-mono font-semibold" data-testid="gemini-weekly-percent" :class="getProgressColor(aggregatedQuotas.gemini.weeklyPercent).text">
                 {{ aggregatedQuotas.gemini.weeklyPercent }}%
               </span>
             </div>
@@ -704,7 +755,7 @@ function getProgressColor(percent: number): { bar: string; text: string; bg: str
           <div class="space-y-1.5">
             <div class="flex items-center justify-between text-xs">
               <span class="font-medium text-slate-700">Claude 系列</span>
-              <span class="font-mono font-semibold" :class="getProgressColor(aggregatedQuotas.claude.weeklyPercent).text">
+              <span class="font-mono font-semibold" data-testid="claude-weekly-percent" :class="getProgressColor(aggregatedQuotas.claude.weeklyPercent).text">
                 {{ aggregatedQuotas.claude.weeklyPercent }}%
               </span>
             </div>
