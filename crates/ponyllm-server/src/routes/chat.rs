@@ -23,8 +23,8 @@ use crate::routes::models::ParsedRequestModel;
 use crate::state::{AppState, RoutedTarget};
 use crate::streaming::{
     antigravity_sse_to_openai_stream, anthropic_sse_to_openai_stream,
-    collect_antigravity_sse_to_json, verify_antigravity_stream_preamble,
-    AntigravityPreambleResult,
+    collect_antigravity_sse_to_json, empty_stop_retry_delay, is_transient_empty_stop_error,
+    verify_antigravity_stream_preamble, AntigravityPreambleResult, MIN_EMPTY_STOP_ATTEMPTS,
     extract_usage_tokens, passthrough_sse, responses_sse_to_chat_stream,
     wrap_telemetry_stream, StreamFailureContext,
 };
@@ -347,6 +347,14 @@ pub async fn handle_chat_completions(
             .with_opencode_zen(is_opencode_zen_target(&target.provider_name, &target_url))
             .with_event_sink(sink_ctx.clone(), state.event_sink(sink_ctx));
 
+        // Empty-STOP is an upstream transient unrelated to credential health
+        // (fails pre-commit, fails fast): give it its own, larger budget so a
+        // multi-second upstream blip cannot exhaust the generic retry budget.
+        let max_empty_stop_attempts = executor
+            .max_retries
+            .max(pool.total_key_count())
+            .max(MIN_EMPTY_STOP_ATTEMPTS);
+
         if is_streaming {
             let current_executor = executor;
             let mut stream_attempt = 0;
@@ -411,8 +419,24 @@ pub async fn handle_chat_completions(
                             (boxed, false)
                         };
 
-                        if is_empty_stop_retry && stream_attempt < max_stream_attempts {
-                            continue;
+                        if is_empty_stop_retry {
+                            if stream_attempt < max_empty_stop_attempts {
+                                let delay = empty_stop_retry_delay(stream_attempt);
+                                tracing::warn!(
+                                    provider = %target.provider_name,
+                                    stream_attempt,
+                                    max_empty_stop_attempts,
+                                    backoff_ms = delay.as_millis() as u64,
+                                    "Antigravity empty-STOP before commit; backing off and retrying transparently"
+                                );
+                                tokio::time::sleep(delay).await;
+                                continue;
+                            }
+                            tracing::warn!(
+                                provider = %target.provider_name,
+                                attempts = stream_attempt,
+                                "Antigravity empty-STOP persisted across all transparent retries; surfacing EMPTY_RESPONSE to client"
+                            );
                         }
 
                         if let Some(p) = prompt_hint.as_deref() {
@@ -500,22 +524,41 @@ pub async fn handle_chat_completions(
                     physical_model = %target.physical_model,
                     "Dispatching non-stream Antigravity request via stream collector"
                 );
-                match executor.execute_stream_request(&target_url, &req_val).await {
-                    Ok(resp) => {
-                        let raw_stream = resp.bytes_stream();
-                        match collect_antigravity_sse_to_json(raw_stream).await {
-                            Ok(v) => Ok(v),
-                            Err(e) => {
-                                tracing::warn!(
-                                    provider = %target.provider_name,
-                                    error = %e,
-                                    "Antigravity stream collection failed"
-                                );
-                                Err(CoreError::Internal(format!("Antigravity stream collect failed: {}", e)))
+                // Transparent same-target retry: the stream collector reports an
+                // upstream transient empty STOP as an error string; failover alone
+                // would 502 a single-provider setup for a blithe upstream blip.
+                let mut collect_attempt = 0usize;
+                loop {
+                    collect_attempt += 1;
+                    match executor.execute_stream_request(&target_url, &req_val).await {
+                        Ok(resp) => {
+                            let raw_stream = resp.bytes_stream();
+                            match collect_antigravity_sse_to_json(raw_stream).await {
+                                Ok(v) => break Ok(v),
+                                Err(e) if is_transient_empty_stop_error(&e) && collect_attempt < max_empty_stop_attempts => {
+                                    let delay = empty_stop_retry_delay(collect_attempt);
+                                    tracing::warn!(
+                                        provider = %target.provider_name,
+                                        error = %e,
+                                        collect_attempt,
+                                        max_empty_stop_attempts,
+                                        backoff_ms = delay.as_millis() as u64,
+                                        "Non-stream Antigravity collect hit transient empty STOP; backing off and retrying"
+                                    );
+                                    tokio::time::sleep(delay).await;
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        provider = %target.provider_name,
+                                        error = %e,
+                                        "Antigravity stream collection failed"
+                                    );
+                                    break Err(CoreError::Internal(format!("Antigravity stream collect failed: {}", e)));
+                                }
                             }
                         }
+                        Err(e) => break Err(e),
                     }
-                    Err(e) => Err(e),
                 }
             } else {
                 executor.execute_json_request(&target_url, &req_val).await

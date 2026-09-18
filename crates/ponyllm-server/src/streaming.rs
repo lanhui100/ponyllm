@@ -714,15 +714,111 @@ pub enum AntigravityPreambleResult<S> {
     AbruptTermination,
 }
 
+/// Default overall wall-clock budget for preamble verification. The verifier
+/// only inspects frames until the first content frame, a terminal STOP, or this
+/// deadline; keepalive-only warm-up phases (heartbeat pings) no longer force an
+/// early `Ready` on a zero-content stream.
+pub const DEFAULT_PREAMBLE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Minimum number of streaming attempts dedicated to absorbing upstream
+/// transient empty-STOP completions. Empty STOPs fail fast in the preamble
+/// (no downstream bytes committed, no key fault), so a dedicated budget larger
+/// than the generic `max_retries` is cheap and credential-independent.
+pub const MIN_EMPTY_STOP_ATTEMPTS: usize = 6;
+
+/// Jittered exponential backoff before a transparent empty-STOP retry.
+///
+/// `attempt` is 1-based (the first retry waits ~250ms). Base doubles per
+/// attempt, capped at 2s, with ±25% jitter derived from wall-clock nanos
+/// (deliberately no `rand` dependency). Upstream empty-STOP episodes usually
+/// last seconds; retrying instantly N times burns the whole budget inside the
+/// outage window, which is exactly how `EMPTY_RESPONSE` used to reach clients.
+pub fn empty_stop_retry_delay(attempt: usize) -> std::time::Duration {
+    let shift = attempt.saturating_sub(1).min(4);
+    let base_ms = 250u64.saturating_mul(1u64 << shift);
+    let capped = base_ms.min(2000);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as u64)
+        .unwrap_or(0);
+    // Jitter factor in [750, 1250] thousandths → [0.75x, 1.25x].
+    let factor_milli = 750 + (nanos % 1000) * 500 / 1000;
+    std::time::Duration::from_millis(capped * factor_milli / 1000)
+}
+
+/// Classify a collector error string as the upstream transient empty-STOP
+/// anomaly. The marker substring is part of the contract asserted by tests
+/// (`Antigravity stream completed with zero text and zero tool calls
+/// (transient empty STOP)`), so routes can retry it transparently.
+pub fn is_transient_empty_stop_error(msg: &str) -> bool {
+    msg.contains("transient empty STOP")
+}
+
+/// Whether an upstream frame is "significant" for preamble frame accounting:
+/// it either carries candidate content, a terminal finish reason, or a
+/// deterministic block/error signal. Keepalive pings, usage-only frames and
+/// role-only empty candidate frames are NOT significant and must not consume
+/// the preamble frame budget (a burst of heartbeats during thinking warm-up
+/// previously triggered `Ready` on a zero-content stream, committing the
+/// response right before the late empty STOP arrived).
+fn antigravity_frame_is_significant(val: &serde_json::Value) -> bool {
+    let target = val.get("response").unwrap_or(val);
+    if target
+        .get("promptFeedback")
+        .and_then(|f| f.get("blockReason"))
+        .is_some()
+    {
+        return true;
+    }
+    if val.get("error").is_some() || target.get("error").is_some() {
+        return true;
+    }
+    match target
+        .get("candidates")
+        .and_then(|v| v.as_array())
+        .and_then(|c| c.first())
+    {
+        Some(first) => {
+            if first.get("finishReason").is_some() {
+                return true;
+            }
+            has_antigravity_content(val)
+        }
+        None => false,
+    }
+}
+
 /// Bounded preamble verification for an Antigravity byte stream.
 ///
-/// Inspects frames from the raw byte stream up to `max_frames` (default 8) or until
-/// valid content (`text`, `thought`, or `functionCall`) is confirmed.
-/// If an empty candidate with `finishReason == "STOP"` is encountered before any content
-/// has been emitted, returns `TransientEmptyStop` to allow transparent gateway-side retry.
+/// Inspects frames from the raw byte stream up to `max_frames` (default 8,
+/// significant frames only) or until valid content (`text`, `thought`, or
+/// `functionCall`) is confirmed. If an empty candidate with `finishReason == "STOP"`
+/// is encountered before any content has been emitted, returns `TransientEmptyStop`
+/// to allow transparent gateway-side retry.
 pub async fn verify_antigravity_stream_preamble<S, E>(
     stream: S,
     chunk_timeout: std::time::Duration,
+) -> Result<AntigravityPreambleResult<S>, E>
+where
+    S: Stream<Item = Result<Bytes, E>> + Send + Unpin + 'static,
+    E: Send + 'static,
+{
+    verify_antigravity_stream_preamble_with_deadline(
+        stream,
+        chunk_timeout,
+        DEFAULT_PREAMBLE_DEADLINE,
+    )
+    .await
+}
+
+/// Like [`verify_antigravity_stream_preamble`], but with an explicit overall
+/// wall-clock budget. When the budget lapses without content or terminal
+/// signal, returns `Ready` with the buffered bytes (best-effort commit) so a
+/// pathological upstream can never hold a request open indefinitely.
+pub async fn verify_antigravity_stream_preamble_with_deadline<S, E>(
+    stream: S,
+    chunk_timeout: std::time::Duration,
+    overall_deadline: std::time::Duration,
 ) -> Result<AntigravityPreambleResult<S>, E>
 where
     S: Stream<Item = Result<Bytes, E>> + Send + Unpin + 'static,
@@ -734,13 +830,13 @@ where
     let mut frames_inspected = 0;
     let max_frames = 8;
     let max_buffered_bytes = 64 * 1024;
+    let deadline = tokio::time::Instant::now() + overall_deadline;
 
     loop {
         // First check if any full SSE event exists in the frame_buf
         while let Some(len) = find_sse_boundary(&frame_buf) {
             let frame_block = frame_buf.split_to(len);
             let evt = parse_event_lines(&frame_block);
-            frames_inspected += 1;
             let data = evt.data.trim();
 
             if !data.is_empty() && data != "[DONE]" {
@@ -766,6 +862,11 @@ where
                             frames: frames_inspected,
                         });
                     }
+
+                    // Only significant frames consume the frame budget.
+                    if antigravity_frame_is_significant(&val) {
+                        frames_inspected += 1;
+                    }
                 }
             } else if data == "[DONE]" {
                 return Ok(AntigravityPreambleResult::TransientEmptyStop {
@@ -788,8 +889,17 @@ where
             });
         }
 
-        // Fetch next chunk from upstream with timeout
-        match tokio::time::timeout(chunk_timeout, inner.next()).await {
+        // Fetch next chunk from upstream, bounded by both the per-chunk stall
+        // timeout and the overall preamble deadline.
+        let now = tokio::time::Instant::now();
+        let Some(remaining) = deadline.checked_duration_since(now) else {
+            return Ok(AntigravityPreambleResult::Ready {
+                buffered: buffered_bytes,
+                tail: inner,
+            });
+        };
+        let deadline_bounded = remaining < chunk_timeout;
+        match tokio::time::timeout(remaining.min(chunk_timeout), inner.next()).await {
             Ok(Some(Ok(bytes))) => {
                 frame_buf.extend_from_slice(&bytes);
                 buffered_bytes.push(bytes);
@@ -804,6 +914,13 @@ where
                 });
             }
             Err(_) => {
+                if deadline_bounded {
+                    // Overall preamble budget elapsed: commit what we have.
+                    return Ok(AntigravityPreambleResult::Ready {
+                        buffered: buffered_bytes,
+                        tail: inner,
+                    });
+                }
                 // Stalled chunk timeout
                 return Ok(AntigravityPreambleResult::AbruptTermination);
             }
@@ -2969,6 +3086,121 @@ mod tests {
             }
             _ => panic!("Expected DeterministicBlock"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_verify_preamble_keepalive_burst_does_not_commit_zero_content() {
+        // Regression: a warm-up burst of keepalive comments must not consume the
+        // preamble frame budget. 10 pings + late empty STOP must be classified as
+        // TransientEmptyStop (retryable), never Ready-then-leak to the client.
+        let mut chunks: Vec<Bytes> = (0..10)
+            .map(|i| Bytes::from(format!(": keepalive {}\n\n", i)))
+            .collect();
+        chunks.push(Bytes::from(format!(
+            "data: {}\n\n",
+            serde_json::json!({
+                "response": {
+                    "candidates": [{
+                        "content": {"role": "model", "parts": []},
+                        "finishReason": "STOP"
+                    }]
+                }
+            })
+        )));
+        let s = bytes_stream(chunks);
+
+        let res = verify_antigravity_stream_preamble(s, std::time::Duration::from_secs(1))
+            .await
+            .expect("verification should succeed");
+
+        assert!(
+            matches!(res, AntigravityPreambleResult::TransientEmptyStop { .. }),
+            "keepalive burst followed by empty STOP must stay retryable"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_verify_preamble_role_only_frames_do_not_consume_budget() {
+        // Role-only candidate frames (no parts, no finishReason) are not
+        // significant: several of them followed by an empty STOP must remain
+        // retryable instead of tripping the max_frames Ready valve.
+        let role_frame = Bytes::from(format!(
+            "data: {}\n\n",
+            serde_json::json!({
+                "response": {
+                    "candidates": [{
+                        "content": {"role": "model", "parts": []}
+                    }]
+                }
+            })
+        ));
+        let empty_stop = Bytes::from(format!(
+            "data: {}\n\n",
+            serde_json::json!({
+                "response": {
+                    "candidates": [{
+                        "content": {"role": "model", "parts": []},
+                        "finishReason": "STOP"
+                    }]
+                }
+            })
+        ));
+        let s = bytes_stream(vec![role_frame; 10].into_iter().chain(std::iter::once(empty_stop)).collect());
+
+        let res = verify_antigravity_stream_preamble(s, std::time::Duration::from_secs(1))
+            .await
+            .expect("verification should succeed");
+
+        assert!(matches!(res, AntigravityPreambleResult::TransientEmptyStop { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_verify_preamble_overall_deadline_returns_ready() {
+        // A stream that never yields must hit the overall preamble deadline and
+        // return Ready (best-effort commit), not stall the request forever.
+        let s = futures_util::stream::pending::<Result<Bytes, std::io::Error>>();
+        let res = verify_antigravity_stream_preamble_with_deadline(
+            s,
+            std::time::Duration::from_secs(30),
+            std::time::Duration::from_millis(80),
+        )
+        .await
+        .expect("verification should succeed");
+
+        assert!(matches!(res, AntigravityPreambleResult::Ready { .. }));
+    }
+
+    #[test]
+    fn test_empty_stop_retry_delay_bounds() {
+        // 1-based attempt schedule: 250ms doubling to a 2s cap, jitter ±25%.
+        let first = empty_stop_retry_delay(1);
+        assert!(
+            first >= std::time::Duration::from_millis(187) && first <= std::time::Duration::from_millis(313),
+            "first retry delay out of jitter band: {:?}",
+            first
+        );
+        for attempt in 4..=8 {
+            let d = empty_stop_retry_delay(attempt);
+            assert!(
+                d >= std::time::Duration::from_millis(1500) && d <= std::time::Duration::from_millis(2500),
+                "capped delay out of jitter band at attempt {}: {:?}",
+                attempt,
+                d
+            );
+        }
+    }
+
+    #[test]
+    fn test_is_transient_empty_stop_error_classification() {
+        assert!(is_transient_empty_stop_error(
+            "Antigravity stream completed with zero text and zero tool calls (transient empty STOP)"
+        ));
+        assert!(!is_transient_empty_stop_error(
+            "Antigravity stream error frame: quota exceeded"
+        ));
+        assert!(!is_transient_empty_stop_error(
+            "Antigravity SSE stream stalled: 15s chunk timeout exceeded"
+        ));
     }
 }
 
