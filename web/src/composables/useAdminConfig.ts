@@ -13,6 +13,7 @@ import type {
   CreateModelPayload,
   UpdateModelPayload,
   CreateKeyPayload,
+  UpdateKeyPayload,
   CreateKeyResponse,
   AntigravityAuthUrlView,
   AntigravityPendingView,
@@ -237,6 +238,15 @@ export function useAdminConfig(options: UseAdminConfigOptions = {}) {
     });
   }
 
+  async function editKey(id: string, payload: UpdateKeyPayload): Promise<KeyView> {
+    return runWithConflictCheck(async () => {
+      const res = await adminApi.updateKey(id, payload, configVersion.value).send();
+      const refreshedKeys = await adminApi.getKeys().send();
+      keys.value = refreshedKeys;
+      return res;
+    });
+  }
+
   async function removeKey(id: string): Promise<void> {
     return runWithConflictCheck(async () => {
       await adminApi.deleteKey(id, configVersion.value).send();
@@ -353,6 +363,7 @@ export function useAdminConfig(options: UseAdminConfigOptions = {}) {
     editModel,
     removeModel,
     addKey,
+    editKey,
     removeKey,
     testSingleKey,
     batchTestAllKeys,

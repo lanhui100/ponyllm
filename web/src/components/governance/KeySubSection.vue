@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
-import type { KeyView, KeyTestView, CreateKeyPayload } from '../../types/admin';
+import type { KeyView, KeyTestView, CreateKeyPayload, UpdateKeyPayload } from '../../types/admin';
 import Icons from '../ui/Icons.vue';
 import UiButton from '../ui/UiButton.vue';
 import UiBadge from '../ui/UiBadge.vue';
@@ -20,6 +20,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   (e: 'create', payload: CreateKeyPayload): Promise<void>;
+  (e: 'update', id: string, payload: UpdateKeyPayload): Promise<void>;
   (e: 'delete', id: string): Promise<void>;
   (e: 'test-single', id: string): Promise<void>;
   (e: 'oauth-antigravity', providerName: string): void;
@@ -93,11 +94,12 @@ const form = ref<CreateKeyPayload>({
 });
 
 function openAddInline() {
+  const nextPriority = props.keys.length > 0 ? Math.max(...props.keys.map((k) => k.priority || 0)) + 1 : 1;
   form.value = {
     id: `key-${Date.now().toString().slice(-4)}`,
     provider: props.providerName,
     api_key: '',
-    priority: 1,
+    priority: nextPriority,
     weight: 10,
   };
   formError.value = null;
@@ -317,6 +319,39 @@ async function handleSubmit() {
     formError.value = err instanceof Error ? err.message : String(err);
   } finally {
     submitting.value = false;
+  }
+}
+
+const editingKeyId = ref<string | null>(null);
+const editPriority = ref(1);
+const editWeight = ref(10);
+const editSaving = ref(false);
+
+function startEditKey(k: KeyView) {
+  if (!props.adminWriteEnabled) return;
+  editingKeyId.value = k.id;
+  editPriority.value = k.priority;
+  editWeight.value = k.weight;
+}
+
+function cancelEditKey() {
+  editingKeyId.value = null;
+}
+
+async function saveEditKey(id: string) {
+  if (!props.adminWriteEnabled) return;
+  editSaving.value = true;
+  try {
+    await emit('update', id, {
+      priority: editPriority.value,
+      weight: editWeight.value,
+    });
+    editingKeyId.value = null;
+    toast.success('密钥调度参数已更新');
+  } catch (err: unknown) {
+    toast.error(`更新失败: ${err instanceof Error ? err.message : String(err)}`);
+  } finally {
+    editSaving.value = false;
   }
 }
 
@@ -560,6 +595,28 @@ async function handleRefreshAllQuotas() {
                 >
                   {{ formatKeyDisplay(k, isAntigravity).subtitle }}
                 </span>
+                <!-- 优先级与权重徽标 / 编辑触发 -->
+                <div class="flex items-center gap-1.5 text-xs text-slate-500 font-mono">
+                  <UiTooltip content="优先级: 数值越小越优先，1耗尽自动故障顺延至2">
+                    <span
+                      class="px-1.5 py-0.5 rounded bg-slate-100/80 hover:bg-slate-200/80 text-slate-700 font-semibold cursor-pointer border border-slate-200/60"
+                      :data-testid="`key-priority-badge-${k.id}`"
+                      @click="startEditKey(k)"
+                    >
+                      P{{ k.priority }}
+                    </span>
+                  </UiTooltip>
+                  <UiTooltip content="权重 (轮询比重)">
+                    <span
+                      class="px-1.5 py-0.5 rounded bg-slate-100/80 hover:bg-slate-200/80 text-slate-600 cursor-pointer border border-slate-200/60"
+                      :data-testid="`key-weight-badge-${k.id}`"
+                      @click="startEditKey(k)"
+                    >
+                      W{{ k.weight }}
+                    </span>
+                  </UiTooltip>
+                </div>
+
                 <!-- 仅在非 active 状态（如 cooling_down / disabled）下显示状态徽标，正常可用时不显示“就绪” -->
                 <UiBadge
                   v-if="k.state !== 'active'"
@@ -711,6 +768,21 @@ async function handleRefreshAllQuotas() {
                   </div>
                 </div>
 
+                <!-- 编辑优先级/权重按钮 -->
+                <UiTooltip content="编辑调度优先级与权重">
+                  <UiButton
+                    variant="ghost"
+                    size="icon"
+                    :aria-label="`编辑密钥 ${k.id} 优先级与权重`"
+                    :disabled="!adminWriteEnabled"
+                    :data-testid="`edit-key-${k.id}`"
+                    class="text-slate-400 hover:text-indigo-600 hover:bg-indigo-50"
+                    @click="startEditKey(k)"
+                  >
+                    <Icons name="edit" size="14" />
+                  </UiButton>
+                </UiTooltip>
+
                 <!-- 拨测/刷新单 Key 按钮 (支持 Antigravity 在账号后单独复测/解冻) -->
                 <UiTooltip :content="isAntigravity ? '探测用量并更新状态 (若配额恢复将自动解除冷却)' : '测试密钥连通性'">
                   <UiButton
@@ -746,6 +818,60 @@ async function handleRefreshAllQuotas() {
                 </UiTooltip>
               </div>
             </div>
+
+            <!-- 行内编辑调度参数区域 (priority & weight) -->
+            <UiCollapsible :open="editingKeyId === k.id">
+              <div class="mt-2 p-3 bg-slate-50/90 rounded-md border border-slate-200/70 text-xs space-y-2.5">
+                <div class="flex items-center justify-between">
+                  <span class="font-semibold text-slate-800 text-[13px]">修改调度参数</span>
+                  <button
+                    type="button"
+                    class="text-slate-400 hover:text-slate-600 cursor-pointer p-0.5"
+                    @click="cancelEditKey"
+                  >
+                    <Icons name="cross" size="13" />
+                  </button>
+                </div>
+
+                <div class="grid grid-cols-2 gap-3">
+                  <div>
+                    <label class="block text-slate-600 mb-1 font-medium">优先级 (Priority, 数值越小越优先)</label>
+                    <input
+                      v-model.number="editPriority"
+                      type="number"
+                      min="0"
+                      class="w-full bg-white border border-slate-200 rounded px-2.5 py-1 text-xs text-slate-900 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                      data-testid="edit-key-priority-input"
+                    />
+                  </div>
+                  <div>
+                    <label class="block text-slate-600 mb-1 font-medium">权重 (Weight, 轮询比重)</label>
+                    <input
+                      v-model.number="editWeight"
+                      type="number"
+                      min="1"
+                      class="w-full bg-white border border-slate-200 rounded px-2.5 py-1 text-xs text-slate-900 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                      data-testid="edit-key-weight-input"
+                    />
+                  </div>
+                </div>
+
+                <div class="flex items-center justify-end gap-2 pt-1 border-t border-slate-200/50">
+                  <UiButton variant="ghost" size="sm" class="text-xs px-2 py-0.5" @click="cancelEditKey">
+                    取消
+                  </UiButton>
+                  <UiButton
+                    size="sm"
+                    class="text-xs px-2.5 py-0.5"
+                    :disabled="editSaving || !adminWriteEnabled"
+                    data-testid="save-key-edit-btn"
+                    @click="saveEditKey(k.id)"
+                  >
+                    {{ editSaving ? '保存中...' : '保存' }}
+                  </UiButton>
+                </div>
+              </div>
+            </UiCollapsible>
           </div>
         </div>
       </div>

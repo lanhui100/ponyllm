@@ -79,6 +79,42 @@
       }
     },
     "/api/admin/keys/{id}": {
+      "put": {
+        "tags": [],
+        "operationId": "handle_admin_update_key",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateKeyPayload"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KeyView"
+                }
+              }
+            }
+          }
+        }
+      },
       "delete": {
         "tags": [],
         "operationId": "handle_admin_delete_key",
@@ -825,7 +861,10 @@
             ]
           },
           "priority": {
-            "type": "integer",
+            "type": [
+              "integer",
+              "null"
+            ],
             "format": "int32",
             "minimum": 0
           },
@@ -854,7 +893,10 @@
             ]
           },
           "weight": {
-            "type": "integer",
+            "type": [
+              "integer",
+              "null"
+            ],
             "format": "int32",
             "minimum": 0
           }
@@ -920,7 +962,10 @@
             "type": "string"
           },
           "priority": {
-            "type": "integer",
+            "type": [
+              "integer",
+              "null"
+            ],
             "format": "int32",
             "minimum": 0
           },
@@ -928,7 +973,10 @@
             "type": "string"
           },
           "weight": {
-            "type": "integer",
+            "type": [
+              "integer",
+              "null"
+            ],
             "format": "int32",
             "minimum": 0
           }
@@ -1639,6 +1687,33 @@
           },
           "strategy": {
             "type": "string"
+          }
+        }
+      },
+      "UpdateKeyPayload": {
+        "type": "object",
+        "properties": {
+          "priority": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "minimum": 0
+          },
+          "provider": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "weight": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "minimum": 0
           }
         }
       },

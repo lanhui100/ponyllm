@@ -362,17 +362,20 @@ pub struct CreateKeyPayload {
     pub provider: String,
     pub id: String,
     pub api_key: String,
-    #[serde(default = "default_key_priority")]
-    pub priority: u32,
-    #[serde(default = "default_key_weight")]
-    pub weight: u32,
+    #[serde(default)]
+    pub priority: Option<u32>,
+    #[serde(default)]
+    pub weight: Option<u32>,
 }
 
-fn default_key_priority() -> u32 {
-    1
-}
-fn default_key_weight() -> u32 {
-    10
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct UpdateKeyPayload {
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub priority: Option<u32>,
+    #[serde(default)]
+    pub weight: Option<u32>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -487,10 +490,10 @@ pub struct AuthorizeAntigravityPayload {
     pub provider: Option<String>,
     #[serde(default)]
     pub id: Option<String>,
-    #[serde(default = "default_key_priority")]
-    pub priority: u32,
-    #[serde(default = "default_key_weight")]
-    pub weight: u32,
+    #[serde(default)]
+    pub priority: Option<u32>,
+    #[serde(default)]
+    pub weight: Option<u32>,
     #[serde(default)]
     pub redirect_uri: Option<String>,
     #[serde(default)]
@@ -1928,11 +1931,16 @@ pub async fn handle_admin_create_key(
             .into_response();
     }
 
+    let final_priority = payload.priority.unwrap_or_else(|| {
+        p_sec.keys.iter().map(|k| k.priority).max().unwrap_or(0) + 1
+    });
+    let final_weight = payload.weight.unwrap_or(10);
+
     p_sec.keys.push(KeySection {
         id: key_id.clone(),
         api_key: payload.api_key.clone(),
-        priority: payload.priority,
-        weight: payload.weight,
+        priority: final_priority,
+        weight: final_weight,
     });
 
     let new_ver = match save_store_config(&state, &mut file) {
@@ -1949,11 +1957,11 @@ pub async fn handle_admin_create_key(
                 &KeySection {
                     id: key_id.clone(),
                     api_key: payload.api_key.clone(),
-                    priority: payload.priority,
-                    weight: payload.weight,
+                    priority: final_priority,
+                    weight: final_weight,
                 },
             ),
-            None => ApiKeyEntry::new(&key_id, &payload.api_key, payload.priority, payload.weight),
+            None => ApiKeyEntry::new(&key_id, &payload.api_key, final_priority, final_weight),
         };
         pool.add_key(entry);
     }
@@ -1966,8 +1974,8 @@ pub async fn handle_admin_create_key(
             provider: payload.provider,
             id: key_id,
             api_key: payload.api_key,
-            priority: payload.priority,
-            weight: payload.weight,
+            priority: final_priority,
+            weight: final_weight,
             state: "active".to_string(),
             config_version: new_ver,
         }),
@@ -1981,6 +1989,120 @@ pub async fn handle_admin_create_key(
     resp.headers_mut().insert(
         header::PRAGMA,
         HeaderValue::from_static("no-cache"),
+    );
+    resp
+}
+
+#[utoipa::path(put, path = "/api/admin/keys/{id}", params(("id" = String, Path)), request_body = UpdateKeyPayload, responses((status = 200, body = KeyView)))]
+pub async fn handle_admin_update_key(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Json(payload): Json<UpdateKeyPayload>,
+) -> impl IntoResponse {
+    if let Err(resp) = check_admin_write_enabled(&state) {
+        return resp;
+    }
+    let _lock = state.admin_write_lock.lock().await;
+    let mut file = match load_store_config(&state) {
+        Ok(f) => f,
+        Err(resp) => return resp,
+    };
+    if let Err(resp) = check_if_match(&headers, file.config_version) {
+        return resp;
+    }
+
+    let target_provider_name = if let Some(ref p) = payload.provider {
+        if file.providers.contains_key(p) {
+            p.clone()
+        } else {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": {"message": format!("provider '{p}' not found"), "code": "provider_not_found"}})),
+            )
+                .into_response();
+        }
+    } else {
+        let found = file
+            .providers
+            .iter()
+            .find(|(_, p_sec)| p_sec.keys.iter().any(|k| k.id == id));
+        match found {
+            Some((p_name, _)) => p_name.clone(),
+            None => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(json!({"error": {"message": format!("key '{id}' not found"), "code": "key_not_found"}})),
+                )
+                    .into_response();
+            }
+        }
+    };
+
+    let (strat, updated_key_sec, all_keys) = {
+        let p_sec = file.providers.get_mut(&target_provider_name).unwrap();
+        let Some(key_sec) = p_sec.keys.iter_mut().find(|k| k.id == id) else {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": {"message": format!("key '{id}' not found in provider '{target_provider_name}'"), "code": "key_not_found"}})),
+            )
+                .into_response();
+        };
+        if let Some(p) = payload.priority {
+            key_sec.priority = p;
+        }
+        if let Some(w) = payload.weight {
+            key_sec.weight = w;
+        }
+        (parse_pool_strategy(&p_sec.strategy), key_sec.clone(), p_sec.keys.clone())
+    };
+
+    let new_ver = match save_store_config(&state, &mut file) {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
+
+    // Hot-rebuild KeyPool with updated keys
+    let new_pool = Arc::new(KeyPool::new(&target_provider_name, strat));
+    if let Some(p_sec) = file.providers.get(&target_provider_name) {
+        for k in &all_keys {
+            new_pool.add_key(build_pool_entry(&state, &target_provider_name, p_sec, k));
+        }
+    } else {
+        for k in &all_keys {
+            new_pool.add_key(ApiKeyEntry::new(&k.id, &k.api_key, k.priority, k.weight));
+        }
+    }
+    state
+        .pools
+        .write()
+        .insert(target_provider_name.clone(), new_pool.clone());
+
+    tracing::info!(provider = %target_provider_name, key_id = %id, priority = updated_key_sec.priority, weight = updated_key_sec.weight, "admin updated key");
+
+    let status = new_pool.get_key_status(&id).unwrap_or(ponyllm_core::pool::KeyState::Active);
+    let (cooldown_remaining, cooldown_reset_at) = new_pool.key_cooldown(&id);
+
+    let view = KeyView {
+        id: updated_key_sec.id,
+        provider: target_provider_name,
+        masked_key: ponyllm_core::telemetry::FlightRecorder::sanitize_key(&updated_key_sec.api_key),
+        priority: updated_key_sec.priority,
+        weight: updated_key_sec.weight,
+        state: match status {
+            ponyllm_core::pool::KeyState::Active => "active".to_string(),
+            ponyllm_core::pool::KeyState::CoolingDown => "cooling_down".to_string(),
+            ponyllm_core::pool::KeyState::Disabled => "disabled".to_string(),
+        },
+        cooldown_remaining_secs: cooldown_remaining.map(|d| d.as_secs()),
+        cooldown_reset_at: cooldown_reset_at
+            .map(|t| chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339()),
+    };
+
+    let mut resp = (StatusCode::OK, Json(view)).into_response();
+    resp.headers_mut().insert(
+        header::ETAG,
+        HeaderValue::from_str(&format!("\"{}\"", new_ver)).unwrap(),
     );
     resp
 }
@@ -3061,7 +3183,7 @@ pub async fn handle_admin_authorize_antigravity(
         format!("ag-account-{}", &uuid_simple()[..8])
     };
 
-    let provider_base_url = {
+    let (provider_base_url, effective_priority, effective_weight) = {
         let p_sec = file.providers.entry(target_provider.clone()).or_insert_with(|| {
             ProviderSection {
                 base_url: ponyllm_core::pool::DEFAULT_ANTIGRAVITY_ENDPOINT.to_string(),
@@ -3095,19 +3217,28 @@ pub async fn handle_admin_authorize_antigravity(
             }
         }
 
+        let effective_priority = payload.priority.unwrap_or_else(|| {
+            p_sec.keys.iter().map(|k| k.priority).max().unwrap_or(0) + 1
+        });
+        let effective_weight = payload.weight.unwrap_or(10);
+
         if let Some(existing_key) = p_sec.keys.iter_mut().find(|k| k.id == final_id) {
             existing_key.api_key = auth_res.credential.refresh_token.clone();
-            existing_key.priority = payload.priority;
-            existing_key.weight = payload.weight;
+            if let Some(p) = payload.priority {
+                existing_key.priority = p;
+            }
+            if let Some(w) = payload.weight {
+                existing_key.weight = w;
+            }
         } else {
             p_sec.keys.push(KeySection {
                 id: final_id.clone(),
                 api_key: auth_res.credential.refresh_token.clone(),
-                priority: payload.priority,
-                weight: payload.weight,
+                priority: effective_priority,
+                weight: effective_weight,
             });
         }
-        p_sec.base_url.clone()
+        (p_sec.base_url.clone(), effective_priority, effective_weight)
     };
 
     let new_ver = match save_store_config(&state, &mut file) {
@@ -3160,7 +3291,7 @@ pub async fn handle_admin_authorize_antigravity(
             let strat = parse_pool_strategy(&p_sec.strategy);
             Arc::new(KeyPool::new(&target_provider, strat))
         });
-        let entry = ApiKeyEntry::new_antigravity(&final_id, mgr.clone(), payload.priority, payload.weight);
+        let entry = ApiKeyEntry::new_antigravity(&final_id, mgr.clone(), effective_priority, effective_weight);
         pool.add_key(entry);
     }
 
@@ -3515,6 +3646,7 @@ pub async fn handle_admin_provider_upstream_models(
         handle_admin_delete_model,
         handle_admin_keys,
         handle_admin_create_key,
+        handle_admin_update_key,
         handle_admin_delete_key,
         handle_admin_test_key,
         handle_admin_get_strategy,
@@ -3538,6 +3670,7 @@ pub async fn handle_admin_provider_upstream_models(
         UpstreamModelsView,
         KeyView,
         CreateKeyPayload,
+        UpdateKeyPayload,
         CreateKeyResponse,
         KeyTestView,
         StrategyView,
@@ -3557,7 +3690,7 @@ pub async fn handle_admin_provider_upstream_models(
 pub struct AdminApiDoc;
 
 pub fn admin_routes() -> axum::Router<Arc<AppState>> {
-    use axum::routing::{delete, get, post, put};
+    use axum::routing::{get, post, put};
     axum::Router::new()
         .route("/api/admin/overview", get(handle_admin_overview))
         .route(
@@ -3590,7 +3723,7 @@ pub fn admin_routes() -> axum::Router<Arc<AppState>> {
         )
         .route(
             "/api/admin/keys/{id}",
-            delete(handle_admin_delete_key),
+            put(handle_admin_update_key).delete(handle_admin_delete_key),
         )
         .route(
             "/api/admin/keys/{id}/test",

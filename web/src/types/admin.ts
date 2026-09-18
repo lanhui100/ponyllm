@@ -213,6 +213,12 @@ export interface CreateKeyPayload {
   weight?: number;
 }
 
+export interface UpdateKeyPayload {
+  provider?: string;
+  priority?: number;
+  weight?: number;
+}
+
 export interface CreateKeyResponse {
   id: string;
   provider: string;

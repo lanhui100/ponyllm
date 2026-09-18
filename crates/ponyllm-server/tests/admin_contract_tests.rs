@@ -807,8 +807,52 @@ async fn test_overview_hot_reload_ms_and_no_path_leak() {
 }
 
 // -----------------------------------------------------------------------------
-// Test 10: config_version_serde_default_compat
+// Test 11: update_key_priority_and_weight_hot_reloads
 // -----------------------------------------------------------------------------
+#[tokio::test]
+async fn test_update_key_priority_and_weight_hot_reloads() {
+    let harness = TestHarness::new("127.0.0.1:8080", "secret-key", GatewayRoutingStrategy::Economy).await;
+    let client = reqwest::Client::new();
+
+    // 1. Get initial keys (openai provider has "k-sk-standard" with priority 1, weight 10 from TestHarness)
+    let keys_resp = client
+        .get(format!("http://{}/api/admin/keys", harness.addr))
+        .header("Authorization", format!("Bearer {}", harness.api_key))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(keys_resp.status(), StatusCode::OK);
+    let keys_val: Vec<serde_json::Value> = keys_resp.json().await.unwrap();
+    let k1 = keys_val.iter().find(|k| k["id"] == "k-sk-standard").expect("k-sk-standard must exist");
+    assert_eq!(k1["priority"], 1);
+    assert_eq!(k1["weight"], 10);
+
+    // 2. PUT /api/admin/keys/k-sk-standard to update priority to 3, weight to 50
+    let update_resp = client
+        .put(format!("http://{}/api/admin/keys/k-sk-standard", harness.addr))
+        .header("Authorization", format!("Bearer {}", harness.api_key))
+        .header("If-Match", "*")
+        .json(&serde_json::json!({
+            "provider": "openai",
+            "priority": 3,
+            "weight": 50
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(update_resp.status(), StatusCode::OK);
+    let updated_key: serde_json::Value = update_resp.json().await.unwrap();
+    assert_eq!(updated_key["id"], "k-sk-standard");
+    assert_eq!(updated_key["priority"], 3);
+    assert_eq!(updated_key["weight"], 50);
+
+    // 3. Verify in-memory KeyPool reflects the updated priority
+    let pool = harness.state.get_pool("openai").expect("pool must exist");
+    let pool_keys = pool.list_keys();
+    let k1_in_pool = pool_keys.iter().find(|k| k.0 == "k-sk-standard").unwrap();
+    assert_eq!(k1_in_pool.1, 3); // priority
+    assert_eq!(k1_in_pool.2, 50); // weight
+}
 #[test]
 fn test_config_version_serde_default_compat() {
     // Old toml without config_version key

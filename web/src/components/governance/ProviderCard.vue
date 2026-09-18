@@ -8,6 +8,7 @@ import type {
   CreateModelPayload,
   UpdateModelPayload,
   CreateKeyPayload,
+  UpdateKeyPayload,
   UpdateProviderPayload,
 } from '../../types/admin';
 import Icons from '../ui/Icons.vue';
@@ -44,6 +45,7 @@ const emit = defineEmits<{
   (e: 'delete-model', name: string): Promise<void>;
   (e: 'notice', message: string): void;
   (e: 'create-key', payload: CreateKeyPayload): Promise<void>;
+  (e: 'update-key', id: string, payload: UpdateKeyPayload): Promise<void>;
   (e: 'delete-key', id: string): Promise<void>;
   (e: 'test-single-key', id: string): Promise<void>;
   (e: 'oauth-antigravity', providerName: string): void;
@@ -103,6 +105,7 @@ const customUrls = ref({
   messages: props.provider.messages_url || '',
   responses: props.provider.responses_url || '',
 });
+const editStrategy = ref(props.provider.strategy || 'priority');
 const isEditingProtocols = ref(false);
 const protocolsSaving = ref(false);
 
@@ -116,6 +119,7 @@ watch(
       messages: p.messages_url || '',
       responses: p.responses_url || '',
     };
+    editStrategy.value = p.strategy || 'priority';
   },
   { deep: true }
 );
@@ -139,6 +143,7 @@ function cancelEditProtocols() {
     messages: props.provider.messages_url || '',
     responses: props.provider.responses_url || '',
   };
+  editStrategy.value = props.provider.strategy || 'priority';
   isEditingProtocols.value = false;
 }
 
@@ -165,15 +170,16 @@ async function handleSaveProtocols() {
   protocolsSaving.value = true;
   try {
     await emit('update-provider', props.provider.name, {
+      strategy: editStrategy.value,
       default_protocol: activeProtocols.value[0] || 'chat',
       chat_url: activeProtocols.value.includes('chat') ? chatVal : '',
       messages_url: activeProtocols.value.includes('messages') ? messagesVal : '',
       responses_url: activeProtocols.value.includes('responses') ? responsesVal : '',
     });
     isEditingProtocols.value = false;
-    toast.success('协议配置已保存');
+    toast.success('服务商配置已保存');
   } catch (err: unknown) {
-    toast.error(`保存协议配置失败: ${err instanceof Error ? err.message : String(err)}`);
+    toast.error(`保存服务商配置失败: ${err instanceof Error ? err.message : String(err)}`);
   } finally {
     protocolsSaving.value = false;
   }
@@ -186,6 +192,11 @@ const hasCustomUrls = computed(() => {
 const activeKeysCount = computed(() => {
   return props.keys.filter((k) => k.state === 'active').length;
 });
+
+function toggleQuickStrategyEdit() {
+  expanded.value = true;
+  isEditingProtocols.value = true;
+}
 
 async function handleDeleteProvider() {
   const confirmed = await toast.confirm({
@@ -229,9 +240,16 @@ async function handleDeleteProvider() {
             <span class="font-bold text-slate-900 text-lg tracking-tight truncate">
               {{ provider.name }}
             </span>
-            <UiBadge variant="secondary" class="text-[13px] font-semibold">
-              {{ formatStrategyLabel(provider.strategy) }}
-            </UiBadge>
+            <UiTooltip content="点击修改服务商调度策略">
+              <UiBadge
+                variant="secondary"
+                class="text-[13px] font-semibold cursor-pointer hover:bg-slate-200/80 transition-colors"
+                data-testid="provider-strategy-badge"
+                @click.stop="toggleQuickStrategyEdit"
+              >
+                {{ formatStrategyLabel(provider.strategy) }}
+              </UiBadge>
+            </UiTooltip>
           </div>
 
           <!-- 去除敏感明文 URL，仅在有默认模型时显示默认模型 -->
@@ -291,8 +309,8 @@ async function handleDeleteProvider() {
           <div class="flex items-center justify-between min-h-[32px] pb-1">
             <div class="flex items-center gap-2 text-sm font-semibold text-slate-800 leading-6">
               <Icons name="activity" size="15" class="text-amber-600" />
-              模型协议
-              <UiTooltip content="该服务商默认提供的协议与端点，未覆盖时统一走 Base URL">
+              协议与调度配置
+              <UiTooltip content="配置该服务商支持的模型协议端点，以及密钥池的多账号调度算法">
                 <Icons name="info" size="13" class="text-slate-400 cursor-pointer" />
               </UiTooltip>
             </div>
@@ -306,7 +324,7 @@ async function handleDeleteProvider() {
                 data-testid="edit-protocols-btn"
                 @click="isEditingProtocols = true"
               >
-                配置端点
+                配置端点与调度
               </UiButton>
               <div v-else class="flex items-center gap-1.5">
                 <UiButton
@@ -355,8 +373,20 @@ async function handleDeleteProvider() {
             </button>
           </div>
 
-          <!-- 专属 URL 输入字段折叠 (编辑态) / 概览行 (展示态) -->
+          <!-- 专属 URL 输入字段折叠与策略配置 (编辑态) / 概览行 (展示态) -->
           <div v-if="isEditingProtocols" class="pt-2 space-y-2.5">
+            <div>
+              <label class="block text-xs font-medium text-slate-700 mb-1">密钥池调度算法 (Routing Strategy)</label>
+              <select
+                v-model="editStrategy"
+                class="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-1.5 text-xs text-slate-900 focus:outline-none focus:ring-2 focus:ring-slate-400/20 focus:border-slate-400 focus:bg-white"
+                data-testid="provider-strategy-select"
+              >
+                <option value="priority">主备优先级 (Priority·推荐，一个耗尽再切下一个)</option>
+                <option value="round_robin">轮询调度 (Round Robin·每次请求循环切换)</option>
+                <option value="weighted_round_robin">加权轮询 (Weighted Round Robin·按权重比例分流)</option>
+              </select>
+            </div>
             <div v-if="activeProtocols.includes('chat')">
               <label class="block text-xs font-medium text-slate-600">OpenAI Chat 专属 Base URL</label>
               <input
@@ -404,6 +434,7 @@ async function handleDeleteProvider() {
             :key-test-results="keyTestResults"
             :testing-key-ids="testingKeyIds"
             @create="(payload) => emit('create-key', payload)"
+            @update="(id, payload) => emit('update-key', id, payload)"
             @delete="(id) => emit('delete-key', id)"
             @test-single="(id) => emit('test-single-key', id)"
             @oauth-antigravity="(name) => emit('oauth-antigravity', name)"

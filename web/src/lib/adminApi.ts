@@ -12,6 +12,7 @@ import type {
   CreateModelPayload,
   UpdateModelPayload,
   CreateKeyPayload,
+  UpdateKeyPayload,
   CreateKeyResponse,
   PutStrategyPayload,
   AntigravityAuthUrlView,
@@ -113,6 +114,12 @@ export const adminApi = {
 
   createKey(payload: CreateKeyPayload, ifMatchVersion?: number | string) {
     return alova.Post<CreateKeyResponse>('/api/admin/keys', payload, {
+      headers: ifMatchHeaders(ifMatchVersion),
+    });
+  },
+
+  updateKey(id: string, payload: UpdateKeyPayload, ifMatchVersion?: number | string) {
+    return alova.Put<KeyView>(`/api/admin/keys/${encodeURIComponent(id)}`, payload, {
       headers: ifMatchHeaders(ifMatchVersion),
     });
   },

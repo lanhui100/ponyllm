@@ -42,6 +42,7 @@ const {
   editModel,
   removeModel,
   addKey,
+  editKey,
   removeKey,
   testSingleKey,
   batchTestAllKeys,
@@ -117,7 +118,7 @@ const newProviderForm = ref<CreateProviderPayload>({
   name: '',
   base_url: 'https://tokens.ponyjob.top/v1',
   default_model: '',
-  strategy: 'economy',
+  strategy: 'priority',
   billing_mode: 'token',
   input_price: 0,
   cached_price: 0,
@@ -348,7 +349,7 @@ function openAddProvider() {
     name: '',
     base_url: 'https://tokens.ponyjob.top/v1',
     default_model: '',
-    strategy: 'economy',
+    strategy: 'priority',
     billing_mode: 'token',
     input_price: 0,
     cached_price: 0,
@@ -356,11 +357,13 @@ function openAddProvider() {
   };
   newProviderProtocols.value = ['chat'];
   newProviderCustomUrls.value = { chat: '', messages: '', responses: '' };
+  const agKeys = keys.value.filter((k) => k.provider === 'antigravity');
+  const nextPriority = agKeys.length > 0 ? Math.max(...agKeys.map((k) => k.priority || 0)) + 1 : 1;
   antigravityForm.value = {
     provider: 'antigravity',
     id: '',
     code_or_url: '',
-    priority: 1,
+    priority: nextPriority,
     weight: 10,
   };
   antigravityAuthUrl.value = '';
@@ -671,13 +674,9 @@ onUnmounted(() => {
                   v-model="newProviderForm.strategy"
                   class="w-full bg-white/60 border border-white/50 rounded-lg px-3.5 py-2 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-slate-400/20 focus:border-slate-400 focus:bg-white/90"
                 >
-                  <option value="round_robin">轮询 (Round Robin)</option>
                   <option value="priority">主备优先级 (Priority)</option>
+                  <option value="round_robin">轮询 (Round Robin)</option>
                   <option value="weighted_round_robin">加权轮询 (Weighted)</option>
-                  <option value="economy">经济优先 (Economy)</option>
-                  <option value="speed">速度优先 (Speed)</option>
-                  <option value="reliable">稳定优先 (Reliable)</option>
-                  <option value="balanced">综合均衡 (Balanced)</option>
                 </select>
               </div>
             </div>
@@ -989,6 +988,7 @@ onUnmounted(() => {
             @update-model="editModel"
             @delete-model="removeModel"
             @create-key="addKey"
+            @update-key="editKey"
             @delete-key="removeKey"
             @test-single-key="testSingleKey"
             @oauth-antigravity="handleOpenAntigravityForProvider"
