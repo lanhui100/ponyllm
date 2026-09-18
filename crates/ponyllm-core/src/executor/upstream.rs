@@ -106,8 +106,11 @@ pub const SESSION_HEADER_PRIORITY: &[&str] = &[
 /// none. Passes the upstream `MissingSessionID` gate; per-conversation
 /// stability still requires the downstream to send one of
 /// [`SESSION_HEADER_PRIORITY`].
+///
+/// For OpenCode Zen targets, upstream strict regex validator requires `ses_` + exactly 26 chars!
 pub fn new_upstream_session_id() -> String {
-    format!("ponyllm-{}", uuid::Uuid::new_v4().simple())
+    let raw = uuid::Uuid::new_v4().simple().to_string();
+    format!("ses_{}", &raw[..26])
 }
 
 fn clean_session_value(value: &HeaderValue) -> Option<String> {
@@ -832,9 +835,10 @@ impl UpstreamExecutor {
             let client_val = HeaderValue::from_str(&self.client_label)
                 .map_err(|e| CoreError::Internal(format!("Invalid client label: {}", e)))?;
             headers.insert("x-opencode-client", client_val);
-            // Own agent string, never a generic SDK default.
-            let ua_val = HeaderValue::from_str(&ponyllm_user_agent())
-                .map_err(|e| CoreError::Internal(format!("Invalid user agent: {}", e)))?;
+            // OpenCode zen endpoints require an official OpenCode client User-Agent
+            // (FreeTierError otherwise for free models, e.g. >=1.17.0).
+            let ua_str = "opencode/1.18.31 (Linux; x64)";
+            let ua_val = HeaderValue::from_static(ua_str);
             headers.insert(USER_AGENT, ua_val);
         }
 
@@ -1416,9 +1420,9 @@ mod session_header_tests {
     fn generates_prefixed_id_when_missing_or_blank() {
         let empty = HeaderMap::new();
         let generated = resolve_upstream_session(&empty);
-        assert!(generated.starts_with("ponyllm-"), "got {}", generated);
+        assert!(generated.starts_with("ses_"), "got {}", generated);
         let blank = downstream(&[("x-opencode-session", "   ")]);
-        assert!(resolve_upstream_session(&blank).starts_with("ponyllm-"));
+        assert!(resolve_upstream_session(&blank).starts_with("ses_"));
         assert_ne!(
             resolve_upstream_session(&empty),
             resolve_upstream_session(&empty)
@@ -1469,7 +1473,7 @@ mod session_header_tests {
         assert_eq!(headers.get("x-opencode-client").unwrap(), "ponyllm");
         assert_eq!(
             headers.get(USER_AGENT).unwrap().to_str().unwrap(),
-            ponyllm_user_agent()
+            "opencode/1.18.31 (Linux; x64)"
         );
 
         let pool = Arc::new(KeyPool::new("test", RoutingStrategy::RoundRobin));
@@ -1480,7 +1484,7 @@ mod session_header_tests {
             .unwrap()
             .to_str()
             .unwrap();
-        assert!(session.starts_with("ponyllm-"), "got {}", session);
+        assert!(session.starts_with("ses_"), "got {}", session);
     }
 
     #[test]
