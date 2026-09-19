@@ -560,6 +560,49 @@ pub async fn handle_chat_completions(
                         Err(e) => break Err(e),
                     }
                 }
+            } else if ponyllm_core::executor::zen_free_tier_forces_upstream_stream(
+                &target.provider_name,
+                &target_url,
+                &target.physical_model,
+            ) && matches!(
+                target.upstream_protocol,
+                ponyllm_core::pool::UpstreamProtocol::Chat | ponyllm_core::pool::UpstreamProtocol::Responses
+            ) {
+                // Zen free tier: the Console gate rejects non-stream upstream
+                // bodies even with the tool gate satisfied. Force an upstream
+                // stream and aggregate to the JSON shape the downstream asked
+                // for (mirrors the Antigravity stream-collector pattern).
+                let mut streamed_val = req_val.clone();
+                if let Some(obj) = streamed_val.as_object_mut() {
+                    obj.insert("stream".to_string(), serde_json::Value::Bool(true));
+                    if target.upstream_protocol == ponyllm_core::pool::UpstreamProtocol::Chat {
+                        obj.entry("stream_options".to_string())
+                            .or_insert_with(|| serde_json::json!({"include_usage": true}));
+                    }
+                }
+                match executor.execute_stream_request(&target_url, &streamed_val).await {
+                    Ok(resp) => {
+                        let raw_stream = resp.bytes_stream();
+                        let collected = match target.upstream_protocol {
+                            ponyllm_core::pool::UpstreamProtocol::Responses => {
+                                crate::streaming::collect_responses_sse_to_json(raw_stream).await
+                            }
+                            _ => crate::streaming::collect_chat_sse_to_json(raw_stream).await,
+                        };
+                        match collected {
+                            Ok(v) => Ok(v),
+                            Err(e) => {
+                                tracing::warn!(
+                                    provider = %target.provider_name,
+                                    error = %e,
+                                    "Zen free-tier upstream stream collection failed"
+                                );
+                                Err(CoreError::Internal(format!("Zen stream collect failed: {}", e)))
+                            }
+                        }
+                    }
+                    Err(e) => Err(e),
+                }
             } else {
                 executor.execute_json_request(&target_url, &req_val).await
             };

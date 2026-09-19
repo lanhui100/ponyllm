@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use parking_lot::Mutex;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE, USER_AGENT};
-use serde_json::Value;
+use serde_json::{json, Value};
 use crate::error::{CoreError, GatewayErrorKind, Result};
 use crate::pool::{ApiKeyEntry, KeyPool, KeyState, PoolErrorType};
 use crate::telemetry::{GatewayEvent, StageTimings};
@@ -393,6 +393,111 @@ pub fn is_opencode_zen_target(provider_name: &str, target_url: &str) -> bool {
     !url.contains("/go/")
 }
 
+/// Whether this routed target hits the zen free tier, whose Console gate
+/// rejects non-stream upstream bodies outright (`FreeTierError` even with
+/// the tool gate satisfied — verified 2026-09-19). Routes must force an
+/// upstream stream for these targets and aggregate the SSE downstream.
+/// Chat/Responses upstream protocols only: the aggregation collectors cover
+/// those two wire shapes.
+pub fn zen_free_tier_forces_upstream_stream(provider_name: &str, target_url: &str, physical_model: &str) -> bool {
+    is_opencode_zen_target(provider_name, target_url) && physical_model.ends_with("-free")
+}
+
+/// OpenCode zen free-tier body gate: since 2026-09-17 the Console rejects
+/// `*-free` models with `FreeTierError` unless the request body itself
+/// carries opencode's agent tool set. Wire probe (2026-09-19): the full
+/// 12-name tool list passes on `/chat/completions`, `/responses` and
+/// `/messages`; header/UA/TLS replication alone does not; a single-name
+/// subset does not; tool schemas are irrelevant (stub objects pass).
+pub const OPENCODE_ZEN_TOOL_NAMES: [&str; 12] = [
+    "bash", "edit", "glob", "google_search", "grep", "read", "skill", "task", "todowrite",
+    "webfetch", "websearch", "write",
+];
+
+/// Wire shapes the zen free-tier gate accepts for the tool list, selected by
+/// the upstream endpoint path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ZenToolWire {
+    /// `{type:"function",function:{name,...}}` — `/chat/completions`.
+    OpenAiChat,
+    /// `{type:"function",name,...}` — `/responses`.
+    OpenAiResponses,
+    /// `{name,input_schema,...}` — `/messages`.
+    AnthropicMessages,
+}
+
+fn zen_tool_wire(url: &str) -> ZenToolWire {
+    let url = url.to_ascii_lowercase();
+    if url.contains("/responses") {
+        ZenToolWire::OpenAiResponses
+    } else if url.contains("/messages") {
+        ZenToolWire::AnthropicMessages
+    } else {
+        ZenToolWire::OpenAiChat
+    }
+}
+
+/// Whether the upstream body targets a zen free model (`-free` suffix).
+/// Paid zen models keep the historical no-injection wire.
+fn zen_body_requests_free_model(body: &Value) -> bool {
+    body.get("model")
+        .and_then(|v| v.as_str())
+        .map(|m| m.ends_with("-free"))
+        .unwrap_or(false)
+}
+
+/// Tool names already present in the body, across all three wire shapes
+/// (OpenAI chat nests the name under `function`, Responses and Anthropic
+/// carry a flat `name`).
+fn zen_existing_tool_names(body: &Value) -> Vec<String> {
+    body.get("tools")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|t| {
+                    t.get("name")
+                        .and_then(|n| n.as_str())
+                        .or_else(|| {
+                            t.get("function")
+                                .and_then(|f| f.get("name"))
+                                .and_then(|n| n.as_str())
+                        })
+                        .map(String::from)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn zen_missing_tool_names(body: &Value) -> Vec<&'static str> {
+    let existing = zen_existing_tool_names(body);
+    OPENCODE_ZEN_TOOL_NAMES
+        .iter()
+        .filter(|n| !existing.iter().any(|e| e == *n))
+        .copied()
+        .collect()
+}
+
+fn zen_stub_tool(name: &str, wire: ZenToolWire) -> Value {
+    match wire {
+        ZenToolWire::OpenAiChat => json!({
+            "type": "function",
+            "function": {"name": name, "description": "opencode agent tool", "parameters": {"type": "object", "properties": {}}}
+        }),
+        ZenToolWire::OpenAiResponses => json!({
+            "type": "function",
+            "name": name,
+            "description": "opencode agent tool",
+            "parameters": {"type": "object", "properties": {}}
+        }),
+        ZenToolWire::AnthropicMessages => json!({
+            "name": name,
+            "description": "opencode agent tool",
+            "input_schema": {"type": "object", "properties": {}}
+        }),
+    }
+}
+
 /// Create an optimized, connection-pooled HTTP client for upstream LLM providers.
 /// Enables TCP nodelay, Keep-Alive probing, and idle connection reuse to minimize TTFT.
 /// By default, disables system environment proxies (`http_proxy`/`https_proxy`) to isolate
@@ -779,6 +884,41 @@ impl UpstreamExecutor {
         std::borrow::Cow::Borrowed(body)
     }
 
+    /// Zen free-tier body gate: append opencode's agent tool set to
+    /// `*-free` model requests so the Console free-tier check passes.
+    /// Downstream tools are preserved; only the missing opencode names are
+    /// appended, so the patch is idempotent across per-key retries. No-op
+    /// outside the zen scope, for paid models, and once the tool set is
+    /// already complete.
+    fn inject_zen_free_tier_tools<'a>(
+        &self,
+        url: &str,
+        body: std::borrow::Cow<'a, Value>,
+    ) -> std::borrow::Cow<'a, Value> {
+        if !self.opencode_zen || !zen_body_requests_free_model(body.as_ref()) {
+            return body;
+        }
+        let missing = zen_missing_tool_names(body.as_ref());
+        if missing.is_empty() {
+            return body;
+        }
+        let wire = zen_tool_wire(url);
+        let mut patched = body.into_owned();
+        let Some(obj) = patched.as_object_mut() else {
+            return std::borrow::Cow::Owned(patched);
+        };
+        let tools = obj.entry("tools".to_string()).or_insert_with(|| Value::Array(Vec::new()));
+        if let Some(arr) = tools.as_array_mut() {
+            for name in missing {
+                arr.push(zen_stub_tool(name, wire));
+            }
+        }
+        if wire == ZenToolWire::OpenAiChat && !obj.contains_key("tool_choice") {
+            obj.insert("tool_choice".to_string(), Value::String("auto".to_string()));
+        }
+        std::borrow::Cow::Owned(patched)
+    }
+
     async fn build_headers(&self, key: &ApiKeyEntry, body: Option<&Value>) -> Result<HeaderMap> {
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
@@ -882,7 +1022,7 @@ impl UpstreamExecutor {
             attempted_keys.push(key.id.clone());
             self.emit_key_selected(&key.id, select_start.elapsed());
 
-            let effective_body = Self::prepare_effective_body(&key, body);
+            let effective_body = self.inject_zen_free_tier_tools(url, Self::prepare_effective_body(&key, body));
             let headers = match self.build_headers(&key, Some(effective_body.as_ref())).await {
                 Ok(h) => h,
                 Err(e) => {
@@ -1057,7 +1197,7 @@ impl UpstreamExecutor {
             attempted_keys.push(key.id.clone());
             self.emit_key_selected(&key.id, select_start.elapsed());
 
-            let effective_body = Self::prepare_effective_body(&key, body);
+            let effective_body = self.inject_zen_free_tier_tools(url, Self::prepare_effective_body(&key, body));
             let headers = match self.build_headers(&key, Some(effective_body.as_ref())).await {
                 Ok(h) => h,
                 Err(e) => {
@@ -1558,5 +1698,94 @@ mod session_header_tests {
         let prepared = UpstreamExecutor::prepare_effective_body(&key2, &pre_serialized_body);
         assert_eq!(prepared["project"], "project-of-key-2");
         assert_eq!(prepared["requestId"], "agent/u/1/t/1");
+    }
+}
+
+#[cfg(test)]
+mod zen_tools_tests {
+    use super::*;
+    use crate::pool::{KeyPool, RoutingStrategy};
+
+    fn zen_executor() -> UpstreamExecutor {
+        let pool = Arc::new(KeyPool::new("zen-provider", RoutingStrategy::RoundRobin));
+        UpstreamExecutor::new(pool, 1).with_opencode_zen(true)
+    }
+
+    fn tool_names(body: &Value) -> Vec<String> {
+        zen_existing_tool_names(body)
+    }
+
+    const CHAT_URL: &str = "http://127.0.0.1:8899/pony_x/opencode/zen/v1/chat/completions";
+    const RESP_URL: &str = "https://opencode.ai/zen/v1/responses";
+    const MSG_URL: &str = "https://opencode.ai/zen/v1/messages";
+
+    #[test]
+    fn free_model_chat_body_gets_full_tool_set() {
+        let ex = zen_executor();
+        let body = json!({"model": "mimo-v2.5-free", "messages": [{"role": "user", "content": "hi"}]});
+        let out = ex.inject_zen_free_tier_tools(CHAT_URL, std::borrow::Cow::Borrowed(&body));
+        let names = tool_names(out.as_ref());
+        assert_eq!(names.len(), OPENCODE_ZEN_TOOL_NAMES.len());
+        for n in OPENCODE_ZEN_TOOL_NAMES {
+            assert!(names.iter().any(|e| e == n), "missing {n}");
+        }
+        assert_eq!(out["tool_choice"], "auto");
+        // OpenAI chat wire shape: nested under "function".
+        assert_eq!(out["tools"][0]["type"], "function");
+        assert_eq!(out["tools"][0]["function"]["name"], "bash");
+    }
+
+    #[test]
+    fn injection_is_idempotent_and_preserves_downstream_tools() {
+        let ex = zen_executor();
+        let body = json!({
+            "model": "muse-spark-1.3-contributor-free",
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [{"type": "function", "function": {"name": "my_tool", "parameters": {}}}],
+            "tool_choice": "required"
+        });
+        let once = ex.inject_zen_free_tier_tools(CHAT_URL, std::borrow::Cow::Borrowed(&body));
+        let names_once = tool_names(once.as_ref());
+        assert_eq!(names_once.len(), OPENCODE_ZEN_TOOL_NAMES.len() + 1);
+        assert!(names_once.iter().any(|e| e == "my_tool"));
+        // Downstream tool_choice is never overwritten.
+        assert_eq!(once["tool_choice"], "required");
+        // Second pass must be a no-op (per-key retry safety).
+        let twice = ex.inject_zen_free_tier_tools(CHAT_URL, once.clone());
+        assert_eq!(tool_names(twice.as_ref()).len(), names_once.len());
+    }
+
+    #[test]
+    fn responses_wire_uses_flat_name() {
+        let ex = zen_executor();
+        let body = json!({"model": "muse-spark-1.3-contributor-free", "input": "hi"});
+        let out = ex.inject_zen_free_tier_tools(RESP_URL, std::borrow::Cow::Borrowed(&body));
+        assert_eq!(out["tools"][0]["type"], "function");
+        assert_eq!(out["tools"][0]["name"], "bash");
+        assert!(out["tools"][0].get("function").is_none());
+    }
+
+    #[test]
+    fn messages_wire_uses_anthropic_schema() {
+        let ex = zen_executor();
+        let body = json!({"model": "mimo-v2.5-free", "messages": [], "max_tokens": 16});
+        let out = ex.inject_zen_free_tier_tools(MSG_URL, std::borrow::Cow::Borrowed(&body));
+        assert_eq!(out["tools"][0]["name"], "bash");
+        assert!(out["tools"][0].get("input_schema").is_some());
+        assert!(out["tools"][0].get("function").is_none());
+    }
+
+    #[test]
+    fn paid_model_and_non_zen_scope_stay_untouched() {
+        let ex = zen_executor();
+        let paid = json!({"model": "glm-5.3", "messages": []});
+        let out = ex.inject_zen_free_tier_tools(CHAT_URL, std::borrow::Cow::Borrowed(&paid));
+        assert!(out.get("tools").is_none());
+
+        let plain_pool = Arc::new(KeyPool::new("zen-provider", RoutingStrategy::RoundRobin));
+        let plain = UpstreamExecutor::new(plain_pool, 1);
+        let free = json!({"model": "mimo-v2.5-free", "messages": []});
+        let out = plain.inject_zen_free_tier_tools(CHAT_URL, std::borrow::Cow::Borrowed(&free));
+        assert!(out.get("tools").is_none());
     }
 }

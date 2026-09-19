@@ -1357,6 +1357,250 @@ where
     collect_antigravity_sse_to_json_with_timeout(stream, std::time::Duration::from_secs(15)).await
 }
 
+/// Collect an upstream OpenAI chat-completions SSE stream into one
+/// consolidated `chat.completion` JSON body.
+///
+/// Used for OpenCode zen free models: the Console free-tier gate rejects
+/// non-stream upstream bodies (`FreeTierError`) even when the tool gate is
+/// satisfied, so a non-stream downstream request must be executed as an
+/// upstream stream and aggregated here. Mirrors the Antigravity collector
+/// contract: error frames and empty streams yield `Err` so route-level
+/// failover still applies.
+pub async fn collect_chat_sse_to_json<S, E>(stream: S) -> Result<serde_json::Value, String>
+where
+    S: Stream<Item = Result<Bytes, E>> + Send + 'static,
+    E: std::fmt::Display + Send + 'static,
+{
+    collect_chat_sse_to_json_with_timeout(stream, std::time::Duration::from_secs(30)).await
+}
+
+pub async fn collect_chat_sse_to_json_with_timeout<S, E>(
+    stream: S,
+    chunk_timeout: std::time::Duration,
+) -> Result<serde_json::Value, String>
+where
+    S: Stream<Item = Result<Bytes, E>> + Send + 'static,
+    E: std::fmt::Display + Send + 'static,
+{
+    #[derive(Default)]
+    struct ToolAcc {
+        id: Option<String>,
+        name: Option<String>,
+        arguments: String,
+    }
+    #[derive(Default)]
+    struct ChoiceAcc {
+        role: Option<String>,
+        content: String,
+        reasoning: String,
+        tool_calls: std::collections::BTreeMap<u64, ToolAcc>,
+        finish_reason: Option<String>,
+    }
+
+    let mut sse_stream = Box::pin(sse_event_stream(stream));
+    let mut choices: std::collections::BTreeMap<u64, ChoiceAcc> = std::collections::BTreeMap::new();
+    let mut id: Option<String> = None;
+    let mut model: Option<String> = None;
+    let mut created: Option<i64> = None;
+    let mut usage: Option<serde_json::Value> = None;
+    let mut saw_frame = false;
+
+    loop {
+        let evt = match tokio::time::timeout(chunk_timeout, sse_stream.next()).await {
+            Ok(Some(res)) => res,
+            Ok(None) => break,
+            Err(_) => return Err(format!("Chat SSE stream stalled: {:?} chunk timeout exceeded", chunk_timeout)),
+        };
+        let evt = match evt {
+            Ok(e) => e,
+            Err(e) => return Err(format!("Chat SSE transport error: {}", e)),
+        };
+        let data = evt.data.trim();
+        if data.is_empty() || data == "[DONE]" {
+            continue;
+        }
+        let Ok(val) = serde_json::from_str::<serde_json::Value>(data) else {
+            continue;
+        };
+        if let Some(err_obj) = val.get("error") {
+            let msg = err_obj
+                .get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or("chat upstream error frame");
+            return Err(format!("Chat stream error frame: {}", msg));
+        }
+        saw_frame = true;
+        if id.is_none() {
+            id = val.get("id").and_then(|v| v.as_str()).map(String::from);
+        }
+        if model.is_none() {
+            model = val.get("model").and_then(|v| v.as_str()).map(String::from);
+        }
+        if created.is_none() {
+            created = val.get("created").and_then(|v| v.as_i64());
+        }
+        if val.get("usage").map(|u| !u.is_null()).unwrap_or(false) {
+            usage = Some(val.get("usage").cloned().unwrap_or(serde_json::Value::Null));
+        }
+        let Some(chunk_choices) = val.get("choices").and_then(|v| v.as_array()) else {
+            continue;
+        };
+        for ch in chunk_choices {
+            let idx = ch.get("index").and_then(|v| v.as_u64()).unwrap_or(0);
+            let acc = choices.entry(idx).or_default();
+            if let Some(delta) = ch.get("delta") {
+                if acc.role.is_none() {
+                    acc.role = delta.get("role").and_then(|v| v.as_str()).map(String::from);
+                }
+                if let Some(c) = delta.get("content").and_then(|v| v.as_str()) {
+                    acc.content.push_str(c);
+                }
+                // zen chat deltas carry `reasoning`; deepseek-style uses
+                // `reasoning_content` — fold both into the latter.
+                for key in ["reasoning_content", "reasoning"] {
+                    if let Some(r) = delta.get(key).and_then(|v| v.as_str()) {
+                        acc.reasoning.push_str(r);
+                    }
+                }
+                if let Some(tcs) = delta.get("tool_calls").and_then(|v| v.as_array()) {
+                    for tc in tcs {
+                        let tidx = tc.get("index").and_then(|v| v.as_u64()).unwrap_or(0);
+                        let tool = acc.tool_calls.entry(tidx).or_default();
+                        if tool.id.is_none() {
+                            tool.id = tc.get("id").and_then(|v| v.as_str()).map(String::from);
+                        }
+                        if let Some(f) = tc.get("function") {
+                            if tool.name.is_none() {
+                                tool.name = f.get("name").and_then(|v| v.as_str()).map(String::from);
+                            }
+                            if let Some(a) = f.get("arguments").and_then(|v| v.as_str()) {
+                                tool.arguments.push_str(a);
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some(fr) = ch.get("finish_reason").and_then(|v| v.as_str()) {
+                acc.finish_reason = Some(fr.to_string());
+            }
+        }
+    }
+
+    if !saw_frame || choices.is_empty() {
+        return Err("Chat SSE stream ended without choices".to_string());
+    }
+
+    let built_choices: Vec<serde_json::Value> = choices
+        .into_iter()
+        .map(|(idx, acc)| {
+            let mut message = serde_json::Map::new();
+            message.insert("role".into(), serde_json::Value::String(acc.role.unwrap_or_else(|| "assistant".into())));
+            let has_tools = !acc.tool_calls.is_empty();
+            if acc.content.is_empty() && has_tools {
+                message.insert("content".into(), serde_json::Value::Null);
+            } else {
+                message.insert("content".into(), serde_json::Value::String(acc.content.clone()));
+            }
+            if !acc.reasoning.is_empty() {
+                message.insert("reasoning_content".into(), serde_json::Value::String(acc.reasoning.clone()));
+            }
+            if has_tools {
+                let tools: Vec<serde_json::Value> = acc
+                    .tool_calls
+                    .into_iter()
+                    .map(|(tidx, t)| {
+                        serde_json::json!({
+                            "index": tidx,
+                            "id": t.id.unwrap_or_else(|| format!("call_{}", tidx)),
+                            "type": "function",
+                            "function": {"name": t.name.unwrap_or_default(), "arguments": t.arguments}
+                        })
+                    })
+                    .collect();
+                message.insert("tool_calls".into(), serde_json::Value::Array(tools));
+            }
+            serde_json::json!({
+                "index": idx,
+                "message": message,
+                "finish_reason": acc.finish_reason.unwrap_or_else(|| "stop".into()),
+            })
+        })
+        .collect();
+
+    let mut out = serde_json::Map::new();
+    out.insert("id".into(), serde_json::Value::String(id.unwrap_or_else(|| "chatcmpl-ponyllm".into())));
+    out.insert("object".into(), serde_json::Value::String("chat.completion".into()));
+    out.insert("created".into(), serde_json::Value::Number(created.unwrap_or_default().into()));
+    out.insert("model".into(), serde_json::Value::String(model.unwrap_or_default()));
+    out.insert("choices".into(), serde_json::Value::Array(built_choices));
+    if let Some(u) = usage {
+        out.insert("usage".into(), u);
+    } else {
+        out.insert("usage".into(), serde_json::json!({"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}));
+    }
+    Ok(serde_json::Value::Object(out))
+}
+
+/// Collect an upstream OpenAI Responses SSE stream into the consolidated
+/// `response` JSON object. The terminal `response.completed` event carries
+/// the full response object, so aggregation is a scan for that event;
+/// `response.failed`/`error` events surface as `Err` for route failover.
+pub async fn collect_responses_sse_to_json<S, E>(stream: S) -> Result<serde_json::Value, String>
+where
+    S: Stream<Item = Result<Bytes, E>> + Send + 'static,
+    E: std::fmt::Display + Send + 'static,
+{
+    collect_responses_sse_to_json_with_timeout(stream, std::time::Duration::from_secs(30)).await
+}
+
+pub async fn collect_responses_sse_to_json_with_timeout<S, E>(
+    stream: S,
+    chunk_timeout: std::time::Duration,
+) -> Result<serde_json::Value, String>
+where
+    S: Stream<Item = Result<Bytes, E>> + Send + 'static,
+    E: std::fmt::Display + Send + 'static,
+{
+    let mut sse_stream = Box::pin(sse_event_stream(stream));
+    loop {
+        let evt = match tokio::time::timeout(chunk_timeout, sse_stream.next()).await {
+            Ok(Some(res)) => res,
+            Ok(None) => break,
+            Err(_) => return Err(format!("Responses SSE stream stalled: {:?} chunk timeout exceeded", chunk_timeout)),
+        };
+        let evt = match evt {
+            Ok(e) => e,
+            Err(e) => return Err(format!("Responses SSE transport error: {}", e)),
+        };
+        let data = evt.data.trim();
+        if data.is_empty() {
+            continue;
+        }
+        let Ok(val) = serde_json::from_str::<serde_json::Value>(data) else {
+            continue;
+        };
+        let ev_type = val.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        match ev_type {
+            "response.completed" => {
+                if let Some(resp) = val.get("response") {
+                    return Ok(resp.clone());
+                }
+            }
+            "response.failed" | "error" => {
+                let err = val.get("response").and_then(|r| r.get("error")).unwrap_or(&val);
+                let msg = err
+                    .get("message")
+                    .and_then(|m| m.as_str())
+                    .or_else(|| err.get("code").and_then(|c| c.as_str()))
+                    .unwrap_or("responses upstream error event");
+                return Err(format!("Responses stream error event: {}", msg));
+            }
+            _ => {}
+        }
+    }
+    Err("Responses SSE stream ended without response.completed".to_string())
+}
+
 /// Collect upstream Antigravity SSE stream into a consolidated Gemini response Value with configurable chunk timeout.
 pub async fn collect_antigravity_sse_to_json_with_timeout<S, E>(
     stream: S,
