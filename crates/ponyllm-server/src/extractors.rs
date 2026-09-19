@@ -135,18 +135,25 @@ pub fn parse_thinking_header(headers: &axum::http::HeaderMap) -> Option<ponyllm_
 /// Build the client-visible exhaustion message, distinguishing local pool
 /// exhaustion (no Active keys, check cooling/disabled via `ponyllm status`)
 /// from genuine upstream failures across all candidates.
+/// `model` is the client's raw requested model name so multi-model clients
+/// can attribute the failure without grepping server logs.
 /// `pool_exhausted` must come from matching the terminal error variant
 /// (`CoreError::NoAvailableKey`), never from substring matching.
-pub fn format_exhausted_message(last_error: &str, pool_exhausted: bool, request_id: &str) -> String {
+pub fn format_exhausted_message(
+    model: &str,
+    last_error: &str,
+    pool_exhausted: bool,
+    request_id: &str,
+) -> String {
     if pool_exhausted {
         format!(
-            "Local key pool exhausted (gateway-side cooling, no upstream attempt in this request; no Active keys, check `ponyllm status`). Last error: {} (request_id: {})",
-            last_error, request_id
+            "Local key pool exhausted for model '{}' (gateway-side cooling, no upstream attempt in this request; no Active keys, check `ponyllm status`). Last error: {} (request_id: {})",
+            model, last_error, request_id
         )
     } else {
         format!(
-            "All candidate upstream providers exhausted (upstream-side failure, gateway did attempt upstream). Last error: {} (request_id: {})",
-            last_error, request_id
+            "All candidate upstream providers exhausted for model '{}' (upstream-side failure, gateway did attempt upstream). Last error: {} (request_id: {})",
+            model, last_error, request_id
         )
     }
 }

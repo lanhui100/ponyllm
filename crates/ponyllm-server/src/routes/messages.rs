@@ -738,7 +738,7 @@ pub async fn handle_messages(
     // Correlate the client-visible error with the black-box frame: the
     // request_id is embedded in the message and exposed as a header, so
     // `ponyllm telemetry` output can be grepped for the failing request.
-    let msg = crate::extractors::format_exhausted_message(&last_error, last_pool_exhausted, &request_id);
+    let msg = crate::extractors::format_exhausted_message(&requested_raw_model, &last_error, last_pool_exhausted, &request_id);
     let mut resp = crate::extractors::project_anthropic_error(&last_kind, &msg);
     if let Some(secs) = last_retry_after {
         if let Ok(v) = HeaderValue::from_str(&secs.to_string()) {

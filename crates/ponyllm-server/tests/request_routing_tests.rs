@@ -546,14 +546,17 @@ fn test_inbound_native_endpoint_wins_over_provider_default() {
 fn test_exhausted_message_distinguishes_local_pool() {
     use ponyllm_server::extractors::format_exhausted_message;
     let local = format_exhausted_message(
+        "gemini-3.8-flash",
         "No available key for provider 'opencode' (all keys cooling down or disabled)",
         true,
         "req_1",
     );
     assert!(local.contains("Local key pool exhausted"));
+    assert!(local.contains("for model 'gemini-3.8-flash'"));
     assert!(local.contains("req_1"));
-    let upstream = format_exhausted_message("HTTP 500 from k1: boom", false, "req_2");
+    let upstream = format_exhausted_message("gemini-3.8-flash", "HTTP 500 from k1: boom", false, "req_2");
     assert!(upstream.contains("All candidate upstream providers exhausted"));
+    assert!(upstream.contains("for model 'gemini-3.8-flash'"));
 }
 
 #[tokio::test]

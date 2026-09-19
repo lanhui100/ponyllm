@@ -508,7 +508,7 @@ pub async fn handle_responses(
         },
     );
 
-    let msg = crate::extractors::format_exhausted_message(&last_error, last_pool_exhausted, &request_id);
+    let msg = crate::extractors::format_exhausted_message(&requested_raw_model, &last_error, last_pool_exhausted, &request_id);
     let mut err_resp = crate::extractors::project_openai_error(&last_kind, &msg);
     if let Some(secs) = last_retry_after {
         if let Ok(v) = HeaderValue::from_str(&secs.to_string()) {
