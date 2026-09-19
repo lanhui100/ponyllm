@@ -44,6 +44,7 @@ fn test_model_spec_pricing_inheritance_and_override() {
         responses_url: None,
         messages_url: None,
         proxy: None,
+        timeout_secs: None,
     };
 
     // 1. deepseek-chat should inherit provider default
@@ -129,6 +130,7 @@ fn test_economy_routing_respects_model_level_pricing() {
         responses_url: None,
         messages_url: None,
         proxy: None,
+        timeout_secs: None,
     };
 
     // Provider B: default is expensive (1.0), but special-model is discounted (0.3)
@@ -160,6 +162,7 @@ fn test_economy_routing_respects_model_level_pricing() {
         responses_url: None,
         messages_url: None,
         proxy: None,
+        timeout_secs: None,
     };
 
     providers.insert("provider_a".to_string(), p_a);
@@ -223,6 +226,7 @@ fn test_pricing_anti_inversion_and_free_model_preservation() {
         responses_url: None,
         messages_url: None,
         proxy: None,
+        timeout_secs: None,
     };
 
     let mini_pricing = p.get_model_pricing("mini");
@@ -279,6 +283,7 @@ fn test_hot_cache_probe_guides_economy_routing() {
         responses_url: None,
         messages_url: None,
         proxy: None,
+        timeout_secs: None,
     };
 
     // Provider 2: Standard price $0.80, cached $0.40
@@ -297,6 +302,7 @@ fn test_hot_cache_probe_guides_economy_routing() {
         responses_url: None,
         messages_url: None,
         proxy: None,
+        timeout_secs: None,
     };
 
     providers.insert("p1".to_string(), p1);

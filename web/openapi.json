@@ -1155,6 +1155,15 @@
               "null"
             ]
           },
+          "timeout_secs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Optional total upstream timeout override (seconds, 60~1800).",
+            "minimum": 0
+          },
           "top_p": {
             "type": [
               "number",
@@ -1227,6 +1236,15 @@
           },
           "strategy": {
             "type": "string"
+          },
+          "timeout_secs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Optional total upstream timeout override (seconds, 60~1800).",
+            "minimum": 0
           }
         }
       },
@@ -1845,6 +1863,15 @@
               "null"
             ]
           },
+          "timeout_secs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Optional total upstream timeout override (seconds, 60~1800).",
+            "minimum": 0
+          },
           "top_p": {
             "type": [
               "number",
@@ -1904,6 +1931,15 @@
               "string",
               "null"
             ]
+          },
+          "timeout_secs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Optional total upstream timeout override (seconds, 60~1800).",
+            "minimum": 0
           }
         }
       },

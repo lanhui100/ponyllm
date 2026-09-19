@@ -129,6 +129,7 @@ async fn test_model_echo_policy_and_auto_routing() {
             responses_url: None,
             messages_url: None,
             proxy: None,
+            timeout_secs: None,
         },
     );
 
@@ -157,6 +158,7 @@ async fn test_model_echo_policy_and_auto_routing() {
             responses_url: None,
             messages_url: None,
             proxy: None,
+            timeout_secs: None,
         },
     );
 
@@ -286,6 +288,7 @@ fn test_is_anthropic_upstream_heuristic_lock() {
             responses_url: None,
             messages_url: None,
             proxy: None,
+            timeout_secs: None,
         },
     );
     config.providers.insert(
@@ -305,6 +308,7 @@ fn test_is_anthropic_upstream_heuristic_lock() {
             responses_url: None,
             messages_url: None,
             proxy: None,
+            timeout_secs: None,
         },
     );
     let state = AppState::new(config);
@@ -362,6 +366,7 @@ fn test_protocol_resolution_priority_and_overrides() {
             responses_url,
             messages_url,
             proxy: None,
+            timeout_secs: None,
         }
     }
 
@@ -431,6 +436,7 @@ fn test_models_listing_exposes_native_protocol() {
             responses_url: None,
             messages_url: None,
             proxy: None,
+            timeout_secs: None,
         },
     );
     let state = AppState::new(config);
@@ -470,6 +476,7 @@ fn test_native_protocol_wins_ties_for_passthrough_first() {
                 responses_url: None,
                 messages_url: None,
             proxy: None,
+            timeout_secs: None,
             },
         );
     }
@@ -515,6 +522,7 @@ fn test_inbound_native_endpoint_wins_over_provider_default() {
             responses_url: None,
             messages_url: Some("https://api.deepseek.com/anthropic".to_string()),
             proxy: None,
+            timeout_secs: None,
         },
     );
     let state = AppState::new(config);
@@ -624,6 +632,7 @@ async fn test_cross_provider_transparent_failover() {
             responses_url: None,
             messages_url: None,
             proxy: None,
+            timeout_secs: None,
         },
     );
 
@@ -652,6 +661,7 @@ async fn test_cross_provider_transparent_failover() {
             responses_url: None,
             messages_url: None,
             proxy: None,
+            timeout_secs: None,
         },
     );
 
@@ -746,6 +756,7 @@ async fn test_anthropic_messages_routing_and_model_echo() {
             responses_url: None,
             messages_url: None,
             proxy: None,
+            timeout_secs: None,
         },
     );
 
@@ -847,6 +858,7 @@ async fn test_gateway_configuration_hot_reload() {
             responses_url: None,
             messages_url: None,
             proxy: None,
+            timeout_secs: None,
         },
     );
 
@@ -902,6 +914,7 @@ async fn test_gateway_configuration_hot_reload() {
             responses_url: None,
             messages_url: None,
             proxy: None,
+            timeout_secs: None,
         },
     );
 
@@ -1018,6 +1031,7 @@ async fn test_large_payload_handling_with_1m_context_support() {
             responses_url: None,
             messages_url: None,
             proxy: None,
+            timeout_secs: None,
         },
     );
 
@@ -1073,6 +1087,7 @@ async fn test_custom_request_body_limit_rejection_with_helpful_error() {
             responses_url: None,
             messages_url: None,
             proxy: None,
+            timeout_secs: None,
         },
     );
 
@@ -1163,6 +1178,7 @@ async fn test_responses_cross_provider_failover() {
             responses_url: None,
             messages_url: None,
             proxy: None,
+            timeout_secs: None,
             },
         );
     }
@@ -1207,6 +1223,7 @@ fn cross_protocol_provider(base_url: String, model: &str, proto: UpstreamProtoco
         responses_url: None,
         messages_url: None,
         proxy: None,
+        timeout_secs: None,
     }
 }
 

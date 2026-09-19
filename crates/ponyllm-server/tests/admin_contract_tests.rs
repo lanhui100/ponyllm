@@ -103,6 +103,7 @@ impl TestHarness {
                 thinking_default: None,
                 thinking_max: None,
                 proxy: None,
+                timeout_secs: None,
             }],
             keys: raw_keys.clone(),
             default_protocol: None,
@@ -110,6 +111,7 @@ impl TestHarness {
             responses_url: None,
             messages_url: None,
             proxy: None,
+            timeout_secs: None,
         };
 
         let mut providers = HashMap::new();
@@ -160,6 +162,7 @@ impl TestHarness {
             thinking_default: None,
             thinking_max: None,
             proxy: None,
+            timeout_secs: None,
         };
 
         gw_config.providers.insert(
@@ -179,6 +182,7 @@ impl TestHarness {
                 responses_url: None,
                 messages_url: None,
                 proxy: None,
+                timeout_secs: None,
             },
         );
 

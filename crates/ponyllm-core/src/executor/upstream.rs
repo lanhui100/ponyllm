@@ -498,12 +498,25 @@ fn zen_stub_tool(name: &str, wire: ZenToolWire) -> Value {
     }
 }
 
+/// Default total wall-clock budget for one upstream call: 20 minutes.
+/// Long-thinking streams routinely exceed the legacy 120s budget; the
+/// gateway complements it with TTFB + tail-stall detection so a genuinely
+/// dead stream still fails fast instead of pinning the connection for the
+/// whole budget.
+pub const DEFAULT_UPSTREAM_TOTAL_TIMEOUT: Duration = Duration::from_secs(1200);
+
+/// TTFB guard: the upstream must deliver response headers within this budget
+/// or the attempt is judged dead (TRANSPORT) and failover kicks in. Far
+/// smaller than the total budget because a healthy provider starts emitting
+/// headers in seconds, while the *body* may legitimately stream for 20 min.
+pub const DEFAULT_UPSTREAM_TTFB_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// Create an optimized, connection-pooled HTTP client for upstream LLM providers.
 /// Enables TCP nodelay, Keep-Alive probing, and idle connection reuse to minimize TTFT.
 /// By default, disables system environment proxies (`http_proxy`/`https_proxy`) to isolate
 /// the gateway from ambient terminal proxy environments.
 pub fn create_upstream_http_client() -> reqwest::Client {
-    create_upstream_http_client_with_options(None, false)
+    create_upstream_http_client_with_timeout(None, false, DEFAULT_UPSTREAM_TOTAL_TIMEOUT)
 }
 
 /// Create an upstream HTTP client with optional explicit proxy URL and system proxy inheritance flag (returns Result).
@@ -511,8 +524,17 @@ pub fn try_create_upstream_http_client_with_options(
     proxy_url: Option<&str>,
     use_system_proxy: bool,
 ) -> std::result::Result<reqwest::Client, String> {
+    try_create_upstream_http_client_with_timeout(proxy_url, use_system_proxy, DEFAULT_UPSTREAM_TOTAL_TIMEOUT)
+}
+
+/// Variant with an explicit total-budget override (per-gateway/provider/model).
+pub fn try_create_upstream_http_client_with_timeout(
+    proxy_url: Option<&str>,
+    use_system_proxy: bool,
+    total_timeout: Duration,
+) -> std::result::Result<reqwest::Client, String> {
     let mut builder = reqwest::Client::builder()
-        .timeout(Duration::from_secs(120))
+        .timeout(total_timeout)
         .connect_timeout(Duration::from_secs(10))
         .tcp_nodelay(true)
         .tcp_keepalive(Duration::from_secs(60))
@@ -540,7 +562,16 @@ pub fn create_upstream_http_client_with_options(
     proxy_url: Option<&str>,
     use_system_proxy: bool,
 ) -> reqwest::Client {
-    match try_create_upstream_http_client_with_options(proxy_url, use_system_proxy) {
+    create_upstream_http_client_with_timeout(proxy_url, use_system_proxy, DEFAULT_UPSTREAM_TOTAL_TIMEOUT)
+}
+
+/// Non-fallible variant with an explicit total-budget override.
+pub fn create_upstream_http_client_with_timeout(
+    proxy_url: Option<&str>,
+    use_system_proxy: bool,
+    total_timeout: Duration,
+) -> reqwest::Client {
+    match try_create_upstream_http_client_with_timeout(proxy_url, use_system_proxy, total_timeout) {
         Ok(client) => client,
         Err(e) => {
             tracing::warn!(error = %e, "Failed to create configured proxy client, falling back to default");
@@ -700,6 +731,26 @@ impl UpstreamExecutor {
         self.session_id = resolve_upstream_session(downstream);
         self.client_label = resolve_upstream_client(downstream);
         self
+    }
+
+    /// Send one upstream request guarded by the TTFB budget: the response
+    /// headers must arrive within [`DEFAULT_UPSTREAM_TTFB_TIMEOUT`] or the
+    /// attempt is judged dead. The reqwest client itself still owns the
+    /// larger *total* budget (20 min default) that covers the whole body
+    /// stream; this guard only cuts the "provider never answered" case short
+    /// so failover happens in seconds, not minutes.
+    async fn send_guarded(
+        &self,
+        req: reqwest::RequestBuilder,
+    ) -> std::result::Result<reqwest::Response, String> {
+        match tokio::time::timeout(DEFAULT_UPSTREAM_TTFB_TIMEOUT, req.send()).await {
+            Ok(Ok(r)) => Ok(r),
+            Ok(Err(e)) => Err(e.to_string()),
+            Err(_elapsed) => Err(format!(
+                "upstream TTFB timeout after {:?} (no response headers)",
+                DEFAULT_UPSTREAM_TTFB_TIMEOUT
+            )),
+        }
     }
 
     /// Attach an opt-in event sink. Emits `KeySelected`, `UpstreamHeaders`
@@ -1045,8 +1096,23 @@ impl UpstreamExecutor {
 
             let req = self.client.post(url).headers(headers).json(effective_body.as_ref());
 
-            match req.send().await {
-                Ok(resp) => {
+            let resp = match self.send_guarded(req).await {
+                Ok(r) => r,
+                Err(err_str) => {
+                    last_error = format!("Network error with {}: {}", key.id, err_str);
+                    last_kind = GatewayErrorKind::UpstreamUnavailable;
+                    self.pool.record_error(&key.id, PoolErrorType::NetworkError);
+                    if let Some(delay) = transient_retry_delay(&self.pool, &key.id, attempt, max_attempts, None) {
+                        attempted_keys.retain(|id| id != &key.id);
+                        self.emit_both(&key.id, attempt_idx, None, last_kind.clone(), last_error.clone(), None, attempt_start.elapsed());
+                        tokio::time::sleep(delay).await;
+                        continue;
+                    }
+                    self.emit_both(&key.id, attempt_idx, None, last_kind.clone(), last_error.clone(), None, attempt_start.elapsed());
+                    continue;
+                }
+            };
+            {
                     let status = resp.status();
                     if status.is_success() {
                         self.pool.record_success(&key.id);
@@ -1136,19 +1202,6 @@ impl UpstreamExecutor {
                     }
                     self.emit_both(&key.id, attempt_idx, Some(status_code), last_kind.clone(), last_error.clone(), Some(err_body), attempt_start.elapsed());
                 }
-                Err(err) => {
-                    last_error = format!("Network error with {}: {}", key.id, err);
-                    last_kind = GatewayErrorKind::UpstreamUnavailable;
-                    self.pool.record_error(&key.id, PoolErrorType::NetworkError);
-                    if let Some(delay) = transient_retry_delay(&self.pool, &key.id, attempt, max_attempts, None) {
-                        attempted_keys.retain(|id| id != &key.id);
-                        self.emit_both(&key.id, attempt_idx, None, last_kind.clone(), last_error.clone(), None, attempt_start.elapsed());
-                        tokio::time::sleep(delay).await;
-                        continue;
-                    }
-                    self.emit_both(&key.id, attempt_idx, None, last_kind.clone(), last_error.clone(), None, attempt_start.elapsed());
-                }
-            }
         }
 
         Err(CoreError::AllRetriesFailed {
@@ -1220,8 +1273,23 @@ impl UpstreamExecutor {
 
             let req = self.client.post(url).headers(headers).json(effective_body.as_ref());
 
-            match req.send().await {
-                Ok(resp) => {
+            let resp = match self.send_guarded(req).await {
+                Ok(r) => r,
+                Err(err_str) => {
+                    last_error = format!("Network error with {}: {}", key.id, err_str);
+                    last_kind = GatewayErrorKind::UpstreamUnavailable;
+                    self.pool.record_error(&key.id, PoolErrorType::NetworkError);
+                    if let Some(delay) = transient_retry_delay(&self.pool, &key.id, attempt, max_attempts, None) {
+                        attempted_keys.retain(|id| id != &key.id);
+                        self.emit_both(&key.id, attempt_idx, None, last_kind.clone(), last_error.clone(), None, attempt_start.elapsed());
+                        tokio::time::sleep(delay).await;
+                        continue;
+                    }
+                    self.emit_both(&key.id, attempt_idx, None, last_kind.clone(), last_error.clone(), None, attempt_start.elapsed());
+                    continue;
+                }
+            };
+            {
                     let status = resp.status();
                     if status.is_success() {
                         self.pool.record_success(&key.id);
@@ -1309,19 +1377,6 @@ impl UpstreamExecutor {
                         });
                     }
                     self.emit_both(&key.id, attempt_idx, Some(status_code), last_kind.clone(), last_error.clone(), Some(err_body), attempt_start.elapsed());
-                }
-                Err(err) => {
-                    last_error = format!("Network error with {}: {}", key.id, err);
-                    last_kind = GatewayErrorKind::UpstreamUnavailable;
-                    self.pool.record_error(&key.id, PoolErrorType::NetworkError);
-                    if let Some(delay) = transient_retry_delay(&self.pool, &key.id, attempt, max_attempts, None) {
-                        attempted_keys.retain(|id| id != &key.id);
-                        self.emit_both(&key.id, attempt_idx, None, last_kind.clone(), last_error.clone(), None, attempt_start.elapsed());
-                        tokio::time::sleep(delay).await;
-                        continue;
-                    }
-                    self.emit_both(&key.id, attempt_idx, None, last_kind.clone(), last_error.clone(), None, attempt_start.elapsed());
-                }
             }
         }
 

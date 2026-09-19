@@ -55,6 +55,9 @@ pub struct ModelSpec {
     /// `None` inherits the provider default proxy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxy: Option<String>,
+    /// Optional total upstream timeout override for this model (seconds, 60~1800).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
 }
 
 impl ModelSpec {
@@ -99,6 +102,7 @@ impl Default for ModelSpec {
             thinking_default: None,
             thinking_max: None,
             proxy: None,
+            timeout_secs: None,
         }
     }
 }
@@ -136,6 +140,9 @@ pub struct ProviderConfig {
     /// Optional explicit outbound HTTP proxy for this provider (e.g. "http://127.0.0.1:8899").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxy: Option<String>,
+    /// Optional total upstream timeout override for this provider (seconds, 60~1800).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
 }
 
 fn default_strategy() -> String {
@@ -159,6 +166,7 @@ impl Default for ProviderConfig {
             responses_url: None,
             messages_url: None,
             proxy: None,
+            timeout_secs: None,
         }
     }
 }
@@ -247,6 +255,7 @@ impl ProviderConfig {
             thinking_default: None,
             thinking_max: None,
             proxy: None,
+            timeout_secs: None,
         }
     }
 
@@ -286,6 +295,17 @@ impl ProviderConfig {
         EffectiveProxy::InheritGateway
     }
 
+    /// Effective total upstream timeout for a model: model override >
+    /// provider override > `None` (caller falls back to the gateway default).
+    pub fn effective_timeout_secs_for_model(&self, model_name: &str) -> Option<u64> {
+        if let Some(spec) = self.model_specs.iter().find(|m| m.name == model_name) {
+            if let Some(t) = spec.timeout_secs {
+                return Some(t);
+            }
+        }
+        self.timeout_secs
+    }
+
     /// Effective native protocol for a model: model override > provider default.
     /// Returns `None` when neither is configured so callers fall back to the
     /// legacy URL heuristic (zero-migration for old configs).
@@ -320,6 +340,11 @@ pub fn default_request_body_limit() -> usize {
     128 * 1024 * 1024 // 128MB default for 1M context / multimodal payloads
 }
 
+/// Default total upstream budget: 20 minutes (see [`GatewayConfig::upstream_timeout_secs`]).
+pub fn default_upstream_timeout_secs() -> u64 {
+    1200
+}
+
 fn default_event_log_retention_days() -> u64 {
     7
 }
@@ -349,6 +374,11 @@ pub struct GatewayConfig {
     pub providers: HashMap<String, ProviderConfig>,
     pub max_retries: usize,
     pub flight_recorder_capacity: usize,
+    /// Total wall-clock budget for one upstream call, in seconds (default 1200 =
+    /// 20 minutes). Long-thinking streams routinely exceed the legacy 120s
+    /// budget; the gateway replaces it with TTFB + tail-stall detection.
+    #[serde(default = "default_upstream_timeout_secs")]
+    pub upstream_timeout_secs: u64,
     #[serde(default = "default_request_body_limit")]
     pub request_body_limit: usize,
     /// Hourly JSONL event-log directory. `None` (default) keeps events in the
@@ -396,6 +426,7 @@ impl Default for GatewayConfig {
             providers: HashMap::new(),
             max_retries: 3,
             flight_recorder_capacity: 100,
+            upstream_timeout_secs: default_upstream_timeout_secs(),
             request_body_limit: default_request_body_limit(),
             event_log_dir: None,
             event_log_retention_days: default_event_log_retention_days(),

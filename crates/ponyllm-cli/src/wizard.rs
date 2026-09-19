@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use inquire::{Confirm, Password, PasswordDisplayMode, Select, Text};
 use crate::config::{
-    default_request_body_limit, generate_secure_api_key, ConfigFile, GatewaySection, KeySection,
-    ProviderSection,
+    default_request_body_limit, default_upstream_timeout_secs, generate_secure_api_key, ConfigFile,
+    GatewaySection, KeySection, ProviderSection,
 };
 
 pub fn run_interactive_init(output_path: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -238,6 +238,7 @@ pub fn run_interactive_init(output_path: &str) -> Result<(), Box<dyn std::error:
             responses_url: None,
             messages_url: preset_messages_url,
             proxy: provider_proxy,
+            timeout_secs: None,
         });
 
         let add_another_provider = Confirm::new("是否继续配置其他大模型提供商?")
@@ -254,6 +255,7 @@ pub fn run_interactive_init(output_path: &str) -> Result<(), Box<dyn std::error:
             bind: bind_addr,
             max_retries: 3,
             flight_recorder_capacity: 200,
+            upstream_timeout_secs: default_upstream_timeout_secs(),
             api_key: api_token,
             default_strategy,
             request_body_limit: default_request_body_limit(),

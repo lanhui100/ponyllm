@@ -15,7 +15,7 @@ use crate::extractors::{format_request_snippet, AppJson};
 use crate::routes::chat::{inject_routing_headers, inject_telemetry_headers};
 use crate::routes::models::ParsedRequestModel;
 use crate::state::AppState;
-use crate::streaming::{anthropic_sse_to_responses_stream, chat_sse_to_responses_stream, extract_usage_tokens, passthrough_sse, wrap_telemetry_stream, StreamFailureContext};
+use crate::streaming::{anthropic_sse_to_responses_stream, chat_sse_to_responses_stream, extract_usage_tokens, passthrough_sse, stall_guard, wrap_telemetry_stream, StreamFailureContext, DEFAULT_TAIL_STALL_IDLE};
 
 pub async fn handle_responses(
     State(state): State<Arc<AppState>>,
@@ -347,7 +347,7 @@ pub async fn handle_responses(
                     let body = match target.upstream_protocol {
                         ponyllm_core::pool::UpstreamProtocol::Chat => {
                             let stream = chat_sse_to_responses_stream(
-                                upstream_resp.bytes_stream(),
+                                stall_guard(upstream_resp.bytes_stream(), DEFAULT_TAIL_STALL_IDLE),
                                 &target.physical_model,
                             );
                             let monitored = wrap_telemetry_stream(stream, failure_ctx);
@@ -355,14 +355,14 @@ pub async fn handle_responses(
                         }
                         ponyllm_core::pool::UpstreamProtocol::Anthropic => {
                             let stream = anthropic_sse_to_responses_stream(
-                                upstream_resp.bytes_stream(),
+                                stall_guard(upstream_resp.bytes_stream(), DEFAULT_TAIL_STALL_IDLE),
                                 &target.physical_model,
                             );
                             let monitored = wrap_telemetry_stream(stream, failure_ctx);
                             axum::body::Body::from_stream(monitored)
                         }
                         ponyllm_core::pool::UpstreamProtocol::Responses => {
-                            let stream = passthrough_sse(upstream_resp.bytes_stream());
+                            let stream = passthrough_sse(stall_guard(upstream_resp.bytes_stream(), DEFAULT_TAIL_STALL_IDLE));
                             let monitored = wrap_telemetry_stream(stream, failure_ctx);
                             axum::body::Body::from_stream(monitored)
                         }

@@ -236,6 +236,9 @@ pub struct CreateProviderPayload {
     pub messages_url: Option<String>,
     #[serde(default)]
     pub proxy: Option<String>,
+    /// Optional total upstream timeout override (seconds, 60~1800).
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
 }
 
 fn default_model_str() -> String {
@@ -266,6 +269,9 @@ pub struct UpdateProviderPayload {
     pub messages_url: Option<String>,
     #[serde(default)]
     pub proxy: Option<String>,
+    /// Optional total upstream timeout override (seconds, 60~1800).
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -292,6 +298,9 @@ pub struct CreateModelPayload {
     pub thinking_max: Option<String>,
     #[serde(default)]
     pub proxy: Option<String>,
+    /// Optional total upstream timeout override (seconds, 60~1800).
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
     #[serde(default)]
     pub input_price: Option<f64>,
     #[serde(default)]
@@ -334,6 +343,9 @@ pub struct UpdateModelPayload {
     pub thinking_max: Option<String>,
     #[serde(default)]
     pub proxy: Option<String>,
+    /// Optional total upstream timeout override (seconds, 60~1800).
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
     #[serde(default)]
     pub input_price: Option<f64>,
     #[serde(default)]
@@ -906,6 +918,7 @@ pub async fn handle_admin_create_provider(
         responses_url: payload.responses_url.clone(),
         messages_url: payload.messages_url.clone(),
         proxy: payload.proxy.clone(),
+        timeout_secs: payload.timeout_secs,
     };
     file.providers.insert(name.clone(), p_sec);
 
@@ -928,6 +941,7 @@ pub async fn handle_admin_create_provider(
         responses_url: payload.responses_url.clone(),
         messages_url: payload.messages_url.clone(),
         proxy: payload.proxy,
+        timeout_secs: payload.timeout_secs,
     };
     state.config.write().providers.insert(name.clone(), p_cfg);
 
@@ -1034,6 +1048,9 @@ pub async fn handle_admin_update_provider(
             Some(proxy.trim().to_string())
         };
     }
+    if let Some(t) = payload.timeout_secs {
+        p.timeout_secs = Some(t);
+    }
 
     // H2: same format validation as create (strategy/billing/URLs), then the
     // egress guard on the effective URLs. Field-level validation must run
@@ -1105,6 +1122,7 @@ pub async fn handle_admin_update_provider(
         p_cfg.responses_url = updated_p.responses_url.clone();
         p_cfg.messages_url = updated_p.messages_url.clone();
         p_cfg.proxy = updated_p.proxy.clone();
+        p_cfg.timeout_secs = updated_p.timeout_secs;
     }
 
     if payload.strategy.is_some() || payload.proxy.is_some() {
@@ -1420,6 +1438,7 @@ pub async fn handle_admin_create_model(
         thinking_default: think_def,
         thinking_max: think_max,
         proxy: payload.proxy.clone(),
+        timeout_secs: payload.timeout_secs,
     };
 
     p_sec.models.push(model_name.clone());
@@ -1456,6 +1475,7 @@ pub async fn handle_admin_create_model(
         thinking_default: think_def,
         thinking_max: think_max,
         proxy: payload.proxy,
+        timeout_secs: payload.timeout_secs,
     };
 
     let spec_obj = m_spec.thinking_spec();
@@ -1606,6 +1626,7 @@ pub async fn handle_admin_update_model(
             thinking_default: None,
             thinking_max: None,
             proxy: None,
+            timeout_secs: None,
         });
 
     if let Some(ref t) = payload.tier {
@@ -1641,6 +1662,9 @@ pub async fn handle_admin_update_model(
     }
     if payload.proxy.is_some() {
         existing_config.proxy = payload.proxy.clone();
+    }
+    if let Some(t) = payload.timeout_secs {
+        existing_config.timeout_secs = Some(t);
     }
     if payload.input_price.is_some() {
         existing_config.input_price = payload.input_price;
@@ -1723,6 +1747,7 @@ pub async fn handle_admin_update_model(
         thinking_default: existing_config.thinking_default,
         thinking_max: existing_config.thinking_max,
         proxy: existing_config.proxy.clone(),
+        timeout_secs: existing_config.timeout_secs,
     };
 
     let spec_obj = m_spec.thinking_spec();
@@ -3204,6 +3229,7 @@ pub async fn handle_admin_authorize_antigravity(
                 responses_url: None,
                 messages_url: None,
                 proxy: None,
+                timeout_secs: None,
                 keys: vec![],
                 model_configs: vec![],
             }
@@ -3266,10 +3292,12 @@ pub async fn handle_admin_authorize_antigravity(
                 responses_url: p_sec.responses_url.clone(),
                 messages_url: p_sec.messages_url.clone(),
                 proxy: p_sec.proxy.clone(),
+                timeout_secs: p_sec.timeout_secs,
             }
         });
         entry.default_protocol = p_sec.default_protocol;
         entry.proxy = p_sec.proxy.clone();
+        entry.timeout_secs = p_sec.timeout_secs;
         for m in &p_sec.models {
             if !entry.models.contains(m) {
                 entry.models.push(m.clone());

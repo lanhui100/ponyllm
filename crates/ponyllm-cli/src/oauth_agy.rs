@@ -246,6 +246,7 @@ pub async fn handle_key_auth_agy(
                 responses_url: None,
                 messages_url: None,
                 proxy: None,
+                timeout_secs: None,
                 keys: vec![],
                 model_configs: vec![],
             }

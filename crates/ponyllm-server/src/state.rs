@@ -206,6 +206,13 @@ pub struct PendingAntigravityOAuth {
     pub redirect_uri: Option<String>,
 }
 
+/// Cache key for a pooled proxy client: `(proxy_url, total_timeout_secs)`.
+/// Distinct timeouts get distinct pools so a per-target override never
+/// silently inherits a mismatched total budget.
+fn proxy_client_key(url: &str, timeout: std::time::Duration) -> String {
+    format!("{}|{}", url, timeout.as_secs())
+}
+
 #[derive(Debug)]
 pub struct AppState {
     pub config: RwLock<GatewayConfig>,
@@ -253,13 +260,16 @@ impl AppState {
         let bus = Arc::new(EventBus::new(capacity));
         let metrics_proj = Arc::new(MetricsProjection::new(metrics.clone()));
         let stream_proj = Arc::new(StreamProjection::default());
-        let direct_client = ponyllm_core::executor::create_upstream_http_client_with_options(
+        let gw_timeout = std::time::Duration::from_secs(config.upstream_timeout_secs);
+        let direct_client = ponyllm_core::executor::create_upstream_http_client_with_timeout(
             None,
             false,
+            gw_timeout,
         );
-        let http_client = ponyllm_core::executor::create_upstream_http_client_with_options(
+        let http_client = ponyllm_core::executor::create_upstream_http_client_with_timeout(
             config.proxy.as_deref(),
             config.use_system_proxy,
+            gw_timeout,
         );
         let mut proxy_clients = HashMap::new();
         for (_, p_cfg) in &config.providers {
@@ -269,10 +279,11 @@ impl AppState {
                     && !trimmed.eq_ignore_ascii_case("direct")
                     && !trimmed.eq_ignore_ascii_case("none")
                 {
-                    proxy_clients.entry(trimmed.to_string()).or_insert_with(|| {
-                        ponyllm_core::executor::create_upstream_http_client_with_options(
+                    proxy_clients.entry(proxy_client_key(trimmed, gw_timeout)).or_insert_with(|| {
+                        ponyllm_core::executor::create_upstream_http_client_with_timeout(
                             Some(trimmed),
                             config.use_system_proxy,
+                            gw_timeout,
                         )
                     });
                 }
@@ -284,10 +295,11 @@ impl AppState {
                         && !trimmed.eq_ignore_ascii_case("direct")
                         && !trimmed.eq_ignore_ascii_case("none")
                     {
-                        proxy_clients.entry(trimmed.to_string()).or_insert_with(|| {
-                            ponyllm_core::executor::create_upstream_http_client_with_options(
+                        proxy_clients.entry(proxy_client_key(trimmed, gw_timeout)).or_insert_with(|| {
+                            ponyllm_core::executor::create_upstream_http_client_with_timeout(
                                 Some(trimmed),
                                 config.use_system_proxy,
+                                gw_timeout,
                             )
                         });
                     }
@@ -410,30 +422,59 @@ impl AppState {
             .get(provider_name)
             .map(|p| p.effective_proxy_for_model(model_name))
             .unwrap_or(crate::config::EffectiveProxy::InheritGateway);
+        let timeout_secs = cfg
+            .providers
+            .get(provider_name)
+            .and_then(|p| p.effective_timeout_secs_for_model(model_name))
+            .unwrap_or(cfg.upstream_timeout_secs);
+        let timeout = std::time::Duration::from_secs(timeout_secs);
+        let gw_timeout = std::time::Duration::from_secs(cfg.upstream_timeout_secs);
+        let use_sys = cfg.use_system_proxy;
+        let proxy_url: Option<String> = match effective {
+            crate::config::EffectiveProxy::InheritGateway => cfg.proxy.clone(),
+            crate::config::EffectiveProxy::Direct => None,
+            crate::config::EffectiveProxy::Custom(url) => Some(url.to_string()),
+        };
+        drop(cfg);
 
-        match effective {
-            crate::config::EffectiveProxy::InheritGateway => self.http_client.clone(),
-            crate::config::EffectiveProxy::Direct => self.direct_client.clone(),
-            crate::config::EffectiveProxy::Custom(url) => {
-                self.get_or_create_proxy_client(url, cfg.use_system_proxy)
+        // Fast paths for the gateway defaults (no per-target override):
+        // reuse the prebuilt gateway/direct clients.
+        if timeout == gw_timeout {
+            match proxy_url.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                None => return self.direct_client.clone(),
+                Some(url) => return self.get_or_create_proxy_client(url, use_sys, timeout),
             }
         }
+        // Overridden timeout: build/refresh a client keyed by (url, timeout).
+        let url = proxy_url.as_deref().unwrap_or("");
+        self.get_or_create_proxy_client(url, use_sys, timeout)
     }
 
-    /// Helper for retrieving or lazily building a connection pool client for a proxy endpoint.
-    fn get_or_create_proxy_client(&self, url: &str, use_system_proxy: bool) -> reqwest::Client {
-        if let Some(client) = self.proxy_clients.read().get(url) {
+    /// Helper for retrieving or lazily building a connection pool client for
+    /// a proxy endpoint, keyed by `(url, total_timeout)` so per-target
+    /// timeout overrides get their own pool instead of inheriting a
+    /// mismatched budget.
+    fn get_or_create_proxy_client(
+        &self,
+        url: &str,
+        use_system_proxy: bool,
+        total_timeout: std::time::Duration,
+    ) -> reqwest::Client {
+        let key = proxy_client_key(url, total_timeout);
+        if let Some(client) = self.proxy_clients.read().get(&key) {
             return client.clone();
         }
         let mut write = self.proxy_clients.write();
-        if let Some(client) = write.get(url) {
+        if let Some(client) = write.get(&key) {
             return client.clone();
         }
-        let client = ponyllm_core::executor::create_upstream_http_client_with_options(
-            Some(url),
+        let proxy_opt = url.trim().is_empty().then(|| url);
+        let client = ponyllm_core::executor::create_upstream_http_client_with_timeout(
+            proxy_opt,
             use_system_proxy,
+            total_timeout,
         );
-        write.insert(url.to_string(), client.clone());
+        write.insert(key, client.clone());
         client
     }
 
@@ -510,6 +551,7 @@ impl AppState {
 
         let mut proxy_clients_guard = self.proxy_clients.write();
         proxy_clients_guard.clear();
+        let gw_timeout = std::time::Duration::from_secs(new_config.upstream_timeout_secs);
         for (_, p_cfg) in &new_config.providers {
             if let Some(proxy) = &p_cfg.proxy {
                 let trimmed = proxy.trim();
@@ -517,10 +559,11 @@ impl AppState {
                     && !trimmed.eq_ignore_ascii_case("direct")
                     && !trimmed.eq_ignore_ascii_case("none")
                 {
-                    proxy_clients_guard.entry(trimmed.to_string()).or_insert_with(|| {
-                        ponyllm_core::executor::create_upstream_http_client_with_options(
+                    proxy_clients_guard.entry(proxy_client_key(trimmed, gw_timeout)).or_insert_with(|| {
+                        ponyllm_core::executor::create_upstream_http_client_with_timeout(
                             Some(trimmed),
                             new_config.use_system_proxy,
+                            gw_timeout,
                         )
                     });
                 }
@@ -532,10 +575,11 @@ impl AppState {
                         && !trimmed.eq_ignore_ascii_case("direct")
                         && !trimmed.eq_ignore_ascii_case("none")
                     {
-                        proxy_clients_guard.entry(trimmed.to_string()).or_insert_with(|| {
-                            ponyllm_core::executor::create_upstream_http_client_with_options(
+                        proxy_clients_guard.entry(proxy_client_key(trimmed, gw_timeout)).or_insert_with(|| {
+                            ponyllm_core::executor::create_upstream_http_client_with_timeout(
                                 Some(trimmed),
                                 new_config.use_system_proxy,
+                                gw_timeout,
                             )
                         });
                     }

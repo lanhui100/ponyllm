@@ -35,6 +35,7 @@ fn provider(base_url: String, model: &str, proto: UpstreamProtocol, price: f64) 
         responses_url: None,
         messages_url: None,
         proxy: None,
+        timeout_secs: None,
     }
 }
 

@@ -88,6 +88,7 @@ async fn test_thinking_output_safeguard_chat_flooring() {
             responses_url: None,
             messages_url: None,
             proxy: None,
+            timeout_secs: None,
         },
     );
 
@@ -211,6 +212,7 @@ async fn test_thinking_output_safeguard_messages_flooring() {
             responses_url: None,
             messages_url: None,
             proxy: None,
+            timeout_secs: None,
         },
     );
 

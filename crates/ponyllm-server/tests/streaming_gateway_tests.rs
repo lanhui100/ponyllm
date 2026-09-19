@@ -24,6 +24,7 @@ fn make_provider(base_url: &str, default_model: &str) -> ProviderConfig {
         responses_url: None,
         messages_url: None,
         proxy: None,
+        timeout_secs: None,
     }
 }
 

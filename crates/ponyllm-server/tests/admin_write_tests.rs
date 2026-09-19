@@ -91,6 +91,7 @@ impl WriteTestHarness {
                 thinking_default: None,
                 thinking_max: None,
                 proxy: None,
+                timeout_secs: None,
             }],
             keys: raw_keys.clone(),
             default_protocol: None,
@@ -98,6 +99,7 @@ impl WriteTestHarness {
             responses_url: None,
             messages_url: None,
             proxy: None,
+            timeout_secs: None,
         };
 
         let mut providers = HashMap::new();
@@ -142,6 +144,7 @@ impl WriteTestHarness {
             thinking_default: None,
             thinking_max: None,
             proxy: None,
+            timeout_secs: None,
         };
 
         gw_config.providers.insert(
@@ -161,6 +164,7 @@ impl WriteTestHarness {
                 responses_url: None,
                 messages_url: None,
                 proxy: None,
+                timeout_secs: None,
             },
         );
 
@@ -973,6 +977,7 @@ async fn test_provider_upstream_models() {
                 responses_url: None,
                 messages_url: None,
                 proxy: None,
+                timeout_secs: None,
             },
         );
     }
@@ -1005,6 +1010,7 @@ async fn test_provider_upstream_models() {
                 responses_url: None,
                 messages_url: None,
                 proxy: None,
+                timeout_secs: None,
             },
         );
     }
@@ -1171,6 +1177,7 @@ async fn test_dial_test_blocked_target_refused() {
         responses_url: None,
         messages_url: None,
         proxy: None,
+        timeout_secs: None,
     };
     let mut providers = HashMap::new();
     providers.insert("meta".to_string(), provider_sec);
@@ -1203,6 +1210,7 @@ async fn test_dial_test_blocked_target_refused() {
             responses_url: None,
             messages_url: None,
             proxy: None,
+            timeout_secs: None,
         },
     );
 

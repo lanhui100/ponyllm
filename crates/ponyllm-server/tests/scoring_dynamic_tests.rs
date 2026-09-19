@@ -30,6 +30,7 @@ fn test_node_latency_metrics_dynamic_update_and_speed_scoring() {
         responses_url: None,
         messages_url: None,
         proxy: None,
+        timeout_secs: None,
     };
 
     let p_slow = ProviderConfig {
@@ -55,6 +56,7 @@ fn test_node_latency_metrics_dynamic_update_and_speed_scoring() {
         responses_url: None,
         messages_url: None,
         proxy: None,
+        timeout_secs: None,
     };
 
     providers.insert("fast_node".to_string(), p_fast);

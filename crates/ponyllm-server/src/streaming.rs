@@ -42,6 +42,103 @@ pub struct SseEvent {
     pub data: String,
 }
 
+/// Unified mid-stream error projected by [`stall_guard`]: either the upstream
+/// transport error (carried as text) or a tail-stall timeout. Translators are
+/// generic over their error type, so wrapping the raw upstream byte stream
+/// with [`stall_guard`] normalizes `reqwest::Error` into this type and lets
+/// the telemetry layer attach a stable timeout tag.
+#[derive(Debug)]
+pub enum StallError {
+    /// Upstream transport error detail (the `Display` of the original error).
+    Transport(String),
+    /// The upstream stopped producing bytes (and heartbeats) for longer than
+    /// the configured idle budget after response headers were committed.
+    Stall { idle: std::time::Duration },
+}
+
+impl std::fmt::Display for StallError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            StallError::Transport(detail) => write!(f, "upstream transport error: {}", detail),
+            StallError::Stall { idle } => {
+                write!(f, "upstream stream stalled after {:?} without bytes", idle)
+            }
+        }
+    }
+}
+
+impl std::error::Error for StallError {}
+
+/// Default tail-stall budget: if the upstream stops producing bytes (and
+/// heartbeats) for this long after headers were committed, the stream is
+/// judged dead. Far smaller than the 20-minute total budget, so a genuinely
+/// dead upstream fails in ~2 minutes instead of pinning the connection for
+/// the whole budget.
+pub const DEFAULT_TAIL_STALL_IDLE: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Wrap an upstream byte stream with a tail-stall watchdog and normalize its
+/// error type to [`StallError`]. The watchdog resets its deadline on every
+/// byte, so long thinking phases that keep emitting heartbeats stay alive;
+/// only a true silence of `idle` trips the stall error.
+pub fn stall_guard<S, E>(
+    stream: S,
+    idle: std::time::Duration,
+) -> futures_util::stream::BoxStream<'static, Result<Bytes, StallError>>
+where
+    S: Stream<Item = Result<Bytes, E>> + Send + Unpin + 'static,
+    E: std::fmt::Display + Send + 'static,
+{
+    futures_util::stream::unfold(
+        (stream, idle, tokio::time::Instant::now(), false),
+        |(mut inner, idle, mut last, done)| async move {
+            if done {
+                return None;
+            }
+            match tokio::time::timeout(idle, inner.next()).await {
+                Ok(Some(Ok(bytes))) => {
+                    last = tokio::time::Instant::now();
+                    Some((Ok(bytes), (inner, idle, last, false)))
+                }
+                Ok(Some(Err(e))) => {
+                    Some((Err(StallError::Transport(e.to_string())), (inner, idle, last, true)))
+                }
+                Ok(None) => None,
+                Err(_elapsed) => Some((Err(StallError::Stall { idle }), (inner, idle, last, true))),
+            }
+        },
+    )
+    .boxed()
+}
+
+/// Stable timeout-symptom tag for a failed stream, attached to flight-recorder
+/// error text so operators can tell "total-budget kill" from "tail stall"
+/// from "TTFB timeout" without string archaeology.
+///
+/// The `latency_ms` window for the total-budget suspect mirrors the observed
+/// 120002~120004ms cluster that motivated this whole change: a proxy/egress
+/// hard cap (Vercel `maxDuration: 120`) kills the stream at ~120s regardless
+/// of the gateway budget, and the kill is indistinguishable from the gateway
+/// total-budget timeout except by its elapsed time.
+pub fn classify_stream_timeout_tag(error: &str, latency_ms: u64) -> &'static str {
+    if error.contains("stalled after") || error.contains("stream stalled") {
+        "tail-stall"
+    } else if error.contains("upstream TTFB timeout") {
+        "ttfb-timeout"
+    } else if error.contains("error decoding response body") || error.contains("request timed out") {
+        // ~120s: a proxy/egress hard cap (Vercel maxDuration) suspect, or the
+        // gateway total budget if someone configured it near 120s.
+        if (118_000..=124_000).contains(&latency_ms) {
+            "total-budget-120s-suspect"
+        } else if latency_ms >= 1_190_000 {
+            "total-budget"
+        } else {
+            "transport"
+        }
+    } else {
+        "transport"
+    }
+}
+
 /// Pass through an upstream SSE byte stream unchanged (same protocol on both
 /// ends — e.g. OpenAI upstream -> OpenAI client, or Anthropic upstream ->
 /// Anthropic client). The upstream frames are already correctly prefixed, so
@@ -3448,6 +3545,73 @@ mod tests {
             "Antigravity SSE stream stalled: 15s chunk timeout exceeded"
         ));
     }
+
+    #[tokio::test]
+    async fn test_stall_guard_passes_chunks_faster_than_idle() {
+        let s = bytes_stream(vec![
+            Bytes::from_static(b"data: a\n\n"),
+            Bytes::from_static(b"data: b\n\n"),
+            Bytes::from_static(b"data: [DONE]\n\n"),
+        ]);
+        let guarded = stall_guard(s, std::time::Duration::from_secs(5));
+        let out: Vec<Result<Bytes, StallError>> = guarded.collect().await;
+        assert_eq!(out.len(), 3, "all chunks pass through");
+        for item in &out {
+            assert!(item.is_ok(), "no stall on a healthy stream");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_stall_guard_trips_on_silence() {
+        // One chunk, then silence longer than the idle budget.
+        let s = futures_util::stream::iter(vec![Ok::<Bytes, std::io::Error>(
+            Bytes::from_static(b"data: a\n\n"),
+        )])
+        .chain(futures_util::stream::pending::<Result<Bytes, std::io::Error>>());
+        let guarded = stall_guard(s, std::time::Duration::from_millis(50));
+        let mut out = Vec::new();
+        let mut it = std::pin::pin!(guarded);
+        // Pull with a cap so a broken watchdog cannot hang the test forever.
+        for _ in 0..4 {
+            match tokio::time::timeout(std::time::Duration::from_millis(500), it.next()).await {
+                Ok(Some(item)) => out.push(item),
+                _ => break,
+            }
+        }
+        assert!(out.iter().any(|r| matches!(r, Err(StallError::Stall { .. }))),
+            "silence must trip the stall watchdog: {:?}", out);
+    }
+
+    #[tokio::test]
+    async fn test_stall_guard_normalizes_transport_error() {
+        let s = futures_util::stream::iter(vec![Err::<Bytes, std::io::Error>(std::io::Error::other(
+            "error decoding response body",
+        ))]);
+        let guarded = stall_guard(s, std::time::Duration::from_secs(5));
+        let out: Vec<Result<Bytes, StallError>> = guarded.collect().await;
+        assert_eq!(out.len(), 1);
+        match &out[0] {
+            Err(StallError::Transport(detail)) => {
+                assert!(detail.contains("error decoding response body"), "detail: {detail}");
+            }
+            other => panic!("expected Transport error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_classify_stream_timeout_tag() {
+        // Tail-stall wording wins.
+        assert_eq!(classify_stream_timeout_tag("upstream stream stalled after 120s without bytes", 130_000), "tail-stall");
+        assert_eq!(classify_stream_timeout_tag("upstream stream stalled after 120s without bytes", 90_000), "tail-stall");
+        // TTFB guard.
+        assert_eq!(classify_stream_timeout_tag("upstream TTFB timeout after 60s (no response headers)", 61_000), "ttfb-timeout");
+        // Vercel 120s hard-cap suspect: body decode error + ~120s elapsed.
+        assert_eq!(classify_stream_timeout_tag("upstream transport error: error decoding response body", 120_002), "total-budget-120s-suspect");
+        assert_eq!(classify_stream_timeout_tag("upstream transport error: error decoding response body", 123_900), "total-budget-120s-suspect");
+        // Gateway total budget (20 min default) kill.
+        assert_eq!(classify_stream_timeout_tag("upstream transport error: error decoding response body", 1_200_003), "total-budget");
+        // Plain transport at other latencies stays transport.
+        assert_eq!(classify_stream_timeout_tag("upstream transport error: error decoding response body", 5_000), "transport");
+        assert_eq!(classify_stream_timeout_tag("connection reset", 120_000), "transport");
+    }
 }
-
-

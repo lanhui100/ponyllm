@@ -139,3 +139,62 @@ fn test_app_state_http_client_routing_and_pooling() {
     let c_muse_again = state.http_client_for_target("opencode-zen", "muse-spark");
     let _ = (c_zen, c_claude_dir, c_muse, c_foreign, c_muse_again);
 }
+
+#[test]
+fn test_timeout_config_toml_roundtrip_and_effective_resolution() {
+    // P1: gateway/provider/model total-budget overrides parse from TOML and
+    // resolve to the effective per-target value.
+    let toml_str = r#"
+[gateway]
+bind = "127.0.0.1:8080"
+max_retries = 3
+flight_recorder_capacity = 200
+upstream_timeout_secs = 1500
+
+[providers.longthink]
+base_url = "https://api.example.com"
+default_model = "fast-model"
+strategy = "priority"
+timeout_secs = 900
+keys = [ { id = "k1", api_key = "sk-abc123", priority = 1, weight = 10 } ]
+
+[[providers.longthink.model_configs]]
+name = "long-thinker"
+context_window = "1M"
+max_output = "32K"
+timeout_secs = 1800
+
+[[providers.longthink.model_configs]]
+name = "fast-model"
+context_window = "128K"
+max_output = "16K"
+"#;
+    let cfg: ponyllm_config::ConfigFile = toml::from_str(toml_str).expect("TOML parses");
+    assert_eq!(cfg.gateway.upstream_timeout_secs, 1500, "gateway override");
+    let prov = cfg.providers.get("longthink").expect("provider present");
+    assert_eq!(prov.timeout_secs, Some(900), "provider override");
+    let long = prov
+        .model_configs
+        .iter()
+        .find(|m| m.name == "long-thinker")
+        .expect("model present");
+    assert_eq!(long.timeout_secs, Some(1800), "model override");
+    let fast = prov
+        .model_configs
+        .iter()
+        .find(|m| m.name == "fast-model")
+        .expect("model present");
+    assert_eq!(fast.timeout_secs, None, "inherits provider default");
+
+    // Range guard: 0 and oversized values are rejected loudly.
+    assert!(ponyllm_config::validate_upstream_timeout_secs(0, "test").is_err());
+    assert!(ponyllm_config::validate_upstream_timeout_secs(59, "test").is_err());
+    assert!(ponyllm_config::validate_upstream_timeout_secs(1801, "test").is_err());
+    assert!(ponyllm_config::validate_upstream_timeout_secs(60, "test").is_ok());
+    assert!(ponyllm_config::validate_upstream_timeout_secs(1200, "test").is_ok());
+    assert!(ponyllm_config::validate_upstream_timeout_secs(1800, "test").is_ok());
+
+    // Defaults: absent field means the 20-minute budget.
+    let minimal: ponyllm_config::ConfigFile = toml::from_str("[gateway]\nbind = \"127.0.0.1:1\"\n").unwrap();
+    assert_eq!(minimal.gateway.upstream_timeout_secs, ponyllm_config::default_upstream_timeout_secs());
+}

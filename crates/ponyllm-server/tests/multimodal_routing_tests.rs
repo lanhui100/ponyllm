@@ -36,6 +36,7 @@ fn make_multimodal_provider(
         responses_url: None,
         messages_url: None,
         proxy: None,
+        timeout_secs: None,
     }
 }
 

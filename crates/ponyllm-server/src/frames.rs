@@ -127,6 +127,17 @@ impl Projection for FrameConverter {
                 ..
             } => {
                 let provider = env.provider.clone().unwrap_or_default();
+                // P3 timeout attribution: tag the error with a stable symptom
+                // (tail-stall / ttfb-timeout / total-budget-120s-suspect /
+                // total-budget / transport) so the trace view and Harness
+                // retries see a classifier, not a bare socket word.
+                let latency_ms = (env.elapsed_ms * 1000.0).round() as u64;
+                let tag = crate::streaming::classify_stream_timeout_tag(error, latency_ms);
+                let tagged = if tag == "transport" {
+                    error.clone()
+                } else {
+                    format!("[timeout:{}] {}", tag, error)
+                };
                 FlightFrame {
                     request_id: env.request_id.clone(),
                     endpoint: env.endpoint.clone(),
@@ -136,7 +147,7 @@ impl Projection for FrameConverter {
                     attempt: None,
                     status_code: None,
                     latency: latency_of(env),
-                    error: Some(error.clone()),
+                    error: Some(tagged),
                     request_snippet: request_snippet.clone(),
                     response_snippet: None,
                     prompt_tokens: flow.as_ref().map(|f| f.prompt_tokens),

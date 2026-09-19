@@ -26,9 +26,10 @@ use crate::streaming::{
     antigravity_sse_to_anthropic_stream, collect_antigravity_sse_to_json,
     empty_stop_retry_delay, is_transient_empty_stop_error,
     openai_sse_to_anthropic_stream, passthrough_sse,
-    responses_sse_to_anthropic_stream, verify_antigravity_stream_preamble,
+    responses_sse_to_anthropic_stream, stall_guard,
+    verify_antigravity_stream_preamble,
     wrap_telemetry_stream, AntigravityPreambleResult, StreamFailureContext,
-    MIN_EMPTY_STOP_ATTEMPTS,
+    MIN_EMPTY_STOP_ATTEMPTS, DEFAULT_TAIL_STALL_IDLE,
 };
 use ponyllm_protocol::anthropic::messages::{AnthropicSystem, AnthropicSystemBlock};
 
@@ -406,7 +407,7 @@ pub async fn handle_messages(
                 stream_attempt += 1;
                 match current_executor.execute_stream_request_with_timing(&target_url, &req_val).await {
                     Ok((upstream_resp, attempt_start)) => {
-                        let raw_stream = upstream_resp.bytes_stream();
+                        let raw_stream = stall_guard(upstream_resp.bytes_stream(), DEFAULT_TAIL_STALL_IDLE);
 
                         // For Antigravity upstream, verify preamble before committing downstream headers.
                         let (final_raw_stream, is_empty_stop_retry) = if target.upstream_protocol == ponyllm_core::pool::UpstreamProtocol::Antigravity {
@@ -414,7 +415,7 @@ pub async fn handle_messages(
                                 Ok(AntigravityPreambleResult::Ready { buffered, tail }) => {
                                     let head_stream = futures_util::stream::iter(buffered.into_iter().map(Ok));
                                     let chained = head_stream.chain(tail);
-                                    let boxed: Box<dyn futures_util::Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Send + Unpin> = Box::new(chained);
+                                    let boxed: Box<dyn futures_util::Stream<Item = Result<bytes::Bytes, crate::streaming::StallError>> + Send + Unpin> = Box::new(chained);
                                     (boxed, false)
                                 }
                                 Ok(AntigravityPreambleResult::TransientEmptyStop { frames }) => {
@@ -425,7 +426,7 @@ pub async fn handle_messages(
                                         max_stream_attempts,
                                         "Antigravity stream preamble completed with empty STOP! Triggering transparent gateway retry."
                                     );
-                                    let boxed: Box<dyn futures_util::Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Send + Unpin> = Box::new(futures_util::stream::empty());
+                                    let boxed: Box<dyn futures_util::Stream<Item = Result<bytes::Bytes, crate::streaming::StallError>> + Send + Unpin> = Box::new(futures_util::stream::empty());
                                     (boxed, true)
                                 }
                                 Ok(AntigravityPreambleResult::DeterministicBlock { reason }) => {
@@ -434,7 +435,7 @@ pub async fn handle_messages(
                                         reason = %reason,
                                         "Antigravity prompt blocked by upstream safety during preamble"
                                     );
-                                    let boxed: Box<dyn futures_util::Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Send + Unpin> = Box::new(futures_util::stream::empty());
+                                    let boxed: Box<dyn futures_util::Stream<Item = Result<bytes::Bytes, crate::streaming::StallError>> + Send + Unpin> = Box::new(futures_util::stream::empty());
                                     (boxed, false)
                                 }
                                 Ok(AntigravityPreambleResult::AbruptTermination) => {
@@ -442,7 +443,7 @@ pub async fn handle_messages(
                                         provider = %target.provider_name,
                                         "Antigravity stream preamble terminated abruptly before content"
                                     );
-                                    let boxed: Box<dyn futures_util::Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Send + Unpin> = Box::new(futures_util::stream::empty());
+                                    let boxed: Box<dyn futures_util::Stream<Item = Result<bytes::Bytes, crate::streaming::StallError>> + Send + Unpin> = Box::new(futures_util::stream::empty());
                                     (boxed, true)
                                 }
                                 Err(e) => {
@@ -451,12 +452,12 @@ pub async fn handle_messages(
                                         error = %e,
                                         "Antigravity stream preamble transport error"
                                     );
-                                    let boxed: Box<dyn futures_util::Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Send + Unpin> = Box::new(futures_util::stream::empty());
+                                    let boxed: Box<dyn futures_util::Stream<Item = Result<bytes::Bytes, crate::streaming::StallError>> + Send + Unpin> = Box::new(futures_util::stream::empty());
                                     (boxed, true)
                                 }
                             }
                         } else {
-                            let boxed: Box<dyn futures_util::Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Send + Unpin> = Box::new(raw_stream);
+                            let boxed: Box<dyn futures_util::Stream<Item = Result<bytes::Bytes, crate::streaming::StallError>> + Send + Unpin> = Box::new(raw_stream);
                             (boxed, false)
                         };
 

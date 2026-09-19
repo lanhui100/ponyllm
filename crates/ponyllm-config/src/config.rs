@@ -33,6 +33,13 @@ pub struct GatewaySection {
     pub max_retries: usize,
     #[serde(default = "default_capacity")]
     pub flight_recorder_capacity: usize,
+    /// Total wall-clock budget for one upstream call, in seconds (default 1200 =
+    /// 20 minutes). Long-thinking streams routinely exceed the legacy 120s
+    /// budget; the gateway replaces it with TTFB + tail-stall detection, so a
+    /// genuinely dead stream still fails fast instead of pinning the
+    /// connection for the whole budget.
+    #[serde(default = "default_upstream_timeout_secs")]
+    pub upstream_timeout_secs: u64,
     #[serde(default = "default_api_key")]
     pub api_key: String,
     #[serde(default)]
@@ -80,6 +87,25 @@ fn default_retries() -> usize {
 }
 fn default_capacity() -> usize {
     200
+}
+
+/// Default total upstream budget: 20 minutes (see [`GatewaySection::upstream_timeout_secs`]).
+pub fn default_upstream_timeout_secs() -> u64 {
+    1200
+}
+
+/// Range guard shared by gateway/provider/model timeout overrides.
+/// Accepts `60..=1800` seconds so a 0/1 typo cannot pin connections for
+/// seconds or kill long streams instantly.
+pub fn validate_upstream_timeout_secs(v: u64, label: &str) -> Result<(), String> {
+    if (60..=1800).contains(&v) {
+        Ok(())
+    } else {
+        Err(format!(
+            "{} 必须在 60~1800 秒之间（收到 {}），防止误配导致长流被秒杀或死连占资源",
+            label, v
+        ))
+    }
 }
 fn default_web_enabled() -> bool {
     true
@@ -140,6 +166,7 @@ impl Default for GatewaySection {
             bind: default_bind(),
             max_retries: default_retries(),
             flight_recorder_capacity: default_capacity(),
+            upstream_timeout_secs: default_upstream_timeout_secs(),
             api_key: default_api_key(),
             default_strategy: GatewayRoutingStrategy::Economy,
             request_body_limit: default_request_body_limit(),
@@ -203,6 +230,9 @@ pub struct ModelConfig {
     /// Optional outbound HTTP proxy override for this model (e.g. "http://127.0.0.1:8899", "direct", or "none").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxy: Option<String>,
+    /// Optional total upstream timeout override for this model (seconds, 60~1800).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
 }
 
 pub fn default_context_window() -> String {
@@ -238,6 +268,7 @@ impl Default for ModelConfig {
             thinking_default: None,
             thinking_max: None,
             proxy: None,
+            timeout_secs: None,
         }
     }
 }
@@ -265,6 +296,7 @@ impl ModelConfig {
             thinking_default: None,
             thinking_max: None,
             proxy: None,
+            timeout_secs: None,
         }
     }
 
@@ -308,6 +340,9 @@ pub struct ProviderSection {
     /// Optional explicit outbound HTTP proxy for this provider (e.g. "http://127.0.0.1:8899").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxy: Option<String>,
+    /// Optional total upstream timeout override for this provider (seconds, 60~1800).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
 }
 
 impl ProviderSection {
@@ -661,6 +696,7 @@ impl ConfigFile {
             responses_url: None,
             messages_url: None,
             proxy: None,
+            timeout_secs: None,
         });
         entry.base_url = base_url.to_string();
         entry.default_model = default_model.to_string();

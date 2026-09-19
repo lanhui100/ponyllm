@@ -67,6 +67,7 @@ fn build_gateway_config_and_pools(
         .unwrap_or_else(|| config_file.gateway.web_dist_dir.clone());
     gw_config.proxy = config_file.gateway.proxy.clone();
     gw_config.use_system_proxy = config_file.gateway.use_system_proxy;
+    gw_config.upstream_timeout_secs = config_file.gateway.upstream_timeout_secs;
     gw_config.admin_write_enabled = config_file.gateway.admin_write_enabled;
     gw_config.telemetry_snapshot_path = config_file.gateway.telemetry_snapshot_path.clone();
 
@@ -98,6 +99,7 @@ fn build_gateway_config_and_pools(
                 thinking_default: m.thinking_default,
                 thinking_max: m.thinking_max,
                 proxy: m.proxy,
+                timeout_secs: m.timeout_secs,
             })
             .collect();
 
@@ -118,6 +120,7 @@ fn build_gateway_config_and_pools(
                 responses_url: p_sec.responses_url.clone(),
                 messages_url: p_sec.messages_url.clone(),
                 proxy: p_sec.proxy.clone(),
+                timeout_secs: p_sec.timeout_secs,
             },
         );
 
@@ -885,6 +888,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     thinking_default: None,
                     thinking_max: None,
                     proxy: model_proxy.clone(),
+                    timeout_secs: None,
                 };
 
                 cfg.upsert_model_config(&provider, model_cfg)
