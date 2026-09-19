@@ -427,7 +427,7 @@ const slotMatrix = computed<HeatSlotItem[]>(() => {
         level: 'low',
         // 绿阶第1级 (<15%): 清新明朗浅绿 (提高辨识度，不发白)
         heatClass: 'bg-[#7bc96f]',
-        tooltipText: `${baseTooltip}\n状态: 额度偏低（G 5h即将耗尽）`,
+        tooltipText: `${baseTooltip}\n状态: 额度偏低（Gemini 5h即将耗尽）`,
         isCooling: false,
       };
     }
@@ -631,7 +631,7 @@ function getProgressColor(percent: number): { bar: string; text: string; bg: str
           <div class="space-y-1.5 mb-4">
             <div class="flex items-center justify-between text-xs">
               <span class="font-medium text-slate-700">5小时窗口</span>
-              <span class="font-mono font-semibold" data-testid="gemini-h5-percent" :class="getProgressColor(aggregatedQuotas.gemini.h5Percent).text">
+              <span class="font-mono font-semibold tabular-nums w-[3rem] text-right shrink-0" data-testid="gemini-h5-percent" :class="getProgressColor(aggregatedQuotas.gemini.h5Percent).text">
                 {{ aggregatedQuotas.gemini.h5Percent }}%
               </span>
             </div>
@@ -651,7 +651,7 @@ function getProgressColor(percent: number): { bar: string; text: string; bg: str
           <div class="space-y-1.5">
             <div class="flex items-center justify-between text-xs">
               <span class="font-medium text-slate-700">周度窗口</span>
-              <span class="font-mono font-semibold" data-testid="gemini-weekly-percent" :class="getProgressColor(aggregatedQuotas.gemini.weeklyPercent).text">
+              <span class="font-mono font-semibold tabular-nums w-[3rem] text-right shrink-0" data-testid="gemini-weekly-percent" :class="getProgressColor(aggregatedQuotas.gemini.weeklyPercent).text">
                 {{ aggregatedQuotas.gemini.weeklyPercent }}%
               </span>
             </div>
