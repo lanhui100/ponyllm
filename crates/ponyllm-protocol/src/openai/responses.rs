@@ -531,6 +531,13 @@ pub enum ResponseStreamEvent {
     #[serde(rename = "response.output_text.delta")]
     OutputTextDelta(ResponseTextDelta),
 
+    /// OpenAI Responses reasoning delta events.
+    #[serde(rename = "response.reasoning_text.delta")]
+    ReasoningTextDelta(ResponseTextDelta),
+
+    #[serde(rename = "response.reasoning_summary_text.delta")]
+    ReasoningSummaryTextDelta(ResponseTextDelta),
+
     /// Real OpenAI terminal event carrying usage.
     #[serde(rename = "response.completed")]
     Completed { response: ResponseObject },

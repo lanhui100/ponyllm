@@ -175,6 +175,8 @@ pub fn responses_event_to_sse_bytes(event: &ResponseStreamEvent) -> Option<Bytes
         ResponseStreamEvent::ContentPartDone { .. } => "response.content_part.done",
         ResponseStreamEvent::TextDelta(_) => "response.text.delta",
         ResponseStreamEvent::OutputTextDelta(_) => "response.output_text.delta",
+        ResponseStreamEvent::ReasoningTextDelta(_) => "response.reasoning_text.delta",
+        ResponseStreamEvent::ReasoningSummaryTextDelta(_) => "response.reasoning_summary_text.delta",
         ResponseStreamEvent::FunctionCallArgumentsDelta(_) => {
             "response.function_call_arguments.delta"
         }
@@ -724,7 +726,7 @@ pub const DEFAULT_PREAMBLE_DEADLINE: std::time::Duration = std::time::Duration::
 /// transient empty-STOP completions. Empty STOPs fail fast in the preamble
 /// (no downstream bytes committed, no key fault), so a dedicated budget larger
 /// than the generic `max_retries` is cheap and credential-independent.
-pub const MIN_EMPTY_STOP_ATTEMPTS: usize = 6;
+pub const MIN_EMPTY_STOP_ATTEMPTS: usize = 12;
 
 /// Jittered exponential backoff before a transparent empty-STOP retry.
 ///
@@ -828,7 +830,7 @@ where
     let mut buffered_bytes: Vec<Bytes> = Vec::new();
     let mut frame_buf = BytesMut::new();
     let mut frames_inspected = 0;
-    let max_frames = 8;
+    let max_frames = 16;
     let max_buffered_bytes = 64 * 1024;
     let deadline = tokio::time::Instant::now() + overall_deadline;
 

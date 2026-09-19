@@ -180,6 +180,30 @@ impl ResponsesToChatFsm {
                     d.delta,
                 ));
             }
+            ResponseStreamEvent::ReasoningTextDelta(d)
+            | ResponseStreamEvent::ReasoningSummaryTextDelta(d) => {
+                chunks.push(ChatCompletionChunk {
+                    id: self.response_id.clone(),
+                    object: "chat.completion.chunk".to_string(),
+                    created: self.created,
+                    model: self.model.clone(),
+                    choices: vec![ChatChunkChoice {
+                        index: 0,
+                        delta: ChatChunkDelta {
+                            role: None,
+                            content: None,
+                            reasoning_content: Some(d.delta),
+                            refusal: None,
+                            tool_calls: None,
+                        },
+                        finish_reason: None,
+                        logprobs: None,
+                    }],
+                    usage: None,
+                    system_fingerprint: None,
+                    service_tier: None,
+                });
+            }
             ResponseStreamEvent::OutputItemAdded {
                 item: ResponseOutputItem::FunctionCall { id, call_id, name, .. },
                 ..

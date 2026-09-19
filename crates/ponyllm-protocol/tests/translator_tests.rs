@@ -864,6 +864,20 @@ fn test_responses_to_chat_stream_fsm() {
         Some("assistant")
     );
 
+    let reasoning = ResponseStreamEvent::ReasoningTextDelta(ResponseTextDelta {
+        response_id: "resp_1".to_string(),
+        item_id: "it_0".to_string(),
+        output_index: 0,
+        content_index: 0,
+        delta: "thinking".to_string(),
+    });
+    let chunks = fsm.process_event(reasoning).unwrap();
+    assert_eq!(chunks.len(), 1);
+    assert_eq!(
+        chunks[0].choices[0].delta.reasoning_content.as_deref(),
+        Some("thinking")
+    );
+
     let text = ResponseStreamEvent::OutputTextDelta(ResponseTextDelta {
         response_id: "resp_1".to_string(),
         item_id: "it_0".to_string(),
