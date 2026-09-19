@@ -195,7 +195,7 @@ describe('ProviderCard UI and Phase 2 Requirements', () => {
     expect(quotaContainer).not.toBeNull();
     const geminiCapsule = container.querySelector('[data-testid="quota-capsule-gemini"]');
     expect(geminiCapsule).not.toBeNull();
-    expect(geminiCapsule?.textContent).toContain('G');
+    expect(geminiCapsule?.textContent).toContain('Gemini');
     expect(geminiCapsule?.textContent).toContain('5h');
     expect(geminiCapsule?.textContent).toContain('85%');
     expect(geminiCapsule?.textContent).toContain('周');
@@ -287,7 +287,7 @@ describe('ProviderCard UI and Phase 2 Requirements', () => {
     // Verify Gemini capsule and 0% text are displayed
     const geminiCapsule = container.querySelector('[data-testid="quota-capsule-gemini"]');
     expect(geminiCapsule).not.toBeNull();
-    expect(geminiCapsule?.textContent).toContain('G');
+    expect(geminiCapsule?.textContent).toContain('Gemini');
     expect(geminiCapsule?.textContent).toContain('0%');
 
     // Claude 胶囊已移除：仅展示 Gemini
@@ -350,7 +350,7 @@ describe('ProviderCard UI and Phase 2 Requirements', () => {
     // Verify quota progress capsules are automatically displayed with 0% and cooling indicators
     const geminiCapsule = container.querySelector('[data-testid="quota-capsule-gemini"]');
     expect(geminiCapsule).not.toBeNull();
-    expect(geminiCapsule?.textContent).toContain('G');
+    expect(geminiCapsule?.textContent).toContain('Gemini');
     expect(geminiCapsule?.textContent).toContain('0%');
 
     // Claude 胶囊已移除：仅展示 Gemini

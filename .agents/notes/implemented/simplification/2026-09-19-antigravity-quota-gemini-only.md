@@ -42,6 +42,9 @@ Antigravity 上游配额面已不再提供 Claude 系列额度：`retrieveUserQu
 
 - Dashboard 与密钥行不再出现任何 Claude 水位；`quota-capsule-claude` /
   `claude-h5-percent` / `claude-weekly-percent` testid 删除，相关单测同步更新。
+- 密钥行用量胶囊以「Gemini」全称标识（非缩写 G），5h/周百分比采用等宽数字
+  （tabular-nums）与固定宽度右对齐占位，位数不足（如 5% vs 100%）时各密钥行
+  用量组件仍保持上下对齐。
 - 冷却/可用性语义收窄为"Gemini 周耗尽或后端 state"，Claude 周耗尽不再触发
   前端冷却误判（后端 state 冷却仍以原逻辑为准）。
 - 若上游未来恢复 Claude 系列额度，需重新引入分区逻辑——届时以本记录为起点

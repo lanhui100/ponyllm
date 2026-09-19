@@ -658,9 +658,7 @@ async function handleRefreshAllQuotas() {
                     class="flex items-center gap-1.5 px-2 py-1 bg-white/60 hover:bg-white/90 rounded-md border border-slate-200/80 text-[11px] shadow-2xs transition-colors"
                     data-testid="quota-capsule-gemini"
                   >
-                    <UiTooltip content="Gemini 系列模型">
-                      <span class="font-bold text-slate-700 tracking-tight cursor-help">G</span>
-                    </UiTooltip>
+                    <span class="text-[11px] font-bold text-slate-700 tracking-tight">Gemini</span>
                     <!-- Gemini 5h -->
                     <UiTooltip
                       :content="`Gemini 5小时用量剩余 ${formatQuotaPercent(extractCompactQuotas(keyTestResults[k.id], k.state === 'cooling_down').gemini.h5?.fraction)}% (${extractCompactQuotas(keyTestResults[k.id], k.state === 'cooling_down').gemini.h5?.timeUntilReset || '已就绪'})`"
@@ -675,7 +673,7 @@ async function handleRefreshAllQuotas() {
                           />
                         </div>
                         <span
-                          class="font-mono text-[10px] font-semibold"
+                          class="font-mono text-[10px] font-semibold tabular-nums w-[2.5rem] text-right shrink-0"
                           :class="getQuotaProgressColor(extractCompactQuotas(keyTestResults[k.id], k.state === 'cooling_down').gemini.h5?.fraction).text"
                         >
                           {{ formatQuotaPercent(extractCompactQuotas(keyTestResults[k.id], k.state === 'cooling_down').gemini.h5?.fraction) }}%
@@ -700,7 +698,7 @@ async function handleRefreshAllQuotas() {
                           />
                         </div>
                         <span
-                          class="font-mono text-[10px] font-semibold"
+                          class="font-mono text-[10px] font-semibold tabular-nums w-[2.5rem] text-right shrink-0"
                           :class="getQuotaProgressColor(extractCompactQuotas(keyTestResults[k.id], k.state === 'cooling_down').gemini.weekly?.fraction ?? 1.0).text"
                         >
                           {{ formatQuotaPercent(extractCompactQuotas(keyTestResults[k.id], k.state === 'cooling_down').gemini.weekly?.fraction ?? 1.0) }}%
