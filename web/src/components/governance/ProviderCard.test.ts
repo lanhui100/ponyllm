@@ -205,10 +205,8 @@ describe('ProviderCard UI and Phase 2 Requirements', () => {
     const progressBar = geminiCapsule?.querySelector('.h-1');
     expect(progressBar).not.toBeNull();
 
-    // Verify Claude capsule renders
-    const claudeCapsule = container.querySelector('[data-testid="quota-capsule-claude"]');
-    expect(claudeCapsule).not.toBeNull();
-    expect(claudeCapsule?.textContent).toContain('C');
+    // Claude 胶囊已移除：上游不再下发 Claude 额度，仅展示 Gemini
+    expect(container.querySelector('[data-testid="quota-capsule-claude"]')).toBeNull();
 
     // Verify Antigravity provider only displays Antigravity protocol pill
     const agPill = container.querySelector('[data-testid="protocol-pill-antigravity"]');
@@ -292,10 +290,8 @@ describe('ProviderCard UI and Phase 2 Requirements', () => {
     expect(geminiCapsule?.textContent).toContain('G');
     expect(geminiCapsule?.textContent).toContain('0%');
 
-    // Verify Claude capsule is also stably displayed
-    const claudeCapsule = container.querySelector('[data-testid="quota-capsule-claude"]');
-    expect(claudeCapsule).not.toBeNull();
-    expect(claudeCapsule?.textContent).toContain('C');
+    // Claude 胶囊已移除：仅展示 Gemini
+    expect(container.querySelector('[data-testid="quota-capsule-claude"]')).toBeNull();
 
     app.unmount();
     document.body.removeChild(container);
@@ -357,10 +353,8 @@ describe('ProviderCard UI and Phase 2 Requirements', () => {
     expect(geminiCapsule?.textContent).toContain('G');
     expect(geminiCapsule?.textContent).toContain('0%');
 
-    const claudeCapsule = container.querySelector('[data-testid="quota-capsule-claude"]');
-    expect(claudeCapsule).not.toBeNull();
-    expect(claudeCapsule?.textContent).toContain('C');
-    expect(claudeCapsule?.textContent).toContain('0%');
+    // Claude 胶囊已移除：仅展示 Gemini
+    expect(container.querySelector('[data-testid="quota-capsule-claude"]')).toBeNull();
 
     app.unmount();
     document.body.removeChild(container);

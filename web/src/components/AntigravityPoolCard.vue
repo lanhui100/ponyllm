@@ -114,8 +114,9 @@ function isKeyCoolingDown(k: KeyView): boolean {
   if (!testResult) return false;
   // 必须具有真实 quota_groups 或 quota 配额探测数据，才参与根据周限流判定冷却
   if (!testResult.quota_groups && !testResult.quota) return false;
+  // 仅 Gemini 系列参与冷却判定：上游已不再下发 Claude 额度
   const q = extractKeyQuota(k, testResult);
-  return q.gemini.weeklyFraction <= 0 || q.claude.weeklyFraction <= 0;
+  return q.gemini.weeklyFraction <= 0;
 }
 
 const coolingKeys = computed(() => {
@@ -153,9 +154,6 @@ const nextRecovery = computed(() => {
         if (q.gemini.weeklyFraction <= 0 && q.gemini.weeklyResetHint && q.gemini.weeklyResetHint !== '已就绪' && q.gemini.weeklyResetHint !== '冷却保护中') {
           fallbackHint = q.gemini.weeklyResetHint;
           targetKey = k;
-        } else if (q.claude.weeklyFraction <= 0 && q.claude.weeklyResetHint && q.claude.weeklyResetHint !== '已就绪' && q.claude.weeklyResetHint !== '冷却保护中') {
-          fallbackHint = q.claude.weeklyResetHint;
-          targetKey = k;
         }
       }
     }
@@ -191,7 +189,9 @@ interface ExtractedQuota {
   weeklyResetHint: string;
 }
 
-function extractKeyQuota(k: KeyView, testResult?: KeyTestView): { gemini: ExtractedQuota; claude: ExtractedQuota } {
+// 仅查询显示 Gemini 系列额度：上游已不再下发 Claude 额度，Claude/GPT/3P
+// 分组与 claude/gpt/sonnet/opus 模型直接跳过（不归入 Gemini，防止残留污染水位）。
+function extractKeyQuota(k: KeyView, testResult?: KeyTestView): { gemini: ExtractedQuota } {
   const isCooling = k.state === 'cooling_down';
   const defaultCooling: ExtractedQuota = {
     h5Fraction: 0,
@@ -199,32 +199,34 @@ function extractKeyQuota(k: KeyView, testResult?: KeyTestView): { gemini: Extrac
     weeklyFraction: 0,
     weeklyResetHint: '冷却保护中',
   };
+  const defaultPending: ExtractedQuota = {
+    h5Fraction: 0,
+    h5ResetHint: '等待刷新',
+    weeklyFraction: 0,
+    weeklyResetHint: '等待刷新',
+  };
 
   if (!testResult) {
     if (isCooling) {
-      return { gemini: { ...defaultCooling }, claude: { ...defaultCooling } };
+      return { gemini: { ...defaultCooling } };
     }
-    return {
-      gemini: { h5Fraction: 0, h5ResetHint: '等待刷新', weeklyFraction: 0, weeklyResetHint: '等待刷新' },
-      claude: { h5Fraction: 0, h5ResetHint: '等待刷新', weeklyFraction: 0, weeklyResetHint: '等待刷新' },
-    };
+    return { gemini: { ...defaultPending } };
   }
 
   const res = {
     gemini: { h5Fraction: 0, h5ResetHint: '已就绪', weeklyFraction: 0, weeklyResetHint: '已就绪' },
-    claude: { h5Fraction: 0, h5ResetHint: '已就绪', weeklyFraction: 0, weeklyResetHint: '已就绪' },
   };
 
   // 1. Quota groups
   if (testResult.quota_groups && testResult.quota_groups.length > 0) {
-    // 记录每系列是否真实出现周窗口：摘要缺失 ≠ 耗尽（retrieveUserQuotaSummary
+    // 记录 Gemini 是否真实出现周窗口：摘要缺失 ≠ 耗尽（retrieveUserQuotaSummary
     // 只有 4s 超时，冷建连下整组缺席时不做有罪推定；未知周默认健康，与模型管理页 ?? 1.0 对齐）
     let geminiWeeklySeen = false;
-    let claudeWeeklySeen = false;
     for (const group of testResult.quota_groups) {
       const name = (group.display_name || '').toLowerCase();
       const isClaudeGroup = name.includes('claude') || name.includes('gpt') || name.includes('3p');
-      const target = isClaudeGroup ? res.claude : res.gemini;
+      if (isClaudeGroup) continue;
+      const target = res.gemini;
 
       for (const b of group.buckets || []) {
         const win = (b.window || '').toLowerCase();
@@ -240,8 +242,7 @@ function extractKeyQuota(k: KeyView, testResult?: KeyTestView): { gemini: Extrac
         if (isWeekly) {
           target.weeklyFraction = fraction;
           target.weeklyResetHint = resetHint;
-          if (isClaudeGroup) claudeWeeklySeen = true;
-          else geminiWeeklySeen = true;
+          geminiWeeklySeen = true;
         } else {
           target.h5Fraction = fraction;
           target.h5ResetHint = resetHint;
@@ -252,39 +253,24 @@ function extractKeyQuota(k: KeyView, testResult?: KeyTestView): { gemini: Extrac
       res.gemini.weeklyFraction = 1.0;
       res.gemini.weeklyResetHint = '已就绪';
     }
-    if (!claudeWeeklySeen) {
-      res.claude.weeklyFraction = 1.0;
-      res.claude.weeklyResetHint = '已就绪';
-    }
   } else if (testResult.quota && testResult.quota.length > 0) {
     // 平铺 fetchAvailableModels 只表达 5h 滚动余量（33 个模型均无周窗口标识）：
     // 按同系列最小值聚合为 5h 水位（与模型管理页 extractCompactQuotas 取最小值一致，
     // 替代此前的遍历覆盖/末值胜出）；周水位无信号时记健康，冷却判定交还后端 state。
     let geminiH5: { fraction: number; hint: string } | null = null;
-    let claudeH5: { fraction: number; hint: string } | null = null;
     let geminiWeeklySeen = false;
-    let claudeWeeklySeen = false;
     for (const q of testResult.quota) {
       const mId = q.model_id.toLowerCase();
       const isClaude = mId.includes('claude') || mId.includes('gpt') || mId.includes('sonnet') || mId.includes('opus');
+      if (isClaude) continue;
       const fraction = q.remaining_fraction ?? 0;
       const resetHint = q.time_until_reset || q.reset_time_beijing || '已就绪';
       const isWeekly = mId.includes('week') || mId.includes('7d') || (q.time_until_reset && (q.time_until_reset.includes('天') || q.time_until_reset.includes('d')));
 
       if (isWeekly) {
-        if (isClaude) {
-          claudeWeeklySeen = true;
-          res.claude.weeklyFraction = fraction;
-          res.claude.weeklyResetHint = resetHint;
-        } else {
-          geminiWeeklySeen = true;
-          res.gemini.weeklyFraction = fraction;
-          res.gemini.weeklyResetHint = resetHint;
-        }
-      } else if (isClaude) {
-        if (claudeH5 === null || fraction < claudeH5.fraction) {
-          claudeH5 = { fraction, hint: resetHint };
-        }
+        geminiWeeklySeen = true;
+        res.gemini.weeklyFraction = fraction;
+        res.gemini.weeklyResetHint = resetHint;
       } else {
         if (geminiH5 === null || fraction < geminiH5.fraction) {
           geminiH5 = { fraction, hint: resetHint };
@@ -295,28 +281,16 @@ function extractKeyQuota(k: KeyView, testResult?: KeyTestView): { gemini: Extrac
       res.gemini.h5Fraction = geminiH5.fraction;
       res.gemini.h5ResetHint = geminiH5.hint;
     }
-    if (claudeH5 !== null) {
-      res.claude.h5Fraction = claudeH5.fraction;
-      res.claude.h5ResetHint = claudeH5.hint;
-    }
     if (!geminiWeeklySeen) {
       res.gemini.weeklyFraction = 1.0;
       res.gemini.weeklyResetHint = '已就绪';
     }
-    if (!claudeWeeklySeen) {
-      res.claude.weeklyFraction = 1.0;
-      res.claude.weeklyResetHint = '已就绪';
-    }
   } else {
     // 探测结果不存在 quota / quota_groups 时（如测试失败或无配额信息）
-    res.gemini.h5Fraction = isCooling ? 0 : 0;
-    res.claude.h5Fraction = isCooling ? 0 : 0;
-    res.gemini.weeklyFraction = isCooling ? 0 : 0;
-    res.claude.weeklyFraction = isCooling ? 0 : 0;
+    res.gemini.h5Fraction = 0;
+    res.gemini.weeklyFraction = 0;
     res.gemini.h5ResetHint = isCooling ? '冷却保护中' : '等待刷新';
-    res.claude.h5ResetHint = isCooling ? '冷却保护中' : '等待刷新';
     res.gemini.weeklyResetHint = isCooling ? '冷却保护中' : '等待刷新';
-    res.claude.weeklyResetHint = isCooling ? '冷却保护中' : '等待刷新';
   }
 
   return res;
@@ -328,30 +302,21 @@ const aggregatedQuotas = computed(() => {
   if (active.length === 0) {
     return {
       gemini: { h5Percent: 0, h5Hint: '所有账号冷却中', weeklyPercent: 0, weeklyHint: '所有账号冷却中' },
-      claude: { h5Percent: 0, h5Hint: '所有账号冷却中', weeklyPercent: 0, weeklyHint: '所有账号冷却中' },
     };
   }
 
   let geminiH5Sum = 0;
   let geminiWeeklySum = 0;
-  let claudeH5Sum = 0;
-  let claudeWeeklySum = 0;
   let geminiH5Hint = '';
-  let claudeH5Hint = '';
   let geminiWeeklyHint = '';
-  let claudeWeeklyHint = '';
 
   for (const k of active) {
     const q = extractKeyQuota(k, props.keyTestResults[k.id]);
     geminiH5Sum += q.gemini.h5Fraction;
     geminiWeeklySum += q.gemini.weeklyFraction;
-    claudeH5Sum += q.claude.h5Fraction;
-    claudeWeeklySum += q.claude.weeklyFraction;
 
     if (!geminiH5Hint && q.gemini.h5ResetHint !== '已就绪') geminiH5Hint = q.gemini.h5ResetHint;
-    if (!claudeH5Hint && q.claude.h5ResetHint !== '已就绪') claudeH5Hint = q.claude.h5ResetHint;
     if (!geminiWeeklyHint && q.gemini.weeklyResetHint !== '已就绪') geminiWeeklyHint = q.gemini.weeklyResetHint;
-    if (!claudeWeeklyHint && q.claude.weeklyResetHint !== '已就绪') claudeWeeklyHint = q.claude.weeklyResetHint;
   }
 
   const count = active.length;
@@ -361,12 +326,6 @@ const aggregatedQuotas = computed(() => {
       h5Hint: geminiH5Hint || '配额充足',
       weeklyPercent: Math.round((geminiWeeklySum / count) * 100),
       weeklyHint: geminiWeeklyHint || '配额充足',
-    },
-    claude: {
-      h5Percent: Math.round((claudeH5Sum / count) * 100),
-      h5Hint: claudeH5Hint || '配额充足',
-      weeklyPercent: Math.round((claudeWeeklySum / count) * 100),
-      weeklyHint: claudeWeeklyHint || '配额充足',
     },
   };
 });
@@ -390,8 +349,8 @@ const slotMatrix = computed<HeatSlotItem[]>(() => {
   return props.keys.map((k) => {
     const testResult = props.keyTestResults[k.id];
     const quota = extractKeyQuota(k, testResult);
-    // 若后端标记为冷却，或当前探测结果中周限流/5h配额已耗尽归零，均视为冷却保护中
-    const isWeeklyZero = quota.gemini.weeklyFraction <= 0 || quota.claude.weeklyFraction <= 0;
+    // 若后端标记为冷却，或当前探测结果中 Gemini 周限流已耗尽归零，均视为冷却保护中
+    const isWeeklyZero = quota.gemini.weeklyFraction <= 0;
     const isCooling = k.state === 'cooling_down' || isWeeklyZero;
 
     let email = k.id;
@@ -406,9 +365,7 @@ const slotMatrix = computed<HeatSlotItem[]>(() => {
         ? `预计 ${label} 后解冻`
         : (quota.gemini.weeklyResetHint !== '冷却保护中' && quota.gemini.weeklyResetHint !== '已就绪'
           ? `预计 ${quota.gemini.weeklyResetHint} 解冻`
-          : (quota.claude.weeklyResetHint !== '冷却保护中' && quota.claude.weeklyResetHint !== '已就绪'
-            ? `预计 ${quota.claude.weeklyResetHint} 解冻`
-            : '等待解冻'));
+          : '等待解冻');
       return {
         key: k,
         level: 'cooling',
@@ -433,11 +390,9 @@ const slotMatrix = computed<HeatSlotItem[]>(() => {
     // 以 Gemini 配额为核心判断等级（兼顾 5h 即时爆发余量与周度余量）
     const g5hFraction = quota.gemini.h5Fraction;
     const g5h = Math.round(g5hFraction * 100);
-    const c5h = Math.round(quota.claude.h5Fraction * 100);
     const gWeekly = Math.round(quota.gemini.weeklyFraction * 100);
-    const cWeekly = Math.round(quota.claude.weeklyFraction * 100);
 
-    const baseTooltip = `账号: ${email}\nGemini: 5h余量 ${g5h}% · 周余量 ${gWeekly}%\nClaude: 5h余量 ${c5h}% · 周余量 ${cWeekly}%`;
+    const baseTooltip = `账号: ${email}\nGemini: 5h余量 ${g5h}% · 周余量 ${gWeekly}%`;
 
     if (g5hFraction >= 0.75) {
       return {
@@ -583,8 +538,8 @@ function getProgressColor(percent: number): { bar: string; text: string; bg: str
       </div>
     </div>
 
-    <!-- 三栏指标网格 -->
-    <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+    <!-- 双栏指标网格 -->
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
       <!-- 栏 1: 账号可用性与恢复倒计时 -->
       <div class="flex flex-col justify-between p-3.5 rounded-lg bg-slate-50/60 border border-slate-100/80">
         <div>
@@ -659,23 +614,23 @@ function getProgressColor(percent: number): { bar: string; text: string; bg: str
         </div>
       </div>
 
-      <!-- 栏 2: 5小时滚动容量 (即时爆发) -->
+      <!-- 栏 2: Gemini 容量 (5小时即时窗口 + 周度长效续航) -->
       <div class="flex flex-col justify-between p-3.5 rounded-lg bg-slate-50/60 border border-slate-100/80">
         <div>
           <div class="flex items-center justify-between text-xs text-slate-500 mb-2.5 font-medium">
             <span class="inline-flex items-center gap-1 text-slate-700">
-              <Icons name="activity" size="14" class="text-sky-600" />
-              5小时滚动容量
+              <Icons name="sparkles" size="14" class="text-sky-600" />
+              Gemini 容量
             </span>
-            <UiTooltip content="由上游 5h 窗口限流桶驱动，表征就绪账号当前的即时高并发余量。">
-              <span class="text-[11px] text-slate-400 cursor-help">即时窗口 ⓘ</span>
+            <UiTooltip content="5h 窗口由上游即时限流桶驱动，周度窗口由自然周/7天配额桶驱动，共同表征就绪账号的爆发余量与周期续航。">
+              <span class="text-[11px] text-slate-400 cursor-help">即时 + 周度窗口 ⓘ</span>
             </UiTooltip>
           </div>
 
-          <!-- Gemini 水位 -->
-          <div class="space-y-1.5 mb-3">
+          <!-- 5 小时窗口水位 -->
+          <div class="space-y-1.5 mb-4">
             <div class="flex items-center justify-between text-xs">
-              <span class="font-medium text-slate-700">Gemini 系列</span>
+              <span class="font-medium text-slate-700">5小时窗口</span>
               <span class="font-mono font-semibold" data-testid="gemini-h5-percent" :class="getProgressColor(aggregatedQuotas.gemini.h5Percent).text">
                 {{ aggregatedQuotas.gemini.h5Percent }}%
               </span>
@@ -692,49 +647,10 @@ function getProgressColor(percent: number): { bar: string; text: string; bg: str
             </div>
           </div>
 
-          <!-- Claude 水位 -->
+          <!-- 周度窗口水位 -->
           <div class="space-y-1.5">
             <div class="flex items-center justify-between text-xs">
-              <span class="font-medium text-slate-700">Claude 系列</span>
-              <span class="font-mono font-semibold" data-testid="claude-h5-percent" :class="getProgressColor(aggregatedQuotas.claude.h5Percent).text">
-                {{ aggregatedQuotas.claude.h5Percent }}%
-              </span>
-            </div>
-            <div class="w-full bg-slate-200/80 rounded-full h-1.5 overflow-hidden">
-              <div
-                class="h-full rounded-full transition-all duration-300"
-                :class="getProgressColor(aggregatedQuotas.claude.h5Percent).bar"
-                :style="{ width: `${aggregatedQuotas.claude.h5Percent}%` }"
-              />
-            </div>
-            <div class="text-[11px] text-slate-400 text-right truncate">
-              {{ aggregatedQuotas.claude.h5Hint }}
-            </div>
-          </div>
-        </div>
-
-        <div class="mt-3 pt-2.5 border-t border-slate-200/50 text-[11px] text-slate-400">
-          基于当前 {{ activeKeys.length }} 个就绪账号会话余量加权聚合
-        </div>
-      </div>
-
-      <!-- 栏 3: 周度滚动容量 (长效续航) -->
-      <div class="flex flex-col justify-between p-3.5 rounded-lg bg-slate-50/60 border border-slate-100/80">
-        <div>
-          <div class="flex items-center justify-between text-xs text-slate-500 mb-2.5 font-medium">
-            <span class="inline-flex items-center gap-1 text-slate-700">
-              <Icons name="sparkles" size="14" class="text-purple-600" />
-              周度滚动容量
-            </span>
-            <UiTooltip content="由上游自然周/7天配额桶驱动，表征就绪账号在整个周期的耐力续航。">
-              <span class="text-[11px] text-slate-400 cursor-help">周度窗口 ⓘ</span>
-            </UiTooltip>
-          </div>
-
-          <!-- Gemini 周度水位 -->
-          <div class="space-y-1.5 mb-3">
-            <div class="flex items-center justify-between text-xs">
-              <span class="font-medium text-slate-700">Gemini 系列</span>
+              <span class="font-medium text-slate-700">周度窗口</span>
               <span class="font-mono font-semibold" data-testid="gemini-weekly-percent" :class="getProgressColor(aggregatedQuotas.gemini.weeklyPercent).text">
                 {{ aggregatedQuotas.gemini.weeklyPercent }}%
               </span>
@@ -750,30 +666,10 @@ function getProgressColor(percent: number): { bar: string; text: string; bg: str
               {{ aggregatedQuotas.gemini.weeklyHint }}
             </div>
           </div>
-
-          <!-- Claude 周度水位 -->
-          <div class="space-y-1.5">
-            <div class="flex items-center justify-between text-xs">
-              <span class="font-medium text-slate-700">Claude 系列</span>
-              <span class="font-mono font-semibold" data-testid="claude-weekly-percent" :class="getProgressColor(aggregatedQuotas.claude.weeklyPercent).text">
-                {{ aggregatedQuotas.claude.weeklyPercent }}%
-              </span>
-            </div>
-            <div class="w-full bg-slate-200/80 rounded-full h-1.5 overflow-hidden">
-              <div
-                class="h-full rounded-full transition-all duration-300"
-                :class="getProgressColor(aggregatedQuotas.claude.weeklyPercent).bar"
-                :style="{ width: `${aggregatedQuotas.claude.weeklyPercent}%` }"
-              />
-            </div>
-            <div class="text-[11px] text-slate-400 text-right truncate">
-              {{ aggregatedQuotas.claude.weeklyHint }}
-            </div>
-          </div>
         </div>
 
         <div class="mt-3 pt-2.5 border-t border-slate-200/50 text-[11px] text-slate-400">
-          长周期配额防超限指示 · 自然周滚动重置
+          基于当前 {{ activeKeys.length }} 个就绪账号 Gemini 会话余量加权聚合 · 长周期配额防超限指示，自然周滚动重置
         </div>
       </div>
     </div>

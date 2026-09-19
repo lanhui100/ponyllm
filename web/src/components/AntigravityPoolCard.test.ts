@@ -113,15 +113,15 @@ describe('AntigravityPoolCard Component', () => {
     expect(container.textContent).toContain('acc-2');
 
     // 4. Verify 5h rolling capacities
-    expect(container.textContent).toContain('5小时滚动容量');
+    expect(container.textContent).toContain('5小时窗口');
     expect(container.textContent).toContain('80%'); // Gemini 5h
-    expect(container.textContent).toContain('60%'); // Claude 5h
     expect(container.textContent).toContain('3小时后重置');
+    // 上游仍携带 Claude 分组（回归素材），但 UI 已不再查询显示 Claude 额度
+    expect(container.textContent).not.toContain('Claude');
 
     // 5. Verify Weekly rolling capacities
-    expect(container.textContent).toContain('周度滚动容量');
+    expect(container.textContent).toContain('周度窗口');
     expect(container.textContent).toContain('90%'); // Gemini Weekly
-    expect(container.textContent).toContain('75%'); // Claude Weekly
 
     // 6. Test Refresh button click
     const refreshBtn = container.querySelector('[data-testid="refresh-antigravity-pool-btn"]') as HTMLButtonElement;
@@ -217,9 +217,10 @@ describe('AntigravityPoolCard Component', () => {
     // 5h 取同系列最小值（与模型管理页取最小值语义一致）：0.0068*100=0.68→1%
     // 精确断言 testid，避免与可用率/周水位的 '100%' 混淆
     expect(container.querySelector('[data-testid="gemini-h5-percent"]')?.textContent).toContain('1%');
-    expect(container.querySelector('[data-testid="claude-h5-percent"]')?.textContent).toContain('100%');
     expect(container.querySelector('[data-testid="gemini-weekly-percent"]')?.textContent).toContain('100%');
-    expect(container.querySelector('[data-testid="claude-weekly-percent"]')?.textContent).toContain('100%');
+    // Claude 系列不再展示：claude 模型 id 被跳过，claude testid 已移除
+    expect(container.querySelector('[data-testid="claude-h5-percent"]')).toBeNull();
+    expect(container.querySelector('[data-testid="claude-weekly-percent"]')).toBeNull();
 
     app.unmount();
     document.body.removeChild(container);

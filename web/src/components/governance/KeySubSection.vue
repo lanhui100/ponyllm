@@ -207,28 +207,30 @@ function cooldownResetTooltip(k: KeyView): string {
   return '配额已耗尽，冷却保护中';
 }
 
-function extractCompactQuotas(keyResult?: KeyTestView, isCoolingDown?: boolean): { gemini: CompactModelQuota; claude: CompactModelQuota } {
-  const res: { gemini: CompactModelQuota; claude: CompactModelQuota } = {
+function extractCompactQuotas(keyResult?: KeyTestView, isCoolingDown?: boolean): { gemini: CompactModelQuota } {
+  const res: { gemini: CompactModelQuota } = {
     gemini: {},
-    claude: {},
   };
   if (!keyResult) {
     if (isCoolingDown) {
       return {
         gemini: { h5: { fraction: 0, timeUntilReset: '冷却保护中' } },
-        claude: { h5: { fraction: 0, timeUntilReset: '冷却保护中' } },
       };
     }
     return res;
   }
 
+  // 仅查询显示 Gemini 系列额度：上游已不再下发 Claude 额度，
+  // Claude/GPT/3P 分组与 claude/gpt/sonnet/opus 模型直接跳过。
+  const isClaudeFamily = (s: string) =>
+    s.includes('claude') || s.includes('gpt') || s.includes('3p') || s.includes('sonnet') || s.includes('opus');
+
   // 1. Check quota_groups (from retrieveUserQuotaSummary)
   if (keyResult.quota_groups && keyResult.quota_groups.length > 0) {
     for (const group of keyResult.quota_groups) {
       const name = (group.display_name || '').toLowerCase();
-      const target = name.includes('claude') || name.includes('gpt') || name.includes('3p')
-        ? res.claude
-        : res.gemini;
+      if (isClaudeFamily(name)) continue;
+      const target = res.gemini;
 
       for (const bucket of group.buckets || []) {
         const win = (bucket.window || '').toLowerCase();
@@ -258,8 +260,8 @@ function extractCompactQuotas(keyResult?: KeyTestView, isCoolingDown?: boolean):
   if (keyResult.quota && keyResult.quota.length > 0) {
     for (const q of keyResult.quota) {
       const mId = q.model_id.toLowerCase();
-      const isClaude = mId.includes('claude') || mId.includes('gpt') || mId.includes('sonnet') || mId.includes('opus');
-      const target = isClaude ? res.claude : res.gemini;
+      if (isClaudeFamily(mId)) continue;
+      const target = res.gemini;
 
       const qData: CompactBucketQuota = {
         fraction: q.remaining_fraction ?? 0,
@@ -283,10 +285,7 @@ function extractCompactQuotas(keyResult?: KeyTestView, isCoolingDown?: boolean):
 
   // 3. 即使额度为0，或探测响应成功但某些窗口未下发，只要已探测即保证有 5h 默认展示，确保进度条稳定呈现
   if (!res.gemini.h5) {
-    res.gemini.h5 = { fraction: isCoolingDown ? 0 : 0, timeUntilReset: isCoolingDown ? '冷却保护中' : '已就绪' };
-  }
-  if (!res.claude.h5) {
-    res.claude.h5 = { fraction: isCoolingDown ? 0 : 0, timeUntilReset: isCoolingDown ? '冷却保护中' : '已就绪' };
+    res.gemini.h5 = { fraction: 0, timeUntilReset: isCoolingDown ? '冷却保护中' : '已就绪' };
   }
 
   return res;
@@ -639,7 +638,7 @@ async function handleRefreshAllQuotas() {
               </div>
 
               <div class="flex items-center gap-3 shrink-0">
-                <!-- 行内双进度条 (Gemini / Claude 的 5h 与周用量)，显示在刷新按钮前方 -->
+                <!-- 行内单胶囊进度条 (Gemini 的 5h 与周用量)，显示在刷新按钮前方 -->
                 <div
                   v-if="isAntigravity"
                   class="flex items-center gap-2"
@@ -653,7 +652,7 @@ async function handleRefreshAllQuotas() {
                     点击上方刷新查看用量
                   </div>
 
-                  <!-- 探测结果或冷却保护状态：Gemini 胶囊双进度条 (G: 5h / 周) -->
+                  <!-- 探测结果或冷却保护状态：Gemini 胶囊双进度条 (5h / 周) -->
                   <div
                     v-if="keyTestResults[k.id] || k.state === 'cooling_down'"
                     class="flex items-center gap-1.5 px-2 py-1 bg-white/60 hover:bg-white/90 rounded-md border border-slate-200/80 text-[11px] shadow-2xs transition-colors"
@@ -668,7 +667,7 @@ async function handleRefreshAllQuotas() {
                     >
                       <div class="flex items-center gap-1 cursor-default">
                         <span class="text-[10px] text-slate-500 font-mono">5h</span>
-                        <div class="w-12 bg-slate-200 rounded-full h-1 overflow-hidden">
+                        <div class="w-16 bg-slate-200 rounded-full h-1 overflow-hidden">
                           <div
                             class="h-full rounded-full transition-all duration-300"
                             :class="getQuotaProgressColor(extractCompactQuotas(keyTestResults[k.id], k.state === 'cooling_down').gemini.h5?.fraction).bar"
@@ -693,7 +692,7 @@ async function handleRefreshAllQuotas() {
                     >
                       <div class="flex items-center gap-1 cursor-default">
                         <span class="text-[10px] text-slate-500 font-mono">周</span>
-                        <div class="w-12 bg-slate-200 rounded-full h-1 overflow-hidden">
+                        <div class="w-16 bg-slate-200 rounded-full h-1 overflow-hidden">
                           <div
                             class="h-full rounded-full transition-all duration-300"
                             :class="getQuotaProgressColor(extractCompactQuotas(keyTestResults[k.id], k.state === 'cooling_down').gemini.weekly?.fraction ?? 1.0).bar"
@@ -705,63 +704,6 @@ async function handleRefreshAllQuotas() {
                           :class="getQuotaProgressColor(extractCompactQuotas(keyTestResults[k.id], k.state === 'cooling_down').gemini.weekly?.fraction ?? 1.0).text"
                         >
                           {{ formatQuotaPercent(extractCompactQuotas(keyTestResults[k.id], k.state === 'cooling_down').gemini.weekly?.fraction ?? 1.0) }}%
-                        </span>
-                      </div>
-                    </UiTooltip>
-                  </div>
-
-                  <!-- 探测结果或冷却保护状态：Claude 胶囊双进度条 (C: 5h / 周) -->
-                  <div
-                    v-if="keyTestResults[k.id] || k.state === 'cooling_down'"
-                    class="flex items-center gap-1.5 px-2 py-1 bg-white/60 hover:bg-white/90 rounded-md border border-slate-200/80 text-[11px] shadow-2xs transition-colors"
-                    data-testid="quota-capsule-claude"
-                  >
-                    <UiTooltip content="Claude 系列模型">
-                      <span class="font-bold text-slate-700 tracking-tight cursor-help">C</span>
-                    </UiTooltip>
-                    <!-- Claude 5h -->
-                    <UiTooltip
-                      :content="`Claude 5小时用量剩余 ${formatQuotaPercent(extractCompactQuotas(keyTestResults[k.id], k.state === 'cooling_down').claude.h5?.fraction)}% (${extractCompactQuotas(keyTestResults[k.id], k.state === 'cooling_down').claude.h5?.timeUntilReset || '已就绪'})`"
-                    >
-                      <div class="flex items-center gap-1 cursor-default">
-                        <span class="text-[10px] text-slate-500 font-mono">5h</span>
-                        <div class="w-12 bg-slate-200 rounded-full h-1 overflow-hidden">
-                          <div
-                            class="h-full rounded-full transition-all duration-300"
-                            :class="getQuotaProgressColor(extractCompactQuotas(keyTestResults[k.id], k.state === 'cooling_down').claude.h5?.fraction).bar"
-                            :style="{ width: `${formatQuotaPercent(extractCompactQuotas(keyTestResults[k.id], k.state === 'cooling_down').claude.h5?.fraction)}%` }"
-                          />
-                        </div>
-                        <span
-                          class="font-mono text-[10px] font-semibold"
-                          :class="getQuotaProgressColor(extractCompactQuotas(keyTestResults[k.id], k.state === 'cooling_down').claude.h5?.fraction).text"
-                        >
-                          {{ formatQuotaPercent(extractCompactQuotas(keyTestResults[k.id], k.state === 'cooling_down').claude.h5?.fraction) }}%
-                        </span>
-                      </div>
-                    </UiTooltip>
-
-                    <!-- Claude 周用量 (若无真实周数据，默认展示 100% / 未受限状态) -->
-                    <span class="text-slate-300">|</span>
-                    <UiTooltip
-                      :content="extractCompactQuotas(keyTestResults[k.id], k.state === 'cooling_down').claude.weekly
-                        ? `Claude 周用量剩余 ${formatQuotaPercent(extractCompactQuotas(keyTestResults[k.id], k.state === 'cooling_down').claude.weekly?.fraction)}% (${extractCompactQuotas(keyTestResults[k.id], k.state === 'cooling_down').claude.weekly?.timeUntilReset})`
-                        : 'Claude 周配额未达阈值或已就绪 (100%)'"
-                    >
-                      <div class="flex items-center gap-1 cursor-default">
-                        <span class="text-[10px] text-slate-500 font-mono">周</span>
-                        <div class="w-12 bg-slate-200 rounded-full h-1 overflow-hidden">
-                          <div
-                            class="h-full rounded-full transition-all duration-300"
-                            :class="getQuotaProgressColor(extractCompactQuotas(keyTestResults[k.id], k.state === 'cooling_down').claude.weekly?.fraction ?? 1.0).bar"
-                            :style="{ width: `${formatQuotaPercent(extractCompactQuotas(keyTestResults[k.id], k.state === 'cooling_down').claude.weekly?.fraction ?? 1.0)}%` }"
-                          />
-                        </div>
-                        <span
-                          class="font-mono text-[10px] font-semibold"
-                          :class="getQuotaProgressColor(extractCompactQuotas(keyTestResults[k.id], k.state === 'cooling_down').claude.weekly?.fraction ?? 1.0).text"
-                        >
-                          {{ formatQuotaPercent(extractCompactQuotas(keyTestResults[k.id], k.state === 'cooling_down').claude.weekly?.fraction ?? 1.0) }}%
                         </span>
                       </div>
                     </UiTooltip>
