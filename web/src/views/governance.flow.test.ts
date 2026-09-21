@@ -616,3 +616,93 @@ describe('GovernanceView End-to-End User Flow (WEB-04)', () => {
     vi.useRealTimers();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Regression: provider creation must send a backend-valid billing_mode.
+// Previously the form hardcoded `billing_mode: 'token'` (an auth-mode value),
+// so every console-side provider creation failed with
+// "无效的计费模式 'token': 仅支持 metered, plan, free".
+// ---------------------------------------------------------------------------
+describe('GovernanceView provider billing_mode regression', () => {
+  let router: ReturnType<typeof createRouter>;
+  let pinia: ReturnType<typeof createPinia>;
+  let container: HTMLDivElement;
+
+  beforeEach(() => {
+    pinia = createPinia();
+    setActivePinia(pinia);
+    router = createRouter({ history: createMemoryHistory(), routes: [{ path: '/', component: { template: '<div/>' } }] });
+    container = document.createElement('div');
+    document.body.appendChild(container);
+  });
+
+  afterEach(() => {
+    container.remove();
+  });
+
+  const overviewWritable: OverviewView = {
+    version: '0.2.43',
+    bind: '127.0.0.1:8080',
+    auth_mode: 'token',
+    providers: 0,
+    keys: 0,
+    keys_active: 0,
+    strategy: 'economy',
+    hot_reload_ms: 500,
+    admin_write_enabled: true,
+    config_version: 12,
+  };
+  const noProviders: ProviderView[] = [];
+
+  it('submits metered by default and honours a plan selection', async () => {
+    const session = useSessionStore(pinia);
+    session.login('sk-admin-token');
+    vi.spyOn(adminApi, 'getOverview').mockReturnValue({ send: () => Promise.resolve(overviewWritable) } as any);
+    vi.spyOn(adminApi, 'getProviders').mockReturnValue({ send: () => Promise.resolve(noProviders) } as any);
+    vi.spyOn(adminApi, 'getModels').mockReturnValue({ send: () => Promise.resolve([]) } as any);
+    vi.spyOn(adminApi, 'getKeys').mockReturnValue({ send: () => Promise.resolve([]) } as any);
+    vi.spyOn(adminApi, 'getStrategy').mockReturnValue({ send: () => Promise.resolve({ strategy: 'economy', config_version: 12 }) } as any);
+    const createSpy = vi.spyOn(adminApi, 'createProvider').mockReturnValue({
+      send: () => Promise.resolve({ name: 'my-vendor' }),
+    } as any);
+
+    const app = createApp(GovernanceView);
+    app.use(router);
+    app.use(pinia);
+    app.mount(container);
+    await nextTick();
+    await new Promise((r) => setTimeout(r, 10));
+
+    (container.querySelector('[data-testid="add-provider-btn"]') as HTMLButtonElement).click();
+    await nextTick();
+
+    const nameInput = container.querySelector('[data-testid="provider-name-input"]') as HTMLInputElement;
+    const urlInput = container.querySelector('[data-testid="provider-base-url-input"]') as HTMLInputElement;
+    nameInput.value = 'my-vendor';
+    nameInput.dispatchEvent(new Event('input'));
+    urlInput.value = 'https://api.example.com/v1';
+    urlInput.dispatchEvent(new Event('input'));
+
+    const billing = container.querySelector('[data-testid="provider-billing-mode-select"]') as HTMLSelectElement;
+    expect(billing).not.toBeNull();
+    // The default value must already be backend-valid.
+    expect(['metered', 'plan', 'free']).toContain(billing.value);
+    expect(billing.value).toBe('metered');
+
+    // A non-default choice must be forwarded verbatim.
+    billing.value = 'plan';
+    billing.dispatchEvent(new Event('change'));
+    await nextTick();
+
+    (container.querySelector('[data-testid="submit-provider-btn"]') as HTMLButtonElement).click();
+    await nextTick();
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(createSpy).toHaveBeenCalled();
+    const payload = createSpy.mock.calls[0][0] as { billing_mode?: string; name?: string };
+    expect(['metered', 'plan', 'free']).toContain(payload.billing_mode);
+    expect(payload.billing_mode).toBe('plan');
+    expect(payload.name).toBe('my-vendor');
+    app.unmount();
+  });
+});

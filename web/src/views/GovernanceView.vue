@@ -124,7 +124,7 @@ const newProviderForm = ref<CreateProviderPayload>({
   base_url: 'https://tokens.ponyjob.top/v1',
   default_model: '',
   strategy: 'priority',
-  billing_mode: 'token',
+  billing_mode: 'metered',
   input_price: 0,
   cached_price: 0,
   output_price: 0,
@@ -355,7 +355,7 @@ function openAddProvider() {
     base_url: 'https://tokens.ponyjob.top/v1',
     default_model: '',
     strategy: 'priority',
-    billing_mode: 'token',
+    billing_mode: 'metered',
     input_price: 0,
     cached_price: 0,
     output_price: 0,
@@ -684,6 +684,20 @@ onUnmounted(() => {
                   <option value="weighted_round_robin">加权轮询 (Weighted)</option>
                 </select>
               </div>
+            </div>
+
+            <!-- 计费模式：后端仅接受 metered | plan | free -->
+            <div>
+              <label class="block text-[13px] font-medium text-slate-700 mb-1.5">计费模式</label>
+              <select
+                v-model="newProviderForm.billing_mode"
+                class="w-full bg-white/60 border border-white/50 rounded-lg px-3.5 py-2 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-slate-400/20 focus:border-slate-400 focus:bg-white/90"
+                data-testid="provider-billing-mode-select"
+              >
+                <option value="metered">按量计费 (metered)</option>
+                <option value="plan">套餐订阅 (plan)</option>
+                <option value="free">免费额度 (free)</option>
+              </select>
             </div>
 
             <!-- 支持模型协议选择器 (非下拉胶囊药丸) -->
