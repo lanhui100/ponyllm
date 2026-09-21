@@ -415,6 +415,19 @@ pub struct GatewayConfig {
     /// empty string disables snapshot persistence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub telemetry_snapshot_path: Option<String>,
+    /// Auth compatibility mode (P0, task-20; contract `.agents/notes/auth-eval.md` §3.1).
+    /// Canonical type lives in `ponyllm-config`; re-exported here for the
+    /// runtime config. Old configs without the field deserialize to `dual`.
+    #[serde(default = "default_auth_compat")]
+    pub auth_compat: ponyllm_config::AuthCompat,
+    /// Scoped gateway keys (P1, task-21): verified by `auth::authenticate`
+    /// (salted SHA-256, never plaintext). Empty = legacy single `api_key`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gateway_keys: Vec<ponyllm_config::GatewayKeyEntry>,
+}
+
+fn default_auth_compat() -> ponyllm_config::AuthCompat {
+    ponyllm_config::AuthCompat::Dual
 }
 
 impl Default for GatewayConfig {
@@ -437,6 +450,8 @@ impl Default for GatewayConfig {
             web_dist_dir: default_web_dist_dir(),
             admin_write_enabled: false,
             telemetry_snapshot_path: None,
+            auth_compat: default_auth_compat(),
+            gateway_keys: Vec::new(),
         }
     }
 }

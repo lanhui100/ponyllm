@@ -1,0 +1,89 @@
+# 鉴权分级端到端真实链路验证（auth-e2e）
+
+Status: implemented — task-24 交付，含一次现网 lockout 事故与恢复记录。
+Date: 2026-09-21
+
+## Problem
+
+代码层门禁（191 passed）与红队静态审核全绿，但**没有在真实网关上跑过**分级鉴权：
+二进制是否含 P1 代码、热加载是否搬 `gateway_keys`、Web/skill 真实路径是否可用，
+都只能靠 live 验证回答。task-24 做这件事。
+
+## Decision（验证动作与结论）
+
+环境：现网网关 `/home/dm/.config/ponyllm/ponyllm.toml`（bind `0.0.0.0:8080`），
+P1 release 二进制（`strings` 确认含 `insufficient scope` 与 `sk-pony-infer-`）。
+配置先备份 `ponyllm.toml.bak-e2e-20260921063454`。
+
+### 1. 矩阵实测（dual 模式，全部符合契约）
+
+| 凭证 | `/api/admin/quota` | `/v1/models` | `/api/admin/providers` | `POST auth/rotate` |
+|---|---|---|---|---|
+| legacy `api_key` | 200 | 200 | 200 | 200 |
+| `inference` key | 200 | 200 | **403** | **403** |
+| `readonly` key | 200 | **403** | 200 | （同 admin-write 403） |
+| 无凭证 | 401 | 401 | 401 | 401 |
+| 伪造 `sk-pony-infer-*` | 401 | — | — | — |
+
+- `403 forbidden` 新码、`401 invalid_api_key` 旧码分工与契约一致；
+- 真实推理链路：`POST /v1/chat/completions`（`mimo-v2.5-free`，agent key）
+  返回 200 完整 completion + usage，证明 gateway 转发面在新鉴权下无回归；
+- `/app/` 200、`/health` 200、无凭证 401 均正常。
+
+### 2. strict 三态实测 + 现网 lockout 事故（关键教训）
+
+按契约验证 `legacy-only/dual/strict`：切 `strict` 后 legacy token 全形态 401
+（符合设计）。**但这一步把现网打断了**：该部署除 legacy token 外没有任何
+`admin` 作用域 key，而 Web 控制台、CLI、skill 全都用 legacy token；
+strict 一落地，全部客户端立即 401（用户侧表现为"所有 API 密钥无效"）。
+
+恢复：把 `auth_compat` 改回 `dual`（热加载 ~500ms），实测 legacy key
+`/api/admin/quota`、`/api/admin/providers`、`/v1/models` 全部 200，服务恢复。
+事故窗口约数分钟，无数据损坏，无 secret 外泄。
+
+根因不是实现错，而是**收敛路径缺一道 lockout 护栏**：
+`strict` + 无可用 `admin` 作用域 key 的组合 = 管理面永久锁死（只能手改
+TOML 回 `dual` 才能救）。契约的 P2"staging 演练 RTO"正是防这个，但本轮
+在现网直接切了，跳过演练。
+
+### 3. 签发/查看闭环（用户问题的答案）
+
+- 签发：`ponyllm keys issue --scope admin|inference|readonly --id <name>`
+  → 明文 **只显示一次**，落盘只存 `sha256(salt::plaintext)`。
+- 查看：`ponyllm keys list`（id/scope/prefix/status，永不含明文）；
+  legacy token 用 `ponyllm auth --show` 或 `ponyllm status` 查看。
+- 吊销：`ponyllm keys revoke --id <name>`（fail-closed 即时生效）。
+- 已清理 4 个 E2E 测试 key（全部 revoked），留下 1 个 `agent-1`（inference）
+  供 agent 使用；legacy token 保留作管理与 Web 登录凭证（dual 模式）。
+
+## Alternatives considered
+
+1. **strict 失败后回滚到 `legacy-only`**——否决：`dual` 才是长期目标态，
+   既能恢复 legacy 又保留分级 key 生效；回 `legacy-only` 会顺带关掉
+   agent/viewer key 的作用域语义（虽然 legacy-only 下它们仍按 scope 判）。
+2. **保持 strict 并给所有客户端换发 scoped key**——否决：无法在不中断的
+   前提下给 Web 控制台/第三方换凭证（且部分调用方不可召回），事故期间
+   可用性优先，先 dual 恢复再谈收敛。
+3. **给 `strict` 加"无 admin key 拒绝启动"护栏（推荐，未实施）**——P3 项：
+   与 P0 的 `validate_bind_auth_combo` 同族，把"把自己锁在门外"的配置
+   在启动期 fail-fast 掉；本轮不改代码（用户优先要可用），记入遗留。
+4. **把 scoped key 明文可回显**——否决：契约 E5，只存哈希是硬要求；
+   "看不到明文"是设计后果，不是缺陷，需在文档/CLI 提示中说清（已提示）。
+5. **让 `ponyllm status` 汇总 scoped key 数量**——暂缓：`ponyllm keys list`
+   已覆盖；status 属 P3 打磨项（红队 F6 同族）。
+6. **立即补 Web 端 strict 预检（前端探测 401 提示换 key）**——暂缓：
+   task-22 已做版本变更强制 logout + 401/403 文案分流；strict 收敛前
+   必须先做 staging 演练，前端预检属演练配套。
+
+## Consequences
+
+- 现网处于 `dual`：legacy token 全权 + 1 个 `agent-1`(inference) 可用，
+  4 个测试 key 已吊销；配置备份可回滚。
+- 遗留（P3，按优先级）：
+  1. `strict` + 无 admin scoped key 的启动护栏（防再次自锁）；
+  2. 收敛前必须 staging 演练 RTO（契约 P2 原意）；
+  3. `serve` banner / `ponyllm status` 明文回显收敛（红队 F6）；
+  4. `pending` 端点 AdminRead 可读性复核（红队 F7）；
+  5. 审计持久化（P1 契约留的口子）。
+- 机器可查：`cargo test -p ponyllm-server`（191）+ 本报告矩阵可重跑；
+  事故与演练结论为 review 项（无自动化门禁可覆盖"运营窗口"）。

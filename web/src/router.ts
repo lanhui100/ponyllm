@@ -80,17 +80,22 @@ export async function probeOpenMode(): Promise<boolean> {
 router.beforeEach(async (to) => {
   const session = useSessionStore();
 
-  // 检查 URL 是否携带 token 或 key 参数实现直接授权直达
+  // P2 (?token= 收敛): URL token 不再静默登录——服务端早已不认 query 凭证
+  // (app.rs 只读 Authorization/x-api-key 头)，且 query 会进历史/书签/代理日志。
+  // 此处只做 query 清洗并放行到 Connect，由 Connect 预填表单 + 用户显式点
+  // "连接"完成鉴权探针；strict/dual 语义由服务端探针 verdict 统一裁决。
+  // NOTE: token 明文值只在内存中转一次，禁止 console.* / 日志落值。
   const rawToken = (to.query.token || to.query.key) as string | undefined;
   if (rawToken && typeof rawToken === 'string' && rawToken.trim() !== '') {
-    session.login(rawToken.trim());
     const nextQuery = { ...to.query };
     delete nextQuery.token;
     delete nextQuery.key;
-    const targetPath = to.path === '/connect' || to.path === '/' || to.path === '/app' ? '/dashboard' : to.path;
+    if (to.path === '/connect') {
+      return { path: '/connect', query: nextQuery, replace: true };
+    }
     return {
-      path: targetPath,
-      query: nextQuery,
+      path: '/connect',
+      query: { ...nextQuery, redirect: to.fullPath.split('?')[0] },
       replace: true,
     };
   }

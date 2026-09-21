@@ -1594,5 +1594,124 @@ async fn test_model_specific_base_url_routing() {
     assert_eq!(def_target.chat_completions_url(), "https://provider.example.com/v1/chat/completions");
 }
 
+#[test]
+fn test_deepseek_v41_flash_alias_routes_to_live_upstream_name() {
+    use ponyllm_server::{AppState, GatewayConfig, ProviderConfig, ModelSpec};
+
+    let mut config = GatewayConfig::default();
+    config.providers.insert(
+        "deepseek".to_string(),
+        ProviderConfig {
+            base_url: "https://api.deepseek.com".to_string(),
+            default_model: "deepseek-flash".to_string(),
+            models: vec!["deepseek-flash".to_string()],
+            model_specs: vec![ModelSpec {
+                name: "deepseek-flash".to_string(),
+                context_window: "1M".to_string(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        },
+    );
+    let state = AppState::new(config);
+
+    // Alias resolves to the live upstream name for failover + wire model.
+    let targets = state
+        .resolve_routed_targets(&ParsedRequestModel::parse("deepseek-v4.1-flash"), None)
+        .expect("alias must resolve");
+    assert_eq!(targets[0].provider_name, "deepseek");
+    assert_eq!(targets[0].physical_model, "deepseek-flash");
+
+    // Explicit config entry still wins over the alias (never shadow config).
+    let mut config2 = GatewayConfig::default();
+    config2.providers.insert(
+        "deepseek".to_string(),
+        ProviderConfig {
+            base_url: "https://api.deepseek.com".to_string(),
+            default_model: "deepseek-flash".to_string(),
+            models: vec!["deepseek-flash".to_string(), "deepseek-v4.1-flash".to_string()],
+            ..Default::default()
+        },
+    );
+    let state2 = AppState::new(config2);
+    let targets2 = state2
+        .resolve_routed_targets(&ParsedRequestModel::parse("deepseek-v4.1-flash"), None)
+        .expect("explicit entry must resolve");
+    assert_eq!(targets2[0].physical_model, "deepseek-v4.1-flash");
+
+    // Alias is listed for discovery, with its [1m] variant.
+    let models = state.list_all_models();
+    assert!(models.iter().any(|(m, p, _, _)| m == "deepseek-v4.1-flash" && p == "deepseek"));
+    assert!(models.iter().any(|(m, p, _, _)| m == "deepseek-v4.1-flash[1m]" && p == "deepseek"));
+}
+
+#[tokio::test]
+async fn test_deepseek_v41_flash_alias_echo_and_wire_model() {
+    // Mock upstream asserts it receives the live name, never the retired alias.
+    let mock_upstream = Router::new().route(
+        "/v1/chat/completions",
+        post(|Json(req): Json<serde_json::Value>| async move {
+            let upstream_model = req["model"].as_str().unwrap_or_default().to_string();
+            assert_eq!(upstream_model, "deepseek-flash");
+            axum::Json(json!({
+                "id": "chatcmpl-alias-1",
+                "object": "chat.completion",
+                "created": 1710000000,
+                "model": upstream_model,
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "alias ok"},
+                    "finish_reason": "stop"
+                }],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+            }))
+        }),
+    );
+    let upstream_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_addr = upstream_listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(upstream_listener, mock_upstream).await.unwrap();
+    });
+
+    let pool = Arc::new(KeyPool::new("deepseek", RoutingStrategy::RoundRobin));
+    pool.add_key(ApiKeyEntry::new("ds-k1", "sk-ds-key", 1, 10));
+    let mut config = GatewayConfig::default();
+    config.providers.insert(
+        "deepseek".to_string(),
+        ProviderConfig {
+            base_url: format!("http://{}", upstream_addr),
+            default_model: "deepseek-flash".to_string(),
+            models: vec!["deepseek-flash".to_string()],
+            ..Default::default()
+        },
+    );
+    let state = Arc::new(AppState::new(config));
+    state.register_pool("deepseek", pool);
+    let app = create_app(state);
+    let gw = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let gw_addr = gw.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(gw, app).await.unwrap();
+    });
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://{}/v1/chat/completions", gw_addr))
+        .json(&json!({
+            "model": "deepseek-v4.1-flash",
+            "messages": [{"role": "user", "content": "hi"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(
+        resp.headers().get("x-ponyllm-routed-model").unwrap().to_str().unwrap(),
+        "deepseek-flash"
+    );
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["model"], "deepseek-v4.1-flash");
+}
+
 
 

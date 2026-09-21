@@ -92,43 +92,45 @@ fn allowed_headers() -> Vec<axum::http::HeaderName> {
 /// WEB-01 acceptance greps this exact string (stderr + log).
 pub const WEB_DIST_MISSING_WARN: &str = "[web] web/dist 缺失，Web 控制台未托管（网关转发不受影响）；用 `--no-web` 可显式关闭";
 
-/// Constant-time byte slice comparison to eliminate timing side-channels in token verification.
-#[inline]
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0
-}
-
 async fn auth_middleware(
     State(state): State<Arc<AppState>>,
     req: Request,
     next: Next,
 ) -> Response {
-    let path = req.uri().path();
+    use crate::auth::{authenticate, classify_resource, scope_allows, AuthVerdict, Resource};
+    use ponyllm_config::AuthCompat;
+
+    let method = req.method().as_str().to_string();
+    let path = req.uri().path().to_string();
+    let query = req.uri().query().map(|q| q.to_string());
     // /health and /oauth2callback endpoints are exempt from authentication
     if path == "/health" || path == "/oauth2callback" {
         return next.run(req).await;
     }
 
-    let expected_key = {
+    let (legacy_key, entries, compat) = {
         let cfg = state.config.read();
-        cfg.api_key.trim().to_string()
+        (
+            cfg.api_key.trim().to_string(),
+            cfg.gateway_keys.clone(),
+            cfg.auth_compat,
+        )
     };
-    // If api_key is not configured, is empty or set to "none", allow all requests
-    if expected_key.is_empty() || expected_key.eq_ignore_ascii_case("none") {
+    // Open mode (empty/`none` legacy key AND no scoped keys): unchanged P0
+    // behavior — allow all (non-loopback binds are refused at startup by
+    // `validate_bind_auth_combo`).
+    let open = (legacy_key.is_empty() || legacy_key.eq_ignore_ascii_case("none")) && entries.is_empty();
+    if open {
         return next.run(req).await;
     }
 
     let headers = req.headers();
 
-    // 1. Check Authorization: Bearer <token> (scheme is case-insensitive per RFC 6750) or plain token
-    let mut provided_token = None;
+    // Extract the presented credential: `Authorization: Bearer <token>`
+    // (scheme case-insensitive), bare Authorization value, or `x-api-key`.
+    // P0 G3 is preserved as the strict bare-token rule below.
+    let mut provided_token: Option<&str> = None;
+    let mut is_bare_token = false;
     if let Some(auth_val) = headers.get("authorization").and_then(|v| v.to_str().ok()) {
         let trimmed = auth_val.trim();
         let lower = trimmed.to_ascii_lowercase();
@@ -136,35 +138,51 @@ async fn auth_middleware(
             provided_token = Some(trimmed[7..].trim());
         } else {
             provided_token = Some(trimmed);
+            is_bare_token = true;
         }
     }
-
-    // 2. Check X-Api-Key: <token>
     if provided_token.is_none() {
         if let Some(key_val) = headers.get("x-api-key").and_then(|v| v.to_str().ok()) {
             provided_token = Some(key_val.trim());
         }
     }
 
-    // Validate token using constant-time comparison to prevent timing side-channel attacks
-    if let Some(token) = provided_token {
-        if constant_time_eq(token.as_bytes(), expected_key.as_bytes()) {
-            return next.run(req).await;
-        }
+    let strict = matches!(compat, AuthCompat::Strict);
+    // P0 G3: strict rejects bare tokens even when the value is otherwise
+    // correct — clients must send `Authorization: Bearer <token>`.
+    // (`x-api-key` carries equal rights in both modes, never tightened.)
+    if strict && is_bare_token {
+        return crate::auth::unauthorized("Bare token rejected in strict mode; send `Authorization: Bearer <token>`. Legacy token disabled; re-issue a scoped key.");
     }
 
-    // 4. Unauthorized rejection
-    (
-        StatusCode::UNAUTHORIZED,
-        Json(json!({
-            "error": {
-                "message": "Incorrect API key provided or missing authorization header. Please provide a valid Bearer token or x-api-key.",
-                "type": "invalid_request_error",
-                "code": "invalid_api_key"
+    let Some(token) = provided_token.filter(|t| !t.is_empty()) else {
+        return crate::auth::invalid_api_key();
+    };
+
+    match authenticate(token, &entries, &legacy_key, strict) {
+        AuthVerdict::Invalid => crate::auth::invalid_api_key(),
+        AuthVerdict::LegacyDisabled => crate::auth::legacy_disabled(),
+        AuthVerdict::Allowed { scope, .. } => {
+            let resource = classify_resource(&method, &path, query.as_deref());
+            if matches!(resource, Resource::Exempt) {
+                return next.run(req).await;
             }
-        })),
-    )
-        .into_response()
+            if scope_allows(scope, resource) {
+                next.run(req).await
+            } else {
+                let name = match resource {
+                    Resource::Inference => "inference",
+                    Resource::AdminRead => "admin-read",
+                    Resource::AdminWrite => "admin-write",
+                    Resource::TeleFull => "telemetry-full",
+                    Resource::TeleSummary => "telemetry-summary",
+                    Resource::Quota => "quota",
+                    Resource::Exempt => "exempt",
+                };
+                crate::auth::forbidden(name)
+            }
+        }
+    }
 }
 
 pub fn create_app(state: Arc<AppState>) -> Router {

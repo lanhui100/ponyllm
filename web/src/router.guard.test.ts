@@ -160,13 +160,39 @@ describe('URL token direct authorization', () => {
     window.sessionStorage.clear();
   });
 
-  it('router navigation with ?token= extracts token and cleans query', async () => {
+  it('P2: ?token= no longer logs in silently (prefill-confirm convergence)', async () => {
     const session = useSessionStore();
     expect(session.token).toBe('');
     await router.push('/?token=my-secret-token');
-    expect(session.token).toBe('my-secret-token');
-    expect(router.currentRoute.value.path).toBe('/dashboard');
+    // P2 收敛：守卫只清洗 query 并转到 /connect，不再静默 login。
+    expect(session.token).toBe('');
+    expect(router.currentRoute.value.path).toBe('/connect');
     expect(router.currentRoute.value.query.token).toBeUndefined();
+  });
+
+  it('P2: ?key= alias converges the same way', async () => {
+    const session = useSessionStore();
+    await router.push('/dashboard?key=alias-secret');
+    expect(session.token).toBe('');
+    expect(router.currentRoute.value.path).toBe('/connect');
+    expect(router.currentRoute.value.query.key).toBeUndefined();
+  });
+
+  it('P2: logoutIfGatewayUpgraded wipes session only on version change', () => {
+    const session = useSessionStore();
+    session.login('sk-pony-admin-aaa');
+    // First sight records the version, no wipe.
+    expect(session.logoutIfGatewayUpgraded('1.2.3')).toBe(false);
+    expect(session.token).toBe('sk-pony-admin-aaa');
+    // Same version: no wipe.
+    expect(session.logoutIfGatewayUpgraded('1.2.3')).toBe(false);
+    expect(session.token).toBe('sk-pony-admin-aaa');
+    // New release: forced logout.
+    expect(session.logoutIfGatewayUpgraded('1.3.0')).toBe(true);
+    expect(session.token).toBe('');
+    expect(window.sessionStorage.getItem('ponyllm_session_token')).toBeNull();
+    // Version pin advanced to the new release.
+    expect(window.sessionStorage.getItem('ponyllm_gateway_version')).toBe('1.3.0');
   });
 
   it('page refresh preserves token from sessionStorage', async () => {

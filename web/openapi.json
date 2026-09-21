@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "ponyllm-server",
-    "description": "Axum HTTP and SSE gateway service for ponyllm",
+    "description": "ponyllm gateway admin API. Auth: `Authorization: Bearer <gateway-key>` or `x-api-key: <gateway-key>`. `?token=` query auth is deprecated: it leaks credentials into logs/bookmarks and is disabled in `strict` mode (P2); use header auth. Rotate: `POST /api/admin/auth/rotate` (200 one-time plaintext; 401 invalid key; 404 admin-write disabled; 409 open mode has no credential).",
     "contact": {
       "name": "ponyllm team"
     },
@@ -27,6 +27,129 @@
                 }
               }
             }
+          },
+          "401": {
+            "description": "invalid gateway key (current 401 envelope)"
+          },
+          "404": {
+            "description": "admin write channel disabled (`admin_write_disabled`)"
+          },
+          "409": {
+            "description": "open mode has no credential to rotate (`open_mode_no_credential`)"
+          }
+        }
+      }
+    },
+    "/api/admin/gateway-keys": {
+      "get": {
+        "tags": [],
+        "operationId": "handle_gateway_keys_list",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/GatewayKeyView"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "invalid gateway key (current 401 envelope)"
+          },
+          "403": {
+            "description": "insufficient scope (`forbidden`)"
+          },
+          "404": {
+            "description": "admin write channel disabled (`admin_write_disabled`)"
+          }
+        }
+      },
+      "post": {
+        "tags": [],
+        "operationId": "handle_gateway_keys_issue",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IssueGatewayKeyPayload"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IssueGatewayKeyResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "bad id / scope / expiry"
+          },
+          "401": {
+            "description": "invalid gateway key (current 401 envelope)"
+          },
+          "403": {
+            "description": "insufficient scope (`forbidden`)"
+          },
+          "404": {
+            "description": "admin write channel disabled (`admin_write_disabled`)"
+          },
+          "409": {
+            "description": "key id already exists (`gateway_key_already_exists`)"
+          },
+          "412": {
+            "description": "missing/conflicting If-Match (`precondition_failed`)"
+          }
+        }
+      }
+    },
+    "/api/admin/gateway-keys/{id}/revoke": {
+      "post": {
+        "tags": [],
+        "operationId": "handle_gateway_keys_revoke",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GatewayKeyView"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "invalid gateway key (current 401 envelope)"
+          },
+          "403": {
+            "description": "insufficient scope (`forbidden`)"
+          },
+          "404": {
+            "description": "admin write channel disabled (`admin_write_disabled`) or unknown id (`gateway_key_not_found`)"
+          },
+          "412": {
+            "description": "missing/conflicting If-Match (`precondition_failed`)"
           }
         }
       }
@@ -576,6 +699,62 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ProxyStatusView"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/quota": {
+      "get": {
+        "tags": [],
+        "summary": "Read-only quota snapshot for agents (`GET /api/admin/quota`).",
+        "description": "Default is pure in-memory (key state + cooldown from the live pools):\nzero upstream calls, zero config writes. `refresh=true` additionally\nprobes Antigravity keys via the same egress-gated `fetch_quota` path as\nthe key dial-test; a probe failure degrades to `stale=true` memory state\ninstead of failing the request. Never emits key material.",
+        "operationId": "handle_admin_quota",
+        "parameters": [
+          {
+            "name": "provider",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "key_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "refresh",
+            "in": "path",
+            "description": "`true` = allow one Antigravity upstream quota probe per key\n(15s built-in timeout, egress-gated, failure is silent `stale`).\nDefault `false` = pure in-memory, zero upstream calls.",
+            "required": true,
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/QuotaKeyView"
+                  }
                 }
               }
             }
@@ -1248,6 +1427,102 @@
           }
         }
       },
+      "GatewayKeyView": {
+        "type": "object",
+        "description": "Read-only projection of one scoped gateway credential.\n\nNever contains the plaintext, the salt, or the hash — only the operator\nidentification fields (`prefix` + `last4`) plus lifecycle state.",
+        "required": [
+          "id",
+          "scope",
+          "prefix",
+          "last4",
+          "revoked",
+          "config_version"
+        ],
+        "properties": {
+          "config_version": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "expires_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "id": {
+            "type": "string"
+          },
+          "last4": {
+            "type": "string"
+          },
+          "prefix": {
+            "type": "string"
+          },
+          "revoked": {
+            "type": "boolean"
+          },
+          "scope": {
+            "type": "string"
+          }
+        }
+      },
+      "IssueGatewayKeyPayload": {
+        "type": "object",
+        "required": [
+          "id",
+          "scope"
+        ],
+        "properties": {
+          "expires_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "id": {
+            "type": "string"
+          },
+          "scope": {
+            "type": "string"
+          }
+        }
+      },
+      "IssueGatewayKeyResponse": {
+        "type": "object",
+        "description": "One-time issuance response: `api_key` is plaintext ONLY here (plus\n`Cache-Control: no-store`); the server persists hash + salt + `last4`.",
+        "required": [
+          "id",
+          "scope",
+          "api_key",
+          "config_version"
+        ],
+        "properties": {
+          "api_key": {
+            "type": "string"
+          },
+          "config_version": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "expires_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "id": {
+            "type": "string"
+          },
+          "scope": {
+            "type": "string"
+          }
+        }
+      },
       "KeyTestView": {
         "type": "object",
         "required": [
@@ -1478,11 +1753,16 @@
           "strategy",
           "hot_reload_ms",
           "admin_write_enabled",
-          "config_version"
+          "config_version",
+          "auth_compat"
         ],
         "properties": {
           "admin_write_enabled": {
             "type": "boolean"
+          },
+          "auth_compat": {
+            "type": "string",
+            "description": "Auth compatibility mode (`legacy-only|dual|strict`). Surfaced so the\nconsole can warn before a `strict` switch locks out legacy-only clients."
           },
           "auth_mode": {
             "type": "string"
@@ -1635,6 +1915,77 @@
         ],
         "properties": {
           "strategy": {
+            "type": "string"
+          }
+        }
+      },
+      "QuotaKeyView": {
+        "type": "object",
+        "required": [
+          "provider",
+          "key_id",
+          "state",
+          "source"
+        ],
+        "properties": {
+          "cooldown_remaining_secs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Seconds left in the current cooldown (only while `cooling_down`).",
+            "minimum": 0
+          },
+          "cooldown_reset_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Wall-clock instant the key is expected to recover, RFC 3339 UTC."
+          },
+          "key_id": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "quota": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/AntigravityQuotaItemView"
+            },
+            "description": "Antigravity per-model remaining fractions (refresh hit only)."
+          },
+          "quota_groups": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/AntigravityQuotaGroupView"
+            },
+            "description": "Antigravity 5h/weekly buckets (refresh hit only)."
+          },
+          "schedulable": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether the key may receive traffic now (`None` = unknown/probe path)."
+          },
+          "source": {
+            "type": "string",
+            "description": "Quota signal lineage (v2 §4, frozen wording): `buckets` (antigravity\nrefresh hit) / `probe_only` (in-memory state+cooldown) / `unknown`."
+          },
+          "stale": {
+            "type": "boolean",
+            "description": "True when the refresh probe failed and only memory state is served."
+          },
+          "state": {
             "type": "string"
           }
         }
@@ -1976,6 +2327,18 @@
           }
         }
       }
+    },
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "ponyllm gateway API key"
+      }
     }
-  }
+  },
+  "security": [
+    {
+      "bearerAuth": []
+    }
+  ]
 }

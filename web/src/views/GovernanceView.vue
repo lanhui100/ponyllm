@@ -5,6 +5,7 @@ import { onStopPolling } from '../router';
 import NavBar from '../components/NavBar.vue';
 import ProviderCard from '../components/governance/ProviderCard.vue';
 import StrategySection from '../components/governance/StrategySection.vue';
+import CredentialsSection from '../components/governance/CredentialsSection.vue';
 import GovernanceSkeleton from '../components/GovernanceSkeleton.vue';
 import KeySecretModal from '../components/governance/KeySecretModal.vue';
 import ConflictModal from '../components/governance/ConflictModal.vue';
@@ -25,6 +26,7 @@ const {
   configVersion,
   loading,
   error,
+  overview,
   adminWriteEnabled,
   conflictDetected,
   createdKeyResult,
@@ -54,8 +56,11 @@ const {
   authorizeAntigravity,
 } = useAdminConfig({ autoFetch: true });
 
-type TabType = 'providers' | 'strategy';
+type TabType = 'providers' | 'strategy' | 'credentials';
 const currentTab = ref<TabType>('providers');
+
+/** Auth compatibility mode echo (F4 banner): surfaces `strict` before it locks out legacy clients. */
+const authCompat = computed(() => overview.value?.auth_compat ?? 'dual');
 
 /**
  * 首屏骨架：首次加载且列表仍空、无错误时展示。
@@ -956,6 +961,16 @@ onUnmounted(() => {
         >
           全局策略
         </button>
+
+        <button
+          type="button"
+          class="px-4 py-2 text-[14px] font-medium rounded-lg transition-colors cursor-pointer"
+          :class="currentTab === 'credentials' ? 'bg-white/70 shadow-2xs text-slate-950 font-semibold border border-white/60 backdrop-blur-xs' : 'text-slate-600 hover:text-slate-900 hover:bg-white/30'"
+          data-testid="tab-credentials"
+          @click="currentTab = 'credentials'"
+        >
+          网关凭证
+        </button>
       </div>
 
       <!-- 首屏骨架（仅初始加载且无数据时，避免误报空态） -->
@@ -1004,6 +1019,15 @@ onUnmounted(() => {
           :current-strategy="strategy"
           :admin-write-enabled="adminWriteEnabled"
           @update="saveStrategy"
+        />
+      </div>
+
+      <!-- Credentials Tab：网关分级凭证治理 -->
+      <div v-else-if="currentTab === 'credentials'">
+        <CredentialsSection
+          :admin-write-enabled="adminWriteEnabled"
+          :auth-compat="authCompat"
+          @notice="showToast"
         />
       </div>
     </main>

@@ -21,6 +21,9 @@ import type {
   AuthorizeAntigravityResponse,
   ProxyStatusView,
   UpstreamModelsView,
+  GatewayKeyView,
+  IssueGatewayKeyPayload,
+  IssueGatewayKeyResponse,
 } from '../types/admin';
 
 export function ifMatchHeaders(version?: number | string): Record<string, string> {
@@ -64,6 +67,11 @@ export const adminApi = {
 
   getStrategy() {
     return alova.Get<StrategyView>('/api/admin/strategy');
+  },
+
+  /** Scoped gateway credentials (task-28). AdminRead: inference callers get 403. */
+  getGatewayKeys() {
+    return alova.Get<GatewayKeyView[]>('/api/admin/gateway-keys');
   },
 
   // Write APIs (With optional If-Match optimistic concurrency headers)
@@ -142,6 +150,22 @@ export const adminApi = {
     return alova.Put<StrategyView>('/api/admin/strategy', payload, {
       headers: ifMatchHeaders(ifMatchVersion),
     });
+  },
+
+  /** Issue a scoped gateway key: plaintext returned ONCE (no-store server side). */
+  issueGatewayKey(payload: IssueGatewayKeyPayload, ifMatchVersion?: number | string) {
+    return alova.Post<IssueGatewayKeyResponse>('/api/admin/gateway-keys', payload, {
+      headers: ifMatchHeaders(ifMatchVersion),
+    });
+  },
+
+  /** Revoke (soft delete, idempotent): the key fails closed immediately. */
+  revokeGatewayKey(id: string, ifMatchVersion?: number | string) {
+    return alova.Post<GatewayKeyView>(
+      `/api/admin/gateway-keys/${encodeURIComponent(id)}/revoke`,
+      {},
+      { headers: ifMatchHeaders(ifMatchVersion) },
+    );
   },
 
   getAntigravityAuthUrl(redirectUri?: string, state?: string) {

@@ -12,6 +12,6 @@ pub use pool::*;
 pub use executor::*;
 pub use telemetry::*;
 pub use discovery::{resolve_config_path, resolve_config_path_from};
-pub use endpoints::{normalize_chat_completions_url, normalize_messages_url, normalize_responses_url};
+pub use endpoints::{canonicalize_model_name, model_aliases, normalize_chat_completions_url, normalize_messages_url, normalize_responses_url};
 
 

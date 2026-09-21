@@ -62,6 +62,16 @@
             </div>
           </div>
 
+          <div v-if="upgradedNotice" class="p-2.5 rounded-lg bg-amber-50 border border-amber-200/60 text-xs text-amber-700 flex items-start gap-2 animate-in fade-in duration-200">
+            <Icons name="info" size="14" class="mt-0.5 shrink-0 text-amber-500" />
+            <span class="leading-relaxed">网关已发版，旧会话已清除，请重新连接。</span>
+          </div>
+
+          <div v-if="prefilledNotice" class="p-2.5 rounded-lg bg-sky-50 border border-sky-200/60 text-xs text-sky-700 flex items-start gap-2 animate-in fade-in duration-200">
+            <Icons name="info" size="14" class="mt-0.5 shrink-0 text-sky-500" />
+            <span class="leading-relaxed">已从链接预填凭证（未自动登录，URL token 不再直达），请点"连接"完成验证。strict 模式下旧版单 token 将被拒绝，请使用分级 key（<span class="font-mono">ponyllm keys issue --scope &lt;admin|inference|readonly&gt;</span>）。</span>
+          </div>
+
           <div v-if="error" class="p-2.5 rounded-lg bg-rose-50 border border-rose-200/60 text-xs text-rose-600 flex items-start gap-2 animate-in fade-in duration-200">
             <Icons name="info" size="14" class="mt-0.5 shrink-0 text-rose-500" />
             <span class="error leading-relaxed">{{ error }}</span>
@@ -104,15 +114,30 @@ const input = ref('');
 const error = ref('');
 const loading = ref(false);
 const openMode = ref(false);
+// P2: ?token= 预填提示（不再静默直达）与发版强制 logout 提示。
+const prefilledNotice = ref(false);
+const upgradedNotice = ref(false);
 const route = useRoute();
 const router = useRouter();
 const session = useSessionStore();
 
 onMounted(async () => {
+  // P2 发版强制 logout: /health 免鉴权，取服务端版本比对；版本变更则清会话。
+  try {
+    const health = await fetch('/health');
+    const body = (await health.json().catch(() => null)) as { version?: unknown } | null;
+    const ver = typeof body?.version === 'string' ? body.version : '';
+    if (ver !== '' && session.logoutIfGatewayUpgraded(ver)) {
+      upgradedNotice.value = true;
+    }
+  } catch {
+    // 网关不可达时不强制 logout，探针/表单提交会给出 DOWN/不可达态。
+  }
   const qToken = (route.query.token || route.query.key) as string | undefined;
   if (qToken && typeof qToken === 'string' && qToken.trim() !== '') {
+    // P2: 只预填、不自动 submit。query 清洗由 router 守卫完成。
     input.value = qToken.trim();
-    await submit();
+    prefilledNotice.value = true;
     return;
   }
   // If navigating to /connect explicitly without token in URL, clear any stale session
@@ -153,8 +178,13 @@ async function submit(): Promise<void> {
     });
     // Tight: only 2xx logs in (P1-4). 401 => bad token; anything else (403/404/
     // 500) surfaces its status instead of silently "succeeding".
+    // P2: 403 => scoped key 角色不足（换高权 key）；401 文案带 strict 指引。
     if (resp.status === 401) {
-      error.value = 'Token 无效（401）';
+      error.value = 'Token 无效（401）。若网关已切 strict 模式，旧版单 token 会被拒绝，请改用分级 key（ponyllm keys issue --scope <admin|inference|readonly>）。';
+      return;
+    }
+    if (resp.status === 403) {
+      error.value = '权限不足（403）：该 key 作用域不够，请更换高权限 key 后重试。';
       return;
     }
     if (!resp.ok) {

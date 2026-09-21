@@ -19,6 +19,28 @@ pub fn normalize_messages_url(base_url: &str) -> String {
     normalize_endpoint_url(base_url, "messages")
 }
 
+/// Canonical upstream model name for known retired/renamed aliases.
+///
+/// DeepSeek's live API name is `deepseek-flash` (`deepseek-v4.1-flash` was
+/// never a valid upstream name and is rejected with 400). Normalize the alias
+/// centrally so the gateway and the embedded SDK route identically.
+pub fn canonicalize_model_name(model: &str) -> String {
+    if model.eq_ignore_ascii_case("deepseek-v4.1-flash") {
+        "deepseek-flash".to_string()
+    } else {
+        model.to_string()
+    }
+}
+
+/// Client-facing aliases exposed in `/v1/models` for a canonical model name.
+pub fn model_aliases(canonical: &str) -> &'static [&'static str] {
+    if canonical.eq_ignore_ascii_case("deepseek-flash") {
+        &["deepseek-v4.1-flash"]
+    } else {
+        &[]
+    }
+}
+
 fn normalize_endpoint_url(base_url: &str, leaf: &str) -> String {
     let trimmed = base_url.trim_end_matches('/');
     let suffix = format!("/{}", leaf);
@@ -71,5 +93,15 @@ mod tests {
             normalize_messages_url("https://x.example.com/v1/messages"),
             "https://x.example.com/v1/messages"
         );
+    }
+
+    #[test]
+    fn test_deepseek_v41_flash_alias_canonicalizes() {
+        assert_eq!(canonicalize_model_name("deepseek-v4.1-flash"), "deepseek-flash");
+        assert_eq!(canonicalize_model_name("DeepSeek-V4.1-Flash"), "deepseek-flash");
+        assert_eq!(canonicalize_model_name("deepseek-flash"), "deepseek-flash");
+        assert_eq!(canonicalize_model_name("deepseek-chat"), "deepseek-chat");
+        assert!(model_aliases("deepseek-flash").contains(&"deepseek-v4.1-flash"));
+        assert!(model_aliases("deepseek-chat").is_empty());
     }
 }

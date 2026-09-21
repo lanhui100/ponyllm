@@ -8,6 +8,7 @@ use ponyllm_core::pool::{
     GatewayRoutingStrategy, HotCacheTracker, KeyPool, ModelTier, ModelThinkingSpec, NodeLatencyMetrics, PricingConfig,
     SpeedScorer, UpstreamProtocol,
 };
+use ponyllm_core::{canonicalize_model_name, model_aliases};
 
 use ponyllm_core::telemetry::{
     ConnectivitySampler, EventBus, EventCtx, MetricsCollector, MetricsProjection,
@@ -901,9 +902,11 @@ impl AppState {
         inbound: Option<UpstreamProtocol>,
     ) -> Result<Vec<RoutedTarget>> {
         let clean = &parsed.clean_model_name;
+        let canonical = canonicalize_model_name(clean);
+        let effective = canonical.as_str();
         let mut candidates = Vec::new();
 
-        // 1. Match exact model name across all providers
+        // 1. Match exact model name across all providers (alias never shadows config)
         for (p_name, p_cfg) in &config.providers {
             if p_cfg.default_model == *clean || p_cfg.models.iter().any(|m| m == clean) {
                 let spec = p_cfg.get_model_spec(clean);
@@ -932,20 +935,54 @@ impl AppState {
             }
         }
 
+        // 1b. Canonical alias fallback: retired/renamed request names map to the
+        // live upstream name (e.g. deepseek-v4.1-flash -> deepseek-flash).
+        if candidates.is_empty() && effective != clean.as_str() {
+            for (p_name, p_cfg) in &config.providers {
+                if p_cfg.default_model == effective || p_cfg.models.iter().any(|m| m == effective) {
+                    let spec = p_cfg.get_model_spec(effective);
+                    let thinking_spec = spec.thinking_spec();
+                    let pricing = p_cfg.get_model_pricing(effective);
+                    let billing_mode = p_cfg.get_model_billing_mode(effective);
+                    let (protocol, endpoint_base) =
+                        resolve_effective_protocol(p_name, p_cfg, effective, proto_override, inbound);
+                    candidates.push(RoutedTarget {
+                        provider_name: p_name.clone(),
+                        base_url: spec.base_url.clone().unwrap_or_else(|| p_cfg.base_url.clone()),
+                        physical_model: effective.to_string(),
+                        tier: spec.tier,
+                        strategy,
+                        upstream_protocol: protocol,
+                        endpoint_base,
+                        context_window: spec.context_window,
+                        billing_mode,
+                        pricing,
+                        thinking_spec,
+                        temperature: spec.temperature,
+                        top_p: spec.top_p,
+                        input_types: spec.input_types,
+                        max_output: spec.max_output,
+                    });
+                }
+            }
+        }
+
         // 2. Prefix matching (e.g. "deepseek/deepseek-chat")
         if candidates.is_empty() {
             if let Some((prefix, sub_model)) = clean.split_once('/') {
+                let sub_canonical = canonicalize_model_name(sub_model);
+                let sub_effective = sub_canonical.as_str();
                 if let Some(p_cfg) = config.providers.get(prefix) {
-                    let spec = p_cfg.get_model_spec(sub_model);
+                    let spec = p_cfg.get_model_spec(sub_effective);
                     let thinking_spec = spec.thinking_spec();
-                    let pricing = p_cfg.get_model_pricing(sub_model);
-                    let billing_mode = p_cfg.get_model_billing_mode(sub_model);
+                    let pricing = p_cfg.get_model_pricing(sub_effective);
+                    let billing_mode = p_cfg.get_model_billing_mode(sub_effective);
                     let (protocol, endpoint_base) =
-                        resolve_effective_protocol(prefix, p_cfg, sub_model, proto_override, inbound);
+                        resolve_effective_protocol(prefix, p_cfg, sub_effective, proto_override, inbound);
                     candidates.push(RoutedTarget {
                         provider_name: prefix.to_string(),
                         base_url: spec.base_url.clone().unwrap_or_else(|| p_cfg.base_url.clone()),
-                        physical_model: sub_model.to_string(),
+                        physical_model: sub_effective.to_string(),
                         tier: spec.tier,
                         strategy,
                         upstream_protocol: protocol,
@@ -965,23 +1002,23 @@ impl AppState {
 
         // 3. Keyword heuristic matching
         if candidates.is_empty() {
-            let lower = clean.to_lowercase();
+            let lower = effective.to_lowercase();
             for (p_name, p_cfg) in &config.providers {
                 if lower.contains(p_name)
                     || (p_name == "openai" && (lower.starts_with("gpt") || lower.starts_with("o1") || lower.starts_with("o3")))
                     || (p_name == "anthropic" && lower.starts_with("claude"))
                     || (p_name == "deepseek" && lower.starts_with("deepseek"))
                 {
-                    let spec = p_cfg.get_model_spec(clean);
+                    let spec = p_cfg.get_model_spec(effective);
                     let thinking_spec = spec.thinking_spec();
-                    let pricing = p_cfg.get_model_pricing(clean);
-                    let billing_mode = p_cfg.get_model_billing_mode(clean);
+                    let pricing = p_cfg.get_model_pricing(effective);
+                    let billing_mode = p_cfg.get_model_billing_mode(effective);
                     let (protocol, endpoint_base) =
-                        resolve_effective_protocol(p_name, p_cfg, clean, proto_override, inbound);
+                        resolve_effective_protocol(p_name, p_cfg, effective, proto_override, inbound);
                     candidates.push(RoutedTarget {
                         provider_name: p_name.clone(),
                         base_url: spec.base_url.clone().unwrap_or_else(|| p_cfg.base_url.clone()),
-                        physical_model: clean.clone(),
+                        physical_model: effective.to_string(),
                         tier: spec.tier,
                         strategy,
                         upstream_protocol: protocol,
@@ -1226,10 +1263,17 @@ impl AppState {
 
             if !cfg.default_model.is_empty() {
                 add_model_and_alias(&cfg.default_model);
+                let canonical = cfg.default_model.clone();
+                for alias in model_aliases(&canonical) {
+                    add_model_and_alias(alias);
+                }
             }
             for m in &cfg.models {
                 if m != &cfg.default_model {
                     add_model_and_alias(m);
+                    for alias in model_aliases(m) {
+                        add_model_and_alias(alias);
+                    }
                 }
             }
         }

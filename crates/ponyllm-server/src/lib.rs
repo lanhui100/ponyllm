@@ -4,6 +4,7 @@ pub mod config;
 pub mod state;
 pub mod routes;
 pub mod app;
+pub mod auth;
 pub mod streaming;
 pub mod extractors;
 pub mod frames;

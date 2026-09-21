@@ -10,8 +10,8 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use ponyllm_core::pool::{ApiKeyEntry, GatewayRoutingStrategy, KeyPool, RoutingStrategy};
 use ponyllm_server::{create_app, AppState, GatewayConfig, ProviderConfig};
 use ponyllm_cli::cli::{
-    format_web_status_url, Cli, Commands, KeyCommands, ModelCommands, ProviderCommands,
-    StrategyCommands,
+    format_web_status_url, Cli, Commands, KeyCommands, KeysCommands, ModelCommands,
+    ProviderCommands, StrategyCommands,
 };
 use ponyllm_cli::config::{
     generate_sample_config, generate_secure_api_key, parse_gateway_auth_action, ConfigFile,
@@ -70,6 +70,10 @@ fn build_gateway_config_and_pools(
     gw_config.upstream_timeout_secs = config_file.gateway.upstream_timeout_secs;
     gw_config.admin_write_enabled = config_file.gateway.admin_write_enabled;
     gw_config.telemetry_snapshot_path = config_file.gateway.telemetry_snapshot_path.clone();
+    // P0 auth_compat passthrough (disk format -> runtime config).
+    gw_config.auth_compat = config_file.gateway.auth_compat;
+    // P1 scoped gateway keys passthrough (disk format -> runtime config).
+    gw_config.gateway_keys = config_file.gateway.gateway_keys.clone();
 
     let mut pools = HashMap::new();
 
@@ -245,12 +249,22 @@ async fn run_server(opts: ServerOptions) -> Result<(), Box<dyn std::error::Error
         &config_file,
         Some(final_bind.clone()),
         opts.retries,
-        Some(final_api_key),
+        Some(final_api_key.clone()),
         // `--no-web` is a process-level switch: hot reload must not flip it
         // back on when the config file still says `web_enabled = true`.
         opts.no_web.then_some(false),
         opts.web_dist_dir.clone(),
     );
+    // P0 open-mode guard (contract §4): open (empty/`none` key) on a
+    // non-loopback bind refuses to start (fail-fast, non-zero exit).
+    if let Err(reason) = ponyllm_config::validate_bind_auth_combo(
+        &final_bind,
+        &final_api_key,
+        config_file.gateway.auth_compat,
+    ) {
+        eprintln!("❌ {}", reason);
+        return Err(reason.into());
+    }
     if gw_config.telemetry_snapshot_path.is_none() {
         let snap = ponyllm_server::telemetry_snapshot::snapshot_path_for_config(
             None,
@@ -720,8 +734,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             KeyCommands::Test { provider, config } => {
                 handle_test_keys(provider, config).await?;
             }
-            KeyCommands::Gateway { config, key, rotate } => {
-                handle_manage_gateway_auth(config.as_deref(), key, rotate)?;
+            KeyCommands::Gateway { config, key, rotate, show } => {
+                handle_manage_gateway_auth(config.as_deref(), key, rotate, show)?;
             }
             KeyCommands::Auth {
                 provider,
@@ -973,9 +987,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("✅ 成功将全局默认调度策略切换为 '{}' ({}) 并已保存至 '{}'", strat, desc, resolved.display());
             }
         },
-        Commands::Auth { config, key, rotate } => {
-            handle_manage_gateway_auth(config.as_deref(), key, rotate)?;
+        Commands::Auth { config, key, rotate, show } => {
+            handle_manage_gateway_auth(config.as_deref(), key, rotate, show)?;
         }
+        Commands::Keys(cmd) => match cmd {
+            KeysCommands::List { config } => {
+                handle_gateway_keys_list(config.as_deref())?;
+            }
+            KeysCommands::Issue { scope, id, config } => {
+                handle_gateway_keys_issue(config.as_deref(), &scope, id.as_deref())?;
+            }
+            KeysCommands::Revoke { id, config } => {
+                handle_gateway_keys_revoke(config.as_deref(), &id)?;
+            }
+        },
         Commands::Tui { config, gateway_url } => {
             let resolved = resolve_path(config.as_deref());
             let path = resolved.to_str().unwrap_or("ponyllm.toml");
@@ -1107,6 +1132,7 @@ fn handle_manage_gateway_auth(
     config_path: Option<&str>,
     custom_key: Option<String>,
     rotate: bool,
+    show_plaintext: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let resolved = resolve_path(config_path);
     let path = resolved.to_str().unwrap_or("ponyllm.toml");
@@ -1131,12 +1157,15 @@ fn handle_manage_gateway_auth(
             return Ok(());
         }
         GatewayAuthAction::Show => {
-            let current_key = if cfg.gateway.api_key.is_empty()
-                || cfg.gateway.api_key.eq_ignore_ascii_case("none")
-            {
+            // P0: default masked display; `--show` reveals plaintext (contract §4).
+            let open_mode = cfg.gateway.api_key.is_empty()
+                || cfg.gateway.api_key.eq_ignore_ascii_case("none");
+            let current_key = if open_mode {
                 "免鉴权 (开放模式)".to_string()
-            } else {
+            } else if show_plaintext {
                 cfg.gateway.api_key.clone()
+            } else {
+                ConfigFile::mask_key(&cfg.gateway.api_key)
             };
 
             let host_port = if cfg.gateway.bind.starts_with("0.0.0.0") {
@@ -1196,6 +1225,11 @@ fn handle_manage_gateway_auth(
             println!("╚════════════════════════════════════════════════════════════════════════╝\n");
         }
         GatewayAuthAction::Set(new_key) => {
+            // P0 weak-key guard: refuse to persist `123456`-class secrets.
+            if let Err(reason) = ponyllm_config::validate_gateway_key_strength(&new_key) {
+                eprintln!("❌ {}", reason);
+                return Err(reason.into());
+            }
             cfg.gateway.api_key = new_key.clone();
             cfg.save_to_path(path)?;
 
@@ -1212,6 +1246,125 @@ fn handle_manage_gateway_auth(
         }
     }
 
+    Ok(())
+}
+
+/// List scoped gateway keys (P1): id/scope/prefix only, never plaintext.
+/// The legacy single `api_key` is shown as an implicit `admin` entry.
+fn handle_gateway_keys_list(config_path: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+    use ponyllm_cli::config::KeyScope;
+    let resolved = resolve_path(config_path);
+    let path = resolved.to_str().unwrap_or("ponyllm.toml");
+    let cfg = ConfigFile::load_or_default(Some(path).filter(|_| resolved.exists()))
+        .unwrap_or_default();
+    println!("=== 网关分级 Key（仅哈希存储，明文只在签发时显示一次） ===");
+    println!("{:<24} {:<10} {:<20} {:<10}", "ID", "SCOPE", "PREFIX", "STATUS");
+    println!("{}", "-".repeat(70));
+    let open = cfg.gateway.api_key.is_empty() || cfg.gateway.api_key.eq_ignore_ascii_case("none");
+    if !open {
+        println!(
+            "{:<24} {:<10} {:<20} {:<10}",
+            "(legacy api_key)",
+            KeyScope::Admin.as_str(),
+            "sk-pony-*",
+            "active"
+        );
+    }
+    for k in &cfg.gateway.gateway_keys {
+        let status = if k.revoked {
+            "revoked"
+        } else if let Some(exp) = k.expires_at {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            if now > exp {
+                "expired"
+            } else {
+                "active"
+            }
+        } else {
+            "active"
+        };
+        println!(
+            "{:<24} {:<10} {:<20} {:<10}",
+            k.id,
+            k.scope.as_str(),
+            format!("{}***", k.prefix),
+            status
+        );
+    }
+    if cfg.gateway.gateway_keys.is_empty() && open {
+        println!("(空：开放模式，无凭证)");
+    }
+    Ok(())
+}
+
+/// Issue a scoped gateway key (P1): plaintext shown ONCE, only the salted
+/// SHA-256 hash is persisted. Fails when the id already exists.
+fn handle_gateway_keys_issue(
+    config_path: Option<&str>,
+    scope_raw: &str,
+    id_opt: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use ponyllm_cli::config::{generate_scoped_gateway_key, KeyScope};
+    let resolved = resolve_path(config_path);
+    let path = resolved.to_str().unwrap_or("ponyllm.toml");
+    let mut cfg = ConfigFile::load_or_default(Some(path).filter(|_| resolved.exists()))
+        .unwrap_or_default();
+    let scope = match scope_raw.trim().to_ascii_lowercase().as_str() {
+        "admin" => KeyScope::Admin,
+        "inference" | "infer" => KeyScope::Inference,
+        "readonly" | "read" => KeyScope::Readonly,
+        other => {
+            let msg = format!(
+                "未知 scope '{}'（仅 admin | inference | readonly）；机器 key 永不签发 operator",
+                other
+            );
+            eprintln!("❌ {}", msg);
+            return Err(msg.into());
+        }
+    };
+    let id = id_opt
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| format!("{}-{}", scope.as_str(), &uuid::Uuid::new_v4().simple().to_string()[..8]));
+    if cfg.gateway.gateway_keys.iter().any(|k| k.id == id) {
+        let msg = format!("Key id '{}' 已存在（先 revoke 再重发，不做原地加权）", id);
+        eprintln!("❌ {}", msg);
+        return Err(msg.into());
+    }
+    let (plaintext, mut entry) = generate_scoped_gateway_key(&id, scope);
+    entry.id = id.clone();
+    cfg.gateway.gateway_keys.push(entry);
+    cfg.save_to_path(path)?;
+    println!("\n⚠️  明文仅显示一次，请立即复制保存；服务端只存哈希，丢失不可找回。");
+    println!("scope={} id={}", scope.as_str(), id);
+    println!("key: {}", plaintext);
+    Ok(())
+}
+
+/// Revoke a scoped gateway key by id (P1): fail-closed immediately.
+fn handle_gateway_keys_revoke(
+    config_path: Option<&str>,
+    id: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let resolved = resolve_path(config_path);
+    let path = resolved.to_str().unwrap_or("ponyllm.toml");
+    let mut cfg = ConfigFile::load_or_default(Some(path).filter(|_| resolved.exists()))
+        .unwrap_or_default();
+    let Some(k) = cfg.gateway.gateway_keys.iter_mut().find(|k| k.id == id) else {
+        let msg = format!("Key id '{}' 不存在", id);
+        eprintln!("❌ {}", msg);
+        return Err(msg.into());
+    };
+    if k.revoked {
+        println!("Key id '{}' 已是 revoked，无需重复操作。", id);
+        return Ok(());
+    }
+    k.revoked = true;
+    cfg.save_to_path(path)?;
+    println!("✅ Key id '{}' 已吊销（热加载约 500ms 内全网生效）。", id);
     Ok(())
 }
 

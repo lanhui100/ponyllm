@@ -16,7 +16,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::IntoResponse;
 use axum::Json;
-use ponyllm_config::{ConfigFile, KeySection, ModelConfig, ProviderSection};
+use ponyllm_config::{ConfigFile, KeyScope, KeySection, ModelConfig, ProviderSection};
 use ponyllm_core::pool::{
     ApiKeyEntry, BillingMode, KeyPool, ModelTier, PricingMode, PricingPeriod,
     UpstreamProtocol,
@@ -45,6 +45,9 @@ pub struct OverviewView {
     pub hot_reload_ms: u64,
     pub admin_write_enabled: bool,
     pub config_version: u64,
+    /// Auth compatibility mode (`legacy-only|dual|strict`). Surfaced so the
+    /// console can warn before a `strict` switch locks out legacy-only clients.
+    pub auth_compat: String,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -207,6 +210,44 @@ pub struct ServiceStatusView {
 pub struct RotateView {
     pub new_token: String,
     pub rotated_at: String,
+    pub config_version: u64,
+}
+
+// ---------- gateway credentials (task-27; contract `web-users-api.md`) ----------
+
+/// Read-only projection of one scoped gateway credential.
+///
+/// Never contains the plaintext, the salt, or the hash — only the operator
+/// identification fields (`prefix` + `last4`) plus lifecycle state.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct GatewayKeyView {
+    pub id: String,
+    pub scope: String,
+    pub prefix: String,
+    pub last4: String,
+    pub revoked: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<i64>,
+    pub config_version: u64,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct IssueGatewayKeyPayload {
+    pub id: String,
+    pub scope: String,
+    #[serde(default)]
+    pub expires_at: Option<i64>,
+}
+
+/// One-time issuance response: `api_key` is plaintext ONLY here (plus
+/// `Cache-Control: no-store`); the server persists hash + salt + `last4`.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct IssueGatewayKeyResponse {
+    pub id: String,
+    pub scope: String,
+    pub api_key: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<i64>,
     pub config_version: u64,
 }
 
@@ -445,6 +486,211 @@ pub struct KeyTestView {
     pub quota: Option<Vec<AntigravityQuotaItemView>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub quota_groups: Option<Vec<AntigravityQuotaGroupView>>,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct QuotaKeyView {
+    pub provider: String,
+    pub key_id: String,
+    pub state: String,
+    /// Seconds left in the current cooldown (only while `cooling_down`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cooldown_remaining_secs: Option<u64>,
+    /// Wall-clock instant the key is expected to recover, RFC 3339 UTC.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cooldown_reset_at: Option<String>,
+    /// Quota signal lineage (v2 §4, frozen wording): `buckets` (antigravity
+    /// refresh hit) / `probe_only` (in-memory state+cooldown) / `unknown`.
+    pub source: String,
+    /// Whether the key may receive traffic now (`None` = unknown/probe path).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schedulable: Option<bool>,
+    /// Antigravity per-model remaining fractions (refresh hit only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quota: Option<Vec<AntigravityQuotaItemView>>,
+    /// Antigravity 5h/weekly buckets (refresh hit only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quota_groups: Option<Vec<AntigravityQuotaGroupView>>,
+    /// True when the refresh probe failed and only memory state is served.
+    #[serde(default)]
+    pub stale: bool,
+}
+
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+pub struct QuotaQuery {
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub key_id: Option<String>,
+    /// `true` = allow one Antigravity upstream quota probe per key
+    /// (15s built-in timeout, egress-gated, failure is silent `stale`).
+    /// Default `false` = pure in-memory, zero upstream calls.
+    #[serde(default)]
+    pub refresh: bool,
+}
+
+/// Read-only quota snapshot for agents (`GET /api/admin/quota`).
+///
+/// Default is pure in-memory (key state + cooldown from the live pools):
+/// zero upstream calls, zero config writes. `refresh=true` additionally
+/// probes Antigravity keys via the same egress-gated `fetch_quota` path as
+/// the key dial-test; a probe failure degrades to `stale=true` memory state
+/// instead of failing the request. Never emits key material.
+#[utoipa::path(get, path = "/api/admin/quota", params(QuotaQuery), responses((status = 200, body = [QuotaKeyView])))]
+pub async fn handle_admin_quota(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<QuotaQuery>,
+) -> impl IntoResponse {
+    Json(handle_admin_quota_inner(q, state).await).into_response()
+}
+
+async fn handle_admin_quota_inner(q: QuotaQuery, state: Arc<AppState>) -> Vec<QuotaKeyView> {
+    // Snapshot pools + key states first: parking_lot guards are !Send and
+    // must never be held across the refresh `.await` below.
+    let snapshot: Vec<(
+        String,
+        Arc<ponyllm_core::pool::KeyPool>,
+        Vec<(String, ponyllm_core::pool::KeyState)>,
+    )> = {
+        let pools = state.pools.read();
+        let mut names: Vec<String> = pools.keys().cloned().collect();
+        names.sort();
+        if let Some(ref want) = q.provider {
+            names.retain(|n| n == want);
+        }
+        let mut out = Vec::new();
+        for provider in names {
+            let Some(pool) = pools.get(&provider) else {
+                continue;
+            };
+            let keys: Vec<(String, ponyllm_core::pool::KeyState)> = pool
+                .list_keys()
+                .into_iter()
+                .filter(|(id, _, _, _)| {
+                    q.key_id.as_ref().is_none_or(|want| id == want)
+                })
+                .map(|(id, _, _, s)| (id, s))
+                .collect();
+            out.push((provider, pool.clone(), keys));
+        }
+        out
+    };
+    let mut views: Vec<QuotaKeyView> = Vec::new();
+    for (provider, pool, keys) in snapshot {
+        let is_agy = provider.eq_ignore_ascii_case("agy")
+            || provider.eq_ignore_ascii_case("antigravity");
+        for (id, key_state) in keys {
+            let (cooldown_remaining, cooldown_reset_at) = pool.key_cooldown(&id);
+            let state_name = key_state_name(key_state).to_string();
+            let schedulable = match key_state {
+                ponyllm_core::pool::KeyState::Active => Some(true),
+                ponyllm_core::pool::KeyState::CoolingDown => Some(false),
+                ponyllm_core::pool::KeyState::Disabled => Some(false),
+            };
+            let mut view = QuotaKeyView {
+                provider: provider.clone(),
+                key_id: id.clone(),
+                state: state_name,
+                cooldown_remaining_secs: cooldown_remaining.map(|d| d.as_secs()),
+                cooldown_reset_at: cooldown_reset_at
+                    .map(|t| chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339()),
+                source: "probe_only".to_string(),
+                schedulable,
+                quota: None,
+                quota_groups: None,
+                stale: false,
+            };
+            if q.refresh && is_agy {
+                match refresh_agy_quota(&state, &provider, &id).await {
+                    Some((items, groups)) => {
+                        view.source = "buckets".to_string();
+                        view.quota = Some(items);
+                        view.quota_groups = Some(groups);
+                    }
+                    None => {
+                        view.stale = true;
+                    }
+                }
+            }
+            views.push(view);
+        }
+    }
+    views.sort_by(|a, b| a.provider.cmp(&b.provider).then(a.key_id.cmp(&b.key_id)));
+    views
+}
+
+/// Best-effort Antigravity quota snapshot for one key (read-only).
+/// Returns `None` on any failure (egress block / token / upstream) so the
+/// caller degrades to memory state instead of failing the request.
+async fn refresh_agy_quota(
+    state: &Arc<AppState>,
+    provider: &str,
+    key_id: &str,
+) -> Option<(Vec<AntigravityQuotaItemView>, Vec<AntigravityQuotaGroupView>)> {
+    let base_url = {
+        let cfg = state.config.read();
+        cfg.providers.get(provider)?.base_url.clone()
+    };
+    if crate::egress::check_probe_url(&base_url).await.is_err() {
+        return None;
+    }
+    let mgr = {
+        let pools = state.pools.read();
+        pools.get(provider).and_then(|pool| {
+            pool.snapshot_keys()
+                .into_iter()
+                .find(|entry| entry.id == key_id)
+                .and_then(|entry| entry.antigravity_manager())
+        })
+    }?;
+    let probe_client = state.probe_http_client_for_provider(provider);
+    let snapshot = mgr
+        .with_client(&probe_client)
+        .fetch_quota(Some(&base_url))
+        .await
+        .ok()?;
+    let mut items: Vec<AntigravityQuotaItemView> = Vec::new();
+    let mut models: Vec<_> = snapshot.models.values().collect();
+    models.sort_by_key(|m| &m.model_id);
+    for m in models {
+        items.push(AntigravityQuotaItemView {
+            model_id: m.model_id.clone(),
+            remaining_fraction: m.remaining_fraction,
+            reset_time: m.reset_time.map(|t| t.to_rfc3339()),
+            reset_time_beijing: m.reset_time.map(|t| {
+                (t + chrono::Duration::hours(8)).format("%Y-%m-%d %H:%M:%S").to_string()
+            }),
+            time_until_reset: None,
+        });
+    }
+    let mut groups: Vec<AntigravityQuotaGroupView> = Vec::new();
+    if let Some(qg) = snapshot.quota_groups.as_ref() {
+        for g in qg {
+            groups.push(AntigravityQuotaGroupView {
+                display_name: g.display_name.clone(),
+                description: g.description.clone(),
+                buckets: g
+                    .buckets
+                    .iter()
+                    .map(|b| AntigravityQuotaBucketView {
+                        bucket_id: b.bucket_id.clone(),
+                        window: b.window.clone(),
+                        remaining_fraction: b.remaining_fraction,
+                        reset_time: b.reset_time.map(|t| t.to_rfc3339()),
+                        reset_time_beijing: b.reset_time.map(|t| {
+                            (t + chrono::Duration::hours(8))
+                                .format("%Y-%m-%d %H:%M:%S")
+                                .to_string()
+                        }),
+                        time_until_reset: None,
+                        display_name: b.display_name.clone(),
+                        description: b.description.clone(),
+                    })
+                    .collect(),
+            });
+        }
+    }
+    Some((items, groups))
 }
 
 #[derive(Debug, Deserialize, utoipa::IntoParams)]
@@ -775,6 +1021,12 @@ pub async fn handle_admin_overview(State(state): State<Arc<AppState>>) -> impl I
         hot_reload_ms: HOT_RELOAD_MS,
         admin_write_enabled: cfg.admin_write_enabled,
         config_version: file.config_version,
+        auth_compat: match cfg.auth_compat {
+            ponyllm_config::AuthCompat::LegacyOnly => "legacy-only",
+            ponyllm_config::AuthCompat::Dual => "dual",
+            ponyllm_config::AuthCompat::Strict => "strict",
+        }
+        .to_string(),
     })
     .into_response()
 }
@@ -2676,10 +2928,272 @@ pub async fn handle_admin_service_status(State(state): State<Arc<AppState>>) -> 
     .into_response()
 }
 
-#[utoipa::path(post, path = "/api/admin/auth/rotate", responses((status = 200, body = RotateView)))]
-pub async fn handle_admin_auth_rotate(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+// ---------- gateway credentials (task-27; contract `web-users-api.md`) ----------
+
+/// Render a stored entry as its read-only projection (never leaks salt/hash).
+fn gateway_key_view(e: &ponyllm_config::GatewayKeyEntry, config_version: u64) -> GatewayKeyView {
+    GatewayKeyView {
+        id: e.id.clone(),
+        scope: e.scope.as_str().to_string(),
+        prefix: e.prefix.clone(),
+        last4: e.last4.clone(),
+        revoked: e.revoked,
+        expires_at: e.expires_at,
+        config_version,
+    }
+}
+
+fn parse_gateway_scope(raw: &str) -> Option<KeyScope> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "admin" => Some(KeyScope::Admin),
+        "inference" | "infer" => Some(KeyScope::Inference),
+        "readonly" | "read" => Some(KeyScope::Readonly),
+        _ => None,
+    }
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/admin/gateway-keys",
+    responses(
+        (status = 200, body = [GatewayKeyView]),
+        (status = 401, description = "invalid gateway key (current 401 envelope)"),
+        (status = 404, description = "admin write channel disabled (`admin_write_disabled`)"),
+        (status = 403, description = "insufficient scope (`forbidden`)")
+    )
+)]
+pub async fn handle_gateway_keys_list(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    // Read surface shares the admin-write channel gate with `GET /api/admin/keys`.
     if let Err(resp) = check_admin_write_enabled(&state) {
         return resp;
+    }
+    let file = match load_store_config(&state) {
+        Ok(f) => f,
+        Err(resp) => return resp,
+    };
+    let mut views: Vec<GatewayKeyView> = file
+        .gateway
+        .gateway_keys
+        .iter()
+        .map(|e| gateway_key_view(e, file.config_version))
+        .collect();
+    views.sort_by(|a, b| a.id.cmp(&b.id));
+    Json(views).into_response()
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/admin/gateway-keys",
+    request_body = IssueGatewayKeyPayload,
+    responses(
+        (status = 201, body = IssueGatewayKeyResponse),
+        (status = 400, description = "bad id / scope / expiry"),
+        (status = 401, description = "invalid gateway key (current 401 envelope)"),
+        (status = 404, description = "admin write channel disabled (`admin_write_disabled`)"),
+        (status = 409, description = "key id already exists (`gateway_key_already_exists`)"),
+        (status = 412, description = "missing/conflicting If-Match (`precondition_failed`)"),
+        (status = 403, description = "insufficient scope (`forbidden`)")
+    )
+)]
+pub async fn handle_gateway_keys_issue(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(payload): Json<IssueGatewayKeyPayload>,
+) -> impl IntoResponse {
+    if let Err(resp) = check_admin_write_enabled(&state) {
+        return resp;
+    }
+    let _lock = state.admin_write_lock.lock().await;
+    let mut file = match load_store_config(&state) {
+        Ok(f) => f,
+        Err(resp) => return resp,
+    };
+    if let Err(resp) = check_if_match(&headers, file.config_version) {
+        return resp;
+    }
+
+    let id = payload.id.trim().to_string();
+    if id.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": {"message": "gateway key id cannot be empty", "code": "invalid_key_id"}})),
+        )
+            .into_response();
+    }
+    let Some(scope) = parse_gateway_scope(&payload.scope) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": {"message": format!("unknown scope '{}' (admin | inference | readonly)", payload.scope), "code": "invalid_scope"}})),
+        )
+            .into_response();
+    };
+    if let Some(exp) = payload.expires_at {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        if exp <= now {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": {"message": "expires_at must be a future UNIX timestamp", "code": "invalid_expiry"}})),
+            )
+                .into_response();
+        }
+    }
+    if file.gateway.gateway_keys.iter().any(|k| k.id == id) {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({"error": {"message": format!("gateway key '{id}' already exists"), "code": "gateway_key_already_exists"}})),
+        )
+            .into_response();
+    }
+
+    let (plaintext, mut entry) = ponyllm_config::generate_scoped_gateway_key(&id, scope);
+    entry.expires_at = payload.expires_at;
+    file.gateway.gateway_keys.push(entry);
+
+    let new_ver = match save_store_config(&state, &mut file) {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
+    // Mirror to memory (same-request auth must see the new key; contract
+    // requires revoke to sync memory before responding — issuance too).
+    if let Some(stored) = file.gateway.gateway_keys.iter().find(|k| k.id == id).cloned() {
+        let mut cfg = state.config.write();
+        if let Some(slot) = cfg.gateway_keys.iter_mut().find(|k| k.id == id) {
+            *slot = stored;
+        } else {
+            cfg.gateway_keys.push(stored);
+        }
+    }
+
+    tracing::info!(key_id = %id, scope = %scope.as_str(), config_version = new_ver, "admin issued gateway key");
+    let mut resp = (
+        StatusCode::CREATED,
+        Json(IssueGatewayKeyResponse {
+            id,
+            scope: scope.as_str().to_string(),
+            api_key: plaintext,
+            expires_at: payload.expires_at,
+            config_version: new_ver,
+        }),
+    )
+        .into_response();
+    resp.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store"),
+    );
+    resp.headers_mut().insert(
+        header::PRAGMA,
+        HeaderValue::from_static("no-cache"),
+    );
+    resp
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/admin/gateway-keys/{id}/revoke",
+    params(("id" = String, Path)),
+    responses(
+        (status = 200, body = GatewayKeyView),
+        (status = 401, description = "invalid gateway key (current 401 envelope)"),
+        (status = 404, description = "admin write channel disabled (`admin_write_disabled`) or unknown id (`gateway_key_not_found`)"),
+        (status = 412, description = "missing/conflicting If-Match (`precondition_failed`)"),
+        (status = 403, description = "insufficient scope (`forbidden`)")
+    )
+)]
+pub async fn handle_gateway_keys_revoke(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(resp) = check_admin_write_enabled(&state) {
+        return resp;
+    }
+    let _lock = state.admin_write_lock.lock().await;
+    let mut file = match load_store_config(&state) {
+        Ok(f) => f,
+        Err(resp) => return resp,
+    };
+    if let Err(resp) = check_if_match(&headers, file.config_version) {
+        return resp;
+    }
+
+    let Some(entry) = file.gateway.gateway_keys.iter_mut().find(|k| k.id == id) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": {"message": format!("gateway key '{id}' not found"), "code": "gateway_key_not_found"}})),
+        )
+            .into_response();
+    };
+    // Idempotent: re-revoking an already-revoked id returns 200, not 409.
+    entry.revoked = true;
+
+    let new_ver = match save_store_config(&state, &mut file) {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
+    // Sync memory BEFORE responding: no "disk revoked, memory still allows"
+    // window (contract §3). `authenticate` reads `state.config.gateway_keys`,
+    // so the revoked entry must be visible here.
+    {
+        let mut cfg = state.config.write();
+        if let Some(slot) = cfg.gateway_keys.iter_mut().find(|k| k.id == id) {
+            slot.revoked = true;
+        } else if let Some(stored) = file.gateway.gateway_keys.iter().find(|k| k.id == id).cloned() {
+            cfg.gateway_keys.push(stored);
+        }
+    }
+
+    tracing::info!(key_id = %id, config_version = new_ver, "admin revoked gateway key");
+    let view = file
+        .gateway
+        .gateway_keys
+        .iter()
+        .find(|k| k.id == id)
+        .map(|e| gateway_key_view(e, new_ver))
+        .expect("revoked entry present after save");
+    (StatusCode::OK, Json(view)).into_response()
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/admin/auth/rotate",
+    responses(
+        (status = 200, body = RotateView),
+        (status = 401, description = "invalid gateway key (current 401 envelope)"),
+        (status = 404, description = "admin write channel disabled (`admin_write_disabled`)"),
+        (status = 409, description = "open mode has no credential to rotate (`open_mode_no_credential`)")
+    )
+)]
+pub async fn handle_admin_auth_rotate(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(resp) = check_admin_write_enabled(&state) {
+        return resp;
+    }
+    // task-27 human-machine isolation: rotate is admin-only. The `auth`
+    // middleware already 403s non-admin scoped keys via the AdminWrite
+    // matrix, but this defense-in-depth gate keeps the invariant even if
+    // classification is ever bypassed. Legacy bearer maps to admin (dual);
+    // open mode has no credential and keeps its 409 below.
+    {
+        let cfg = state.config.read();
+        let strict = matches!(
+            cfg.auth_compat,
+            ponyllm_config::AuthCompat::Strict
+        );
+        let entries = cfg.gateway_keys.clone();
+        let legacy = cfg.api_key.clone();
+        let open = (legacy.trim().is_empty() || legacy.trim().eq_ignore_ascii_case("none"))
+            && entries.is_empty();
+        if !open {
+            match crate::auth::caller_scope(&headers, &entries, &legacy, strict) {
+                Some(ponyllm_config::KeyScope::Admin) => {}
+                _ => return crate::auth::forbidden("admin-write"),
+            }
+        }
     }
     if auth_mode(&state) == "open" {
         return (
@@ -3660,6 +4174,14 @@ pub async fn handle_admin_provider_upstream_models(
 
 #[derive(utoipa::OpenApi)]
 #[openapi(
+    info(
+        description = "ponyllm gateway admin API. Auth: `Authorization: Bearer <gateway-key>` \
+            or `x-api-key: <gateway-key>`. `?token=` query auth is deprecated: it leaks \
+            credentials into logs/bookmarks and is disabled in `strict` mode (P2); use \
+            header auth. Rotate: `POST /api/admin/auth/rotate` (200 one-time plaintext; \
+            401 invalid key; 404 admin-write disabled; 409 open mode has no credential)."
+    ),
+    modifiers(&SecurityAddon),
     paths(
         handle_admin_overview,
         handle_admin_providers,
@@ -3677,6 +4199,10 @@ pub async fn handle_admin_provider_upstream_models(
         handle_admin_update_key,
         handle_admin_delete_key,
         handle_admin_test_key,
+        handle_admin_quota,
+        handle_gateway_keys_list,
+        handle_gateway_keys_issue,
+        handle_gateway_keys_revoke,
         handle_admin_get_strategy,
         handle_admin_put_strategy,
         handle_admin_service_status,
@@ -3701,6 +4227,10 @@ pub async fn handle_admin_provider_upstream_models(
         UpdateKeyPayload,
         CreateKeyResponse,
         KeyTestView,
+        QuotaKeyView,
+        GatewayKeyView,
+        IssueGatewayKeyPayload,
+        IssueGatewayKeyResponse,
         StrategyView,
         PutStrategyPayload,
         ServiceStatusView,
@@ -3716,6 +4246,32 @@ pub async fn handle_admin_provider_upstream_models(
     ))
 )]
 pub struct AdminApiDoc;
+
+/// P0 OpenAPI auth declaration (contract §4): global HTTP bearer scheme so
+/// generated clients send `Authorization: Bearer <gateway-key>`.
+pub struct SecurityAddon;
+
+impl utoipa::Modify for SecurityAddon {
+    fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
+        use utoipa::openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme};
+        let components = openapi.components.get_or_insert_with(Default::default);
+        components.add_security_scheme(
+            "bearerAuth",
+            SecurityScheme::Http(
+                HttpBuilder::new()
+                    .scheme(HttpAuthScheme::Bearer)
+                    .bearer_format("ponyllm gateway API key")
+                    .build(),
+            ),
+        );
+        openapi.security = Some(vec![
+            utoipa::openapi::security::SecurityRequirement::new(
+                "bearerAuth",
+                Vec::<String>::new(),
+            ),
+        ]);
+    }
+}
 
 pub fn admin_routes() -> axum::Router<Arc<AppState>> {
     use axum::routing::{get, post, put};
@@ -3757,12 +4313,21 @@ pub fn admin_routes() -> axum::Router<Arc<AppState>> {
             "/api/admin/keys/{id}/test",
             post(handle_admin_test_key),
         )
+        .route("/api/admin/quota", get(handle_admin_quota))
         .route(
             "/api/admin/strategy",
             get(handle_admin_get_strategy).put(handle_admin_put_strategy),
         )
         .route("/api/admin/service/status", get(handle_admin_service_status))
         .route("/api/admin/auth/rotate", post(handle_admin_auth_rotate))
+        .route(
+            "/api/admin/gateway-keys",
+            get(handle_gateway_keys_list).post(handle_gateway_keys_issue),
+        )
+        .route(
+            "/api/admin/gateway-keys/{id}/revoke",
+            post(handle_gateway_keys_revoke),
+        )
         .route("/api/admin/proxy/status", get(handle_admin_proxy_status))
         .route("/api/admin/oauth/antigravity/auth-url", get(handle_admin_antigravity_auth_url))
         .route("/api/admin/oauth/antigravity/pending", get(handle_admin_antigravity_pending))

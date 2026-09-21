@@ -1,6 +1,6 @@
 use clap::Parser;
 use ponyllm_cli::config::ConfigFile;
-use ponyllm_cli::cli::{Cli, Commands, KeyCommands, ModelCommands, ProviderCommands};
+use ponyllm_cli::cli::{Cli, Commands, KeyCommands, KeysCommands, ModelCommands, ProviderCommands};
 
 #[test]
 fn test_cli_parse_sample_config() {
@@ -520,30 +520,33 @@ fn test_secure_api_key_generation_and_cli_auth_commands() {
     // 2. Verify CLI Commands::Auth parsing
     let cli_auth_view = Cli::try_parse_from(["ponyllm", "auth"]).unwrap();
     match cli_auth_view.command {
-        Commands::Auth { config, key, rotate } => {
+        Commands::Auth { config, key, rotate, show } => {
             assert_eq!(config, None);
             assert_eq!(key, None);
             assert!(!rotate);
+            assert!(!show);
         }
         _ => panic!("Expected Auth command"),
     }
 
     let cli_auth_rotate = Cli::try_parse_from(["ponyllm", "auth", "--rotate"]).unwrap();
     match cli_auth_rotate.command {
-        Commands::Auth { config, key, rotate } => {
+        Commands::Auth { config, key, rotate, show } => {
             assert_eq!(config, None);
             assert_eq!(key, None);
             assert!(rotate);
+            assert!(!show);
         }
         _ => panic!("Expected Auth command"),
     }
 
     let cli_auth_set = Cli::try_parse_from(["ponyllm", "auth", "-c", "custom.toml", "sk-custom-secret"]).unwrap();
     match cli_auth_set.command {
-        Commands::Auth { config, key, rotate } => {
+        Commands::Auth { config, key, rotate, show } => {
             assert_eq!(config, Some("custom.toml".to_string()));
             assert_eq!(key, Some("sk-custom-secret".to_string()));
             assert!(!rotate);
+            assert!(!show);
         }
         _ => panic!("Expected Auth command"),
     }
@@ -551,12 +554,22 @@ fn test_secure_api_key_generation_and_cli_auth_commands() {
     // 3. Verify KeyCommands::Gateway parsing
     let cli_key_gw = Cli::try_parse_from(["ponyllm", "key", "gateway", "sk-another-token"]).unwrap();
     match cli_key_gw.command {
-        Commands::Key(KeyCommands::Gateway { config, key, rotate }) => {
+        Commands::Key(KeyCommands::Gateway { config, key, rotate, show }) => {
             assert_eq!(config, None);
             assert_eq!(key, Some("sk-another-token".to_string()));
             assert!(!rotate);
+            assert!(!show);
         }
         _ => panic!("Expected KeyCommands::Gateway"),
+    }
+
+    // 3b. P0: `--show` reveals plaintext (default masked)
+    let cli_auth_show = Cli::try_parse_from(["ponyllm", "auth", "--show"]).unwrap();
+    match cli_auth_show.command {
+        Commands::Auth { show, .. } => {
+            assert!(show);
+        }
+        _ => panic!("Expected Auth command"),
     }
 
     // 4. Verify Commands::Status parsing with config and api_key overrides
@@ -1084,4 +1097,47 @@ async fn test_provider_add_agy_proxy_auto_detection_and_persistence() {
 
     std::env::remove_var("ANTIGRAVITY_OAUTH_TOKEN_URL_OVERRIDE");
     std::env::remove_var("PONYLLM_NON_INTERACTIVE");
+}
+
+#[test]
+fn test_gateway_keys_commands_parse() {
+    // P1: `ponyllm keys list|issue|revoke` parsing (scoped gateway keys).
+    let list = Cli::try_parse_from(["ponyllm", "keys", "list"]).unwrap();
+    match list.command {
+        Commands::Keys(KeysCommands::List { config }) => assert_eq!(config, None),
+        _ => panic!("Expected Keys::List"),
+    }
+    let issue = Cli::try_parse_from(["ponyllm", "keys", "issue", "--scope", "inference", "--id", "agent-ci-1"]).unwrap();
+    match issue.command {
+        Commands::Keys(KeysCommands::Issue { scope, id, config }) => {
+            assert_eq!(scope, "inference");
+            assert_eq!(id, Some("agent-ci-1".to_string()));
+            assert_eq!(config, None);
+        }
+        _ => panic!("Expected Keys::Issue"),
+    }
+    let revoke = Cli::try_parse_from(["ponyllm", "keys", "revoke", "--id", "agent-ci-1"]).unwrap();
+    match revoke.command {
+        Commands::Keys(KeysCommands::Revoke { id, config }) => {
+            assert_eq!(id, "agent-ci-1");
+            assert_eq!(config, None);
+        }
+        _ => panic!("Expected Keys::Revoke"),
+    }
+}
+
+#[test]
+fn test_scoped_key_gen_and_hash_roundtrip() {
+    // P1: plaintext verifies against the stored hash; scope prefixes frozen.
+    use ponyllm_cli::config::{generate_scoped_gateway_key, hash_gateway_key, KeyScope};
+    assert_eq!(KeyScope::Admin.prefix(), "sk-pony-admin-");
+    assert_eq!(KeyScope::Inference.prefix(), "sk-pony-infer-");
+    assert_eq!(KeyScope::Readonly.prefix(), "sk-pony-read-");
+    for scope in [KeyScope::Admin, KeyScope::Inference, KeyScope::Readonly] {
+        let (plain, entry) = generate_scoped_gateway_key("t1", scope);
+        assert!(plain.starts_with(scope.prefix()));
+        assert_eq!(entry.scope, scope);
+        assert_eq!(hash_gateway_key(&entry.salt, &plain), entry.key_hash);
+        assert!(!entry.revoked);
+    }
 }

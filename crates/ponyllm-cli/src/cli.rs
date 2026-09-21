@@ -55,7 +55,15 @@ pub enum Commands {
         /// Rotate and regenerate a new secure random gateway API Key
         #[arg(short, long)]
         rotate: bool,
+
+        /// Show the full key in plaintext (default: masked display)
+        #[arg(long)]
+        show: bool,
     },
+
+    /// Manage scoped gateway keys (P1: admin/inference/readonly; replaces sharing one token)
+    #[command(subcommand)]
+    Keys(KeysCommands),
 
     /// Launch interactive full-screen TUI terminal dashboard
     #[command(alias = "dashboard", alias = "top")]
@@ -255,6 +263,37 @@ pub enum StrategyCommands {
 }
 
 #[derive(Debug, Subcommand)]
+pub enum KeysCommands {
+    /// List scoped gateway keys (id/scope/prefix, never plaintext)
+    List {
+        /// Path to configuration file
+        #[arg(short, long)]
+        config: Option<String>,
+    },
+    /// Issue a scoped gateway key (plaintext shown ONCE, only hash is stored)
+    Issue {
+        /// Key scope: admin | inference | readonly
+        #[arg(short, long)]
+        scope: String,
+        /// Stable identifier (e.g. agent-ci-1)
+        #[arg(short, long)]
+        id: Option<String>,
+        /// Path to configuration file
+        #[arg(short, long)]
+        config: Option<String>,
+    },
+    /// Revoke a scoped gateway key by id (fail-closed immediately)
+    Revoke {
+        /// Key id to revoke
+        #[arg(short, long)]
+        id: String,
+        /// Path to configuration file
+        #[arg(short, long)]
+        config: Option<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 pub enum ProviderCommands {
     /// List all configured upstream providers
     List {
@@ -417,6 +456,10 @@ pub enum KeyCommands {
         /// Rotate and regenerate a new secure random gateway API Key
         #[arg(short, long)]
         rotate: bool,
+
+        /// Show the full key in plaintext (default: masked display)
+        #[arg(long)]
+        show: bool,
     },
     /// Interactively authorize and add an upstream account (e.g. Antigravity 'agy') via OAuth2
     #[command(alias = "auth-agy", alias = "agy-auth")]

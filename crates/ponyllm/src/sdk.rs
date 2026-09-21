@@ -3,7 +3,7 @@ use std::sync::Arc;
 use ponyllm_core::error::{CoreError, Result};
 use ponyllm_core::executor::UpstreamExecutor;
 use ponyllm_core::pool::{ApiKeyEntry, KeyPool, RoutingStrategy, UpstreamProtocol};
-use ponyllm_core::{normalize_chat_completions_url, normalize_messages_url, normalize_responses_url};
+use ponyllm_core::{canonicalize_model_name, normalize_chat_completions_url, normalize_messages_url, normalize_responses_url};
 use ponyllm_protocol::anthropic::messages::{MessageRequest, MessageResponse};
 use ponyllm_protocol::openai::chat::{ChatCompletionRequest, ChatCompletionResponse};
 use ponyllm_protocol::openai::responses::{CreateResponseRequest, ResponseObject};
@@ -85,12 +85,15 @@ impl PonyGateway {
     }
 
     fn resolve_provider(&self, model: &str) -> Result<&ProviderInfo> {
+        // Retired/renamed aliases resolve to the live upstream name first.
+        let canonical = canonicalize_model_name(model);
         // Deterministic name order so multi-provider matches never depend on
         // HashMap iteration randomness.
         let mut names: Vec<&String> = self.providers.keys().collect();
         names.sort();
 
         // 1. Exact match on default_model or configured models list
+        // (alias never shadows an explicit config entry).
         for name in &names {
             let info = &self.providers[*name];
             if info.default_model == model || info.models.iter().any(|m| m == model) {
@@ -98,15 +101,25 @@ impl PonyGateway {
             }
         }
 
+        // 1b. Canonical alias fallback (e.g. deepseek-v4.1-flash -> deepseek-flash).
+        if canonical != model {
+            for name in &names {
+                let info = &self.providers[*name];
+                if info.default_model == canonical || info.models.iter().any(|m| m == &canonical) {
+                    return Ok(info);
+                }
+            }
+        }
+
         // 2. Prefix matching e.g. "deepseek/deepseek-chat"
-        if let Some((prefix, _)) = model.split_once('/') {
+        if let Some((prefix, _)) = canonical.split_once('/') {
             if let Some(info) = self.providers.get(prefix) {
                 return Ok(info);
             }
         }
 
         // 3. Keyword / model family heuristic matching
-        let lower = model.to_lowercase();
+        let lower = canonical.to_lowercase();
         for name in &names {
             let info = &self.providers[*name];
             if lower.contains(name.as_str())
@@ -129,6 +142,11 @@ impl PonyGateway {
     /// In-memory Chat Completion API
     pub async fn chat_completion(&self, req: &ChatCompletionRequest) -> Result<ChatCompletionResponse> {
         let provider = self.resolve_provider(&req.model)?;
+        let canonical = canonicalize_model_name(&req.model);
+        // Upstream wire model is always canonical; translators copy req.model.
+        let mut wire_req = req.clone();
+        wire_req.model = canonical.clone();
+        let req = &wire_req;
         let executor = UpstreamExecutor::with_client(provider.pool.clone(), self.http_client.clone(), self.max_retries);
 
         match provider.native_protocol() {
@@ -155,9 +173,9 @@ impl PonyGateway {
                 Ok(resp)
             }
             UpstreamProtocol::Antigravity => {
-                let ant_req = chat_to_antigravity_request(req, &req.model, "aicode-consumers", req.get_reasoning_effort(), "")?;
+                let ant_req = chat_to_antigravity_request(req, &canonical, "aicode-consumers", req.get_reasoning_effort(), "")?;
                 let resp_val = executor.execute_json_request(&provider.antigravity_url(), &ant_req).await?;
-                let chat_val = antigravity_to_chat_response(&resp_val, &req.model);
+                let chat_val = antigravity_to_chat_response(&resp_val, &canonical);
                 let resp: ChatCompletionResponse = serde_json::from_value(chat_val)?;
                 Ok(resp)
             }
@@ -167,6 +185,10 @@ impl PonyGateway {
     /// In-memory Anthropic Messages API (with transparent bidirectional translation)
     pub async fn create_message(&self, req: &MessageRequest) -> Result<MessageResponse> {
         let provider = self.resolve_provider(&req.model)?;
+        let canonical = canonicalize_model_name(&req.model);
+        let mut wire_req = req.clone();
+        wire_req.model = canonical.clone();
+        let req = &wire_req;
         let executor = UpstreamExecutor::with_client(provider.pool.clone(), self.http_client.clone(), self.max_retries);
 
         match provider.native_protocol() {
@@ -193,9 +215,9 @@ impl PonyGateway {
                 Ok(ant_resp)
             }
             UpstreamProtocol::Antigravity => {
-                let ant_req = messages_to_antigravity_request(req, &req.model, "aicode-consumers", req.get_reasoning_effort(), "")?;
+                let ant_req = messages_to_antigravity_request(req, &canonical, "aicode-consumers", req.get_reasoning_effort(), "")?;
                 let resp_val = executor.execute_json_request(&provider.antigravity_url(), &ant_req).await?;
-                let msg_val = antigravity_to_messages_response(&resp_val, &req.model);
+                let msg_val = antigravity_to_messages_response(&resp_val, &canonical);
                 let resp: MessageResponse = serde_json::from_value(msg_val)?;
                 Ok(resp)
             }
@@ -205,6 +227,10 @@ impl PonyGateway {
     /// In-memory OpenAI Responses API
     pub async fn create_response(&self, req: &CreateResponseRequest) -> Result<ResponseObject> {
         let provider = self.resolve_provider(&req.model)?;
+        let canonical = canonicalize_model_name(&req.model);
+        let mut wire_req = req.clone();
+        wire_req.model = canonical.clone();
+        let req = &wire_req;
         let executor = UpstreamExecutor::with_client(provider.pool.clone(), self.http_client.clone(), self.max_retries);
 
         match provider.native_protocol() {

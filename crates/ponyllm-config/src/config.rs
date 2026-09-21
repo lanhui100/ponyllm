@@ -69,6 +69,219 @@ pub struct GatewaySection {
     /// `<config-dir>/telemetry-snapshot.json` in serve; set explicit path to override.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub telemetry_snapshot_path: Option<String>,
+    /// Auth compatibility mode (P0, task-20; contract `.agents/notes/auth-eval.md` §3.1):
+    /// `legacy-only` (current behavior) | `dual` (default, old token fully
+    /// privileged) | `strict` (legacy token rejected). Missing field in old
+    /// configs deserializes to `dual` (zero-migration); unknown values
+    /// fail-fast at parse time (never silently fall back).
+    #[serde(default = "default_auth_compat")]
+    pub auth_compat: AuthCompat,
+    /// Scoped gateway keys (P1, task-21; contract `.agents/notes/auth-eval.md` §3.2).
+    /// Empty = legacy single `api_key` (auto-mapped to `admin`, zero migration).
+    /// Only password hashes are persisted, never plaintext.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gateway_keys: Vec<GatewayKeyEntry>,
+}
+
+/// Scoped gateway credential (P1): one entry per issued key.
+///
+/// `key_hash` is `sha256_hex(salt + "::" + plaintext)`; `salt` is per-entry
+/// random hex. The plaintext is shown ONCE at issuance and never stored.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GatewayKeyEntry {
+    /// Stable identifier (e.g. `agent-ci-1`).
+    pub id: String,
+    /// Key scope: `admin` | `inference` | `readonly` (see `KeyScope`).
+    pub scope: KeyScope,
+    /// Plaintext prefix for operator identification (e.g. `sk-pony-admin-`);
+    /// full key = `{prefix}{random}`.
+    pub prefix: String,
+    /// Random hex salt for the stored hash.
+    pub salt: String,
+    /// SHA-256 hex of `salt + "::" + plaintext`.
+    pub key_hash: String,
+    /// Optional UNIX expiry seconds; `None` = never expires.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<i64>,
+    /// Revoked keys fail closed (401) even when the hash matches.
+    #[serde(default)]
+    pub revoked: bool,
+    /// Last 4 chars of the plaintext, persisted at issuance for operator
+    /// identification (task-27; contract `web-users-api.md` §1). The server
+    /// stores only hashes and cannot recompute this — entries issued before
+    /// this field deserialize to `"****"`.
+    #[serde(default = "default_gateway_key_last4")]
+    pub last4: String,
+}
+
+/// Gateway key scope (P1; contract §3.2 frozen names).
+///
+/// Three machine scopes only; `operator` stays a human-login role (Deferred A)
+/// and is never issued as a machine key.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum KeyScope {
+    /// Full power (legacy single `api_key` maps here).
+    #[default]
+    Admin,
+    /// Inference + quota + telemetry summaries (agent/skill keys).
+    Inference,
+    /// Admin reads + quota + telemetry summaries (no inference).
+    Readonly,
+}
+
+impl KeyScope {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Admin => "admin",
+            Self::Inference => "inference",
+            Self::Readonly => "readonly",
+        }
+    }
+
+    /// Plaintext prefix identifying the scope (contract §3.2 frozen).
+    pub fn prefix(&self) -> &'static str {
+        match self {
+            Self::Admin => "sk-pony-admin-",
+            Self::Inference => "sk-pony-infer-",
+            Self::Readonly => "sk-pony-read-",
+        }
+    }
+
+    pub fn from_prefix(prefix: &str) -> Option<Self> {
+        match prefix {
+            "sk-pony-admin-" => Some(Self::Admin),
+            "sk-pony-infer-" => Some(Self::Inference),
+            "sk-pony-read-" => Some(Self::Readonly),
+            _ => None,
+        }
+    }
+}
+
+/// Default `last4` for entries issued before the field existed (task-27).
+fn default_gateway_key_last4() -> String {
+    "****".to_string()
+}
+
+/// Compute the stored hash for a scoped gateway key (P1): never store plaintext.
+pub fn hash_gateway_key(salt: &str, plaintext: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(salt.as_bytes());
+    h.update(b"::");
+    h.update(plaintext.as_bytes());
+    format!("{:x}", h.finalize())
+}
+
+/// Generate a new scoped gateway key (P1): returns `(plaintext, entry)`.
+/// Plaintext is shown ONCE at issuance; only `entry` (hash) is persisted.
+pub fn generate_scoped_gateway_key(id: impl Into<String>, scope: KeyScope) -> (String, GatewayKeyEntry) {
+    use sha2::{Digest, Sha256};
+    let raw = uuid::Uuid::new_v4().simple().to_string();
+    let plaintext = format!("{}{}", scope.prefix(), raw);
+    let salt_src = uuid::Uuid::new_v4().simple().to_string();
+    let mut s = Sha256::new();
+    s.update(salt_src.as_bytes());
+    let salt = format!("{:x}", s.finalize())[..32].to_string();
+    let key_hash = hash_gateway_key(&salt, &plaintext);
+    let last4 = plaintext
+        .chars()
+        .rev()
+        .take(4)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<String>();
+    (
+        plaintext,
+        GatewayKeyEntry {
+            id: id.into(),
+            scope,
+            prefix: scope.prefix().to_string(),
+            salt,
+            key_hash,
+            expires_at: None,
+            revoked: false,
+            last4,
+        },
+    )
+}
+
+/// Gateway auth compatibility mode (P0 auth hardening switch).
+///
+/// Serialized lowercase on the wire (`legacy-only | dual | strict`); unknown
+/// values are rejected at deserialization (fail-fast, never default).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum AuthCompat {
+    /// Current behavior: single token, bare token accepted.
+    #[serde(rename = "legacy-only")]
+    LegacyOnly,
+    /// Default: legacy fully privileged (bare token accepted + deprecated-auth
+    /// tagging reserved for P1 telemetry).
+    #[default]
+    Dual,
+    /// Legacy token rejected (401 with re-issue guidance); bare token rejected.
+    Strict,
+}
+
+fn default_auth_compat() -> AuthCompat {
+    AuthCompat::Dual
+}
+
+/// Fail-fast guard for bind/auth combinations (P0):
+/// open mode (empty/`none` key) on a non-loopback bind is refused at startup.
+/// Returns `Err` with a human-readable reason when the combination is unsafe.
+pub fn validate_bind_auth_combo(bind: &str, api_key: &str, auth_compat: AuthCompat) -> Result<(), String> {
+    let _ = auth_compat;
+    let trimmed = api_key.trim();
+    let open = trimmed.is_empty() || trimmed.eq_ignore_ascii_case("none");
+    if !open {
+        return Ok(());
+    }
+    let host = bind.split_once(':').map(|(h, _)| h.trim()).unwrap_or(bind.trim());
+    let loopback = host.eq_ignore_ascii_case("127.0.0.1")
+        || host.eq_ignore_ascii_case("localhost")
+        || host == "::1"
+        || host == "[::1]";
+    if loopback {
+        return Ok(());
+    }
+    Err(format!(
+        "拒绝启动：开放模式（空 api_key）禁止绑定非环回地址 '{}'（auth_compat={:?}）。请设置网关 api_key，或改绑 127.0.0.1。",
+        bind, auth_compat
+    ))
+}
+
+/// Weak-key guard for CLI `auth <KEY>` (P0): rejects well-known weak secrets
+/// before they are persisted. Returns `Err` with a human-readable reason.
+pub fn validate_gateway_key_strength(key: &str) -> Result<(), String> {
+    let trimmed = key.trim();
+    if trimmed.len() < 16 {
+        return Err(format!(
+            "拒绝落盘：网关口令长度 {} < 16（弱口令）。请用 `ponyllm auth --rotate` 生成随机 Key。",
+            trimmed.len()
+        ));
+    }
+    if trimmed.chars().all(|c| c.is_ascii_digit()) {
+        return Err("拒绝落盘：网关口令为纯数字（弱口令）。请用 `ponyllm auth --rotate` 生成随机 Key。".to_string());
+    }
+    const BLOCKLIST: &[&str] = &[
+        "123456", "password", "qwerty", "admin", "letmein", "ponyllm", "changeme", "secret",
+    ];
+    let lower = trimmed.to_ascii_lowercase();
+    // Substring matching only applies to short keys (<24 chars): a long key
+    // containing e.g. "123456" as a random hex run still carries full entropy
+    // (uuid-derived suffixes hit this with ~1e-6 probability otherwise).
+    // Exact blocklist equality is rejected at any length.
+    let stripped: String = lower.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+    if BLOCKLIST.iter().any(|w| stripped == *w) {
+        return Err("拒绝落盘：网关口令为常见弱口令（弱口令）。请用 `ponyllm auth --rotate` 生成随机 Key。".to_string());
+    }
+    if trimmed.len() < 24 && BLOCKLIST.iter().any(|w| lower.contains(w)) {
+        return Err("拒绝落盘：网关口令命中常见弱口令（弱口令）。请用 `ponyllm auth --rotate` 生成随机 Key。".to_string());
+    }
+    Ok(())
 }
 
 fn default_admin_write_enabled() -> bool {
@@ -176,6 +389,8 @@ impl Default for GatewaySection {
             web_dist_dir: default_web_dist_dir(),
             admin_write_enabled: false,
             telemetry_snapshot_path: None,
+            auth_compat: default_auth_compat(),
+            gateway_keys: Vec::new(),
         }
     }
 }
@@ -926,5 +1141,25 @@ mod tests {
         let mode = meta.permissions().mode() & 0o777;
         let _ = fs::remove_dir_all(&test_dir);
         assert_eq!(mode, 0o600, "Expected file mode 0600, but got {:o}", mode);
+    }
+
+    #[test]
+    fn test_scoped_key_last4_roundtrip_and_legacy_default() {
+        // Issued entries persist the plaintext tail for operator identification.
+        let (plain, entry) = generate_scoped_gateway_key("k1", KeyScope::Inference);
+        assert_eq!(entry.last4, plain[plain.len() - 4..].to_string());
+        assert_eq!(entry.prefix, KeyScope::Inference.prefix());
+        // Old entries without the field deserialize to "****" (never fail).
+        let legacy: GatewayKeyEntry = serde_json::from_value(serde_json::json!({
+            "id": "old",
+            "scope": "admin",
+            "prefix": "sk-pony-admin-",
+            "salt": "s",
+            "key_hash": "h"
+        }))
+        .unwrap();
+        assert_eq!(legacy.last4, "****");
+        assert!(!legacy.revoked);
+        assert!(legacy.expires_at.is_none());
     }
 }

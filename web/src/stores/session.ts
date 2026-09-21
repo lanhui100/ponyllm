@@ -2,6 +2,7 @@ import { defineStore } from 'pinia';
 import { ref } from 'vue';
 
 export const SESSION_TOKEN_STORAGE_KEY = 'ponyllm_session_token';
+export const SESSION_GATEWAY_VERSION_KEY = 'ponyllm_gateway_version';
 
 function getInitialToken(): string {
   try {
@@ -35,6 +36,30 @@ function persistToken(nextToken: string): void {
   }
 }
 
+function readStoredGatewayVersion(): string {
+  try {
+    if (typeof window !== 'undefined' && window.sessionStorage) {
+      const raw = window.sessionStorage.getItem(SESSION_GATEWAY_VERSION_KEY);
+      if (typeof raw === 'string' && raw.trim() !== '') {
+        return raw.trim();
+      }
+    }
+  } catch {
+    // Sandboxed storage: treat as first-seen (no forced logout).
+  }
+  return '';
+}
+
+function writeStoredGatewayVersion(version: string): void {
+  try {
+    if (typeof window !== 'undefined' && window.sessionStorage) {
+      window.sessionStorage.setItem(SESSION_GATEWAY_VERSION_KEY, version);
+    }
+  } catch {
+    // Non-blocking: version pin is best-effort.
+  }
+}
+
 // Session store with tab-scoped sessionStorage persistence.
 // Maintains login across page reloads (F5) without leaking to persistent disk storage.
 export const useSessionStore = defineStore('session', () => {
@@ -58,6 +83,21 @@ export const useSessionStore = defineStore('session', () => {
     persistToken('');
   }
 
+  /// P2: release-forced logout. Compares the gateway `/health` version against
+  /// the last-seen version in sessionStorage; on mismatch the stored session
+  /// is wiped (old keys/sessions must not survive a release) and the caller
+  /// shows a "re-connect" notice. Returns true when a wipe happened.
+  /// Pure of network: the caller fetches `/health` and passes `version` in.
+  function logoutIfGatewayUpgraded(gatewayVersion: string): boolean {
+    const seen = readStoredGatewayVersion();
+    writeStoredGatewayVersion(gatewayVersion);
+    if (seen !== '' && seen !== gatewayVersion) {
+      logout();
+      return true;
+    }
+    return false;
+  }
+
   /// Token wipe WITHOUT re-arming: used by the 401 single-flight path AFTER a
   /// successful claim. Re-arming here would let a concurrent second 401 claim
   /// the redirect again (P1-1: claim-then-wipe must not self-destruct).
@@ -74,6 +114,6 @@ export const useSessionStore = defineStore('session', () => {
     return true;
   }
 
-  return { token, unauthorizedHandled, login, logout, clearToken, markUnauthorizedHandled };
+  return { token, unauthorizedHandled, login, logout, logoutIfGatewayUpgraded, clearToken, markUnauthorizedHandled };
 });
 

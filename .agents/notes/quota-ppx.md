@@ -1,0 +1,87 @@
+# ppx（皮皮虾AI中转）额度/余额接口调研（ponyllm 网关集成）
+
+Status: proposed — 调研结论待网关多供应商配额抽象设计时采纳
+Date: 2026-09-19
+
+## Problem
+
+ponyllm 网关除直连 OpenAI 外，还需纳管 OpenAI 兼容中转 ppx（`base https://api.psydo.top/v1`）。中转站的额度语义与官方完全不同（余额/订阅/分组倍率自成体系），需要明确：ppx 是否提供机器可查的余额/额度/按 key 用量接口、各接口的鉴权与字段，以及网关应如何集成。约束：**只做无鉴权指纹 + 假 key 存在性神谕，绝不使用真实 Key，全文脱敏、无任何 Key 原文。**
+
+验证方式（2026-09-19 实测）：
+- `GET /v1/<候选路径>` 无鉴权扫 20+ 路径：仅 `/v1/usage` 回 `401 {"code":"API_KEY_REQUIRED",…}`（路径存在、先鉴权），其余余额类猜测（`billing`/`credits`/`quota`/`balance`/`account*`/`organization/*` 等）全部 `404 page not found`。
+- 假 key（`sk-fake-probe-…`，虚构值）神谕：`/v1/models`、`/v1/usage`、`POST /v1/chat/completions` 均回 `401 {"code":"INVALID_API_KEY","message":"Invalid API key"}`，证明三者皆为"存在且先验 key"的有效路由；而 `/v1/embeddings`（GET）回 404，属方法/路径双重不存在的噪声对照。
+- 前端 bundle（`GET /assets/index-B1yXZ70S.js`，HTTP 200，约 206KB）静态分析：面板 API 基址为同源 `/api/v1`（cookie 会话鉴权，非 key 鉴权）；用户侧自助用量家族与 key 维度用量调用均可从 `assets/usage-B5-ezzwJ.js`（HTTP 200，1882B，完整可读）还原。
+- 面板 API 无鉴权指纹：`/api/v1/usage`、`/usage/stats`、`/auth/me`、`/keys`、`/subscriptions/summary|progress`、`/groups/rates` 均回 `401 {"code":"UNAUTHORIZED","message":"Authorization header is required"}`（存在且需登录会话）；`/api/v1/settings/public` 回 `200 {"code":0,"message":"success","data":{…}}`（唯一公开接口）。
+
+## Decision（调研结论，先行）
+
+1. **`/v1`（key 鉴权面）存在且可用的额度相关端点只有一个：`GET /v1/usage`。** 它是按 key 查自身用量的接口（存在性由假 key 神谕确认：401 而非 404）。OpenAI 官方的 `organization/usage|成本`、`dashboard/billing/*` 在此 base 下**全部 404**，不要移植官方 Admin 面假设。
+2. **余额（剩余额度）没有 key 鉴权接口。** 余额/订阅/分组倍率走面板会话面（`/api/v1/*`，cookie + `Authorization` 会话头），网关拿业务 key 调不到。这是自研网关（非 NewAPI 兼容 admin token 体系）的刻意隔离——主包里 admin 调用全是 `/admin/*` 会话路径，无 key 维度的 admin token 设计。
+3. **网关集成建议：`GET /v1/usage?api_key_id=` 低频自检 + `/v1/models` 存活探测 + 被动 429 熔断；余额不同步**（除非用户另配面板会话凭据，此时归为 opt-in 的站外同步，要单独评估 cookie 会话保活成本）。
+
+## 候选 endpoint 明细
+
+### A. `GET /v1/usage` —— 按 key 自身用量（key 鉴权面唯一可用）✅
+
+- URL：`https://api.psydo.top/v1/usage`，参数（由 `usage-B5-ezzwJ.js` 还原）：`page`（默认 1）、`page_size`（默认 20）、`api_key_id`（可选，按 key 过滤）、`start_date`/`end_date`（日期范围查询用）、明细 `GET /v1/usage/{id}`。
+- Method：GET
+- 鉴权：业务 API key，`Authorization: Bearer <key>`（亦支持 `x-api-key` / `x-goog-api-key` 头——无鉴权时报错信息原文披露）。假 key 实测：`401 {"code":"INVALID_API_KEY","message":"Invalid API key"}`。**无需 admin key，无 admin key 概念。**
+- 返回字段：未持有效 key 无法实测；bundle 侧 UsageView 消费字段线索含 `tokens`、`total_tokens`、`input_tokens`、`output_tokens`、`cache_tokens`、`actual_cost`、`cost`、`quota`、`balance`、`entitlement_quota`、`rate_limit`（字段名见 chunk 字面量统计，**形状以持 key 联调为准**，本文件不虚构 schema）。
+- 存在性证据：无鉴权 `401 API_KEY_REQUIRED`（vs 不存在路径的 404）；假 key `401 INVALID_API_KEY`（vs 不存在路径的 404）。
+- 相关官方/站点链接：
+  - 站点根（面板 SPA，同源 API 基址）：<https://api.psydo.top/>
+  - 公开设置接口（唯一 200 的面板 API，证明 `/api/v1` 前缀）：`https://api.psydo.top/api/v1/settings/public`
+
+### B. `GET /v1/models` —— key 存活探测（只能判有效，不能读额度）
+
+- URL：`https://api.psydo.top/v1/models`
+- Method：GET
+- 鉴权：业务 API key（`Authorization: Bearer`）。无鉴权：`401 {"code":"API_KEY_REQUIRED",…}`；假 key：`401 {"code":"INVALID_API_KEY",…}`。
+- 返回字段：持有效 key 时为 OpenAI 兼容的模型列表（`{object:"list",data:[…]}` 形）；**无额度字段**，仅用于存活性/吊销探测。
+- 证据：同 A 的双 401 神谕。
+
+### C. 面板会话面（`/api/v1/*`，cookie 会话鉴权 —— 网关默认**不集成**，仅记录存在性）
+
+| 面板端点 | 方法/参数（bundle 还原） | 鉴权 | 说明 |
+|---|---|---|---|
+| `/api/v1/usage/stats` | GET，`period=today\|…` 或 `start_date/end_date`，可选 `api_key_id` | 登录会话（无鉴权回 `401 UNAUTHORIZED`） | 用户用量汇总，`/v1/usage` 的面板侧孪生 |
+| `/api/v1/usage/dashboard/{stats,trend,models,snapshot-v2}`、`POST /usage/dashboard/api-keys-usage{api_key_ids}` | GET/POST | 登录会话 | 面板用量看板 |
+| `/api/v1/user/api-keys/{id}/usage/daily?days=30` | GET | 登录会话 | **按 key 日用量**（面板侧最细的 key 维度） |
+| `/api/v1/keys…`、`/api/v1/auth/me`、`/api/v1/groups/rates`、`/api/v1/subscriptions/{summary,progress}` | GET | 登录会话 | key 管理/余额订阅/分组倍率（余额语义在此，但要登录态） |
+| `/api/v1/settings/public` | GET，无需鉴权（`200 {"code":0,…}`） | 无 | 唯一公开口，可做站点存活/功能开关探测 |
+
+### D. 明确不存在（404）：`dashboard/billing/*`、`billing/*`、`credits`、`quota`、`balance`、`wallet`、`account*`、`organization/*`、`users/me`、`keys`（`/v1` 下）
+
+- 证据：无鉴权与假 key 双扫全部 `404 page not found`。网关**不要**为 ppx 实现这些路径。
+
+### E. 推理响应头：无额度信号
+
+- 证据：假 key 下 `GET /v1/models` 响应头仅 `x-client-request-id` / `x-request-id` / nginx 常规头，**无 `x-ratelimit-*` / `Retry-After` 类字段**（401 场景；2xx 是否透传上游头需持 key 联调确认）。
+
+## 给 ponyllm 网关的集成建议
+
+1. **按 key 查用量：用 `GET /v1/usage`，低频。** 建议形状：`GET {base}/v1/usage?page=1&page_size=1&api_key_id=<id>`（`api_key_id` 是否必填待持 key 联调；bundle 显示可选）。轮询间隔 ≥15min/ key，仅做**观测与 key 健康分**输入，不做实时准入（中转用量有聚合延迟）。
+2. **存活探测：`GET /v1/models`**，冷却 key 恢复探测间隔 ≥60s；`401 INVALID_API_KEY` → key 判废（对应池 `AuthInvalid`），`429/5xx` → 冷却重试。注意与官方语义差：ppx 的错误体是 `{code,message}`（`INVALID_API_KEY` / `API_KEY_REQUIRED` / `UNAUTHORIZED`），`upstream.rs` 的分类器需加这套 code 映射（`INVALID_API_KEY`→`AuthInvalid`；`API_KEY_REQUIRED` 属网关配置缺失，不应记 key 失败）。
+3. **余额（`balance`/`subscriptions`）不同步。** 面板会话面需用户登录态（cookie + 会话 `Authorization`），网关持业务 key 调不到；强行存用户会话凭据会引入会话保活/CSRF/过期三重成本。替代：在网关侧用 `actual_cost` 累加做**支出影子账本**（telemetry frame 累加，精度靠 review）。
+4. **缓存策略：** `/v1/usage` TTL 10–30min；`/v1/models` 成功 10min / 失败退避；面板面不缓存（默认不调）。所有 ppx 侧探测走独立限流桶，不占用业务重试预算。
+5. **联调前置（持 key，另起任务）：** 确认 `GET /v1/usage` 返回 schema、`api_key_id` 取值（数字 id 还是 key 明文指纹）、成功推理响应是否带任何剩余额度头、429 体形状（`code` 枚举）。
+
+## Alternatives considered
+
+1. **移植 OpenAI 官方 `organization/usage|成本` 假设到 ppx**——否决：双扫全 404；ppx 是自研网关，用量语义自成体系（`actual_cost`、订阅、分组倍率），官方 Admin 面不存在。
+2. **用业务 key 调面板 `/api/v1/keys|usage/stats|subscriptions/summary`**——否决：面板面要登录会话（无鉴权 401 `UNAUTHORIZED`，与 key 面的 `API_KEY_REQUIRED`/`INVALID_API_KEY` 是两套体系），业务 key 无权；且路径前缀不同（`/api/v1/*` vs `/v1/*`）。
+3. **高频轮询 `/v1/usage` 做实时准入**——否决：聚合延迟 + 中转侧限流未知，高频 poll 既不准又易被封；只做低频观测。
+4. **`GET /v1/models` 当余额探针**——否决（作存活探针则采纳）：无额度字段，只能判 key 有效/吊销。
+5. **为余额去存用户面板会话（cookie/token）**——否决为默认：凭据敏感度升格、会话过期保活、且余额口无文档；仅当用户明确要求且接受风险时作 opt-in，并在 ADR 里单独立项（本文件不覆盖）。
+
+## Acceptance criteria（给后续实现/联调任务）
+
+- [ ] 持（测试）key 联调 `GET /v1/usage`，把真实 schema（含 `api_key_id` 语义）补进本文件或实现 PR（非零退出命令：新增的 `ppx_usage` 解析单测 `cargo test -p ponyllm-core ppx` 全绿）。
+- [ ] `upstream.rs` 错误分类加 `INVALID_API_KEY→AuthInvalid`、`API_KEY_REQUIRED→配置错误（不记 key 失败）` 映射（靠 review 确认不误伤官方 key 语义）。
+- [ ] 本文件所有"存在性"断言可复现：无鉴权 `/v1/usage→401`、`/v1/billing→404`、`/api/v1/settings/public→200`（靠 review 跑一遍指纹脚本）。
+
+## Risks
+
+- 自研网关无文档契约：bundle 分析还原的参数/路径可随前端发版漂移（`assets/index-<hash>.js` 文件名即版本），实现必须做未知字段宽容 + 版本钉死记录（靠 review）。
+- `/v1/usage` 的返回 schema 未经持 key 验证，本文件字段名仅为 bundle 线索，**不得**直接当契约编码（靠 review + 联调任务）。
+- 2xx 推理响应头是否透传剩余额度未知；联调前网关不得假设 ppx 有官方式 `x-ratelimit-*`（靠 review）。

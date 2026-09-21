@@ -11,6 +11,8 @@ export interface OverviewView {
   hot_reload_ms: number;
   admin_write_enabled: boolean;
   config_version: number;
+  /** Auth compatibility mode echo (`legacy-only` | `dual` | `strict`). */
+  auth_compat?: string;
 }
 
 export interface ProviderView {
@@ -231,6 +233,35 @@ export interface CreateKeyResponse {
 
 export interface PutStrategyPayload {
   strategy: string;
+}
+
+/**
+ * Scoped gateway credential (task-28). Read projection NEVER carries the
+ * plaintext, the salt, or the hash — only `prefix` + `last4` identification.
+ */
+export interface GatewayKeyView {
+  id: string;
+  scope: string;
+  prefix: string;
+  last4: string;
+  revoked: boolean;
+  expires_at?: number | null;
+  config_version: number;
+}
+
+export interface IssueGatewayKeyPayload {
+  id: string;
+  scope: string;
+  expires_at?: number | null;
+}
+
+/** One-time issuance response: `api_key` is the ONLY place the plaintext exists. */
+export interface IssueGatewayKeyResponse {
+  id: string;
+  scope: string;
+  api_key: string;
+  expires_at?: number | null;
+  config_version: number;
 }
 
 export interface AdminConflictError {

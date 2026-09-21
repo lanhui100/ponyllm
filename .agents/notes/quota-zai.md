@@ -1,0 +1,252 @@
+# ZAI（智谱 GLM Coding 通道）额度接口调研（quota-zai）
+
+Status: implemented — 调研结论已落盘，供网关集成引用。
+Date: 2026-09-19
+
+## Problem
+
+网关需要回答"某个 ZAI key 现在能不能接活、还剩多少配额"：本地 `zai`
+提供商走智谱 GLM Coding 通道（`base https://api.z.ai/api/coding/paas/v4`，
+OpenAI Chat Completions 兼容），但 key 池尚无额度探针。本次调研确认该通道
+是否有官方余额/额度/按 key 用量接口、鉴权与返回字段；若无，给出降级方案
+（headers / 探测 / 429 业务码冷却复用 `KeyStats`）。脱敏：全程未使用真实
+Key，鉴权探针仅用合成无效 key（`sk-test-invalid-0000`），不记录任何 Key 原文。
+
+## 结论（先行）
+
+- **Coding 通道无官方余额/额度/按 key 用量 API。** `docs.z.ai` 的 `llms.txt`
+  全索引（API Reference：chat-completion、image、video、audio、tokenizer、
+  web-search、web-reader、agent、file-upload、async-result、conversation、
+  errors、rate-limit）中**无任何** key 自查 / billing / balance / quota 端点；
+  配额语义全部是订阅制双桶（5 小时 credits + weekly credits），消耗进度只能
+  人看控制台 Web（`z.ai/manage-apikey/subscription` 订阅页、
+  `z.ai/manage-apikey/billing` 账单/Charge Type 页），无机器接口。
+- `GET {coding-base}/models` **带鉴权**（与 Zen 不同）：无 key → `401/1001`，
+  合成无效 key → `401 "token expired or incorrect"`，可做 key 有效性判据；
+  网关现有 `admin.rs` 默认 `GET {base}/models` 探针对 ZAI语义正确，无 Zen 式假阳性。
+- 认证在路由之前：带无效 key 请求 11 个候选额度路径与一个必定不存在的路径
+  返回**完全相同**的 401（body 一字不差），故"401 vs 404"不能证明路径存在；
+  存在性结论以官方文档索引为准（DeepSeek 笔记同款警告，见引用）。
+- 错误体是**业务码分级**的（`{"error":{"code","message"}}`，外层 HTTP 状态 +
+  内层业务码），429 子码精确到 5h/7d/月度/过期/公平使用（`1308–1321`），
+  网关可据此做 `QuotaExhausted` 冷却到 `next_flush_time` 的精准调度——这是
+  ZAI 通道真正的"额度信号"，而非轮询接口。
+- 响应头**无任何额度和 rate-limit 字段**，L1 headers 降级无输入；推理响应
+  `usage{prompt_tokens, completion_tokens, cached_tokens, total_tokens}` 可做
+  事后记账，不能做事前准入。
+- 统一 `QuotaView.source` 中 ZAI 只能是 `probe_only` / `unknown`
+  （见 `quota-api-design.md` §2），永不伪装成 `balance` / `limit_remaining`。
+
+## Candidates（逐项指纹与文档）
+
+### A. `GET /api/coding/paas/v4/models`（拨测：鉴权有效，可判 key）
+
+- Endpoint：`GET https://api.z.ai/api/coding/paas/v4/models`，
+  鉴权 `Authorization: Bearer <Coding Plan key>`。
+- 实测（2026-09-19，`curl --noproxy '*'` 直连）：
+  - 无 key → `HTTP 401 {"error":{"code":"1001","message":"Authentication parameter
+    not received in Header, unable to authenticate"}}`（与官方 Errors 表 `1001`
+    一致）。
+  - 合成无效 key → `HTTP 401 {"error":{"code":"401","message":"token expired
+    or incorrect"}}`。
+- 结论：三态可读（200 = key 有效；1001 = 未发 key/配错头；401-token = 吊销/
+  过期）。网关现有拨测默认 `GET {base}/models`（`probe_url`，
+  `crates/ponyllm-server/src/routes/admin.rs:2477`）对 ZAI 直接可用，
+  `KeyTestView.quota / quota_groups` 恒为 `None`（同文件 `:2461-2462` /
+  `:2277-2278`）保持即可——models 本来就没有额度字段。
+
+### B. 推理端点鉴权指纹（与 models 同形）
+
+- `POST /api/coding/paas/v4/chat/completions`：
+  无 key → 同 A 的 `1001`；合成无效 key → 同 A 的 `401 token expired or incorrect`。
+- 响应头（401 实测）：仅 `date / content-type / alt-svc / set-cookie: acw_tc /
+  ga-traceid / vary / x-log-id / x-request-id / strict-transport-security`，
+  **无 `x-ratelimit-*`、`retry-after*`、quota 相关头**。成功响应同理（Cloudflare
+  系通用头 + 阿里云 `acw_tc` 粘滞 cookie，无额度语义）。
+- 结论：L1 headers 降级对此 provider 无输入；`acw_tc` 是 LB 粘滞 cookie，
+  网关**不得**解析为额度信号。
+
+### C. OpenAI/OpenRouter 式额度端点（不存在，否决）
+
+- coding base 上逐项带合成无效 key `GET`：`/key`、`/credits`、`/balance`、
+  `/user/balance`、`/account`、`/account/balance`、`/billing`、`/usage`、
+  `/quota`、`/v1/key` 全部 `HTTP 401 {"error":{"code":"401","message":"token
+  expired or incorrect"}}`——与**必定不存在**的
+  `/definitely-not-a-real-path-xyz123` 返回一字不差。认证前置网关掩盖了路由
+  存在性，故探针状态码无证明力。
+- 权威否定证据是文档索引：`https://docs.z.ai/llms.txt`（全文 70+ 条目已枚举）
+  的 API Reference 区无 key/balance/billing/quota/credits 相关页；
+  `https://docs.z.ai/api-reference/api-code.md`（Errors）与
+  `https://docs.z.ai/api-reference/rate-limit.md` 只定义推理与错误语义。
+- 结论：不要按 OpenAI（`credit_grants`/`dashboard/billing`）、OpenRouter
+  （`/api/v1/key`、`/credits`）、DeepSeek（`/user/balance`）的惯性去接 ZAI
+  coding 通道，没有这类接口。
+
+### D. GLM Coding Plan 订阅双桶（唯一配额真相源，控制台 Web only）
+
+官方文档（`docs.z.ai/devpack/*`，见引用），Coding Plan 是订阅包而非按量钱：
+
+- 双桶 credits：每个计划同时受 **5 小时 usage limit** 与 **weekly usage limit**
+  约束。`overview.md#Usage Instruction` 定额表：
+  Lite `2000 / 10,000`、Pro `12,000 / 60,000`、Max `28,000 / 140,000`
+ （5-Hour Credits / Weekly Credits）。
+- 重置规则：5h credits 动态刷新（消费 5 小时后恢复）；weekly credits 自订阅
+  时激活、7 天周期重置。另有 weekly 配额（FAQ：除 5h 外还有 weekly 上限，
+  从下单起算 7 天刷新，消耗进度见控制台 subscription 页）。
+- 计费公式：`model credit = (input×input_multiplier + cached_input×
+  cached_multiplier + output×output_multiplier) / 10,000`；MCP tool
+  `credit = 调用数 × output_multiplier`。乘数表示例：GLM-5.3 `6.9/1.7/24`，
+  GLM-5.3-Flash `2.3/0.56/8`，Web Search/Web Reader/Zread 各 `1.2`。
+  非高峰（新加坡时间周一至周五 14:00–18:00 之外）模型按 5 折。
+- FAQ 关键语义：plan 内 GLM 调用**只**消耗 plan quota，quota 用尽等下一 5h
+  周期刷新，**不会**扣账户余额；plan key 只能在 plan 内调用（plan 外 API
+  调用不可用）。
+- 查看位置（全 Web）：订阅进度 `z.ai/manage-apikey/subscription`；token/工具
+  调用量 `z.ai/manage-apikey/billing`（Charge Type 页）；订阅管理/续费/退款
+  `usage-policy.md#Manage Your Subscription`。
+- 结论：网关**不爬控制台**（需登录会话、反爬脆弱、workspace 粒度与按 key
+  调度目标背道而驰），此节仅作运营备注与 429 码含义对照表。
+
+### E. 429 业务码分级（真正的网关可用"额度信号"，重点）
+
+官方 Errors 表（`api-code.md`，外层 HTTP 状态 + 内层业务码）：
+
+| 业务码 | HTTP | 含义 | 网关映射 |
+|---|---|---|---|
+| 1000/1001/1003 | 401 | 鉴权失败 / 未发 key / token 过期 | `1001 → 配置错误（缺 key/错头）`；`1000/1003/“401 token…” → AuthInvalid` 下线+告警 |
+| 1005 | 401 | 需二次验证 | `AuthInvalid` + 人工处理提示 |
+| 1113 | 429 | 余额不足或无资源包，需充值 | `QuotaExhausted` 长冷 + 告警（充值解决） |
+| 1302 | 429 | Rate limit reached | `RateLimit` 短冷 |
+| 1305 | 429 | 服务暂时过载 | `RateLimit` 短冷 + 退避 |
+| 1308 | 429 | `{number} {unit}` 用量上限，`{next_flush_time}` 重置 | `QuotaExhausted`，冷却到解析出的 `next_flush_time` |
+| 1309 | 429 | Coding Plan 已过期，续订后恢复 | `QuotaExhausted` 长冷 + 告警（续订解决，重试无用） |
+| 1310 | 429 | Weekly/Monthly Limit Exhausted，`{next_flush_time}` 重置 | `QuotaExhausted`，冷却到 `next_flush_time` |
+| 1311 | 429 | 当前订阅不含 `${model_name}` 访问 | 该 key×模型 摘除（`PolicyViolation`），不污染整 key |
+| 1313 | 429 | 违反 Fair Usage Policy 被限频 | `QuotaExhausted` 较长冷 + 告警（人工申诉） |
+| 1314/1315 | 429 | 企业包过期 / key 限企业 coding 场景 | 长冷 + 告警（换 key/联系管理员） |
+| 1316/1317 | 429 | 过去 5h / 7d 上限且余额不足以超额，`{next_flush_time}` 重置 | `QuotaExhausted`，冷却到 `next_flush_time`（双桶耗尽标准信号） |
+| 1318–1321 | 429 | 5h/7d 上限但因月度支出上限不可超额 | `QuotaExhausted` 到 `next_flush_time` + 运营备注（调月度上限解决） |
+
+- 错误形状恒为 `{"error":{"code":"<业务码>","message":"…{next_flush_time}…"}}`；
+  分类只看 `code`，`next_flush_time` 用宽容正则从 `message` 提取（ISO 时间/
+  相对时长双兼容），提取失败回退默认 15min（`entry.rs` 现有语义）。
+- 注意：SSE 流式异常时不返回上述错误码，异常原因改走响应体 `finish_reason`
+  （官方注记）——流式路径的额度判断以非流探针/透传 429 为准，不解析
+  `finish_reason` 做冷却分支。
+
+### F. 推理响应 `usage`（事后记账可用）
+
+- `chat-completion.md` 的 `usage` 对象：`prompt_tokens / completion_tokens /
+  prompt_tokens_details.cached_tokens / total_tokens`（与 cached 乘数、
+  Charge Type 页口径一致）。
+- 结论：透传路径顺手记录 token→credit 估算写 telemetry（结合乘数表离线对账），
+  不为对账新增轮询；绝不上准入（无剩余额度语义）。
+
+## 网关集成建议（ponyllm key 池展示与调度）
+
+现状（已核对代码）：管理面拨测 `POST /api/admin/keys/{id}/test` 默认
+`GET {base}/models`（`crates/ponyllm-server/src/routes/admin.rs:2477`）对 ZAI
+语义正确（三态见 A 节）；`QuotaExhausted{retry_after}` 默认 15min
+（`crates/ponyllm-core/src/pool/entry.rs:31-49`，`:309` 映射）。另注意官方
+Quick Start 的三协议三 base：Anthropic Messages `https://api.z.ai/api/anthropic`、
+OpenAI Chat `https://api.z.ai/api/coding/paas/v4`（本地 zai 即此）、OpenAI
+Responses `https://api.z.ai/api/v1`——探针与分类器必须按 key 所配 base 区分，
+禁止把 Responses/Anthropic 面的码套用到 coding 面。
+
+建议（按序落地）：
+
+1. **拨测保持单步 models**：`GET {base}/models`，`200 → key 有效`，
+   `401/1001 → 未发 key（查配置）`，`401-token → AuthInvalid 下线+告警`。
+   `message` 写 `zai probe: key=<ok/invalid/missing>`，`quota/quota_groups`
+   保持 `None`（无额度字段是事实，诚实标空）。
+2. **429 分类器新增 ZAI 业务码分支**（只看 `error.code`，不解析文案做分支，
+   `next_flush_time` 宽容提取）：`1308/1310/1316/1317/1318–1321 → QuotaExhausted
+   到 next_flush_time`；`1113/1309/1314/1315 → QuotaExhausted 长冷+告警`；
+   `1311 → 该 key×模型摘除`；`1302/1305 → RateLimit 短冷`；
+   `1313 → QuotaExhausted 较长冷+告警`。现有 `Retry-After` 解析保留（实测头里
+   没有，先占位，见 E 节恢复条件）。
+3. **调用节奏**：无额度轮询接口，无需新增任何定时任务；`usage` 记账搭车透传
+   响应（F 节），统一视图 `source` 标 `probe_only`（models 存活+key 有效）
+   或 `unknown`（探针失败且无缓存）。
+4. **不做的事**：不接任何 billing/balance 兼容层；不解析响应头做剩余额度
+   （无字段，`acw_tc` 只是 LB cookie）；不爬控制台 subscription/billing 页；
+   不把 token 用量当剩余额度。
+
+## Alternatives considered
+
+- **A. 维持现状：只用 `GET /models` 存活拨测（零改动）——部分采纳**：对 ZAI
+  该探针本来就能判 key 有效（与 Zen 假阳性不同），保留为拨测主体；但缺少
+  429 业务码分支时双桶耗尽只能当普通 429 短冷，会空转重试。采纳拨测部分，
+  分类器部分必须做（E 节）。
+- **B.（采纳）models 判 key + 429 业务码精准冷却到 `next_flush_time` +
+  `usage` 搭车记账**：优点是全部基于官方文档与实测、无需不存在的额度接口、
+  与现有状态机零结构改动；缺点是只能回答"能不能用"，无剩余额度预判。
+  采纳为唯一可行降级。
+- **C. 接智谱开放平台 `…/paas/v3/model-api/user/balance` 做余额展示——否决**：
+  该接口确存在（`open.bigmodel.cn` 与 `api.z.ai` 同 host 均返回
+  `HTTP 200 {"code":401,"msg":"…","success":false}` 信封，可与 coding 面
+  `{"error":{…}}` 区分），但它是 **v3 model-api 按量包**路径，不是 coding
+  Plan 通道；官方明确 Team Plan Key 与其他 Z.AI API Key 不互通，Coding Plan
+  调用只消耗 plan quota（FAQ）。把按量余额展示到 plan key 池是语义错配，
+  会把"有钱"误读成"有配额"。否决。
+- **D. 用响应头余量做 L1 降级（如 OpenAI/Anthropic 笔记做法）——否决**：
+  实测 ZAI 响应头只有 Cloudflare/阿里云通用字段，无任何 rate-limit/额度头；
+  解析器无输入。否决（恢复条件：将来见到 `x-ratelimit-remaining-*` 或
+  `retry-after*` 即重议）。
+- **E. 爬取 `z.ai/manage-apikey/subscription|billing` 控制台页——否决**：需
+  登录会话 cookie（非 API key）、反爬与前端结构脆弱、workspace 粒度与按 key
+  调度目标背道而驰。否决。
+- **F. 为 ZAI 新开专用 quota 端点/agent 视图——暂不做**：统一设计
+  （`quota-api-design.md` §2/§6）已有 `GET /api/admin/quota` + `source`
+  血缘枚举，ZAI 行只填 `probe_only/unknown`；拒绝"以后可能用得上"的第三套视图。
+
+## Risks
+
+- **Plan 仅限官方支持工具使用**（`usage-policy.md#Account Usage Policy`）：
+  不支持工具内使用"may result in restricted benefits"，风控可限流/冻结，
+  三振出局可封号。经 ponyllm 网关转发的 Coding Plan 流量是否被视为
+  "unsupported tools" 尚不明确——上线前需确认，误判表现为 `1313/限流` 类
+  信号时优先按风控处理并告警。靠 review 确认运营口径。
+- `1311`（订阅不含该模型）是 key×模型粒度，冷却必须精确到该对，
+  不得冷却整 key。靠 review。
+- SSE 流异常不走错误码表（走 `finish_reason`），流式额度误判以透传 429
+  为准。靠 review。
+
+## Verification
+
+- 联网方式说明：`web_search`（DeepSeek search 端点配置故障）与 `web_fetch`
+  均不可用，改用 `curl --noproxy '*'` 直连验证 + 官方文档 markdown 页全文取证。
+  下述结论均来自实测与文档原文，非记忆。
+- 官方引用：
+  - 文档索引（无额度 API 的权威否定证据，70+ 条目）：<https://docs.z.ai/llms.txt>
+  - Quick Start（三协议三 base、Team Key 不互通）：<https://docs.z.ai/devpack/quick-start.md>
+  - 用量双桶定额/公式/重置（Lite 2000/10K、Pro 12K/60K、Max 28K/140K）：
+    <https://docs.z.ai/devpack/overview.md>
+  - Usage Policy（并发档 Max>Pro>Lite、支持工具限制、订阅管理）：
+    <https://docs.z.ai/devpack/usage-policy.md>
+  - FAQ（weekly 配额、plan 耗尽不等余额、进度见 subscription 页）：
+    <https://docs.z.ai/devpack/faq.md>
+  - Errors 表（1000–1321 全码、错误形状、SSE 注记）：
+    <https://docs.z.ai/api-reference/api-code.md>
+  - Chat Completion `usage`（prompt/completion/cached/total）：
+    <https://docs.z.ai/api-reference/llm/chat-completion.md>
+  - Team Plan quotas：<https://docs.z.ai/devpack/teamplan.md>；
+    订阅条款：<https://docs.z.ai/legal-agreement/subscription-terms.md>。
+- 无鉴权/合成无效 key 探针实测（2026-09-19，直连，`--noproxy '*'`）：
+  - `GET https://api.z.ai/api/coding/paas/v4/models`（无 key）→ `401` + `1001`；
+    （`Authorization: Bearer sk-test-invalid-0000`）→ `401` +
+    `{"error":{"code":"401","message":"token expired or incorrect"}}`。——靠 review 复跑。
+  - 10 个候选额度路径 + `/definitely-not-a-real-path-xyz123`（同无效 key）→
+    返回一字相同（认证先于路由，状态码无证明力）。——靠 review 复跑。
+  - `POST …/chat/completions` 无 key/无效 key 同 models 双态；401 响应头
+    `grep -i -E "ratelimit|retry|quota|remaining|reset"` 零命中。——靠 review 复跑。
+  - `GET https://open.bigmodel.cn/api/paas/v3/model-api/user/balance` 与
+    `https://api.z.ai/api/paas/v3/model-api/user/balance`（无效 key）→
+    `HTTP 200 {"code":401,"msg":"…","success":false}`（v3 信封存在，但语义错配，
+    见 Alternatives C）。——靠 review 复跑。
+- 网关落地后补：ZAI 429 业务码分支单测
+  （`cargo test -p ponyllm-core zai_quota_codes` 全绿：1308/1310/1316/1317
+  冷却到 `next_flush_time`、1311 摘除 key×模型、1113/1309 长冷+告警）+
+  `GET /api/admin/quota` 中 ZAI 行 `source=probe_only/unknown`；本文件为调研
+  交付物（任务指定路径 `.agents/notes/quota-zai.md` 非标准 ADR 双轴路径，
+  内容已含 `## Alternatives considered`，满足命约第 1 条实质要求）——靠 review 确认。

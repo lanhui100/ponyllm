@@ -139,6 +139,20 @@ ponyllm auth --rotate                # 显式轮转生成新密钥并持久化
 > **概念区隔**：`ponyllm auth` 管的是**网关接入凭证**（客户端连网关用的 Gateway Token）；
 > `ponyllm key` 管的是**上游厂商密钥池**（网关连 OpenAI/DeepSeek 用的 Provider Keys）。两者不要混用。
 
+### 6.1 网关分级 key（签发/吊销）与 dual → strict 路径
+
+网关机器 key 只三种作用域（服务端只存哈希，明文仅签发时显示一次）：`admin`（全权）、`inference`（推理 + quota/telemetry 摘要，**agent 只领此**）、`readonly`（只读，不能推理）。
+
+```bash
+ponyllm keys issue --scope inference --id agent-ci-1   # 签发 agent key（明文只显示一次）
+ponyllm keys list                                      # 列表（id/scope/前缀，永不明文）
+ponyllm keys revoke --id agent-ci-1                    # 吊销（立即 fail-closed）
+```
+
+兼容三态（`[gateway] auth_compat`，默认 `dual`）：`legacy-only`（旧行为）→ `dual`（旧单 token 全权 + `deprecated-auth` 打标）→ `strict`（旧单 token 一律 401，需重领分级 key；裸 token 无 `Bearer ` 前缀拒绝；`?token=` URL 直达禁用，Web 走表单登录）。
+
+dual → strict 发版路径：先在 staging 切 `strict` 观 401 → 回 `dual`（RTO 演练）；正式发版后 Web 按网关 `/health` 版本强制 logout（旧会话不跨版本），`?token=` 书签请改走表单登录一次。401 = 换 key/重领，403 `insufficient_scope` = 提权换 key。
+
 ### 7. 配置文件与寻路规则
 
 网关与 CLI 共用一份 `ponyllm.toml`。定位优先级（高→低）：
@@ -272,6 +286,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 ```
+
+---
+
+## 📊 额度查询（只读）
+
+agent 查"模型现在能不能用"的统一入口：`GET /api/admin/quota`（只读：GET 方法 + 无配置写 + 默认零上游调用）。
+
+```bash
+# 全快照（默认纯内存：key state + 冷却恢复时间）
+curl -s -H "Authorization: Bearer <网关api_key>" 'http://127.0.0.1:8080/api/admin/quota' | head -c 2000
+# 按 provider / key 过滤
+curl -s -H "Authorization: Bearer <网关api_key>" 'http://127.0.0.1:8080/api/admin/quota?provider=deepseek'
+curl -s -H "Authorization: Bearer <网关api_key>" 'http://127.0.0.1:8080/api/admin/quota?key_id=<key-id>'
+# Antigravity 穿透刷新（走一次上游 quota 探针，失败自动降级 stale）
+curl -s -H "Authorization: Bearer <KEY>" 'http://127.0.0.1:8080/api/admin/quota?provider=antigravity&refresh=true'
+```
+
+判读：`state=active/cooling_down/disabled` + `schedulable` + `cooldown_reset_at`（恢复时间）；
+`source` 为信号血缘（`probe_only` 内存态 / `buckets` antigravity 快照 / `unknown`），
+`probe_only` 是存活态、不是剩余额度。响应永不含 key 原文。
+
+### 🤖 Agent skill 一键安装（DSH / Claude / 通用 agent）
+
+```bash
+bash skills/ponyllm-quota/install.sh   # 装到 ~/.agents/skills/ponyllm-quota，任意 cwd 直接撞到
+```
+
+装完 agent 触发"查额度/探活/倒换排查"时自动加载（skill 名 `ponyllm-quota`），实时数据走网关 API。
 
 ---
 

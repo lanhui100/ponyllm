@@ -49,6 +49,7 @@ ratatui = "0.29"
 crossterm = { version = "0.28", features = ["event-stream"] }
 parking_lot = "0.12"
 dashmap = "6.1"
+sha2 = "0.10"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1.13", features = ["v4", "serde"] }
 
