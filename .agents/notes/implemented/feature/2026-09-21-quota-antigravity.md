@@ -1,7 +1,6 @@
-# Antigravity 额度接口调研（quota-antigravity）
+# Agent Note: Antigravity 额度接口调研（quota-antigravity）
 
-Status: implemented — 调研结论已落盘，供网关集成引用。
-
+Status: implemented
 ## Problem
 
 网关需要回答"某个 OAuth 账号现在能不能接活"：agent 查询可用性时不能只看
@@ -113,5 +112,5 @@ endpoint、鉴权、返回字段，并给出网关集成建议。
 
 - `cargo test -p ponyllm-core antigravity`（token 刷新 / Singleflight / 脱敏单测）。
 - `bash .agents/skills/write-adr/verify-note.sh` 对本文件不适用（任务指定路径
-  `.agents/notes/quota-antigravity.md` 非标准 ADR 双轴路径，属任务交付物而非
+  `.agents/notes/implemented/feature/2026-09-21-quota-antigravity.md` 非标准 ADR 双轴路径，属任务交付物而非
   决策记录；内容已含 `## Alternatives considered` 满足命约第 1 条实质要求）——靠 review 确认。

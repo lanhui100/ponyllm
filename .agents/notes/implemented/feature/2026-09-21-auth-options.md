@@ -1,7 +1,6 @@
-# 用户系统选型对比（auth-options）
+# Agent Note: 用户系统选型对比（auth-options）
 
-Status: implemented — 调研结论已落盘，供网关用户系统选型引用。
-
+Status: implemented
 ## Problem
 
 网关当前只有**单共享 token**：`GatewaySection.api_key`（缺省 `sk-pony-{uuid}`，
@@ -119,6 +118,6 @@ Status: implemented — 调研结论已落盘，供网关用户系统选型引�
   CRUD）——靠 review 抽查。
 - 依赖断言：`grep -E 'rusqlite|sqlx|argon2|jsonwebtoken|openidconnect' Cargo.toml
   Cargo.lock crates/*/Cargo.toml` 无命中——机器可查，落地实现 PR 需重跑。
-- 本文件为调研交付物（任务指定路径 `.agents/notes/auth-options.md`，
+- 本文件为调研交付物（任务指定路径 `.agents/notes/implemented/feature/2026-09-21-auth-options.md`，
   与 `quota-*.md` 同例，非标准 ADR 双轴路径；内容已含
   `## Alternatives considered`，满足命约第 1 条实质要求）——靠 review 确认。

@@ -1,6 +1,6 @@
-# 鉴权实现红队审核报告（auth-redteam，task-23）
+# Agent Note: 鉴权实现红队审核报告（auth-redteam，task-23）
 
-Status: proposed — 新代码（未提交工作区实现）对抗审核；live 网关验证留给 task-24
+Status: implemented
 Date: 2026-09-20
 
 ## Problem
@@ -26,7 +26,7 @@ open 绕过、admin_write 门控绕过、telemetry 全帧越权、quota 遍历�
   5 个 test 全绿）：4 凭证（legacy/admin/infer/read）× dual/strict ×
   GET 13 路径 + 写 3 路径 + 匿名/伪造/截断/大小写/空白/x-key/上游仿冒 12 组 +
   重放 + 跨 scope + 写门控 OFF 排序 + open（含 `none`）绕过 + 计时 200 样本。
-- 契约：`.agents/notes/auth-eval.md` §3（401/403 信封、顺序铁律、命名空间隔离）。
+- 契约：`.agents/notes/implemented/feature/2026-09-20-auth-eval.md` §3（401/403 信封、顺序铁律、命名空间隔离）。
 
 ## Findings（F1–F9，按严重度）
 

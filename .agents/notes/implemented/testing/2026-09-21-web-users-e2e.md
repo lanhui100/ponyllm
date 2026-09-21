@@ -1,6 +1,6 @@
-# 凭证治理端到端与对抗验证（web-users-e2e / redteam）
+# Agent Note: 凭证治理端到端与对抗验证（web-users-e2e / redteam）
 
-Status: implemented — task-29（对抗）+ task-30（E2E）合并交付，均在真实网关与真实浏览器执行。
+Status: implemented
 Date: 2026-09-21
 
 ## Problem

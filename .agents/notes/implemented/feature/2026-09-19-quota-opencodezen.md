@@ -1,6 +1,6 @@
-# opencode-zen 额度接口调研（quota-opencodezen）
+# Agent Note: opencode-zen 额度接口调研（quota-opencodezen）
 
-Status: implemented — 调研结论已落盘，供网关集成引用。
+Status: implemented
 Date: 2026-09-19
 
 ## Problem
@@ -190,5 +190,5 @@ key（`sk-test-invalid-0000`），不记录任何 Key 原文。
 - 网关落地后补：拨测双步 + `Missing/Invalid` 三态分类单测
   （`cargo test -p ponyllm-server zen_probe` 全绿）+ `GET /api/admin/quota`
   中 Zen 行 `source=probe_only/unknown` 诚实标注；本文件为调研交付物
-  （任务指定路径 `.agents/notes/quota-opencodezen.md` 非标准 ADR 双轴路径，
+  （任务指定路径 `.agents/notes/implemented/feature/2026-09-19-quota-opencodezen.md` 非标准 ADR 双轴路径，
   内容已含 `## Alternatives considered`，满足命约第 1 条实质要求）——靠 review 确认。

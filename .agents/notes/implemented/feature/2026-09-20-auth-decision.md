@@ -1,6 +1,6 @@
-# 鉴权改造拍板建议（auth-decision）
+# Agent Note: 鉴权改造拍板建议（auth-decision）
 
-Status: proposed — 待用户拍板 3 个关键选择后转实现
+Status: implemented
 Date: 2026-09-20
 
 汇总源：`auth-current.md`（task-14 现状+R1–R9）/ `auth-options.md`（task-15 选型）/

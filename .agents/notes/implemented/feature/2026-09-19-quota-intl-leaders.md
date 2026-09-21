@@ -1,11 +1,11 @@
-# 国际头部额度/余额接口调研（ponyllm 网关集成：Gemini / xAI / Azure + 二线对照）
+# Agent Note: 国际头部额度/余额接口调研（ponyllm 网关集成：Gemini / xAI / Azure + 二线对照）
 
-Status: proposed — 调研结论待网关配额模块设计时采纳
+Status: implemented
 Date: 2026-09-19
 
 ## Problem
 
-ponyllm 网关已有多 key 池（`crates/ponyllm-core/src/pool/`：`quota.rs` 租约计数、`entry.rs` 冷却/`QuotaExhausted` + `cooldown_reset_at` 墙钟镜像、`upstream.rs` 429 分类与 `Retry-After`/`Resets in` 解析）与 OpenAI（`.agents/notes/quota-openai.md`）、Anthropic（`.agents/notes/quota-anthropic.md`）两篇调研。本任务补齐其余国际头部——Google Gemini Developer API、xAI Grok、Azure OpenAI——以及 MiniMax / 字节豆包（火山方舟）/ 腾讯混元的二线对照：每家"有无余额接口、Tier/limits 怎么查、响应头带什么、失败形态是什么"，并给出网关统一集成建议，避免为每家重复造"余额轮询器"。
+ponyllm 网关已有多 key 池（`crates/ponyllm-core/src/pool/`：`quota.rs` 租约计数、`entry.rs` 冷却/`QuotaExhausted` + `cooldown_reset_at` 墙钟镜像、`upstream.rs` 429 分类与 `Retry-After`/`Resets in` 解析）与 OpenAI（`.agents/notes/implemented/feature/2026-09-19-quota-openai.md`）、Anthropic（`.agents/notes/implemented/feature/2026-09-19-quota-anthropic.md`）两篇调研。本任务补齐其余国际头部——Google Gemini Developer API、xAI Grok、Azure OpenAI——以及 MiniMax / 字节豆包（火山方舟）/ 腾讯混元的二线对照：每家"有无余额接口、Tier/limits 怎么查、响应头带什么、失败形态是什么"，并给出网关统一集成建议，避免为每家重复造"余额轮询器"。
 
 验证方式说明：本机 `web_search` 网关故障，`ai.google.dev` / `docs.x.ai` / `learn.microsoft.com` / `management.azure.com` / `api.minimax.chat` / `ark.cn-beijing.volces.com` / `api.hunyuan.cloud.tencent.com` 均被出口代理拒绝（`curl -w` 验证 `000`），仅 `generativelanguage.googleapis.com`（Google API）与 `github.com` / `raw.githubusercontent.com` 可直连。改为以下可直连源验证：
 - 线上 API 实测：`generativelanguage.googleapis.com/v1beta/models?key=FAKE` 与 `generateContent?key=FAKE` 均返回 Google RPC 错误体（`API_KEY_INVALID`，见 A），确认 endpoint 存活与错误形态；
@@ -96,7 +96,7 @@ ponyllm 网关已有多 key 池（`crates/ponyllm-core/src/pool/`：`quota.rs` �
 5. **xAI management-api 深度集成**——否决（暂缓）：`management-api.x.ai` 的 REST 出账端点未能确认存在（直连被拦），SDK 侧为 gRPC；等可直连环境证实端点后再评估，不阻塞当前三族收敛。
 6. **Azure 沿用 `/v1/models` 探测**——否决：Azure 数据面无 `/v1/models`（deployment 寻址），用 deployments 列表或轻量 chat 探测代替；误用会导致探测恒失败、key 被误下线。
 
-## Acceptance criteria（给后续实现任务）
+## Follow-ups（给后续实现任务）
 
 - [ ] `upstream.rs` 新增 `RetryInfo.retryDelay`（`"Ns"`/`"N.Ms"`）解析，与 `Retry-After` 取大者；Google `QUOTA_EXHAUSTED` + `RESOURCE_EXHAUSTED` 签名单测（实测 400 `API_KEY_INVALID` 体做反例：401 类 → 废 key 下线非冷却）。非零退出命令：`cargo test -p ponyllm-core` 全绿。
 - [ ] provider 三族矩阵落盘（base/鉴权/探测端点/头家族/429 体签名对照表进代码注释或 `docs/`，靠 review 确认与本文件一致）。

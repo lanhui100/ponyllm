@@ -4,7 +4,7 @@ Status: implemented
 
 ## Problem
 
-网关当前是单 token 全权 + 空 key 即开放模式，0.0.0.0 监听配空 key 可直接裸奔启动；CLI 可落盘 `123456` 类弱口令且 `auth` 默认明文回显；OpenAPI 无鉴权声明。task-19 契约（`.agents/notes/auth-eval.md` §3–§4）已冻结 P0 范围，本次照单落地。
+网关当前是单 token 全权 + 空 key 即开放模式，0.0.0.0 监听配空 key 可直接裸奔启动；CLI 可落盘 `123456` 类弱口令且 `auth` 默认明文回显；OpenAPI 无鉴权声明。task-19 契约（`.agents/notes/implemented/feature/2026-09-20-auth-eval.md` §3–§4）已冻结 P0 范围，本次照单落地。
 
 ## Decision
 

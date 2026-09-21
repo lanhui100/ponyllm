@@ -1,6 +1,6 @@
-# 现有鉴权架构盘点（auth-current）
+# Agent Note: 现有鉴权架构盘点（auth-current）
 
-Status: proposed — 只读盘点，不改代码；结论供鉴权改造设计时采纳
+Status: implemented
 Date: 2026-09-20
 
 ## Problem

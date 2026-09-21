@@ -1,6 +1,6 @@
-# 网关统一 Quota API / MCP 设计 v2（quota-api-design）
+# Agent Note: 网关统一 Quota API / MCP 设计 v2（quota-api-design）
 
-Status: proposed — 待配额模块实现时采纳（v2 修订版）
+Status: implemented
 Date: 2026-09-20（v1: 2026-09-19）
 
 汇总源（11 份）：
@@ -195,7 +195,7 @@ MCP 直调 / 纯被动现状），另增 v2 否决项：
 10. **为 sense/Zen/ZAI/ppx 各开专用 quota 端点**——否决：统一接口 + `source` 已覆盖，
     拒绝重复投影（"以后可能用得上"式怀旧）。
 
-## Acceptance criteria（给后续实现任务，v2）
+## Follow-ups（给后续实现任务，v2）
 
 - [ ] `GET /api/admin/quota` provider 枚举含本地 6 + 大厂对照，9 档 `source` 诚实标注
     （非零退出：`cargo test -p ponyllm-server quota_api` 全绿，含 Zen/ZAI/ppx/sense 行）。

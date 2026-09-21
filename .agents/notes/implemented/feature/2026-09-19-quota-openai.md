@@ -1,6 +1,6 @@
-# OpenAI 额度/余额接口调研（ponyllm 网关集成）
+# Agent Note: OpenAI 额度/余额接口调研（ponyllm 网关集成）
 
-Status: proposed — 调研结论待网关配额模块设计时采纳
+Status: implemented
 Date: 2026-09-19
 
 ## Problem
@@ -111,7 +111,7 @@ ponyllm 网关维护多 key 池（`crates/ponyllm-core/src/pool/`：`quota.rs` �
 4. **解析 `x-ratelimit-remaining=0` 即永久下线 key**——否决：header 窗口是分钟级滑动窗口，归零≠欠费；正确动作是按 `reset` 冷却，而欠费/吊销类 429（需人工处理，`Retry-After` 缺席或 body 指向 billing）才走 `QuotaExhausted` 长冷却 + 告警。
 5. **不做 Admin 面集成、纯被动 429 熔断（现状）**——可接受为默认：零配置、零额外成本；本调研的 Admin 面同步作为 opt-in 增强，不改变默认行为。
 
-## Acceptance criteria（给后续实现任务）
+## Follow-ups（给后续实现任务）
 
 - [ ] `upstream.rs` 解析 `x-ratelimit-remaining-requests/tokens` 与 `x-ratelimit-reset-*`，`remaining=0` 时按 reset 冷却（非零退出命令：`cargo test -p ponyllm-core` 全绿，含新增单测）。
 - [ ] opt-in 的 Admin 面同步模块（feature-gated 或 `admin_key` 为空时跳过），costs TTL 默认 12h、usage 默认 10min，可配置；失败熔断独立于业务池（靠 review 确认不抢业务预算）。

@@ -1,7 +1,6 @@
-# OpenRouter 额度接口调研（quota-openrouter）
+# Agent Note: OpenRouter 额度接口调研（quota-openrouter）
 
-Status: implemented — 调研结论已落盘，供网关集成引用。
-
+Status: implemented
 ## Problem
 
 网关需要回答"某个 OpenRouter key 现在能不能接活、还剩多少钱"：调度/拨测不能只看
@@ -153,5 +152,5 @@ ponyllm 网关目前对 OpenRouter 只有透传调用，尚无 key 级额度探�
   generation 页 `GenerationResponse` example——均已逐条引用，靠 review 抽查官方链接。
 - 网关落地后补：`cargo test -p ponyllm-core openrouter_quota`（字段解析/`limit_remaining`
   冷却规则单测）+ 拨测快照落盘；本文件为调研交付物（任务指定路径
-  `.agents/notes/quota-openrouter.md` 非标准 ADR 双轴路径，内容已含
+  `.agents/notes/implemented/feature/2026-09-21-quota-openrouter.md` 非标准 ADR 双轴路径，内容已含
   `## Alternatives considered` 满足命约第 1 条实质要求）——靠 review 确认。

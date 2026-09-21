@@ -11,8 +11,8 @@ P1 落地了 scoped key（`admin/inference/readonly`）与资源矩阵，但只�
 
 ## Decision
 
-按契约 `.agents/notes/web-users-api.md`（设计冻结）与
-`.agents/notes/web-users-design.md`（前端功能清单）落地三个端点：
+按契约 `.agents/notes/implemented/feature/2026-09-21-web-users-api.md`（设计冻结）与
+`.agents/notes/implemented/feature/2026-09-21-web-users-design.md`（前端功能清单）落地三个端点：
 
 1. `GET /api/admin/gateway-keys`（资源类 `AdminRead`）→ `[GatewayKeyView]`：
    只回 `id/scope/prefix/last4/revoked/expires_at/config_version`，

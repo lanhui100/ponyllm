@@ -1,5 +1,6 @@
-# 国内头部额度接口调研（Qwen / DeepSeek / Kimi / 智谱GLM）
+# Agent Note: 国内头部额度接口调研（Qwen / DeepSeek / Kimi / 智谱GLM）
 
+Status: implemented
 日期： 2026-09-20 ｜ 范围： 四家官方余额/账单/用量接口是否存在、endpoint、鉴权、返回字段、ponyllm 网关 key 池集成建议
 
 ## 结论一览
@@ -36,7 +37,7 @@
 
 - **结论**：与 task-3 本地调研完全复用，无需重新验证逻辑；本节只做对照确认，详细字段与探针记录以本地文档为准。
 - Endpoint / Method / 鉴权 / 字段：`GET https://api.deepseek.com/user/balance`，`Authorization: Bearer <key>`，返回 `is_available:boolean` + `balance_infos[]:{currency(CNY|USD), total_balance, granted_balance, topped_up_balance}`（string 金额）。`GET /models` 仅模型列表无额度；OpenAI 式 billing 不存在；原生路径无 `/v1`。
-- 本地对照：[.agents/notes/quota-deepseek.md](.agents/notes/quota-deepseek.md)（task-3 交付，含 `Alternatives considered` 与可复现探针命令）。
+- 本地对照：[.agents/notes/implemented/feature/2026-09-19-quota-deepseek.md](.agents/notes/implemented/feature/2026-09-19-quota-deepseek.md)（task-3 交付，含 `Alternatives considered` 与可复现探针命令）。
 - 网关集成建议：沿用该文档 §网关集成建议（拨测后追加 balance 探针 → `KeyTestView.quota/quota_groups`；`is_available=false` → `QuotaExhausted` 冷却；string 金额按 decimal 解析）。
 
 ## 3. 月之暗面 Kimi（Moonshot）
@@ -97,7 +98,7 @@
   - 智谱费用 FAQ（控制台查账唯一口径）：<https://docs.bigmodel.cn/cn/faq/fee-issues.md>
   - 智谱 quickstart（Bearer 鉴权原文与 `open.bigmodel.cn/api/paas/v4` 前缀）：<https://docs.bigmodel.cn/cn/guide/start/quick-start.md>
   - 智谱文档 sitemap（api-reference 全枚举，无余额接口）：<https://docs.bigmodel.cn/sitemap.xml>
-  - DeepSeek（复用本地 task-3 文档，不重复抓取）：[.agents/notes/quota-deepseek.md](.agents/notes/quota-deepseek.md)
+  - DeepSeek（复用本地 task-3 文档，不重复抓取）：[.agents/notes/implemented/feature/2026-09-19-quota-deepseek.md](.agents/notes/implemented/feature/2026-09-19-quota-deepseek.md)
 - 实测探针（2026-09-20，直连）：
   - `GET https://api.moonshot.{ai,cn}/v1/users/me/balance` 无 key → 401 `incorrect_api_key_error`；假 key → 401 `invalid_authentication_error`（双 host 一致）。
   - `GET https://open.bigmodel.cn/api/paas/v4/models` 无 key → 401 `code 1001`（需 Authorization 头）。

@@ -1,6 +1,6 @@
-# Anthropic 额度/余额接口调研（ponyllm 网关集成）
+# Agent Note: Anthropic 额度/余额接口调研（ponyllm 网关集成）
 
-Status: proposed — 调研结论待网关配额模块设计时采纳
+Status: implemented
 Date: 2026-09-19
 
 ## Problem
@@ -106,7 +106,7 @@ ponyllm 网关维护多 key 池（`crates/ponyllm-core/src/pool/`：`quota.rs` �
 5. **复用 Google `Resets in` 解析器处理 Anthropic 429**——否决：Anthropic 无此文案；解析器返回 None 走默认分支即可，单测锁定该行为，防止"为不存在的格式写代码"。
 6. **不做 Admin 面集成、纯被动熔断 + 响应头预判（现状+2）**——可接受为默认：零配置、零额外成本；Admin 上限同步作为 opt-in 增强，不改变默认行为。
 
-## Acceptance criteria（给后续实现任务）
+## Follow-ups（给后续实现任务）
 
 - [ ] `upstream.rs`（Anthropic 分支）解析 `anthropic-ratelimit-remaining-requests/tokens`，`remaining=0` 时短冷却（默认 60s）；`x-should-retry: false` + `rate_limit_error` → `QuotaExhausted` 长冷却；`retry-after-ms` 解析新增（非零退出命令：`cargo test -p ponyllm-core` 全绿，含新增单测；Anthropic 无 `Resets in` 时 `parse_reset_duration` 返回 None 的单测）。
 - [ ] 冷却恢复 `GET /v1/models?limit=1` 轻探测（401 下线 / 429-5xx 重冷冻），间隔与退避可配置（靠 review 确认不抢业务预算）。

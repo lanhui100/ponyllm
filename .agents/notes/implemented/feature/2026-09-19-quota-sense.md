@@ -1,6 +1,6 @@
-# SenseNova（token.sensenova.cn 中转通道）额度接口调研（quota-sense）
+# Agent Note: SenseNova（token.sensenova.cn 中转通道）额度接口调研（quota-sense）
 
-Status: proposed — 调研结论待网关配额模块设计时采纳
+Status: implemented
 Date: 2026-09-19
 
 ## Problem
@@ -157,7 +157,7 @@ OpenAI 兼容中转通道；`crates/ponyllm-core/src/executor/upstream.rs:1646-1
   （quota-api-design.md）落地时 sense 自然以 `probe_only + usage 记账` 接入，
   不预先开第二套视图。拒绝"以后可能用得上"。
 
-## Acceptance criteria（给后续实现任务）
+## Follow-ups（给后续实现任务）
 
 - [ ] 统一 `GET /api/admin/quota` 中 sense 的 `source` 诚实标注为 `probe_only`
  （存活）+ 可选的透传 `usage` 累积，绝不出现"余额"文案（靠 review 查 UI 文案）。

@@ -1,5 +1,6 @@
-# DeepSeek 额度接口调研
+# Agent Note: DeepSeek 额度接口调研
 
+Status: implemented
 日期： 2026-09-19 ｜ 范围： DeepSeek 官方余额/额度接口是否存在、鉴权与字段、ponyllm 网关 key 池集成建议
 
 ## 结论

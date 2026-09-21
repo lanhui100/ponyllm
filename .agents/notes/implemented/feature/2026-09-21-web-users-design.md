@@ -1,6 +1,6 @@
-# Web 凭证治理页功能设计（Credentials Tab）
+# Agent Note: Web 凭证治理页功能设计（Credentials Tab）
 
-Status: proposed — task-25 交付；实现任务 task-28 照此开工。
+Status: implemented
 Date: 2026-09-21
 
 > 输入：后端设计 `web-users-api.md`（三端点冻结）/ `GovernanceView.vue`

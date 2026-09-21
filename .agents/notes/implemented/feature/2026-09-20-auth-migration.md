@@ -1,6 +1,6 @@
-# 用户系统迁移风险评估（auth-migration）
+# Agent Note: 用户系统迁移风险评估（auth-migration）
 
-Status: proposed — 供 task-18 拍板引用；本文只做风险评估，不含实现。
+Status: implemented
 Date: 2026-09-20
 
 > 范围声明：只写文档，不写代码。兄弟文档 `auth-current.md` / `auth-options.md` /

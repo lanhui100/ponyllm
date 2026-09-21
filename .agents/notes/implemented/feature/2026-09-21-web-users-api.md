@@ -1,5 +1,6 @@
-# 网关凭证管理后端 API 设计（gateway-keys）
+# Agent Note: 网关凭证管理后端 API 设计（gateway-keys）
 
+Status: implemented
 日期： 2026-09-21 ｜ 状态： 设计（只写文档不写代码，实现任务照此开工） ｜ 输入： 前端用户管理页设计（独立成篇以前端为准）、`auth-eval.md` §3 冻结契约、P0（task-20）/P1 鉴权（task-21，`auth.rs` 已落地）现状
 
 ## 结论
