@@ -62,7 +62,7 @@ const scopeBadgeClass: Record<string, string> = {
 };
 
 function statusOf(k: GatewayKeyView): { label: string; cls: string } {
-  if (k.revoked) return { label: '已吊销', cls: 'text-slate-400' };
+  // Hard-delete semantic: deleted rows never render, so there is no '已吊销' state.
   if (k.expires_at && k.expires_at * 1000 < Date.now()) {
     return { label: '已过期', cls: 'text-amber-600' };
   }
@@ -100,7 +100,9 @@ async function confirmRevoke() {
   revoking.value = true;
   try {
     await revoke(target.id);
-    emit('notice', `凭证 ${target.id} 已吊销（立即失效）`);
+    // Hard delete: the row is gone for good — drop it from local memory too.
+    gatewayKeys.value = gatewayKeys.value.filter((k) => k.id !== target.id);
+    emit('notice', `凭证 ${target.id} 已删除（无残留记录）`);
     revokeTarget.value = null;
   } catch (err: unknown) {
     emit('notice', err instanceof Error ? err.message : String(err));
@@ -236,15 +238,15 @@ function closeSecret() {
               </td>
               <td class="px-4 py-2.5 text-right">
                 <button
-                  v-if="canWrite && !k.revoked"
+                  v-if="canWrite"
                   type="button"
                   class="text-rose-600 hover:text-rose-700 text-[13px] cursor-pointer"
                   :data-testid="`credentials-revoke-${k.id}`"
                   @click="revokeTarget = k"
                 >
-                  吊销
+                  删除
                 </button>
-                <span v-else-if="k.revoked" class="text-slate-300 text-[13px]">已吊销</span>
+                <span v-else class="text-slate-300 text-[13px]">—</span>
                 <span v-else class="text-slate-300 text-[13px]">—</span>
               </td>
             </tr>
@@ -321,15 +323,15 @@ function closeSecret() {
       data-testid="credentials-revoke-modal"
     >
       <div class="swiss-card w-full max-w-md p-5 bg-white/95">
-        <h4 class="text-base font-semibold text-slate-900 mb-2">确认吊销</h4>
+        <h4 class="text-base font-semibold text-slate-900 mb-2">确认删除</h4>
         <p class="text-[13px] text-slate-600 mb-4">
           凭证 <span class="font-mono font-semibold">{{ revokeTarget.id }}</span>
-          （{{ revokeTarget.scope }}）将立即失效，使用它的客户端会收到 401。此操作不可撤销。
+          （{{ revokeTarget.scope }}）将被彻底删除且不留记录，使用它的客户端会立即收到 401。此操作不可撤销。
         </p>
         <div class="flex justify-end gap-2">
           <UiButton variant="secondary" @click="revokeTarget = null">取消</UiButton>
           <UiButton variant="destructive" :disabled="revoking" data-testid="credentials-revoke-confirm" @click="confirmRevoke">
-            {{ revoking ? '吊销中…' : '确认吊销' }}
+            {{ revoking ? '删除中…' : '确认删除' }}
           </UiButton>
         </div>
       </div>

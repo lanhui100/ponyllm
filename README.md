@@ -139,14 +139,14 @@ ponyllm auth --rotate                # 显式轮转生成新密钥并持久化
 > **概念区隔**：`ponyllm auth` 管的是**网关接入凭证**（客户端连网关用的 Gateway Token）；
 > `ponyllm key` 管的是**上游厂商密钥池**（网关连 OpenAI/DeepSeek 用的 Provider Keys）。两者不要混用。
 
-### 6.1 网关分级 key（签发/吊销）与 dual → strict 路径
+### 6.1 网关分级 key（签发/删除）与 dual → strict 路径
 
 网关机器 key 只三种作用域（服务端只存哈希，明文仅签发时显示一次）：`admin`（全权）、`inference`（推理 + quota/telemetry 摘要，**agent 只领此**）、`readonly`（只读，不能推理）。
 
 ```bash
 ponyllm keys issue --scope inference --id agent-ci-1   # 签发 agent key（明文只显示一次）
 ponyllm keys list                                      # 列表（id/scope/前缀，永不明文）
-ponyllm keys revoke --id agent-ci-1                    # 吊销（立即 fail-closed）
+ponyllm keys revoke --id agent-ci-1                    # 删除（硬删除：无残留记录，立即 fail-closed）
 ```
 
 兼容三态（`[gateway] auth_compat`，默认 `dual`）：`legacy-only`（旧行为）→ `dual`（旧单 token 全权 + `deprecated-auth` 打标）→ `strict`（旧单 token 一律 401，需重领分级 key；裸 token 无 `Bearer ` 前缀拒绝；`?token=` URL 直达禁用，Web 走表单登录）。

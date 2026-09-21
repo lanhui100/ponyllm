@@ -159,7 +159,8 @@ export const adminApi = {
     });
   },
 
-  /** Revoke (soft delete, idempotent): the key fails closed immediately. */
+  /** Delete a scoped gateway key (hard delete since 2026-09-21): the entry is
+      removed from disk + memory and no record of it remains. Unknown id → 404. */
   revokeGatewayKey(id: string, ifMatchVersion?: number | string) {
     return alova.Post<GatewayKeyView>(
       `/api/admin/gateway-keys/${encodeURIComponent(id)}/revoke`,

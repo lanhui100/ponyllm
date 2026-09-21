@@ -151,7 +151,7 @@ pub fn scope_allows(scope: KeyScope, resource: Resource) -> bool {
 pub enum AuthVerdict {
     /// Credential valid: act with `scope` (`key_id=None` = legacy token).
     Allowed { scope: KeyScope, key_id: Option<String> },
-    /// Unknown / missing / revoked / expired credential.
+    /// Unknown (incl. hard-deleted) / missing / revoked / expired credential.
     Invalid,
     /// Legacy token presented while `strict` rejects it.
     LegacyDisabled,
@@ -169,7 +169,8 @@ pub fn authenticate(
     strict: bool,
 ) -> AuthVerdict {
     // Scoped keys: match by plaintext prefix, verify salted hash in
-    // constant time, then enforce revocation + expiry.
+    // constant time, then enforce the `revoked` flag (kept for entries that
+    // predate the 2026-09-21 hard-delete semantic) + expiry.
     for prefix in [
         KeyScope::Admin.prefix(),
         KeyScope::Inference.prefix(),

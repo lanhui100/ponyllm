@@ -6,11 +6,11 @@ import { adminApi } from '../../lib/adminApi';
 import type { GatewayKeyView } from '../../types/admin';
 
 /**
- * CredentialsSection (task-28) contract tests:
+ * CredentialsSection contract tests (hard-delete semantic since 2026-09-21):
  * - list renders prefix/last4 only (never a full key),
  * - inference scoped login (403 on list) shows the empty state, hides writes,
  * - issue shows the one-time plaintext and clears it on close,
- * - revoke requires explicit confirmation,
+ * - delete requires explicit confirmation and removes the row (no tombstone),
  * - writes are hidden when the admin write channel is closed.
  */
 
@@ -29,7 +29,7 @@ const rows: GatewayKeyView[] = [
     scope: 'readonly',
     prefix: 'sk-pony-read-',
     last4: 'beef',
-    revoked: true,
+    revoked: false,
     expires_at: null,
     config_version: 7,
   },
@@ -72,7 +72,7 @@ describe('CredentialsSection (gateway scoped keys)', () => {
     expect(text).toContain('agent-ci-1');
     expect(text).toContain('sk-pony-infer-');
     expect(text).toContain('9a70');
-    expect(text).toContain('已吊销');
+    expect(text).not.toContain('已吊销');
     expect(text).not.toContain('key_hash');
     app.unmount();
   });
@@ -131,12 +131,12 @@ describe('CredentialsSection (gateway scoped keys)', () => {
     app.unmount();
   });
 
-  it('requires confirmation before revoking', async () => {
-    vi.spyOn(adminApi, 'getGatewayKeys').mockReturnValue({
+  it('requires confirmation before deleting, then removes the row', async () => {
+    const listMock = vi.spyOn(adminApi, 'getGatewayKeys').mockReturnValue({
       send: async () => rows,
     } as never);
     const revokeSpy = vi.spyOn(adminApi, 'revokeGatewayKey').mockReturnValue({
-      send: async () => ({ ...rows[0], revoked: true }),
+      send: async () => ({ ...rows[0] }),
     } as never);
 
     const { app, container } = mountSection({ adminWriteEnabled: true });
@@ -149,10 +149,19 @@ describe('CredentialsSection (gateway scoped keys)', () => {
     expect(container.querySelector('[data-testid="credentials-revoke-modal"]')).not.toBeNull();
     expect(revokeSpy).not.toHaveBeenCalled();
 
+    // After a real hard delete the follow-up list no longer contains the row.
+    listMock.mockReturnValue({
+      send: async () => rows.filter((r) => r.id !== 'agent-ci-1'),
+    } as never);
     (container.querySelector('[data-testid="credentials-revoke-confirm"]') as HTMLElement).click();
+    // Flush the full async chain: revoke POST -> refetch list -> local filter -> re-render.
+    await new Promise((r) => setTimeout(r, 20));
     await nextTick();
     await nextTick();
     expect(revokeSpy).toHaveBeenCalledWith('agent-ci-1', 7);
+    // Hard delete: the row vanishes entirely (no "已吊销" tombstone).
+    expect(container.querySelector('[data-testid="credentials-row-agent-ci-1"]')).toBeNull();
+    expect(container.querySelector('[data-testid="credentials-revoke-agent-ci-1"]')).toBeNull();
     app.unmount();
   });
 

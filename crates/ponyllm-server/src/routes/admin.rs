@@ -3102,6 +3102,12 @@ pub async fn handle_gateway_keys_issue(
         (status = 403, description = "insufficient scope (`forbidden`)")
     )
 )]
+/// Hard-delete a gateway credential (2026-09-21 semantic change).
+///
+/// `revoke` historically flipped `revoked=true` (soft delete); it now REMOVES
+/// the entry from disk + memory and keeps NO record of it. A second delete of
+/// the same id is therefore 404 (`gateway_key_not_found`), not 200 — there is
+/// nothing left to be idempotent over. The deleted id may be re-issued later.
 pub async fn handle_gateway_keys_revoke(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -3119,41 +3125,32 @@ pub async fn handle_gateway_keys_revoke(
         return resp;
     }
 
-    let Some(entry) = file.gateway.gateway_keys.iter_mut().find(|k| k.id == id) else {
+    let pos = file.gateway.gateway_keys.iter().position(|k| k.id == id);
+    let Some(idx) = pos else {
         return (
             StatusCode::NOT_FOUND,
             Json(json!({"error": {"message": format!("gateway key '{id}' not found"), "code": "gateway_key_not_found"}})),
         )
             .into_response();
     };
-    // Idempotent: re-revoking an already-revoked id returns 200, not 409.
-    entry.revoked = true;
+    // Hard delete: remove the entry entirely (disk + memory). No tombstone,
+    // no audit row here — the id is immediately free for re-issuance.
+    let removed = file.gateway.gateway_keys.remove(idx);
 
     let new_ver = match save_store_config(&state, &mut file) {
         Ok(v) => v,
         Err(resp) => return resp,
     };
-    // Sync memory BEFORE responding: no "disk revoked, memory still allows"
-    // window (contract §3). `authenticate` reads `state.config.gateway_keys`,
-    // so the revoked entry must be visible here.
+    // Sync memory BEFORE responding: no "disk deleted, memory still allows"
+    // window. `authenticate` reads `state.config.gateway_keys`, so the entry
+    // must be gone here as well.
     {
         let mut cfg = state.config.write();
-        if let Some(slot) = cfg.gateway_keys.iter_mut().find(|k| k.id == id) {
-            slot.revoked = true;
-        } else if let Some(stored) = file.gateway.gateway_keys.iter().find(|k| k.id == id).cloned() {
-            cfg.gateway_keys.push(stored);
-        }
+        cfg.gateway_keys.retain(|k| k.id != id);
     }
 
-    tracing::info!(key_id = %id, config_version = new_ver, "admin revoked gateway key");
-    let view = file
-        .gateway
-        .gateway_keys
-        .iter()
-        .find(|k| k.id == id)
-        .map(|e| gateway_key_view(e, new_ver))
-        .expect("revoked entry present after save");
-    (StatusCode::OK, Json(view)).into_response()
+    tracing::info!(key_id = %id, scope = %removed.scope.as_str(), config_version = new_ver, "admin deleted gateway key");
+    (StatusCode::OK, Json(gateway_key_view(&removed, new_ver))).into_response()
 }
 
 #[utoipa::path(

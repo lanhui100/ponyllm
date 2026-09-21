@@ -103,7 +103,10 @@ pub struct GatewayKeyEntry {
     /// Optional UNIX expiry seconds; `None` = never expires.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<i64>,
-    /// Revoked keys fail closed (401) even when the hash matches.
+    /// Legacy flag, kept for deserializing entries written before the
+    /// 2026-09-21 hard-delete semantic (nothing writes `true` anymore;
+    /// deletion removes the entry outright). Still enforced by
+    /// `authenticate` so a stale on-disk `revoked = true` keeps failing closed.
     #[serde(default)]
     pub revoked: bool,
     /// Last 4 chars of the plaintext, persisted at issuance for operator

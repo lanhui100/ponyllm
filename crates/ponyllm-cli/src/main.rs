@@ -1271,9 +1271,9 @@ fn handle_gateway_keys_list(config_path: Option<&str>) -> Result<(), Box<dyn std
         );
     }
     for k in &cfg.gateway.gateway_keys {
-        let status = if k.revoked {
-            "revoked"
-        } else if let Some(exp) = k.expires_at {
+        // Deleted entries are gone entirely (hard delete since 2026-09-21);
+        // only expiry can still mark a row non-active.
+        let status = if let Some(exp) = k.expires_at {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs() as i64)
@@ -1330,7 +1330,7 @@ fn handle_gateway_keys_issue(
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| format!("{}-{}", scope.as_str(), &uuid::Uuid::new_v4().simple().to_string()[..8]));
     if cfg.gateway.gateway_keys.iter().any(|k| k.id == id) {
-        let msg = format!("Key id '{}' 已存在（先 revoke 再重发，不做原地加权）", id);
+        let msg = format!("Key id '{}' 已存在（先删除再重发，不做原地加权）", id);
         eprintln!("❌ {}", msg);
         return Err(msg.into());
     }
@@ -1344,7 +1344,9 @@ fn handle_gateway_keys_issue(
     Ok(())
 }
 
-/// Revoke a scoped gateway key by id (P1): fail-closed immediately.
+/// Delete a scoped gateway key by id (hard delete since 2026-09-21: removes
+/// the entry from disk + memory and keeps no record of it). Fail-closed
+/// immediately.
 fn handle_gateway_keys_revoke(
     config_path: Option<&str>,
     id: &str,
@@ -1353,18 +1355,15 @@ fn handle_gateway_keys_revoke(
     let path = resolved.to_str().unwrap_or("ponyllm.toml");
     let mut cfg = ConfigFile::load_or_default(Some(path).filter(|_| resolved.exists()))
         .unwrap_or_default();
-    let Some(k) = cfg.gateway.gateway_keys.iter_mut().find(|k| k.id == id) else {
+    let before = cfg.gateway.gateway_keys.len();
+    cfg.gateway.gateway_keys.retain(|k| k.id != id);
+    if cfg.gateway.gateway_keys.len() == before {
         let msg = format!("Key id '{}' 不存在", id);
         eprintln!("❌ {}", msg);
         return Err(msg.into());
-    };
-    if k.revoked {
-        println!("Key id '{}' 已是 revoked，无需重复操作。", id);
-        return Ok(());
     }
-    k.revoked = true;
     cfg.save_to_path(path)?;
-    println!("✅ Key id '{}' 已吊销（热加载约 500ms 内全网生效）。", id);
+    println!("✅ Key id '{}' 已删除（无残留记录，热加载约 500ms 内全网生效）。", id);
     Ok(())
 }
 

@@ -282,7 +282,7 @@ pub enum KeysCommands {
         #[arg(short, long)]
         config: Option<String>,
     },
-    /// Revoke a scoped gateway key by id (fail-closed immediately)
+    /// Delete a scoped gateway key by id (hard delete: no record kept, fail-closed immediately)
     Revoke {
         /// Key id to revoke
         #[arg(short, long)]

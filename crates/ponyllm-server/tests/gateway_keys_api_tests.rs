@@ -169,7 +169,8 @@ async fn gateway_keys_issue_list_revoke_roundtrip() {
     assert_eq!(row["revoked"], false);
     assert!(list2.as_array().unwrap().len() >= 4);
 
-    // revoke: 200 + revoked:true, and the key dies immediately (401).
+    // revoke: 200, the entry is DELETED (hard delete since 2026-09-21),
+    // and the key dies immediately (401).
     let ver = row["config_version"].as_i64().unwrap();
     let rev = c
         .post(h.url("/api/admin/gateway-keys/ci-agent-1/revoke"))
@@ -180,7 +181,22 @@ async fn gateway_keys_issue_list_revoke_roundtrip() {
         .unwrap();
     assert_eq!(rev.status(), StatusCode::OK);
     let rev_body: serde_json::Value = rev.json().await.unwrap();
-    assert_eq!(rev_body["revoked"], true);
+    assert_eq!(rev_body["id"], "ci-agent-1");
+
+    // The deleted id is absent from the list: no tombstone, no trace.
+    let list3: serde_json::Value = c
+        .get(h.url("/api/admin/gateway-keys"))
+        .header("Authorization", bearer(&h.admin))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        list3.as_array().unwrap().iter().all(|v| v["id"] != "ci-agent-1"),
+        "deleted key must vanish from the list: {list3}"
+    );
 
     let dead = c
         .get(h.url("/api/admin/quota"))
@@ -188,9 +204,9 @@ async fn gateway_keys_issue_list_revoke_roundtrip() {
         .send()
         .await
         .unwrap();
-    assert_eq!(dead.status(), StatusCode::UNAUTHORIZED, "revoked key fail-closed");
+    assert_eq!(dead.status(), StatusCode::UNAUTHORIZED, "deleted key fail-closed");
 
-    // idempotent re-revoke: 200, not 409.
+    // Deleting twice is 404 (nothing left to be idempotent over).
     let again = c
         .post(h.url("/api/admin/gateway-keys/ci-agent-1/revoke"))
         .header("Authorization", bearer(&h.admin))
@@ -198,7 +214,20 @@ async fn gateway_keys_issue_list_revoke_roundtrip() {
         .send()
         .await
         .unwrap();
-    assert_eq!(again.status(), StatusCode::OK);
+    assert_eq!(again.status(), StatusCode::NOT_FOUND);
+    let ab: serde_json::Value = again.json().await.unwrap();
+    assert_eq!(ab["error"]["code"], "gateway_key_not_found");
+
+    // The freed id may be re-issued later.
+    let reissue = c
+        .post(h.url("/api/admin/gateway-keys"))
+        .header("Authorization", bearer(&h.admin))
+        .header("If-Match", "*")
+        .json(&serde_json::json!({"id": "ci-agent-1", "scope": "inference"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(reissue.status(), StatusCode::CREATED);
 
     // unknown id -> 404 gateway_key_not_found (distinct from gate 404).
     let unknown = c

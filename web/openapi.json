@@ -117,6 +117,8 @@
     "/api/admin/gateway-keys/{id}/revoke": {
       "post": {
         "tags": [],
+        "summary": "Hard-delete a gateway credential (2026-09-21 semantic change).",
+        "description": "`revoke` historically flipped `revoked=true` (soft delete); it now REMOVES\nthe entry from disk + memory and keeps NO record of it. A second delete of\nthe same id is therefore 404 (`gateway_key_not_found`), not 200 — there is\nnothing left to be idempotent over. The deleted id may be re-issued later.",
         "operationId": "handle_gateway_keys_revoke",
         "parameters": [
           {
