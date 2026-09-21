@@ -218,3 +218,35 @@ describe('CredentialsSection loading state', () => {
     app.unmount();
   });
 });
+
+describe('CredentialsSection scope display labels', () => {
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  it('shows friendly Chinese scope names and never the raw scope enum', async () => {
+    vi.spyOn(adminApi, 'getGatewayKeys').mockReturnValue({
+      send: async () => [
+        { id: 'a1', scope: 'admin', prefix: 'sk-pony-admin-', last4: '1111', revoked: false, expires_at: null, config_version: 7 },
+        { id: 'i1', scope: 'inference', prefix: 'sk-pony-infer-', last4: '2222', revoked: false, expires_at: null, config_version: 7 },
+        { id: 'r1', scope: 'readonly', prefix: 'sk-pony-read-', last4: '3333', revoked: false, expires_at: null, config_version: 7 },
+      ],
+    } as never);
+    const { app, container } = mountSection({ adminWriteEnabled: true });
+    await nextTick();
+    await nextTick();
+    await new Promise((r) => setTimeout(r, 20));
+    const table = container.querySelector('[data-testid="credentials-table"]');
+    expect(table).not.toBeNull();
+    const text = table!.textContent || '';
+    // Friendly names shown…
+    expect(text).toContain('管理员');
+    expect(text).toContain('调用方');
+    expect(text).toContain('只读');
+    // …and the raw API contract values never leak into badge/labels.
+    for (const badge of Array.from(table!.querySelectorAll('.inline-flex'))) {
+      expect(['管理员', '调用方', '只读']).toContain((badge.textContent || '').trim());
+    }
+    app.unmount();
+  });
+});

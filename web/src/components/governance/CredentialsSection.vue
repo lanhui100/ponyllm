@@ -61,6 +61,21 @@ const scopeBadgeClass: Record<string, string> = {
   readonly: 'bg-slate-100 text-slate-600 border-slate-200',
 };
 
+/**
+ * Display-layer scope labels (2026-09-21): backend scope names
+ * (`admin|inference|readonly`) are a frozen API contract and must keep flowing
+ * verbatim in requests, ids and testids — but users see these friendly names.
+ */
+const scopeLabel: Record<string, string> = {
+  admin: '管理员',
+  inference: '调用方',
+  readonly: '只读',
+};
+
+function scopeName(scope: string): string {
+  return scopeLabel[scope] ?? scope;
+}
+
 function statusOf(k: GatewayKeyView): { label: string; cls: string } {
   // Hard-delete semantic: deleted rows never render, so there is no '已吊销' state.
   if (k.expires_at && k.expires_at * 1000 < Date.now()) {
@@ -86,7 +101,7 @@ async function submitIssue() {
   try {
     await issue({ id, scope: form.value.scope });
     showIssue.value = false;
-    emit('notice', `已签发 ${form.value.scope} 凭证 ${id}`);
+    emit('notice', `已签发${scopeName(form.value.scope)}凭证 ${id}`);
   } catch (err: unknown) {
     formError.value = err instanceof Error ? err.message : String(err);
   } finally {
@@ -142,10 +157,10 @@ function closeSecret() {
         鉴权兼容模式：<span class="font-mono font-semibold text-slate-900">{{ authCompat || 'dual' }}</span>
       </span>
       <span v-if="authCompat === 'strict'" class="text-amber-700">
-        strict 下旧版单 token 全部 401，请确保已签发 admin 级凭证再用
+        strict 下旧版单 token 全部 401，请确保已签发管理员级凭证再用
       </span>
       <span v-else class="text-slate-500">
-        旧版单 token（legacy）仍可用；建议为 agent 单独签发 inference 凭证
+        旧版单 token（legacy）仍可用；建议为 agent 单独签发调用方凭证
       </span>
     </div>
 
@@ -153,7 +168,7 @@ function closeSecret() {
       <div>
         <h3 class="text-base font-semibold text-slate-900">网关访问凭证</h3>
         <p class="text-[13px] text-slate-500 mt-0.5">
-          分级 key：admin 全权 / inference 仅推理+额度 / readonly 仅只读。明文只在签发时显示一次。
+          分级凭证：管理员（全权）/ 调用方（仅推理 + 额度）/ 只读（仅查看）。明文只在签发时显示一次。
         </p>
       </div>
       <div class="flex items-center gap-2">
@@ -181,7 +196,7 @@ function closeSecret() {
       <Icons name="lock" size="36" class="text-slate-300 mx-auto mb-2.5" />
       <p class="text-base font-semibold text-slate-800">当前凭证无权查看凭证清单</p>
       <p class="text-sm text-slate-500 mt-1">
-        inference 级凭证不可读取管理面（防 agent 窥视凭证）。请改用 admin 或 readonly 凭证登录。
+        调用方凭证不可读取管理面（防 agent 窥视凭证）。请改用管理员或只读凭证登录。
       </p>
     </div>
 
@@ -202,7 +217,7 @@ function closeSecret() {
         <Icons name="key" size="36" class="text-slate-300 mx-auto mb-2.5" />
         <p class="text-base font-semibold text-slate-800">暂无分级凭证</p>
         <p class="text-sm text-slate-500 mt-1">
-          点击「+ 签发凭证」为 agent 分配 inference key，避免共享管理 token
+          点击「+ 签发凭证」为 agent 分配调用方凭证，避免共享管理 token
         </p>
       </div>
 
@@ -227,7 +242,7 @@ function closeSecret() {
               <td class="px-4 py-2.5 font-mono text-slate-900">{{ k.id }}</td>
               <td class="px-4 py-2.5">
                 <UiBadge :class="scopeBadgeClass[k.scope] || scopeBadgeClass.readonly">
-                  {{ k.scope }}
+                  {{ scopeName(k.scope) }}
                 </UiBadge>
               </td>
               <td class="px-4 py-2.5 font-mono text-slate-500">
@@ -277,9 +292,9 @@ function closeSecret() {
           class="w-full swiss-input mb-3"
           data-testid="credentials-issue-scope"
         >
-          <option value="inference">inference（agent：推理 + 额度）</option>
-          <option value="readonly">readonly（只读运维）</option>
-          <option value="admin">admin（全权）</option>
+          <option value="inference">调用方（agent：推理 + 额度）</option>
+          <option value="readonly">只读（只读运维）</option>
+          <option value="admin">管理员（全权）</option>
         </select>
         <p v-if="formError" class="text-[13px] text-rose-600 mb-2">{{ formError }}</p>
         <div class="flex justify-end gap-2 mt-2">
