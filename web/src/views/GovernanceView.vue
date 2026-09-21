@@ -401,14 +401,16 @@ async function handleSaveProvider() {
   providerSubmitting.value = true;
   providerFormError.value = null;
   try {
+    // 多选持久化（与 ProviderCard.handleSaveProtocols 同规则）：选中的协议若
+    // 未填专属 URL，用 base_url 回填做显式声明，否则纯胶囊选中不落盘。
     await saveProvider({
       ...newProviderForm.value,
       name,
       base_url: url,
       default_protocol: newProviderProtocols.value[0] || 'chat',
-      chat_url: newProviderProtocols.value.includes('chat') ? (newProviderCustomUrls.value.chat.trim() || null) : null,
-      messages_url: newProviderProtocols.value.includes('messages') ? (newProviderCustomUrls.value.messages.trim() || null) : null,
-      responses_url: newProviderProtocols.value.includes('responses') ? (newProviderCustomUrls.value.responses.trim() || null) : null,
+      chat_url: newProviderProtocols.value.includes('chat') ? (newProviderCustomUrls.value.chat.trim() || url) : null,
+      messages_url: newProviderProtocols.value.includes('messages') ? (newProviderCustomUrls.value.messages.trim() || url) : null,
+      responses_url: newProviderProtocols.value.includes('responses') ? (newProviderCustomUrls.value.responses.trim() || url) : null,
     });
     isAddingProvider.value = false;
   } catch (err: unknown) {

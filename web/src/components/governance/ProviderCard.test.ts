@@ -536,3 +536,86 @@ describe('ProviderCard UI and Phase 2 Requirements', () => {
     document.body.removeChild(container);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Regression: multi-select must persist. A selected protocol with an empty
+// custom URL is backfilled with base_url as an explicit declaration — backend
+// only trusts default_protocol + per-protocol URLs, a bare pill selection is
+// lost on the next render otherwise (chat+responses could never stay selected).
+// ---------------------------------------------------------------------------
+describe('ProviderCard protocol multi-select persistence', () => {
+  function mountCard(provider: any) {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    let updatedPayload: any = null;
+    const app = createApp(ProviderCard, {
+      provider,
+      models: [],
+      keys: [],
+      adminWriteEnabled: true,
+      keyTestResults: {},
+      testingKeyIds: new Set<string>(),
+      defaultExpanded: true,
+      'onUpdate-provider': (_name: string, payload: any) => {
+        updatedPayload = payload;
+      },
+    });
+    app.mount(container);
+    return { app, container, getPayload: () => updatedPayload };
+  }
+
+  const baseProvider = {
+    name: 'moyo-like',
+    base_url: 'https://v1.cdks.work/v1',
+    default_model: 'gpt-5.6-terra',
+    strategy: 'priority',
+    billing_mode: 'metered',
+    input_price: 0,
+    cached_price: 0,
+    output_price: 0,
+    models: 1,
+    default_protocol: 'chat',
+    chat_url: null,
+    messages_url: null,
+    responses_url: null,
+  };
+
+  it('backfills selected-but-empty protocol URLs with base_url on save', async () => {
+    const { app, container, getPayload } = mountCard({ ...baseProvider });
+    await nextTick();
+
+    (container.querySelector('[data-testid="edit-protocols-btn"]') as HTMLButtonElement).click();
+    await nextTick();
+    // Select responses alongside the initially-active chat (no custom URLs typed).
+    (container.querySelector('[data-testid="protocol-pill-responses"]') as HTMLButtonElement).click();
+    await nextTick();
+    (container.querySelector('[data-testid="save-protocols-btn"]') as HTMLButtonElement).click();
+    await nextTick();
+
+    const payload = getPayload();
+    expect(payload).not.toBeNull();
+    expect(payload.chat_url).toBe('https://v1.cdks.work/v1');
+    expect(payload.responses_url).toBe('https://v1.cdks.work/v1');
+    expect(payload.messages_url).toBe('');
+    expect(payload.default_protocol).toBe('chat');
+    app.unmount();
+    document.body.removeChild(container);
+  });
+
+  it('re-renders both pills as active after the backfilled URLs land', async () => {
+    const landed = {
+      ...baseProvider,
+      chat_url: 'https://v1.cdks.work/v1',
+      responses_url: 'https://v1.cdks.work/v1',
+    };
+    const { app, container } = mountCard(landed);
+    await nextTick();
+
+    const chat = container.querySelector('[data-testid="protocol-pill-chat"]') as HTMLElement;
+    const responses = container.querySelector('[data-testid="protocol-pill-responses"]') as HTMLElement;
+    expect(chat.className).toContain('bg-slate-900');
+    expect(responses.className).toContain('bg-slate-900');
+    app.unmount();
+    document.body.removeChild(container);
+  });
+});

@@ -169,12 +169,16 @@ async function handleSaveProtocols() {
 
   protocolsSaving.value = true;
   try {
+    // 多选持久化：选中的协议若未填专属 URL，自动填入 base_url 做显式声明
+    // （后端只认 default_protocol + 三个 per-protocol URL；纯胶囊选中不落盘，
+    // 下次打开会回显丢失）。同 base 双通的上游派生结果一致，行为不变。
+    const base = (props.provider.base_url || '').trim();
     await emit('update-provider', props.provider.name, {
       strategy: editStrategy.value,
       default_protocol: activeProtocols.value[0] || 'chat',
-      chat_url: activeProtocols.value.includes('chat') ? chatVal : '',
-      messages_url: activeProtocols.value.includes('messages') ? messagesVal : '',
-      responses_url: activeProtocols.value.includes('responses') ? responsesVal : '',
+      chat_url: activeProtocols.value.includes('chat') ? chatVal || base : '',
+      messages_url: activeProtocols.value.includes('messages') ? messagesVal || base : '',
+      responses_url: activeProtocols.value.includes('responses') ? responsesVal || base : '',
     });
     isEditingProtocols.value = false;
     toast.success('服务商配置已保存');
