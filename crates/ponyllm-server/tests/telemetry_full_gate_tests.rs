@@ -21,6 +21,7 @@ fn test_frame(id: &str) -> FlightFrame {
         request_id: id.to_string(),
         endpoint: "/v1/chat/completions".to_string(),
         provider: Some("openai".to_string()),
+        model: Some("gpt-4o".to_string()),
         key_id: "k1".to_string(),
         raw_key: None,
         attempt: Some(0),

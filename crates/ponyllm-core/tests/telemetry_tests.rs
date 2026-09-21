@@ -10,6 +10,7 @@ fn test_flight_recorder_record_and_sanitize() {
         request_id: "req-123".to_string(),
         endpoint: "/v1/chat/completions".to_string(),
         provider: None,
+        model: Some("gpt-4o".to_string()),
         key_id: "primary-key".to_string(),
         raw_key: Some("sk-proj-1234567890abcdef".to_string()),
         attempt: None,
@@ -33,6 +34,8 @@ fn test_flight_recorder_record_and_sanitize() {
     
     // Key must be sanitized in output!
     assert_eq!(frames[0].sanitized_key, "sk-***cdef");
+    // Requested model survives the record path for trace display.
+    assert_eq!(frames[0].model.as_deref(), Some("gpt-4o"));
 }
 
 #[test]
@@ -65,6 +68,7 @@ fn test_flight_recorder_snippet_truncation() {
         request_id: "req-giant".to_string(),
         endpoint: "/v1/chat/completions".to_string(),
         provider: None,
+        model: None,
         key_id: "k1".to_string(),
         raw_key: None,
         attempt: None,
@@ -96,6 +100,7 @@ fn test_flight_recorder_ring_buffer_capacity() {
             request_id: format!("req-{}", i),
             endpoint: "/v1/chat/completions".to_string(),
             provider: None,
+                model: None,
             key_id: format!("key-{}", i),
             raw_key: None,
             attempt: None,
@@ -198,6 +203,7 @@ fn test_stream_flow_detail_survives_recorder() {
         request_id: "req-stream".to_string(),
         endpoint: "/v1/chat/completions".to_string(),
         provider: Some("opencode-zen".to_string()),
+        model: None,
         key_id: "zen".to_string(),
         raw_key: None,
         attempt: None,
@@ -241,6 +247,7 @@ fn test_flight_recorder_preserves_distinct_attempt_failures() {
         request_id: "req_retry_test".to_string(),
         endpoint: "/v1/chat/completions".to_string(),
         provider: Some("provider_a".to_string()),
+        model: None,
         key_id: "key_a".to_string(),
         raw_key: None,
         attempt: Some(0),
@@ -262,6 +269,7 @@ fn test_flight_recorder_preserves_distinct_attempt_failures() {
         request_id: "req_retry_test".to_string(),
         endpoint: "/v1/chat/completions".to_string(),
         provider: Some("provider_b".to_string()),
+        model: None,
         key_id: "key_b".to_string(),
         raw_key: None,
         attempt: Some(1),

@@ -250,6 +250,9 @@ pub struct FlightFrame {
     /// Upstream provider name (e.g. "deepseek"); kept for TUI display.
     /// `None` preserves the legacy frames that only carried `key_id`.
     pub provider: Option<String>,
+    /// Client-requested model (raw virtual name, e.g. "auto" untouched).
+    /// Carried for trace display; attribution-neutral.
+    pub model: Option<String>,
     pub key_id: String,
     pub raw_key: Option<String>,
     /// Zero-based attempt index within one client request (key retry / provider fallback).
@@ -274,6 +277,9 @@ pub struct RecordedFrame {
     pub endpoint: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
+    /// Client-requested model; `None` for legacy frames / non-model events.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     pub key_id: String,
     pub sanitized_key: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -353,6 +359,7 @@ impl FlightRecorder {
             timestamp: Utc::now(),
             endpoint: frame.endpoint,
             provider: frame.provider,
+            model: frame.model,
             key_id,
             sanitized_key,
             attempt: frame.attempt,
@@ -526,6 +533,7 @@ mod scrub_tests {
             request_id: "h4-test".to_string(),
             endpoint: "/v1/chat/completions".to_string(),
             provider: Some("openai".to_string()),
+                model: None,
             key_id: "key-1".to_string(),
             raw_key: None,
             attempt: Some(0),
@@ -565,6 +573,7 @@ mod scrub_tests {
             request_id: "h4-trunc".to_string(),
             endpoint: "/v1/chat/completions".to_string(),
             provider: Some("openai".to_string()),
+                model: None,
             key_id: "key-1".to_string(),
             raw_key: None,
             attempt: Some(0),

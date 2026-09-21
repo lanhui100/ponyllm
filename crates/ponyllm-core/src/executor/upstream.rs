@@ -42,6 +42,8 @@ pub struct EventSinkCtx {
     pub request_id: String,
     pub endpoint: String,
     pub provider: String,
+    /// Client-requested model (raw virtual name); survives into attempt frames.
+    pub model: Option<String>,
     pub start: Instant,
     pub stages: Arc<Mutex<StageTimings>>,
     pub request_snippet: Option<String>,

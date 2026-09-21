@@ -306,6 +306,7 @@ pub async fn handle_responses(
             request_id: request_id.clone(),
             endpoint: endpoint.clone(),
             provider: provider_name.clone(),
+            model: Some(requested_raw_model.clone()),
             start: start_time,
             stages: stages.clone(),
             request_snippet: req_snippet.clone(),

@@ -676,7 +676,7 @@ impl AppState {
         let ctx = EventCtx {
             request_id: sink_ctx.request_id.clone(),
             session_id: None,
-            model: None,
+            model: sink_ctx.model.clone(),
             endpoint: sink_ctx.endpoint.clone(),
             start: sink_ctx.start,
         };

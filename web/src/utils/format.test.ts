@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { formatStrategyLabel, formatTierLabel, formatKeyState, formatContextWindow } from './format';
+import { formatStrategyLabel, formatTierLabel, formatKeyState, formatContextWindow, formatDateTime, formatMsInt } from './format';
 
 describe('format utility', () => {
   it('formats strategies into colloquial Chinese', () => {
@@ -40,6 +40,21 @@ describe('format utility', () => {
     expect(formatContextWindow('1M')).toBe('1M');
     expect(formatContextWindow('')).toBe('256K');
     expect(formatContextWindow(null)).toBe('256K');
+  });
+
+  it('formats trace timestamps as date+time', () => {
+    // 本地时区下断言形状而非绝对值：YYYY-MM-DD HH:mm:ss
+    const out = formatDateTime('2026-09-21T08:05:04.123Z');
+    expect(out).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+    expect(formatDateTime(null)).toBe('--');
+    expect(formatDateTime('not-a-date')).toBe('--');
+  });
+
+  it('rounds ms values to integers', () => {
+    expect(formatMsInt(110.6)).toBe('111');
+    expect(formatMsInt(110.4)).toBe('110');
+    expect(formatMsInt(undefined)).toBe('--');
+    expect(formatMsInt(null)).toBe('--');
   });
 });
 

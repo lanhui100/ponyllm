@@ -8,6 +8,7 @@ import UiButton from '../components/ui/UiButton.vue';
 import UiTooltip from '../components/ui/UiTooltip.vue';
 import type { RecordedFrame } from '../types/telemetry';
 import { maskKey } from '../utils/scrub';
+import { formatDateTime, formatMsInt } from '../utils/format';
 import { useSessionStore } from '../stores/session';
 import { onStopPolling } from '../router';
 
@@ -341,7 +342,7 @@ onUnmounted(() => {
           ref="tableContainerRef"
           class="flex-1 min-h-0 overflow-auto no-scrollbar scrollbar-none"
         >
-          <table class="w-full min-w-[1000px] border-collapse text-left text-sm">
+          <table class="w-full min-w-[1240px] border-collapse text-left text-sm">
             <!-- 固顶表头 -->
             <thead class="sticky top-0 z-10 bg-slate-100/90 backdrop-blur-md border-b border-slate-200/80 text-xs font-semibold text-slate-600 select-none shadow-2xs">
               <tr>
@@ -349,9 +350,10 @@ onUnmounted(() => {
                 <th class="py-3.5 px-4 w-28">耗时</th>
                 <th class="py-3.5 px-4 min-w-[220px]">端点</th>
                 <th class="py-3.5 px-4 w-32">Provider</th>
+                <th class="py-3.5 px-4 w-36">模型</th>
                 <th class="py-3.5 px-4 w-36">Key 标识</th>
                 <th class="py-3.5 px-4 min-w-[200px]">摘要 / Payload</th>
-                <th class="py-3.5 pl-4 pr-8 w-40 text-right">时间</th>
+                <th class="py-3.5 pl-4 pr-8 w-48 text-right">时间</th>
               </tr>
             </thead>
 
@@ -397,6 +399,13 @@ onUnmounted(() => {
                   </span>
                 </td>
 
+                <!-- 模型 -->
+                <td class="py-3.5 px-4 text-xs text-slate-700">
+                  <div class="truncate max-w-[160px] font-mono" :title="frame.model || '--'">
+                    {{ frame.model || '--' }}
+                  </div>
+                </td>
+
                 <!-- Key 标识 (无需脱敏) -->
                 <td class="py-3.5 px-4 whitespace-nowrap font-mono text-xs text-slate-800 font-medium">
                   <span :title="frame.key_id">
@@ -411,7 +420,7 @@ onUnmounted(() => {
                       [Err] {{ frame.error }}
                     </span>
                     <span v-else-if="frame.stream_flow?.chunks" class="text-emerald-700">
-                      [Stream] {{ frame.stream_flow.chunks }} chunks / {{ frame.stream_flow.ttft_ms ?? '--' }}ms ttft
+                      [Stream] {{ frame.stream_flow.chunks }} chunks / {{ formatMsInt(frame.stream_flow.ttft_ms) }}ms ttft
                     </span>
                     <span v-else>
                       {{ frame.request_snippet || frame.response_snippet || '--' }}
@@ -421,7 +430,7 @@ onUnmounted(() => {
 
                 <!-- 时间 -->
                 <td class="py-3.5 pl-4 pr-8 whitespace-nowrap text-right font-mono text-xs text-slate-500">
-                  {{ new Date(frame.timestamp).toLocaleTimeString() }}
+                  {{ formatDateTime(frame.timestamp) }}
                 </td>
               </tr>
             </tbody>

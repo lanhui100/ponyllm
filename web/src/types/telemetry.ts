@@ -18,6 +18,8 @@ export interface RecordedFrame {
   timestamp: string;
   endpoint: string;
   provider?: string;
+  /** 客户端请求模型（原始虚拟名）；老帧可能缺失 */
+  model?: string;
   key_id: string;
   sanitized_key: string;
   attempt?: number;

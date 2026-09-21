@@ -73,3 +73,21 @@ export function formatContextWindow(ctx?: string | null): string {
   return trimmed.replace(/([0-9]+)\s*([kKmMgGtT])/g, (_, num, unit) => `${num}${unit.toUpperCase()}`);
 }
 
+/**
+ * 轨迹时间统一格式：日期+时间（本地时区），`YYYY-MM-DD HH:mm:ss`。
+ * 不用 toLocaleString：各 locale 输出不稳定、不可测。
+ */
+export function formatDateTime(iso?: string | null): string {
+  if (!iso) return '--';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '--';
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
+/** 毫秒取整展示：ttft 等 f64 小数无意义，统一 Math.round（NaN/缺失回退 '--'） */
+export function formatMsInt(v?: number | null): string {
+  if (v === undefined || v === null || Number.isNaN(v)) return '--';
+  return `${Math.round(v)}`;
+}
+

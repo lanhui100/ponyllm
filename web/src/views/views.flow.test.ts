@@ -180,6 +180,7 @@ describe('WEB-02 End-to-End User Flow (Connect -> Dashboard -> Recorder)', () =>
       timestamp: new Date(Date.now() - i * 1000).toISOString(),
       endpoint: i % 2 === 0 ? '/v1/chat/completions' : '/v1/messages',
       provider: i % 3 === 0 ? 'deepseek' : 'openai',
+      model: i % 2 === 0 ? 'deepseek-chat' : 'gpt-4o',
       key_id: `key-${i}`,
       sanitized_key: `sk-***tail${i}`,
       status_code: i === 5 ? 500 : 200,
@@ -188,7 +189,7 @@ describe('WEB-02 End-to-End User Flow (Connect -> Dashboard -> Recorder)', () =>
       request_snippet: '{"model":"gpt-4","prompt":"sk-secret-payload-test"}',
       response_snippet: '{"reply":"ok"}',
       stream_flow: {
-        ttft_ms: 110,
+        ttft_ms: 110.6,
         ttlb_ms: 600,
         chunks: 8,
         bytes: 1024,
@@ -215,6 +216,14 @@ describe('WEB-02 End-to-End User Flow (Connect -> Dashboard -> Recorder)', () =>
     expect(container.textContent).toContain('轨迹');
     expect(container.textContent).toContain('保留 7 天');
     expect(container.textContent).toContain('共 50 / 50 帧');
+    // 模型列：表头 + 行内模型名
+    expect(container.textContent).toContain('模型');
+    expect(container.textContent).toContain('deepseek-chat');
+    // 摘要 ttft 取整：110.6 -> 111ms（无小数）
+    expect(container.textContent).toContain('111ms ttft');
+    expect(container.textContent).not.toContain('110.6ms ttft');
+    // 时间列：日期+时间格式 YYYY-MM-DD HH:mm:ss
+    expect(container.textContent).toMatch(/\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/);
 
     // Filter by 5xx status
     const select = container.querySelector('.select-box') as HTMLSelectElement;
@@ -240,6 +249,9 @@ describe('WEB-02 End-to-End User Flow (Connect -> Dashboard -> Recorder)', () =>
     // Verify Drawer content
     expect(container.textContent).toContain('轨迹详情');
     expect(container.textContent).toContain('cURL 复现命令');
+    // 抽屉元数据：模型行 + 日期时间
+    expect(container.textContent).toContain('gpt-4o');
+    expect(container.textContent).toMatch(/\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/);
 
     // Verify all keys displayed are strictly sk-*** (zero leak of tails like sk-***tail0 or payload keys)
     expect(container.textContent).toContain('sk-***');

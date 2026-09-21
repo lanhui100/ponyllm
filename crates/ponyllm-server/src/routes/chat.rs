@@ -338,6 +338,7 @@ pub async fn handle_chat_completions(
             request_id: request_id.clone(),
             endpoint: endpoint.clone(),
             provider: target.provider_name.clone(),
+            model: Some(requested_raw_model.clone()),
             start: start_time,
             stages: stages.clone(),
             request_snippet: req_snippet.clone(),

@@ -2,6 +2,7 @@
 import { h, ref, computed, watch, onMounted, onUnmounted } from 'vue';
 import type { RecordedFrame } from '../types/telemetry';
 import { scrubSecrets, generateCurlCommand } from '../utils/scrub';
+import { formatDateTime } from '../utils/format';
 import Icons from './ui/Icons.vue';
 import UiTooltip from './ui/UiTooltip.vue';
 
@@ -605,6 +606,13 @@ const JsonTree = {
             </span>
           </div>
 
+          <div>
+            <span class="block text-slate-500 mb-1">模型</span>
+            <span class="font-mono font-medium text-slate-800 break-all" :title="frame.model || '--'">
+              {{ frame.model || '--' }}
+            </span>
+          </div>
+
           <div class="col-span-2 sm:col-span-2">
             <span class="block text-slate-500 mb-1">端点</span>
             <span class="font-mono text-slate-800 break-all">{{ frame.endpoint }}</span>
@@ -617,7 +625,7 @@ const JsonTree = {
 
           <div class="col-span-2 sm:col-span-3">
             <span class="block text-slate-500 mb-1">时间戳</span>
-            <span class="font-mono text-slate-600">{{ new Date(frame.timestamp).toLocaleString() }}</span>
+            <span class="font-mono text-slate-600">{{ formatDateTime(frame.timestamp) }}</span>
           </div>
         </div>
 

@@ -23,8 +23,9 @@ import UiSkeleton from './ui/UiSkeleton.vue';
       <UiSkeleton width="160px" height="12px" />
       <UiSkeleton width="72px" height="12px" />
       <UiSkeleton width="88px" height="12px" />
+      <UiSkeleton width="96px" height="12px" />
       <UiSkeleton width="200px" height="12px" class="hidden lg:inline-block" />
-      <UiSkeleton width="64px" height="12px" class="ml-auto" />
+      <UiSkeleton width="140px" height="12px" class="ml-auto" />
     </div>
 
     <!-- 数据行 × 8 -->
@@ -38,9 +39,10 @@ import UiSkeleton from './ui/UiSkeleton.vue';
         <UiSkeleton width="64px" height="12px" />
         <UiSkeleton width="180px" height="12px" />
         <UiSkeleton width="72px" height="20px" radius="4px" />
+        <UiSkeleton width="96px" height="12px" />
         <UiSkeleton width="88px" height="12px" />
         <UiSkeleton width="220px" height="12px" class="hidden lg:inline-block" />
-        <UiSkeleton width="64px" height="12px" class="ml-auto" />
+        <UiSkeleton width="140px" height="12px" class="ml-auto" />
       </div>
     </div>
 
