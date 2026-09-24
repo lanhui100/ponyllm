@@ -93,7 +93,8 @@ export function useTelemetry(options: UseTelemetryOptions = {}) {
   const history = ref<TelemetryPoint[]>([]);
   const transport = ref<'sse' | 'polling' | 'offline'>('polling');
   const isDown = ref(false);
-  const selectedRange = ref<'24h' | '7d' | '30d'>('24h');
+  const selectedRange = ref<'24h' | '7d' | '30d' | 'all'>('24h');
+  const isHistoryLoading = ref(false);
   const historyData = ref<TimeseriesHistoryResponse | null>(null);
   const initialPersisted = loadPersistedGatewaySlots();
   const gatewaySlots = ref<ConnectivitySlot[]>(initialPersisted.slots);
@@ -192,8 +193,16 @@ export function useTelemetry(options: UseTelemetryOptions = {}) {
     }
   }
 
-  async function fetchHistory(range?: '24h' | '7d' | '30d') {
+  async function fetchHistory(range?: '24h' | '7d' | '30d' | 'all') {
     const targetRange = range || selectedRange.value;
+    if (targetRange === 'all') {
+      // 保持现有的 30d 历史数据作为时序图表展示，而头部卡片切换为 all-time 累计统计
+      if (!historyData.value) {
+        await fetchHistory('30d');
+      }
+      return;
+    }
+    isHistoryLoading.value = true;
     try {
       const headers = getAuthHeaders();
       const res = await fetch(getFullUrl(`/v1/telemetry/history?range=${targetRange}`), { headers });
@@ -202,10 +211,12 @@ export function useTelemetry(options: UseTelemetryOptions = {}) {
       }
     } catch {
       // Best-effort history fetch
+    } finally {
+      isHistoryLoading.value = false;
     }
   }
 
-  async function setRange(r: '24h' | '7d' | '30d') {
+  async function setRange(r: '24h' | '7d' | '30d' | 'all') {
     selectedRange.value = r;
     await fetchHistory(r);
   }
@@ -463,6 +474,7 @@ export function useTelemetry(options: UseTelemetryOptions = {}) {
     transport,
     isDown,
     selectedRange,
+    isHistoryLoading,
     historyData,
     gatewayUptimeBars,
     fetchHistory,

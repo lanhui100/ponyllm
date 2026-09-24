@@ -121,9 +121,17 @@ export interface WindowUsage {
   requests: number;
 }
 
+export interface CycleStats {
+  count: number;
+  total_tokens: number;
+  avg_tokens: number;
+}
+
 export interface KeyCapacityEstimate {
   window_5h: WindowUsage;
   window_weekly: WindowUsage;
+  window_monthly: WindowUsage;
+  completed_5h_stats?: CycleStats | null;
   estimated_capacity_5h?: number | null;
   estimated_tokens_remaining_5h?: number | null;
   account_tier: 'pro' | 'standard' | 'free' | 'calibrating' | 'unknown' | string;

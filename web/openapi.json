@@ -1429,6 +1429,31 @@
           }
         }
       },
+      "CycleStats": {
+        "type": "object",
+        "required": [
+          "count",
+          "total_tokens",
+          "avg_tokens"
+        ],
+        "properties": {
+          "avg_tokens": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "count": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "total_tokens": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
       "GatewayKeyView": {
         "type": "object",
         "description": "Read-only projection of one scoped gateway credential.\n\nNever contains the plaintext, the salt, or the hash — only the operator\nidentification fields (`prefix` + `last4`) plus lifecycle state.",
@@ -1531,6 +1556,7 @@
         "required": [
           "window_5h",
           "window_weekly",
+          "window_monthly",
           "account_tier",
           "confidence"
         ],
@@ -1538,6 +1564,17 @@
           "account_tier": {
             "type": "string",
             "description": "Inferred account tier: \"pro\", \"standard\", \"free\", \"calibrating\", or \"unknown\""
+          },
+          "completed_5h_stats": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/CycleStats",
+                "description": "Completed 5h cycle weighted average stats (objective factual historical cycles)"
+              }
+            ]
           },
           "confidence": {
             "type": "number",
@@ -1565,6 +1602,10 @@
           "window_5h": {
             "$ref": "#/components/schemas/WindowUsage",
             "description": "5-hour rolling usage metrics"
+          },
+          "window_monthly": {
+            "$ref": "#/components/schemas/WindowUsage",
+            "description": "30-day (monthly) rolling usage metrics"
           },
           "window_weekly": {
             "$ref": "#/components/schemas/WindowUsage",

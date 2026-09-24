@@ -8,7 +8,7 @@ import UptimeBars from './ui/UptimeBars.vue';
 const props = withDefaults(
   defineProps<{
     providers: Record<string, ProviderFlowSnapshot> | undefined;
-    range?: '24h' | '7d' | '30d';
+    range?: '24h' | '7d' | '30d' | 'all';
     providerTokens?: Record<string, number>;
     providerPromptTokens?: Record<string, number>;
     providerCompletionTokens?: Record<string, number>;
@@ -20,7 +20,7 @@ const props = withDefaults(
 );
 
 const emit = defineEmits<{
-  (e: 'update:range', range: '24h' | '7d' | '30d'): void;
+  (e: 'update:range', range: '24h' | '7d' | '30d' | 'all'): void;
 }>();
 
 const sortedProviders = computed(() => {
@@ -35,6 +35,8 @@ const rangeOptions: Array<{ key: '24h' | '7d' | '30d'; label: string }> = [
   { key: '7d', label: '7天' },
   { key: '30d', label: '30天' },
 ];
+
+const effectiveRange = computed(() => (props.range === 'all' ? '30d' : props.range));
 
 const totalAllTokens = computed(() => {
   let sum = 0;

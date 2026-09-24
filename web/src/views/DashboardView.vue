@@ -70,6 +70,7 @@ const {
   transport,
   isDown,
   selectedRange,
+  isHistoryLoading,
   historyData,
   gatewayUptimeBars,
   setRange,
@@ -125,6 +126,10 @@ const speed24h = computed<number | undefined>(() => {
       <MetricCards
         :metrics="metrics"
         :latest-point="latestPoint"
+        :range="selectedRange"
+        :history-data="historyData"
+        :loading="isHistoryLoading"
+        @update:range="setRange"
       />
 
       <AntigravityPoolCard

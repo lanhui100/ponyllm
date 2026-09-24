@@ -15,7 +15,7 @@ const props = withDefaults(
   defineProps<{
     history?: TelemetryPoint[];
     historyData?: TimeseriesHistoryResponse | null;
-    range?: '24h' | '7d' | '30d';
+    range?: '24h' | '7d' | '30d' | 'all';
   }>(),
   {
     history: () => [],
@@ -25,7 +25,7 @@ const props = withDefaults(
 );
 
 const emit = defineEmits<{
-  (e: 'update:range', range: '24h' | '7d' | '30d'): void;
+  (e: 'update:range', range: '24h' | '7d' | '30d' | 'all'): void;
 }>();
 
 const rangeOptions: Array<{ key: '24h' | '7d' | '30d'; label: string }> = [
@@ -33,6 +33,8 @@ const rangeOptions: Array<{ key: '24h' | '7d' | '30d'; label: string }> = [
   { key: '7d', label: '7天' },
   { key: '30d', label: '30天' },
 ];
+
+const effectiveRange = computed(() => (props.range === 'all' ? '30d' : props.range));
 
 const tokenDimension = ref<'type' | 'provider' | 'model'>('type');
 
@@ -634,7 +636,7 @@ watch(
           type="button"
           class="px-3.5 py-1.5 text-[13px] font-medium rounded-md transition-all duration-150 cursor-pointer"
           :class="[
-            range === opt.key
+            effectiveRange === opt.key
               ? 'bg-white text-slate-950 font-semibold'
               : 'text-slate-600 hover:text-slate-900',
           ]"

@@ -253,6 +253,13 @@ describe('AntigravityPoolCard Component', () => {
             total_tokens: 500000,
             requests: 120,
           },
+          window_monthly: {
+            prompt_tokens: 1600000,
+            completion_tokens: 400000,
+            cached_tokens: 80000,
+            total_tokens: 2000000,
+            requests: 480,
+          },
           estimated_capacity_5h: 500000,
           estimated_tokens_remaining_5h: 400000,
           account_tier: 'pro',
@@ -274,16 +281,9 @@ describe('AntigravityPoolCard Component', () => {
     const cell = container.querySelector('[data-testid="slot-heatmap-cell"]') as HTMLElement;
     expect(cell).not.toBeNull();
 
-    // Click cell to open modal
-    cell.click();
-    await nextTick();
-
-    const modal = document.querySelector('[data-testid="account-details-modal"]');
-    expect(modal).not.toBeNull();
-    expect(modal?.textContent).toContain('Pro 会员');
-    expect(modal?.textContent).toContain('100K');
-    expect(modal?.textContent).toContain('500K');
-    expect(modal?.textContent).toContain('缓存命中');
+    // Verify factual cycle summary rendered in third column
+    expect(container.textContent).toContain('账号周期额度测定');
+    expect(container.textContent).toContain('5小时周期实测均值');
 
     app.unmount();
     document.body.removeChild(container);

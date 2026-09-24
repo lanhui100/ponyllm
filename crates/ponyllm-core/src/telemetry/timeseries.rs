@@ -26,6 +26,14 @@ pub struct HourlyBucket {
     #[serde(default)]
     pub latency_count: u64,
     #[serde(default)]
+    pub ttft_sum_ms: f64,
+    #[serde(default)]
+    pub ttft_count: u64,
+    #[serde(default)]
+    pub tps_sum_milli: u64,
+    #[serde(default)]
+    pub tps_count: u64,
+    #[serde(default)]
     pub tokens_by_provider: HashMap<String, u64>,
     #[serde(default)]
     pub tokens_by_model: HashMap<String, u64>,
@@ -73,6 +81,14 @@ pub struct TimeseriesHistoryResponse {
     pub completion_tokens: u64,
     #[serde(default)]
     pub cached_tokens: u64,
+    #[serde(default)]
+    pub failed_requests: u64,
+    #[serde(default)]
+    pub avg_latency_ms: f64,
+    #[serde(default)]
+    pub avg_ttft_ms: f64,
+    #[serde(default)]
+    pub avg_tps: f64,
     pub provider_tokens: HashMap<String, u64>,
     #[serde(default)]
     pub provider_prompt_tokens: HashMap<String, u64>,
@@ -119,6 +135,33 @@ impl TimeseriesProjection {
         latency_ms: f64,
         is_success: bool,
     ) {
+        self.record_metric_full(
+            wall_ms,
+            provider,
+            model,
+            prompt_tokens,
+            completion_tokens,
+            cached_tokens,
+            latency_ms,
+            is_success,
+            None,
+            None,
+        );
+    }
+
+    pub fn record_metric_full(
+        &self,
+        wall_ms: u64,
+        provider: Option<&str>,
+        model: Option<&str>,
+        prompt_tokens: u64,
+        completion_tokens: u64,
+        cached_tokens: u64,
+        latency_ms: f64,
+        is_success: bool,
+        ttft_ms: Option<f64>,
+        tps: Option<f64>,
+    ) {
         let bucket_start = (wall_ms / HOUR_MS) * HOUR_MS;
         let mut buckets = self.buckets.write();
 
@@ -150,6 +193,21 @@ impl TimeseriesProjection {
         if valid_latency > 0.0 {
             bucket.latency_sum_ms += valid_latency;
             bucket.latency_count = bucket.latency_count.saturating_add(1);
+        }
+
+        if let Some(ttft) = ttft_ms {
+            if ttft.is_finite() && ttft > 0.0 {
+                bucket.ttft_sum_ms += ttft;
+                bucket.ttft_count = bucket.ttft_count.saturating_add(1);
+            }
+        }
+
+        if let Some(v_tps) = tps {
+            if v_tps.is_finite() && v_tps > 0.0 {
+                let milli = (v_tps * 1000.0).round().max(1000.0) as u64;
+                bucket.tps_sum_milli = bucket.tps_sum_milli.saturating_add(milli);
+                bucket.tps_count = bucket.tps_count.saturating_add(1);
+            }
         }
 
         let total_tokens = prompt_tokens.saturating_add(completion_tokens);
@@ -207,10 +265,17 @@ impl TimeseriesProjection {
 
         let mut points = Vec::with_capacity(total_buckets);
         let mut total_requests = 0u64;
+        let mut total_failed_requests = 0u64;
         let mut total_tokens = 0u64;
         let mut total_prompt_tokens = 0u64;
         let mut total_completion_tokens = 0u64;
         let mut total_cached_tokens = 0u64;
+        let mut total_latency_sum = 0.0f64;
+        let mut total_latency_count = 0u64;
+        let mut total_ttft_sum = 0.0f64;
+        let mut total_ttft_count = 0u64;
+        let mut total_tps_sum_milli = 0u64;
+        let mut total_tps_count = 0u64;
         let mut provider_tokens: HashMap<String, u64> = HashMap::new();
         let mut provider_prompt_tokens: HashMap<String, u64> = HashMap::new();
         let mut provider_completion_tokens: HashMap<String, u64> = HashMap::new();
@@ -241,6 +306,14 @@ impl TimeseriesProjection {
                     b_lat_sum += h.latency_sum_ms;
                 }
                 b_lat_count = b_lat_count.saturating_add(h.latency_count);
+                if h.ttft_sum_ms.is_finite() && h.ttft_count > 0 {
+                    total_ttft_sum += h.ttft_sum_ms;
+                    total_ttft_count = total_ttft_count.saturating_add(h.ttft_count);
+                }
+                if h.tps_count > 0 {
+                    total_tps_sum_milli = total_tps_sum_milli.saturating_add(h.tps_sum_milli);
+                    total_tps_count = total_tps_count.saturating_add(h.tps_count);
+                }
                 for (k, v) in &h.tokens_by_provider {
                     let b_entry = b_prov_tokens.entry(k.clone()).or_insert(0);
                     *b_entry = (*b_entry).saturating_add(*v);
@@ -276,10 +349,15 @@ impl TimeseriesProjection {
 
             let b_tokens = b_prompt.saturating_add(b_comp);
             total_requests = total_requests.saturating_add(b_reqs);
+            total_failed_requests = total_failed_requests.saturating_add(b_fails);
             total_tokens = total_tokens.saturating_add(b_tokens);
             total_prompt_tokens = total_prompt_tokens.saturating_add(b_prompt);
             total_completion_tokens = total_completion_tokens.saturating_add(b_comp);
             total_cached_tokens = total_cached_tokens.saturating_add(b_cached);
+            if b_lat_sum.is_finite() && b_lat_count > 0 {
+                total_latency_sum += b_lat_sum;
+                total_latency_count = total_latency_count.saturating_add(b_lat_count);
+            }
 
             let bucket_sec = (bucket_span_ms / 1000) as f64;
             let qps = if bucket_sec > 0.0 {
@@ -373,6 +451,27 @@ impl TimeseriesProjection {
             });
         }
 
+        let overall_avg_latency = if total_latency_count > 0 && total_latency_sum.is_finite() {
+            let v = total_latency_sum / total_latency_count as f64;
+            if v.is_finite() { (v * 10.0).round() / 10.0 } else { 0.0 }
+        } else {
+            0.0
+        };
+
+        let overall_avg_ttft = if total_ttft_count > 0 && total_ttft_sum.is_finite() {
+            let v = total_ttft_sum / total_ttft_count as f64;
+            if v.is_finite() { (v * 10.0).round() / 10.0 } else { 0.0 }
+        } else {
+            0.0
+        };
+
+        let overall_avg_tps = if total_tps_count > 0 {
+            let v = total_tps_sum_milli as f64 / 1000.0 / total_tps_count as f64;
+            if v.is_finite() { (v * 10.0).round() / 10.0 } else { 0.0 }
+        } else {
+            0.0
+        };
+
         TimeseriesHistoryResponse {
             range: range.to_string(),
             points,
@@ -381,6 +480,10 @@ impl TimeseriesProjection {
             prompt_tokens: total_prompt_tokens,
             completion_tokens: total_completion_tokens,
             cached_tokens: total_cached_tokens,
+            failed_requests: total_failed_requests,
+            avg_latency_ms: overall_avg_latency,
+            avg_ttft_ms: overall_avg_ttft,
+            avg_tps: overall_avg_tps,
             provider_tokens,
             provider_prompt_tokens,
             provider_completion_tokens,
@@ -420,7 +523,7 @@ impl Projection for TimeseriesProjection {
                     flow.chunks.max(1)
                 };
                 let cached = flow.cached_tokens;
-                self.record_metric(
+                self.record_metric_full(
                     env.wall_ms,
                     env.provider.as_deref(),
                     env.model.as_deref(),
@@ -429,10 +532,12 @@ impl Projection for TimeseriesProjection {
                     cached,
                     flow.ttlb_ms,
                     true,
+                    flow.ttft_ms,
+                    flow.tps,
                 );
             }
             GatewayEvent::StreamFailed { flow, .. } => {
-                let (prompt, completion, cached, latency) = match flow {
+                let (prompt, completion, cached, latency, ttft, tps) = match flow {
                     Some(s) => {
                         let p = s.prompt_tokens;
                         let c = if s.completion_tokens > 0 {
@@ -440,11 +545,11 @@ impl Projection for TimeseriesProjection {
                         } else {
                             s.chunks.max(1)
                         };
-                        (p, c, s.cached_tokens, s.ttlb_ms)
+                        (p, c, s.cached_tokens, s.ttlb_ms, s.ttft_ms, s.tps)
                     }
-                    None => (0, 0, 0, 0.0),
+                    None => (0, 0, 0, 0.0, None, None),
                 };
-                self.record_metric(
+                self.record_metric_full(
                     env.wall_ms,
                     env.provider.as_deref(),
                     env.model.as_deref(),
@@ -453,6 +558,8 @@ impl Projection for TimeseriesProjection {
                     cached,
                     latency,
                     false,
+                    ttft,
+                    tps,
                 );
             }
             GatewayEvent::RequestFailed { latency_ms, .. } => {

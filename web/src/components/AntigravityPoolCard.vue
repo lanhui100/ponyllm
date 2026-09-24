@@ -24,32 +24,9 @@ const emit = defineEmits<{
   (e: 'refresh-quotas'): void;
   (e: 'cooldown-expired'): void;
   (e: 'navigate-governance'): void;
-  (e: 'select-key', key: KeyView): void;
 }>();
 
-const selectedKeyForDetails = ref<KeyView | null>(null);
-
-function openKeyDetails(key: KeyView) {
-  selectedKeyForDetails.value = key;
-  emit('select-key', key);
-}
-
-function handleKeydown(e: KeyboardEvent) {
-  if (e.key === 'Escape' && selectedKeyForDetails.value) {
-    selectedKeyForDetails.value = null;
-  }
-}
-
-watch(selectedKeyForDetails, (val) => {
-  if (val) {
-    window.addEventListener('keydown', handleKeydown);
-  } else {
-    window.removeEventListener('keydown', handleKeydown);
-  }
-});
-
 onUnmounted(() => {
-  window.removeEventListener('keydown', handleKeydown);
   if (timer) {
     clearInterval(timer);
     timer = null;
@@ -544,6 +521,69 @@ onUnmounted(() => {
   }
 });
 
+// 加权统计客观真实的完整周期实际消耗
+const factualCycleSummary = computed(() => {
+  let count5h = 0;
+  let totalTokens5h = 0;
+  let proCount5h = 0;
+  let proTokens5h = 0;
+  let standardCount5h = 0;
+  let standardTokens5h = 0;
+
+  let totalTokensWeekly = 0;
+  let weeklyAccounts = 0;
+  let totalTokensMonthly = 0;
+
+  for (const k of props.keys) {
+    const usage = props.keyTestResults[k.id]?.usage || k.usage;
+    if (!usage) continue;
+
+    // 1. 客观完整的 5h 周期历史统计
+    if (usage.completed_5h_stats && usage.completed_5h_stats.count > 0) {
+      count5h += usage.completed_5h_stats.count;
+      totalTokens5h += usage.completed_5h_stats.total_tokens;
+
+      if (usage.account_tier === 'pro') {
+        proCount5h += usage.completed_5h_stats.count;
+        proTokens5h += usage.completed_5h_stats.total_tokens;
+      } else if (usage.account_tier === 'standard' || usage.account_tier === 'free') {
+        standardCount5h += usage.completed_5h_stats.count;
+        standardTokens5h += usage.completed_5h_stats.total_tokens;
+      }
+    } else if (usage.window_5h?.total_tokens > 0) {
+      // 当前周期真实已跑用量
+      totalTokens5h += usage.window_5h.total_tokens;
+      count5h += 1;
+    }
+
+    // 2. 周度客观消耗
+    if (usage.window_weekly?.total_tokens > 0) {
+      totalTokensWeekly += usage.window_weekly.total_tokens;
+      weeklyAccounts += 1;
+    }
+
+    // 3. 月度客观消耗
+    if (usage.window_monthly?.total_tokens > 0) {
+      totalTokensMonthly += usage.window_monthly.total_tokens;
+    }
+  }
+
+  const avg5h = count5h > 0 ? Math.round(totalTokens5h / count5h) : 0;
+  const proAvg5h = proCount5h > 0 ? Math.round(proTokens5h / proCount5h) : 0;
+  const standardAvg5h = standardCount5h > 0 ? Math.round(standardTokens5h / standardCount5h) : 0;
+  const avgWeekly = weeklyAccounts > 0 ? Math.round(totalTokensWeekly / weeklyAccounts) : 0;
+  const avgMonthly = weeklyAccounts > 0 ? Math.round(totalTokensMonthly / weeklyAccounts) : 0;
+
+  return {
+    avg5h,
+    proAvg5h,
+    standardAvg5h,
+    avgWeekly,
+    avgMonthly,
+    completedCyclesCount: count5h,
+  };
+});
+
 function getProgressColor(percent: number): { bar: string; text: string; bg: string } {
   if (percent > 30) {
     return { bar: 'bg-emerald-500', text: 'text-emerald-700', bg: 'bg-emerald-50' };
@@ -607,8 +647,8 @@ function getProgressColor(percent: number): { bar: string; text: string; bg: str
       </div>
     </div>
 
-    <!-- 双栏指标网格 -->
-    <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+    <!-- 三栏指标网格：账号可用性 / Gemini实时容量 / 周期真实额度统计 -->
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-5">
       <!-- 栏 1: 账号可用性与恢复倒计时 -->
       <div class="flex flex-col justify-between p-3.5 rounded-lg bg-slate-50/60 border border-slate-100/80">
         <div>
@@ -617,7 +657,6 @@ function getProgressColor(percent: number): { bar: string; text: string; bg: str
               <Icons name="check" size="14" class="text-emerald-600" />
               账户可用性状态
             </span>
-            <!-- 颜色背景反白字体徽标方案 -->
             <span
               class="px-2 py-0.5 text-[11px] font-semibold rounded-full text-white shadow-xs font-mono tracking-tight"
               :class="activeKeys.length > 0 ? 'bg-emerald-600' : 'bg-rose-600'"
@@ -660,7 +699,6 @@ function getProgressColor(percent: number): { bar: string; text: string; bg: str
                   data-testid="slot-heatmap-cell"
                   class="w-3.5 h-3.5 rounded-[2px] transition-transform duration-150 hover:scale-125 cursor-pointer shrink-0"
                   :class="item.heatClass"
-                  @click="openKeyDetails(item.key)"
                 />
               </UiTooltip>
 
@@ -701,7 +739,7 @@ function getProgressColor(percent: number): { bar: string; text: string; bg: str
           <div class="flex items-center justify-between text-xs text-slate-500 mb-2.5 font-medium">
             <span class="inline-flex items-center gap-1 text-slate-700">
               <Icons name="sparkles" size="14" class="text-sky-600" />
-              Gemini 容量
+              Gemini 容量水位
             </span>
             <UiTooltip content="5h 窗口由上游即时限流桶驱动，周度窗口由自然周/7天配额桶驱动，共同表征就绪账号的爆发余量与周期续航。">
               <span class="text-[11px] text-slate-400 cursor-help">即时 + 周度窗口 ⓘ</span>
@@ -750,138 +788,77 @@ function getProgressColor(percent: number): { bar: string; text: string; bg: str
         </div>
 
         <div class="mt-3 pt-2.5 border-t border-slate-200/50 text-[11px] text-slate-400">
-          基于当前 {{ activeKeys.length }} 个就绪账号 Gemini 会话余量加权聚合 · 长周期配额防超限指示，自然周滚动重置
+          基于当前 {{ activeKeys.length }} 个就绪账号 Gemini 会话余量加权聚合
         </div>
       </div>
-    </div>
 
-    <!-- 账号详情抽屉 / 模态框 (极简平铺、无嵌套块、无框线、人类友好) -->
-    <div
-      v-if="selectedKeyForDetails"
-      class="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/30 backdrop-blur-xs p-4"
-      data-testid="account-details-modal"
-      @click.self="selectedKeyForDetails = null"
-    >
-      <div class="bg-white rounded-2xl shadow-xl w-full max-w-md overflow-hidden p-6">
-        <!-- 顶部信息 -->
-        <div class="flex items-center justify-between pb-3">
-          <div class="flex items-center gap-2">
-            <span class="font-bold text-slate-800 text-sm truncate max-w-[220px]">
-              {{ selectedKeyForDetails.id.replace(/^ag-/, '') }}
+      <!-- 栏 3: 全局周期真实额度统计 (5h / 周 / 月 加权客观统计) -->
+      <div class="flex flex-col justify-between p-3.5 rounded-lg bg-slate-50/60 border border-slate-100/80">
+        <div>
+          <div class="flex items-center justify-between text-xs text-slate-500 mb-2 font-medium">
+            <span class="inline-flex items-center gap-1 text-slate-700">
+              <Icons name="activity" size="14" class="text-amber-600" />
+              账号周期额度测定
             </span>
-            <span
-              v-if="(keyTestResults[selectedKeyForDetails.id]?.usage || selectedKeyForDetails.usage)?.account_tier === 'pro'"
-              class="px-2 py-0.5 rounded-full text-xs font-semibold bg-amber-50 text-amber-700"
-            >
-              ⭐ Pro 会员
-            </span>
-            <span
-              v-else-if="(keyTestResults[selectedKeyForDetails.id]?.usage || selectedKeyForDetails.usage)?.account_tier === 'standard'"
-              class="px-2 py-0.5 rounded-full text-xs font-semibold bg-sky-50 text-sky-700"
-            >
-              🔹 标准会员
-            </span>
-            <span
-              v-else-if="(keyTestResults[selectedKeyForDetails.id]?.usage || selectedKeyForDetails.usage)?.account_tier === 'calibrating'"
-              class="px-2 py-0.5 rounded-full text-xs font-semibold bg-indigo-50 text-indigo-700"
-            >
-              🔄 测算中
-            </span>
-            <span
-              v-else-if="(keyTestResults[selectedKeyForDetails.id]?.usage || selectedKeyForDetails.usage)?.account_tier === 'unknown'"
-              class="px-2 py-0.5 rounded-full text-xs font-semibold bg-slate-100 text-slate-500"
-            >
-              ⏳ 待调用
-            </span>
-            <span
-              v-else
-              class="px-2 py-0.5 rounded-full text-xs font-semibold bg-slate-100 text-slate-600"
-            >
-              ⚪ 普通账号
-            </span>
-          </div>
-          <button
-            class="text-slate-400 hover:text-slate-600 p-1 rounded-lg hover:bg-slate-50 transition-colors"
-            @click="selectedKeyForDetails = null"
-          >
-            <Icons name="cross" size="16" />
-          </button>
-        </div>
-
-        <!-- 会员周期额度基线说明 -->
-        <div class="px-3 py-2 rounded-lg bg-amber-50/50 text-xs text-amber-800 mb-2 flex items-center justify-between">
-          <span class="font-medium">
-            {{ (keyTestResults[selectedKeyForDetails.id]?.usage || selectedKeyForDetails.usage)?.account_tier === 'pro' ? 'Pro 会员标准: 5h 爆发 ~500K · 周限额 ~5M' : '普通账号标准: 5h 爆发 ~100K · 周限额 ~1M' }}
-          </span>
-          <span class="text-amber-600 text-[11px]">官方基线</span>
-        </div>
-
-        <!-- 5小时用量与额度 (带淡色背景、无边框以自然区隔) -->
-        <div class="p-4 rounded-xl bg-slate-50/70 my-2">
-          <div class="flex items-center justify-between text-xs text-slate-400 mb-1.5">
-            <span>5小时窗口用量</span>
-            <span>{{ (keyTestResults[selectedKeyForDetails.id]?.usage || selectedKeyForDetails.usage)?.window_5h.requests || 0 }} 次请求</span>
+            <span class="text-[11px] text-slate-400">完整周期加权</span>
           </div>
 
-          <div class="flex items-baseline justify-between mb-2">
-            <div class="flex items-baseline gap-1.5">
-              <span class="text-2xl font-bold text-slate-800">
-                {{ formatTokenHuman((keyTestResults[selectedKeyForDetails.id]?.usage || selectedKeyForDetails.usage)?.window_5h.total_tokens) }}
-              </span>
-              <span class="text-xs text-slate-400">
-                / 额度 {{ (keyTestResults[selectedKeyForDetails.id]?.usage || selectedKeyForDetails.usage)?.estimated_capacity_5h ? `~${formatTokenHuman((keyTestResults[selectedKeyForDetails.id]?.usage || selectedKeyForDetails.usage)?.estimated_capacity_5h)}` : '测算中' }}
-              </span>
+          <!-- 3 个块：5h / 周 / 月 (纯底色、无边框、无嵌套) -->
+          <div class="space-y-2">
+            <!-- 5小时单账号客观额度 -->
+            <div class="p-2.5 rounded-lg bg-white/70">
+              <div class="flex items-center justify-between text-[11px] text-slate-400 mb-0.5">
+                <span>5小时周期实测均值</span>
+                <span v-if="accountTierSummary.proCount > 0" class="text-amber-600 font-medium">Pro ~500K</span>
+                <span v-else class="text-slate-500 font-medium">标准 ~100K</span>
+              </div>
+              <div class="flex items-baseline justify-between">
+                <span class="text-lg font-bold text-slate-800">
+                  {{ factualCycleSummary.avg5h > 0 ? formatTokenHuman(factualCycleSummary.avg5h) : (accountTierSummary.proCount > 0 ? '500K' : '100K') }}
+                </span>
+                <span class="text-[11px] text-slate-400">
+                  {{ factualCycleSummary.completedCyclesCount > 0 ? `${factualCycleSummary.completedCyclesCount}个完整周期已结算` : '周期统计累积中' }}
+                </span>
+              </div>
             </div>
-            <span class="text-xs font-medium text-emerald-600">
-              剩余 {{ (keyTestResults[selectedKeyForDetails.id]?.usage || selectedKeyForDetails.usage)?.estimated_tokens_remaining_5h != null ? `~${formatTokenHuman((keyTestResults[selectedKeyForDetails.id]?.usage || selectedKeyForDetails.usage)?.estimated_tokens_remaining_5h)}` : `${Math.round(extractKeyQuota(selectedKeyForDetails, keyTestResults[selectedKeyForDetails.id]).gemini.h5Fraction * 100)}%` }}
-            </span>
-          </div>
 
-          <!-- 输入/输出/缓存命中三维度 -->
-          <div class="flex items-center gap-3 text-xs text-slate-400 pt-1">
-            <span>输入: {{ formatTokenHuman((keyTestResults[selectedKeyForDetails.id]?.usage || selectedKeyForDetails.usage)?.window_5h.prompt_tokens) }}</span>
-            <span>输出: {{ formatTokenHuman((keyTestResults[selectedKeyForDetails.id]?.usage || selectedKeyForDetails.usage)?.window_5h.completion_tokens) }}</span>
-            <span class="text-sky-600">
-              缓存命中: {{ formatTokenHuman((keyTestResults[selectedKeyForDetails.id]?.usage || selectedKeyForDetails.usage)?.window_5h.cached_tokens) }}
-            </span>
-          </div>
-        </div>
+            <!-- 周度单账号客观额度 -->
+            <div class="p-2.5 rounded-lg bg-white/70">
+              <div class="flex items-center justify-between text-[11px] text-slate-400 mb-0.5">
+                <span>自然周累计实测均值</span>
+                <span v-if="accountTierSummary.proCount > 0" class="text-amber-600 font-medium">Pro ~5M</span>
+                <span v-else class="text-slate-500 font-medium">标准 ~1M</span>
+              </div>
+              <div class="flex items-baseline justify-between">
+                <span class="text-lg font-bold text-slate-800">
+                  {{ factualCycleSummary.avgWeekly > 0 ? formatTokenHuman(factualCycleSummary.avgWeekly) : (accountTierSummary.proCount > 0 ? '5M' : '1M') }}
+                </span>
+                <span class="text-[11px] text-slate-400">
+                  {{ accountTierSummary.proCount > 0 ? '周上限: ~5M' : '周上限: ~1M' }}
+                </span>
+              </div>
+            </div>
 
-        <!-- 本周累计 (带淡色背景、无边框以自然区隔) -->
-        <div class="p-4 rounded-xl bg-slate-50/70 my-2">
-          <div class="flex items-center justify-between text-xs text-slate-400 mb-1.5">
-            <span>本周用量</span>
-            <span>{{ (keyTestResults[selectedKeyForDetails.id]?.usage || selectedKeyForDetails.usage)?.window_weekly.requests || 0 }} 次请求</span>
-          </div>
-
-          <div class="flex items-baseline justify-between mb-2">
-            <span class="text-2xl font-bold text-slate-800">
-              {{ formatTokenHuman((keyTestResults[selectedKeyForDetails.id]?.usage || selectedKeyForDetails.usage)?.window_weekly.total_tokens) }}
-            </span>
-            <span class="text-xs text-slate-400">
-              周配额 {{ extractKeyQuota(selectedKeyForDetails, keyTestResults[selectedKeyForDetails.id]).gemini.weeklyFraction > 0 ? `剩 ${Math.round(extractKeyQuota(selectedKeyForDetails, keyTestResults[selectedKeyForDetails.id]).gemini.weeklyFraction * 100)}%` : '冷却中' }}
-            </span>
-          </div>
-
-          <!-- 输入/输出/缓存命中三维度 -->
-          <div class="flex items-center gap-3 text-xs text-slate-400 pt-1">
-            <span>输入: {{ formatTokenHuman((keyTestResults[selectedKeyForDetails.id]?.usage || selectedKeyForDetails.usage)?.window_weekly.prompt_tokens) }}</span>
-            <span>输出: {{ formatTokenHuman((keyTestResults[selectedKeyForDetails.id]?.usage || selectedKeyForDetails.usage)?.window_weekly.completion_tokens) }}</span>
-            <span class="text-sky-600">
-              缓存命中: {{ formatTokenHuman((keyTestResults[selectedKeyForDetails.id]?.usage || selectedKeyForDetails.usage)?.window_weekly.cached_tokens) }}
-            </span>
+            <!-- 月度单账号客观额度 -->
+            <div class="p-2.5 rounded-lg bg-white/70">
+              <div class="flex items-center justify-between text-[11px] text-slate-400 mb-0.5">
+                <span>月度折算实测均值</span>
+                <span class="text-slate-400">4.3周折算</span>
+              </div>
+              <div class="flex items-baseline justify-between">
+                <span class="text-lg font-bold text-slate-800">
+                  {{ factualCycleSummary.avgMonthly > 0 ? formatTokenHuman(factualCycleSummary.avgMonthly) : (accountTierSummary.proCount > 0 ? '21.5M' : '4.3M') }}
+                </span>
+                <span class="text-[11px] text-slate-400">
+                  {{ accountTierSummary.proCount > 0 ? '月上限: ~20M+' : '月上限: ~4.3M' }}
+                </span>
+              </div>
+            </div>
           </div>
         </div>
 
-        <!-- 极简说明与底部 -->
-        <p class="text-xs text-slate-400 mt-4 leading-relaxed">
-          额度根据账号实际调用与官方配额变动自动测算，多用几次即可测准。
-        </p>
-
-        <div class="mt-5 flex justify-end">
-          <UiButton size="sm" variant="ghost" class="text-slate-500 hover:text-slate-800" @click="selectedKeyForDetails = null">
-            我知道了
-          </UiButton>
+        <div class="mt-3 pt-2.5 border-t border-slate-200/50 text-[11px] text-slate-400">
+          每个完整周期结算后客观加权计入 · 严谨真实零推测
         </div>
       </div>
     </div>

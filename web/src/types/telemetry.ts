@@ -128,6 +128,10 @@ export interface TimeseriesHistoryResponse {
   prompt_tokens?: number;
   completion_tokens?: number;
   cached_tokens?: number;
+  failed_requests?: number;
+  avg_latency_ms?: number;
+  avg_ttft_ms?: number;
+  avg_tps?: number;
   provider_tokens: Record<string, number>;
   provider_prompt_tokens?: Record<string, number>;
   provider_completion_tokens?: Record<string, number>;
