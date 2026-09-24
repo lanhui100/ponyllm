@@ -162,6 +162,25 @@ const activeKeys = computed(() => {
   return props.keys.filter((k) => !isKeyCoolingDown(k));
 });
 
+// 统计 Pro 账号与普通账号数量及容量画像
+const accountTierSummary = computed(() => {
+  let proCount = 0;
+  let standardCount = 0;
+  let calibratingCount = 0;
+  for (const k of props.keys) {
+    const usage = props.keyTestResults[k.id]?.usage || k.usage;
+    const tier = usage?.account_tier;
+    if (tier === 'pro') {
+      proCount++;
+    } else if (tier === 'standard') {
+      standardCount++;
+    } else {
+      calibratingCount++;
+    }
+  }
+  return { proCount, standardCount, calibratingCount };
+});
+
 const availabilityRate = computed(() => {
   if (totalAccounts.value === 0) return 0;
   return Math.round((activeKeys.value.length / totalAccounts.value) * 100);
@@ -612,6 +631,17 @@ function getProgressColor(percent: number): { bar: string; text: string; bg: str
             <span class="text-3xl font-bold font-mono tracking-tight text-slate-900 tabular-nums">
               {{ availabilityRate }}%
             </span>
+            <div class="flex items-center gap-1.5 ml-1 text-xs">
+              <span v-if="accountTierSummary.proCount > 0" class="px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 font-medium">
+                {{ accountTierSummary.proCount }} Pro
+              </span>
+              <span v-if="accountTierSummary.standardCount > 0" class="px-2 py-0.5 rounded-full bg-sky-50 text-sky-700 font-medium">
+                {{ accountTierSummary.standardCount }} 标准
+              </span>
+              <span v-if="accountTierSummary.calibratingCount > 0" class="px-2 py-0.5 rounded-full bg-slate-100 text-slate-500 font-medium">
+                {{ accountTierSummary.calibratingCount }} 待测
+              </span>
+            </div>
           </div>
 
           <!-- 绝对严格等距矩阵：移除 justify-between，横纵均由 gap-[3px] 锁定，自动排列填满整行 -->
@@ -776,6 +806,14 @@ function getProgressColor(percent: number): { bar: string; text: string; bg: str
           >
             <Icons name="cross" size="16" />
           </button>
+        </div>
+
+        <!-- 会员周期额度基线说明 -->
+        <div class="px-3 py-2 rounded-lg bg-amber-50/50 text-xs text-amber-800 mb-2 flex items-center justify-between">
+          <span class="font-medium">
+            {{ (keyTestResults[selectedKeyForDetails.id]?.usage || selectedKeyForDetails.usage)?.account_tier === 'pro' ? 'Pro 会员标准: 5h 爆发 ~500K · 周限额 ~5M' : '普通账号标准: 5h 爆发 ~100K · 周限额 ~1M' }}
+          </span>
+          <span class="text-amber-600 text-[11px]">官方基线</span>
         </div>
 
         <!-- 5小时用量与额度 (带淡色背景、无边框以自然区隔) -->
