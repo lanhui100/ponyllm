@@ -734,9 +734,9 @@ function getProgressColor(percent: number): { bar: string; text: string; bg: str
     >
       <div class="bg-white rounded-2xl shadow-xl w-full max-w-md overflow-hidden p-6">
         <!-- 顶部信息 -->
-        <div class="flex items-center justify-between pb-4">
+        <div class="flex items-center justify-between pb-3">
           <div class="flex items-center gap-2">
-            <span class="font-bold text-slate-800 text-sm font-mono truncate max-w-[220px]">
+            <span class="font-bold text-slate-800 text-sm truncate max-w-[220px]">
               {{ selectedKeyForDetails.id.replace(/^ag-/, '') }}
             </span>
             <span
@@ -778,19 +778,19 @@ function getProgressColor(percent: number): { bar: string; text: string; bg: str
           </button>
         </div>
 
-        <!-- 5小时用量与额度 (极简平铺，无块嵌套、无框线) -->
-        <div class="py-3">
-          <div class="flex items-center justify-between text-xs text-slate-400 mb-2">
+        <!-- 5小时用量与额度 (带淡色背景、无边框以自然区隔) -->
+        <div class="p-4 rounded-xl bg-slate-50/70 my-2">
+          <div class="flex items-center justify-between text-xs text-slate-400 mb-1.5">
             <span>5小时窗口用量</span>
             <span>{{ (keyTestResults[selectedKeyForDetails.id]?.usage || selectedKeyForDetails.usage)?.window_5h.requests || 0 }} 次请求</span>
           </div>
 
-          <div class="flex items-baseline justify-between mb-1">
+          <div class="flex items-baseline justify-between mb-2">
             <div class="flex items-baseline gap-1.5">
-              <span class="text-2xl font-bold font-mono text-slate-800">
+              <span class="text-2xl font-bold text-slate-800">
                 {{ formatTokenHuman((keyTestResults[selectedKeyForDetails.id]?.usage || selectedKeyForDetails.usage)?.window_5h.total_tokens) }}
               </span>
-              <span class="text-xs text-slate-400 font-mono">
+              <span class="text-xs text-slate-400">
                 / 额度 {{ (keyTestResults[selectedKeyForDetails.id]?.usage || selectedKeyForDetails.usage)?.estimated_capacity_5h ? `~${formatTokenHuman((keyTestResults[selectedKeyForDetails.id]?.usage || selectedKeyForDetails.usage)?.estimated_capacity_5h)}` : '测算中' }}
               </span>
             </div>
@@ -799,25 +799,25 @@ function getProgressColor(percent: number): { bar: string; text: string; bg: str
             </span>
           </div>
 
-          <!-- 输入/输出/缓存细分 -->
-          <div class="flex items-center gap-3 text-xs text-slate-400 mt-2 font-mono">
-            <span>提问: {{ formatTokenHuman((keyTestResults[selectedKeyForDetails.id]?.usage || selectedKeyForDetails.usage)?.window_5h.prompt_tokens) }}</span>
-            <span>回答: {{ formatTokenHuman((keyTestResults[selectedKeyForDetails.id]?.usage || selectedKeyForDetails.usage)?.window_5h.completion_tokens) }}</span>
-            <span v-if="((keyTestResults[selectedKeyForDetails.id]?.usage || selectedKeyForDetails.usage)?.window_5h.cached_tokens || 0) > 0" class="text-sky-600">
+          <!-- 输入/输出/缓存命中三维度 -->
+          <div class="flex items-center gap-3 text-xs text-slate-400 pt-1">
+            <span>输入: {{ formatTokenHuman((keyTestResults[selectedKeyForDetails.id]?.usage || selectedKeyForDetails.usage)?.window_5h.prompt_tokens) }}</span>
+            <span>输出: {{ formatTokenHuman((keyTestResults[selectedKeyForDetails.id]?.usage || selectedKeyForDetails.usage)?.window_5h.completion_tokens) }}</span>
+            <span class="text-sky-600">
               缓存命中: {{ formatTokenHuman((keyTestResults[selectedKeyForDetails.id]?.usage || selectedKeyForDetails.usage)?.window_5h.cached_tokens) }}
             </span>
           </div>
         </div>
 
-        <!-- 本周累计 (极简平铺) -->
-        <div class="py-3 mt-1">
-          <div class="flex items-center justify-between text-xs text-slate-400 mb-2">
+        <!-- 本周累计 (带淡色背景、无边框以自然区隔) -->
+        <div class="p-4 rounded-xl bg-slate-50/70 my-2">
+          <div class="flex items-center justify-between text-xs text-slate-400 mb-1.5">
             <span>本周用量</span>
             <span>{{ (keyTestResults[selectedKeyForDetails.id]?.usage || selectedKeyForDetails.usage)?.window_weekly.requests || 0 }} 次请求</span>
           </div>
 
-          <div class="flex items-baseline justify-between mb-1">
-            <span class="text-2xl font-bold font-mono text-slate-800">
+          <div class="flex items-baseline justify-between mb-2">
+            <span class="text-2xl font-bold text-slate-800">
               {{ formatTokenHuman((keyTestResults[selectedKeyForDetails.id]?.usage || selectedKeyForDetails.usage)?.window_weekly.total_tokens) }}
             </span>
             <span class="text-xs text-slate-400">
@@ -825,10 +825,11 @@ function getProgressColor(percent: number): { bar: string; text: string; bg: str
             </span>
           </div>
 
-          <div class="flex items-center gap-3 text-xs text-slate-400 mt-2 font-mono">
-            <span>提问: {{ formatTokenHuman((keyTestResults[selectedKeyForDetails.id]?.usage || selectedKeyForDetails.usage)?.window_weekly.prompt_tokens) }}</span>
-            <span>回答: {{ formatTokenHuman((keyTestResults[selectedKeyForDetails.id]?.usage || selectedKeyForDetails.usage)?.window_weekly.completion_tokens) }}</span>
-            <span v-if="((keyTestResults[selectedKeyForDetails.id]?.usage || selectedKeyForDetails.usage)?.window_weekly.cached_tokens || 0) > 0" class="text-sky-600">
+          <!-- 输入/输出/缓存命中三维度 -->
+          <div class="flex items-center gap-3 text-xs text-slate-400 pt-1">
+            <span>输入: {{ formatTokenHuman((keyTestResults[selectedKeyForDetails.id]?.usage || selectedKeyForDetails.usage)?.window_weekly.prompt_tokens) }}</span>
+            <span>输出: {{ formatTokenHuman((keyTestResults[selectedKeyForDetails.id]?.usage || selectedKeyForDetails.usage)?.window_weekly.completion_tokens) }}</span>
+            <span class="text-sky-600">
               缓存命中: {{ formatTokenHuman((keyTestResults[selectedKeyForDetails.id]?.usage || selectedKeyForDetails.usage)?.window_weekly.cached_tokens) }}
             </span>
           </div>
