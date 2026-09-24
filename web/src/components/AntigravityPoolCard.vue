@@ -803,21 +803,31 @@ function getProgressColor(percent: number): { bar: string; text: string; bg: str
             <span class="text-[11px] text-slate-400">完整周期加权</span>
           </div>
 
-          <!-- 3 个块：5h / 周 / 月 (纯底色、无边框、无嵌套) -->
+          <!-- 3 个块：5h / 周 / 月 (纯客观实测、无假定推测、无硬编码) -->
           <div class="space-y-2">
             <!-- 5小时单账号客观额度 -->
             <div class="p-2.5 rounded-lg bg-white/70">
               <div class="flex items-center justify-between text-[11px] text-slate-400 mb-0.5">
                 <span>5小时周期实测均值</span>
-                <span v-if="accountTierSummary.proCount > 0" class="text-amber-600 font-medium">Pro ~500K</span>
-                <span v-else class="text-slate-500 font-medium">标准 ~100K</span>
+                <span v-if="factualCycleSummary.completedCyclesCount > 0" class="text-emerald-700 font-medium font-mono">
+                  已结算 {{ factualCycleSummary.completedCyclesCount }} 轮
+                </span>
+                <span v-else class="text-slate-400">统计累积中</span>
               </div>
               <div class="flex items-baseline justify-between">
-                <span class="text-lg font-bold text-slate-800">
-                  {{ factualCycleSummary.avg5h > 0 ? formatTokenHuman(factualCycleSummary.avg5h) : (accountTierSummary.proCount > 0 ? '500K' : '100K') }}
+                <span class="text-lg font-bold text-slate-800 font-mono">
+                  {{ factualCycleSummary.avg5h > 0 ? formatTokenHuman(factualCycleSummary.avg5h) : '--' }}
                 </span>
-                <span class="text-[11px] text-slate-400">
-                  {{ factualCycleSummary.completedCyclesCount > 0 ? `${factualCycleSummary.completedCyclesCount}个完整周期已结算` : '周期统计累积中' }}
+                <span class="text-[11px] text-slate-400 font-mono">
+                  <template v-if="factualCycleSummary.proAvg5h > 0">
+                    Pro: {{ formatTokenHuman(factualCycleSummary.proAvg5h) }}
+                  </template>
+                  <template v-else-if="factualCycleSummary.standardAvg5h > 0">
+                    标准: {{ formatTokenHuman(factualCycleSummary.standardAvg5h) }}
+                  </template>
+                  <template v-else>
+                    等待完整周期
+                  </template>
                 </span>
               </div>
             </div>
@@ -826,15 +836,17 @@ function getProgressColor(percent: number): { bar: string; text: string; bg: str
             <div class="p-2.5 rounded-lg bg-white/70">
               <div class="flex items-center justify-between text-[11px] text-slate-400 mb-0.5">
                 <span>自然周累计实测均值</span>
-                <span v-if="accountTierSummary.proCount > 0" class="text-amber-600 font-medium">Pro ~5M</span>
-                <span v-else class="text-slate-500 font-medium">标准 ~1M</span>
+                <span v-if="factualCycleSummary.avgWeekly > 0" class="text-sky-700 font-medium font-mono">
+                  活跃账号均值
+                </span>
+                <span v-else class="text-slate-400">周一重置</span>
               </div>
               <div class="flex items-baseline justify-between">
-                <span class="text-lg font-bold text-slate-800">
-                  {{ factualCycleSummary.avgWeekly > 0 ? formatTokenHuman(factualCycleSummary.avgWeekly) : (accountTierSummary.proCount > 0 ? '5M' : '1M') }}
+                <span class="text-lg font-bold text-slate-800 font-mono">
+                  {{ factualCycleSummary.avgWeekly > 0 ? formatTokenHuman(factualCycleSummary.avgWeekly) : '--' }}
                 </span>
-                <span class="text-[11px] text-slate-400">
-                  {{ accountTierSummary.proCount > 0 ? '周上限: ~5M' : '周上限: ~1M' }}
+                <span class="text-[11px] text-slate-400 font-mono">
+                  {{ factualCycleSummary.avgWeekly > 0 ? '单账号实际周消耗' : '等待周结算' }}
                 </span>
               </div>
             </div>
@@ -842,15 +854,15 @@ function getProgressColor(percent: number): { bar: string; text: string; bg: str
             <!-- 月度单账号客观额度 -->
             <div class="p-2.5 rounded-lg bg-white/70">
               <div class="flex items-center justify-between text-[11px] text-slate-400 mb-0.5">
-                <span>月度折算实测均值</span>
-                <span class="text-slate-400">4.3周折算</span>
+                <span>30天自然月实测均值</span>
+                <span class="text-slate-400 font-mono">近30天吞吐</span>
               </div>
               <div class="flex items-baseline justify-between">
-                <span class="text-lg font-bold text-slate-800">
-                  {{ factualCycleSummary.avgMonthly > 0 ? formatTokenHuman(factualCycleSummary.avgMonthly) : (accountTierSummary.proCount > 0 ? '21.5M' : '4.3M') }}
+                <span class="text-lg font-bold text-slate-800 font-mono">
+                  {{ factualCycleSummary.avgMonthly > 0 ? formatTokenHuman(factualCycleSummary.avgMonthly) : '--' }}
                 </span>
-                <span class="text-[11px] text-slate-400">
-                  {{ accountTierSummary.proCount > 0 ? '月上限: ~20M+' : '月上限: ~4.3M' }}
+                <span class="text-[11px] text-slate-400 font-mono">
+                  {{ factualCycleSummary.avgMonthly > 0 ? '单账号30天实际吞吐' : '等待月统计' }}
                 </span>
               </div>
             </div>
@@ -858,7 +870,7 @@ function getProgressColor(percent: number): { bar: string; text: string; bg: str
         </div>
 
         <div class="mt-3 pt-2.5 border-t border-slate-200/50 text-[11px] text-slate-400">
-          每个完整周期结算后客观加权计入 · 严谨真实零推测
+          基于账号完成真实完整周期的消耗客观加权计算 · 纯实测零推测
         </div>
       </div>
     </div>

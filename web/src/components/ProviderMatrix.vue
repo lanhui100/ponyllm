@@ -145,7 +145,7 @@ function getProviderTps(p: any): string {
             type="button"
             class="px-3.5 py-1.5 text-[13px] font-medium rounded-md transition-all duration-150 cursor-pointer"
             :class="[
-              range === opt.key
+              effectiveRange === opt.key
                 ? 'bg-white text-slate-950 font-semibold'
                 : 'text-slate-600 hover:text-slate-900',
             ]"
