@@ -656,6 +656,133 @@ impl AppState {
         }
     }
 
+    /// Background worker to periodically refresh Antigravity tokens and quota snapshots.
+    ///
+    /// Prevents standby / low-priority keys from expiring under Google's 180-day
+    /// inactivity rule, while keeping quota buckets warm without requiring manual
+    /// console button clicks.
+    pub fn spawn_antigravity_auto_refresh_worker(self: &Arc<Self>) {
+        let state = self.clone();
+        tokio::spawn(async move {
+            // Initial delay after startup (30 seconds) to let bootstrap & routes settle.
+            tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+
+            let mut last_run = std::time::Instant::now();
+            // Immediate initial pass on startup cycle
+            {
+                let enabled = state.config.read().antigravity_auto_refresh;
+                if enabled {
+                    tracing::info!("Starting initial Antigravity quota & token refresh keepalive cycle");
+                    state.perform_antigravity_keepalive_cycle().await;
+                    last_run = std::time::Instant::now();
+                }
+            }
+
+            loop {
+                // Short sleep tick (5 seconds) so runtime interval updates in hot-reload
+                // are detected promptly without waiting for the full 24h sleep.
+                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+
+                let (enabled, interval_secs) = {
+                    let cfg = state.config.read();
+                    (cfg.antigravity_auto_refresh, cfg.antigravity_refresh_interval_secs.max(60))
+                };
+
+                if enabled && last_run.elapsed() >= std::time::Duration::from_secs(interval_secs) {
+                    tracing::info!("Starting scheduled Antigravity quota & token refresh keepalive cycle");
+                    state.perform_antigravity_keepalive_cycle().await;
+                    last_run = std::time::Instant::now();
+                }
+            }
+        });
+    }
+
+    /// Execute a single pass of token refresh + quota query for all Antigravity keys across pools.
+    pub async fn perform_antigravity_keepalive_cycle(&self) {
+        // Collect Antigravity key managers without holding locks across async operations.
+        let key_entries: Vec<(String, String, Arc<ponyllm_core::pool::AntigravityTokenManager>, Option<String>)> = {
+            let pools = self.pools.read();
+            let cfg = self.config.read();
+            let mut list = Vec::new();
+            for (provider, pool) in pools.iter() {
+                let base_url = cfg.providers.get(provider).map(|p| p.base_url.clone());
+                for entry in pool.snapshot_keys() {
+                    if let Some(mgr) = entry.antigravity_manager() {
+                        list.push((provider.clone(), entry.id.clone(), mgr, base_url.clone()));
+                    }
+                }
+            }
+            list
+        };
+
+        if key_entries.is_empty() {
+            return;
+        }
+
+        tracing::info!(
+            count = key_entries.len(),
+            "Running Antigravity keepalive cycle for accounts"
+        );
+
+        for (provider, key_id, mgr, base_url) in key_entries {
+            // Stagger calls by 1.5s to avoid burst hammering upstream OAuth/API endpoints.
+            tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
+
+            // 1. Force refresh token: resets upstream Google 180-day inactivity window
+            // and triggers rotation hook if Google issues a new refresh token.
+            match mgr.force_refresh_token().await {
+                Ok(_) => {
+                    tracing::debug!(
+                        provider = %provider,
+                        key_id = %key_id,
+                        "Antigravity OAuth token refreshed successfully in keepalive cycle"
+                    );
+                }
+                Err(ponyllm_core::error::CoreError::AuthInvalid { ref reason, .. }) => {
+                    tracing::warn!(
+                        provider = %provider,
+                        key_id = %key_id,
+                        reason = %reason,
+                        "Antigravity key permanently rejected (invalid_grant) during keepalive cycle"
+                    );
+                    if let Some(pool) = self.pools.read().get(&provider) {
+                        pool.record_error(&key_id, ponyllm_core::pool::PoolErrorType::AuthInvalid);
+                    }
+                    continue;
+                }
+                Err(e) => {
+                    tracing::debug!(
+                        provider = %provider,
+                        key_id = %key_id,
+                        error = %e,
+                        "Transient error refreshing Antigravity token during keepalive cycle; continuing"
+                    );
+                }
+            }
+
+            // 2. Fetch latest quota snapshot to warm quota buckets
+            let probe_client = self.probe_http_client_for_provider(&provider);
+            match mgr.with_client(&probe_client).fetch_quota(base_url.as_deref()).await {
+                Ok(snapshot) => {
+                    tracing::debug!(
+                        provider = %provider,
+                        key_id = %key_id,
+                        models_count = snapshot.models.len(),
+                        "Antigravity quota snapshot refreshed successfully in keepalive cycle"
+                    );
+                }
+                Err(e) => {
+                    tracing::debug!(
+                        provider = %provider,
+                        key_id = %key_id,
+                        error = %e,
+                        "Antigravity quota fetch encountered non-fatal error during keepalive cycle"
+                    );
+                }
+            }
+        }
+    }
+
     pub fn register_pool(&self, provider: &str, pool: Arc<KeyPool>) {
         self.pools.write().insert(provider.to_string(), pool);
     }

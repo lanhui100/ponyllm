@@ -74,6 +74,8 @@ fn build_gateway_config_and_pools(
     gw_config.auth_compat = config_file.gateway.auth_compat;
     // P1 scoped gateway keys passthrough (disk format -> runtime config).
     gw_config.gateway_keys = config_file.gateway.gateway_keys.clone();
+    gw_config.antigravity_auto_refresh = config_file.gateway.antigravity_auto_refresh;
+    gw_config.antigravity_refresh_interval_secs = config_file.gateway.antigravity_refresh_interval_secs;
 
     let mut pools = HashMap::new();
 
@@ -285,6 +287,7 @@ async fn run_server(opts: ServerOptions) -> Result<(), Box<dyn std::error::Error
         state.register_pool(&p_name, pool);
     }
     state.attach_antigravity_rotation_hooks_all();
+    state.spawn_antigravity_auto_refresh_worker();
 
     // Spawn background config watcher for zero-downtime hot reload
     let watcher_path = resolved_config.clone();

@@ -81,6 +81,13 @@ pub struct GatewaySection {
     /// Only password hashes are persisted, never plaintext.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub gateway_keys: Vec<GatewayKeyEntry>,
+    /// Whether background auto-refresh & keepalive for Antigravity accounts is enabled.
+    /// Defaults to `true` to keep standby accounts from expiring (Google 180-day rule).
+    #[serde(default = "default_antigravity_auto_refresh")]
+    pub antigravity_auto_refresh: bool,
+    /// Background interval in seconds for Antigravity auto-refresh (default 86400 = 24h).
+    #[serde(default = "default_antigravity_refresh_interval_secs")]
+    pub antigravity_refresh_interval_secs: u64,
 }
 
 /// Scoped gateway credential (P1): one entry per issued key.
@@ -291,6 +298,14 @@ fn default_admin_write_enabled() -> bool {
     false
 }
 
+fn default_antigravity_auto_refresh() -> bool {
+    true
+}
+
+fn default_antigravity_refresh_interval_secs() -> u64 {
+    86400
+}
+
 pub fn default_request_body_limit() -> usize {
     128 * 1024 * 1024 // 128MB
 }
@@ -394,6 +409,8 @@ impl Default for GatewaySection {
             telemetry_snapshot_path: None,
             auth_compat: default_auth_compat(),
             gateway_keys: Vec::new(),
+            antigravity_auto_refresh: default_antigravity_auto_refresh(),
+            antigravity_refresh_interval_secs: default_antigravity_refresh_interval_secs(),
         }
     }
 }

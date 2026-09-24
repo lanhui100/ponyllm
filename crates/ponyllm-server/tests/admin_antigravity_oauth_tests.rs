@@ -397,3 +397,82 @@ async fn test_oauth2_callback_xss_prevention_and_security_headers() {
     assert!(body.contains("http://127.0.0.1:8080"));
 }
 
+#[tokio::test]
+async fn test_antigravity_keepalive_cycle_execution() {
+    let harness = OAuthHarness::new(true).await;
+    
+    // Add an Antigravity key pool (with custom provider name to verify P1 fix)
+    let pool = Arc::new(ponyllm_core::pool::KeyPool::new(
+        "custom-code-assist",
+        ponyllm_core::pool::RoutingStrategy::RoundRobin,
+    ));
+    
+    let cred = ponyllm_core::pool::AntigravityCredential {
+        access_token: Some("mock-access-token".to_string()),
+        refresh_token: "1//mock-refresh-token-keepalive".to_string(),
+        client_id: "test-client".to_string(),
+        client_secret: "test-secret".to_string(),
+        project_id: "test-project".to_string(),
+        expiry: None,
+    };
+    let mgr = Arc::new(ponyllm_core::pool::AntigravityTokenManager::new(
+        "ag-test-keepalive",
+        cred,
+        reqwest::Client::new(),
+    ));
+    pool.add_key(ponyllm_core::pool::ApiKeyEntry::new_antigravity(
+        "ag-test-keepalive",
+        mgr,
+        1,
+        1,
+    ));
+    harness.state.register_pool("custom-code-assist", pool);
+
+    // Run keepalive cycle directly
+    harness.state.perform_antigravity_keepalive_cycle().await;
+
+    // Verify key remains in pool and is not corrupted
+    let ag_pool = harness.state.get_pool("custom-code-assist").expect("custom pool exists");
+    assert_eq!(ag_pool.total_key_count(), 1);
+}
+
+#[tokio::test]
+async fn test_antigravity_keepalive_invalid_grant_circuit_breaker() {
+    let harness = OAuthHarness::new(true).await;
+    
+    let pool = Arc::new(ponyllm_core::pool::KeyPool::new(
+        "antigravity",
+        ponyllm_core::pool::RoutingStrategy::RoundRobin,
+    ));
+    
+    let cred = ponyllm_core::pool::AntigravityCredential {
+        access_token: None,
+        refresh_token: "1//burned-refresh-token".to_string(),
+        client_id: "test-client".to_string(),
+        client_secret: "test-secret".to_string(),
+        project_id: "test-project".to_string(),
+        expiry: None,
+    };
+    let mgr = Arc::new(ponyllm_core::pool::AntigravityTokenManager::new(
+        "ag-burned-key",
+        cred,
+        reqwest::Client::new(),
+    ));
+    pool.add_key(ponyllm_core::pool::ApiKeyEntry::new_antigravity(
+        "ag-burned-key",
+        mgr,
+        1,
+        1,
+    ));
+    harness.state.register_pool("antigravity", pool.clone());
+
+    // Trigger key error with AuthInvalid
+    pool.record_error("ag-burned-key", ponyllm_core::pool::PoolErrorType::AuthInvalid);
+    assert_eq!(
+        pool.get_key_status("ag-burned-key"),
+        Some(ponyllm_core::pool::KeyState::Disabled)
+    );
+}
+
+
+

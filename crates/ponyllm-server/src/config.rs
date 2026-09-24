@@ -424,6 +424,16 @@ pub struct GatewayConfig {
     /// (salted SHA-256, never plaintext). Empty = legacy single `api_key`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub gateway_keys: Vec<ponyllm_config::GatewayKeyEntry>,
+    /// Whether background auto-refresh & keepalive for Antigravity accounts is enabled.
+    #[serde(default = "default_true")]
+    pub antigravity_auto_refresh: bool,
+    /// Background interval in seconds for Antigravity auto-refresh (default 86400 = 24h).
+    #[serde(default = "default_antigravity_refresh_interval_secs")]
+    pub antigravity_refresh_interval_secs: u64,
+}
+
+fn default_antigravity_refresh_interval_secs() -> u64 {
+    86400
 }
 
 fn default_auth_compat() -> ponyllm_config::AuthCompat {
@@ -452,6 +462,8 @@ impl Default for GatewayConfig {
             telemetry_snapshot_path: None,
             auth_compat: default_auth_compat(),
             gateway_keys: Vec::new(),
+            antigravity_auto_refresh: true,
+            antigravity_refresh_interval_secs: default_antigravity_refresh_interval_secs(),
         }
     }
 }
