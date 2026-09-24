@@ -1151,19 +1151,11 @@ where
                             stopped_flag.store(true, std::sync::atomic::Ordering::SeqCst);
                         }
 
-                        let text_so_far = total_text_bytes_flag.load(std::sync::atomic::Ordering::Relaxed);
-                        let tools_so_far = total_tool_calls_flag.load(std::sync::atomic::Ordering::Relaxed);
-                        let thought_so_far = total_thought_bytes_flag.load(std::sync::atomic::Ordering::Relaxed);
-                        // If this chunk is an empty STOP and zero content has been emitted so far,
-                        // do NOT push the deceptive STOP chunk downstream!
-                        if is_empty_stop && text_so_far == 0 && tools_so_far == 0 && thought_so_far == 0 {
+                        if is_empty_stop {
                             had_empty_stop_candidate_flag.store(true, std::sync::atomic::Ordering::SeqCst);
-                            tracing::warn!(
-                                model = %model_stream,
-                                response_id = %response_id_stream,
-                                "Suppressing deceptive empty STOP chunk on zero-content stream"
-                            );
-                        } else if let Ok(json) = serde_json::to_string(&chunk) {
+                        }
+
+                        if let Ok(json) = serde_json::to_string(&chunk) {
                             out.push(Ok(Bytes::from(format!("data: {}\n\n", json))));
                         }
                     }
@@ -1186,8 +1178,8 @@ where
         .chain(futures_util::stream::once(async move {
             let mut buf = Vec::new();
             // If the stream did not stop normally and no transport error occurred,
-            // synthesize the graceful Stop chunk ONLY if the stream actually emitted at least
-            // one response chunk. If the upstream ended abruptly with zero chunks emitted,
+            // synthesize the graceful Stop chunk only if at least one response chunk was emitted.
+            // If the upstream ended abruptly with zero chunks emitted,
             // never synthesize a fake Stop chunk that masks the empty termination.
             if !stopped.load(std::sync::atomic::Ordering::SeqCst)
                 && !transport_errored.load(std::sync::atomic::Ordering::SeqCst)
@@ -1237,23 +1229,8 @@ where
                     text_bytes = 0,
                     tool_calls = 0,
                     finish_reason = ?finish_reason,
-                    "Antigravity SSE to OpenAI stream finalized with ZERO content bytes! Emitting stream error event to guide client retry."
+                    "Antigravity SSE to OpenAI stream finalized with ZERO content bytes"
                 );
-                // Only if the stream actually had an empty STOP candidate,
-                // emit the EMPTY_RESPONSE error frame to notify downstream of the failure.
-                if had_empty_stop_candidate.load(std::sync::atomic::Ordering::SeqCst) {
-                    let err_payload = serde_json::json!({
-                        "error": {
-                            "message": format!("model \"{}\" returned a completed response with no content (upstream transient empty STOP)", model),
-                            "type": "server_error",
-                            "param": null,
-                            "code": "EMPTY_RESPONSE"
-                        }
-                    });
-                    if let Ok(err_str) = serde_json::to_string(&err_payload) {
-                        buf.extend_from_slice(format!("data: {}\n\n", err_str).as_bytes());
-                    }
-                }
             } else {
                 tracing::debug!(
                     response_id = %response_id,
@@ -1859,6 +1836,8 @@ pub struct StreamFailureContext {
     pub request_snippet: Option<String>,
     pub estimated_prompt_tokens: u64,
     pub attempt_start: Option<Instant>,
+    pub key_pool: Option<Arc<ponyllm_core::pool::KeyPool>>,
+    pub key_id: Option<String>,
 }
 
 /// Telemetry wrapper stream tracking TTFT on first emitted chunk and measuring TPS on completion.
@@ -2087,6 +2066,15 @@ where
                         } else {
                             None
                         };
+                        if let (Some(pool), Some(kid)) = (self.failure_ctx.key_pool.as_ref(), self.failure_ctx.key_id.as_deref()) {
+                            let wall_ms = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_millis() as u64;
+                            let prompt = sample.prompt_tokens;
+                            let comp = if sample.completion_tokens > 0 { sample.completion_tokens } else { sample.chunks.max(1) };
+                            pool.record_tokens(kid, wall_ms, prompt, comp, sample.cached_tokens);
+                        }
                         self.emit(
                             None,
                             GatewayEvent::StreamCompleted {
@@ -2121,8 +2109,31 @@ impl<S> Drop for TelemetryStream<S> {
             if self.has_error || self.chunks_emitted == 0 {
                 let (sample, _avg_gap) = self.build_flow(now);
                 let stages = self.finish_stages(sample.ttft_ms, sample.downstream_ttft_ms);
+                if let (Some(pool), Some(kid)) = (self.failure_ctx.key_pool.as_ref(), self.failure_ctx.key_id.as_deref()) {
+                    let wall_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as u64;
+                    let prompt = sample.prompt_tokens;
+                    let comp = if sample.completion_tokens > 0 { sample.completion_tokens } else { sample.chunks };
+                    if prompt > 0 || comp > 0 {
+                        pool.record_tokens(kid, wall_ms, prompt, comp, sample.cached_tokens);
+                    }
+                }
                 self.emit_failure("stream dropped before completion", Some(sample), stages);
             } else {
+                let (sample, _avg_gap) = self.build_flow(now);
+                if let (Some(pool), Some(kid)) = (self.failure_ctx.key_pool.as_ref(), self.failure_ctx.key_id.as_deref()) {
+                    let wall_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as u64;
+                    let prompt = sample.prompt_tokens;
+                    let comp = if sample.completion_tokens > 0 { sample.completion_tokens } else { sample.chunks };
+                    if prompt > 0 || comp > 0 {
+                        pool.record_tokens(kid, wall_ms, prompt, comp, sample.cached_tokens);
+                    }
+                }
                 let ttlb_ms = now
                     .saturating_duration_since(self.failure_ctx.ctx.start)
                     .as_secs_f64()
@@ -2463,6 +2474,8 @@ mod tests {
             request_snippet: None,
             estimated_prompt_tokens: 10,
             attempt_start: Some(start),
+            key_pool: None,
+            key_id: None,
         };
         let s = bytes_stream(vec![
             Bytes::from_static(b"data: one\n\n"),
@@ -2808,6 +2821,8 @@ mod tests {
             request_snippet: None,
             estimated_prompt_tokens: 10,
             attempt_start: Some(start),
+            key_pool: None,
+            key_id: None,
         };
         let failed = format!(
             "event: response.failed\ndata: {}\n\n",
@@ -3065,9 +3080,10 @@ mod tests {
     #[tokio::test]
     async fn test_antigravity_sse_to_openai_stream_zero_content_emits_error_frame() {
         // When upstream sends a candidate that has only empty parts or no content
-        // followed by finishReason STOP, antigravity_sse_to_openai_stream must NOT emit
-        // a deceptive empty stop chunk followed by [DONE]; it must emit an SSE error frame
-        // to clearly notify downstream clients of the upstream failure.
+        // followed by finishReason STOP, antigravity_sse_to_openai_stream preserves the standard
+        // finish_reason: "stop" chunk so downstream OpenAI clients (such as DSH / pi-ai) can
+        // cleanly detect the empty completion and engage native retry (e.g. EMPTY_RESPONSE),
+        // without failing on non-standard error frames or 'Stream ended without finish_reason'.
         let empty_chunk = format!(
             "data: {}\n\n",
             serde_json::json!({
@@ -3093,8 +3109,8 @@ mod tests {
             .await;
 
         let joined = out.join("");
-        assert!(!joined.contains("\"finish_reason\":\"stop\""), "Stream must NOT emit deceptive stop on zero content: {}", joined);
-        assert!(joined.contains("\"code\":\"EMPTY_RESPONSE\""), "Stream must emit EMPTY_RESPONSE error frame: {}", joined);
+        assert!(joined.contains("\"finish_reason\":\"stop\""), "Stream MUST emit finish_reason:stop: {}", joined);
+        assert!(!joined.contains("\"code\":\"EMPTY_RESPONSE\""), "Stream must NOT emit non-standard error frame into OpenAI stream: {}", joined);
         assert!(joined.ends_with("data: [DONE]\n\n"), "Stream must end with [DONE]");
     }
 
@@ -3272,6 +3288,8 @@ mod tests {
             request_snippet: None,
             estimated_prompt_tokens: 10,
             attempt_start: Some(start),
+            key_pool: None,
+            key_id: None,
         };
 
         // Two chunks containing real content: total 20 characters (~6-7 tokens)
