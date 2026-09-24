@@ -184,6 +184,8 @@ pub struct KeyView {
     /// the Web badge show the upstream-advertised quota reset verbatim.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cooldown_reset_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage: Option<ponyllm_core::pool::usage::KeyCapacityEstimate>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -486,6 +488,8 @@ pub struct KeyTestView {
     pub quota: Option<Vec<AntigravityQuotaItemView>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub quota_groups: Option<Vec<AntigravityQuotaGroupView>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage: Option<ponyllm_core::pool::usage::KeyCapacityEstimate>,
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
@@ -511,6 +515,9 @@ pub struct QuotaKeyView {
     /// Antigravity 5h/weekly buckets (refresh hit only).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub quota_groups: Option<Vec<AntigravityQuotaGroupView>>,
+    /// Measured rolling usage & inferred capacity metrics
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage: Option<ponyllm_core::pool::usage::KeyCapacityEstimate>,
     /// True when the refresh probe failed and only memory state is served.
     #[serde(default)]
     pub stale: bool,
@@ -598,6 +605,7 @@ async fn handle_admin_quota_inner(q: QuotaQuery, state: Arc<AppState>) -> Vec<Qu
                 schedulable,
                 quota: None,
                 quota_groups: None,
+                usage: None,
                 stale: false,
             };
             if q.refresh && is_agy {
@@ -611,6 +619,32 @@ async fn handle_admin_quota_inner(q: QuotaQuery, state: Arc<AppState>) -> Vec<Qu
                         view.stale = true;
                     }
                 }
+            }
+            // Populate rolling usage and capacity inference
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            let current_fraction = view.quota_groups.as_ref().and_then(|groups| {
+                for g in groups {
+                    for b in &g.buckets {
+                        if b.window.eq_ignore_ascii_case("5h") || b.bucket_id.contains("5h") {
+                            return Some(b.remaining_fraction);
+                        }
+                    }
+                }
+                None
+            }).or_else(|| {
+                view.quota.as_ref().and_then(|items| {
+                    items.first().map(|m| m.remaining_fraction)
+                })
+            });
+
+            if let Some(entry) = pool.snapshot_keys().into_iter().find(|k| k.id == id) {
+                if let Some(frac) = current_fraction {
+                    entry.usage_tracker.observe_upstream_probe(now_ms, frac);
+                }
+                view.usage = Some(entry.usage_tracker.estimate_capacity(now_ms, current_fraction));
             }
             views.push(view);
         }
@@ -2149,6 +2183,16 @@ pub async fn handle_admin_keys(State(state): State<Arc<AppState>>) -> impl IntoR
                 .map(|k| k.api_key.clone())
                 .unwrap_or_default();
             let (cooldown_remaining, cooldown_reset_at) = pool.key_cooldown(&id);
+            let usage = pool.snapshot_keys()
+                .into_iter()
+                .find(|k| k.id == id)
+                .map(|k| {
+                    let now_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as u64;
+                    k.usage_tracker.estimate_capacity(now_ms, None)
+                });
             views.push(KeyView {
                 provider: provider.clone(),
                 id,
@@ -2159,6 +2203,7 @@ pub async fn handle_admin_keys(State(state): State<Arc<AppState>>) -> impl IntoR
                 cooldown_remaining_secs: cooldown_remaining.map(|d| d.as_secs()),
                 cooldown_reset_at: cooldown_reset_at
                     .map(|t| chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339()),
+                usage,
             });
         }
     }
@@ -2374,6 +2419,7 @@ pub async fn handle_admin_update_key(
         cooldown_remaining_secs: cooldown_remaining.map(|d| d.as_secs()),
         cooldown_reset_at: cooldown_reset_at
             .map(|t| chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339()),
+        usage: None,
     };
 
     let mut resp = (StatusCode::OK, Json(view)).into_response();
@@ -2514,6 +2560,7 @@ pub async fn handle_admin_test_key(
                 message: format!("probe target blocked by egress policy: {}", reason),
                 quota: None,
                 quota_groups: None,
+                usage: None,
             })
             .into_response();
         }
@@ -2528,6 +2575,7 @@ pub async fn handle_admin_test_key(
                     message: format!("Invalid Antigravity credential: {}", e),
                     quota: None,
                     quota_groups: None,
+                    usage: None,
                 })
                 .into_response();
             }
@@ -2702,6 +2750,7 @@ pub async fn handle_admin_test_key(
                     message: quota_msg,
                     quota: quota_view,
                     quota_groups: quota_groups_view,
+                    usage: None,
                 }
             }
             Err(e) => KeyTestView {
@@ -2712,6 +2761,7 @@ pub async fn handle_admin_test_key(
                 message: format!("OAuth token refresh failed: {}", e),
                 quota: None,
                 quota_groups: None,
+                usage: None,
             },
         };
 
@@ -2743,6 +2793,7 @@ pub async fn handle_admin_test_key(
             message: format!("probe target blocked by egress policy: {}", reason),
             quota: None,
             quota_groups: None,
+            usage: None,
         })
         .into_response();
     }
@@ -2779,6 +2830,7 @@ pub async fn handle_admin_test_key(
                     message: "probe ok".to_string(),
                     quota: None,
                     quota_groups: None,
+                    usage: None,
                 }
             } else if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
                 KeyTestView {
@@ -2789,6 +2841,7 @@ pub async fn handle_admin_test_key(
                     message: "upstream authentication failed".to_string(),
                     quota: None,
                     quota_groups: None,
+                    usage: None,
                 }
             } else if status == StatusCode::TOO_MANY_REQUESTS {
                 KeyTestView {
@@ -2799,6 +2852,7 @@ pub async fn handle_admin_test_key(
                     message: "upstream rate limit exceeded".to_string(),
                     quota: None,
                     quota_groups: None,
+                    usage: None,
                 }
             } else {
                 KeyTestView {
@@ -2809,6 +2863,7 @@ pub async fn handle_admin_test_key(
                     message: format!("upstream returned HTTP {}", status.as_u16()),
                     quota: None,
                     quota_groups: None,
+                    usage: None,
                 }
             }
         }
@@ -2822,6 +2877,7 @@ pub async fn handle_admin_test_key(
                     message: "dial test timed out after 3s".to_string(),
                     quota: None,
                     quota_groups: None,
+                    usage: None,
                 }
             } else {
                 KeyTestView {
@@ -2832,10 +2888,39 @@ pub async fn handle_admin_test_key(
                     message: "upstream connection error".to_string(),
                     quota: None,
                     quota_groups: None,
+                    usage: None,
                 }
             }
         }
     };
+
+    let mut test_view = test_view;
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+
+    let current_fraction = test_view.quota_groups.as_ref().and_then(|groups| {
+        for g in groups {
+            for b in &g.buckets {
+                if b.window.eq_ignore_ascii_case("5h") || b.bucket_id.contains("5h") {
+                    return Some(b.remaining_fraction);
+                }
+            }
+        }
+        None
+    }).or_else(|| {
+        test_view.quota.as_ref().and_then(|items| items.first().map(|m| m.remaining_fraction))
+    });
+
+    if let Some(pool) = state.pools.read().get(&p_name) {
+        if let Some(entry) = pool.snapshot_keys().into_iter().find(|k| k.id == id) {
+            if let Some(frac) = current_fraction {
+                entry.usage_tracker.observe_upstream_probe(now_ms, frac);
+            }
+            test_view.usage = Some(entry.usage_tracker.estimate_capacity(now_ms, current_fraction));
+        }
+    }
 
     tracing::info!(
         key_id = %id,

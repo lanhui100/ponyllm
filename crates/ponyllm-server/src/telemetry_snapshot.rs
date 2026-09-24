@@ -27,6 +27,8 @@ pub struct TelemetrySnapshot {
     pub connectivity: HashMap<String, ProviderConnectivitySnapshot>,
     #[serde(default)]
     pub streams: HashMap<String, NodeLatencySnapshot>,
+    #[serde(default)]
+    pub key_usages: HashMap<String, ponyllm_core::pool::usage::KeyUsageStateSnapshot>,
 }
 
 fn default_version() -> u32 {
@@ -42,6 +44,7 @@ impl Default for TelemetrySnapshot {
             metrics: MetricsCounterSnapshot::default(),
             connectivity: HashMap::new(),
             streams: HashMap::new(),
+            key_usages: HashMap::new(),
         }
     }
 }

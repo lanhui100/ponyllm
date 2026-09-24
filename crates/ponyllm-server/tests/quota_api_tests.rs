@@ -291,5 +291,8 @@ async fn quota_requires_auth_and_refresh_false_is_upstream_free() {
     for v in body.as_array().unwrap() {
         assert!(v.get("quota").is_none(), "refresh=false must not probe: {v}");
         assert_eq!(v["stale"], false);
+        assert!(v.get("usage").is_some(), "usage metrics must be present: {v}");
+        assert!(v["usage"]["window_5h"].is_object());
+        assert!(v["usage"]["window_weekly"].is_object());
     }
 }

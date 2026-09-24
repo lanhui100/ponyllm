@@ -85,6 +85,7 @@ export interface KeyView {
   cooldown_remaining_secs?: number | null;
   /** RFC 3339 UTC instant the key is expected to recover after a cooldown. */
   cooldown_reset_at?: string | null;
+  usage?: KeyCapacityEstimate | null;
 }
 
 export interface AntigravityQuotaItemView {
@@ -112,6 +113,23 @@ export interface AntigravityQuotaGroupView {
   buckets: AntigravityQuotaBucketView[];
 }
 
+export interface WindowUsage {
+  prompt_tokens: number;
+  completion_tokens: number;
+  cached_tokens: number;
+  total_tokens: number;
+  requests: number;
+}
+
+export interface KeyCapacityEstimate {
+  window_5h: WindowUsage;
+  window_weekly: WindowUsage;
+  estimated_capacity_5h?: number | null;
+  estimated_tokens_remaining_5h?: number | null;
+  account_tier: 'pro' | 'standard' | 'free' | 'calibrating' | 'unknown' | string;
+  confidence: number;
+}
+
 export interface KeyTestView {
   success: boolean;
   latency_ms: number;
@@ -120,6 +138,7 @@ export interface KeyTestView {
   error_code?: string | null;
   quota?: AntigravityQuotaItemView[] | null;
   quota_groups?: AntigravityQuotaGroupView[] | null;
+  usage?: KeyCapacityEstimate | null;
 }
 
 export interface StrategyView {

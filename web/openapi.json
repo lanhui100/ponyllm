@@ -1525,6 +1525,53 @@
           }
         }
       },
+      "KeyCapacityEstimate": {
+        "type": "object",
+        "description": "Dynamic capacity estimation and account tier inference",
+        "required": [
+          "window_5h",
+          "window_weekly",
+          "account_tier",
+          "confidence"
+        ],
+        "properties": {
+          "account_tier": {
+            "type": "string",
+            "description": "Inferred account tier: \"pro\", \"standard\", \"free\", \"calibrating\", or \"unknown\""
+          },
+          "confidence": {
+            "type": "number",
+            "format": "double",
+            "description": "Fitting confidence (0.0 ~ 1.0)"
+          },
+          "estimated_capacity_5h": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Inferred 5-hour total capacity in tokens, if fitted",
+            "minimum": 0
+          },
+          "estimated_tokens_remaining_5h": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Estimated remaining tokens in 5h window based on current remaining fraction",
+            "minimum": 0
+          },
+          "window_5h": {
+            "$ref": "#/components/schemas/WindowUsage",
+            "description": "5-hour rolling usage metrics"
+          },
+          "window_weekly": {
+            "$ref": "#/components/schemas/WindowUsage",
+            "description": "7-day (weekly) rolling usage metrics"
+          }
+        }
+      },
       "KeyTestView": {
         "type": "object",
         "required": [
@@ -1575,6 +1622,16 @@
           },
           "success": {
             "type": "boolean"
+          },
+          "usage": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/KeyCapacityEstimate"
+              }
+            ]
           }
         }
       },
@@ -1621,6 +1678,16 @@
           },
           "state": {
             "type": "string"
+          },
+          "usage": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/KeyCapacityEstimate"
+              }
+            ]
           },
           "weight": {
             "type": "integer",
@@ -1989,6 +2056,17 @@
           },
           "state": {
             "type": "string"
+          },
+          "usage": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/KeyCapacityEstimate",
+                "description": "Measured rolling usage & inferred capacity metrics"
+              }
+            ]
           }
         }
       },
@@ -2326,6 +2404,43 @@
           },
           "source": {
             "type": "string"
+          }
+        }
+      },
+      "WindowUsage": {
+        "type": "object",
+        "required": [
+          "prompt_tokens",
+          "completion_tokens",
+          "cached_tokens",
+          "total_tokens",
+          "requests"
+        ],
+        "properties": {
+          "cached_tokens": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "completion_tokens": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "prompt_tokens": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "requests": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "total_tokens": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
           }
         }
       }

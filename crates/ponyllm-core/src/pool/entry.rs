@@ -107,6 +107,7 @@ pub struct ApiKeyEntry {
     pub priority: u32,
     pub weight: u32,
     pub stats: KeyStats,
+    pub usage_tracker: Arc<crate::pool::usage::KeyUsageTracker>,
 }
 
 // Manual Debug: `#[derive(Debug)]` would print `api_key` verbatim into
@@ -133,6 +134,7 @@ impl ApiKeyEntry {
             priority,
             weight,
             stats: KeyStats::default(),
+            usage_tracker: Arc::new(crate::pool::usage::KeyUsageTracker::new()),
         }
     }
 
@@ -149,6 +151,7 @@ impl ApiKeyEntry {
             priority,
             weight,
             stats: KeyStats::default(),
+            usage_tracker: Arc::new(crate::pool::usage::KeyUsageTracker::new()),
         }
     }
 
@@ -209,6 +212,11 @@ impl ApiKeyEntry {
         self.stats.total_requests.fetch_add(1, Ordering::Relaxed);
         self.stats.successful_requests.fetch_add(1, Ordering::Relaxed);
         self.stats.consecutive_failures.store(0, Ordering::SeqCst);
+    }
+
+    /// Record token consumption on this key
+    pub fn record_tokens(&self, wall_ms: u64, prompt: u64, completion: u64, cached: u64) {
+        self.usage_tracker.record_tokens(wall_ms, prompt, completion, cached);
     }
 
     /// Clear any active cooldown, immediately returning the key to Active state.

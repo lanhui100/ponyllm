@@ -41,11 +41,22 @@ fn spawn_snapshot_saver(
     metrics: Arc<MetricsCollector>,
     connectivity: Arc<ConnectivitySampler>,
     streams: Arc<StreamProjection>,
+    pools: Arc<RwLock<HashMap<String, Arc<ponyllm_core::pool::KeyPool>>>>,
 ) {
     std::thread::Builder::new()
         .name("ponyllm-telemetry-snapshot".to_string())
         .spawn(move || loop {
             std::thread::sleep(std::time::Duration::from_secs(10));
+            let key_usages = {
+                let mut usages = HashMap::new();
+                let pool_map = pools.read();
+                for pool in pool_map.values() {
+                    for key in pool.snapshot_keys() {
+                        usages.insert(key.id.clone(), key.usage_tracker.export_snapshot());
+                    }
+                }
+                usages
+            };
             let snap = crate::telemetry_snapshot::TelemetrySnapshot {
                 version: crate::telemetry_snapshot::SNAPSHOT_VERSION,
                 saved_at_ms: 0,
@@ -53,6 +64,7 @@ fn spawn_snapshot_saver(
                 metrics: metrics.snapshot_counters(),
                 connectivity: connectivity.snapshot_state(),
                 streams: streams.snapshot_nodes(),
+                key_usages,
             };
             if let Err(e) = crate::telemetry_snapshot::save_snapshot(&path, &snap) {
                 tracing::warn!("telemetry snapshot save failed: {}", e);
@@ -217,7 +229,7 @@ fn proxy_client_key(url: &str, timeout: std::time::Duration) -> String {
 #[derive(Debug)]
 pub struct AppState {
     pub config: RwLock<GatewayConfig>,
-    pub pools: RwLock<HashMap<String, Arc<KeyPool>>>,
+    pub pools: Arc<RwLock<HashMap<String, Arc<KeyPool>>>>,
     pub flight_recorder: Arc<FlightRecorder>,
     pub metrics: Arc<MetricsCollector>,
     pub hot_cache: Arc<HotCacheTracker>,
@@ -245,6 +257,8 @@ pub struct AppState {
     pub admin_write_lock: Arc<tokio::sync::Mutex<()>>,
     /// Dashboard telemetry snapshot path (`None` disables persistence).
     pub telemetry_snapshot_path: Option<std::path::PathBuf>,
+    /// Pending usage state snapshots waiting for pools to be registered
+    pub pending_restored_usages: Arc<RwLock<HashMap<String, ponyllm_core::pool::usage::KeyUsageStateSnapshot>>>,
 }
 
 impl std::fmt::Debug for dyn crate::admin_store::ConfigStore {
@@ -325,6 +339,8 @@ impl AppState {
             );
         }
         let telemetry_snapshot_path = resolve_snapshot_path(&config);
+        let pools: Arc<RwLock<HashMap<String, Arc<KeyPool>>>> = Arc::new(RwLock::new(HashMap::new()));
+        let mut restored_usages = HashMap::new();
         if let Some(ref path) = telemetry_snapshot_path {
             if path.is_file() {
                 match crate::telemetry_snapshot::load_snapshot(path) {
@@ -333,6 +349,7 @@ impl AppState {
                         metrics.restore_counters(&snap.metrics);
                         connectivity_sampler.restore_state(snap.connectivity);
                         stream_proj.restore_nodes(snap.streams);
+                        restored_usages = snap.key_usages;
                         tracing::info!("telemetry snapshot restored from {:?}", path);
                     }
                     None => {
@@ -341,6 +358,7 @@ impl AppState {
                 }
             }
         }
+        let pending_restored_usages = Arc::new(RwLock::new(restored_usages));
         if let Some(ref path) = telemetry_snapshot_path {
             spawn_snapshot_saver(
                 path.clone(),
@@ -348,11 +366,12 @@ impl AppState {
                 metrics.clone(),
                 connectivity_sampler.clone(),
                 stream_proj.clone(),
+                pools.clone(),
             );
         }
         Self {
             config: RwLock::new(config),
-            pools: RwLock::new(HashMap::new()),
+            pools,
             flight_recorder,
             metrics,
             hot_cache: Arc::new(HotCacheTracker::new()),
@@ -369,6 +388,7 @@ impl AppState {
             started_at: std::time::Instant::now(),
             admin_write_lock: Arc::new(tokio::sync::Mutex::new(())),
             telemetry_snapshot_path,
+            pending_restored_usages,
         }
     }
 
@@ -390,6 +410,16 @@ impl AppState {
             metrics: self.metrics.snapshot_counters(),
             connectivity: self.connectivity_sampler.snapshot_state(),
             streams: self.stream_proj.snapshot_nodes(),
+            key_usages: {
+                let mut usages = HashMap::new();
+                let pools = self.pools.read();
+                for pool in pools.values() {
+                    for key in pool.snapshot_keys() {
+                        usages.insert(key.id.clone(), key.usage_tracker.export_snapshot());
+                    }
+                }
+                usages
+            },
         };
         crate::telemetry_snapshot::save_snapshot(&path, &snap)
     }
@@ -770,6 +800,33 @@ impl AppState {
                         models_count = snapshot.models.len(),
                         "Antigravity quota snapshot refreshed successfully in keepalive cycle"
                     );
+
+                    // Autonomous capacity calibration in background keepalive
+                    let now_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as u64;
+
+                    let current_fraction = snapshot.quota_groups.as_ref().and_then(|groups| {
+                        for g in groups {
+                            for b in &g.buckets {
+                                if b.window.eq_ignore_ascii_case("5h") || b.bucket_id.contains("5h") {
+                                    return Some(b.remaining_fraction);
+                                }
+                            }
+                        }
+                        None
+                    }).or_else(|| {
+                        snapshot.models.values().next().map(|m| m.remaining_fraction)
+                    });
+
+                    if let Some(frac) = current_fraction {
+                        if let Some(pool) = self.pools.read().get(&provider) {
+                            if let Some(entry) = pool.snapshot_keys().into_iter().find(|k| k.id == key_id) {
+                                entry.usage_tracker.observe_upstream_probe(now_ms, frac);
+                            }
+                        }
+                    }
                 }
                 Err(e) => {
                     tracing::debug!(
@@ -784,6 +841,17 @@ impl AppState {
     }
 
     pub fn register_pool(&self, provider: &str, pool: Arc<KeyPool>) {
+        {
+            let mut pending = self.pending_restored_usages.write();
+            if !pending.is_empty() {
+                for key in pool.snapshot_keys() {
+                    if let Some(saved) = pending.remove(&key.id) {
+                        key.usage_tracker.import_snapshot(saved);
+                        tracing::info!(provider = %provider, key_id = %key.id, "Restored usage tracker state from snapshot");
+                    }
+                }
+            }
+        }
         self.pools.write().insert(provider.to_string(), pool);
     }
 

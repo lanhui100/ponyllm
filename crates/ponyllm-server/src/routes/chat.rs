@@ -364,8 +364,8 @@ pub async fn handle_chat_completions(
 
             loop {
                 stream_attempt += 1;
-                match current_executor.execute_stream_request_with_timing(&target_url, &req_val).await {
-                    Ok((upstream_resp, attempt_start)) => {
+                match current_executor.execute_stream_request_with_timing_and_key(&target_url, &req_val).await {
+                    Ok((upstream_resp, attempt_start, winning_key_id)) => {
                         let raw_stream = stall_guard(upstream_resp.bytes_stream(), DEFAULT_TAIL_STALL_IDLE);
 
                         // For Antigravity upstream, verify preamble before committing downstream headers.
@@ -466,6 +466,8 @@ pub async fn handle_chat_completions(
                             request_snippet: req_snippet.clone(),
                             estimated_prompt_tokens: est_prompt_tokens,
                             attempt_start: Some(attempt_start),
+                            key_pool: Some(pool.clone()),
+                            key_id: Some(winning_key_id),
                         };
                         let body = match target.upstream_protocol {
                             ponyllm_core::pool::UpstreamProtocol::Anthropic => {
@@ -519,7 +521,7 @@ pub async fn handle_chat_completions(
                 }
             }
         } else {
-            let upstream_result = if target.upstream_protocol == ponyllm_core::pool::UpstreamProtocol::Antigravity {
+            let (upstream_result, winning_key_id) = if target.upstream_protocol == ponyllm_core::pool::UpstreamProtocol::Antigravity {
                 tracing::debug!(
                     provider = %target.provider_name,
                     target_url = %target_url,
@@ -532,11 +534,11 @@ pub async fn handle_chat_completions(
                 let mut collect_attempt = 0usize;
                 loop {
                     collect_attempt += 1;
-                    match executor.execute_stream_request(&target_url, &req_val).await {
-                        Ok(resp) => {
+                    match executor.execute_stream_request_with_timing_and_key(&target_url, &req_val).await {
+                        Ok((resp, _instant, kid)) => {
                             let raw_stream = resp.bytes_stream();
                             match collect_antigravity_sse_to_json(raw_stream).await {
-                                Ok(v) => break Ok(v),
+                                Ok(v) => break (Ok(v), Some(kid)),
                                 Err(e) if is_transient_empty_stop_error(&e) && collect_attempt < max_empty_stop_attempts => {
                                     let delay = empty_stop_retry_delay(collect_attempt);
                                     tracing::warn!(
@@ -555,11 +557,11 @@ pub async fn handle_chat_completions(
                                         error = %e,
                                         "Antigravity stream collection failed"
                                     );
-                                    break Err(CoreError::Internal(format!("Antigravity stream collect failed: {}", e)));
+                                    break (Err(CoreError::Internal(format!("Antigravity stream collect failed: {}", e))), Some(kid));
                                 }
                             }
                         }
-                        Err(e) => break Err(e),
+                        Err(e) => break (Err(e), None),
                     }
                 }
             } else if ponyllm_core::executor::zen_free_tier_forces_upstream_stream(
@@ -582,8 +584,8 @@ pub async fn handle_chat_completions(
                             .or_insert_with(|| serde_json::json!({"include_usage": true}));
                     }
                 }
-                match executor.execute_stream_request(&target_url, &streamed_val).await {
-                    Ok(resp) => {
+                match executor.execute_stream_request_with_timing_and_key(&target_url, &streamed_val).await {
+                    Ok((resp, _instant, kid)) => {
                         let raw_stream = resp.bytes_stream();
                         let collected = match target.upstream_protocol {
                             ponyllm_core::pool::UpstreamProtocol::Responses => {
@@ -592,25 +594,28 @@ pub async fn handle_chat_completions(
                             _ => crate::streaming::collect_chat_sse_to_json(raw_stream).await,
                         };
                         match collected {
-                            Ok(v) => Ok(v),
+                            Ok(v) => (Ok(v), Some(kid)),
                             Err(e) => {
                                 tracing::warn!(
                                     provider = %target.provider_name,
                                     error = %e,
                                     "Zen free-tier upstream stream collection failed"
                                 );
-                                Err(CoreError::Internal(format!("Zen stream collect failed: {}", e)))
+                                (Err(CoreError::Internal(format!("Zen stream collect failed: {}", e))), Some(kid))
                             }
                         }
                     }
-                    Err(e) => Err(e),
+                    Err(e) => (Err(e), None),
                 }
             } else {
-                executor.execute_json_request(&target_url, &req_val).await
+                match executor.execute_json_request_with_key(&target_url, &req_val).await {
+                    Ok((val, kid)) => (Ok(val), Some(kid)),
+                    Err(e) => (Err(e), None),
+                }
             };
 
-            match upstream_result {
-                Ok(resp_val) => {
+            match (upstream_result, winning_key_id) {
+                (Ok(resp_val), winning_key_id) => {
                     let latency = start_time.elapsed();
                     let mut final_val = match target.upstream_protocol {
                         ponyllm_core::pool::UpstreamProtocol::Responses => {
@@ -679,6 +684,13 @@ pub async fn handle_chat_completions(
                     }
 
                     let (prompt_tokens, completion_tokens, cached_tokens) = extract_usage_tokens(&final_val);
+                    if let Some(kid) = winning_key_id.as_deref() {
+                        let wall_ms = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis() as u64;
+                        pool.record_tokens(kid, wall_ms, prompt_tokens, completion_tokens, cached_tokens);
+                    }
                     let tps = if latency.as_secs_f64() > 0.05 && completion_tokens > 0 {
                         Some((completion_tokens as f64 / latency.as_secs_f64()).max(1.0))
                     } else {
@@ -709,7 +721,7 @@ pub async fn handle_chat_completions(
                     inject_telemetry_headers(&mut response, &request_id, &stages);
                     return response;
                 }
-                Err(err) => {
+                (Err(err), _) => {
                     tracing::warn!("Provider '{}' json request failed ({}). Attempting fallback...", target.provider_name, err);
                     last_kind = err.kind();
                     last_pool_exhausted = matches!(err, CoreError::NoAvailableKey(_));

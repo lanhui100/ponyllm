@@ -225,4 +225,66 @@ describe('AntigravityPoolCard Component', () => {
     app.unmount();
     document.body.removeChild(container);
   });
+
+  it('renders account details modal when a slot is clicked', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+
+    const keys: KeyView[] = [
+      {
+        id: 'ag-pro-account@gmail.com',
+        provider: 'antigravity',
+        masked_key: 'ya29.***',
+        state: 'active',
+        priority: 1,
+        weight: 10,
+        usage: {
+          window_5h: {
+            prompt_tokens: 80000,
+            completion_tokens: 20000,
+            cached_tokens: 5000,
+            total_tokens: 100000,
+            requests: 25,
+          },
+          window_weekly: {
+            prompt_tokens: 400000,
+            completion_tokens: 100000,
+            cached_tokens: 20000,
+            total_tokens: 500000,
+            requests: 120,
+          },
+          estimated_capacity_5h: 500000,
+          estimated_tokens_remaining_5h: 400000,
+          account_tier: 'pro',
+          confidence: 0.95,
+        },
+      },
+    ];
+
+    const app = createApp(AntigravityPoolCard, {
+      keys,
+      keyTestResults: {},
+      adminWriteEnabled: true,
+    });
+
+    app.mount(container);
+    await nextTick();
+
+    // Verify cell exists
+    const cell = container.querySelector('[data-testid="slot-heatmap-cell"]') as HTMLElement;
+    expect(cell).not.toBeNull();
+
+    // Click cell to open modal
+    cell.click();
+    await nextTick();
+
+    const modal = document.querySelector('[data-testid="account-details-modal"]');
+    expect(modal).not.toBeNull();
+    expect(modal?.textContent).toContain('Pro 会员');
+    expect(modal?.textContent).toContain('100,000');
+    expect(modal?.textContent).toContain('500,000');
+
+    app.unmount();
+    document.body.removeChild(container);
+  });
 });

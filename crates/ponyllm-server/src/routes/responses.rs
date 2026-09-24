@@ -319,8 +319,8 @@ pub async fn handle_responses(
 
         // Handle streaming request: pass through upstream SSE unchanged
         if is_streaming {
-            match executor.execute_stream_request_with_timing(&target_url, &req_val).await {
-                Ok((upstream_resp, attempt_start)) => {
+            match executor.execute_stream_request_with_timing_and_key(&target_url, &req_val).await {
+                Ok((upstream_resp, attempt_start, winning_key_id)) => {
                     if let Some(p) = prompt_ref {
                         state.hot_cache.record_dispatch(p, &provider_name);
                     }
@@ -342,6 +342,8 @@ pub async fn handle_responses(
                         request_snippet: req_snippet.clone(),
                         estimated_prompt_tokens: est_prompt_tokens,
                         attempt_start: Some(attempt_start),
+                        key_pool: Some(pool.clone()),
+                        key_id: Some(winning_key_id),
                     };
                     // Same-protocol upstreams stream through untouched;
                     // mismatched natives are translated into Responses events.
@@ -393,7 +395,7 @@ pub async fn handle_responses(
             }
         }
 
-        let upstream_result = if ponyllm_core::executor::zen_free_tier_forces_upstream_stream(
+        let (upstream_result, winning_key_id) = if ponyllm_core::executor::zen_free_tier_forces_upstream_stream(
             &provider_name,
             &target_url,
             &target.physical_model,
@@ -413,8 +415,8 @@ pub async fn handle_responses(
                         .or_insert_with(|| serde_json::json!({"include_usage": true}));
                 }
             }
-            match executor.execute_stream_request(&target_url, &streamed_val).await {
-                Ok(resp) => {
+            match executor.execute_stream_request_with_timing_and_key(&target_url, &streamed_val).await {
+                Ok((resp, _instant, kid)) => {
                     let raw_stream = resp.bytes_stream();
                     let collected = match target.upstream_protocol {
                         ponyllm_core::pool::UpstreamProtocol::Responses => {
@@ -423,25 +425,28 @@ pub async fn handle_responses(
                         _ => crate::streaming::collect_chat_sse_to_json(raw_stream).await,
                     };
                     match collected {
-                        Ok(v) => Ok(v),
+                        Ok(v) => (Ok(v), Some(kid)),
                         Err(e) => {
                             tracing::warn!(
                                 provider = %provider_name,
                                 error = %e,
                                 "Zen free-tier upstream stream collection failed"
                             );
-                            Err(CoreError::Internal(format!("Zen stream collect failed: {}", e)))
+                            (Err(CoreError::Internal(format!("Zen stream collect failed: {}", e))), Some(kid))
                         }
                     }
                 }
-                Err(e) => Err(e),
+                Err(e) => (Err(e), None),
             }
         } else {
-            executor.execute_json_request(&target_url, &req_val).await
+            match executor.execute_json_request_with_key(&target_url, &req_val).await {
+                Ok((val, kid)) => (Ok(val), Some(kid)),
+                Err(e) => (Err(e), None),
+            }
         };
 
-        match upstream_result {
-            Ok(resp_val) => {
+        match (upstream_result, winning_key_id) {
+            (Ok(resp_val), winning_key_id) => {
                 let mut resp_val = match target.upstream_protocol {
                     ponyllm_core::pool::UpstreamProtocol::Chat => {
                         let chat_resp: ponyllm_protocol::openai::chat::ChatCompletionResponse =
@@ -500,6 +505,13 @@ pub async fn handle_responses(
                 };
                 let latency = start_time.elapsed();
                 let (prompt_tokens, completion_tokens, cached_tokens) = extract_usage_tokens(&resp_val);
+                if let Some(kid) = winning_key_id.as_deref() {
+                    let wall_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as u64;
+                    pool.record_tokens(kid, wall_ms, prompt_tokens, completion_tokens, cached_tokens);
+                }
                 let tps = if latency.as_secs_f64() > 0.05 && completion_tokens > 0 {
                     Some((completion_tokens as f64 / latency.as_secs_f64()).max(1.0))
                 } else {
@@ -533,7 +545,7 @@ pub async fn handle_responses(
                 inject_telemetry_headers(&mut response, &request_id, &stages);
                 return response;
             }
-            Err(err) => {
+            (Err(err), _) => {
                 tracing::warn!("Provider '{}' responses request failed ({}). Attempting fallback...", provider_name, err);
                 last_kind = err.kind();
                 last_pool_exhausted = matches!(err, CoreError::NoAvailableKey(_));

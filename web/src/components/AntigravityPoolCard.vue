@@ -23,7 +23,41 @@ const emit = defineEmits<{
   (e: 'refresh-quotas'): void;
   (e: 'cooldown-expired'): void;
   (e: 'navigate-governance'): void;
+  (e: 'select-key', key: KeyView): void;
 }>();
+
+const selectedKeyForDetails = ref<KeyView | null>(null);
+
+function openKeyDetails(key: KeyView) {
+  selectedKeyForDetails.value = key;
+  emit('select-key', key);
+}
+
+function handleKeydown(e: KeyboardEvent) {
+  if (e.key === 'Escape' && selectedKeyForDetails.value) {
+    selectedKeyForDetails.value = null;
+  }
+}
+
+watch(selectedKeyForDetails, (val) => {
+  if (val) {
+    window.addEventListener('keydown', handleKeydown);
+  } else {
+    window.removeEventListener('keydown', handleKeydown);
+  }
+});
+
+onUnmounted(() => {
+  window.removeEventListener('keydown', handleKeydown);
+  if (timer) {
+    clearInterval(timer);
+    timer = null;
+  }
+  if (resizeObserver) {
+    resizeObserver.disconnect();
+    resizeObserver = null;
+  }
+});
 
 // 客户端动态秒级时钟信号，驱动倒计时平滑递减
 const nowMs = ref(Date.now());
@@ -358,6 +392,18 @@ const slotMatrix = computed<HeatSlotItem[]>(() => {
       email = email.slice(3);
     }
 
+    const usage = testResult?.usage || k.usage;
+    let tierBadge = '';
+    let usageSummary = '';
+    if (usage) {
+      const tierLabel = usage.account_tier === 'pro' ? '⭐ Pro 会员' : usage.account_tier === 'standard' ? '🔹 标准会员' : usage.account_tier === 'calibrating' ? '🔄 校准中' : usage.account_tier === 'unknown' ? '⏳ 待调用' : '⚪ 普通/免费';
+      tierBadge = ` [${tierLabel}]`;
+      const h5Tokens = (usage.window_5h.total_tokens / 1000).toFixed(1);
+      const capTokens = usage.estimated_capacity_5h ? ` / 测算总额度 ~${(usage.estimated_capacity_5h / 1000).toFixed(0)}k` : '';
+      const wTokens = (usage.window_weekly.total_tokens / 1000).toFixed(1);
+      usageSummary = `\n5h用量: ${h5Tokens}k tokens (${usage.window_5h.requests}次)${capTokens}\n周用量: ${wTokens}k tokens (${usage.window_weekly.requests}次)`;
+    }
+
     if (isCooling) {
       const remaining = cooldownRemainingSecs(k);
       const label = formatCooldownDuration(remaining);
@@ -371,7 +417,7 @@ const slotMatrix = computed<HeatSlotItem[]>(() => {
         level: 'cooling',
         // 纯绿色阶体系中的冷冻态：清晰可见的柔青薄荷绿（加深，对比鲜明）
         heatClass: 'bg-[#a3e4a8]',
-        tooltipText: `账号: ${email}\n状态: 冷却保护中\n重置: ${hint}`,
+        tooltipText: `账号: ${email}${tierBadge}\n状态: 冷却保护中\n重置: ${hint}${usageSummary}`,
         isCooling: true,
       };
     }
@@ -382,7 +428,7 @@ const slotMatrix = computed<HeatSlotItem[]>(() => {
         level: 'low',
         // 尚未探测或未持久化状态：采用低饱和沉静浅灰绿，提示等待刷新
         heatClass: 'bg-[#d0d7de]',
-        tooltipText: `账号: ${email}\n状态: 等待刷新配额`,
+        tooltipText: `账号: ${email}${tierBadge}\n状态: 等待刷新配额${usageSummary}`,
         isCooling: false,
       };
     }
@@ -392,7 +438,7 @@ const slotMatrix = computed<HeatSlotItem[]>(() => {
     const g5h = Math.round(g5hFraction * 100);
     const gWeekly = Math.round(quota.gemini.weeklyFraction * 100);
 
-    const baseTooltip = `账号: ${email}\nGemini: 5h余量 ${g5h}% · 周余量 ${gWeekly}%`;
+    const baseTooltip = `账号: ${email}${tierBadge}\nGemini: 5h余量 ${g5h}% · 周余量 ${gWeekly}%${usageSummary}`;
 
     if (g5hFraction >= 0.75) {
       return {
@@ -580,6 +626,7 @@ function getProgressColor(percent: number): { bar: string; text: string; bg: str
                   data-testid="slot-heatmap-cell"
                   class="w-3.5 h-3.5 rounded-[2px] transition-transform duration-150 hover:scale-125 cursor-pointer shrink-0"
                   :class="item.heatClass"
+                  @click="openKeyDetails(item.key)"
                 />
               </UiTooltip>
 
@@ -670,6 +717,144 @@ function getProgressColor(percent: number): { bar: string; text: string; bg: str
 
         <div class="mt-3 pt-2.5 border-t border-slate-200/50 text-[11px] text-slate-400">
           基于当前 {{ activeKeys.length }} 个就绪账号 Gemini 会话余量加权聚合 · 长周期配额防超限指示，自然周滚动重置
+        </div>
+      </div>
+    </div>
+
+    <!-- 账号详情抽屉 / 模态框 -->
+    <div
+      v-if="selectedKeyForDetails"
+      class="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 backdrop-blur-xs p-4"
+      data-testid="account-details-modal"
+      @click.self="selectedKeyForDetails = null"
+    >
+      <div class="bg-white rounded-xl shadow-xl border border-slate-200 w-full max-w-lg overflow-hidden flex flex-col max-h-[90vh]">
+        <!-- 头部 -->
+        <div class="flex items-center justify-between px-5 py-4 border-b border-slate-100 bg-slate-50/70">
+          <div class="flex items-center gap-2">
+            <Icons name="key" size="18" class="text-amber-600" />
+            <span class="font-bold text-slate-800 text-sm font-mono truncate max-w-[280px]">
+              {{ selectedKeyForDetails.id }}
+            </span>
+            <span
+              v-if="(keyTestResults[selectedKeyForDetails.id]?.usage || selectedKeyForDetails.usage)?.account_tier === 'pro'"
+              class="px-2 py-0.5 rounded text-[11px] font-semibold bg-amber-100 text-amber-800 border border-amber-200"
+            >
+              ⭐ Pro 会员
+            </span>
+            <span
+              v-else-if="(keyTestResults[selectedKeyForDetails.id]?.usage || selectedKeyForDetails.usage)?.account_tier === 'standard'"
+              class="px-2 py-0.5 rounded text-[11px] font-semibold bg-sky-100 text-sky-800 border border-sky-200"
+            >
+              🔹 标准会员
+            </span>
+            <span
+              v-else-if="(keyTestResults[selectedKeyForDetails.id]?.usage || selectedKeyForDetails.usage)?.account_tier === 'calibrating'"
+              class="px-2 py-0.5 rounded text-[11px] font-semibold bg-indigo-100 text-indigo-800 border border-indigo-200"
+            >
+              🔄 校准中
+            </span>
+            <span
+              v-else-if="(keyTestResults[selectedKeyForDetails.id]?.usage || selectedKeyForDetails.usage)?.account_tier === 'unknown'"
+              class="px-2 py-0.5 rounded text-[11px] font-semibold bg-slate-100 text-slate-500 border border-slate-200"
+            >
+              ⏳ 待调用校准
+            </span>
+            <span
+              v-else
+              class="px-2 py-0.5 rounded text-[11px] font-semibold bg-slate-100 text-slate-600 border border-slate-200"
+            >
+              ⚪ 普通/免费
+            </span>
+          </div>
+          <button
+            class="text-slate-400 hover:text-slate-600 p-1 rounded-md transition-colors"
+            @click="selectedKeyForDetails = null"
+          >
+            <Icons name="cross" size="16" />
+          </button>
+        </div>
+
+        <!-- 正文 -->
+        <div class="p-5 overflow-y-auto space-y-5 text-xs text-slate-600">
+          <!-- 5h 即时窗口 -->
+          <div class="p-3.5 rounded-lg bg-slate-50/80 border border-slate-100">
+            <div class="flex items-center justify-between font-semibold text-slate-800 mb-2">
+              <span class="flex items-center gap-1.5">
+                <Icons name="zap" size="14" class="text-amber-500" />
+                5小时爆发窗口 (Rolling 5h)
+              </span>
+              <span class="text-slate-400 font-mono text-[11px]">
+                {{ (keyTestResults[selectedKeyForDetails.id]?.usage || selectedKeyForDetails.usage)?.window_5h.requests || 0 }} 次请求
+              </span>
+            </div>
+
+            <div class="grid grid-cols-2 gap-3 mt-3">
+              <div class="bg-white p-2.5 rounded border border-slate-100">
+                <span class="text-slate-400 block text-[11px]">5h 已消耗 Tokens</span>
+                <strong class="text-base font-mono text-slate-800 tabular-nums">
+                  {{ ((keyTestResults[selectedKeyForDetails.id]?.usage || selectedKeyForDetails.usage)?.window_5h.total_tokens || 0).toLocaleString() }}
+                </strong>
+                <span class="text-[10px] text-slate-400 block mt-0.5">
+                  输入: {{ ((keyTestResults[selectedKeyForDetails.id]?.usage || selectedKeyForDetails.usage)?.window_5h.prompt_tokens || 0).toLocaleString() }} · 输出: {{ ((keyTestResults[selectedKeyForDetails.id]?.usage || selectedKeyForDetails.usage)?.window_5h.completion_tokens || 0).toLocaleString() }}
+                </span>
+              </div>
+              <div class="bg-white p-2.5 rounded border border-slate-100">
+                <span class="text-slate-400 block text-[11px]">推算 5h 物理额度</span>
+                <strong class="text-base font-mono text-emerald-600 tabular-nums">
+                  {{ (keyTestResults[selectedKeyForDetails.id]?.usage || selectedKeyForDetails.usage)?.estimated_capacity_5h ? `~${((keyTestResults[selectedKeyForDetails.id]?.usage || selectedKeyForDetails.usage)?.estimated_capacity_5h || 0).toLocaleString()}` : '待拟合校准' }}
+                </strong>
+                <span class="text-[10px] text-slate-400 block mt-0.5">
+                  预估剩余: {{ (keyTestResults[selectedKeyForDetails.id]?.usage || selectedKeyForDetails.usage)?.estimated_tokens_remaining_5h != null ? `~${((keyTestResults[selectedKeyForDetails.id]?.usage || selectedKeyForDetails.usage)?.estimated_tokens_remaining_5h || 0).toLocaleString()}` : '根据配额换算' }}
+                </span>
+              </div>
+            </div>
+          </div>
+
+          <!-- 自然周窗口 -->
+          <div class="p-3.5 rounded-lg bg-slate-50/80 border border-slate-100">
+            <div class="flex items-center justify-between font-semibold text-slate-800 mb-2">
+              <span class="flex items-center gap-1.5">
+                <Icons name="activity" size="14" class="text-sky-500" />
+                周度累计消耗 (Weekly Window)
+              </span>
+              <span class="text-slate-400 font-mono text-[11px]">
+                {{ (keyTestResults[selectedKeyForDetails.id]?.usage || selectedKeyForDetails.usage)?.window_weekly.requests || 0 }} 次请求
+              </span>
+            </div>
+
+            <div class="grid grid-cols-2 gap-3 mt-3">
+              <div class="bg-white p-2.5 rounded border border-slate-100">
+                <span class="text-slate-400 block text-[11px]">本周已消耗 Tokens</span>
+                <strong class="text-base font-mono text-slate-800 tabular-nums">
+                  {{ ((keyTestResults[selectedKeyForDetails.id]?.usage || selectedKeyForDetails.usage)?.window_weekly.total_tokens || 0).toLocaleString() }}
+                </strong>
+                <span class="text-[10px] text-slate-400 block mt-0.5">
+                  输入: {{ ((keyTestResults[selectedKeyForDetails.id]?.usage || selectedKeyForDetails.usage)?.window_weekly.prompt_tokens || 0).toLocaleString() }} · 输出: {{ ((keyTestResults[selectedKeyForDetails.id]?.usage || selectedKeyForDetails.usage)?.window_weekly.completion_tokens || 0).toLocaleString() }}
+                </span>
+              </div>
+              <div class="bg-white p-2.5 rounded border border-slate-100">
+                <span class="text-slate-400 block text-[11px]">长效续航防触顶</span>
+                <strong class="text-base font-mono text-slate-800 tabular-nums">
+                  {{ extractKeyQuota(selectedKeyForDetails, keyTestResults[selectedKeyForDetails.id]).gemini.weeklyFraction > 0 ? `${Math.round(extractKeyQuota(selectedKeyForDetails, keyTestResults[selectedKeyForDetails.id]).gemini.weeklyFraction * 100)}% 剩余` : '已耗尽/冷却中' }}
+                </strong>
+                <span class="text-[10px] text-slate-400 block mt-0.5 truncate">
+                  {{ extractKeyQuota(selectedKeyForDetails, keyTestResults[selectedKeyForDetails.id]).gemini.weeklyResetHint || '周期重置' }}
+                </span>
+              </div>
+            </div>
+          </div>
+
+          <div class="text-[11px] text-slate-400 bg-slate-50 p-2.5 rounded border border-slate-100">
+            💡 <strong>额度测算说明:</strong> 网关基于本地实时精准 Token 消耗计量与 Google Antigravity 官方配额跳变比例 (ΔTokens / ΔFraction) 进行动态回归拟合。当账号多次产生活跃调用后，将自适应校准物理容量并推断会员层级。
+          </div>
+        </div>
+
+        <!-- 底部 -->
+        <div class="px-5 py-3 border-t border-slate-100 bg-slate-50 flex justify-end">
+          <UiButton size="sm" variant="secondary" @click="selectedKeyForDetails = null">
+            关闭
+          </UiButton>
         </div>
       </div>
     </div>

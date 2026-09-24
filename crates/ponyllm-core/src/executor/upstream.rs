@@ -1040,6 +1040,12 @@ impl UpstreamExecutor {
 
     /// Execute a JSON request with transparent automatic failover before response body starts
     pub async fn execute_json_request(&self, url: &str, body: &Value) -> Result<Value> {
+        let (val, _key_id) = self.execute_json_request_with_key(url, body).await?;
+        Ok(val)
+    }
+
+    /// Execute a JSON request with transparent automatic failover and return (response_val, winning_key_id)
+    pub async fn execute_json_request_with_key(&self, url: &str, body: &Value) -> Result<(Value, String)> {
         let mut last_error = String::new();
         let mut last_kind = GatewayErrorKind::Internal;
         let mut attempted_keys = Vec::new();
@@ -1120,7 +1126,7 @@ impl UpstreamExecutor {
                         self.pool.record_success(&key.id);
                         self.emit_headers(&key.id, attempt_idx, attempt_start.elapsed());
                         let json_val = resp.json::<Value>().await?;
-                        return Ok(json_val);
+                        return Ok((json_val, key.id.clone()));
                     }
 
                     // Handle failover status codes
@@ -1217,6 +1223,13 @@ impl UpstreamExecutor {
     /// Execute a streaming request with failover before the first SSE chunk is yielded.
     /// Returns the response and the exact Instant when the winning attempt started.
     pub async fn execute_stream_request_with_timing(&self, url: &str, body: &Value) -> Result<(reqwest::Response, Instant)> {
+        let (resp, instant, _key_id) = self.execute_stream_request_with_timing_and_key(url, body).await?;
+        Ok((resp, instant))
+    }
+
+    /// Execute a streaming request with failover before the first SSE chunk is yielded.
+    /// Returns (response, attempt_start_instant, winning_key_id).
+    pub async fn execute_stream_request_with_timing_and_key(&self, url: &str, body: &Value) -> Result<(reqwest::Response, Instant, String)> {
         let mut last_error = String::new();
         let mut last_kind = GatewayErrorKind::Internal;
         let mut attempted_keys = Vec::new();
@@ -1296,7 +1309,7 @@ impl UpstreamExecutor {
                     if status.is_success() {
                         self.pool.record_success(&key.id);
                         self.emit_headers(&key.id, attempt_idx, attempt_start.elapsed());
-                        return Ok((resp, attempt_start));
+                        return Ok((resp, attempt_start, key.id.clone()));
                     }
 
                     let status_code = status.as_u16();

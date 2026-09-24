@@ -111,6 +111,14 @@ impl KeyPool {
         }
     }
 
+    /// Record token usage on a key
+    pub fn record_tokens(&self, key_id: &str, wall_ms: u64, prompt: u64, completion: u64, cached: u64) {
+        let keys = self.keys.read();
+        if let Some(entry) = keys.iter().find(|k| k.id == key_id) {
+            entry.record_tokens(wall_ms, prompt, completion, cached);
+        }
+    }
+
     /// Record an error on a key
     pub fn record_error(&self, key_id: &str, error: PoolErrorType) {
         let keys = self.keys.read();
