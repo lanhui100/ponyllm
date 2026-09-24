@@ -281,8 +281,9 @@ describe('AntigravityPoolCard Component', () => {
     const modal = document.querySelector('[data-testid="account-details-modal"]');
     expect(modal).not.toBeNull();
     expect(modal?.textContent).toContain('Pro 会员');
-    expect(modal?.textContent).toContain('100,000');
-    expect(modal?.textContent).toContain('500,000');
+    expect(modal?.textContent).toContain('100K');
+    expect(modal?.textContent).toContain('500K');
+    expect(modal?.textContent).toContain('缓存命中');
 
     app.unmount();
     document.body.removeChild(container);

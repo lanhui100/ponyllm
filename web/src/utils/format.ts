@@ -91,3 +91,21 @@ export function formatMsInt(v?: number | null): string {
   return `${Math.round(v)}`;
 }
 
+/**
+ * 友好 Token 格式化：
+ * < 1,000 直接显示整数
+ * 1,000 ~ 999,999 显示为 K（如 12.5K）
+ * >= 1,000,000 显示为 M（如 3.2M）
+ */
+export function formatTokenHuman(num?: number | null): string {
+  if (num === undefined || num === null || Number.isNaN(num) || num <= 0) return '0';
+  if (num < 1_000) return `${Math.round(num)}`;
+  if (num < 1_000_000) {
+    const k = num / 1_000;
+    return `${k >= 100 ? Math.round(k) : k.toFixed(1).replace(/\.0$/, '')}K`;
+  }
+  const m = num / 1_000_000;
+  return `${m >= 100 ? Math.round(m) : m.toFixed(2).replace(/\.?0+$/, '')}M`;
+}
+
+
