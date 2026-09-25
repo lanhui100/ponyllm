@@ -27,7 +27,11 @@ const props = withDefaults(
       | 'image'
       | 'video'
       | 'mic'
-      | 'external';
+      | 'external'
+      | 'arrow-down-left'
+      | 'arrow-up-right'
+      | 'database'
+      | 'repeat';
     size?: number | string;
     class?: any;
   }>(),
@@ -157,5 +161,22 @@ const pxSize = computed(() => (typeof props.size === 'number' ? `${props.size}px
     </g>
     <!-- external -->
     <path v-else-if="name === 'external'" d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6m4-3h6v6m-11 5L21 3" />
+    <!-- arrow-down-left (input/inbound) -->
+    <path v-else-if="name === 'arrow-down-left'" d="M17 7 7 17M17 17H7V7" />
+    <!-- arrow-up-right (output/outbound) -->
+    <path v-else-if="name === 'arrow-up-right'" d="M7 17 17 7M7 7h10v10" />
+    <!-- database (cache) -->
+    <g v-else-if="name === 'database'">
+      <ellipse cx="12" cy="5" rx="9" ry="3" />
+      <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5" />
+      <path d="M3 12c0 1.66 4 3 9 3s9-1.34 9-3" />
+    </g>
+    <!-- repeat (calls/requests) -->
+    <g v-else-if="name === 'repeat'">
+      <path d="m17 2 4 4-4 4" />
+      <path d="M3 11v-1a4 4 0 0 1 4-4h14" />
+      <path d="m7 22-4-4 4-4" />
+      <path d="M21 13v1a4 4 0 0 1-4 4H3" />
+    </g>
   </svg>
 </template>

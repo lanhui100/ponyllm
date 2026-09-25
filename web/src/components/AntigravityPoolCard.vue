@@ -583,7 +583,17 @@ const factualCycleSummary = computed(() => {
   let totalTokensWeekly = 0;
   let weeklyAccounts = 0;
   let totalWeeklyCapacityEstimated = 0;
+  let totalPromptWeekly = 0;
+  let totalCompWeekly = 0;
+  let totalCachedWeekly = 0;
+  let totalRequestsWeekly = 0;
+
   let totalTokensMonthly = 0;
+  let monthlyAccounts = 0;
+  let totalPromptMonthly = 0;
+  let totalCompMonthly = 0;
+  let totalCachedMonthly = 0;
+  let totalRequestsMonthly = 0;
 
   for (const k of props.keys) {
     const usage = props.keyTestResults[k.id]?.usage || k.usage;
@@ -635,14 +645,27 @@ const factualCycleSummary = computed(() => {
     if (usage.estimated_capacity_weekly && usage.estimated_capacity_weekly > 0) {
       totalWeeklyCapacityEstimated += usage.estimated_capacity_weekly;
       weeklyAccounts += 1;
+      totalPromptWeekly += usage.window_weekly?.prompt_tokens ?? 0;
+      totalCompWeekly += usage.window_weekly?.completion_tokens ?? 0;
+      totalCachedWeekly += usage.window_weekly?.cached_tokens ?? 0;
+      totalRequestsWeekly += usage.window_weekly?.requests ?? 0;
     } else if (usage.window_weekly && usage.window_weekly.total_tokens > 0) {
       totalTokensWeekly += usage.window_weekly.total_tokens;
       weeklyAccounts += 1;
+      totalPromptWeekly += usage.window_weekly.prompt_tokens;
+      totalCompWeekly += usage.window_weekly.completion_tokens;
+      totalCachedWeekly += usage.window_weekly.cached_tokens;
+      totalRequestsWeekly += usage.window_weekly.requests;
     }
 
     // 3. 月度客观消耗
     if (usage.window_monthly && usage.window_monthly.total_tokens > 0) {
       totalTokensMonthly += usage.window_monthly.total_tokens;
+      monthlyAccounts += 1;
+      totalPromptMonthly += usage.window_monthly.prompt_tokens;
+      totalCompMonthly += usage.window_monthly.completion_tokens;
+      totalCachedMonthly += usage.window_monthly.cached_tokens;
+      totalRequestsMonthly += usage.window_monthly.requests;
     }
   }
 
@@ -657,7 +680,16 @@ const factualCycleSummary = computed(() => {
   const avgWeekly = weeklyAccounts > 0
     ? Math.round((totalWeeklyCapacityEstimated > 0 ? totalWeeklyCapacityEstimated : totalTokensWeekly) / weeklyAccounts)
     : 0;
-  const avgMonthly = avgWeekly > 0 ? Math.round(avgWeekly * 4.33) : (weeklyAccounts > 0 ? Math.round(totalTokensMonthly / weeklyAccounts) : 0);
+  const avgPromptWeekly = weeklyAccounts > 0 ? Math.round(totalPromptWeekly / weeklyAccounts) : 0;
+  const avgCompWeekly = weeklyAccounts > 0 ? Math.round(totalCompWeekly / weeklyAccounts) : 0;
+  const avgCachedWeekly = weeklyAccounts > 0 ? Math.round(totalCachedWeekly / weeklyAccounts) : 0;
+  const avgRequestsWeekly = weeklyAccounts > 0 ? Math.round(totalRequestsWeekly / weeklyAccounts) : 0;
+
+  const avgMonthly = avgWeekly > 0 ? Math.round(avgWeekly * 4.33) : (monthlyAccounts > 0 ? Math.round(totalTokensMonthly / monthlyAccounts) : 0);
+  const avgPromptMonthly = monthlyAccounts > 0 ? Math.round(totalPromptMonthly / monthlyAccounts) : (avgPromptWeekly > 0 ? Math.round(avgPromptWeekly * 4.33) : 0);
+  const avgCompMonthly = monthlyAccounts > 0 ? Math.round(totalCompMonthly / monthlyAccounts) : (avgCompWeekly > 0 ? Math.round(avgCompWeekly * 4.33) : 0);
+  const avgCachedMonthly = monthlyAccounts > 0 ? Math.round(totalCachedMonthly / monthlyAccounts) : (avgCachedWeekly > 0 ? Math.round(avgCachedWeekly * 4.33) : 0);
+  const avgRequestsMonthly = monthlyAccounts > 0 ? Math.round(totalRequestsMonthly / monthlyAccounts) : (avgRequestsWeekly > 0 ? Math.round(avgRequestsWeekly * 4.33) : 0);
 
   return {
     avg5h,
@@ -668,7 +700,15 @@ const factualCycleSummary = computed(() => {
     avgCached5h,
     avgRequests5h,
     avgWeekly,
+    avgPromptWeekly,
+    avgCompWeekly,
+    avgCachedWeekly,
+    avgRequestsWeekly,
     avgMonthly,
+    avgPromptMonthly,
+    avgCompMonthly,
+    avgCachedMonthly,
+    avgRequestsMonthly,
     completedCyclesCount: count5h,
     isEstimatedWeekly: totalWeeklyCapacityEstimated > 0,
   };
@@ -929,12 +969,24 @@ function getProgressColor(percent: number): { bar: string; text: string; bg: str
                   </template>
                 </span>
               </div>
-              <!-- 四要素结构直接呈现：输入/输出/缓存/调用次数 -->
-              <div v-if="factualCycleSummary.avg5h > 0" class="mt-2 pt-1.5 border-t border-slate-100 flex flex-wrap items-center justify-between gap-1 text-[10px] text-slate-500 font-mono">
-                <span title="平均单账号 5h 输入 Token">入: <strong class="text-emerald-700 font-semibold">{{ formatTokenHuman(factualCycleSummary.avgPrompt5h) }}</strong></span>
-                <span title="平均单账号 5h 输出 Token (通常扣额权重高)">出: <strong class="text-amber-700 font-semibold">{{ formatTokenHuman(factualCycleSummary.avgComp5h) }}</strong></span>
-                <span title="平均单账号 5h 命中缓存 Token">缓: <strong class="text-sky-700 font-semibold">{{ formatTokenHuman(factualCycleSummary.avgCached5h) }}</strong></span>
-                <span title="平均单账号 5h 承载调用次数">调: <strong class="text-purple-700 font-semibold">{{ factualCycleSummary.avgRequests5h }}次</strong></span>
+              <!-- 四要素结构直接呈现：语义图标 (arrow-down-left / arrow-up-right / database / repeat) -->
+              <div v-if="factualCycleSummary.avg5h > 0" class="mt-2 pt-1.5 border-t border-slate-100 flex items-center justify-between text-[11px] text-slate-600 font-mono">
+                <div class="flex items-center gap-1" title="平均单账号 5h 输入 Prompt Token">
+                  <Icons name="arrow-down-left" size="12" class="text-emerald-600" />
+                  <span>{{ formatTokenHuman(factualCycleSummary.avgPrompt5h) }}</span>
+                </div>
+                <div class="flex items-center gap-1" title="平均单账号 5h 输出 Completion Token">
+                  <Icons name="arrow-up-right" size="12" class="text-amber-600" />
+                  <span>{{ formatTokenHuman(factualCycleSummary.avgComp5h) }}</span>
+                </div>
+                <div class="flex items-center gap-1" title="平均单账号 5h 缓存命中 Token">
+                  <Icons name="database" size="12" class="text-sky-600" />
+                  <span>{{ formatTokenHuman(factualCycleSummary.avgCached5h) }}</span>
+                </div>
+                <div class="flex items-center gap-1" title="平均单账号 5h 承载调用次数">
+                  <Icons name="repeat" size="12" class="text-purple-600" />
+                  <span>{{ factualCycleSummary.avgRequests5h }}次</span>
+                </div>
               </div>
             </div>
 
@@ -955,6 +1007,25 @@ function getProgressColor(percent: number): { bar: string; text: string; bg: str
                   {{ factualCycleSummary.avgWeekly > 0 ? (factualCycleSummary.isEstimatedWeekly ? '单账号理论周配额' : '单账号实际周消耗') : '等待周结算' }}
                 </span>
               </div>
+              <!-- 周度四要素结构直接呈现 -->
+              <div v-if="factualCycleSummary.avgWeekly > 0" class="mt-2 pt-1.5 border-t border-slate-100 flex items-center justify-between text-[11px] text-slate-600 font-mono">
+                <div class="flex items-center gap-1" title="单账号周度输入 Token">
+                  <Icons name="arrow-down-left" size="12" class="text-emerald-600" />
+                  <span>{{ formatTokenHuman(factualCycleSummary.avgPromptWeekly) }}</span>
+                </div>
+                <div class="flex items-center gap-1" title="单账号周度输出 Token">
+                  <Icons name="arrow-up-right" size="12" class="text-amber-600" />
+                  <span>{{ formatTokenHuman(factualCycleSummary.avgCompWeekly) }}</span>
+                </div>
+                <div class="flex items-center gap-1" title="单账号周度缓存命中 Token">
+                  <Icons name="database" size="12" class="text-sky-600" />
+                  <span>{{ formatTokenHuman(factualCycleSummary.avgCachedWeekly) }}</span>
+                </div>
+                <div class="flex items-center gap-1" title="单账号周度累计调用次数">
+                  <Icons name="repeat" size="12" class="text-purple-600" />
+                  <span>{{ factualCycleSummary.avgRequestsWeekly }}次</span>
+                </div>
+              </div>
             </div>
 
             <!-- 月度单账号客观额度 -->
@@ -970,6 +1041,25 @@ function getProgressColor(percent: number): { bar: string; text: string; bg: str
                 <span class="text-[11px] text-slate-400 font-mono">
                   {{ factualCycleSummary.avgMonthly > 0 ? '单账号月度承载上限' : '等待月统计' }}
                 </span>
+              </div>
+              <!-- 月度四要素结构直接呈现 -->
+              <div v-if="factualCycleSummary.avgMonthly > 0" class="mt-2 pt-1.5 border-t border-slate-100 flex items-center justify-between text-[11px] text-slate-600 font-mono">
+                <div class="flex items-center gap-1" title="单账号月度输入 Token">
+                  <Icons name="arrow-down-left" size="12" class="text-emerald-600" />
+                  <span>{{ formatTokenHuman(factualCycleSummary.avgPromptMonthly) }}</span>
+                </div>
+                <div class="flex items-center gap-1" title="单账号月度输出 Token">
+                  <Icons name="arrow-up-right" size="12" class="text-amber-600" />
+                  <span>{{ formatTokenHuman(factualCycleSummary.avgCompMonthly) }}</span>
+                </div>
+                <div class="flex items-center gap-1" title="单账号月度缓存命中 Token">
+                  <Icons name="database" size="12" class="text-sky-600" />
+                  <span>{{ formatTokenHuman(factualCycleSummary.avgCachedMonthly) }}</span>
+                </div>
+                <div class="flex items-center gap-1" title="单账号月度累计调用次数">
+                  <Icons name="repeat" size="12" class="text-purple-600" />
+                  <span>{{ factualCycleSummary.avgRequestsMonthly }}次</span>
+                </div>
               </div>
             </div>
           </div>
