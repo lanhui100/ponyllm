@@ -131,12 +131,16 @@ function isKeyCoolingDown(k: KeyView): boolean {
   return q.gemini.weeklyFraction <= 0;
 }
 
+const disabledKeys = computed(() => {
+  return props.keys.filter((k) => k.state === 'disabled');
+});
+
 const coolingKeys = computed(() => {
-  return props.keys.filter((k) => isKeyCoolingDown(k));
+  return props.keys.filter((k) => k.state !== 'disabled' && isKeyCoolingDown(k));
 });
 
 const activeKeys = computed(() => {
-  return props.keys.filter((k) => !isKeyCoolingDown(k));
+  return props.keys.filter((k) => k.state !== 'disabled' && !isKeyCoolingDown(k));
 });
 
 // 统计 Pro 账号与普通账号数量及容量画像
@@ -402,6 +406,17 @@ const slotMatrix = computed<HeatSlotItem[]>(() => {
         ? ` (缓存命中 ${formatTokenHuman(usage.window_5h.cached_tokens)})`
         : '';
       usageSummary = `\n5小时已用: ${h5Tokens} (${usage.window_5h.requests}次)${capTokens}${cacheRatio}\n本周累计: ${wTokens} (${usage.window_weekly.requests}次)`;
+    }
+
+    if (k.state === 'disabled') {
+      const reasonHint = k.disabled_reason ? `\n原因: ${k.disabled_reason}` : '';
+      return {
+        key: k,
+        level: 'disabled' as any,
+        heatClass: 'bg-rose-400/80',
+        tooltipText: `账号: ${email}${tierBadge}\n状态: 已禁用 (不分配流量)${reasonHint}${usageSummary}`,
+        isCooling: false,
+      };
     }
 
     if (isCooling) {

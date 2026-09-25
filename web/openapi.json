@@ -1736,6 +1736,13 @@
             ],
             "description": "Wall-clock instant the key is expected to recover, RFC 3339 UTC. Lets\nthe Web badge show the upstream-advertised quota reset verbatim."
           },
+          "disabled_reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Reason why the key was permanently disabled, if state is `disabled`."
+          },
           "id": {
             "type": "string"
           },
@@ -2086,6 +2093,13 @@
               "null"
             ],
             "description": "Wall-clock instant the key is expected to recover, RFC 3339 UTC."
+          },
+          "disabled_reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Reason why the key was permanently disabled, if state is `disabled`."
           },
           "key_id": {
             "type": "string"

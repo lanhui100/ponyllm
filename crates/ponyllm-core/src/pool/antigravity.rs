@@ -381,9 +381,21 @@ impl AntigravityTokenManager {
             // recover. Everything else (network blips, 5xx, rate limits)
             // is transient and must not isolate the key.
             if body_text.to_ascii_lowercase().contains("invalid_grant") {
+                let sanitized_desc = if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&body_text) {
+                    let err = parsed.get("error").and_then(|v| v.as_str()).unwrap_or("invalid_grant");
+                    let desc = parsed.get("error_description").and_then(|v| v.as_str()).unwrap_or("");
+                    if desc.is_empty() {
+                        format!("OAuth refresh rejected ({}): {}", status, err)
+                    } else {
+                        format!("OAuth refresh rejected ({}): {} - {}", status, err, desc)
+                    }
+                } else {
+                    let clean: String = body_text.chars().filter(|c| !c.is_control()).take(120).collect();
+                    format!("OAuth refresh rejected ({}): {}", status, clean)
+                };
                 return Err(CoreError::AuthInvalid {
                     key_id: self.key_id.clone(),
-                    reason: format!("OAuth refresh rejected ({}): {}", status, body_text),
+                    reason: sanitized_desc,
                 });
             }
             return Err(CoreError::UpstreamStatusError {

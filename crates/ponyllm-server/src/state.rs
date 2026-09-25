@@ -776,7 +776,7 @@ impl AppState {
                         "Antigravity key permanently rejected (invalid_grant) during keepalive cycle"
                     );
                     if let Some(pool) = self.pools.read().get(&provider) {
-                        pool.record_error(&key_id, ponyllm_core::pool::PoolErrorType::AuthInvalid);
+                        pool.record_error(&key_id, ponyllm_core::pool::PoolErrorType::AuthInvalid { reason: Some(reason.clone()) });
                     }
                     continue;
                 }

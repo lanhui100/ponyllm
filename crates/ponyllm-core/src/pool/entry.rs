@@ -42,7 +42,7 @@ pub enum PoolErrorType {
     /// on its own. `retry_after` defaults to a conservative 15 minutes when
     /// the upstream gave no explicit signal.
     QuotaExhausted { retry_after: Option<Duration> },
-    AuthInvalid,
+    AuthInvalid { reason: Option<String> },
     PolicyViolation,
     ServerError,
     NetworkError,
@@ -227,6 +227,13 @@ impl ApiKeyEntry {
         self.stats.consecutive_failures.store(0, Ordering::SeqCst);
     }
 
+    /// Clear disabled state, restoring key to active unless cooling down.
+    pub fn clear_disabled(&self) {
+        *self.stats.disabled_reason.write() = None;
+        self.stats.policy_violations.store(0, Ordering::SeqCst);
+        self.stats.consecutive_failures.store(0, Ordering::SeqCst);
+    }
+
     /// Remaining cooldown, if still cooling.
     pub fn cooldown_remaining(&self) -> Option<Duration> {
         let guard = self.stats.cooldown_until.read();
@@ -246,6 +253,11 @@ impl ApiKeyEntry {
             return None;
         }
         *self.stats.cooldown_reset_at.read()
+    }
+
+    /// Concrete reason why the key is disabled, if permanently isolated.
+    pub fn disabled_reason(&self) -> Option<String> {
+        self.stats.disabled_reason.read().clone()
     }
 
     /// Apply a cooldown, keeping the monotonic deadline and its wall-clock
@@ -323,8 +335,9 @@ impl ApiKeyEntry {
                 let duration = retry_after.unwrap_or(Duration::from_secs(15 * 60));
                 self.set_cooldown(duration);
             }
-            PoolErrorType::AuthInvalid => {
-                *self.stats.disabled_reason.write() = Some("Authentication failed (invalid key)".to_string());
+            PoolErrorType::AuthInvalid { reason } => {
+                let msg = reason.unwrap_or_else(|| "Authentication failed (invalid key)".to_string());
+                *self.stats.disabled_reason.write() = Some(msg);
             }
             PoolErrorType::PolicyViolation => {
                 *self.stats.disabled_reason.write() = Some("Account policy violation / Terms of Service suspension (permanent isolate)".to_string());

@@ -544,14 +544,14 @@ describe('ProviderCard UI and Phase 2 Requirements', () => {
 // lost on the next render otherwise (chat+responses could never stay selected).
 // ---------------------------------------------------------------------------
 describe('ProviderCard protocol multi-select persistence', () => {
-  function mountCard(provider: any) {
+  function mountCard(provider: any, keys: KeyView[] = []) {
     const container = document.createElement('div');
     document.body.appendChild(container);
     let updatedPayload: any = null;
     const app = createApp(ProviderCard, {
       provider,
       models: [],
-      keys: [],
+      keys,
       adminWriteEnabled: true,
       keyTestResults: {},
       testingKeyIds: new Set<string>(),
@@ -615,6 +615,30 @@ describe('ProviderCard protocol multi-select persistence', () => {
     const responses = container.querySelector('[data-testid="protocol-pill-responses"]') as HTMLElement;
     expect(chat.className).toContain('bg-slate-900');
     expect(responses.className).toContain('bg-slate-900');
+    app.unmount();
+    document.body.removeChild(container);
+  });
+
+  it('renders disabled badge and info icon for disabled keys', async () => {
+    const disabledKey: KeyView = {
+      id: 'key-disabled-1',
+      provider: 'test-provider',
+      masked_key: 'sk-proj-****',
+      priority: 1,
+      weight: 10,
+      state: 'disabled',
+      disabled_reason: 'OAuth refresh rejected (400 Bad Request): {"error": "invalid_grant"}',
+    };
+    const { app, container } = mountCard({ ...baseProvider }, [disabledKey]);
+    await nextTick();
+
+    const stateBadge = container.querySelector('[data-testid="key-state-badge-key-disabled-1"]');
+    expect(stateBadge).not.toBeNull();
+    expect(stateBadge?.textContent).toContain('已禁用');
+
+    const infoIcon = container.querySelector('[data-testid="key-disabled-info-key-disabled-1"]');
+    expect(infoIcon).not.toBeNull();
+
     app.unmount();
     document.body.removeChild(container);
   });

@@ -184,6 +184,9 @@ pub struct KeyView {
     /// the Web badge show the upstream-advertised quota reset verbatim.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cooldown_reset_at: Option<String>,
+    /// Reason why the key was permanently disabled, if state is `disabled`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disabled_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub usage: Option<ponyllm_core::pool::usage::KeyCapacityEstimate>,
 }
@@ -503,6 +506,9 @@ pub struct QuotaKeyView {
     /// Wall-clock instant the key is expected to recover, RFC 3339 UTC.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cooldown_reset_at: Option<String>,
+    /// Reason why the key was permanently disabled, if state is `disabled`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disabled_reason: Option<String>,
     /// Quota signal lineage (v2 §4, frozen wording): `buckets` (antigravity
     /// refresh hit) / `probe_only` (in-memory state+cooldown) / `unknown`.
     pub source: String,
@@ -594,6 +600,11 @@ async fn handle_admin_quota_inner(q: QuotaQuery, state: Arc<AppState>) -> Vec<Qu
                 ponyllm_core::pool::KeyState::CoolingDown => Some(false),
                 ponyllm_core::pool::KeyState::Disabled => Some(false),
             };
+            let disabled_reason = if key_state == ponyllm_core::pool::KeyState::Disabled {
+                pool.key_disabled_reason(&id)
+            } else {
+                None
+            };
             let mut view = QuotaKeyView {
                 provider: provider.clone(),
                 key_id: id.clone(),
@@ -601,6 +612,7 @@ async fn handle_admin_quota_inner(q: QuotaQuery, state: Arc<AppState>) -> Vec<Qu
                 cooldown_remaining_secs: cooldown_remaining.map(|d| d.as_secs()),
                 cooldown_reset_at: cooldown_reset_at
                     .map(|t| chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339()),
+                disabled_reason,
                 source: "probe_only".to_string(),
                 schedulable,
                 quota: None,
@@ -2208,6 +2220,11 @@ pub async fn handle_admin_keys(State(state): State<Arc<AppState>>) -> impl IntoR
                         .as_millis() as u64;
                     k.usage_tracker.estimate_capacity(now_ms, None)
                 });
+            let disabled_reason = if key_state == ponyllm_core::pool::KeyState::Disabled {
+                pool.key_disabled_reason(&id)
+            } else {
+                None
+            };
             views.push(KeyView {
                 provider: provider.clone(),
                 id,
@@ -2218,6 +2235,7 @@ pub async fn handle_admin_keys(State(state): State<Arc<AppState>>) -> impl IntoR
                 cooldown_remaining_secs: cooldown_remaining.map(|d| d.as_secs()),
                 cooldown_reset_at: cooldown_reset_at
                     .map(|t| chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339()),
+                disabled_reason,
                 usage,
             });
         }
@@ -2399,7 +2417,8 @@ pub async fn handle_admin_update_key(
         Err(resp) => return resp,
     };
 
-    // Hot-rebuild KeyPool with updated keys
+    // Hot-rebuild KeyPool with updated keys, inheriting runtime state (disabled_reason, cooldown)
+    let old_pool_opt = state.pools.read().get(&target_provider_name).cloned();
     let new_pool = Arc::new(KeyPool::new(&target_provider_name, strat));
     if let Some(p_sec) = file.providers.get(&target_provider_name) {
         for k in &all_keys {
@@ -2410,6 +2429,21 @@ pub async fn handle_admin_update_key(
             new_pool.add_key(ApiKeyEntry::new(&k.id, &k.api_key, k.priority, k.weight));
         }
     }
+
+    if let Some(old_pool) = old_pool_opt {
+        for old_entry in old_pool.snapshot_keys() {
+            if let Some(new_entry) = new_pool.snapshot_keys().into_iter().find(|k| k.id == old_entry.id) {
+                if let Some(reason) = old_entry.disabled_reason() {
+                    *new_entry.stats.disabled_reason.write() = Some(reason);
+                }
+                if let (Some(remaining), Some(reset_at)) = (old_entry.cooldown_remaining(), old_entry.cooldown_reset_at()) {
+                    new_entry.set_cooldown(remaining);
+                    *new_entry.stats.cooldown_reset_at.write() = Some(reset_at);
+                }
+            }
+        }
+    }
+
     state
         .pools
         .write()
@@ -2419,6 +2453,12 @@ pub async fn handle_admin_update_key(
 
     let status = new_pool.get_key_status(&id).unwrap_or(ponyllm_core::pool::KeyState::Active);
     let (cooldown_remaining, cooldown_reset_at) = new_pool.key_cooldown(&id);
+
+    let disabled_reason = if status == ponyllm_core::pool::KeyState::Disabled {
+        new_pool.key_disabled_reason(&id)
+    } else {
+        None
+    };
 
     let view = KeyView {
         id: updated_key_sec.id,
@@ -2434,6 +2474,7 @@ pub async fn handle_admin_update_key(
         cooldown_remaining_secs: cooldown_remaining.map(|d| d.as_secs()),
         cooldown_reset_at: cooldown_reset_at
             .map(|t| chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339()),
+        disabled_reason,
         usage: None,
     };
 
@@ -2745,6 +2786,10 @@ pub async fn handle_admin_test_key(
                                 pool.set_key_cooldown(&key_sec.id, exhausted_dur);
                             } else if has_positive_quota {
                                 pool.clear_key_cooldown(&key_sec.id);
+                                let cleared = pool.clear_key_disabled(&key_sec.id);
+                                if cleared {
+                                    tracing::info!(provider = %p_name, key_id = %key_sec.id, "Antigravity probe succeeded with quota; key restored to active");
+                                }
                             }
                         }
 

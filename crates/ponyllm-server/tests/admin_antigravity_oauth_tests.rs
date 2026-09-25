@@ -467,10 +467,16 @@ async fn test_antigravity_keepalive_invalid_grant_circuit_breaker() {
     harness.state.register_pool("antigravity", pool.clone());
 
     // Trigger key error with AuthInvalid
-    pool.record_error("ag-burned-key", ponyllm_core::pool::PoolErrorType::AuthInvalid);
+    pool.record_error("ag-burned-key", ponyllm_core::pool::PoolErrorType::AuthInvalid {
+        reason: Some("OAuth refresh rejected (400 Bad Request): invalid_grant - Token has been expired or revoked.".to_string()),
+    });
     assert_eq!(
         pool.get_key_status("ag-burned-key"),
         Some(ponyllm_core::pool::KeyState::Disabled)
+    );
+    assert_eq!(
+        pool.key_disabled_reason("ag-burned-key"),
+        Some("OAuth refresh rejected (400 Bad Request): invalid_grant - Token has been expired or revoked.".to_string())
     );
 }
 

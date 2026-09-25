@@ -154,7 +154,7 @@ impl KeyPool {
         // HOWEVER, a key that triggers PolicyViolation for a second time (violations >= 2)
         // is confirmed dead and must be permanently disabled to avoid infinite oscillation loops.
         let permanent = is_policy_violation
-            || (matches!(error, PoolErrorType::AuthInvalid) && entry.is_antigravity());
+            || (matches!(error, PoolErrorType::AuthInvalid { .. }) && entry.is_antigravity());
 
         if permanent && violations < 2 && self.would_break_floor_locked(&keys, key_id) {
             tracing::warn!(
@@ -208,6 +208,12 @@ impl KeyPool {
         }
     }
 
+    /// Retrieve the disabled reason for a key, if present.
+    pub fn key_disabled_reason(&self, key_id: &str) -> Option<String> {
+        let keys = self.keys.read();
+        keys.iter().find(|k| k.id == key_id).and_then(|k| k.disabled_reason())
+    }
+
     /// Total keys in pool
     pub fn total_key_count(&self) -> usize {
         self.keys.read().len()
@@ -229,6 +235,17 @@ impl KeyPool {
         let keys = self.keys.read();
         if let Some(k) = keys.iter().find(|k| k.id == key_id) {
             k.set_cooldown(duration);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Clear disabled state for a specific key, restoring it to active.
+    pub fn clear_key_disabled(&self, key_id: &str) -> bool {
+        let keys = self.keys.read();
+        if let Some(k) = keys.iter().find(|k| k.id == key_id) {
+            k.clear_disabled();
             true
         } else {
             false

@@ -251,10 +251,15 @@ fn test_breaker_allows_isolate_above_floor() {
 
     pool.record_error("k1", PoolErrorType::PolicyViolation);
     assert_eq!(pool.get_key_status("k1"), Some(KeyState::Disabled));
+    assert_eq!(
+        pool.key_disabled_reason("k1"),
+        Some("Account policy violation / Terms of Service suspension (permanent isolate)".to_string())
+    );
 
     // Isolating a second key would leave 1/3 alive: breaker trips.
     pool.record_error("k2", PoolErrorType::PolicyViolation);
     assert_eq!(pool.get_key_status("k2"), Some(KeyState::CoolingDown));
+    assert_eq!(pool.key_disabled_reason("k2"), None);
 }
 
 #[test]

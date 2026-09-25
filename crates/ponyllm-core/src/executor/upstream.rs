@@ -909,7 +909,7 @@ impl UpstreamExecutor {
             Err(CoreError::AuthInvalid { reason, .. }) => {
                 // refresh_token burned (invalid_grant): permanent isolate,
                 // still guarded by the pool mass-disable breaker.
-                self.pool.record_error(&key.id, PoolErrorType::AuthInvalid);
+                self.pool.record_error(&key.id, PoolErrorType::AuthInvalid { reason: Some(reason.clone()) });
                 tracing::warn!(key_id = %key.id, reason = %reason, "Antigravity refresh_token dead (invalid_grant)");
                 StaleTokenRecovery::Recorded(GatewayErrorKind::AuthInvalid)
             }
@@ -1090,9 +1090,9 @@ impl UpstreamExecutor {
                     // faults only cool (P0-3). Static keys keep the legacy
                     // fail-closed behavior.
                     let pool_err = match &e {
-                        CoreError::AuthInvalid { .. } => PoolErrorType::AuthInvalid,
+                        CoreError::AuthInvalid { reason, .. } => PoolErrorType::AuthInvalid { reason: Some(reason.clone()) },
                         _ if key.is_antigravity() => PoolErrorType::NetworkError,
-                        _ => PoolErrorType::AuthInvalid,
+                        _ => PoolErrorType::AuthInvalid { reason: None },
                     };
                     self.pool.record_error(&key.id, pool_err);
                     last_error = e.to_string();
@@ -1173,7 +1173,7 @@ impl UpstreamExecutor {
                             }
                             StaleTokenRecovery::Passthrough => {
                                 last_kind = GatewayErrorKind::AuthInvalid;
-                                self.pool.record_error(&key.id, PoolErrorType::AuthInvalid);
+                                self.pool.record_error(&key.id, PoolErrorType::AuthInvalid { reason: None });
                             }
                         }
                     } else if status_code == 403 {
@@ -1274,9 +1274,9 @@ impl UpstreamExecutor {
                     // faults only cool (P0-3). Static keys keep the legacy
                     // fail-closed behavior.
                     let pool_err = match &e {
-                        CoreError::AuthInvalid { .. } => PoolErrorType::AuthInvalid,
+                        CoreError::AuthInvalid { reason, .. } => PoolErrorType::AuthInvalid { reason: Some(reason.clone()) },
                         _ if key.is_antigravity() => PoolErrorType::NetworkError,
-                        _ => PoolErrorType::AuthInvalid,
+                        _ => PoolErrorType::AuthInvalid { reason: None },
                     };
                     self.pool.record_error(&key.id, pool_err);
                     last_error = e.to_string();
@@ -1355,7 +1355,7 @@ impl UpstreamExecutor {
                             }
                             StaleTokenRecovery::Passthrough => {
                                 last_kind = GatewayErrorKind::AuthInvalid;
-                                self.pool.record_error(&key.id, PoolErrorType::AuthInvalid);
+                                self.pool.record_error(&key.id, PoolErrorType::AuthInvalid { reason: None });
                             }
                         }
                     } else if status_code == 403 {
@@ -1453,7 +1453,7 @@ mod session_header_tests {
         ] {
             let (kind, pool_err) = classify_forbidden(body, None);
             assert!(
-                !matches!(pool_err, PoolErrorType::PolicyViolation | PoolErrorType::AuthInvalid),
+                !matches!(pool_err, PoolErrorType::PolicyViolation | PoolErrorType::AuthInvalid { .. }),
                 "body: {}",
                 body
             );

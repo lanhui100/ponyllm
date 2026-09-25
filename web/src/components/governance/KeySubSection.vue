@@ -207,6 +207,27 @@ function cooldownResetTooltip(k: KeyView): string {
   return '配额已耗尽，冷却保护中';
 }
 
+function disabledReasonTooltip(k: KeyView): string {
+  const reason = k.disabled_reason?.trim();
+  const noun = isAntigravity.value ? '账号' : '密钥';
+  if (!reason) {
+    return `该${noun}已被网关永久禁用。可能原因：OAuth 凭据失效（invalid_grant）、账号密码重置、授权被撤销或账号触犯上游服务条款（PolicyViolation）。`;
+  }
+  const lower = reason.toLowerCase();
+  let explanation = '';
+  if (lower.includes('invalid_grant')) {
+    explanation = '上游判定 OAuth 授权失效 (invalid_grant)。可能是 Google 授权被撤销、密码被修改、Refresh Token 过期或账号已被上游风控冻结。';
+  } else if (lower.includes('terms of service') || lower.includes('policy') || lower.includes('suspended')) {
+    explanation = `上游判定${noun}违规或停用 (PolicyViolation)。触犯了服务条款或已被上游封禁。`;
+  } else if (/\b(auth|unauthorized|401)\b/i.test(lower) || lower.includes('invalid key') || lower.includes('invalid_api_key')) {
+    explanation = `身份鉴权失败，该${noun}无效或已失效。`;
+  } else {
+    explanation = `该${noun}已被永久禁用，不再分配流量。`;
+  }
+  const cleanReason = reason.length > 300 ? `${reason.slice(0, 297)}...` : reason;
+  return `${explanation}\n\n具体原因: ${cleanReason}`;
+}
+
 function extractCompactQuotas(keyResult?: KeyTestView, isCoolingDown?: boolean): { gemini: CompactModelQuota } {
   const res: { gemini: CompactModelQuota } = {
     gemini: {},
@@ -617,9 +638,33 @@ async function handleRefreshAllQuotas() {
                 </div>
 
                 <!-- 仅在非 active 状态（如 cooling_down / disabled）下显示状态徽标，正常可用时不显示“就绪” -->
+                <div v-if="k.state === 'disabled'" class="inline-flex items-center gap-1">
+                  <UiBadge
+                    variant="destructive"
+                    :data-testid="`key-state-badge-${k.id}`"
+                  >
+                    {{ formatKeyState(k.state) }}
+                  </UiBadge>
+                  <!-- 禁用徽标后提供信息图标与合理换行的 Tooltip 展示具体禁用原因 -->
+                  <UiTooltip
+                    :content="disabledReasonTooltip(k)"
+                    wrap
+                  >
+                    <button
+                      type="button"
+                      class="inline-flex items-center justify-center text-rose-500 hover:text-rose-700 cursor-help transition-colors focus:outline-hidden focus:ring-1 focus:ring-rose-500 rounded-xs"
+                      :data-testid="`key-disabled-info-${k.id}`"
+                      aria-label="查看禁用原因"
+                    >
+                      <Icons name="info" :size="13" class="stroke-[2.2]" />
+                    </button>
+                  </UiTooltip>
+                </div>
+
                 <UiBadge
-                  v-if="k.state !== 'active'"
-                  :variant="k.state === 'cooling_down' ? 'warning' : 'destructive'"
+                  v-else-if="k.state === 'cooling_down'"
+                  variant="warning"
+                  :data-testid="`key-state-badge-${k.id}`"
                 >
                   {{ formatKeyState(k.state) }}
                 </UiBadge>

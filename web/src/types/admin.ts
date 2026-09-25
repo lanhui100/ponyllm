@@ -85,6 +85,8 @@ export interface KeyView {
   cooldown_remaining_secs?: number | null;
   /** RFC 3339 UTC instant the key is expected to recover after a cooldown. */
   cooldown_reset_at?: string | null;
+  /** Reason why the key was permanently disabled, if state is `disabled`. */
+  disabled_reason?: string | null;
   usage?: KeyCapacityEstimate | null;
 }
 
