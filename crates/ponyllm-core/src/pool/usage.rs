@@ -35,7 +35,15 @@ pub struct WindowUsage {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct CycleStats {
     pub count: u64,
+    #[serde(default)]
+    pub prompt_tokens: u64,
+    #[serde(default)]
+    pub completion_tokens: u64,
+    #[serde(default)]
+    pub cached_tokens: u64,
     pub total_tokens: u64,
+    #[serde(default)]
+    pub requests: u64,
     pub avg_tokens: u64,
 }
 
@@ -57,10 +65,30 @@ pub struct KeyCapacityEstimate {
     /// Estimated remaining tokens in 5h window based on current remaining fraction
     #[serde(skip_serializing_if = "Option::is_none")]
     pub estimated_tokens_remaining_5h: Option<u64>,
+    /// Inferred weekly total capacity in tokens (via weekly quota bucket fraction)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub estimated_capacity_weekly: Option<u64>,
     /// Inferred account tier: "pro", "standard", "free", "calibrating", or "unknown"
     pub account_tier: String,
     /// Fitting confidence (0.0 ~ 1.0)
     pub confidence: f64,
+    /// Calibration status: "benchmarked" (completed reset cycle), "estimated" (inferred slope), or "calibrating"
+    #[serde(default = "default_calibration_status")]
+    pub calibration_status: String,
+}
+
+fn default_calibration_status() -> String {
+    "calibrating".to_string()
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CompletedCycleRecord {
+    pub cycle_end_ms: u64,
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub cached_tokens: u64,
+    pub total_tokens: u64,
+    pub requests: u64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -68,6 +96,8 @@ pub struct KeyUsageStateSnapshot {
     pub slices: Vec<UsageSlice>,
     pub cached_capacity: Option<u64>,
     pub last_probe: Option<(u64, f64, u64)>, // (timestamp_ms, fraction, lifetime_tokens)
+    #[serde(default)]
+    pub completed_5h_records: Vec<CompletedCycleRecord>,
     #[serde(default)]
     pub completed_5h: Vec<(u64, u64, u64)>,
     #[serde(default)]
@@ -77,14 +107,22 @@ pub struct KeyUsageStateSnapshot {
 #[derive(Debug, Default)]
 pub struct KeyUsageTracker {
     slices: RwLock<BTreeMap<u64, UsageSlice>>,
-/// Monotonically increasing lifetime total tokens to prevent rolling-window underflow
+    /// Monotonically increasing lifetime total tokens to prevent rolling-window underflow
     lifetime_tokens: AtomicU64,
-    /// Completed 5h cycles history: (cycle_end_ms, tokens, requests)
-    completed_5h_cycles: RwLock<Vec<(u64, u64, u64)>>,
+    /// Monotonically increasing lifetime prompt tokens
+    lifetime_prompt: AtomicU64,
+    /// Monotonically increasing lifetime completion tokens
+    lifetime_completion: AtomicU64,
+    /// Monotonically increasing lifetime cached tokens
+    lifetime_cached: AtomicU64,
+    /// Monotonically increasing lifetime requests
+    lifetime_requests: AtomicU64,
+    /// Completed 5h cycles history with full 4-factor breakdown
+    completed_5h_cycles: RwLock<Vec<CompletedCycleRecord>>,
     /// Completed weekly cycles history: (cycle_end_ms, tokens, requests)
     completed_weekly_cycles: RwLock<Vec<(u64, u64, u64)>>,
-    /// Last observed remaining fraction from quota refresh: (timestamp_ms, remaining_fraction, lifetime_tokens_at_probe)
-    last_probe_snapshot: RwLock<Option<(u64, f64, u64)>>,
+    /// Last observed remaining fraction from quota refresh: (timestamp_ms, remaining_fraction, lifetime_tokens_at_probe, prompt, comp, cached, reqs)
+    last_probe_snapshot: RwLock<Option<(u64, f64, u64, u64, u64, u64, u64)>>,
     cached_capacity: RwLock<Option<u64>>,
 }
 
@@ -96,6 +134,10 @@ impl KeyUsageTracker {
     pub fn record_tokens(&self, wall_ms: u64, prompt: u64, completion: u64, cached: u64) {
         let total = prompt.saturating_add(completion);
         self.lifetime_tokens.fetch_add(total, Ordering::Relaxed);
+        self.lifetime_prompt.fetch_add(prompt, Ordering::Relaxed);
+        self.lifetime_completion.fetch_add(completion, Ordering::Relaxed);
+        self.lifetime_cached.fetch_add(cached, Ordering::Relaxed);
+        self.lifetime_requests.fetch_add(1, Ordering::Relaxed);
 
         let slice_key = (wall_ms / SLICE_INTERVAL_MS) * SLICE_INTERVAL_MS;
         let mut slices = self.slices.write();
@@ -176,23 +218,43 @@ impl KeyUsageTracker {
     /// Observe upstream probe fraction with reset detection, monotonic token deltas, and sanity bounds
     pub fn observe_upstream_probe(&self, now_ms: u64, remaining_fraction: f64) {
         let current_lifetime = self.lifetime_tokens.load(Ordering::Relaxed);
+        let current_prompt = self.lifetime_prompt.load(Ordering::Relaxed);
+        let current_comp = self.lifetime_completion.load(Ordering::Relaxed);
+        let current_cached = self.lifetime_cached.load(Ordering::Relaxed);
+        let current_reqs = self.lifetime_requests.load(Ordering::Relaxed);
+
         let mut probe = self.last_probe_snapshot.write();
 
-        if let Some((prev_time, prev_frac, prev_lifetime)) = *probe {
+        if let Some((prev_time, prev_frac, prev_lifetime, prev_prompt, prev_comp, prev_cached, prev_reqs)) = *probe {
             // Check for upstream quota reset (fraction jumped upwards by > 5%)
             if remaining_fraction > prev_frac + 0.05 {
                 // An actual completed cycle occurred before this reset!
-                let cycle_tokens = current_lifetime.saturating_sub(prev_lifetime);
-                if cycle_tokens > 0 {
-                    let mut completed_5h = self.completed_5h_cycles.write();
-                    completed_5h.push((now_ms, cycle_tokens, 1));
-                    if completed_5h.len() > 100 {
-                        completed_5h.remove(0);
+                // Guard: only record cycle if previous baseline was initialized (prev_lifetime > 0)
+                if prev_lifetime > 0 {
+                    let cycle_tokens = current_lifetime.saturating_sub(prev_lifetime);
+                    let cycle_prompt = current_prompt.saturating_sub(prev_prompt);
+                    let cycle_comp = current_comp.saturating_sub(prev_comp);
+                    let cycle_cached = current_cached.saturating_sub(prev_cached);
+                    let cycle_reqs = current_reqs.saturating_sub(prev_reqs);
+
+                    if cycle_tokens > 0 {
+                        let mut completed_5h = self.completed_5h_cycles.write();
+                        completed_5h.push(CompletedCycleRecord {
+                            cycle_end_ms: now_ms,
+                            prompt_tokens: cycle_prompt,
+                            completion_tokens: cycle_comp,
+                            cached_tokens: cycle_cached,
+                            total_tokens: cycle_tokens,
+                            requests: cycle_reqs.max(1),
+                        });
+                        if completed_5h.len() > 100 {
+                            completed_5h.remove(0);
+                        }
                     }
                 }
 
                 // Upstream window reset occurred: reset baseline without fitting
-                *probe = Some((now_ms, remaining_fraction, current_lifetime));
+                *probe = Some((now_ms, remaining_fraction, current_lifetime, current_prompt, current_comp, current_cached, current_reqs));
                 return;
             }
 
@@ -200,10 +262,23 @@ impl KeyUsageTracker {
             if now_ms >= prev_time && (now_ms - prev_time) <= FIVE_HOURS_MS {
                 let frac_delta = prev_frac - remaining_fraction;
                 let token_delta = current_lifetime.saturating_sub(prev_lifetime);
+                let prompt_delta = current_prompt.saturating_sub(prev_prompt);
+                let comp_delta = current_comp.saturating_sub(prev_comp);
+                let cached_delta = current_cached.saturating_sub(prev_cached);
 
                 // Significant consumption jump (tolerance for IEEE 754 precision)
                 if frac_delta >= 0.0095 && token_delta >= 1000 {
-                    let inferred_capacity = (token_delta as f64 / frac_delta).round() as u64;
+                    // Equivalent benchmark tokens: output weighted 3x, cache weighted 0.25x
+                    let eq_tokens = (prompt_delta as f64) + (comp_delta as f64 * 3.0) + (cached_delta as f64 * 0.25);
+                    // Blended capacity: 60% total tokens baseline + 40% equivalent weighted tokens
+                    let raw_capacity = (token_delta as f64 / frac_delta).round() as u64;
+                    let eq_capacity = (eq_tokens / frac_delta).round() as u64;
+                    let inferred_capacity = if comp_delta > 0 || cached_delta > 0 {
+                        ((raw_capacity as f64 * 0.6 + eq_capacity as f64 * 0.4).round() as u64)
+                            .clamp(MIN_REASONABLE_CAPACITY, MAX_REASONABLE_CAPACITY)
+                    } else {
+                        raw_capacity.clamp(MIN_REASONABLE_CAPACITY, MAX_REASONABLE_CAPACITY)
+                    };
 
                     // Clamping guard: ignore unreasonable outliers
                     if (MIN_REASONABLE_CAPACITY..=MAX_REASONABLE_CAPACITY).contains(&inferred_capacity) {
@@ -220,28 +295,55 @@ impl KeyUsageTracker {
             }
         }
 
-        *probe = Some((now_ms, remaining_fraction, current_lifetime));
+        *probe = Some((now_ms, remaining_fraction, current_lifetime, current_prompt, current_comp, current_cached, current_reqs));
     }
 
-    /// Compute full estimate snapshot
+    /// Compute full estimate snapshot with optional weekly fraction for dual-track estimation
     pub fn estimate_capacity(&self, now_ms: u64, current_remaining_fraction: Option<f64>) -> KeyCapacityEstimate {
+        self.estimate_capacity_dual(now_ms, current_remaining_fraction, None)
+    }
+
+    /// Compute full estimate snapshot with dual-track 5h and weekly capacity inference
+    pub fn estimate_capacity_dual(
+        &self,
+        now_ms: u64,
+        current_remaining_fraction: Option<f64>,
+        weekly_remaining_fraction: Option<f64>,
+    ) -> KeyCapacityEstimate {
         let (window_5h, window_weekly, window_monthly) = self.query_windows(now_ms);
 
         let cap_5h = *self.cached_capacity.read();
-        let (account_tier, confidence) = match cap_5h {
-            Some(cap) if cap >= 350_000 => ("pro".to_string(), 0.95),
-            Some(cap) if cap >= 100_000 => ("standard".to_string(), 0.85),
-            Some(_) => ("free".to_string(), 0.75),
-            None => {
-                // Heuristic based on consumption without full drop calibration yet
-                if window_5h.total_tokens > 200_000 || window_weekly.total_tokens > 500_000 {
-                    ("pro".to_string(), 0.50)
-                } else if window_5h.requests > 0 {
-                    ("calibrating".to_string(), 0.30)
-                } else {
-                    ("unknown".to_string(), 0.0)
-                }
-            }
+        let completed_cycles = self.completed_5h_cycles.read();
+        let has_benchmarked_cycles = !completed_cycles.is_empty();
+
+        let (calibration_status, account_tier, confidence) = if has_benchmarked_cycles {
+            let avg_benchmarked = completed_cycles.iter().map(|c| c.total_tokens).sum::<u64>() / completed_cycles.len() as u64;
+            let tier = if avg_benchmarked >= 350_000 {
+                "pro".to_string()
+            } else if avg_benchmarked >= 100_000 {
+                "standard".to_string()
+            } else {
+                "free".to_string()
+            };
+            ("benchmarked".to_string(), tier, 0.98)
+        } else if let Some(cap) = cap_5h {
+            let tier = if cap >= 350_000 {
+                "pro".to_string()
+            } else if cap >= 100_000 {
+                "standard".to_string()
+            } else {
+                "free".to_string()
+            };
+            ("estimated".to_string(), tier, 0.85)
+        } else {
+            let (tier, conf) = if window_5h.total_tokens > 200_000 || window_weekly.total_tokens > 500_000 {
+                ("pro".to_string(), 0.50)
+            } else if window_5h.requests > 0 {
+                ("calibrating".to_string(), 0.30)
+            } else {
+                ("unknown".to_string(), 0.0)
+            };
+            ("calibrating".to_string(), tier, conf)
         };
 
         let estimated_tokens_remaining_5h = match (cap_5h, current_remaining_fraction) {
@@ -249,19 +351,42 @@ impl KeyUsageTracker {
             _ => None,
         };
 
-        let completed_5h_stats = {
-            let cycles = self.completed_5h_cycles.read();
-            if !cycles.is_empty() {
-                let count = cycles.len() as u64;
-                let total_tokens: u64 = cycles.iter().map(|(_, t, _)| *t).sum();
-                Some(CycleStats {
-                    count,
-                    total_tokens,
-                    avg_tokens: total_tokens / count,
-                })
+        // Weekly capacity estimation based on remaining fraction and weekly tokens spent
+        let estimated_capacity_weekly = weekly_remaining_fraction.and_then(|w_frac| {
+            if !w_frac.is_finite() || !(0.0..=1.0).contains(&w_frac) {
+                return None;
+            }
+            let spent_frac = 1.0 - w_frac;
+            // Guard: only infer when spent fraction is significant and within sane bounds
+            if spent_frac >= 0.03 && spent_frac <= 0.95 && window_weekly.total_tokens >= 5_000 {
+                let inferred = (window_weekly.total_tokens as f64 / spent_frac).round() as u64;
+                Some(inferred.clamp(100_000, 20_000_000))
+            } else if let Some(c5) = cap_5h {
+                // Heuristic baseline for weekly capacity: ~5x of 5h burst capacity
+                Some(c5.saturating_mul(5))
             } else {
                 None
             }
+        });
+
+        let completed_5h_stats = if !completed_cycles.is_empty() {
+            let count = completed_cycles.len() as u64;
+            let prompt_tokens: u64 = completed_cycles.iter().map(|c| c.prompt_tokens).sum();
+            let completion_tokens: u64 = completed_cycles.iter().map(|c| c.completion_tokens).sum();
+            let cached_tokens: u64 = completed_cycles.iter().map(|c| c.cached_tokens).sum();
+            let total_tokens: u64 = completed_cycles.iter().map(|c| c.total_tokens).sum();
+            let requests: u64 = completed_cycles.iter().map(|c| c.requests).sum();
+            Some(CycleStats {
+                count,
+                prompt_tokens,
+                completion_tokens,
+                cached_tokens,
+                total_tokens,
+                requests,
+                avg_tokens: total_tokens / count,
+            })
+        } else {
+            None
         };
 
         KeyCapacityEstimate {
@@ -271,17 +396,21 @@ impl KeyUsageTracker {
             completed_5h_stats,
             estimated_capacity_5h: cap_5h,
             estimated_tokens_remaining_5h,
+            estimated_capacity_weekly,
             account_tier,
             confidence,
+            calibration_status,
         }
     }
 
     pub fn export_snapshot(&self) -> KeyUsageStateSnapshot {
+        let last_probe = self.last_probe_snapshot.read().map(|(t, f, lt, ..)| (t, f, lt));
         KeyUsageStateSnapshot {
             slices: self.slices.read().values().cloned().collect(),
             cached_capacity: *self.cached_capacity.read(),
-            last_probe: *self.last_probe_snapshot.read(),
-            completed_5h: self.completed_5h_cycles.read().clone(),
+            last_probe,
+            completed_5h_records: self.completed_5h_cycles.read().clone(),
+            completed_5h: self.completed_5h_cycles.read().iter().map(|r| (r.cycle_end_ms, r.total_tokens, r.requests)).collect(),
             completed_weekly: self.completed_weekly_cycles.read().clone(),
         }
     }
@@ -290,11 +419,30 @@ impl KeyUsageTracker {
         if let Some(cap) = snap.cached_capacity {
             *self.cached_capacity.write() = Some(cap);
         }
-        if let Some(probe) = snap.last_probe {
-            *self.last_probe_snapshot.write() = Some(probe);
-            self.lifetime_tokens.store(probe.2, Ordering::Relaxed);
+        if let Some((t, f, lt)) = snap.last_probe {
+            *self.last_probe_snapshot.write() = Some((t, f, lt, 0, 0, 0, 0));
+            self.lifetime_tokens.store(lt, Ordering::Relaxed);
         }
-        *self.completed_5h_cycles.write() = snap.completed_5h;
+        if !snap.completed_5h_records.is_empty() {
+            let mut records = snap.completed_5h_records;
+            if records.len() > 100 {
+                records = records.split_off(records.len() - 100);
+            }
+            *self.completed_5h_cycles.write() = records;
+        } else if !snap.completed_5h.is_empty() {
+            let mut legacy = snap.completed_5h;
+            if legacy.len() > 100 {
+                legacy = legacy.split_off(legacy.len() - 100);
+            }
+            *self.completed_5h_cycles.write() = legacy.into_iter().map(|(end, tot, req)| CompletedCycleRecord {
+                cycle_end_ms: end,
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                cached_tokens: 0,
+                total_tokens: tot,
+                requests: req,
+            }).collect();
+        }
         *self.completed_weekly_cycles.write() = snap.completed_weekly;
         let mut slices = self.slices.write();
         for item in snap.slices {
@@ -305,7 +453,7 @@ impl KeyUsageTracker {
     pub fn completed_cycle_stats(&self) -> (u64, u64) {
         let cycles = self.completed_5h_cycles.read();
         let count = cycles.len() as u64;
-        let total: u64 = cycles.iter().map(|(_, t, _)| *t).sum();
+        let total: u64 = cycles.iter().map(|c| c.total_tokens).sum();
         (count, total)
     }
 

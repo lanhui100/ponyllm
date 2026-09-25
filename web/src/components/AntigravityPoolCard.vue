@@ -501,6 +501,48 @@ const emptySlotCount = computed(() => {
   return Math.max(0, totalSlots.value - current);
 });
 
+// 选中的账号用于展示单账号详细额度画像
+const selectedKeyId = ref<string | null>(null);
+
+function handleKeydown(e: KeyboardEvent) {
+  if (e.key === 'Escape' && selectedKeyId.value) {
+    selectedKeyId.value = null;
+  }
+}
+
+watch(selectedKeyId, (val) => {
+  if (typeof window !== 'undefined') {
+    if (val) {
+      window.addEventListener('keydown', handleKeydown);
+    } else {
+      window.removeEventListener('keydown', handleKeydown);
+    }
+  }
+});
+
+function selectKeyForDetail(keyId: string) {
+  if (selectedKeyId.value === keyId) {
+    selectedKeyId.value = null;
+  } else {
+    selectedKeyId.value = keyId;
+  }
+}
+
+const selectedKeyData = computed(() => {
+  if (!selectedKeyId.value) return null;
+  const k = props.keys.find((item) => item.id === selectedKeyId.value);
+  if (!k) return null;
+  const testRes = props.keyTestResults[k.id];
+  const usage = testRes?.usage || k.usage;
+  const quota = extractKeyQuota(k, testRes);
+  return {
+    key: k,
+    testRes,
+    usage,
+    quota,
+  };
+});
+
 onMounted(() => {
   if (typeof ResizeObserver !== 'undefined' && gridContainerRef.value) {
     resizeObserver = new ResizeObserver((entries) => {
@@ -519,6 +561,9 @@ onUnmounted(() => {
     resizeObserver.disconnect();
     resizeObserver = null;
   }
+  if (typeof window !== 'undefined') {
+    window.removeEventListener('keydown', handleKeydown);
+  }
 });
 
 // 加权统计客观真实的完整周期实际消耗
@@ -532,13 +577,14 @@ const factualCycleSummary = computed(() => {
 
   let totalTokensWeekly = 0;
   let weeklyAccounts = 0;
+  let totalWeeklyCapacityEstimated = 0;
   let totalTokensMonthly = 0;
 
   for (const k of props.keys) {
     const usage = props.keyTestResults[k.id]?.usage || k.usage;
     if (!usage) continue;
 
-    // 1. 客观完整的 5h 周期历史统计
+    // 1. 客观完整的 5h 周期历史统计（打满实测归档）
     if (usage.completed_5h_stats && usage.completed_5h_stats.count > 0) {
       count5h += usage.completed_5h_stats.count;
       totalTokens5h += usage.completed_5h_stats.total_tokens;
@@ -550,20 +596,34 @@ const factualCycleSummary = computed(() => {
         standardCount5h += usage.completed_5h_stats.count;
         standardTokens5h += usage.completed_5h_stats.total_tokens;
       }
+    } else if (usage.estimated_capacity_5h && usage.estimated_capacity_5h > 0) {
+      // 动态斜率推测的容量
+      totalTokens5h += usage.estimated_capacity_5h;
+      count5h += 1;
+      if (usage.account_tier === 'pro') {
+        proCount5h += 1;
+        proTokens5h += usage.estimated_capacity_5h;
+      } else if (usage.account_tier === 'standard' || usage.account_tier === 'free') {
+        standardCount5h += 1;
+        standardTokens5h += usage.estimated_capacity_5h;
+      }
     } else if (usage.window_5h?.total_tokens > 0) {
-      // 当前周期真实已跑用量
+      // 当前周期真实已跑用量兜底
       totalTokens5h += usage.window_5h.total_tokens;
       count5h += 1;
     }
 
-    // 2. 周度客观消耗
-    if (usage.window_weekly?.total_tokens > 0) {
+    // 2. 周度额度反推与消耗
+    if (usage.estimated_capacity_weekly && usage.estimated_capacity_weekly > 0) {
+      totalWeeklyCapacityEstimated += usage.estimated_capacity_weekly;
+      weeklyAccounts += 1;
+    } else if (usage.window_weekly?.total_tokens > 0) {
       totalTokensWeekly += usage.window_weekly.total_tokens;
       weeklyAccounts += 1;
     }
 
     // 3. 月度客观消耗
-    if (usage.window_monthly?.total_tokens > 0) {
+    if (usage.window_monthly && usage.window_monthly.total_tokens > 0) {
       totalTokensMonthly += usage.window_monthly.total_tokens;
     }
   }
@@ -571,8 +631,10 @@ const factualCycleSummary = computed(() => {
   const avg5h = count5h > 0 ? Math.round(totalTokens5h / count5h) : 0;
   const proAvg5h = proCount5h > 0 ? Math.round(proTokens5h / proCount5h) : 0;
   const standardAvg5h = standardCount5h > 0 ? Math.round(standardTokens5h / standardCount5h) : 0;
-  const avgWeekly = weeklyAccounts > 0 ? Math.round(totalTokensWeekly / weeklyAccounts) : 0;
-  const avgMonthly = weeklyAccounts > 0 ? Math.round(totalTokensMonthly / weeklyAccounts) : 0;
+  const avgWeekly = weeklyAccounts > 0
+    ? Math.round((totalWeeklyCapacityEstimated > 0 ? totalWeeklyCapacityEstimated : totalTokensWeekly) / weeklyAccounts)
+    : 0;
+  const avgMonthly = avgWeekly > 0 ? Math.round(avgWeekly * 4.33) : (weeklyAccounts > 0 ? Math.round(totalTokensMonthly / weeklyAccounts) : 0);
 
   return {
     avg5h,
@@ -581,6 +643,7 @@ const factualCycleSummary = computed(() => {
     avgWeekly,
     avgMonthly,
     completedCyclesCount: count5h,
+    isEstimatedWeekly: totalWeeklyCapacityEstimated > 0,
   };
 });
 
@@ -693,12 +756,21 @@ function getProgressColor(percent: number): { bar: string; text: string; bg: str
               <UiTooltip
                 v-for="item in slotMatrix"
                 :key="item.key.id"
-                :content="item.tooltipText"
+                :content="`${item.tooltipText} · 点击查看单账号测定画像`"
               >
                 <div
                   data-testid="slot-heatmap-cell"
-                  class="w-3.5 h-3.5 rounded-[2px] transition-transform duration-150 hover:scale-125 cursor-pointer shrink-0"
-                  :class="item.heatClass"
+                  role="button"
+                  tabindex="0"
+                  :aria-label="`查看账号 ${item.key.id} 测定画像`"
+                  class="w-3.5 h-3.5 rounded-[2px] transition-transform duration-150 hover:scale-125 cursor-pointer shrink-0 focus:outline-hidden focus:ring-2 focus:ring-amber-500"
+                  :class="[
+                    item.heatClass,
+                    selectedKeyId === item.key.id ? 'ring-2 ring-amber-500 scale-110 z-10' : ''
+                  ]"
+                  @click="selectKeyForDetail(item.key.id)"
+                  @keydown.enter.prevent="selectKeyForDetail(item.key.id)"
+                  @keydown.space.prevent="selectKeyForDetail(item.key.id)"
                 />
               </UiTooltip>
 
@@ -835,9 +907,9 @@ function getProgressColor(percent: number): { bar: string; text: string; bg: str
             <!-- 周度单账号客观额度 -->
             <div class="p-2.5 rounded-lg bg-white/70">
               <div class="flex items-center justify-between text-[11px] text-slate-400 mb-0.5">
-                <span>自然周累计实测均值</span>
+                <span>自然周测定基准</span>
                 <span v-if="factualCycleSummary.avgWeekly > 0" class="text-sky-700 font-medium font-mono">
-                  活跃账号均值
+                  {{ factualCycleSummary.isEstimatedWeekly ? '余量反推容量' : '活跃账号实测' }}
                 </span>
                 <span v-else class="text-slate-400">周一重置</span>
               </div>
@@ -846,7 +918,7 @@ function getProgressColor(percent: number): { bar: string; text: string; bg: str
                   {{ factualCycleSummary.avgWeekly > 0 ? formatTokenHuman(factualCycleSummary.avgWeekly) : '--' }}
                 </span>
                 <span class="text-[11px] text-slate-400 font-mono">
-                  {{ factualCycleSummary.avgWeekly > 0 ? '单账号实际周消耗' : '等待周结算' }}
+                  {{ factualCycleSummary.avgWeekly > 0 ? (factualCycleSummary.isEstimatedWeekly ? '单账号理论周配额' : '单账号实际周消耗') : '等待周结算' }}
                 </span>
               </div>
             </div>
@@ -854,23 +926,141 @@ function getProgressColor(percent: number): { bar: string; text: string; bg: str
             <!-- 月度单账号客观额度 -->
             <div class="p-2.5 rounded-lg bg-white/70">
               <div class="flex items-center justify-between text-[11px] text-slate-400 mb-0.5">
-                <span>30天自然月实测均值</span>
-                <span class="text-slate-400 font-mono">近30天吞吐</span>
+                <span>30天自然月推算基准</span>
+                <span class="text-slate-400 font-mono">周配额累加</span>
               </div>
               <div class="flex items-baseline justify-between">
                 <span class="text-lg font-bold text-slate-800 font-mono">
                   {{ factualCycleSummary.avgMonthly > 0 ? formatTokenHuman(factualCycleSummary.avgMonthly) : '--' }}
                 </span>
                 <span class="text-[11px] text-slate-400 font-mono">
-                  {{ factualCycleSummary.avgMonthly > 0 ? '单账号30天实际吞吐' : '等待月统计' }}
+                  {{ factualCycleSummary.avgMonthly > 0 ? '单账号月度承载上限' : '等待月统计' }}
                 </span>
               </div>
             </div>
           </div>
         </div>
 
-        <div class="mt-3 pt-2.5 border-t border-slate-200/50 text-[11px] text-slate-400">
-          基于账号完成真实完整周期的消耗客观加权计算 · 纯实测零推测
+        <div class="mt-3 pt-2.5 border-t border-slate-200/50 text-[11px] text-slate-400 flex items-center justify-between">
+          <span>基于账号打满重置与余量反推双轨测定</span>
+          <span class="text-amber-600 font-medium cursor-pointer hover:underline" v-if="selectedKeyData" @click="selectedKeyId = null">
+            收起单账号画像
+          </span>
+        </div>
+      </div>
+    </div>
+
+    <!-- 单账号专属四要素精确画像抽屉/展开区 (Swiss Minimalist Card) -->
+    <div
+      v-if="selectedKeyData"
+      data-testid="single-account-detail-card"
+      class="mt-4 p-4 rounded-xl bg-slate-50/90 text-slate-800 shadow-xs border border-slate-200/80 transition-all duration-300 animate-in fade-in"
+    >
+      <div class="flex flex-wrap items-center justify-between gap-3 pb-3 mb-3 border-b border-slate-200/70">
+        <div class="flex items-center gap-2">
+          <span class="w-2.5 h-2.5 rounded-full bg-amber-500 animate-pulse" />
+          <h3 class="text-sm font-semibold tracking-tight font-mono text-slate-900">
+            单账号周期额度画像 · {{ selectedKeyData.key.id }}
+          </h3>
+          <span
+            class="px-2 py-0.5 text-[10px] font-mono rounded-full uppercase"
+            :class="{
+              'bg-emerald-100 text-emerald-800 border border-emerald-300': selectedKeyData.usage?.calibration_status === 'benchmarked',
+              'bg-sky-100 text-sky-800 border border-sky-300': selectedKeyData.usage?.calibration_status === 'estimated',
+              'bg-slate-200/70 text-slate-600 border border-slate-300': !selectedKeyData.usage?.calibration_status || selectedKeyData.usage?.calibration_status === 'calibrating',
+            }"
+          >
+            {{ selectedKeyData.usage?.calibration_status === 'benchmarked' ? '已实测验证 (BENCHMARKED)' : (selectedKeyData.usage?.calibration_status === 'estimated' ? '斜率推算 (ESTIMATED)' : '动态校准中 (CALIBRATING)') }}
+          </span>
+          <span class="text-xs text-slate-500 font-mono">
+            等级: <strong class="text-amber-700 uppercase">{{ selectedKeyData.usage?.account_tier || 'UNKNOWN' }}</strong>
+            (置信度 {{ Math.round((selectedKeyData.usage?.confidence || 0) * 100) }}%)
+          </span>
+        </div>
+        <button
+          class="text-xs text-slate-500 hover:text-slate-800 px-2 py-1 rounded bg-white border border-slate-200 shadow-2xs hover:bg-slate-50 transition-colors"
+          @click="selectedKeyId = null"
+        >
+          关闭画像 ✕
+        </button>
+      </div>
+
+      <!-- 四要素结构指标：Prompt / Completion / Cached / Requests -->
+      <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-3">
+        <!-- 输入 Tokens -->
+        <div class="p-2.5 rounded-lg bg-white border border-slate-200/70 shadow-2xs">
+          <div class="text-[11px] text-slate-500 mb-0.5">输入 (Prompt)</div>
+          <div class="text-base font-bold font-mono text-emerald-700">
+            {{ formatTokenHuman(selectedKeyData.usage?.completed_5h_stats?.prompt_tokens ?? selectedKeyData.usage?.window_5h?.prompt_tokens ?? 0) }}
+          </div>
+          <div class="text-[10px] text-slate-400 mt-0.5 font-mono">
+            5h 累计: {{ (selectedKeyData.usage?.window_5h?.prompt_tokens ?? 0).toLocaleString() }}
+          </div>
+        </div>
+
+        <!-- 输出 Tokens -->
+        <div class="p-2.5 rounded-lg bg-white border border-slate-200/70 shadow-2xs">
+          <div class="text-[11px] text-slate-500 mb-0.5">输出 (Completion)</div>
+          <div class="text-base font-bold font-mono text-amber-700">
+            {{ formatTokenHuman(selectedKeyData.usage?.completed_5h_stats?.completion_tokens ?? selectedKeyData.usage?.window_5h?.completion_tokens ?? 0) }}
+          </div>
+          <div class="text-[10px] text-slate-400 mt-0.5 font-mono">
+            权重 3x: {{ ((selectedKeyData.usage?.window_5h?.completion_tokens ?? 0) * 3).toLocaleString() }} eq
+          </div>
+        </div>
+
+        <!-- 缓存命中 Tokens -->
+        <div class="p-2.5 rounded-lg bg-white border border-slate-200/70 shadow-2xs">
+          <div class="text-[11px] text-slate-500 mb-0.5">缓存命中 (Cached)</div>
+          <div class="text-base font-bold font-mono text-sky-700">
+            {{ formatTokenHuman(selectedKeyData.usage?.completed_5h_stats?.cached_tokens ?? selectedKeyData.usage?.window_5h?.cached_tokens ?? 0) }}
+          </div>
+          <div class="text-[10px] text-slate-400 mt-0.5">
+            命中节省配额
+          </div>
+        </div>
+
+        <!-- 调用次数 (Requests) -->
+        <div class="p-2.5 rounded-lg bg-white border border-slate-200/70 shadow-2xs">
+          <div class="text-[11px] text-slate-500 mb-0.5">累计调用次数 (Requests)</div>
+          <div class="text-base font-bold font-mono text-purple-700">
+            {{ (selectedKeyData.usage?.completed_5h_stats?.requests ?? selectedKeyData.usage?.window_5h?.requests ?? 0) }} 次
+          </div>
+          <div class="text-[10px] text-slate-400 mt-0.5 font-mono">
+            均次消耗: {{ selectedKeyData.usage?.window_5h?.requests ? Math.round((selectedKeyData.usage.window_5h.total_tokens || 0) / selectedKeyData.usage.window_5h.requests).toLocaleString() : '--' }} tk/req
+          </div>
+        </div>
+      </div>
+
+      <!-- 额度容量双轨测定结论 -->
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs bg-white p-3 rounded-lg border border-slate-200/80 font-mono shadow-2xs">
+        <div>
+          <span class="text-slate-500">5h 周期测定容量:</span>
+          <span class="text-slate-900 font-bold ml-1.5">
+            {{ selectedKeyData.usage?.estimated_capacity_5h ? formatTokenHuman(selectedKeyData.usage.estimated_capacity_5h) : '--' }}
+          </span>
+          <span class="text-[10px] text-slate-400 block mt-0.5">
+            剩余: {{ selectedKeyData.usage?.estimated_tokens_remaining_5h ? formatTokenHuman(selectedKeyData.usage.estimated_tokens_remaining_5h) : '--' }}
+            ({{ Math.round(selectedKeyData.quota.gemini.h5Fraction * 100) }}%)
+          </span>
+        </div>
+        <div>
+          <span class="text-slate-500">自然周理论容量:</span>
+          <span class="text-sky-700 font-bold ml-1.5">
+            {{ selectedKeyData.usage?.estimated_capacity_weekly ? formatTokenHuman(selectedKeyData.usage.estimated_capacity_weekly) : '--' }}
+          </span>
+          <span class="text-[10px] text-slate-400 block mt-0.5">
+            周度余量水位: {{ Math.round(selectedKeyData.quota.gemini.weeklyFraction * 100) }}%
+          </span>
+        </div>
+        <div>
+          <span class="text-slate-500">月度等效承载量:</span>
+          <span class="text-emerald-700 font-bold ml-1.5">
+            {{ selectedKeyData.usage?.estimated_capacity_weekly ? formatTokenHuman(Math.round(selectedKeyData.usage.estimated_capacity_weekly * 4.33)) : '--' }}
+          </span>
+          <span class="text-[10px] text-slate-400 block mt-0.5">
+            近30天实跑: {{ formatTokenHuman(selectedKeyData.usage?.window_monthly?.total_tokens ?? 0) }}
+          </span>
         </div>
       </div>
     </div>

@@ -285,6 +285,62 @@ describe('AntigravityPoolCard Component', () => {
     expect(container.textContent).toContain('账号周期额度测定');
     expect(container.textContent).toContain('5小时周期实测均值');
 
+    // Click heatmap cell to open single account profile drawer
+    cell.click();
+    await nextTick();
+
+    expect(container.querySelector('[data-testid="single-account-detail-card"]')).not.toBeNull();
+    expect(container.textContent).toContain('单账号周期额度画像');
+    expect(container.textContent).toContain('输入 (Prompt)');
+    expect(container.textContent).toContain('输出 (Completion)');
+    expect(container.textContent).toContain('缓存命中 (Cached)');
+    expect(container.textContent).toContain('累计调用次数 (Requests)');
+
+    // Click again to toggle close
+    cell.click();
+    await nextTick();
+    expect(container.querySelector('[data-testid="single-account-detail-card"]')).toBeNull();
+
+    app.unmount();
+    document.body.removeChild(container);
+  });
+
+  it('handles account with completely missing usage gracefully without throwing', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+
+    const keys: KeyView[] = [
+      {
+        id: 'acc-bare-key',
+        provider: 'antigravity',
+        state: 'active',
+        priority: 1,
+        weight: 10,
+        masked_key: 'bare-key-secret',
+        usage: null,
+      },
+    ];
+
+    const app = createApp(AntigravityPoolCard, {
+      keys,
+      keyTestResults: {},
+      adminWriteEnabled: true,
+    });
+
+    app.mount(container);
+    await nextTick();
+
+    const cell = container.querySelector('[data-testid="slot-heatmap-cell"]') as HTMLElement;
+    expect(cell).not.toBeNull();
+
+    // Clicking bare account should safely render drawer without runtime exceptions
+    cell.click();
+    await nextTick();
+
+    expect(container.querySelector('[data-testid="single-account-detail-card"]')).not.toBeNull();
+    expect(container.textContent).toContain('单账号周期额度画像 · acc-bare-key');
+    expect(container.textContent).toContain('动态校准中 (CALIBRATING)');
+
     app.unmount();
     document.body.removeChild(container);
   });

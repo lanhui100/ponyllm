@@ -123,19 +123,25 @@ export interface WindowUsage {
 
 export interface CycleStats {
   count: number;
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  cached_tokens?: number;
   total_tokens: number;
+  requests?: number;
   avg_tokens: number;
 }
 
 export interface KeyCapacityEstimate {
   window_5h: WindowUsage;
   window_weekly: WindowUsage;
-  window_monthly: WindowUsage;
+  window_monthly?: WindowUsage | null;
   completed_5h_stats?: CycleStats | null;
   estimated_capacity_5h?: number | null;
   estimated_tokens_remaining_5h?: number | null;
+  estimated_capacity_weekly?: number | null;
   account_tier: 'pro' | 'standard' | 'free' | 'calibrating' | 'unknown' | string;
   confidence: number;
+  calibration_status?: 'benchmarked' | 'estimated' | 'calibrating' | string;
 }
 
 export interface KeyTestView {

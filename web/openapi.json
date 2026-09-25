@@ -1442,7 +1442,27 @@
             "format": "int64",
             "minimum": 0
           },
+          "cached_tokens": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "completion_tokens": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
           "count": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "prompt_tokens": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "requests": {
             "type": "integer",
             "format": "int64",
             "minimum": 0
@@ -1565,6 +1585,10 @@
             "type": "string",
             "description": "Inferred account tier: \"pro\", \"standard\", \"free\", \"calibrating\", or \"unknown\""
           },
+          "calibration_status": {
+            "type": "string",
+            "description": "Calibration status: \"benchmarked\" (completed reset cycle), \"estimated\" (inferred slope), or \"calibrating\""
+          },
           "completed_5h_stats": {
             "oneOf": [
               {
@@ -1588,6 +1612,15 @@
             ],
             "format": "int64",
             "description": "Inferred 5-hour total capacity in tokens, if fitted",
+            "minimum": 0
+          },
+          "estimated_capacity_weekly": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Inferred weekly total capacity in tokens (via weekly quota bucket fraction)",
             "minimum": 0
           },
           "estimated_tokens_remaining_5h": {

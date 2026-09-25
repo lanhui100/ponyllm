@@ -640,11 +640,26 @@ async fn handle_admin_quota_inner(q: QuotaQuery, state: Arc<AppState>) -> Vec<Qu
                 })
             });
 
+            let weekly_fraction = view.quota_groups.as_ref().and_then(|groups| {
+                for g in groups {
+                    for b in &g.buckets {
+                        let win = b.window.to_lowercase();
+                        let b_id = b.bucket_id.to_lowercase();
+                        let b_desc = b.description.as_deref().unwrap_or("").to_lowercase();
+                        let b_disp = b.display_name.as_deref().unwrap_or("").to_lowercase();
+                        if win == "weekly" || b_id.contains("week") || b_desc.contains("week") || b_disp.contains("周") || b_id.contains("7d") {
+                            return Some(b.remaining_fraction);
+                        }
+                    }
+                }
+                None
+            });
+
             if let Some(entry) = pool.snapshot_keys().into_iter().find(|k| k.id == id) {
                 if let Some(frac) = current_fraction {
                     entry.usage_tracker.observe_upstream_probe(now_ms, frac);
                 }
-                view.usage = Some(entry.usage_tracker.estimate_capacity(now_ms, current_fraction));
+                view.usage = Some(entry.usage_tracker.estimate_capacity_dual(now_ms, current_fraction, weekly_fraction));
             }
             views.push(view);
         }
@@ -2913,12 +2928,27 @@ pub async fn handle_admin_test_key(
         test_view.quota.as_ref().and_then(|items| items.first().map(|m| m.remaining_fraction))
     });
 
+    let weekly_fraction = test_view.quota_groups.as_ref().and_then(|groups| {
+        for g in groups {
+            for b in &g.buckets {
+                let win = b.window.to_lowercase();
+                let b_id = b.bucket_id.to_lowercase();
+                let b_desc = b.description.as_deref().unwrap_or("").to_lowercase();
+                let b_disp = b.display_name.as_deref().unwrap_or("").to_lowercase();
+                if win == "weekly" || b_id.contains("week") || b_desc.contains("week") || b_disp.contains("周") || b_id.contains("7d") {
+                    return Some(b.remaining_fraction);
+                }
+            }
+        }
+        None
+    });
+
     if let Some(pool) = state.pools.read().get(&p_name) {
         if let Some(entry) = pool.snapshot_keys().into_iter().find(|k| k.id == id) {
             if let Some(frac) = current_fraction {
                 entry.usage_tracker.observe_upstream_probe(now_ms, frac);
             }
-            test_view.usage = Some(entry.usage_tracker.estimate_capacity(now_ms, current_fraction));
+            test_view.usage = Some(entry.usage_tracker.estimate_capacity_dual(now_ms, current_fraction, weekly_fraction));
         }
     }
 
