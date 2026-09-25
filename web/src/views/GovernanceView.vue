@@ -144,6 +144,8 @@ const antigravityForm = ref({
   priority: 1,
   weight: 10,
 });
+// 重新授权目标：非空时表示当前 OAuth 流程是"重新授权已禁用账号"而非新建
+const reauthorizeTarget = ref<{ provider: string; keyId: string } | null>(null);
 const antigravityAuthUrl = ref('');
 const fetchingAuthUrl = ref(false);
 const authUrlCopied = ref(false);
@@ -350,6 +352,7 @@ async function copyAuthUrl() {
 
 function openAddProvider() {
   newProviderMode.value = 'standard';
+  reauthorizeTarget.value = null;
   newProviderForm.value = {
     name: '',
     base_url: 'https://tokens.ponyjob.top/v1',
@@ -381,6 +384,7 @@ function openAddProvider() {
 
 function cancelAddProvider() {
   cleanupOAuthSession();
+  reauthorizeTarget.value = null;
   isAddingProvider.value = false;
   providerFormError.value = null;
 }
@@ -441,9 +445,11 @@ async function handleAuthorizeAntigravity() {
       redirect_uri: originUri,
       state: oauthState.value || undefined,
     });
+    const wasReauthorize = reauthorizeTarget.value !== null;
     cleanupOAuthSession();
     isAddingProvider.value = false;
-    showToast(`Google Antigravity 账号已成功接入`);
+    reauthorizeTarget.value = null;
+    showToast(wasReauthorize ? `账号 ${antigravityForm.value.id.trim()} 已重新授权并恢复可用` : `Google Antigravity 账号已成功接入`);
   } catch (err: unknown) {
     providerFormError.value = err instanceof Error ? err.message : String(err);
   } finally {
@@ -466,6 +472,24 @@ async function handleOpenAntigravityForProvider(providerName: string) {
   openAddProvider();
   await switchToAntigravityMode();
   antigravityForm.value.provider = providerName;
+}
+
+/** 重新授权已禁用的 Antigravity 账号：打开 OAuth 表单并锁定目标 Key ID */
+async function handleReauthorizeAntigravity(providerName: string, keyId: string) {
+  if (!adminWriteEnabled.value) return;
+  openAddProvider();
+  await switchToAntigravityMode();
+  const existing = keys.value.find((k) => k.id === keyId && k.provider === providerName);
+  antigravityForm.value = {
+    provider: providerName,
+    id: keyId,
+    code_or_url: '',
+    priority: existing?.priority ?? 1,
+    weight: existing?.weight ?? 10,
+  };
+  reauthorizeTarget.value = { provider: providerName, keyId };
+  showAgAdvanced.value = true;
+  showToast(`正在重新授权已禁用账号 ${keyId}，授权完成后将自动恢复可用`);
 }
 
 async function handleRefresh() {
@@ -750,6 +774,19 @@ onUnmounted(() => {
 
           <!-- Google Antigravity OAuth 专属表单 -->
           <form v-else class="space-y-4" @submit.prevent="handleAuthorizeAntigravity">
+            <!-- 重新授权横幅：明确告知当前流程是恢复已禁用账号而非新建 -->
+            <div
+              v-if="reauthorizeTarget"
+              class="flex items-center gap-2.5 px-3.5 py-2.5 bg-amber-50 border border-amber-200 rounded-lg text-[13px] text-amber-800"
+              data-testid="reauthorize-banner"
+            >
+              <Icons name="repeat" size="15" class="text-amber-600 shrink-0" />
+              <div class="flex-1">
+                <strong class="font-semibold">重新授权已禁用账号：</strong>
+                <span class="font-mono">{{ reauthorizeTarget.keyId }}</span>
+                <span class="text-amber-700/80"> — 授权完成后将替换失效凭据并自动解除禁用、恢复调度。</span>
+              </div>
+            </div>
             <!-- 极简本地代理状态检测：无背景无边框无注释，仅显示状态与重新探测 -->
             <div
               class="flex items-center justify-between text-[13px] py-1"
@@ -909,8 +946,11 @@ onUnmounted(() => {
                       <input
                         v-model="antigravityForm.id"
                         type="text"
+                        :disabled="reauthorizeTarget !== null"
                         placeholder="留空自动以 Google 邮箱命名"
-                        class="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-1.5 text-sm text-slate-900"
+                        :class="reauthorizeTarget !== null
+                          ? 'w-full bg-slate-100 border border-slate-200/80 rounded-lg px-3 py-1.5 text-sm text-slate-500 cursor-not-allowed'
+                          : 'w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-1.5 text-sm text-slate-900'"
                         data-testid="ag-custom-id-input"
                       />
                     </div>
@@ -1023,6 +1063,7 @@ onUnmounted(() => {
             @delete-key="removeKey"
             @test-single-key="testSingleKey"
             @oauth-antigravity="handleOpenAntigravityForProvider"
+            @reauthorize="handleReauthorizeAntigravity"
             @cooldown-expired="handleCooldownExpired"
           />
         </template>

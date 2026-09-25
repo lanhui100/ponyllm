@@ -49,6 +49,7 @@ const emit = defineEmits<{
   (e: 'delete-key', id: string): Promise<void>;
   (e: 'test-single-key', id: string): Promise<void>;
   (e: 'oauth-antigravity', providerName: string): void;
+  (e: 'reauthorize', providerName: string, keyId: string): void;
   (e: 'cooldown-expired'): void;
 }>();
 
@@ -442,6 +443,7 @@ async function handleDeleteProvider() {
             @delete="(id) => emit('delete-key', id)"
             @test-single="(id) => emit('test-single-key', id)"
             @oauth-antigravity="(name) => emit('oauth-antigravity', name)"
+            @reauthorize="(name, keyId) => emit('reauthorize', name, keyId)"
             @cooldown-expired="emit('cooldown-expired')"
           />
         </div>

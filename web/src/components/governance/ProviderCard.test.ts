@@ -642,4 +642,40 @@ describe('ProviderCard protocol multi-select persistence', () => {
     app.unmount();
     document.body.removeChild(container);
   });
+
+  it('renders reauthorize button for disabled antigravity keys and emits reauthorize', async () => {
+    const disabledKey: KeyView = {
+      id: 'ag-burned@gmail.com',
+      provider: 'antigravity',
+      masked_key: 'sk-proj-****',
+      priority: 1,
+      weight: 10,
+      state: 'disabled',
+      disabled_reason: 'OAuth refresh rejected (400 Bad Request): invalid_grant',
+    };
+    const reauthSpy = vi.fn();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const app = createApp(ProviderCard, {
+      provider: { ...baseProvider, name: 'antigravity', default_protocol: 'antigravity' },
+      models: [],
+      keys: [disabledKey],
+      adminWriteEnabled: true,
+      keyTestResults: {},
+      testingKeyIds: new Set<string>(),
+      defaultExpanded: true,
+      'onReauthorize': reauthSpy,
+    });
+    app.mount(container);
+    await nextTick();
+
+    const reauthBtn = container.querySelector('[data-testid="reauthorize-key-ag-burned@gmail.com"]') as HTMLElement;
+    expect(reauthBtn).not.toBeNull();
+    (reauthBtn as HTMLButtonElement).click();
+    await nextTick();
+    expect(reauthSpy).toHaveBeenCalledWith('antigravity', 'ag-burned@gmail.com');
+
+    app.unmount();
+    document.body.removeChild(container);
+  });
 });

@@ -576,6 +576,119 @@ describe('GovernanceView End-to-End User Flow (WEB-04)', () => {
     container.remove();
   });
 
+  it('Flow 6b: Reauthorize a disabled Antigravity key from the key row', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+
+    const agProvider: ProviderView = {
+      name: 'antigravity',
+      base_url: 'https://daily-cloudcode-pa.googleapis.com',
+      default_model: 'claude-sonnet-4-6',
+      strategy: 'priority',
+      billing_mode: 'metered',
+      input_price: 0,
+      cached_price: 0,
+      output_price: 0,
+      models: 1,
+      default_protocol: 'antigravity',
+    };
+    const disabledKey: KeyView = {
+      id: 'ag-burned@gmail.com',
+      provider: 'antigravity',
+      masked_key: 'sk-proj-****',
+      priority: 1,
+      weight: 10,
+      state: 'disabled',
+      disabled_reason: 'OAuth refresh rejected (400 Bad Request): invalid_grant',
+    };
+
+    vi.spyOn(adminApi, 'getOverview').mockReturnValue({
+      send: () => Promise.resolve(mockOverviewWritable),
+    } as any);
+    vi.spyOn(adminApi, 'getProviders').mockReturnValue({
+      send: () => Promise.resolve([agProvider]),
+    } as any);
+    vi.spyOn(adminApi, 'getModels').mockReturnValue({
+      send: () => Promise.resolve(mockModels),
+    } as any);
+    vi.spyOn(adminApi, 'getKeys').mockReturnValue({
+      send: () => Promise.resolve([disabledKey]),
+    } as any);
+    vi.spyOn(adminApi, 'getStrategy').mockReturnValue({
+      send: () => Promise.resolve(mockStrategy),
+    } as any);
+    vi.spyOn(adminApi, 'getProxyStatus').mockReturnValue({
+      send: () => Promise.resolve({
+        available: true,
+        proxy_url: 'http://127.0.0.1:8899',
+        proxy_type: 'pproxy',
+        description: '本地 pproxy 智能出海代理 (127.0.0.1:8899) 运行中',
+        latency_ms: 120,
+        hint: '已自动接管',
+      }),
+    } as any);
+    vi.spyOn(adminApi, 'getAntigravityAuthUrl').mockReturnValue({
+      send: () => Promise.resolve({
+        auth_url: 'https://accounts.google.com/o/oauth2/v2/auth?state=reauth-state',
+        redirect_uri: 'http://localhost:3000/oauth2callback',
+        state: 'reauth-state',
+      }),
+    } as any);
+    const authorizeSpy = vi.spyOn(adminApi, 'authorizeAntigravity').mockReturnValue({
+      send: () => Promise.resolve({
+        provider: 'antigravity',
+        id: 'ag-burned@gmail.com',
+        email: 'burned@gmail.com',
+        config_version: 14,
+      }),
+    } as any);
+
+    const app = createApp(GovernanceView);
+    app.use(router);
+    app.use(pinia);
+    app.mount(container);
+
+    await nextTick();
+    await new Promise((r) => setTimeout(r, 10));
+
+    // The disabled key row exposes a reauthorize button
+    const reauthBtn = container.querySelector('[data-testid="reauthorize-key-ag-burned@gmail.com"]') as HTMLElement;
+    expect(reauthBtn).not.toBeNull();
+    reauthBtn.click();
+    await nextTick();
+    await new Promise((r) => setTimeout(r, 10));
+
+    // Reauthorize banner is shown with the locked target key id
+    expect(container.querySelector('[data-testid="reauthorize-banner"]')).not.toBeNull();
+    expect(container.textContent).toContain('ag-burned@gmail.com');
+
+    // Key id input is pre-filled and locked
+    const idInput = container.querySelector('[data-testid="ag-custom-id-input"]') as HTMLInputElement;
+    expect(idInput).not.toBeNull();
+    expect(idInput.value).toBe('ag-burned@gmail.com');
+    expect(idInput.disabled).toBe(true);
+
+    // Fill the OAuth code and submit
+    const codeInput = container.querySelector('[data-testid="ag-code-input"]') as HTMLInputElement;
+    codeInput.value = 'http://localhost:51121/oauth2callback?code=4/0A-reauth-code';
+    codeInput.dispatchEvent(new Event('input'));
+    await nextTick();
+
+    const submitBtn = container.querySelector('[data-testid="submit-ag-provider-btn"]') as HTMLButtonElement;
+    submitBtn.click();
+    await nextTick();
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(authorizeSpy).toHaveBeenCalledWith(expect.objectContaining({
+      code_or_url: 'http://localhost:51121/oauth2callback?code=4/0A-reauth-code',
+      provider: 'antigravity',
+      id: 'ag-burned@gmail.com',
+    }));
+
+    app.unmount();
+    container.remove();
+  });
+
   it('Flow 7: Background auto-sync periodically invokes refreshSilent without disturbing UI', async () => {
     vi.useFakeTimers();
     const container = document.createElement('div');
