@@ -283,7 +283,11 @@ describe('AntigravityPoolCard Component', () => {
 
     // Verify factual cycle summary rendered in third column
     expect(container.textContent).toContain('账号周期额度测定');
-    expect(container.textContent).toContain('5小时周期实测均值');
+    expect(container.textContent).toContain('5小时周期实测基准');
+    expect(container.textContent).toContain('入: 80K');
+    expect(container.textContent).toContain('出: 20K');
+    expect(container.textContent).toContain('缓: 5K');
+    expect(container.textContent).toContain('调: 25次');
 
     // Click heatmap cell to open single account profile drawer
     cell.click();

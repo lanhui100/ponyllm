@@ -566,7 +566,7 @@ onUnmounted(() => {
   }
 });
 
-// 加权统计客观真实的完整周期实际消耗
+// 加权统计客观真实的完整周期实际消耗与四要素画像
 const factualCycleSummary = computed(() => {
   let count5h = 0;
   let totalTokens5h = 0;
@@ -574,6 +574,11 @@ const factualCycleSummary = computed(() => {
   let proTokens5h = 0;
   let standardCount5h = 0;
   let standardTokens5h = 0;
+
+  let totalPrompt5h = 0;
+  let totalComp5h = 0;
+  let totalCached5h = 0;
+  let totalRequests5h = 0;
 
   let totalTokensWeekly = 0;
   let weeklyAccounts = 0;
@@ -588,6 +593,10 @@ const factualCycleSummary = computed(() => {
     if (usage.completed_5h_stats && usage.completed_5h_stats.count > 0) {
       count5h += usage.completed_5h_stats.count;
       totalTokens5h += usage.completed_5h_stats.total_tokens;
+      totalPrompt5h += usage.completed_5h_stats.prompt_tokens ?? usage.window_5h?.prompt_tokens ?? 0;
+      totalComp5h += usage.completed_5h_stats.completion_tokens ?? usage.window_5h?.completion_tokens ?? 0;
+      totalCached5h += usage.completed_5h_stats.cached_tokens ?? usage.window_5h?.cached_tokens ?? 0;
+      totalRequests5h += usage.completed_5h_stats.requests ?? usage.window_5h?.requests ?? 0;
 
       if (usage.account_tier === 'pro') {
         proCount5h += usage.completed_5h_stats.count;
@@ -600,6 +609,11 @@ const factualCycleSummary = computed(() => {
       // 动态斜率推测的容量
       totalTokens5h += usage.estimated_capacity_5h;
       count5h += 1;
+      totalPrompt5h += usage.window_5h?.prompt_tokens ?? 0;
+      totalComp5h += usage.window_5h?.completion_tokens ?? 0;
+      totalCached5h += usage.window_5h?.cached_tokens ?? 0;
+      totalRequests5h += usage.window_5h?.requests ?? 0;
+
       if (usage.account_tier === 'pro') {
         proCount5h += 1;
         proTokens5h += usage.estimated_capacity_5h;
@@ -607,9 +621,13 @@ const factualCycleSummary = computed(() => {
         standardCount5h += 1;
         standardTokens5h += usage.estimated_capacity_5h;
       }
-    } else if (usage.window_5h?.total_tokens > 0) {
+    } else if (usage.window_5h && usage.window_5h.total_tokens > 0) {
       // 当前周期真实已跑用量兜底
       totalTokens5h += usage.window_5h.total_tokens;
+      totalPrompt5h += usage.window_5h.prompt_tokens;
+      totalComp5h += usage.window_5h.completion_tokens;
+      totalCached5h += usage.window_5h.cached_tokens;
+      totalRequests5h += usage.window_5h.requests;
       count5h += 1;
     }
 
@@ -617,7 +635,7 @@ const factualCycleSummary = computed(() => {
     if (usage.estimated_capacity_weekly && usage.estimated_capacity_weekly > 0) {
       totalWeeklyCapacityEstimated += usage.estimated_capacity_weekly;
       weeklyAccounts += 1;
-    } else if (usage.window_weekly?.total_tokens > 0) {
+    } else if (usage.window_weekly && usage.window_weekly.total_tokens > 0) {
       totalTokensWeekly += usage.window_weekly.total_tokens;
       weeklyAccounts += 1;
     }
@@ -631,6 +649,11 @@ const factualCycleSummary = computed(() => {
   const avg5h = count5h > 0 ? Math.round(totalTokens5h / count5h) : 0;
   const proAvg5h = proCount5h > 0 ? Math.round(proTokens5h / proCount5h) : 0;
   const standardAvg5h = standardCount5h > 0 ? Math.round(standardTokens5h / standardCount5h) : 0;
+  const avgPrompt5h = count5h > 0 ? Math.round(totalPrompt5h / count5h) : 0;
+  const avgComp5h = count5h > 0 ? Math.round(totalComp5h / count5h) : 0;
+  const avgCached5h = count5h > 0 ? Math.round(totalCached5h / count5h) : 0;
+  const avgRequests5h = count5h > 0 ? Math.round(totalRequests5h / count5h) : 0;
+
   const avgWeekly = weeklyAccounts > 0
     ? Math.round((totalWeeklyCapacityEstimated > 0 ? totalWeeklyCapacityEstimated : totalTokensWeekly) / weeklyAccounts)
     : 0;
@@ -640,6 +663,10 @@ const factualCycleSummary = computed(() => {
     avg5h,
     proAvg5h,
     standardAvg5h,
+    avgPrompt5h,
+    avgComp5h,
+    avgCached5h,
+    avgRequests5h,
     avgWeekly,
     avgMonthly,
     completedCyclesCount: count5h,
@@ -877,10 +904,10 @@ function getProgressColor(percent: number): { bar: string; text: string; bg: str
 
           <!-- 3 个块：5h / 周 / 月 (纯客观实测、无假定推测、无硬编码) -->
           <div class="space-y-2">
-            <!-- 5小时单账号客观额度 -->
+            <!-- 5小时单账号客观额度与四要素基准拆解 -->
             <div class="p-2.5 rounded-lg bg-white/70">
               <div class="flex items-center justify-between text-[11px] text-slate-400 mb-0.5">
-                <span>5小时周期实测均值</span>
+                <span>5小时周期实测基准</span>
                 <span v-if="factualCycleSummary.completedCyclesCount > 0" class="text-emerald-700 font-medium font-mono">
                   已结算 {{ factualCycleSummary.completedCyclesCount }} 轮
                 </span>
@@ -901,6 +928,13 @@ function getProgressColor(percent: number): { bar: string; text: string; bg: str
                     等待完整周期
                   </template>
                 </span>
+              </div>
+              <!-- 四要素结构直接呈现：输入/输出/缓存/调用次数 -->
+              <div v-if="factualCycleSummary.avg5h > 0" class="mt-2 pt-1.5 border-t border-slate-100 flex flex-wrap items-center justify-between gap-1 text-[10px] text-slate-500 font-mono">
+                <span title="平均单账号 5h 输入 Token">入: <strong class="text-emerald-700 font-semibold">{{ formatTokenHuman(factualCycleSummary.avgPrompt5h) }}</strong></span>
+                <span title="平均单账号 5h 输出 Token (通常扣额权重高)">出: <strong class="text-amber-700 font-semibold">{{ formatTokenHuman(factualCycleSummary.avgComp5h) }}</strong></span>
+                <span title="平均单账号 5h 命中缓存 Token">缓: <strong class="text-sky-700 font-semibold">{{ formatTokenHuman(factualCycleSummary.avgCached5h) }}</strong></span>
+                <span title="平均单账号 5h 承载调用次数">调: <strong class="text-purple-700 font-semibold">{{ factualCycleSummary.avgRequests5h }}次</strong></span>
               </div>
             </div>
 
