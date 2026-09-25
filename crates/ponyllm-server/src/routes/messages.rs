@@ -478,8 +478,14 @@ pub async fn handle_messages(
                             tracing::warn!(
                                 provider = %target.provider_name,
                                 attempts = stream_attempt,
-                                "Antigravity empty-STOP persisted across all transparent retries; surfacing EMPTY_RESPONSE to client"
+                                "Antigravity empty-STOP persisted across all transparent retries; failing attempt to trigger failover or standard error"
                             );
+                            last_kind = ponyllm_core::error::GatewayErrorKind::UpstreamUnavailable;
+                            last_error = format!(
+                                "Antigravity stream preamble returned empty STOP across all {} attempts",
+                                stream_attempt
+                            );
+                            break;
                         }
 
                         if let Some(p) = prompt_hint.as_deref() {
