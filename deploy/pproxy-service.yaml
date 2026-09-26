@@ -1,0 +1,40 @@
+# ACTIVE (BLOCK lifted 2026-09-26): live objects re-created.
+# Client auth is now enforced by LocalHaForwarder (--client-token /
+# PPROXY_CLIENT_TOKEN; no/ wrong credentials -> 407). Conditions met:
+# 1) client auth covers CONNECT and ordinary HTTP (verified 407/200);
+# 2) Tencent node egress reachable from k3s (TCP + CONNECT verified);
+# 3) ponyllm Pod passes authenticated egress tests (OAuth 401, model 200).
+# TODO: node firewall/security-group ACL reject test + token rotation.
+apiVersion: v1
+kind: Service
+metadata:
+  name: pproxy-host
+  namespace: ponyllm
+  labels:
+    app.kubernetes.io/name: ponyllm
+    app.kubernetes.io/component: egress-proxy
+spec:
+  ports:
+    - name: http-proxy
+      port: 8899
+      targetPort: 8899
+      protocol: TCP
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: pproxy-host
+  namespace: ponyllm
+  labels:
+    app.kubernetes.io/name: ponyllm
+    app.kubernetes.io/component: egress-proxy
+subsets:
+  - addresses:
+      # Tencent node Tailscale address. Verify before applying; do not use devserver 100.95.193.103.
+      - ip: 100.105.241.39
+    ports:
+      - name: http-proxy
+        port: 8899
+        protocol: TCP
+# IMPORTANT: NetworkPolicy cannot constrain a selector-less Service's external endpoint.
+# Access control belongs to pproxy client auth plus Tencent host firewall/ACL.
