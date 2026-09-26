@@ -208,6 +208,20 @@ function cooldownResetTooltip(k: KeyView): string {
   return '配额已耗尽，冷却保护中';
 }
 
+function getDisabledStatusInfo(k: KeyView): { label: string; variant: 'destructive' | 'warning' | 'purple' } {
+  const reason = k.disabled_reason?.toLowerCase() || '';
+  if (reason.includes('validation_required') || reason.includes('verify your account')) {
+    return { label: '需验证', variant: 'warning' };
+  }
+  if (reason.includes('invalid_grant') || reason.includes('token has been expired') || reason.includes('revoked')) {
+    return { label: '凭据失效', variant: 'destructive' };
+  }
+  if (reason.includes('policy') || reason.includes('terms of service') || reason.includes('suspended')) {
+    return { label: '违规停用', variant: 'destructive' };
+  }
+  return { label: '已禁用', variant: 'destructive' };
+}
+
 function disabledReasonTooltip(k: KeyView): string {
   const reason = k.disabled_reason?.trim();
   const noun = isAntigravity.value ? '账号' : '密钥';
@@ -216,7 +230,9 @@ function disabledReasonTooltip(k: KeyView): string {
   }
   const lower = reason.toLowerCase();
   let explanation = '';
-  if (lower.includes('invalid_grant')) {
+  if (lower.includes('validation_required') || lower.includes('verify your account')) {
+    explanation = 'Google 要求对该账号进行安全验证 (VALIDATION_REQUIRED)。请登录该 Google 账号完成验证或重新授权。';
+  } else if (lower.includes('invalid_grant')) {
     explanation = '上游判定 OAuth 授权失效 (invalid_grant)。可能是 Google 授权被撤销、密码被修改、Refresh Token 过期或账号已被上游风控冻结。';
   } else if (lower.includes('terms of service') || lower.includes('policy') || lower.includes('suspended')) {
     explanation = `上游判定${noun}违规或停用 (PolicyViolation)。触犯了服务条款或已被上游封禁。`;
@@ -641,10 +657,10 @@ async function handleRefreshAllQuotas() {
                 <!-- 仅在非 active 状态（如 cooling_down / disabled）下显示状态徽标，正常可用时不显示“就绪” -->
                 <div v-if="k.state === 'disabled'" class="inline-flex items-center gap-1">
                   <UiBadge
-                    variant="destructive"
+                    :variant="getDisabledStatusInfo(k).variant"
                     :data-testid="`key-state-badge-${k.id}`"
                   >
-                    {{ formatKeyState(k.state) }}
+                    {{ getDisabledStatusInfo(k).label }}
                   </UiBadge>
                   <!-- 禁用徽标后提供信息图标与合理换行的 Tooltip 展示具体禁用原因 -->
                   <UiTooltip

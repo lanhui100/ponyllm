@@ -2799,14 +2799,24 @@ pub async fn handle_admin_test_key(
                             format!("probe ok (quota fetched for {} models)", snapshot.models.len()),
                         )
                     }
-                    Err(e) => (None, None, format!("probe ok (quota fetch error: {})", e)),
+                    Err(e) => (None, None, format!("quota fetch error: {}", e)),
                 };
 
+                // quota 探测失败不能再包装成成功：否则前端会继续沿用
+                // localStorage 里的旧额度快照，把不可用账号画成绿色。
+                let quota_failed = quota_view.is_none() && quota_groups_view.is_none();
+                let is_validation = ponyllm_core::executor::is_account_validation_required(&quota_msg);
                 KeyTestView {
-                    success: true,
+                    success: !quota_failed,
                     latency_ms,
-                    http_status: Some(200),
-                    error_code: None,
+                    http_status: if quota_failed { None } else { Some(200) },
+                    error_code: if is_validation {
+                        Some("account_validation_required".to_string())
+                    } else if quota_failed {
+                        Some("quota_probe_failed".to_string())
+                    } else {
+                        None
+                    },
                     message: quota_msg,
                     quota: quota_view,
                     quota_groups: quota_groups_view,

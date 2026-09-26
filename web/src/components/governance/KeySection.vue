@@ -432,6 +432,7 @@ function handleTestBatch() {
 
 .state-active { background: #10b981; }
 .state-cooling_down { background: #f59e0b; }
+.state-disabled { background: #ef4444; }
 .state-exhausted { background: #ef4444; }
 
 .probe-badge {

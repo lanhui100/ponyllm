@@ -120,7 +120,15 @@ function formatCooldownDuration(secs: number | null): string {
 // 统计信息
 const totalAccounts = computed(() => props.keys.length);
 
+function isKeyUnavailable(k: KeyView): boolean {
+  if (k.state === 'disabled') return true;
+  const testResult = props.keyTestResults[k.id];
+  if (testResult && testResult.success === false) return true;
+  return false;
+}
+
 function isKeyCoolingDown(k: KeyView): boolean {
+  if (isKeyUnavailable(k)) return false;
   if (k.state === 'cooling_down') return true;
   const testResult = props.keyTestResults[k.id];
   if (!testResult) return false;
@@ -132,15 +140,15 @@ function isKeyCoolingDown(k: KeyView): boolean {
 }
 
 const disabledKeys = computed(() => {
-  return props.keys.filter((k) => k.state === 'disabled');
+  return props.keys.filter((k) => isKeyUnavailable(k));
 });
 
 const coolingKeys = computed(() => {
-  return props.keys.filter((k) => k.state !== 'disabled' && isKeyCoolingDown(k));
+  return props.keys.filter((k) => !isKeyUnavailable(k) && isKeyCoolingDown(k));
 });
 
 const activeKeys = computed(() => {
-  return props.keys.filter((k) => k.state !== 'disabled' && !isKeyCoolingDown(k));
+  return props.keys.filter((k) => !isKeyUnavailable(k) && !isKeyCoolingDown(k));
 });
 
 // 统计 Pro 账号与普通账号数量及容量画像
@@ -409,12 +417,70 @@ const slotMatrix = computed<HeatSlotItem[]>(() => {
     }
 
     if (k.state === 'disabled') {
+      const reason = k.disabled_reason?.toLowerCase() || '';
       const reasonHint = k.disabled_reason ? `\n原因: ${k.disabled_reason}` : '';
+      if (reason.includes('validation_required') || reason.includes('verify your account')) {
+        return {
+          key: k,
+          level: 'validation_required' as any,
+          heatClass: 'bg-amber-500 hover:bg-amber-400 ring-1 ring-amber-400/60',
+          tooltipText: `账号: ${email}${tierBadge}\n状态: 需安全验证 (Google安全拦截)${reasonHint}${usageSummary}`,
+          isCooling: false,
+        };
+      }
+      if (reason.includes('invalid_grant') || reason.includes('token has been expired') || reason.includes('revoked')) {
+        return {
+          key: k,
+          level: 'auth_invalid' as any,
+          heatClass: 'bg-rose-500 hover:bg-rose-400',
+          tooltipText: `账号: ${email}${tierBadge}\n状态: 授权凭据失效 (invalid_grant)${reasonHint}${usageSummary}`,
+          isCooling: false,
+        };
+      }
+      if (reason.includes('policy') || reason.includes('terms of service') || reason.includes('suspended')) {
+        return {
+          key: k,
+          level: 'policy_violation' as any,
+          heatClass: 'bg-rose-800 hover:bg-rose-700',
+          tooltipText: `账号: ${email}${tierBadge}\n状态: 违规停用 (PolicyViolation)${reasonHint}${usageSummary}`,
+          isCooling: false,
+        };
+      }
       return {
         key: k,
         level: 'disabled' as any,
-        heatClass: 'bg-rose-400/80',
+        heatClass: 'bg-rose-600/90 hover:bg-rose-500',
         tooltipText: `账号: ${email}${tierBadge}\n状态: 已禁用 (不分配流量)${reasonHint}${usageSummary}`,
+        isCooling: false,
+      };
+    }
+
+    if (testResult && testResult.success === false) {
+      const errMsg = (testResult.message || '').toLowerCase();
+      const errCode = (testResult.error_code || '').toLowerCase();
+      if (errCode.includes('validation') || errMsg.includes('validation_required') || errMsg.includes('verify your account')) {
+        return {
+          key: k,
+          level: 'validation_required' as any,
+          heatClass: 'bg-amber-500 hover:bg-amber-400 ring-1 ring-amber-400/60',
+          tooltipText: `账号: ${email}${tierBadge}\n状态: 需安全验证 (Google安全拦截)\n提示: ${testResult.message}${usageSummary}`,
+          isCooling: false,
+        };
+      }
+      if (errCode.includes('auth') || errMsg.includes('invalid_grant')) {
+        return {
+          key: k,
+          level: 'auth_invalid' as any,
+          heatClass: 'bg-rose-500 hover:bg-rose-400',
+          tooltipText: `账号: ${email}${tierBadge}\n状态: 授权凭据失效 (invalid_grant)\n提示: ${testResult.message}${usageSummary}`,
+          isCooling: false,
+        };
+      }
+      return {
+        key: k,
+        level: 'probe_failed' as any,
+        heatClass: 'bg-rose-400/80 hover:bg-rose-300',
+        tooltipText: `账号: ${email}${tierBadge}\n状态: 探测异常\n提示: ${testResult.message}${usageSummary}`,
         isCooling: false,
       };
     }

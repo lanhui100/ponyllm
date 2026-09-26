@@ -348,4 +348,74 @@ describe('AntigravityPoolCard Component', () => {
     app.unmount();
     document.body.removeChild(container);
   });
+
+  it('renders differentiated heat classes and tooltips for validation required, invalid grant, and failed probe', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+
+    const keys: KeyView[] = [
+      {
+        id: 'ag-val@gmail.com',
+        provider: 'antigravity',
+        state: 'disabled',
+        priority: 1,
+        weight: 10,
+        masked_key: 'ya29.***',
+        disabled_reason: 'Google account verification required (VALIDATION_REQUIRED): Verify your account to continue.',
+      },
+      {
+        id: 'ag-burned@gmail.com',
+        provider: 'antigravity',
+        state: 'disabled',
+        priority: 2,
+        weight: 10,
+        masked_key: 'ya29.***',
+        disabled_reason: 'OAuth refresh rejected (400 Bad Request): {"error": "invalid_grant"}',
+      },
+      {
+        id: 'ag-probe-val@gmail.com',
+        provider: 'antigravity',
+        state: 'active',
+        priority: 3,
+        weight: 10,
+        masked_key: 'ya29.***',
+      },
+    ];
+
+    const keyTestResults: Record<string, KeyTestView> = {
+      'ag-probe-val@gmail.com': {
+        success: false,
+        latency_ms: 150,
+        message: 'quota fetch error: 403 VALIDATION_REQUIRED',
+        error_code: 'account_validation_required',
+      },
+    };
+
+    const app = createApp(AntigravityPoolCard, {
+      keys,
+      keyTestResults,
+      adminWriteEnabled: true,
+    });
+
+    app.mount(container);
+    await nextTick();
+
+    const cells = container.querySelectorAll('[data-testid="slot-heatmap-cell"]');
+    expect(cells.length).toBe(3);
+
+    // Cell 0: disabled with VALIDATION_REQUIRED -> amber
+    expect(cells[0].className).toContain('bg-amber-500');
+
+    // Cell 1: disabled with invalid_grant -> rose-500
+    expect(cells[1].className).toContain('bg-rose-500');
+
+    // Cell 2: active in backend but probe failed with account_validation_required -> amber
+    expect(cells[2].className).toContain('bg-amber-500');
+
+    // Ready accounts must be 0/3, none should be counted as ready
+    expect(container.textContent).toContain('0/3 账号就绪');
+
+    app.unmount();
+    document.body.removeChild(container);
+  });
 });

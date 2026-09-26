@@ -141,7 +141,10 @@ impl KeyPool {
             return;
         };
 
-        let is_policy_violation = matches!(error, PoolErrorType::PolicyViolation);
+        let is_policy_violation = matches!(
+            error,
+            PoolErrorType::PolicyViolation | PoolErrorType::AccountValidationRequired
+        );
         let violations = if is_policy_violation {
             entry.stats.policy_violations.fetch_add(1, Ordering::Relaxed) + 1
         } else {

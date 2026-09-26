@@ -189,10 +189,30 @@ fn is_tos_account_death(lower_body: &str) -> bool {
         .any(|sig| lower_body.contains(sig))
 }
 
+/// Google account-verification拦截签名（403 VALIDATION_REQUIRED）：账号本身
+/// 需要人工验证（"Verify your account to continue"），与额度耗尽、ToS 封号
+/// 都不是同一信号。公开给管理面探测路径复用，保证"请求失败"与"拨测失败"
+/// 对同一 body 判定一致。
+const ACCOUNT_VALIDATION_SIGNATURES: &[&str] = &[
+    "validation_required",
+    "validationrequired",
+    "verify your account",
+];
+
+pub fn is_account_validation_required(err_body: &str) -> bool {
+    let lower = err_body.to_lowercase();
+    ACCOUNT_VALIDATION_SIGNATURES
+        .iter()
+        .any(|sig| lower.contains(sig))
+}
+
 /// Classify a 403 body into (gateway kind, pool action).
 ///
 /// - Exact ToS death signature → permanent `PolicyViolation` isolate
 ///   (still guarded by the pool mass-disable breaker).
+/// - Account-validation signature (`VALIDATION_REQUIRED`) → permanent
+///   `AccountValidationRequired` isolate: needs human verification, never
+///   auto-recovers by waiting for a quota window.
 /// - Quota wording → `QuotaExhausted` kind for honest downstream errors,
 ///   but only a cooldown on the pool: real quota recovers at resetTime
 ///   and throttling clears on its own (P0-2).
@@ -205,6 +225,11 @@ fn classify_forbidden(
     let lower = err_body.to_lowercase();
     if is_tos_account_death(&lower) {
         (GatewayErrorKind::AuthInvalid, PoolErrorType::PolicyViolation)
+    } else if is_account_validation_required(err_body) {
+        (
+            GatewayErrorKind::AuthInvalid,
+            PoolErrorType::AccountValidationRequired,
+        )
     } else if lower.contains("quota")
         || lower.contains("#3501")
         || lower.contains("resource_exhausted")
@@ -1459,6 +1484,33 @@ mod session_header_tests {
             );
             assert_ne!(kind, GatewayErrorKind::AuthInvalid, "body: {}", body);
         }
+    }
+
+    #[test]
+    fn forbidden_validation_required_isolates_for_human_verification() {
+        // Exact shape from the reported failure: HTTP 403 VALIDATION_REQUIRED
+        // is an account-level human-verification gate, not quota exhaustion.
+        let body = r#"{"error": {"code": 403, "message": "Verify your account to continue.", "status": "PERMISSION_DENIED"}}"#;
+        let (kind, pool_err) = classify_forbidden(body, None);
+        assert_eq!(kind, GatewayErrorKind::AuthInvalid, "body: {}", body);
+        assert!(
+            matches!(pool_err, PoolErrorType::AccountValidationRequired),
+            "body: {}",
+            body
+        );
+        assert!(is_account_validation_required(body));
+        // Pool-level effect: permanently isolated with a verification hint,
+        // never a quota-window cooldown.
+        let entry = ApiKeyEntry::new("k1", "sk-1", 1, 10);
+        entry.record_failure(pool_err);
+        assert_eq!(entry.current_state(), KeyState::Disabled);
+        assert!(
+            entry
+                .disabled_reason()
+                .unwrap_or_default()
+                .contains("VALIDATION_REQUIRED"),
+            "disabled reason must name the verification gate"
+        );
     }
 
     #[test]

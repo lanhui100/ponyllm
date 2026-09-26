@@ -619,8 +619,8 @@ describe('ProviderCard protocol multi-select persistence', () => {
     document.body.removeChild(container);
   });
 
-  it('renders disabled badge and info icon for disabled keys', async () => {
-    const disabledKey: KeyView = {
+  it('renders differentiated disabled badges (凭据失效, 需验证, 违规停用, 已禁用) and info icon', async () => {
+    const invalidGrantKey: KeyView = {
       id: 'key-disabled-1',
       provider: 'test-provider',
       masked_key: 'sk-proj-****',
@@ -629,12 +629,53 @@ describe('ProviderCard protocol multi-select persistence', () => {
       state: 'disabled',
       disabled_reason: 'OAuth refresh rejected (400 Bad Request): {"error": "invalid_grant"}',
     };
-    const { app, container } = mountCard({ ...baseProvider }, [disabledKey]);
+    const validationRequiredKey: KeyView = {
+      id: 'key-validation-1',
+      provider: 'test-provider',
+      masked_key: 'sk-proj-****',
+      priority: 2,
+      weight: 10,
+      state: 'disabled',
+      disabled_reason: 'Google account verification required (VALIDATION_REQUIRED): Verify your account to continue.',
+    };
+    const policyViolationKey: KeyView = {
+      id: 'key-policy-1',
+      provider: 'test-provider',
+      masked_key: 'sk-proj-****',
+      priority: 3,
+      weight: 10,
+      state: 'disabled',
+      disabled_reason: 'Account policy violation / Terms of Service suspension (permanent isolate)',
+    };
+    const plainDisabledKey: KeyView = {
+      id: 'key-plain-1',
+      provider: 'test-provider',
+      masked_key: 'sk-proj-****',
+      priority: 4,
+      weight: 10,
+      state: 'disabled',
+      disabled_reason: 'Manually isolated by admin',
+    };
+
+    const { app, container } = mountCard({ ...baseProvider }, [
+      invalidGrantKey,
+      validationRequiredKey,
+      policyViolationKey,
+      plainDisabledKey,
+    ]);
     await nextTick();
 
-    const stateBadge = container.querySelector('[data-testid="key-state-badge-key-disabled-1"]');
-    expect(stateBadge).not.toBeNull();
-    expect(stateBadge?.textContent).toContain('已禁用');
+    const badge1 = container.querySelector('[data-testid="key-state-badge-key-disabled-1"]');
+    expect(badge1?.textContent).toContain('凭据失效');
+
+    const badge2 = container.querySelector('[data-testid="key-state-badge-key-validation-1"]');
+    expect(badge2?.textContent).toContain('需验证');
+
+    const badge3 = container.querySelector('[data-testid="key-state-badge-key-policy-1"]');
+    expect(badge3?.textContent).toContain('违规停用');
+
+    const badge4 = container.querySelector('[data-testid="key-state-badge-key-plain-1"]');
+    expect(badge4?.textContent).toContain('已禁用');
 
     const infoIcon = container.querySelector('[data-testid="key-disabled-info-key-disabled-1"]');
     expect(infoIcon).not.toBeNull();

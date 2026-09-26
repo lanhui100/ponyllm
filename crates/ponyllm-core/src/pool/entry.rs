@@ -44,6 +44,9 @@ pub enum PoolErrorType {
     QuotaExhausted { retry_after: Option<Duration> },
     AuthInvalid { reason: Option<String> },
     PolicyViolation,
+    /// Google 账号需要人工验证（403 VALIDATION_REQUIRED）：永久隔离，
+    /// 等人工完成验证/重新授权后恢复；绝不能靠等待额度窗口自动恢复。
+    AccountValidationRequired,
     ServerError,
     NetworkError,
 }
@@ -341,6 +344,9 @@ impl ApiKeyEntry {
             }
             PoolErrorType::PolicyViolation => {
                 *self.stats.disabled_reason.write() = Some("Account policy violation / Terms of Service suspension (permanent isolate)".to_string());
+            }
+            PoolErrorType::AccountValidationRequired => {
+                *self.stats.disabled_reason.write() = Some("Google account verification required (VALIDATION_REQUIRED): complete verification in the Google account, then reauthorize".to_string());
             }
             PoolErrorType::ServerError | PoolErrorType::NetworkError => {
                 if consecutive >= 3 {
