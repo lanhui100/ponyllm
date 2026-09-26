@@ -655,38 +655,33 @@ async function handleRefreshAllQuotas() {
                 </div>
 
                 <!-- 仅在非 active 状态（如 cooling_down / disabled）下显示状态徽标，正常可用时不显示“就绪” -->
-                <div v-if="k.state === 'disabled'" class="inline-flex items-center gap-1">
-                  <UiBadge
-                    :variant="getDisabledStatusInfo(k).variant"
-                    :data-testid="`key-state-badge-${k.id}`"
-                  >
-                    {{ getDisabledStatusInfo(k).label }}
-                  </UiBadge>
-                  <!-- 禁用徽标后提供信息图标与合理换行的 Tooltip 展示具体禁用原因 -->
+                <div v-if="k.state === 'disabled'" class="inline-flex items-center gap-1.5">
+                  <!-- 禁用徽标本身包裹 Tooltip 展示具体禁用原因，去除独立 info 图标 -->
                   <UiTooltip
                     :content="disabledReasonTooltip(k)"
                     wrap
                   >
-                    <button
-                      type="button"
-                      class="inline-flex items-center justify-center text-rose-500 hover:text-rose-700 cursor-help transition-colors focus:outline-hidden focus:ring-1 focus:ring-rose-500 rounded-xs"
-                      :data-testid="`key-disabled-info-${k.id}`"
-                      aria-label="查看禁用原因"
-                    >
-                      <Icons name="info" :size="13" class="stroke-[2.2]" />
-                    </button>
+                    <span class="inline-flex cursor-help" :data-testid="`key-disabled-tooltip-trigger-${k.id}`">
+                      <UiBadge
+                        :variant="getDisabledStatusInfo(k).variant"
+                        :data-testid="`key-state-badge-${k.id}`"
+                      >
+                        {{ getDisabledStatusInfo(k).label }}
+                      </UiBadge>
+                    </span>
                   </UiTooltip>
-                  <!-- 重新授权按钮：Antigravity 账号禁用时，点击进入 OAuth 重新授权流程 -->
+
+                  <!-- 重新授权纯图标按钮：无背景色，更符合语义的 key 凭据图标，hover 展示 Tooltip -->
                   <UiTooltip v-if="isAntigravity" content="重新授权该账号（OAuth）">
                     <button
                       type="button"
-                      class="inline-flex items-center justify-center p-1 rounded-md bg-amber-50/80 hover:bg-amber-100/90 text-amber-700 hover:text-amber-800 border border-amber-200/70 transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed focus:outline-hidden focus:ring-1 focus:ring-amber-500"
+                      class="inline-flex items-center justify-center p-0.5 text-amber-600 hover:text-amber-700 transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed focus:outline-hidden"
                       :disabled="!adminWriteEnabled"
                       :data-testid="`reauthorize-key-${k.id}`"
                       aria-label="重新授权"
                       @click="emit('reauthorize', props.providerName, k.id)"
                     >
-                      <Icons name="repeat" size="13" class="stroke-[2.2]" />
+                      <Icons name="key" size="14" class="stroke-[2.2]" />
                     </button>
                   </UiTooltip>
                 </div>

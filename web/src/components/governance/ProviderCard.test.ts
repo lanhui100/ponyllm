@@ -677,8 +677,11 @@ describe('ProviderCard protocol multi-select persistence', () => {
     const badge4 = container.querySelector('[data-testid="key-state-badge-key-plain-1"]');
     expect(badge4?.textContent).toContain('已禁用');
 
+    const tooltipTrigger = container.querySelector('[data-testid="key-disabled-tooltip-trigger-key-disabled-1"]');
+    expect(tooltipTrigger).not.toBeNull();
+    // Info icon is removed in favor of badge tooltip trigger
     const infoIcon = container.querySelector('[data-testid="key-disabled-info-key-disabled-1"]');
-    expect(infoIcon).not.toBeNull();
+    expect(infoIcon).toBeNull();
 
     app.unmount();
     document.body.removeChild(container);
