@@ -677,16 +677,16 @@ async function handleRefreshAllQuotas() {
                     </button>
                   </UiTooltip>
                   <!-- 重新授权按钮：Antigravity 账号禁用时，点击进入 OAuth 重新授权流程 -->
-                  <UiTooltip v-if="isAntigravity" content="重新授权该账号（OAuth），授权完成后自动恢复可用并解除禁用">
+                  <UiTooltip v-if="isAntigravity" content="重新授权该账号（OAuth）">
                     <button
                       type="button"
-                      class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-amber-50/80 hover:bg-amber-100/90 text-amber-700 hover:text-amber-800 text-[11px] font-semibold border border-amber-200/70 transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed focus:outline-hidden focus:ring-1 focus:ring-amber-500"
+                      class="inline-flex items-center justify-center p-1 rounded-md bg-amber-50/80 hover:bg-amber-100/90 text-amber-700 hover:text-amber-800 border border-amber-200/70 transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed focus:outline-hidden focus:ring-1 focus:ring-amber-500"
                       :disabled="!adminWriteEnabled"
                       :data-testid="`reauthorize-key-${k.id}`"
+                      aria-label="重新授权"
                       @click="emit('reauthorize', props.providerName, k.id)"
                     >
-                      <Icons name="repeat" size="12" class="stroke-[2.2]" />
-                      重新授权
+                      <Icons name="repeat" size="13" class="stroke-[2.2]" />
                     </button>
                   </UiTooltip>
                 </div>
