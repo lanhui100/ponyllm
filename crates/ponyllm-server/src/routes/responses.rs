@@ -15,7 +15,13 @@ use crate::extractors::{format_request_snippet, AppJson};
 use crate::routes::chat::{inject_routing_headers, inject_telemetry_headers};
 use crate::routes::models::ParsedRequestModel;
 use crate::state::AppState;
-use crate::streaming::{anthropic_sse_to_responses_stream, chat_sse_to_responses_stream, extract_usage_tokens, passthrough_sse, stall_guard, wrap_telemetry_stream, StreamFailureContext, DEFAULT_TAIL_STALL_IDLE};
+use crate::streaming::{
+    anthropic_sse_to_responses_stream, antigravity_sse_to_openai_stream,
+    chat_sse_to_responses_stream, collect_antigravity_sse_to_json, empty_stop_retry_delay,
+    extract_usage_tokens, is_transient_empty_stop_error, passthrough_sse, stall_guard,
+    wrap_telemetry_stream, StreamFailureContext, DEFAULT_TAIL_STALL_IDLE, MIN_EMPTY_STOP_ATTEMPTS,
+};
+use ponyllm_protocol::translator::chat_to_antigravity_request;
 
 pub async fn handle_responses(
     State(state): State<Arc<AppState>>,
@@ -137,30 +143,7 @@ pub async fn handle_responses(
             }
         }
     }
-    // B6: Antigravity has no /v1/responses translation. Mixed routings
-    // simply skip those targets (failover covers them); an all-Antigravity
-    // routing set gets an explicit 501 instead of a misleading aggregated
-    // error after silently skipping every target.
-    if !targets.is_empty()
-        && targets
-            .iter()
-            .all(|t| t.upstream_protocol == ponyllm_core::pool::UpstreamProtocol::Antigravity)
-    {
-        return (
-            StatusCode::NOT_IMPLEMENTED,
-            Json(serde_json::json!({
-                "error": {
-                    "message": format!(
-                        "Model '{}' is served by Antigravity providers only, which do not support /v1/responses yet. Use /v1/chat/completions or /v1/messages.",
-                        requested_raw_model
-                    ),
-                    "type": "invalid_request_error",
-                    "code": "protocol_unsupported"
-                }
-            })),
-        )
-            .into_response();
-    }
+    // Antigravity is now bridged via Responses -> Chat -> Antigravity.
     let routing_ms = routing_start.elapsed().as_secs_f64() * 1000.0;
     stages.lock().routing_ms = Some(routing_ms);
     state.emit(
@@ -295,8 +278,34 @@ pub async fn handle_responses(
                 (target.responses_url(), val)
             }
             ponyllm_core::pool::UpstreamProtocol::Antigravity => {
-                last_error = format!("Antigravity protocol does not support /v1/responses endpoint yet for provider {}", provider_name);
-                continue;
+                let url = target.antigravity_url(is_streaming);
+                let thinking = requested_thinking.map(|_| effective_thinking);
+                let (ag_project, ag_salt) = state
+                    .peek_antigravity_identity(&provider_name)
+                    .unwrap_or_else(|| ("aicode-consumers".to_string(), String::new()));
+                // First translate Responses request to Chat request, then to Antigravity envelope
+                let mut chat_req = match ponyllm_protocol::translator::responses_to_chat_request(&target_req) {
+                    Ok(cr) => cr,
+                    Err(e) => {
+                        last_error = format!("Translation error (Responses->Chat) for {}: {}", provider_name, e);
+                        continue;
+                    }
+                };
+                if effective_thinking.is_active() {
+                    chat_req.reasoning_effort = Some(effective_thinking);
+                } else {
+                    chat_req.reasoning_effort = None;
+                    chat_req.extra.remove("reasoning_effort");
+                    chat_req.extra.remove("thinking");
+                }
+                let val = match chat_to_antigravity_request(&chat_req, &target.physical_model, &ag_project, thinking, &ag_salt) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        last_error = format!("Translation error (Chat->Antigravity) for {}: {}", provider_name, e);
+                        continue;
+                    }
+                };
+                (url, val)
             }
         };
 
@@ -370,9 +379,16 @@ pub async fn handle_responses(
                             axum::body::Body::from_stream(monitored)
                         }
                         ponyllm_core::pool::UpstreamProtocol::Antigravity => {
-                            // Filtered at translation time above; kept to
-                            // keep the match exhaustive, never reached.
-                            unreachable!("Antigravity targets skip /v1/responses at translation time");
+                            let chat_stream = antigravity_sse_to_openai_stream(
+                                stall_guard(upstream_resp.bytes_stream(), DEFAULT_TAIL_STALL_IDLE),
+                                &target.physical_model,
+                            );
+                            let stream = chat_sse_to_responses_stream(
+                                chat_stream,
+                                &target.physical_model,
+                            );
+                            let monitored = wrap_telemetry_stream(stream, failure_ctx);
+                            axum::body::Body::from_stream(monitored)
                         }
                     };
                     let mut resp = axum::response::Response::new(body);
@@ -395,7 +411,45 @@ pub async fn handle_responses(
             }
         }
 
-        let (upstream_result, winning_key_id) = if ponyllm_core::executor::zen_free_tier_forces_upstream_stream(
+        let (upstream_result, winning_key_id) = if target.upstream_protocol == ponyllm_core::pool::UpstreamProtocol::Antigravity {
+            let max_empty_stop_attempts = executor
+                .max_retries
+                .max(pool.total_key_count())
+                .max(MIN_EMPTY_STOP_ATTEMPTS);
+            let mut collect_attempt = 0usize;
+            loop {
+                collect_attempt += 1;
+                match executor.execute_stream_request_with_timing_and_key(&target_url, &req_val).await {
+                    Ok((resp, _instant, kid)) => {
+                        let raw_stream = resp.bytes_stream();
+                        match collect_antigravity_sse_to_json(raw_stream).await {
+                            Ok(v) => break (Ok(v), Some(kid)),
+                            Err(e) if is_transient_empty_stop_error(&e) && collect_attempt < max_empty_stop_attempts => {
+                                let delay = empty_stop_retry_delay(collect_attempt);
+                                tracing::warn!(
+                                    provider = %provider_name,
+                                    error = %e,
+                                    collect_attempt,
+                                    max_empty_stop_attempts,
+                                    backoff_ms = delay.as_millis() as u64,
+                                    "Non-stream Antigravity collect hit transient empty STOP in Responses route; backing off and retrying"
+                                );
+                                tokio::time::sleep(delay).await;
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    provider = %provider_name,
+                                    error = %e,
+                                    "Antigravity stream collection failed in Responses route"
+                                );
+                                break (Err(CoreError::Internal(format!("Antigravity stream collect failed: {}", e))), Some(kid));
+                            }
+                        }
+                    }
+                    Err(e) => break (Err(e), None),
+                }
+            }
+        } else if ponyllm_core::executor::zen_free_tier_forces_upstream_stream(
             &provider_name,
             &target_url,
             &target.physical_model,
@@ -498,9 +552,29 @@ pub async fn handle_responses(
                     }
                     ponyllm_core::pool::UpstreamProtocol::Responses => resp_val,
                     ponyllm_core::pool::UpstreamProtocol::Antigravity => {
-                        // Filtered at translation time above; kept to keep
-                        // the match exhaustive, never reached.
-                        unreachable!("Antigravity targets skip /v1/responses at translation time");
+                        let chat_resp_val = ponyllm_protocol::translator::antigravity_to_chat_response(&resp_val, &target.physical_model);
+                        let chat_resp: ponyllm_protocol::openai::chat::ChatCompletionResponse =
+                            match serde_json::from_value(chat_resp_val) {
+                                Ok(cr) => cr,
+                                Err(e) => {
+                                    last_error = format!("Invalid Antigravity translated Chat response from {}: {}", provider_name, e);
+                                    continue;
+                                }
+                            };
+                        let resp_obj = match ponyllm_protocol::translator::chat_to_responses_response(&chat_resp) {
+                            Ok(ro) => ro,
+                            Err(e) => {
+                                last_error = format!("Translation error: {}", e);
+                                continue;
+                            }
+                        };
+                        match serde_json::to_value(&resp_obj) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                last_error = format!("Serialization error: {}", e);
+                                continue;
+                            }
+                        }
                     }
                 };
                 let latency = start_time.elapsed();

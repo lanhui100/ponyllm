@@ -68,3 +68,50 @@ fn test_response_stream_event() {
         panic!("Expected TextDelta event");
     }
 }
+
+#[test]
+fn test_response_input_complex_items_and_reasoning_and_custom() {
+    let req_json = json!({
+        "model": "gpt-5",
+        "input": [
+            {
+                "type": "message",
+                "role": "user",
+                "content": "Hello"
+            },
+            {
+                "type": "reasoning",
+                "content": [
+                    {
+                        "type": "thought",
+                        "thought": "Thinking process step 1"
+                    }
+                ]
+            },
+            {
+                "type": "item_reference",
+                "id": "ref_987654"
+            },
+            {
+                "type": "unknown_future_item",
+                "foo": "bar",
+                "nested": {
+                    "count": 42
+                }
+            }
+        ]
+    });
+
+    let req: Result<CreateResponseRequest, _> = serde_json::from_value(req_json);
+    assert!(req.is_ok(), "Should successfully deserialize input containing reasoning, item_reference, and arbitrary custom items");
+    let req = req.unwrap();
+    if let ResponseInput::Items(items) = req.input {
+        assert_eq!(items.len(), 4);
+        assert!(matches!(items[0], ResponseInputItem::Message { .. }));
+        assert!(matches!(items[1], ResponseInputItem::Reasoning { .. }));
+        assert!(matches!(items[2], ResponseInputItem::ItemReference { .. }));
+        assert!(matches!(items[3], ResponseInputItem::Custom(_)));
+    } else {
+        panic!("Expected ResponseInput::Items");
+    }
+}

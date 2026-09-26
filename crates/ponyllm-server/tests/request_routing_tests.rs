@@ -1361,6 +1361,86 @@ async fn test_responses_entry_translates_chat_native_upstream() {
 }
 
 #[tokio::test]
+async fn test_responses_entry_translates_antigravity_upstream() {
+    let mock = Router::new().route(
+        "/v1internal:streamGenerateContent",
+        post(|Json(req): Json<serde_json::Value>| async move {
+            assert!(req.get("request").is_some(), "expected Antigravity shape, got: {}", req);
+            let sse_data = "data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Hello from Antigravity via Responses!\"}],\"role\":\"model\"},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":10,\"candidatesTokenCount\":6,\"totalTokenCount\":16}}}\n\n";
+            axum::response::Response::builder()
+                .header("content-type", "text/event-stream")
+                .body(axum::body::Body::from(sse_data))
+                .unwrap()
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, mock).await.unwrap();
+    });
+
+    let pool = Arc::new(KeyPool::new("agy_prov", RoutingStrategy::RoundRobin));
+    pool.add_key(ApiKeyEntry::new("k1", "sk-test", 1, 10));
+    let mut config = GatewayConfig::default();
+    config.providers.insert(
+        "agy_prov".to_string(),
+        cross_protocol_provider(format!("http://{}", addr), "gemini-3.8-flash-high", UpstreamProtocol::Antigravity),
+    );
+    let state = Arc::new(AppState::new(config));
+    state.register_pool("agy_prov", pool);
+    let app = create_app(state);
+    let gw = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let gw_addr = gw.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(gw, app).await.unwrap();
+    });
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://{}/v1/responses", gw_addr))
+        .json(&json!({
+            "model": "gemini-3.8-flash-high",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": "Hi from Responses client"
+                }
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200, "Antigravity provider should now succeed for /v1/responses");
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["object"], "response");
+    assert_eq!(body["status"], "completed");
+    assert_eq!(
+        body["output"][0]["content"][0]["text"],
+        "Hello from Antigravity via Responses!"
+    );
+    assert_eq!(body["model"], "gemini-3.8-flash-high");
+
+    // Also test streaming responses through Antigravity
+    let stream_resp = client
+        .post(format!("http://{}/v1/responses", gw_addr))
+        .json(&json!({
+            "model": "gemini-3.8-flash-high",
+            "stream": true,
+            "input": "Stream hi"
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(stream_resp.status(), 200);
+    assert_eq!(stream_resp.headers().get("content-type").unwrap().to_str().unwrap(), "text/event-stream");
+    let stream_text = stream_resp.text().await.unwrap();
+    assert!(stream_text.contains("response.created") || stream_text.contains("response.output_item.added") || stream_text.contains("response.output_text.delta"));
+}
+
+#[tokio::test]
 async fn test_messages_entry_translates_responses_native_upstream() {
     let mock = Router::new().route(
         "/v1/responses",

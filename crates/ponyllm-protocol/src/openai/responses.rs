@@ -215,6 +215,23 @@ pub enum ResponseInputItem {
         call_id: String,
         output: String,
     },
+    Reasoning {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        status: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        content: Option<Vec<ResponseContentPart>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        summary: Option<Vec<ResponseContentPart>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        encrypted_content: Option<String>,
+    },
+    ItemReference {
+        id: String,
+    },
+    #[serde(untagged)]
+    Custom(serde_json::Value),
 }
 
 impl<'de> Deserialize<'de> for ResponseInputItem {
@@ -252,13 +269,35 @@ impl<'de> Deserialize<'de> for ResponseInputItem {
                 call_id: String,
                 output: String,
             },
+            Reasoning {
+                #[serde(default)]
+                id: Option<String>,
+                #[serde(default)]
+                status: Option<String>,
+                #[serde(default)]
+                content: Option<Vec<ResponseContentPart>>,
+                #[serde(default)]
+                summary: Option<Vec<ResponseContentPart>>,
+                #[serde(default)]
+                encrypted_content: Option<String>,
+            },
+            ItemReference {
+                id: String,
+            },
         }
 
-        match serde_json::from_value::<StandardItem>(val) {
+        match serde_json::from_value::<StandardItem>(val.clone()) {
             Ok(StandardItem::Message { role, content }) => Ok(ResponseInputItem::Message { role, content }),
             Ok(StandardItem::FunctionCall { call_id, name, arguments }) => Ok(ResponseInputItem::FunctionCall { call_id, name, arguments }),
             Ok(StandardItem::FunctionResponse { call_id, output }) => Ok(ResponseInputItem::FunctionResponse { call_id, output }),
-            Err(e) => Err(serde::de::Error::custom(format!("Invalid response input item: {}", e))),
+            Ok(StandardItem::Reasoning { id, status, content, summary, encrypted_content }) => {
+                Ok(ResponseInputItem::Reasoning { id, status, content, summary, encrypted_content })
+            }
+            Ok(StandardItem::ItemReference { id }) => Ok(ResponseInputItem::ItemReference { id }),
+            Err(_) => {
+                // Keep arbitrary custom/extension input items intact instead of rejecting with 400
+                Ok(ResponseInputItem::Custom(val))
+            }
         }
     }
 }

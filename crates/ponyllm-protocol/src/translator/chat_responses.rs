@@ -20,6 +20,9 @@ pub fn responses_request_has_text(req: &CreateResponseRequest) -> bool {
         ResponseInputItem::Message { content, .. } => content.is_non_empty(),
         ResponseInputItem::FunctionResponse { output, .. } => !output.trim().is_empty(),
         ResponseInputItem::FunctionCall { .. } => false,
+        ResponseInputItem::Reasoning { .. } => false,
+        ResponseInputItem::ItemReference { .. } => false,
+        ResponseInputItem::Custom(_) => false,
     })
 }
 
@@ -295,6 +298,38 @@ pub fn responses_to_chat_request(req: &CreateResponseRequest) -> Result<ChatComp
                             tool_call_id: call_id.clone(),
                         }));
                     }
+                    ResponseInputItem::Reasoning { content, summary, .. } => {
+                        let mut thought_texts = Vec::new();
+                        if let Some(parts) = content {
+                            for p in parts {
+                                match p {
+                                    ResponseContentPart::Thought { thought } => thought_texts.push(thought.clone()),
+                                    ResponseContentPart::Reasoning { reasoning } => thought_texts.push(reasoning.clone()),
+                                    ResponseContentPart::Text { text } => thought_texts.push(text.clone()),
+                                    _ => {}
+                                }
+                            }
+                        }
+                        if let Some(parts) = summary {
+                            for p in parts {
+                                match p {
+                                    ResponseContentPart::Thought { thought } => thought_texts.push(thought.clone()),
+                                    ResponseContentPart::Reasoning { reasoning } => thought_texts.push(reasoning.clone()),
+                                    ResponseContentPart::Text { text } => thought_texts.push(text.clone()),
+                                    _ => {}
+                                }
+                            }
+                        }
+                        if !thought_texts.is_empty() {
+                            flush_calls(&mut messages, &mut pending_calls);
+                            messages.push(ChatMessage::Assistant(AssistantMessage {
+                                content: Some(MessageContent::Text(format!("<thought>{}</thought>", thought_texts.join("\n")))),
+                                ..Default::default()
+                            }));
+                        }
+                    }
+                    ResponseInputItem::ItemReference { .. } => {}
+                    ResponseInputItem::Custom(_) => {}
                 }
             }
             flush_calls(&mut messages, &mut pending_calls);

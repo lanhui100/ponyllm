@@ -224,6 +224,42 @@ pub fn responses_to_anthropic_request(req: &CreateResponseRequest) -> Result<Mes
                             cache_control: None,
                         });
                     }
+                    ResponseInputItem::Reasoning { content, summary, .. } => {
+                        let mut thought_texts = Vec::new();
+                        if let Some(parts) = content {
+                            for p in parts {
+                                match p {
+                                    ResponseContentPart::Thought { thought } => thought_texts.push(thought.clone()),
+                                    ResponseContentPart::Reasoning { reasoning } => thought_texts.push(reasoning.clone()),
+                                    ResponseContentPart::Text { text } => thought_texts.push(text.clone()),
+                                    _ => {}
+                                }
+                            }
+                        }
+                        if let Some(parts) = summary {
+                            for p in parts {
+                                match p {
+                                    ResponseContentPart::Thought { thought } => thought_texts.push(thought.clone()),
+                                    ResponseContentPart::Reasoning { reasoning } => thought_texts.push(reasoning.clone()),
+                                    ResponseContentPart::Text { text } => thought_texts.push(text.clone()),
+                                    _ => {}
+                                }
+                            }
+                        }
+                        if !thought_texts.is_empty() {
+                            flush_use(&mut messages, &mut pending_use);
+                            flush_result(&mut messages, &mut pending_result);
+                            messages.push(AnthropicMessage {
+                                role: AnthropicRole::Assistant,
+                                content: AnthropicContent::Blocks(vec![AnthropicContentBlock::Thinking {
+                                    thinking: thought_texts.join("\n"),
+                                    signature: None,
+                                }]),
+                            });
+                        }
+                    }
+                    ResponseInputItem::ItemReference { .. } => {}
+                    ResponseInputItem::Custom(_) => {}
                 }
             }
             flush_use(&mut messages, &mut pending_use);
