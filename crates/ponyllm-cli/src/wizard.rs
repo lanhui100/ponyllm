@@ -271,6 +271,7 @@ pub fn run_interactive_init(output_path: &str) -> Result<(), Box<dyn std::error:
             antigravity_refresh_interval_secs: 86400,
         },
         providers,
+        commercial: Default::default(),
         config_version: 0,
     };
 

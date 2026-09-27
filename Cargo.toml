@@ -6,6 +6,7 @@ members = [
     "crates/ponyllm-config",
     "crates/ponyllm-server",
     "crates/ponyllm-cli",
+    "crates/ponyllm-billing",
     "crates/ponyllm",
 ]
 
@@ -53,11 +54,16 @@ sha2 = "0.10"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1.13", features = ["v4", "serde"] }
 
+# Commercial persistence (Stage 1). PostgreSQL is the only financial source of
+# truth; no ORM: the migration runner uses the low-level driver directly.
+tokio-postgres = "0.7"
+
 # Internal workspace crates
 ponyllm-protocol = { path = "crates/ponyllm-protocol" }
 ponyllm-core = { path = "crates/ponyllm-core" }
 ponyllm-config = { path = "crates/ponyllm-config" }
 ponyllm-server = { path = "crates/ponyllm-server" }
+ponyllm-billing = { path = "crates/ponyllm-billing" }
 ponyllm = { path = "crates/ponyllm" }
 
 [profile.dev]

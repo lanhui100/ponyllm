@@ -317,6 +317,18 @@ bash skills/ponyllm-quota/install.sh   # 装到 ~/.agents/skills/ponyllm-quota�
 
 ---
 
+## 💳 商业化（多租户预付费底座）
+
+默认单运营者形态零改动；商业 profile 为显式 opt-in（`[commercial] enabled = false`）。
+当前已落地：租户身份与 `u128` 微美元账本（`ponyllm-billing` + `migrations/commercial/`）、
+PostgreSQL RLS 强制隔离与追加写不变式、失败即关的门禁脚本（`scripts/commercial/`）
+与账本对账工具。Web 控制台仍为单运营者视图，多租户租户端/管理员界面尚未开发；
+支付网关、托管 SaaS、SLA 与合规仍在范围外。详见
+[`docs/commercial-stage0-rfc.md`](docs/commercial-stage0-rfc.md) 与
+[`crates/ponyllm-billing/README.md`](crates/ponyllm-billing/README.md)。
+
+---
+
 ## 🏛 架构与工程治理
 
 本项目遵循 [ponygo](https://github.com/lanhui100/ponygo) 软件工程治理体系，已达 **L2（门禁立法级）**，建立三级物理门禁矩阵：

@@ -4,6 +4,8 @@
 //! re-export shim (`ponyllm_cli::config`) so TUI/wizard imports are unchanged;
 //! the server crate consumes it through the `ConfigStore` boundary (WEB-03).
 
+pub mod commercial;
 pub mod config;
 
+pub use commercial::*;
 pub use config::*;

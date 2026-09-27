@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# Verify the release evidence signature with the repository trust anchor.
+# This performs cryptographic Ed25519 verification; text markers are not enough.
+set -u
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+DEFAULT_PUBLIC_KEY="$PROJECT_ROOT/scripts/commercial/trust/release-evidence.pub"
+
+public_key="$DEFAULT_PUBLIC_KEY"
+manifest=""
+signature=""
+attestation=""
+
+usage() {
+  printf 'usage: %s --public-key PATH --manifest PATH --signature PATH [--attestation PATH]\n' "${0##*/}" >&2
+}
+
+while (($#)); do
+  case "$1" in
+    --public-key) (($# >= 2)) || { usage; exit 2; }; public_key=$2; shift 2 ;;
+    --manifest) (($# >= 2)) || { usage; exit 2; }; manifest=$2; shift 2 ;;
+    --signature) (($# >= 2)) || { usage; exit 2; }; signature=$2; shift 2 ;;
+    --attestation) (($# >= 2)) || { usage; exit 2; }; attestation=$2; shift 2 ;;
+    *) usage; exit 2 ;;
+  esac
+done
+
+[[ -n "$manifest" && -n "$signature" ]] || { usage; exit 2; }
+
+# Trust anchor and inputs must be regular files inside the fixed workspace paths.
+[[ -n "$attestation" ]] || attestation="$PROJECT_ROOT/.security-evidence/attestation.sha256"
+for path in "$public_key" "$manifest" "$signature" "$attestation"; do
+  [[ -f "$path" && ! -L "$path" ]] || { printf 'FAIL: missing or symlinked input: %s\n' "$path" >&2; exit 1; }
+done
+case "$public_key" in "$PROJECT_ROOT/scripts/commercial/trust/release-evidence.pub") ;; *) printf 'FAIL: untrusted public-key path\n' >&2; exit 1 ;; esac
+case "$manifest" in "$PROJECT_ROOT/.security-evidence/manifest.sha256") ;; *) printf 'FAIL: manifest path is outside fixed evidence location\n' >&2; exit 1 ;; esac
+case "$signature" in "$PROJECT_ROOT/.security-evidence/manifest.sig") ;; *) printf 'FAIL: signature path is outside fixed evidence location\n' >&2; exit 1 ;; esac
+case "$attestation" in "$PROJECT_ROOT/.security-evidence/attestation.sha256") ;; *) printf 'FAIL: attestation path is outside fixed evidence location\n' >&2; exit 1 ;; esac
+
+command -v openssl >/dev/null 2>&1 || { printf 'FAIL: openssl is required for cryptographic verification\n' >&2; exit 1; }
+
+# OpenSSL's Ed25519 verifier checks the exact bytes of the manifest.
+if ! openssl pkeyutl -verify -pubin -inkey "$public_key" -rawin -in "$manifest" -sigfile "$signature" >/dev/null 2>&1; then
+  printf 'FAIL: Ed25519 manifest signature verification failed\n' >&2
+  exit 1
+fi
+# The attestation must be cryptographically signed as a detached signature file
+# listed in the signed manifest; a textual signature field is never accepted.
+attestation_sig="$PROJECT_ROOT/.security-evidence/attestation.sig"
+[[ -f "$attestation_sig" && ! -L "$attestation_sig" ]] || { printf 'FAIL: attestation.sig is missing\n' >&2; exit 1; }
+if ! openssl pkeyutl -verify -pubin -inkey "$public_key" -rawin -in "$attestation" -sigfile "$attestation_sig" >/dev/null 2>&1; then
+  printf 'FAIL: Ed25519 attestation signature verification failed\n' >&2
+  exit 1
+fi
+printf 'Evidence manifest and attestation signatures verified cryptographically\n'
+exit 0

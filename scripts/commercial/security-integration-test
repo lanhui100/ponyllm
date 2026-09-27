@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# Repository-owned commercial security integration gate.
+# This runner intentionally fails closed when real app checks or signed evidence are absent.
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+readonly EVIDENCE_DIR="$PROJECT_ROOT/.security-evidence"
+readonly EXPECTED_REVISION="$(git -C "$PROJECT_ROOT" rev-parse HEAD 2>/dev/null || true)"
+readonly RUN_NONCE="$(date +%s)-$$"
+
+failures=0
+fail() {
+  failures=$((failures + 1))
+  printf 'FAIL: %s\n' "$1" >&2
+}
+
+printf '%s\n' '=== repository-owned commercial security integration tests ==='
+printf 'Project: %s\n' "$PROJECT_ROOT"
+printf 'Revision: %s\n' "${EXPECTED_REVISION:-<unknown>}"
+
+# The application boundary must be present; a checklist cannot certify an absent app.
+[[ -f "$PROJECT_ROOT/crates/ponyllm-server/src/app.rs" ]] || fail 'server application boundary is missing'
+[[ -d "$PROJECT_ROOT/crates/ponyllm-server/tests" ]] || fail 'server integration-test directory is missing'
+
+# These are source-owned security test suites, not caller-provided fixtures.
+for test_file in \
+  "$PROJECT_ROOT/crates/ponyllm-server/tests/auth_compat_p0_tests.rs" \
+  "$PROJECT_ROOT/crates/ponyllm-server/tests/proxy_routing_tests.rs" \
+  "$PROJECT_ROOT/crates/ponyllm-server/tests/quota_api_tests.rs"; do
+  [[ -f "$test_file" && ! -L "$test_file" ]] || fail "required security test file is missing: $test_file"
+done
+
+# Ensure the source actually contains assertions for the security boundaries.
+grep -Eq 'unknown.*fail|fail-fast|scope' "$PROJECT_ROOT/crates/ponyllm-server/tests/auth_compat_p0_tests.rs" \
+  || fail 'auth compatibility security assertions are missing'
+grep -Eq 'proxy|egress|private|loopback' "$PROJECT_ROOT/crates/ponyllm-server/tests/proxy_routing_tests.rs" \
+  || fail 'egress security assertions are missing'
+grep -Eq 'auth|unauthorized|quota' "$PROJECT_ROOT/crates/ponyllm-server/tests/quota_api_tests.rs" \
+  || fail 'tenant/auth quota security assertions are missing'
+
+# Run the repository-owned tests when all prerequisites exist. A compile/test failure is fatal.
+if (( failures == 0 )); then
+  if ! cargo test --manifest-path "$PROJECT_ROOT/Cargo.toml" -p ponyllm-server --tests --quiet; then
+    fail 'repository-owned ponyllm-server integration tests failed'
+  fi
+fi
+
+# Evidence must be produced by this repository run and bound to this revision/nonce.
+[[ -d "$EVIDENCE_DIR" && ! -L "$EVIDENCE_DIR" ]] || fail "security evidence directory is missing: $EVIDENCE_DIR"
+if (( failures == 0 )); then
+  for artifact in auth-matrix.md model-grant-idor.md ssrf-egress.md redirect-headers.md redaction-secret-scan.md liveness-commercial-readiness.md oauth-token-query.md backup-secret-scan.md manifest.sha256 manifest.sig attestation.sha256; do
+    [[ -s "$EVIDENCE_DIR/$artifact" && ! -L "$EVIDENCE_DIR/$artifact" ]] || fail "required signed evidence artifact is missing: $EVIDENCE_DIR/$artifact"
+  done
+  [[ -n "$EXPECTED_REVISION" ]] || fail 'tested revision is unavailable'
+  grep -Eq "^tested_revision=${EXPECTED_REVISION//\/\\}$" "$EVIDENCE_DIR"/*.md "$EVIDENCE_DIR/attestation.sha256" 2>/dev/null \
+    || fail 'evidence is not bound to the tested revision'
+  grep -Eq "^run_nonce=${RUN_NONCE//\/\\}$" "$EVIDENCE_DIR"/*.md 2>/dev/null \
+    || fail 'evidence is not bound to this run nonce'
+fi
+
+if (( failures != 0 )); then
+  printf 'SECURITY INTEGRATION: NOT PASSED (%d failure(s); fail-closed)\n' "$failures" >&2
+  exit 1
+fi
+printf 'SECURITY INTEGRATION: tests and evidence prerequisites passed\n'
+exit 0

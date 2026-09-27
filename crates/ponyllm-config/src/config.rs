@@ -12,12 +12,22 @@ use ponyllm_protocol::common::ReasoningEffort;
 use ponyllm_core::telemetry::FlightRecorder;
 use serde::{Deserialize, Serialize};
 
+use crate::commercial::CommercialConfig;
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ConfigFile {
     #[serde(default)]
     pub gateway: GatewaySection,
     #[serde(default)]
     pub providers: HashMap<String, ProviderSection>,
+    /// Opt-in commercial profile (`[commercial]`, Stage 1 scaffolding).
+    /// Absent in old TOMLs deserializes to `CommercialConfig::default()` with
+    /// `enabled = false` (zero migration). Nothing consumes it at runtime yet;
+    /// paid inference stays hard-disabled until Stage 2. Callers must gate on
+    /// `commercial.validate()` before enabling. See `crate::commercial` for the
+    /// fail-closed rules and the no-persisted-secret contract.
+    #[serde(default)]
+    pub commercial: CommercialConfig,
     /// Monotonic version bumped on every successful admin `ConfigStore::save`
     /// (WEB-03: strategy PUT echoes it; WEB-06 builds If-Match on it). Old
     /// TOMLs without the key deserialize as 0 and are migrated on next save.
@@ -835,18 +845,26 @@ impl ConfigFile {
         if resolved.exists() {
             let content = fs::read_to_string(&resolved)?;
             let cfg: ConfigFile = toml::from_str(&content)?;
+            cfg.commercial.validate()?;
             Ok(cfg)
         } else if let Some(p) = path {
             Err(format!("指定的配置文件 '{}' 不存在，请检查路径或执行 'ponyllm init' 生成配置", p).into())
         } else {
             let content = generate_sample_config();
             let cfg: ConfigFile = toml::from_str(content)?;
+            cfg.commercial.validate()?;
             Ok(cfg)
         }
     }
 
     /// Save configuration atomically (write to temp file, sync, then rename)
     pub fn save_to_path(&self, path: &str) -> std::io::Result<()> {
+        if let Err(e) = self.commercial.validate() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("commercial configuration validation failed: {}", e),
+            ));
+        }
         #[cfg(unix)]
         use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 

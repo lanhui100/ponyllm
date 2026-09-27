@@ -1,0 +1,20 @@
+[package]
+name = "ponyllm-billing"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Commercial Stage 1 persistence foundation: integer micro-USD money, fail-closed forward-only PostgreSQL migrations, tenant/RLS schema"
+
+[dependencies]
+thiserror = { workspace = true }
+sha2 = { workspace = true }
+chrono = { workspace = true }
+tokio = { workspace = true }
+tokio-postgres = { workspace = true, features = ["with-chrono-0_4", "with-uuid-1"] }
+serde = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+uuid = { workspace = true }
