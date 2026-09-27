@@ -47,9 +47,10 @@ Kubernetes `NetworkPolicy` 只对 Pod 流量生效，不能对 selector-less Ser
 - **重建 k8s secret**：必须按 `deploy/ponyllm-config.example.toml` 的接线形态
   （route-first 路径 + `proxy=` 凭据，无 `pony_` 段、无 URL userinfo），否则
   407/404 复发。
-- **`pproxy upgrade` 禁令（临时）**：修复（commit 70341aa）尚未发布到 release
-  渠道前，腾讯节点不得执行 `pproxy upgrade`（会把修复版二进制换成未修复的
-  发布版，空 body bug 回归）。发布 `cli-v≥0.3.56` 后解除。
+- **`pproxy upgrade` 已解禁（2026-09-27）**：修复版 CLI 已发布（`cli-v0.3.56`，
+  release 含 `pproxy-linux-amd64` 等）；腾讯节点已升级至官方发布版（sha256
+  `a5ed9904…`，见恢复脚本 EXPECTED_SHA）。此后 `pproxy upgrade` 只会拿到含修复
+  的版本；若校验和不匹配，恢复脚本会提示按发布版重新基线。
 
 ## 回滚
 

@@ -11,7 +11,7 @@
 # 任意一步失败以非零退出，可重复执行（幂等）。
 set -euo pipefail
 
-EXPECTED_SHA="41779d2ec43a39c70cafca9b63786694fdbb6fb9038c42500a58ba182b9aad56"
+EXPECTED_SHA="a5ed9904bc201ac364daac16606fbddac80ddebb29ba3cc29a4b48823cfebae6"
 BIN="/home/ubuntu/.local/bin/pproxy"
 ADMIN="http://127.0.0.1:8900"
 CONFIG="/home/ubuntu/.pony/config.toml"
