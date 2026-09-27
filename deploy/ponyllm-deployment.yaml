@@ -57,7 +57,7 @@ spec:
         - name: aliyun-registry
       initContainers:
         - name: init-config-and-snapshot
-          image: crpi-3cfwwtc3um8h6d3q.cn-hangzhou.personal.cr.aliyuncs.com/job-copilot/api-v2@sha256:932c410e8898948e29b67d82548f77f8255bfd80bed65fa26d9a2be572fb4258
+          image: crpi-3cfwwtc3um8h6d3q.cn-hangzhou.personal.cr.aliyuncs.com/job-copilot/api-v2@sha256:ba88c9d29878189e7cb877edaf97a65a4508c11e27d43b13b3c5966864746aab
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -88,7 +88,7 @@ spec:
               mountPath: /tmp
       containers:
         - name: ponyllm
-          image: crpi-3cfwwtc3um8h6d3q.cn-hangzhou.personal.cr.aliyuncs.com/job-copilot/api-v2@sha256:932c410e8898948e29b67d82548f77f8255bfd80bed65fa26d9a2be572fb4258
+          image: crpi-3cfwwtc3um8h6d3q.cn-hangzhou.personal.cr.aliyuncs.com/job-copilot/api-v2@sha256:ba88c9d29878189e7cb877edaf97a65a4508c11e27d43b13b3c5966864746aab
           imagePullPolicy: IfNotPresent
           env:
             - name: PONYLLM_PROBE_ALLOWLIST
