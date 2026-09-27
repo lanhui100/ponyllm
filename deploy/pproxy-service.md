@@ -23,13 +23,6 @@ Kubernetes `NetworkPolicy` 只对 Pod 流量生效，不能对 selector-less Ser
 
 如果 pproxy 只能监听 `0.0.0.0:8899`，阶段二不得宣称已完成隔离；须先收紧监听或补上节点防火墙 ACL。
 
-## 验收
-
-1. `kubectl get svc,endpoints,endpointslice -n ponyllm pproxy-host`：服务无 selector，Endpoint 与 EndpointSlice 均为 `100.105.241.39:8899`。
-2. 从实际 ponyllm Pod 网络命名空间通过 `pproxy-host.ponyllm.svc.cluster.local:8899` 请求一个境外上游；返回上游 `401`（而不是连接拒绝/超时）表示代理链路已通，不能把 200 当作代理成功。
-3. 从非授权 namespace 的测试 Pod 访问代理必须被 pproxy 鉴权或节点 ACL 拒绝。若没有可执行的拒绝测试，阶段二只标记“连通已验证，租户隔离待补”，不得标记完全通过。
-4. 代理故障时 ponyllm 的国内 provider 仍应保持直连，不得依赖全局代理。
-
 ## 路径路由模式（opencode-zen）接线事实（2026-09-27 实测）
 
 除 antigravity 的 CONNECT 代理模式外，opencode-zen 走**路径路由直连模式**，接线要求（全部实测锁定）：
@@ -45,6 +38,18 @@ Kubernetes `NetworkPolicy` 只对 Pod 流量生效，不能对 selector-less Ser
 3. muse-spark 端到端：`curl … https://tokens.ponyjob.top/v1/chat/completions`（model `muse-spark-1.3-contributor-free`）返回 200 且带完整回复；antigravity 模型回归 200。
 4. 从非授权 namespace 的测试 Pod 访问代理必须被 pproxy 鉴权或节点 ACL 拒绝。若没有可执行的拒绝测试，阶段二只标记"连通已验证，租户隔离待补"，不得标记完全通过。
 5. 代理故障时 ponyllm 的国内 provider 仍应保持直连，不得依赖全局代理。
+
+## 恢复与防降级（2026-09-27）
+
+- **腾讯节点一键恢复**：`bash deploy/pproxy-tencent-restore.sh`（在腾讯节点执行）——
+  幂等校验二进制 sha256（防 `pproxy upgrade` 降级）、补注册 `opencode` 路由、
+  补 `proxy_secret` / systemd 边缘 URL、健康检查。任一失败非零退出。
+- **重建 k8s secret**：必须按 `deploy/ponyllm-config.example.toml` 的接线形态
+  （route-first 路径 + `proxy=` 凭据，无 `pony_` 段、无 URL userinfo），否则
+  407/404 复发。
+- **`pproxy upgrade` 禁令（临时）**：修复（commit 70341aa）尚未发布到 release
+  渠道前，腾讯节点不得执行 `pproxy upgrade`（会把修复版二进制换成未修复的
+  发布版，空 body bug 回归）。发布 `cli-v≥0.3.56` 后解除。
 
 ## 回滚
 

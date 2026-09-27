@@ -1,0 +1,34 @@
+# ponyllm-config.example.toml — k8s secret `ponyllm-config` 的规范化参考片段
+#
+# 用途: 任何人重建 k8s secret（`kubectl create secret generic ponyllm-config \
+#   --from-file=ponyllm.toml=...`）时必须使用本文件的接线形态，否则 407/404 复发。
+# 完整 config 由 deploy 流程提供；这里只锁定**本轮的硬性接线不变量**。
+#
+# 不变量（2026-09-27 实测锁定，详见 deploy/pproxy-service.md）:
+#   1. opencode-zen 走路径路由直连模式: base_url 路由名打头，**不带 pony_ 租户段**
+#      （腾讯 serve 回环免检路径把首段当路由名，pony_ 前缀恒 404）。
+#   2. 客户端凭据只能放 provider `proxy=` 字段（reqwest 以 Proxy-Authorization
+#      携带，追加末位恰好通过 forwarder 解析）；**禁止**写在 base_url 的 URL
+#      userinfo（直连模式 forwarder 不认，恒 407）。
+#   3. 腾讯节点必须已注册 opencode 路由 + vercel 边缘（见 pproxy-tencent-restore.sh）。
+
+[providers.opencode-zen]
+# <PPROXY_CLIENT_TOKEN> 与腾讯节点 PPROXY_CLIENT_TOKEN 同值（当前 0d1fa1ac…，
+# 轮转时同步更新）
+base_url = "http://pproxy-host.ponyllm.svc:8899/opencode/zen/v1"
+proxy = "http://user:<PPROXY_CLIENT_TOKEN>@pproxy-host.ponyllm.svc:8899"
+default_model = "muse-spark-1.3-contributor-free"
+strategy = "round_robin"
+billing_mode = "metered"
+input_price = 0.0
+cached_price = 0.0
+output_price = 0.0
+models = [
+    "mimo-v2.5-free",
+    "muse-spark-1.3-contributor-free",
+]
+default_protocol = "responses"
+
+# antigravity 走 CONNECT 代理模式，proxy= 凭据形态不变（参照 live secret）
+# [providers.antigravity]
+# proxy = "http://user:<PPROXY_CLIENT_TOKEN>@pproxy-host.ponyllm.svc:8899"
