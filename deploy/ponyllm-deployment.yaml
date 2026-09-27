@@ -28,7 +28,10 @@ metadata:
 spec:
   replicas: 1
   strategy:
-    type: Recreate
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
   selector:
     matchLabels:
       app.kubernetes.io/name: ponyllm
@@ -39,7 +42,9 @@ spec:
         app.kubernetes.io/name: ponyllm
         app.kubernetes.io/component: gateway
     spec:
-      terminationGracePeriodSeconds: 360
+      # 60s 足够排空多数在途请求；长请求（upstream_timeout 1200s）会被截断，
+      # 由客户端重试兜底。360s 曾因 Recreate 导致每次重启业务中断 3-6 分钟。
+      terminationGracePeriodSeconds: 60
       automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
@@ -52,7 +57,7 @@ spec:
         - name: aliyun-registry
       initContainers:
         - name: init-config-and-snapshot
-          image: crpi-3cfwwtc3um8h6d3q.cn-hangzhou.personal.cr.aliyuncs.com/job-copilot/api-v2@sha256:f5e68cfa52ae97f8e01546aa9ae7cd01ac1c0b17bca2f6abb02a7174469cea66
+          image: crpi-3cfwwtc3um8h6d3q.cn-hangzhou.personal.cr.aliyuncs.com/job-copilot/api-v2@sha256:932c410e8898948e29b67d82548f77f8255bfd80bed65fa26d9a2be572fb4258
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -78,8 +83,11 @@ spec:
               mountPath: /tmp
       containers:
         - name: ponyllm
-          image: crpi-3cfwwtc3um8h6d3q.cn-hangzhou.personal.cr.aliyuncs.com/job-copilot/api-v2@sha256:f5e68cfa52ae97f8e01546aa9ae7cd01ac1c0b17bca2f6abb02a7174469cea66
+          image: crpi-3cfwwtc3um8h6d3q.cn-hangzhou.personal.cr.aliyuncs.com/job-copilot/api-v2@sha256:932c410e8898948e29b67d82548f77f8255bfd80bed65fa26d9a2be572fb4258
           imagePullPolicy: IfNotPresent
+          env:
+            - name: PONYLLM_PROBE_ALLOWLIST
+              value: "pproxy-host.ponyllm.svc,pproxy-host.ponyllm.svc.cluster.local"
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
