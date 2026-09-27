@@ -1,0 +1,34 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ponyllm-egress-lockdown
+  namespace: ponyllm
+  labels:
+    app.kubernetes.io/name: ponyllm
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: ponyllm
+  policyTypes:
+    - Egress
+  egress:
+    # 1. 允许集群内 DNS 解析
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    # 2. 允许集群内相互通信与监控抓取
+    - to:
+        - namespaceSelector: {}
+    # 3. 允许出海与公网大模型访问，严格禁止访问腾讯云 IMDS 实例元数据 (169.254.0.0/16)
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 169.254.0.0/16

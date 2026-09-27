@@ -291,16 +291,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## 📊 额度查询（只读）
 
-agent 查"模型现在能不能用"的统一入口：`GET /api/admin/quota`（只读：GET 方法 + 无配置写 + 默认零上游调用）。
+agent 查"模型现在能不能用"的统一入口：`GET /api/admin/quota`（只读：GET 方法 + 无配置写 + 默认零上游调用）。支持本地回环调用与生产统一域名 `https://tokens.ponyjob.top` 接入。
 
 ```bash
 # 全快照（默认纯内存：key state + 冷却恢复时间）
-curl -s -H "Authorization: Bearer <网关api_key>" 'http://127.0.0.1:8080/api/admin/quota' | head -c 2000
+curl -s -H "Authorization: Bearer <网关api_key>" 'https://tokens.ponyjob.top/api/admin/quota' | head -c 2000
 # 按 provider / key 过滤
-curl -s -H "Authorization: Bearer <网关api_key>" 'http://127.0.0.1:8080/api/admin/quota?provider=deepseek'
-curl -s -H "Authorization: Bearer <网关api_key>" 'http://127.0.0.1:8080/api/admin/quota?key_id=<key-id>'
+curl -s -H "Authorization: Bearer <网关api_key>" 'https://tokens.ponyjob.top/api/admin/quota?provider=deepseek'
+curl -s -H "Authorization: Bearer <网关api_key>" 'https://tokens.ponyjob.top/api/admin/quota?key_id=<key-id>'
 # Antigravity 穿透刷新（走一次上游 quota 探针，失败自动降级 stale）
-curl -s -H "Authorization: Bearer <KEY>" 'http://127.0.0.1:8080/api/admin/quota?provider=antigravity&refresh=true'
+curl -s -H "Authorization: Bearer <KEY>" 'https://tokens.ponyjob.top/api/admin/quota?provider=antigravity&refresh=true'
 ```
 
 判读：`state=active/cooling_down/disabled` + `schedulable` + `cooldown_reset_at`（恢复时间）；

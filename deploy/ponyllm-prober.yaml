@@ -1,0 +1,82 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ponyllm-synthetic-prober
+  namespace: ponyllm
+  labels:
+    app.kubernetes.io/name: ponyllm
+    app.kubernetes.io/component: synthetic-prober
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ponyllm
+      app.kubernetes.io/component: synthetic-prober
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ponyllm
+        app.kubernetes.io/component: synthetic-prober
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: prober
+          image: crpi-3cfwwtc3um8h6d3q.cn-hangzhou.personal.cr.aliyuncs.com/job-copilot/api-v2@sha256:f5e68cfa52ae97f8e01546aa9ae7cd01ac1c0b17bca2f6abb02a7174469cea66
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          env:
+            - name: PROBE_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: ponyllm-probe-credentials
+                  key: api-key
+          command: ["python3", "/opt/prober/prober.py"]
+          ports:
+            - containerPort: 9115
+              name: metrics
+          resources:
+            requests:
+              cpu: 20m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          volumeMounts:
+            - name: script
+              mountPath: /opt/prober
+            - name: runtime-data
+              mountPath: /tmp
+      volumes:
+        - name: script
+          configMap:
+            name: ponyllm-prober-script
+        - name: runtime-data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ponyllm-synthetic-prober
+  namespace: ponyllm
+  labels:
+    app.kubernetes.io/name: ponyllm
+    app.kubernetes.io/component: synthetic-prober
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: ponyllm
+    app.kubernetes.io/component: synthetic-prober
+  ports:
+    - name: metrics
+      port: 9115
+      targetPort: 9115
+      protocol: TCP

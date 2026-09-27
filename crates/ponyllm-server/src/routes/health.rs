@@ -13,8 +13,6 @@ pub async fn handle_health(State(state): State<Arc<AppState>>) -> impl IntoRespo
         .unwrap_or(0);
     state.connectivity_sampler.record("gateway", now_ms, Some(1.0), true);
     Json(json!({
-        "status": "ok",
-        "service": "ponyllm",
-        "version": env!("CARGO_PKG_VERSION")
+        "status": "ok"
     }))
 }

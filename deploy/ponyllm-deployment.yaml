@@ -1,0 +1,151 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: ponyllm-pod-service
+  namespace: ponyllm
+  labels:
+    app.kubernetes.io/name: ponyllm
+    app.kubernetes.io/component: gateway
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: ponyllm
+    app.kubernetes.io/component: gateway
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+      protocol: TCP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ponyllm-gateway
+  namespace: ponyllm
+  labels:
+    app.kubernetes.io/name: ponyllm
+    app.kubernetes.io/component: gateway
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ponyllm
+      app.kubernetes.io/component: gateway
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ponyllm
+        app.kubernetes.io/component: gateway
+    spec:
+      terminationGracePeriodSeconds: 360
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      imagePullSecrets:
+        - name: aliyun-registry
+      initContainers:
+        - name: init-config-and-snapshot
+          image: crpi-3cfwwtc3um8h6d3q.cn-hangzhou.personal.cr.aliyuncs.com/job-copilot/api-v2@sha256:f5e68cfa52ae97f8e01546aa9ae7cd01ac1c0b17bca2f6abb02a7174469cea66
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          command:
+            - /bin/sh
+            - -c
+            - |
+              cp /etc/ponyllm-ro/ponyllm.toml /var/lib/ponyllm/ponyllm.toml 2>/dev/null || true
+              if [ ! -f /var/lib/ponyllm/telemetry-snapshot.json ]; then
+                cp /etc/telemetry-init/telemetry-snapshot.json /var/lib/ponyllm/telemetry-snapshot.json 2>/dev/null || true
+              fi
+          volumeMounts:
+            - name: config-ro
+              mountPath: /etc/ponyllm-ro
+            - name: telemetry-init
+              mountPath: /etc/telemetry-init
+            - name: telemetry-data
+              mountPath: /var/lib/ponyllm
+            - name: runtime-data
+              mountPath: /tmp
+      containers:
+        - name: ponyllm
+          image: crpi-3cfwwtc3um8h6d3q.cn-hangzhou.personal.cr.aliyuncs.com/job-copilot/api-v2@sha256:f5e68cfa52ae97f8e01546aa9ae7cd01ac1c0b17bca2f6abb02a7174469cea66
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          command:
+            - /usr/local/bin/ponyllm
+            - serve
+            - --bind
+            - 0.0.0.0:8080
+            - --config
+            - /var/lib/ponyllm/ponyllm.toml
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/bin/sh", "-c", "sleep 5"]
+          ports:
+            - containerPort: 8080
+              name: http
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 1000m
+              memory: 512Mi
+          volumeMounts:
+            - name: runtime-data
+              mountPath: /tmp
+            - name: telemetry-data
+              mountPath: /var/lib/ponyllm
+            - name: favicon
+              mountPath: /opt/ponyllm/web/dist/favicon.svg
+              subPath: favicon.svg
+              readOnly: true
+            - name: favicon
+              mountPath: /opt/ponyllm/web/dist/favicon.ico
+              subPath: favicon.ico
+              readOnly: true
+      volumes:
+        - name: config-ro
+          secret:
+            secretName: ponyllm-config
+            defaultMode: 256
+        - name: telemetry-data
+          emptyDir: {}
+        - name: runtime-data
+          emptyDir: {}
+        - name: favicon
+          configMap:
+            name: ponyllm-favicon
+            defaultMode: 292
+        - name: telemetry-init
+          secret:
+            secretName: ponyllm-telemetry-snapshot
+            defaultMode: 256

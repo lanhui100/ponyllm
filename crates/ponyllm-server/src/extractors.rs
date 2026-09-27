@@ -132,6 +132,29 @@ pub fn parse_thinking_header(headers: &axum::http::HeaderMap) -> Option<ponyllm_
 }
 
 
+#[cfg(test)]
+mod security_tests {
+    #[test]
+    fn exhaustion_messages_redact_key_lists() {
+        assert_eq!(super::redact_internal_identifiers("failed keys [\"key-5105\"]"), "failed keys [redacted]");
+        assert_eq!(super::redact_internal_identifiers("upstream timeout"), "upstream timeout");
+    }
+}
+
+fn redact_internal_identifiers(raw: &str) -> String {
+    // Key IDs and retry internals are useful in server logs but must not cross
+    // the API boundary. Keep the error class while removing pool topology.
+    let lower = raw.to_ascii_lowercase();
+    let Some(start) = lower.find("keys [") else {
+        return raw.to_string();
+    };
+    let Some(end_rel) = raw[start..].find(']') else {
+        return raw.to_string();
+    };
+    let end = start + end_rel + 1;
+    format!("{}keys [redacted]{}", &raw[..start], &raw[end..])
+}
+
 /// Build the client-visible exhaustion message, distinguishing local pool
 /// exhaustion (no Active keys, check cooling/disabled via `ponyllm status`)
 /// from genuine upstream failures across all candidates.
@@ -145,15 +168,16 @@ pub fn format_exhausted_message(
     pool_exhausted: bool,
     request_id: &str,
 ) -> String {
+    let safe_error = redact_internal_identifiers(last_error);
     if pool_exhausted {
         format!(
             "Local key pool exhausted for model '{}' (gateway-side cooling, no upstream attempt in this request; no Active keys, check `ponyllm status`). Last error: {} (request_id: {})",
-            model, last_error, request_id
+            model, safe_error, request_id
         )
     } else {
         format!(
             "All candidate upstream providers exhausted for model '{}' (upstream-side failure, gateway did attempt upstream). Last error: {} (request_id: {})",
-            model, last_error, request_id
+            model, safe_error, request_id
         )
     }
 }
