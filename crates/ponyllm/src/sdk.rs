@@ -172,6 +172,7 @@ impl PonyGateway {
                 let resp: ChatCompletionResponse = serde_json::from_value(resp_val)?;
                 Ok(resp)
             }
+            UpstreamProtocol::Systemone => return Err(CoreError::Internal("Systemone protocol requires the /systemone API".to_string())),
             UpstreamProtocol::Antigravity => {
                 let ant_req = chat_to_antigravity_request(req, &canonical, "aicode-consumers", req.get_reasoning_effort(), "")?;
                 let resp_val = executor.execute_json_request(&provider.antigravity_url(), &ant_req).await?;
@@ -214,6 +215,7 @@ impl PonyGateway {
                 let ant_resp = chat_to_anthropic_response(&chat_resp)?;
                 Ok(ant_resp)
             }
+            UpstreamProtocol::Systemone => return Err(CoreError::Internal("Systemone protocol requires the /systemone API".to_string())),
             UpstreamProtocol::Antigravity => {
                 let ant_req = messages_to_antigravity_request(req, &canonical, "aicode-consumers", req.get_reasoning_effort(), "")?;
                 let resp_val = executor.execute_json_request(&provider.antigravity_url(), &ant_req).await?;
@@ -256,6 +258,7 @@ impl PonyGateway {
                 let resp: ResponseObject = serde_json::from_value(resp_val)?;
                 Ok(resp)
             }
+            UpstreamProtocol::Systemone => Err(CoreError::Internal("Systemone protocol requires the /systemone API".to_string())),
             UpstreamProtocol::Antigravity => {
                 Err(CoreError::Internal("Antigravity protocol does not support Responses API".to_string()))
             }

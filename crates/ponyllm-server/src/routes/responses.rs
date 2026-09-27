@@ -307,6 +307,10 @@ pub async fn handle_responses(
                 };
                 (url, val)
             }
+            ponyllm_core::pool::UpstreamProtocol::Systemone => {
+                last_error = format!("Systemone protocol cannot be served by responses endpoint for {}", provider_name);
+                continue;
+            }
         };
 
         let req_snippet = Some(format_request_snippet(&req_val));
@@ -390,8 +394,15 @@ pub async fn handle_responses(
                             let monitored = wrap_telemetry_stream(stream, failure_ctx);
                             axum::body::Body::from_stream(monitored)
                         }
-                    };
-                    let mut resp = axum::response::Response::new(body);
+                         ponyllm_core::pool::UpstreamProtocol::Systemone => {
+                             return crate::extractors::render_openai_error(
+                                 StatusCode::BAD_REQUEST, "invalid_request_error",
+                                 "protocol_mismatch", "Use /v1/systemone for systemone models",
+                             );
+                         }
+                     };
+                     let mut resp = axum::response::Response::new(body);
+
                     resp.headers_mut().insert(
                         axum::http::header::CONTENT_TYPE,
                         HeaderValue::from_static("text/event-stream"),
@@ -576,6 +587,7 @@ pub async fn handle_responses(
                             }
                         }
                     }
+                    ponyllm_core::pool::UpstreamProtocol::Systemone => resp_val,
                 };
                 let latency = start_time.elapsed();
                 let (prompt_tokens, completion_tokens, cached_tokens) = extract_usage_tokens(&resp_val);

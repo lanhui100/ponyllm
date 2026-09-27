@@ -108,6 +108,54 @@ async fn test_antigravity_auth_url_respects_write_gate() {
 }
 
 #[tokio::test]
+async fn test_antigravity_auth_url_rejects_public_redirect_uri() {
+    // Google's official Antigravity OAuth client only registers loopback
+    // redirect URIs: a public console origin must be refused server-side
+    // with an actionable message instead of a Google redirect_uri_mismatch.
+    let harness = OAuthHarness::new(true).await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .get(format!(
+            "http://{}/api/admin/oauth/antigravity/auth-url?redirect_uri=https%3A%2F%2Ftokens.ponyjob.top%2Foauth2callback",
+            harness.addr
+        ))
+        .header("Authorization", format!("Bearer {}", harness.api_key))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let err: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(err["error"]["code"], "invalid_redirect_uri");
+    assert!(err["error"]["message"].as_str().unwrap().contains("localhost"));
+}
+
+#[tokio::test]
+async fn test_antigravity_authorize_rejects_public_redirect_uri() {
+    // Same whitelist on the authorize side: a pasted callback URL or payload
+    // redirect_uri pointing at a public domain must be refused before any
+    // code exchange (no upstream call happens here).
+    let harness = OAuthHarness::new(true).await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post(format!("http://{}/api/admin/oauth/antigravity/authorize", harness.addr))
+        .header("Authorization", format!("Bearer {}", harness.api_key))
+        .json(&serde_json::json!({
+            "code_or_url": "4/0A-mock-code",
+            "redirect_uri": "https://tokens.ponyjob.top/oauth2callback",
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let err: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(err["error"]["code"], "invalid_redirect_uri");
+}
+
+#[tokio::test]
 async fn test_antigravity_authorize_invalid_input() {
     let harness = OAuthHarness::new(true).await;
     let client = reqwest::Client::new();

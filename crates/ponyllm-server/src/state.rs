@@ -148,6 +148,13 @@ impl RoutedTarget {
         let base = self.endpoint_base.as_deref().unwrap_or(&self.base_url).trim_end_matches('/');
         format!("{}/v1internal:streamGenerateContent?alt=sse", base)
     }
+
+    /// Systemone透传上游地址:显式 endpoint_base 优先,否则 base_url + `/systemone`.
+    pub fn systemone_url(&self) -> String {
+        ponyllm_core::normalize_systemone_url(
+            self.endpoint_base.as_deref().unwrap_or(&self.base_url),
+        )
+    }
 }
 
 /// Legacy protocol guess preserved for zero-migration old configs that set
@@ -1490,4 +1497,5 @@ impl AppState {
 
 pub use ponyllm_core::{
     normalize_chat_completions_url, normalize_messages_url, normalize_responses_url,
+    normalize_systemone_url,
 };

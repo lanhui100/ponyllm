@@ -18,6 +18,8 @@ pub enum UpstreamProtocol {
     Anthropic,
     /// Google Antigravity Internal API
     Antigravity,
+    /// Systemone透传 (zen-jev `/systemone` 纯透传,body原样转发)
+    Systemone,
 }
 
 impl UpstreamProtocol {
@@ -27,7 +29,12 @@ impl UpstreamProtocol {
             Self::Responses => "responses",
             Self::Anthropic => "anthropic",
             Self::Antigravity => "antigravity",
+            Self::Systemone => "systemone",
         }
+    }
+
+    pub fn is_systemone(&self) -> bool {
+        matches!(self, Self::Systemone)
     }
 
     pub fn is_anthropic(&self) -> bool {
@@ -52,6 +59,7 @@ impl FromStr for UpstreamProtocol {
             }
             "anthropic" | "messages" | "claude" => Ok(Self::Anthropic),
             "antigravity" | "ant" | "gcli" | "cloudcode" => Ok(Self::Antigravity),
+            "systemone" | "system_one" | "system-one" => Ok(Self::Systemone),
             _ => Err(format!("Unknown upstream protocol '{}'", s)),
         }
     }

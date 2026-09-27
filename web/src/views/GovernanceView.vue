@@ -14,7 +14,6 @@ import UiButton from '../components/ui/UiButton.vue';
 import UiBadge from '../components/ui/UiBadge.vue';
 import UiTooltip from '../components/ui/UiTooltip.vue';
 import UiCollapsible from '../components/ui/UiCollapsible.vue';
-import { resolveBaseURL } from '../lib/alova';
 import type { CreateProviderPayload } from '../types/admin';
 import { toast } from '../composables/useToast';
 
@@ -175,14 +174,11 @@ async function copyPproxyOn() {
   }
 }
 
-function getEffectiveOAuthCallbackUri(): string | undefined {
-  if (typeof window === 'undefined') return undefined;
-  const baseUrl = resolveBaseURL();
-  if (baseUrl) {
-    return `${baseUrl}/oauth2callback`;
-  }
-  return `${window.location.origin}/oauth2callback`;
-}
+// 服务端 auth-url 返回的回环 redirect_uri（默认 http://localhost:51121/oauth2callback）。
+// 前端不硬编码端口，避免与服务端 DEFAULT_ANTIGRAVITY_OAUTH_REDIRECT_PORT 漂移；
+// 授权载荷也不再发送 redirect_uri——服务端会优先采用粘贴回调 URL 里的 redirect_uri
+// （即 Google 实际绑定 code 的那个），保证换票时 §4.1.3 一致。
+const oauthRedirectUri = ref<string | null>(null);
 
 async function checkClipboardForOAuthCode() {
   if (!oauthWaiting.value) return;
@@ -210,6 +206,7 @@ function handleWindowFocus() {
 function cleanupOAuthSession() {
   oauthWaiting.value = false;
   oauthState.value = null;
+  oauthRedirectUri.value = null;
   oauthPopupRef.value = null;
   if (pollTimer) {
     clearInterval(pollTimer);
@@ -225,8 +222,10 @@ function handleWindowMessage(event: MessageEvent) {
   if (!event.data || event.data.type !== 'antigravity:oauth_callback') {
     return;
   }
-  // 安全校验 1: 严格校验消息来源 Origin (允许同源，或后端配置的 target_origin)
-  const expectedOrigin = getEffectiveOAuthCallbackUri() ? new URL(getEffectiveOAuthCallbackUri()!).origin : window.location.origin;
+  // 安全校验 1: 严格校验消息来源 Origin (允许同源，或服务端返回的回环回调 origin)
+  const expectedOrigin = oauthRedirectUri.value
+    ? new URL(oauthRedirectUri.value).origin
+    : window.location.origin;
   if (typeof window !== 'undefined' && event.origin !== window.location.origin && event.origin !== expectedOrigin) {
     console.warn('[PonyLLM OAuth] 拒绝未授信跨源消息:', event.origin);
     return;
@@ -236,9 +235,9 @@ function handleWindowMessage(event: MessageEvent) {
     console.warn('[PonyLLM OAuth] 拒绝来自未知弹窗窗口的消息');
     return;
   }
-  // 安全校验 3: 严格比对 State 防范 CSRF
-  if (oauthState.value && event.data.state && event.data.state !== oauthState.value) {
-    console.warn('[PonyLLM OAuth] 拒绝 State 不匹配的 OAuth 回调');
+  // 安全校验 3: 严格比对 State 防范 CSRF（缺 state 亦拒绝）
+  if (oauthState.value && event.data.state !== oauthState.value) {
+    console.warn('[PonyLLM OAuth] 拒绝 State 缺失或不匹配的 OAuth 回调');
     return;
   }
 
@@ -255,10 +254,10 @@ function handleWindowMessage(event: MessageEvent) {
 async function loadAntigravityAuthUrl() {
   fetchingAuthUrl.value = true;
   try {
-    const originUri = getEffectiveOAuthCallbackUri();
-    const res = await getAntigravityAuthUrl(originUri);
+    const res = await getAntigravityAuthUrl();
     antigravityAuthUrl.value = res.auth_url;
     oauthState.value = res.state;
+    oauthRedirectUri.value = res.redirect_uri ?? null;
   } catch (err: unknown) {
     providerFormError.value = `获取授权链接失败: ${err instanceof Error ? err.message : String(err)}`;
   } finally {
@@ -279,10 +278,10 @@ async function fetchAndOpenAuthUrl() {
   fetchingAuthUrl.value = true;
   providerFormError.value = null;
   try {
-    const originUri = getEffectiveOAuthCallbackUri();
-    const res = await getAntigravityAuthUrl(originUri);
+    const res = await getAntigravityAuthUrl();
     antigravityAuthUrl.value = res.auth_url;
     oauthState.value = res.state;
+    oauthRedirectUri.value = res.redirect_uri ?? null;
 
     if (typeof window !== 'undefined') {
       oauthWaiting.value = true;
@@ -435,14 +434,14 @@ async function handleAuthorizeAntigravity() {
   providerSubmitting.value = true;
   providerFormError.value = null;
   try {
-    const originUri = getEffectiveOAuthCallbackUri();
+    // 不发送 redirect_uri：服务端优先采用粘贴 URL 中的 redirect_uri（Google
+    // 绑定 code 的那个），无粘贴 URL 时回落到回环默认端口。
     await authorizeAntigravity({
       code_or_url: codeOrUrl,
       provider: antigravityForm.value.provider.trim() || 'antigravity',
       id: antigravityForm.value.id.trim() || undefined,
       priority: antigravityForm.value.priority,
       weight: antigravityForm.value.weight,
-      redirect_uri: originUri,
       state: oauthState.value || undefined,
     });
     const wasReauthorize = reauthorizeTarget.value !== null;
@@ -889,7 +888,7 @@ onUnmounted(() => {
               >
                 <div class="flex items-center gap-2">
                   <Icons name="refresh" size="14" class="animate-spin text-indigo-600" />
-                  <span>已打开授权弹窗，正在等待 Google 回调完成并自动换票...</span>
+                  <span>已打开授权弹窗，等待 Google 回调。若本机没有监听该回环端口，请从地址栏复制完整链接粘贴到下方输入框。</span>
                 </div>
                 <button
                   type="button"
@@ -917,12 +916,13 @@ onUnmounted(() => {
                   重定向 URL 或 Code *
                 </div>
                 <p class="text-[13px] text-slate-500 leading-relaxed">
-                  页面将在授权后自动完成授权并入池。如自动授权没有完成，请将浏览器地址栏中的完整重定向链接（以 <code>/oauth2callback</code> 结尾并带有参数）或授权码（<code>code=</code> 后的凭证）复制粘贴至下方输入框，点击“确认授权”。
+                  Google 仅接受本机回环回调，授权完成后浏览器会跳到本机回环地址（默认 <code>http://localhost:51121/oauth2callback</code>，以授权链接中的 <code>redirect_uri</code> 为准）。
+                  若本机无监听服务导致页面打不开，请从浏览器地址栏复制完整重定向链接（以 <code>/oauth2callback</code> 结尾并带有参数）或授权码（<code>code=</code> 后的凭证）粘贴至下方输入框，点击“确认授权”。
                 </p>
                 <input
                   v-model="antigravityForm.code_or_url"
                   type="text"
-                  placeholder="例如: http://localhost:8080/oauth2callback?code=4/0A... 或纯 Code"
+                  placeholder="例如: http://localhost:51121/oauth2callback?code=4/0A... 或纯 Code"
                   required
                   class="w-full bg-white border border-slate-200 rounded-lg px-3.5 py-2 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-slate-400/20 focus:border-slate-400"
                   data-testid="ag-code-input"

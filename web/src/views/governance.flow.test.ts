@@ -318,6 +318,9 @@ describe('GovernanceView End-to-End User Flow (WEB-04)', () => {
     await new Promise((r) => setTimeout(r, 10));
 
     expect(getAuthUrlSpy).toHaveBeenCalled();
+    // 前端不再硬编码/外传 redirect_uri：由服务端决定回环回调（默认 51121），
+    // 换票时优先采用粘贴 URL 中的 redirect_uri。
+    expect(getAuthUrlSpy.mock.calls[0]?.[0]).toBeUndefined();
 
     // 3. Antigravity inputs and smart proxy capsule are rendered
     const proxyCapsule = container.querySelector('[data-testid="proxy-status-capsule"]');
@@ -342,6 +345,8 @@ describe('GovernanceView End-to-End User Flow (WEB-04)', () => {
       code_or_url: 'http://localhost:51121/oauth2callback?code=mock-code-123',
       provider: 'antigravity',
     }));
+    // 载荷不带 redirect_uri：服务端从粘贴 URL 推断并以之为准
+    expect(authorizeSpy.mock.calls[0]?.[0]).not.toHaveProperty('redirect_uri');
   });
 
   it('Flow 5: Antigravity automated OAuth postMessage callback seamlessly completes authorization', async () => {
@@ -374,7 +379,7 @@ describe('GovernanceView End-to-End User Flow (WEB-04)', () => {
     vi.spyOn(adminApi, 'getAntigravityAuthUrl').mockReturnValue({
       send: () => Promise.resolve({
         auth_url: 'https://accounts.google.com/o/oauth2/v2/auth?mock=true',
-        redirect_uri: 'http://localhost:8080/oauth2callback',
+        redirect_uri: 'http://localhost:51121/oauth2callback',
         state: 'auto-test-state-999',
       }),
     } as any);
@@ -509,7 +514,7 @@ describe('GovernanceView End-to-End User Flow (WEB-04)', () => {
     const getAuthUrlSpy = vi.spyOn(adminApi, 'getAntigravityAuthUrl').mockReturnValue({
       send: () => Promise.resolve({
         auth_url: 'https://accounts.google.com/o/oauth2/v2/auth?state=auto-test-state-focus',
-        redirect_uri: 'http://localhost:3000/oauth2callback',
+        redirect_uri: 'http://localhost:51121/oauth2callback',
         state: 'auto-test-state-focus',
       }),
     } as any);
@@ -630,7 +635,7 @@ describe('GovernanceView End-to-End User Flow (WEB-04)', () => {
     vi.spyOn(adminApi, 'getAntigravityAuthUrl').mockReturnValue({
       send: () => Promise.resolve({
         auth_url: 'https://accounts.google.com/o/oauth2/v2/auth?state=reauth-state',
-        redirect_uri: 'http://localhost:3000/oauth2callback',
+        redirect_uri: 'http://localhost:51121/oauth2callback',
         state: 'reauth-state',
       }),
     } as any);

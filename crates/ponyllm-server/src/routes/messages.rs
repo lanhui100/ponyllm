@@ -366,6 +366,10 @@ pub async fn handle_messages(
                 };
                 (url, val)
             }
+            ponyllm_core::pool::UpstreamProtocol::Systemone => {
+                last_error = format!("Systemone protocol cannot be served by messages endpoint for {}", target.provider_name);
+                continue;
+            }
         };
 
         // Forensics snippet must be the actual upstream wire JSON, not the
@@ -546,6 +550,12 @@ pub async fn handle_messages(
                                 let monitored = wrap_telemetry_stream(stream, failure_ctx);
                                 axum::body::Body::from_stream(monitored)
                             }
+                            ponyllm_core::pool::UpstreamProtocol::Systemone => {
+                                return crate::extractors::render_anthropic_error(
+                                    StatusCode::BAD_REQUEST, "invalid_request_error",
+                                    "Use /v1/systemone for systemone models",
+                                );
+                            }
                         };
 
                         let mut resp = axum::response::Response::new(body);
@@ -724,6 +734,10 @@ pub async fn handle_messages(
                                     continue;
                                 }
                             }
+                        }
+                        ponyllm_core::pool::UpstreamProtocol::Systemone => {
+                            last_error = "Systemone protocol cannot be projected as Anthropic messages".to_string();
+                            continue;
                         }
                     };
 

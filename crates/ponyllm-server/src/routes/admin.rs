@@ -969,6 +969,7 @@ fn parse_protocol_opt(s: &str) -> Option<UpstreamProtocol> {
         "anthropic" | "messages" => Some(UpstreamProtocol::Anthropic),
         "responses" => Some(UpstreamProtocol::Responses),
         "antigravity" | "agy" => Some(UpstreamProtocol::Antigravity),
+        "systemone" | "system_one" | "system-one" => Some(UpstreamProtocol::Systemone),
         _ => None,
     }
 }
@@ -1543,6 +1544,7 @@ pub async fn handle_admin_provider_models(
                     UpstreamProtocol::Responses => "responses".to_string(),
                     UpstreamProtocol::Anthropic => "messages".to_string(),
                     UpstreamProtocol::Antigravity => "antigravity".to_string(),
+                    UpstreamProtocol::Systemone => "systemone".to_string(),
                 }),
                 base_url: m.base_url.clone(),
                 thinking_default: format!("{effective_default:?}"),
@@ -1583,6 +1585,7 @@ pub async fn handle_admin_models(State(state): State<Arc<AppState>>) -> impl Int
                     UpstreamProtocol::Responses => "responses".to_string(),
                     UpstreamProtocol::Anthropic => "messages".to_string(),
                     UpstreamProtocol::Antigravity => "antigravity".to_string(),
+                    UpstreamProtocol::Systemone => "systemone".to_string(),
                 }),
                 base_url: m.base_url.clone(),
                 thinking_default: format!("{effective_default:?}"),
@@ -1818,6 +1821,7 @@ pub async fn handle_admin_create_model(
                 UpstreamProtocol::Responses => "responses".to_string(),
                 UpstreamProtocol::Anthropic => "messages".to_string(),
                 UpstreamProtocol::Antigravity => "antigravity".to_string(),
+                    UpstreamProtocol::Systemone => "systemone".to_string(),
             }),
             base_url,
             thinking_default: format!("{effective_def:?}"),
@@ -2088,6 +2092,7 @@ pub async fn handle_admin_update_model(
             UpstreamProtocol::Responses => "responses".to_string(),
             UpstreamProtocol::Anthropic => "messages".to_string(),
             UpstreamProtocol::Antigravity => "antigravity".to_string(),
+                    UpstreamProtocol::Systemone => "systemone".to_string(),
         }),
         base_url: existing_config.base_url,
         thinking_default: format!("{effective_def:?}"),
@@ -3717,6 +3722,73 @@ async fn measure_proxy_latency(proxy_url: &str) -> Option<u64> {
     }
 }
 
+/// Validate that a redirect URI is acceptable for the Antigravity OAuth flow.
+///
+/// The Antigravity OAuth client (Google's official client, hardcoded in
+/// `ponyllm_core::pool`) only registers loopback redirect URIs. Any public
+/// domain — e.g. a deployed console origin — is rejected by Google with
+/// `redirect_uri_mismatch`, so the deployed console (tokens.ponyjob.top)
+/// must keep the callback in loopback form. Enforce the loopback shape
+/// server-side so the console fails fast with an actionable message instead
+/// of a confusing Google error, and so an attacker-supplied redirect_uri can
+/// never be smuggled into the authorization link (security audit
+/// 2026-09-13, "redirect_uri 白名单").
+pub(crate) fn validate_antigravity_redirect_uri(uri: &str) -> Result<(), String> {
+    let parsed = reqwest::Url::parse(uri)
+        .map_err(|_| format!("redirect_uri 不是合法 URL: {uri}"))?;
+    let scheme_ok = matches!(parsed.scheme(), "http" | "https");
+    let host_ok = matches!(parsed.host_str(), Some("localhost" | "127.0.0.1"));
+    let path_ok = parsed.path() == "/oauth2callback";
+    let no_query = parsed.query().is_none();
+    let no_fragment = parsed.fragment().is_none();
+    // The accepted string must be byte-identical to the canonical parse
+    // (rejects dot-segments, trailing whitespace, explicit default port,
+    // uppercase host, percent-encoded host tricks) and carry no userinfo:
+    // what we validate must equal what we hand to Google, otherwise the user
+    // gets Google's confusing redirect_uri_mismatch instead of the
+    // actionable message below. Arbitrary loopback ports stay allowed — the
+    // Antigravity client is a desktop-type client and Google accepts any
+    // localhost port (verified: localhost:8080 reaches the consent screen).
+    let canonical = parsed.as_str() == uri;
+    let no_userinfo = parsed.username().is_empty() && parsed.password().is_none();
+    let port_ok = parsed.port().map(|p| p != 0).unwrap_or(true);
+    if scheme_ok && host_ok && path_ok && no_query && no_fragment && canonical && no_userinfo && port_ok
+    {
+        return Ok(());
+    }
+    Err(
+        "redirect_uri 必须是本机回环地址（形如 http://localhost:<端口>/oauth2callback）。\
+         Google Antigravity 官方 OAuth client 仅接受 localhost 回调，公网域名无法授权。\
+         授权完成后若浏览器无法打开 localhost 回调页，请从地址栏复制完整链接粘贴到控制台输入框。"
+            .to_string(),
+    )
+}
+
+/// Pick the redirect_uri for the token exchange.
+///
+/// Precedence: the pasted callback URL wins because it carries the exact
+/// `redirect_uri` Google bound the authorization code to — its port may
+/// legitimately differ from the default (the CLI grabs the first free port in
+/// 51121..51131, a local gateway may sit on 8080). The payload value is the
+/// console fallback, and the loopback default is the last resort. Getting
+/// this order wrong produces an RFC 6749 §4.1.3 redirect_uri mismatch at the
+/// token endpoint even though both values are whitelisted.
+fn resolve_antigravity_redirect_uri(inferred: Option<String>, payload: Option<String>) -> String {
+    inferred.or(payload).unwrap_or_else(|| {
+        format!(
+            "http://localhost:{}/oauth2callback",
+            ponyllm_core::pool::DEFAULT_ANTIGRAVITY_OAUTH_REDIRECT_PORT
+        )
+    })
+}
+
+fn reject_invalid_redirect_uri(msg: String) -> axum::response::Response {    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({"error": {"message": msg, "code": "invalid_redirect_uri"}})),
+    )
+        .into_response()
+}
+
 #[utoipa::path(get, path = "/api/admin/oauth/antigravity/auth-url", params(AntigravityAuthUrlQuery), responses((status = 200, body = AntigravityAuthUrlView)))]
 pub async fn handle_admin_antigravity_auth_url(
     State(state): State<Arc<AppState>>,
@@ -3734,6 +3806,9 @@ pub async fn handle_admin_antigravity_auth_url(
             ponyllm_core::pool::DEFAULT_ANTIGRAVITY_OAUTH_REDIRECT_PORT
         )
     });
+    if let Err(msg) = validate_antigravity_redirect_uri(&redirect_uri) {
+        return reject_invalid_redirect_uri(msg);
+    }
     let state_key = query.state.unwrap_or_else(uuid_simple);
 
     // Register pending state with expiration cleanup (5 mins) and bounded LRU capacity (max 128)
@@ -3839,14 +3914,20 @@ pub async fn handle_admin_authorize_antigravity(
         }
     };
 
-    let redirect_uri = payload.redirect_uri
-        .or(inferred_redirect)
-        .unwrap_or_else(|| {
-            format!(
-                "http://localhost:{}/oauth2callback",
-                ponyllm_core::pool::DEFAULT_ANTIGRAVITY_OAUTH_REDIRECT_PORT
-            )
-        });
+    // The pasted callback URL carries the redirect_uri Google actually bound
+    // the authorization code to — its port may legitimately differ from the
+    // default (CLI picks the first free port in 51121..51131, a local gateway
+    // may sit on 8080). `inferred_redirect` therefore wins over the payload
+    // value; both pass the loopback whitelist below. Getting this order wrong
+    // makes an RFC 6749 §4.1.3 redirect_uri mismatch at the token endpoint.
+    let redirect_uri = resolve_antigravity_redirect_uri(inferred_redirect, payload.redirect_uri);
+
+    // Loopback-only whitelist: the pasted callback URL or payload redirect_uri
+    // must keep the loopback shape Google registers for this OAuth client
+    // (same rule as auth-url). Fail fast before any code exchange.
+    if let Err(msg) = validate_antigravity_redirect_uri(&redirect_uri) {
+        return reject_invalid_redirect_uri(msg);
+    }
 
     // 3. Build HTTP client with effective proxy for code exchange (Strict Fail-Closed)
     let http_client = if let Some(ref proxy_url) = effective_proxy {
@@ -4523,6 +4604,74 @@ pub fn admin_routes() -> axum::Router<Arc<AppState>> {
 pub fn openapi_json() -> serde_json::Value {
     serde_json::to_value(<AdminApiDoc as utoipa::OpenApi>::openapi())
         .expect("openapi serializes")
+}
+
+#[cfg(test)]
+mod antigravity_redirect_uri_tests {
+    use super::validate_antigravity_redirect_uri;
+
+    #[test]
+    fn loopback_localhost_any_port_ok() {
+        assert!(validate_antigravity_redirect_uri("http://localhost:51121/oauth2callback").is_ok());
+        assert!(validate_antigravity_redirect_uri("http://localhost:8080/oauth2callback").is_ok());
+        assert!(validate_antigravity_redirect_uri("http://127.0.0.1:51121/oauth2callback").is_ok());
+        assert!(validate_antigravity_redirect_uri("https://localhost:51121/oauth2callback").is_ok());
+    }
+
+    #[test]
+    fn public_domain_rejected_with_actionable_message() {
+        let err = validate_antigravity_redirect_uri("https://tokens.ponyjob.top/oauth2callback")
+            .unwrap_err();
+        assert!(err.contains("localhost"), "msg must guide to loopback: {err}");
+        let err2 = validate_antigravity_redirect_uri("https://evil.example.com/oauth2callback")
+            .unwrap_err();
+        assert!(err2.contains("localhost"));
+    }
+
+    #[test]
+    fn wrong_path_or_extra_params_rejected() {
+        assert!(validate_antigravity_redirect_uri("http://localhost:51121/").is_err());
+        assert!(validate_antigravity_redirect_uri("http://localhost:51121/other").is_err());
+        assert!(validate_antigravity_redirect_uri("http://localhost:51121/oauth2callback?extra=1").is_err());
+        assert!(validate_antigravity_redirect_uri("http://localhost:51121/oauth2callback#frag").is_err());
+        assert!(validate_antigravity_redirect_uri("http://evil.com/oauth2callback").is_err());
+        assert!(validate_antigravity_redirect_uri("not-a-url").is_err());
+    }
+
+    #[test]
+    fn non_canonical_or_userinfo_forms_rejected() {
+        // Everything here passes a naive host/path check but would reach Google
+        // in a form Google never registered → must fail with our message.
+        assert!(validate_antigravity_redirect_uri("http://evil.com@localhost:51121/oauth2callback").is_err());
+        assert!(validate_antigravity_redirect_uri("http://localhost:51121/oauth2callback/../oauth2callback").is_err());
+        assert!(validate_antigravity_redirect_uri("http://localhost:51121/oauth2callback ").is_err());
+        assert!(validate_antigravity_redirect_uri(" http://localhost:51121/oauth2callback").is_err());
+        assert!(validate_antigravity_redirect_uri("http://localhost:0/oauth2callback").is_err());
+        assert!(validate_antigravity_redirect_uri("http://LOCALHOST:51121/oauth2callback").is_err());
+        assert!(validate_antigravity_redirect_uri("ftp://localhost:51121/oauth2callback").is_err());
+    }
+
+    #[test]
+    fn pasted_callback_uri_wins_over_payload() {
+        use super::resolve_antigravity_redirect_uri;
+        // CLI/gateway may have used a non-default loopback port; the pasted URL
+        // is what Google bound the code to, so it must drive the exchange.
+        assert_eq!(
+            resolve_antigravity_redirect_uri(
+                Some("http://localhost:51122/oauth2callback".to_string()),
+                Some("http://localhost:51121/oauth2callback".to_string()),
+            ),
+            "http://localhost:51122/oauth2callback"
+        );
+        assert_eq!(
+            resolve_antigravity_redirect_uri(None, Some("http://localhost:8080/oauth2callback".to_string())),
+            "http://localhost:8080/oauth2callback"
+        );
+        assert_eq!(
+            resolve_antigravity_redirect_uri(None, None),
+            "http://localhost:51121/oauth2callback"
+        );
+    }
 }
 
 #[cfg(test)]

@@ -204,6 +204,8 @@ pub fn create_app(state: Arc<AppState>) -> Router {
         .route("/v1/messages", post(handle_messages))
         .route("/responses", post(handle_responses))
         .route("/v1/responses", post(handle_responses))
+        .route("/systemone", post(handle_systemone))
+        .route("/v1/systemone", post(handle_systemone))
         .route("/telemetry/recorder", get(handle_get_recorder))
         .route("/v1/telemetry/recorder", get(handle_get_recorder))
         .route("/telemetry/recorder/{request_id}", get(handle_get_recorder_frame))

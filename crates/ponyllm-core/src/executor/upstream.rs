@@ -973,7 +973,13 @@ impl UpstreamExecutor {
         url: &str,
         body: std::borrow::Cow<'a, Value>,
     ) -> std::borrow::Cow<'a, Value> {
-        if !self.opencode_zen || !zen_body_requests_free_model(body.as_ref()) {
+        // System One is already a native structured-decision wire and must stay
+        // byte-for-byte opaque; the chat/responses free-tier tool gate does not
+        // apply to `/systemone`.
+        if !self.opencode_zen
+            || url.to_ascii_lowercase().contains("/systemone")
+            || !zen_body_requests_free_model(body.as_ref())
+        {
             return body;
         }
         let missing = zen_missing_tool_names(body.as_ref());
@@ -1163,7 +1169,14 @@ impl UpstreamExecutor {
                         .and_then(|s| s.parse::<u64>().ok())
                         .map(Duration::from_secs);
 
-                    let err_body = resp.text().await.unwrap_or_default();
+                    // Error bodies are diagnostic only; cap before converting to
+                    // String so a hostile upstream cannot amplify memory/logs.
+                    const MAX_UPSTREAM_ERROR_BYTES: usize = 64 * 1024;
+                    let err_bytes = resp.bytes().await.unwrap_or_default();
+                    let err_body = String::from_utf8_lossy(
+                        &err_bytes[..err_bytes.len().min(MAX_UPSTREAM_ERROR_BYTES)],
+                    )
+                    .to_string();
                     last_error = format!("HTTP {} from {}: {}", status_code, key.id, err_body);
 
                     if status_code == 429 {
@@ -1345,7 +1358,14 @@ impl UpstreamExecutor {
                         .and_then(|s| s.parse::<u64>().ok())
                         .map(Duration::from_secs);
 
-                    let err_body = resp.text().await.unwrap_or_default();
+                    // Error bodies are diagnostic only; cap before converting to
+                    // String so a hostile upstream cannot amplify memory/logs.
+                    const MAX_UPSTREAM_ERROR_BYTES: usize = 64 * 1024;
+                    let err_bytes = resp.bytes().await.unwrap_or_default();
+                    let err_body = String::from_utf8_lossy(
+                        &err_bytes[..err_bytes.len().min(MAX_UPSTREAM_ERROR_BYTES)],
+                    )
+                    .to_string();
                     last_error = format!("HTTP {} from {}: {}", status_code, key.id, err_body);
 
                     if status_code == 429 {

@@ -19,6 +19,18 @@ pub fn normalize_messages_url(base_url: &str) -> String {
     normalize_endpoint_url(base_url, "messages")
 }
 
+/// Normalize to `<base>/systemone` (zen-jev 透传路由).
+///
+/// 与其它协议不同:systemone 上游路径不带 `/v1` 前缀,base 去尾 slash 后
+/// 直接拼接 `/systemone`;已是 `/systemone` 结尾则原样返回.
+pub fn normalize_systemone_url(base_url: &str) -> String {
+    let trimmed = base_url.trim_end_matches('/');
+    if trimmed.ends_with("/systemone") {
+        return trimmed.to_string();
+    }
+    format!("{}/systemone", trimmed)
+}
+
 /// Canonical upstream model name for known retired/renamed aliases.
 ///
 /// DeepSeek's live API name is `deepseek-flash` (`deepseek-v4.1-flash` was
@@ -92,6 +104,22 @@ mod tests {
         assert_eq!(
             normalize_messages_url("https://x.example.com/v1/messages"),
             "https://x.example.com/v1/messages"
+        );
+    }
+
+    #[test]
+    fn test_normalize_systemone() {
+        assert_eq!(
+            normalize_systemone_url("https://zen.example.com/opencode/zen/v1"),
+            "https://zen.example.com/opencode/zen/v1/systemone"
+        );
+        assert_eq!(
+            normalize_systemone_url("https://zen.example.com/opencode/zen/v1/"),
+            "https://zen.example.com/opencode/zen/v1/systemone"
+        );
+        assert_eq!(
+            normalize_systemone_url("https://zen.example.com/opencode/zen/v1/systemone"),
+            "https://zen.example.com/opencode/zen/v1/systemone"
         );
     }
 

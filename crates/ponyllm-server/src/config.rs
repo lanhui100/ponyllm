@@ -325,6 +325,10 @@ impl ProviderConfig {
             UpstreamProtocol::Responses => self.responses_url.as_deref(),
             UpstreamProtocol::Anthropic => self.messages_url.as_deref(),
             UpstreamProtocol::Antigravity => None,
+            // Systemone 透传不走 per-protocol endpoint 覆盖,恒用 base_url +
+            // `/systemone`(见 RoutedTarget::systemone_url);这里返回 None 让
+            // with_endpoint 落到 base_url 兜底,仅保留编译穷举完整.
+            UpstreamProtocol::Systemone => None,
         }
     }
 }
