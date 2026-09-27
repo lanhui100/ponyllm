@@ -36,8 +36,8 @@ default_protocol = "responses"
 # Jev is kept in a separate provider so systemone metrics, traces, tokens,
 # quota, and key health are isolated from text-generation Zen traffic.
 [providers.zen-jev]
-base_url = "http://pproxy-host.ponyllm.svc:8899/opencode/zen/v1"
-proxy = "http://user:<PPROXY_CLIENT_TOKEN>@pproxy-host.ponyllm.svc:8899"
+# Jev systemone supports direct HTTPS; proxy is optional for restricted egress.
+base_url = "https://opencode.ai/zen/v1"
 default_model = "jev-1.13-free"
 strategy = "round_robin"
 billing_mode = "free"
