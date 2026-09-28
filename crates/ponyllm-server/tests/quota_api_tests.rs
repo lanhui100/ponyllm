@@ -52,6 +52,7 @@ impl QuotaHarness {
             output_price: 2.0,
             models: vec!["probe-model".to_string()],
             model_configs: vec![ModelConfig {
+                priority: None,
                 name: "probe-model".to_string(),
                 tier: ModelTier::Standard,
                 billing_mode: Some(BillingMode::Metered),
@@ -114,6 +115,7 @@ impl QuotaHarness {
                 output_price: 2.0,
                 models: vec!["probe-model".to_string()],
                 model_specs: vec![ModelSpec {
+                    priority: None,
                     name: "probe-model".to_string(),
                     tier: ModelTier::Standard,
                     context_window: "128K".to_string(),

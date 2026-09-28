@@ -26,6 +26,7 @@ fn make_multimodal_provider(
         output_price: 0.2,
         models: vec![model.to_string()],
         model_specs: vec![ModelSpec {
+            priority: None,
             name: model.to_string(),
             tier,
             input_types,

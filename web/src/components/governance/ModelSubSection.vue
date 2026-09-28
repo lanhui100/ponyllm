@@ -86,6 +86,7 @@ const form = ref({
   base_url: '',
   temperature: '',
   top_p: '',
+  priority: '',
   pricing_mode: 'uniform' as PricingMode,
   input_price: '',
   cached_price: '',
@@ -173,6 +174,7 @@ function openAddInline() {
     base_url: '',
     temperature: '',
     top_p: '',
+    priority: '',
     pricing_mode: 'uniform',
     input_price: '',
     cached_price: '',
@@ -216,6 +218,7 @@ function openEditInline(model: ModelView) {
     base_url: model.base_url || '',
     temperature: model.temperature != null ? String(model.temperature) : '',
     top_p: model.top_p != null ? String(model.top_p) : '',
+    priority: model.priority != null ? String(model.priority) : '',
     pricing_mode: (model.pricing_mode as PricingMode) || 'uniform',
     input_price: model.input_price != null ? String(model.input_price) : '',
     cached_price: model.cached_price != null ? String(model.cached_price) : '',
@@ -229,6 +232,7 @@ function openEditInline(model: ModelView) {
       model.display_name ||
       model.temperature != null ||
       model.top_p != null ||
+      model.priority != null ||
       model.pricing_mode === 'peak_valley' ||
       model.input_price != null ||
       model.cached_price != null ||
@@ -333,6 +337,7 @@ async function handleSubmit() {
     const inputPrice = parseOptionalNumber(form.value.input_price);
     const cachedPrice = parseOptionalNumber(form.value.cached_price);
     const outputPrice = parseOptionalNumber(form.value.output_price);
+    const priority = parseOptionalNumber(form.value.priority);
     if (
       temperature !== undefined && !Number.isFinite(temperature) ||
       topP !== undefined && !Number.isFinite(topP) ||
@@ -341,6 +346,11 @@ async function handleSubmit() {
       outputPrice !== undefined && !Number.isFinite(outputPrice)
     ) {
       formError.value = '高级参数中的数字格式不正确，请输入合法数值或留空';
+      submitting.value = false;
+      return;
+    }
+    if (priority !== undefined && (!Number.isInteger(priority) || priority < 0)) {
+      formError.value = '路由优先级必须为非负整数，或留空表示无偏好';
       submitting.value = false;
       return;
     }
@@ -383,6 +393,7 @@ async function handleSubmit() {
       ...(inputPrice !== undefined ? { input_price: inputPrice } : {}),
       ...(cachedPrice !== undefined ? { cached_price: cachedPrice } : {}),
       ...(outputPrice !== undefined ? { output_price: outputPrice } : {}),
+      ...(priority !== undefined ? { priority } : {}),
     };
 
     if (editingModelName.value) {
@@ -757,6 +768,27 @@ function getTierBadgeVariant(tier?: string) {
                         </div>
                       </div>
                     </div>
+                    <!-- 路由优先级 (数值越大越优先；与其他服务商同名模型比较) -->
+                    <div class="grid grid-cols-1 sm:grid-cols-12 gap-2 sm:gap-4 items-center">
+                      <label class="sm:col-span-3 text-slate-600 font-medium text-xs">
+                        <span class="flex items-center gap-1">
+                          <span>路由优先级</span>
+                          <UiTooltip content="数值越大，同名模型跨服务商时越优先被尝试（优先于价格/延迟等策略评分）。留空为 0。">
+                            <Icons name="info" size="12" class="text-slate-400 cursor-pointer" />
+                          </UiTooltip>
+                        </span>
+                      </label>
+                      <div class="sm:col-span-9">
+                        <input
+                          v-model="form.priority"
+                          type="text"
+                          inputmode="numeric"
+                          placeholder="例如 10（留空 = 0，无偏好）"
+                          class="w-full bg-white border border-slate-200/80 rounded-lg px-2.5 py-1.5 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-slate-400/20 focus:border-slate-500"
+                          data-testid="model-priority-input"
+                        />
+                      </div>
+                    </div>
 
                     <!-- 价格与峰谷模式 (同一行2列：默认价格为谷价，可添加峰价时段) -->
                     <div class="grid grid-cols-1 sm:grid-cols-12 gap-2 sm:gap-4 items-start pt-1">
@@ -991,6 +1023,16 @@ function getTierBadgeVariant(tier?: string) {
             >
               {{ m.protocol }}
             </UiBadge>
+
+            <!-- 路由优先级标记 (显式设置的跨服务商偏好) -->
+            <UiTooltip
+              v-if="m.priority != null"
+              :content="`路由优先级: ${m.priority}（数值越大，同名模型跨服务商时越优先被尝试）`"
+            >
+              <UiBadge variant="purple" class="hidden md:inline-flex items-center text-3xs font-mono font-normal cursor-help" data-testid="model-row-priority">
+                ⭐ PRIO={{ m.priority }}
+              </UiBadge>
+            </UiTooltip>
 
             <!-- 采样/价格定制标记 -->
             <UiTooltip
@@ -1283,6 +1325,27 @@ function getTierBadgeVariant(tier?: string) {
                       </div>
                     </div>
 
+                    <!-- 路由优先级 (数值越大越优先；与其他服务商同名模型比较) -->
+                    <div class="grid grid-cols-1 sm:grid-cols-12 gap-2 sm:gap-4 items-center">
+                      <label class="sm:col-span-3 text-slate-600 font-medium text-xs">
+                        <span class="flex items-center gap-1">
+                          <span>路由优先级</span>
+                          <UiTooltip content="数值越大，同名模型跨服务商时越优先被尝试（优先于价格/延迟等策略评分）。留空为 0。">
+                            <Icons name="info" size="12" class="text-slate-400 cursor-pointer" />
+                          </UiTooltip>
+                        </span>
+                      </label>
+                      <div class="sm:col-span-9">
+                        <input
+                          v-model="form.priority"
+                          type="text"
+                          inputmode="numeric"
+                          placeholder="例如 10（留空 = 0，无偏好）"
+                          class="w-full bg-white border border-slate-200/80 rounded-lg px-2.5 py-1.5 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-slate-400/20 focus:border-slate-500"
+                          data-testid="model-priority-input"
+                        />
+                      </div>
+                    </div>
                     <!-- 默认采样参数 (请求未传时生效，同一行2列) -->
                     <div class="grid grid-cols-1 sm:grid-cols-12 gap-2 sm:gap-4 items-center">
                       <label class="sm:col-span-3 text-slate-600 font-medium text-xs">默认采样</label>
@@ -1307,6 +1370,27 @@ function getTierBadgeVariant(tier?: string) {
                             data-testid="model-top-p-input"
                           />
                         </div>
+                      </div>
+                    </div>
+                    <!-- 路由优先级 (数值越大越优先；与其他服务商同名模型比较) -->
+                    <div class="grid grid-cols-1 sm:grid-cols-12 gap-2 sm:gap-4 items-center">
+                      <label class="sm:col-span-3 text-slate-600 font-medium text-xs">
+                        <span class="flex items-center gap-1">
+                          <span>路由优先级</span>
+                          <UiTooltip content="数值越大，同名模型跨服务商时越优先被尝试（优先于价格/延迟等策略评分）。留空为 0。">
+                            <Icons name="info" size="12" class="text-slate-400 cursor-pointer" />
+                          </UiTooltip>
+                        </span>
+                      </label>
+                      <div class="sm:col-span-9">
+                        <input
+                          v-model="form.priority"
+                          type="text"
+                          inputmode="numeric"
+                          placeholder="例如 10（留空 = 0，无偏好）"
+                          class="w-full bg-white border border-slate-200/80 rounded-lg px-2.5 py-1.5 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-slate-400/20 focus:border-slate-500"
+                          data-testid="model-priority-input"
+                        />
                       </div>
                     </div>
 

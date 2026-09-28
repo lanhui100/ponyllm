@@ -17,6 +17,7 @@ fn test_node_latency_metrics_dynamic_update_and_speed_scoring() {
         output_price: 2.0,
         models: vec!["test-model".to_string()],
         model_specs: vec![ModelSpec {
+            priority: None,
             name: "test-model".to_string(),
             tier: ModelTier::Standard,
             context_window: "128K".to_string(),
@@ -43,6 +44,7 @@ fn test_node_latency_metrics_dynamic_update_and_speed_scoring() {
         output_price: 2.0,
         models: vec!["test-model".to_string()],
         model_specs: vec![ModelSpec {
+            priority: None,
             name: "test-model".to_string(),
             tier: ModelTier::Standard,
             context_window: "128K".to_string(),

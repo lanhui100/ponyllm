@@ -87,6 +87,7 @@ fn build_gateway_config_and_pools(
             .map(|m| ponyllm_server::ModelSpec {
                 name: m.name,
                 tier: m.tier,
+                priority: m.priority,
                 context_window: m.context_window,
                 max_output: m.max_output,
                 input_types: m.input_types,
@@ -887,6 +888,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let model_cfg = ponyllm_cli::config::ModelConfig {
                     name: model.clone(),
                     tier: tier_val,
+                    priority: None,
                     billing_mode: mode_val,
                     context_window: context.clone(),
                     max_output: max_output.clone(),

@@ -1134,6 +1134,7 @@ fn handle_modal_key(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                         let proto_val = idx_to_protocol(*protocol_idx);
 
                         let cfg = ModelConfig {
+                            priority: None,
                             name: m_name.clone(),
                             tier: tier_val,
                             context_window: if context_window.trim().is_empty() { "1M".to_string() } else { context_window.trim().to_string() },
@@ -1328,6 +1329,7 @@ fn handle_modal_key(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                     let proto_val = idx_to_protocol(*protocol_idx);
 
                     let cfg = ModelConfig {
+                        priority: None,
                         name: model_name.clone(),
                         tier: tier_val,
                         context_window: if context_window.trim().is_empty() { "1M".to_string() } else { context_window.trim().to_string() },

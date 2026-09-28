@@ -217,4 +217,64 @@ describe('ModelSubSection model form', () => {
     app.unmount();
     document.body.removeChild(container);
   });
+
+  it('submits routing priority when set and shows a priority badge on rows', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    let created: any = null;
+    const app = createApp(ModelSubSection, {
+      providerName: 'openai',
+      models: mockModels,
+      adminWriteEnabled: true,
+      defaultExpanded: true,
+      onCreate: async (payload: any) => {
+        created = payload;
+      },
+    });
+    app.mount(container);
+    await nextTick();
+
+    // Existing rows without priority render no badge.
+    expect(container.querySelector('[data-testid="model-row-priority"]')).toBeNull();
+
+    (container.querySelector('[data-testid="add-model-btn"]') as HTMLButtonElement).click();
+    await nextTick();
+    await nextTick();
+    const setVal = (testid: string, v: string) => {
+      const el = container.querySelector(`[data-testid="${testid}"]`) as HTMLInputElement;
+      el.value = v;
+      el.dispatchEvent(new Event('input'));
+    };
+    setVal('model-name-input', 'gpt-6-sol');
+    (container.querySelector('[data-testid="toggle-advanced-btn"]') as HTMLButtonElement).click();
+    await nextTick();
+    setVal('model-priority-input', '10');
+    await nextTick();
+
+    (container.querySelector('[data-testid="submit-model-btn"]') as HTMLButtonElement).click();
+    await nextTick();
+    await nextTick();
+
+    expect(created).not.toBeNull();
+    expect(created.priority).toBe(10);
+
+    // Reload with a prioritized model -> badge appears.
+    const priorityModel: ModelView[] = [{ ...mockModels[0], priority: 10 }];
+    const container2 = document.createElement('div');
+    document.body.appendChild(container2);
+    const app2 = createApp(ModelSubSection, {
+      providerName: 'openai',
+      models: priorityModel,
+      adminWriteEnabled: true,
+      defaultExpanded: true,
+    });
+    app2.mount(container2);
+    await nextTick();
+    expect(container2.querySelector('[data-testid="model-row-priority"]')?.textContent).toContain('10');
+
+    app.unmount();
+    document.body.removeChild(container);
+    app2.unmount();
+    document.body.removeChild(container2);
+  });
 });

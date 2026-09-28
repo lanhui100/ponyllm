@@ -167,6 +167,10 @@ pub struct ModelView {
     pub top_p: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
+    /// Explicit routing preference for this model under this provider
+    /// (larger = tried first among same-named models; `None` = no preference).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<u32>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -363,6 +367,11 @@ pub struct CreateModelPayload {
     pub top_p: Option<f32>,
     #[serde(default)]
     pub display_name: Option<String>,
+    /// Explicit routing preference for this model under this provider
+    /// (larger = tried first among same-named models). `None` defaults to no
+    /// preference (0), preserving pre-priority ordering.
+    #[serde(default)]
+    pub priority: Option<u32>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -408,6 +417,11 @@ pub struct UpdateModelPayload {
     pub top_p: Option<f32>,
     #[serde(default)]
     pub display_name: Option<String>,
+    /// Explicit routing preference for this model under this provider
+    /// (larger = tried first among same-named models). `None` leaves the
+    /// existing value untouched on update.
+    #[serde(default)]
+    pub priority: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1557,6 +1571,7 @@ pub async fn handle_admin_provider_models(
                 temperature: m.temperature,
                 top_p: m.top_p,
                 display_name: m.display_name.clone(),
+                priority: m.priority,
             }
         })
         .collect();
@@ -1598,6 +1613,7 @@ pub async fn handle_admin_models(State(state): State<Arc<AppState>>) -> impl Int
                 temperature: m.temperature,
                 top_p: m.top_p,
                 display_name: m.display_name.clone(),
+                priority: m.priority,
             });
         }
     }
@@ -1730,6 +1746,7 @@ pub async fn handle_admin_create_model(
     let m_cfg = ModelConfig {
         name: model_name.clone(),
         tier,
+        priority: payload.priority,
         billing_mode: None,
         context_window: ctx_win.clone(),
         max_output: max_out.clone(),
@@ -1767,6 +1784,7 @@ pub async fn handle_admin_create_model(
     let m_spec = ModelSpec {
         name: model_name.clone(),
         tier,
+        priority: payload.priority,
         context_window: ctx_win.clone(),
         max_output: max_out,
         input_types: input_types.clone(),
@@ -1834,6 +1852,7 @@ pub async fn handle_admin_create_model(
             display_name,
             temperature: payload.temperature,
             top_p: payload.top_p,
+            priority: payload.priority,
         }),
     )
         .into_response()
@@ -1925,6 +1944,7 @@ pub async fn handle_admin_update_model(
         .unwrap_or_else(|| ModelConfig {
             name: name.clone(),
             tier: ModelTier::Standard,
+            priority: None,
             billing_mode: None,
             context_window: "128K".to_string(),
             max_output: "16K".to_string(),
@@ -2012,6 +2032,11 @@ pub async fn handle_admin_update_model(
             .filter(|s| !s.is_empty())
             .map(str::to_string);
     }
+    // Explicit priority updates the value; `None` (absent) leaves it untouched
+    // (matching the temperature/top_p semantics of this endpoint).
+    if payload.priority.is_some() {
+        existing_config.priority = payload.priority;
+    }
 
     // H2: same URL/proxy gate as model create, on the effective values.
     if let Some(ref bu) = existing_config.base_url {
@@ -2046,6 +2071,7 @@ pub async fn handle_admin_update_model(
     let m_spec = ModelSpec {
         name: name.clone(),
         tier: existing_config.tier,
+        priority: existing_config.priority,
         context_window: existing_config.context_window.clone(),
         max_output: existing_config.max_output.clone(),
         input_types: existing_config.input_types.clone(),
@@ -2105,6 +2131,7 @@ pub async fn handle_admin_update_model(
         display_name: existing_config.display_name,
         temperature: existing_config.temperature,
         top_p: existing_config.top_p,
+        priority: existing_config.priority,
     })
     .into_response()
 }

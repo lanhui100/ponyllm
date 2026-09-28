@@ -430,6 +430,12 @@ pub struct ModelConfig {
     pub name: String,
     #[serde(default)]
     pub tier: ModelTier,
+    /// Explicit routing preference for this model under this provider: a larger
+    /// value ranks this candidate ahead of same-named models of other providers
+    /// (and ahead of hot-cache / strategy scores). `None` (default) = no
+    /// preference, treated as 0, so legacy configs keep their exact behaviour.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub billing_mode: Option<BillingMode>,
     #[serde(default = "default_context_window")]
@@ -495,6 +501,7 @@ impl Default for ModelConfig {
         Self {
             name: String::new(),
             tier: ModelTier::Standard,
+            priority: None,
             billing_mode: None,
             context_window: default_context_window(),
             max_output: default_max_output(),
@@ -523,6 +530,7 @@ impl ModelConfig {
         Self {
             name: name.into(),
             tier: ModelTier::Standard,
+            priority: None,
             billing_mode: None,
             context_window: default_context_window(),
             max_output: default_max_output(),
@@ -1199,5 +1207,26 @@ mod tests {
         assert_eq!(legacy.last4, "****");
         assert!(!legacy.revoked);
         assert!(legacy.expires_at.is_none());
+    }
+
+    #[test]
+    fn test_model_priority_serde_roundtrip_and_legacy_default() {
+        // A model with priority persists it verbatim through TOML.
+        let mut cfg = ModelConfig::new("gpt-6-sol");
+        cfg.priority = Some(10);
+        let toml_str = toml::to_string(&cfg).unwrap();
+        let back: ModelConfig = toml::from_str(&toml_str).unwrap();
+        assert_eq!(back.priority, Some(10));
+
+        // Legacy models without the field deserialize to `None` (treated as 0).
+        let legacy_toml = "name = \"gpt-6-sol\"\ntier = \"Standard\"\n";
+        let legacy: ModelConfig = toml::from_str(legacy_toml).unwrap();
+        assert_eq!(legacy.priority, None);
+
+        // `None` never leaks into the serialized form.
+        let mut plain = ModelConfig::new("plain");
+        plain.priority = None;
+        let serialized = toml::to_string(&plain).unwrap();
+        assert!(!serialized.contains("priority"), "None priority must be skipped: {}", serialized);
     }
 }

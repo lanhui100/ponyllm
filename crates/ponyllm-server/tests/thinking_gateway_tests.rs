@@ -66,6 +66,7 @@ async fn test_thinking_scrubbing_for_non_reasoning_models() {
             output_price: 10.0,
             models: vec!["gpt-4o".to_string()],
             model_specs: vec![ModelSpec {
+                priority: None,
                 name: "gpt-4o".to_string(),
                 tier: ModelTier::Standard,
                 // gpt-4o defaults to Off, max Off
@@ -211,6 +212,7 @@ async fn test_thinking_forwarding_and_clamping_for_reasoning_models() {
             output_price: 4.4,
             models: vec!["o3-mini".to_string()],
             model_specs: vec![ModelSpec {
+                priority: None,
                 name: "o3-mini".to_string(),
                 tier: ModelTier::Standard,
                 thinking_default: Some(ReasoningEffort::Medium),
@@ -336,6 +338,7 @@ async fn test_cross_protocol_thinking_translation() {
             output_price: 75.0,
             models: vec!["claude-opus-5".to_string()],
             model_specs: vec![ModelSpec {
+                priority: None,
                 name: "claude-opus-5".to_string(),
                 tier: ModelTier::Flagship,
                 thinking_default: Some(ReasoningEffort::Medium),
@@ -442,6 +445,7 @@ async fn test_thinking_precedence_header_wins() {
             output_price: 2.19,
             models: vec!["deepseek-reasoner".to_string()],
             model_specs: vec![ModelSpec {
+                priority: None,
                 name: "deepseek-reasoner".to_string(),
                 tier: ModelTier::Flagship,
                 thinking_default: Some(ReasoningEffort::Medium),
@@ -549,6 +553,7 @@ async fn test_responses_upstream_thinking_serialization_omits_top_level_reasonin
             output_price: 0.0,
             models: vec!["fable-5.1".to_string()],
             model_specs: vec![ModelSpec {
+                priority: None,
                 name: "fable-5.1".to_string(),
                 tier: ModelTier::Flagship,
                 thinking_default: Some(ReasoningEffort::High),

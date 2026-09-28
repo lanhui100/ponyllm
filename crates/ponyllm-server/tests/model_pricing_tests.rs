@@ -17,6 +17,7 @@ fn test_model_spec_pricing_inheritance_and_override() {
         model_specs: vec![
             // deepseek-chat inherits provider default pricing
             ModelSpec {
+                priority: None,
                 name: "deepseek-chat".to_string(),
                 tier: ModelTier::Standard,
                 context_window: "128K".to_string(),
@@ -27,6 +28,7 @@ fn test_model_spec_pricing_inheritance_and_override() {
             },
             // deepseek-reasoner has higher custom pricing with special cached price
             ModelSpec {
+                priority: None,
                 name: "deepseek-reasoner".to_string(),
                 tier: ModelTier::Flagship,
                 context_window: "128K".to_string(),
@@ -61,6 +63,7 @@ fn test_model_spec_pricing_inheritance_and_override() {
 
     // 3. Peak valley pricing model test: default baseline is valley, peak period can exclude/include weekends
     let pv_model = ModelSpec {
+        priority: None,
         name: "deepseek-pv".to_string(),
         input_price: Some(0.05), // 谷价输入
         cached_price: Some(0.01),
@@ -113,6 +116,7 @@ fn test_economy_routing_respects_model_level_pricing() {
         models: vec!["special-model".to_string()],
         model_specs: vec![
             ModelSpec {
+                priority: None,
                 name: "special-model".to_string(),
                 tier: ModelTier::Standard,
                 context_window: "128K".to_string(),
@@ -145,6 +149,7 @@ fn test_economy_routing_respects_model_level_pricing() {
         models: vec!["special-model".to_string()],
         model_specs: vec![
             ModelSpec {
+                priority: None,
                 name: "special-model".to_string(),
                 tier: ModelTier::Standard,
                 context_window: "128K".to_string(),
@@ -199,6 +204,7 @@ fn test_pricing_anti_inversion_and_free_model_preservation() {
         model_specs: vec![
             // mini only specifies input_price = 0.15; cached_price should scale down to 0.075, not 1.25!
             ModelSpec {
+                priority: None,
                 name: "mini".to_string(),
                 tier: ModelTier::Light,
                 context_window: "128K".to_string(),
@@ -210,6 +216,7 @@ fn test_pricing_anti_inversion_and_free_model_preservation() {
             },
             // free-trial has input_price = 0.0; cached_price must be 0.0, output inherits or is 0
             ModelSpec {
+                priority: None,
                 name: "free-trial".to_string(),
                 tier: ModelTier::Light,
                 context_window: "32K".to_string(),

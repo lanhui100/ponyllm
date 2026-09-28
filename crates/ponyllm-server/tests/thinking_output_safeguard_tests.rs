@@ -67,6 +67,7 @@ async fn test_thinking_output_safeguard_chat_flooring() {
             models: vec!["deepseek-reasoner".to_string(), "deepseek-chat".to_string()],
             model_specs: vec![
                 ModelSpec {
+                    priority: None,
                     name: "deepseek-reasoner".to_string(),
                     tier: ModelTier::Flagship,
                     max_output: "32K".to_string(),
@@ -75,6 +76,7 @@ async fn test_thinking_output_safeguard_chat_flooring() {
                     ..Default::default()
                 },
                 ModelSpec {
+                    priority: None,
                     name: "deepseek-chat".to_string(),
                     tier: ModelTier::Standard,
                     max_output: "8K".to_string(),
@@ -199,6 +201,7 @@ async fn test_thinking_output_safeguard_messages_flooring() {
             models: vec!["claude-3-7-sonnet".to_string()],
             model_specs: vec![
                 ModelSpec {
+                    priority: None,
                     name: "claude-3-7-sonnet".to_string(),
                     tier: ModelTier::Flagship,
                     max_output: "64K".to_string(),

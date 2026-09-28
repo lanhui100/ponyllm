@@ -16,6 +16,7 @@ fn test_model_config_tier_and_pricing_serialization() {
     );
 
     let m_custom = ModelConfig {
+        priority: None,
         name: "deepseek-chat".to_string(),
         tier: ModelTier::Standard,
         context_window: "128K".to_string(),
@@ -40,6 +41,7 @@ fn test_model_config_tier_and_pricing_serialization() {
     };
 
     let m_inherit = ModelConfig {
+        priority: None,
         name: "deepseek-coder".to_string(),
         tier: ModelTier::Flagship,
         context_window: "64K".to_string(),

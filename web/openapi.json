@@ -10,7 +10,7 @@
       "name": "MIT OR Apache-2.0",
       "identifier": "MIT OR Apache-2.0"
     },
-    "version": "0.2.44"
+    "version": "0.2.45"
   },
   "paths": {
     "/api/admin/auth/rotate": {
@@ -1296,6 +1296,15 @@
               "$ref": "#/components/schemas/AdminPricingPeriod"
             }
           },
+          "priority": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Explicit routing preference for this model under this provider\n(larger = tried first among same-named models). `None` defaults to no\npreference (0), preserving pre-priority ordering.",
+            "minimum": 0
+          },
           "protocol": {
             "type": [
               "string",
@@ -1856,6 +1865,15 @@
               "$ref": "#/components/schemas/AdminPricingPeriod"
             }
           },
+          "priority": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Explicit routing preference for this model under this provider\n(larger = tried first among same-named models; `None` = no preference).",
+            "minimum": 0
+          },
           "protocol": {
             "type": [
               "string",
@@ -2338,6 +2356,15 @@
             "items": {
               "$ref": "#/components/schemas/AdminPricingPeriod"
             }
+          },
+          "priority": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Explicit routing preference for this model under this provider\n(larger = tried first among same-named models). `None` leaves the\nexisting value untouched on update.",
+            "minimum": 0
           },
           "protocol": {
             "type": [

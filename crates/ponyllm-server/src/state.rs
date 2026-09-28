@@ -79,6 +79,11 @@ pub struct RoutedTarget {
     pub base_url: String,
     pub physical_model: String,
     pub tier: ModelTier,
+    /// Explicit per-(provider, model) routing preference: a larger value ranks
+    /// this candidate ahead of same-named candidates of other providers and
+    /// ahead of hot-cache / strategy scores. `None` = no preference (0), so
+    /// legacy configs keep their exact ordering behaviour.
+    pub priority: Option<u32>,
     pub strategy: GatewayRoutingStrategy,
     /// Effective native upstream protocol: request header > model override >
     /// provider default > legacy URL heuristic.
@@ -1122,6 +1127,7 @@ impl AppState {
                     base_url: spec.base_url.clone().unwrap_or_else(|| p_cfg.base_url.clone()),
                     physical_model: clean.clone(),
                     tier: spec.tier,
+                    priority: spec.priority,
                     strategy,
                     upstream_protocol: protocol,
                     endpoint_base,
@@ -1153,6 +1159,7 @@ impl AppState {
                         base_url: spec.base_url.clone().unwrap_or_else(|| p_cfg.base_url.clone()),
                         physical_model: effective.to_string(),
                         tier: spec.tier,
+                        priority: spec.priority,
                         strategy,
                         upstream_protocol: protocol,
                         endpoint_base,
@@ -1186,6 +1193,7 @@ impl AppState {
                         base_url: spec.base_url.clone().unwrap_or_else(|| p_cfg.base_url.clone()),
                         physical_model: sub_effective.to_string(),
                         tier: spec.tier,
+                        priority: spec.priority,
                         strategy,
                         upstream_protocol: protocol,
                         endpoint_base,
@@ -1222,6 +1230,7 @@ impl AppState {
                         base_url: spec.base_url.clone().unwrap_or_else(|| p_cfg.base_url.clone()),
                         physical_model: effective.to_string(),
                         tier: spec.tier,
+                        priority: spec.priority,
                         strategy,
                         upstream_protocol: protocol,
                         endpoint_base,
@@ -1286,6 +1295,7 @@ impl AppState {
                     base_url: default_spec.base_url.clone().unwrap_or_else(|| p_cfg.base_url.clone()),
                     physical_model: p_cfg.default_model.clone(),
                     tier,
+                    priority: default_spec.priority,
                     strategy,
                     upstream_protocol: protocol,
                     endpoint_base,
@@ -1313,6 +1323,7 @@ impl AppState {
                             base_url: spec.base_url.clone().unwrap_or_else(|| p_cfg.base_url.clone()),
                             physical_model: m.clone(),
                             tier,
+                            priority: spec.priority,
                             strategy,
                             upstream_protocol: protocol,
                             endpoint_base,
@@ -1350,7 +1361,7 @@ impl AppState {
         // Decorate-Sort-Undecorate: snapshot every dynamic signal once per
         // candidate so comparators stay pure functions (strict weak ordering
         // holds even while pools and latency metrics mutate concurrently).
-        match strategy {
+        let mut sorted: Vec<RoutedTarget> = match strategy {
             GatewayRoutingStrategy::Economy => {
                 let mut keyed: Vec<(f64, RoutedTarget)> = candidates
                     .into_iter()
@@ -1414,7 +1425,16 @@ impl AppState {
                 keyed.sort_by_key(|b| std::cmp::Reverse(b.0));
                 keyed.into_iter().map(|(_, c)| c).collect()
             }
-        }
+        };
+        // Explicit priority is the PRIMARY routing key: a stable final sort
+        // preserves everyone's strategy-scored order within equal priorities,
+        // while a higher `priority` (larger number) always ranks first. This
+        // deliberate precedence means an operator's explicit preference wins
+        // over hot-cache stickiness and price/latency/reliability scores
+        // (documented in the model-priority ADR); `None` = 0 keeps legacy
+        // configurations byte-for-byte identical to the pre-priority ordering.
+        sorted.sort_by_key(|c| std::cmp::Reverse(c.priority.unwrap_or(0)));
+        sorted
     }
 
     /// List all exposed models: virtual auto models and physical configured models.

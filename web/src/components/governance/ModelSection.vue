@@ -32,6 +32,7 @@ const form = ref({
   thinking_default: 'Off',
   thinking_max: 'High',
   protocol: '',
+  priority: '',
 });
 
 function openCreateDrawer() {
@@ -45,6 +46,7 @@ function openCreateDrawer() {
     thinking_default: 'Off',
     thinking_max: 'High',
     protocol: '',
+    priority: '',
   };
   formError.value = null;
   showDrawer.value = true;
@@ -61,6 +63,7 @@ function openEditDrawer(model: ModelView) {
     thinking_default: model.thinking_default || 'Off',
     thinking_max: model.thinking_max || 'High',
     protocol: model.protocol || '',
+    priority: model.priority != null ? String(model.priority) : '',
   };
   formError.value = null;
   showDrawer.value = true;
@@ -82,9 +85,20 @@ async function handleSubmit() {
     return;
   }
 
+  const priorityRaw = form.value.priority.trim();
+  let priority: number | undefined;
+  if (priorityRaw) {
+    priority = Number(priorityRaw);
+    if (!Number.isInteger(priority) || priority < 0) {
+      formError.value = '路由优先级必须为非负整数，或留空表示无偏好';
+      return;
+    }
+  }
+
   submitting.value = true;
   formError.value = null;
   try {
+    const priorityPayload = priority !== undefined ? { priority } : {};
     if (isEditing.value) {
       await emit('update', editingModelName.value, {
         provider: form.value.provider,
@@ -93,6 +107,7 @@ async function handleSubmit() {
         thinking_default: form.value.thinking_default,
         thinking_max: form.value.thinking_max,
         protocol: form.value.protocol || null,
+        ...priorityPayload,
       });
     } else {
       await emit('create', {
@@ -103,6 +118,7 @@ async function handleSubmit() {
         thinking_default: form.value.thinking_default,
         thinking_max: form.value.thinking_max,
         protocol: form.value.protocol || null,
+        ...priorityPayload,
       });
     }
     closeDrawer();
@@ -163,6 +179,7 @@ async function handleDelete(name: string) {
             <th>思考默认 (地板)</th>
             <th>思考上限 (天花板)</th>
             <th>协议</th>
+            <th>优先级</th>
             <th class="actions-col">操作</th>
           </tr>
         </thead>
@@ -178,6 +195,7 @@ async function handleDelete(name: string) {
             <td><span class="thinking-badge">{{ m.thinking_default }}</span></td>
             <td><span class="thinking-badge">{{ m.thinking_max }}</span></td>
             <td>{{ m.protocol || '自动推断' }}</td>
+            <td data-testid="model-row-priority-cell">{{ m.priority != null ? m.priority : '—' }}</td>
             <td class="actions-col">
               <button
                 type="button"
@@ -200,7 +218,7 @@ async function handleDelete(name: string) {
             </td>
           </tr>
           <tr v-if="models.length === 0">
-            <td colspan="7" class="empty-cell">暂无 Model 数据</td>
+            <td colspan="8" class="empty-cell">暂无 Model 数据</td>
           </tr>
         </tbody>
       </table>
@@ -267,6 +285,17 @@ async function handleDelete(name: string) {
             <select v-model="form.thinking_max" data-testid="thinking-max-select">
               <option v-for="th in THINKING_TIERS" :key="th" :value="th">{{ th }}</option>
             </select>
+          </div>
+
+          <div class="form-group">
+            <label>路由优先级</label>
+            <input
+              v-model="form.priority"
+              type="text"
+              inputmode="numeric"
+              placeholder="例如: 10（留空 = 0，同名模型跨服务商时越大越优先）"
+              data-testid="model-priority-input"
+            />
           </div>
 
           <div class="drawer-footer">

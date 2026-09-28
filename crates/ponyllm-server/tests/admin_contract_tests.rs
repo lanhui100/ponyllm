@@ -83,6 +83,7 @@ impl TestHarness {
             output_price: 10.0,
             models: vec!["gpt-4o".to_string()],
             model_configs: vec![ModelConfig {
+                priority: None,
                 name: "gpt-4o".to_string(),
                 tier: ModelTier::Standard,
                 billing_mode: Some(BillingMode::Metered),
@@ -142,6 +143,7 @@ impl TestHarness {
         gw_config.admin_write_enabled = true;
 
         let model_spec = ModelSpec {
+            priority: None,
             name: "gpt-4o".to_string(),
             tier: ModelTier::Standard,
             context_window: "128K".to_string(),

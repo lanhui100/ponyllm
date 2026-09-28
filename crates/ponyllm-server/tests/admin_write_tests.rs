@@ -71,6 +71,7 @@ impl WriteTestHarness {
             output_price: 10.0,
             models: vec!["gpt-4o".to_string()],
             model_configs: vec![ModelConfig {
+                priority: None,
                 name: "gpt-4o".to_string(),
                 tier: ModelTier::Standard,
                 billing_mode: Some(BillingMode::Metered),
@@ -124,6 +125,7 @@ impl WriteTestHarness {
         gw_config.admin_write_enabled = admin_write_enabled;
 
         let model_spec = ModelSpec {
+            priority: None,
             name: "gpt-4o".to_string(),
             tier: ModelTier::Standard,
             context_window: "128K".to_string(),
@@ -499,7 +501,8 @@ async fn test_model_cud() {
             "input_types": ["text", "image"],
             "output_types": ["text"],
             "protocol": "chat",
-            "base_url": "https://custom-model.endpoint.com"
+            "base_url": "https://custom-model.endpoint.com",
+            "priority": 7
         }))
         .send()
         .await
@@ -512,6 +515,7 @@ async fn test_model_cud() {
     assert_eq!(m["output_types"], serde_json::json!(["text"]));
     assert_eq!(m["protocol"], "chat");
     assert_eq!(m["base_url"], "https://custom-model.endpoint.com");
+    assert_eq!(m["priority"], 7);
 
     // 2. Duplicate Model returns 409
     let dup_resp = client
@@ -537,7 +541,8 @@ async fn test_model_cud() {
             "context_window": "256K",
             "input_types": ["text", "image", "audio"],
             "output_types": ["text", "audio"],
-            "base_url": ""
+            "base_url": "",
+            "priority": 9
         }))
         .send()
         .await
@@ -548,6 +553,7 @@ async fn test_model_cud() {
     assert_eq!(updated["input_types"], serde_json::json!(["text", "image", "audio"]));
     assert_eq!(updated["output_types"], serde_json::json!(["text", "audio"]));
     assert!(updated["base_url"].is_null());
+    assert_eq!(updated["priority"], 9);
 
     // 4. Delete Model
     let del_resp = client

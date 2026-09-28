@@ -62,6 +62,8 @@ export interface ModelView {
   temperature?: number | null;
   top_p?: number | null;
   display_name?: string | null;
+  /** Explicit routing preference for this model under this provider: larger = tried first among same-named models. */
+  priority?: number | null;
 }
 
 export interface UpstreamModelItem {
@@ -218,6 +220,8 @@ export interface CreateModelPayload {
   temperature?: number | null;
   top_p?: number | null;
   display_name?: string | null;
+  /** Explicit routing preference for this model under this provider (larger = tried first). */
+  priority?: number | null;
 }
 
 export interface UpdateModelPayload {
@@ -240,6 +244,8 @@ export interface UpdateModelPayload {
   temperature?: number | null;
   top_p?: number | null;
   display_name?: string | null;
+  /** Explicit routing preference for this model under this provider (larger = tried first). */
+  priority?: number | null;
 }
 
 export interface CreateKeyPayload {

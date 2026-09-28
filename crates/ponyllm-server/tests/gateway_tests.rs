@@ -484,6 +484,7 @@ async fn test_model_default_sampling_applied() {
     let mut config = GatewayConfig::default();
     let mut prov = make_mock_provider_config(&format!("http://{}", upstream_addr), "gpt-4o", vec!["gpt-4o"]);
     prov.model_specs.push(ponyllm_server::ModelSpec {
+        priority: None,
         name: "gpt-4o".to_string(),
         temperature: Some(0.7),
         top_p: Some(0.9),

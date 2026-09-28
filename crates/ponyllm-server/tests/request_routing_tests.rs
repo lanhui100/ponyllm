@@ -6,6 +6,7 @@ use axum::{Json, Router};
 use serde_json::json;
 use ponyllm_core::pool::*;
 use ponyllm_server::{create_app, AppState, GatewayConfig, ProviderConfig, ModelSpec};
+use ponyllm_server::config::{default_context_window, default_max_output, default_modalities};
 use ponyllm_server::routes::models::ParsedRequestModel;
 
 #[test]
@@ -116,6 +117,7 @@ async fn test_model_echo_policy_and_auto_routing() {
             output_price: 0.28,
             models: vec!["deepseek-v4-flash".to_string()],
             model_specs: vec![ModelSpec {
+                priority: None,
                 name: "deepseek-v4-flash".to_string(),
                 tier: ModelTier::Flagship,
                 context_window: "1M".to_string(),
@@ -145,6 +147,7 @@ async fn test_model_echo_policy_and_auto_routing() {
             output_price: 0.60,
             models: vec!["gpt-4o-mini".to_string()],
             model_specs: vec![ModelSpec {
+                priority: None,
                 name: "gpt-4o-mini".to_string(),
                 tier: ModelTier::Standard,
                 context_window: "128K".to_string(),
@@ -349,6 +352,7 @@ fn test_protocol_resolution_priority_and_overrides() {
             models: vec![],
             model_specs: if let Some(sp) = spec_proto {
                 vec![ModelSpec {
+                    priority: None,
                     name: model.to_string(),
                     tier: ModelTier::Standard,
                     context_window: "128K".to_string(),
@@ -619,6 +623,7 @@ async fn test_cross_provider_transparent_failover() {
             output_price: 0.20,
             models: vec!["deepseek-v4-flash".to_string()],
             model_specs: vec![ModelSpec {
+                priority: None,
                 name: "deepseek-v4-flash".to_string(),
                 tier: ModelTier::Flagship,
                 context_window: "1M".to_string(),
@@ -648,6 +653,7 @@ async fn test_cross_provider_transparent_failover() {
             output_price: 0.40,
             models: vec!["deepseek-v4-flash".to_string()],
             model_specs: vec![ModelSpec {
+                priority: None,
                 name: "deepseek-v4-flash".to_string(),
                 tier: ModelTier::Flagship,
                 context_window: "1M".to_string(),
@@ -743,6 +749,7 @@ async fn test_anthropic_messages_routing_and_model_echo() {
             output_price: 15.0,
             models: vec!["claude-3-7-sonnet".to_string()],
             model_specs: vec![ModelSpec {
+                priority: None,
                 name: "claude-3-7-sonnet".to_string(),
                 tier: ModelTier::Flagship,
                 context_window: "1M".to_string(),
@@ -1018,6 +1025,7 @@ async fn test_large_payload_handling_with_1m_context_support() {
             output_price: 0.28,
             models: vec!["deepseek-v4-flash".to_string()],
             model_specs: vec![ModelSpec {
+                priority: None,
                 name: "deepseek-v4-flash".to_string(),
                 tier: ModelTier::Flagship,
                 context_window: "1M".to_string(),
@@ -1647,6 +1655,7 @@ async fn test_model_specific_base_url_routing() {
         ..Default::default()
     };
     prov.model_specs.push(ModelSpec {
+        priority: None,
         name: "custom-node".to_string(),
         base_url: Some("https://model-node.example.com/v1".to_string()),
         ..Default::default()
@@ -1686,6 +1695,7 @@ fn test_deepseek_v41_flash_alias_routes_to_live_upstream_name() {
             default_model: "deepseek-flash".to_string(),
             models: vec!["deepseek-flash".to_string()],
             model_specs: vec![ModelSpec {
+                priority: None,
                 name: "deepseek-flash".to_string(),
                 context_window: "1M".to_string(),
                 ..Default::default()
@@ -1795,3 +1805,118 @@ async fn test_deepseek_v41_flash_alias_echo_and_wire_model() {
 
 
 
+
+// -----------------------------------------------------------------------------
+// Model priority across providers (model-priority ADR)
+// -----------------------------------------------------------------------------
+
+/// Helper: one provider serving `duo` with the given priority and prices.
+fn priority_provider(name: &str, priority: Option<u32>, input_price: f64) -> (String, ProviderConfig) {
+    (
+        name.to_string(),
+        ProviderConfig {
+            base_url: format!("https://{}.example.com", name),
+            default_model: "duo".to_string(),
+            strategy: "round_robin".to_string(),
+            billing_mode: BillingMode::Metered,
+            input_price,
+            cached_price: input_price / 2.0,
+            output_price: 2.0,
+            models: vec!["duo".to_string()],
+            model_specs: vec![ModelSpec {
+                name: "duo".to_string(),
+                tier: ModelTier::Standard,
+                priority,
+                context_window: default_context_window(),
+                max_output: default_max_output(),
+                input_types: default_modalities(),
+                output_types: default_modalities(),
+                billing_mode: None,
+                input_price: None,
+                cached_price: None,
+                output_price: None,
+                pricing_mode: None,
+                pricing_periods: Vec::new(),
+                display_name: None,
+                temperature: None,
+                top_p: None,
+                protocol: None,
+                base_url: None,
+                thinking_default: None,
+                thinking_max: None,
+                proxy: None,
+                timeout_secs: None,
+            }],
+            default_protocol: Some(UpstreamProtocol::Chat),
+            chat_url: None,
+            responses_url: None,
+            messages_url: None,
+            proxy: None,
+            timeout_secs: None,
+        },
+    )
+}
+
+#[test]
+fn test_model_priority_dominates_strategy_scoring() {
+    use ponyllm_server::{AppState, GatewayConfig};
+    use ponyllm_server::routes::models::ParsedRequestModel;
+
+    // hi-pp is far pricier than lo-pp, so the Economy default would choose
+    // lo-pp first; explicit priority must override the price score.
+    let mut config = GatewayConfig::default();
+    config.default_strategy = GatewayRoutingStrategy::Economy;
+    let (lo_name, lo_cfg) = priority_provider("lo-pp", Some(1), 0.1);
+    config.providers.insert(lo_name, lo_cfg);
+    let (hi_name, hi_cfg) = priority_provider("hi-pp", Some(10), 5.0);
+    config.providers.insert(hi_name, hi_cfg);
+
+    let state = AppState::new(config);
+    let parsed = ParsedRequestModel::parse("duo");
+    let targets = state.resolve_routed_targets(&parsed, None).unwrap();
+    assert_eq!(targets.len(), 2);
+    assert_eq!(targets[0].provider_name, "hi-pp", "higher priority must win over cheaper price");
+    assert_eq!(targets[1].provider_name, "lo-pp");
+}
+
+#[test]
+fn test_model_priority_tie_keeps_strategy_scoring() {
+    use ponyllm_server::{AppState, GatewayConfig};
+    use ponyllm_server::routes::models::ParsedRequestModel;
+
+    // Both providers have no priority: the Economy price score must decide,
+    // exactly as before the priority feature existed.
+    let mut config = GatewayConfig::default();
+    config.default_strategy = GatewayRoutingStrategy::Economy;
+    let (ex_name, ex_cfg) = priority_provider("expensive", None, 5.0);
+    config.providers.insert(ex_name, ex_cfg);
+    let (ch_name, ch_cfg) = priority_provider("cheap", None, 0.1);
+    config.providers.insert(ch_name, ch_cfg);
+
+    let state = AppState::new(config);
+    let parsed = ParsedRequestModel::parse("duo");
+    let targets = state.resolve_routed_targets(&parsed, None).unwrap();
+    assert_eq!(targets.len(), 2);
+    assert_eq!(targets[0].provider_name, "cheap", "no priority keeps strategy (price) ordering");
+    assert_eq!(targets[1].provider_name, "expensive");
+}
+
+#[test]
+fn test_model_priority_equal_values_fall_back_to_strategy() {
+    use ponyllm_server::{AppState, GatewayConfig};
+    use ponyllm_server::routes::models::ParsedRequestModel;
+
+    // Equal priorities behave like no priority: price decides.
+    let mut config = GatewayConfig::default();
+    config.default_strategy = GatewayRoutingStrategy::Economy;
+    let (ex_name, ex_cfg) = priority_provider("expensive", Some(7), 5.0);
+    config.providers.insert(ex_name, ex_cfg);
+    let (ch_name, ch_cfg) = priority_provider("cheap", Some(7), 0.1);
+    config.providers.insert(ch_name, ch_cfg);
+
+    let state = AppState::new(config);
+    let parsed = ParsedRequestModel::parse("duo");
+    let targets = state.resolve_routed_targets(&parsed, None).unwrap();
+    assert_eq!(targets[0].provider_name, "cheap");
+    assert_eq!(targets[1].provider_name, "expensive");
+}

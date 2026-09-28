@@ -12,6 +12,10 @@ pub struct ModelSpec {
     pub name: String,
     #[serde(default)]
     pub tier: ModelTier,
+    /// Explicit routing preference for this model under this provider; mirrors
+    /// `ModelConfig::priority` (larger = preferred first, `None` = 0).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<u32>,
     #[serde(default = "default_context_window")]
     pub context_window: String,
     #[serde(default = "default_max_output")]
@@ -84,6 +88,7 @@ impl Default for ModelSpec {
         Self {
             name: String::new(),
             tier: ModelTier::Standard,
+            priority: None,
             context_window: default_context_window(),
             max_output: default_max_output(),
             input_types: default_modalities(),
@@ -237,6 +242,7 @@ impl ProviderConfig {
         ModelSpec {
             name: model_name.to_string(),
             tier: ModelTier::Standard,
+            priority: None,
             context_window: default_context_window(),
             max_output: default_max_output(),
             input_types: default_modalities(),
