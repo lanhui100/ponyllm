@@ -4,19 +4,15 @@
 #   --from-file=ponyllm.toml=...`）时必须使用本文件的接线形态，否则 407/404 复发。
 # 完整 config 由 deploy 流程提供；这里只锁定**本轮的硬性接线不变量**。
 #
-# 不变量（2026-09-27 实测锁定，详见 deploy/pproxy-service.md）:
-#   1. opencode-zen 走路径路由直连模式: base_url 路由名打头，**不带 pony_ 租户段**
-#      （腾讯 serve 回环免检路径把首段当路由名，pony_ 前缀恒 404）。
-#   2. 客户端凭据只能放 provider `proxy=` 字段（reqwest 以 Proxy-Authorization
-#      携带，追加末位恰好通过 forwarder 解析）；**禁止**写在 base_url 的 URL
-#      userinfo（直连模式 forwarder 不认，恒 407）。
-#   3. 腾讯节点必须已注册 opencode 路由 + vercel 边缘（见 pproxy-tencent-restore.sh）。
+# 不变量（2026-09-28 变更更新）:
+#   1. opencode-zen（Muse 系列）：走 devserver (100.95.193.103:8899) 路径模式直连，
+#      后端通过 VPS 出口隧道转发（避开 Vercel 部署禁用与 CF Worker 区域限制 403）；
+#      不带 proxy 字段。
+#   2. Jev / Systemone 模型：支持直连 https://opencode.ai/zen/v1，无需代理。
+#   3. antigravity：走 CONNECT 代理模式，proxy= 凭据形态不变（参照 live secret）。
 
 [providers.opencode-zen]
-# <PPROXY_CLIENT_TOKEN> 与腾讯节点 PPROXY_CLIENT_TOKEN 同值（当前 0d1fa1ac…，
-# 轮转时同步更新）
-base_url = "http://pproxy-host.ponyllm.svc:8899/opencode/zen/v1"
-proxy = "http://user:<PPROXY_CLIENT_TOKEN>@pproxy-host.ponyllm.svc:8899"
+base_url = "http://100.95.193.103:8899/pony_31abcbd448a003be0ea27524d60973d8/opencode/zen/v1"
 default_model = "muse-spark-1.3-contributor-free"
 strategy = "round_robin"
 billing_mode = "metered"
@@ -25,9 +21,9 @@ cached_price = 0.0
 output_price = 0.0
 models = [
     "mimo-v2.5-free",
-    "mimo-v2.6-flash-free",
     "muse-spark-1.3-contributor-free",
 ]
+default_protocol = "responses"
 # 注(2026-09-27)：deepseek-v4-flash-free 虽在上游目录但实测已下架
 # (400 Model is unavailable)，暂不加入；mimo-v2.6-flash-free 经网关
 # 真实推理验证通过（protocol = "chat"）。

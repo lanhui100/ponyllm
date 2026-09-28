@@ -23,13 +23,15 @@ Kubernetes `NetworkPolicy` 只对 Pod 流量生效，不能对 selector-less Ser
 
 如果 pproxy 只能监听 `0.0.0.0:8899`，阶段二不得宣称已完成隔离；须先收紧监听或补上节点防火墙 ACL。
 
-## 路径路由模式（opencode-zen）接线事实（2026-09-27 实测）
+## 路径路由模式（opencode-zen）接线事实（2026-09-27 建立，2026-09-28 变更更新）
 
-除 antigravity 的 CONNECT 代理模式外，opencode-zen 走**路径路由直连模式**，接线要求（全部实测锁定）：
+> **2026-09-28 变更更新**：因 Vercel 部署被平台禁用（402 DEPLOYMENT_DISABLED）且 CF Worker 出口被 OpenCode 限制区域（403 RegionError），`opencode-zen` 生产 Pod 接线已从腾讯节点切换至 `devserver` 节点（`100.95.193.103:8899`），直连 devserver 维护的 VPS（RackNerd）出口隧道（主 VPS / 备 Worker）。形态改为携带路径 token 的模式，无需 `proxy=` 字段。
 
-- **Pod 配置形态**：`base_url = "http://pproxy-host.ponyllm.svc:8899/opencode/zen/v1"`（**路由名打头，不带 `pony_` 租户段**——腾讯 serve 走 engine 回环免检路径，`pony_` 首段会被当作路由名而恒 404）+ `proxy = "http://user:<PPROXY_CLIENT_TOKEN>@pproxy-host.ponyllm.svc:8899"`（reqwest 以 `Proxy-Authorization` 携带客户端凭据，追加在末位恰好通过 forwarder 解析）。凭据**不能**写在 base_url 的 URL userinfo 里（直连模式 forwarder 不认，恒 407）。
-- **腾讯节点必备**：`opencode` 路由行（`opencode.ai`，override vercel，enabled）与 vercel 边缘客户端（`proxy_secret` + `PPROXY_EDGE_URL/PPROXY_VERCEL_URL`）；缺路由 → 404 `route_not_found_or_disabled`，缺边缘 → 503 `upstream_client_not_configured`。
-- **forwarder 版本门槛**：必须 ≥ 修复 commit 70341aa（`sanitize_and_inject_ticket` 末行头丢失 bug——否则转发 POST 丢 `Content-Length`，上游收不到 body，表现为 `Model  is not supported` / 空 model，验票已过但数据面"假通"）。诊断经验见 pproxy `docs/ops/TROUBLESHOOTING.md` 同名症状条目。
+除 antigravity 的 CONNECT 代理模式外，opencode-zen 历史与现状形态：
+
+- **现状 Pod 配置形态（2026-09-28 切换）**：`base_url = "http://100.95.193.103:8899/pony_31abcbd448a003be0ea27524d60973d8/opencode/zen/v1"`，不带 `proxy=` 字段，直接经 devserver 隧道转发至可用 VPS。
+- **历史腾讯节点形态（备忘）**：`base_url = "http://pproxy-host.ponyllm.svc:8899/opencode/zen/v1"` + `proxy = "http://user:<PPROXY_CLIENT_TOKEN>@pproxy-host.ponyllm.svc:8899"`。
+- **持久卷（PVC）同步关键提醒**：因为线上 Pod 挂载了持久卷 `/var/lib/ponyllm`（PVC `ponyllm-data`）且采用了 `seed-if-missing` 策略，**仅修改 k8s Secret 不会自动覆盖运行中已存在的配置文件**！必须同时通过运行时更新或清空 PVC 触发重新播种，否则 Pod 重启后仍会读取老配置导致 429 冷却死锁。
 
 ## 验收
 

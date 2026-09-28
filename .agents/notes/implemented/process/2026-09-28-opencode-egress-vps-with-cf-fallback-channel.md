@@ -39,10 +39,12 @@ Vercel 出口。
    keys 冷却 → 429。两步修复：① 腾讯节点 opencode 路由切 `worker`（实测
    muse **推理**在 CF 出口被上游拒：`403 RegionError "This model is not
    available in your country"`——CF 出口对 muse 无效，VPS 是唯一可用出口）；
-   ② 集群 `ponyllm-config` secret 的 opencode-zen `base_url` 改指
+   ② 集群 `ponyllm-config` secret 与持久卷 PVC（`/var/lib/ponyllm/ponyllm.toml`，
+   `seed-if-missing` 策略要求必须同步更新 PVC 文件）的 opencode-zen `base_url` 改指
    devserver（`http://100.95.193.103:8899/pony_*/opencode/zen/v1`，去掉 proxy
-   字段，路径模式直连，devserver opencode=主 vps/备 worker），rollout 后
-   `tokens.ponyjob.top` muse 实测 **200**。集群 keys 冷却随重启清空。
+   字段，路径模式直连，devserver opencode=主 vps/备 worker），rollout 重启清空
+   冷却后 `tokens.ponyjob.top` muse 实测 **200**。文档与示例配置同步收口至
+   `deploy/ponyllm-config.example.toml` 与 `deploy/pproxy-service.md`。
 
 ## Alternatives considered
 
