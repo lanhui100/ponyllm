@@ -28,6 +28,10 @@ rules:
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["get", "list", "watch"]
+  # 轮询私有镜像仓库 digest 所需的最小只读权限（仅 imagePullSecrets 凭据，无写权限）
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -38,6 +42,33 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
   name: keel-workload-updater
+subjects:
+  - kind: ServiceAccount
+    name: keel
+    namespace: keel
+---
+# Keel informer 需要集群级只读发现（无 secrets、无写权限）；
+# 写操作仅限 ponyllm 命名空间的 Role。
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: keel-discovery-readonly
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["batch"]
+    resources: ["cronjobs"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: keel-discovery-readonly
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: keel-discovery-readonly
 subjects:
   - kind: ServiceAccount
     name: keel
@@ -63,8 +94,9 @@ spec:
       serviceAccountName: keel
       containers:
         - name: keel
-          image: keelhq/keel:0.16.1
-          imagePullPolicy: IfNotPresent
+          image: keelhq/keel:0.20.0
+          # 本地已通过 docker save + ctr import 预置镜像，避免国内加速源缺失导致拉取失败
+          imagePullPolicy: Never
           command: ["/bin/keel"]
           env:
             - name: POLL
