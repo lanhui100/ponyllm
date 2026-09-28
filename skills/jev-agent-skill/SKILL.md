@@ -87,14 +87,40 @@ curl -s 'https://opencode.ai/zen/v1/systemone' \
 
 批量示例（同请求多题，实测 `noul: 0.05` + `choice: billing` 同回）：`questions` dict 里并排放 `is_urgent`（noul）与 `route`（choice）两题即可，答案按题名分别返回。
 
+### Validator 伪代码
+
+```text
+assert model and state is not None and questions is object and questions is not empty
+for q in questions:
+  assert q.type in {noul, choice, score}
+  if q.type == choice:
+    assert len(q.options) >= 2
+    assert set(q.options) == set(q.criteria.keys())
+  if q.type == score:
+    assert 2 <= len(q.criteria) <= 10
+# response: finite numbers, probabilities >= 0, abs(sum(probabilities)-1) <= 0.02
+```
+
+## 本地请求与响应校验
+
+Jev 上游对部分字段校验较宽松，生产 agent 不应完全依赖上游拒绝非法输入；发请求前本地校验：
+
+- 顶层 `model`、`state`、`questions` 必须存在；协议允许 `state` 为空，但生产 agent 应把空 state 视为低证据输入，默认不自动执行。
+- `questions` 必须是非空对象；题型只能是 `noul`、`choice`、`score`。
+- `choice`：`options` 至少 2 个；`criteria` 必须是对象；两者 key 集合必须完全一致。
+- `score`：`criteria` 必须是 2–10 个非空等级，顺序从低到高。
+- 响应中的数值必须是 finite；`noul` 必须在 `[0,1]`；概率必须非负且总和约等于 1（容差 ±0.02）；choice 结果必须存在于 options；score 必须在 `[0, criteria.length-1]`。
+- 缺字段、类型错误、概率和异常时，不得自动执行；应重试、降级或转人工。
+
 ## 按 confidence 路由纪律
 
-每次判断只看 point 值（label / score / noul 值）不算数，必须同时看 certainty：
+每次判断只看 point 值（label / score / noul 值）不算数，必须同时看 certainty。`confidence` 表示模型分布集中度，不等于事实正确性、证据充分性或真实性；例如模糊文本也可能得到高 confidence。
 
-- certainty `≥ 0.85`：自动执行（按 label/score 走下游流程）。`noul` 题以 `noul` 值本身为 certainty（`≥ 0.85` 判是，`≤ 0.15` 判否，中间段按下条处理）。
+- `noul`：`noul ≥ 0.85` 判“是”，`noul ≤ 0.15` 判“否”，中间段转人工；noul 没有独立 `confidence` 字段。
+- `choice` 自动执行必须同时满足：`confidence ≥ 0.85`、top-1 概率 `≥ 0.85`、top-1 与 top-2 概率差 `≥ 0.20`，且选项通过本地 schema 校验；否则生成草稿或转人工。
+- `score` 自动执行必须同时满足：`confidence ≥ 0.85`、top-1 概率 `≥ 0.85`、top-1 与 top-2 差 `≥ 0.20`，且概率不能双峰/明显分散；否则人工确认。
 - certainty `0.5–0.85`：生成草稿，请人确认后再执行。
 - certainty `< 0.5`：转人工，不自动执行、不生成终稿。
-- `score` 题额外看 `probabilities` 分布：分布分散 / 双峰（概率散在多个档位）时，即使 certainty 好看也按"需确认"处理，不自动执行。
 
 ## 经网关调用（统一计量）
 

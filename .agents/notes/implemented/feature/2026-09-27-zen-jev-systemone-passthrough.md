@@ -8,7 +8,7 @@ Jev 的 `systemone` 协议返回类型化判断结果（noul/choice/score），�
 
 ## Decision
 
-ponyllm 新增 `UpstreamProtocol::Systemone` 与 `POST /systemone`、`POST /v1/systemone` 路由。路由复用现有鉴权、目标解析、key pool、HTTP client、failover 和单写 telemetry 总线；请求 body 不做 Jev schema 转换，原样发送到目标的 `/systemone`，响应 JSON 语义原样返回；由于现有 executor 使用 serde JSON 并统一错误投影，HTTP 成功状态统一为 200、上游错误统一投影为网关标准错误 envelope，不承诺字节级 HTTP status/header/body 透传。Jev 使用独立 provider（建议名 `zen-jev`），使既有 provider/model 维度的 metrics、timeseries、recorder、quota 和 trace 自然隔离。响应中的 `usage.input_tokens`、`usage.output_tokens`、可选 `cached_tokens` 进入现有 token 统计与 key usage tracker。
+ponyllm 新增 `UpstreamProtocol::Systemone` 与 `POST /systemone`、`POST /v1/systemone` 路由。路由复用现有鉴权、目标解析、key pool、HTTP client、failover 和单写 telemetry 总线；请求 body 不做 Jev schema 转换，原样发送到目标的 `/systemone`，响应 JSON 语义原样返回；由于现有 executor 使用 serde JSON 并统一错误投影，HTTP 成功状态统一为 200、上游错误经敏感信息脱敏后保留安全的 client-error JSON，重试耗尽的网络/代理错误使用网关标准错误 envelope，不承诺字节级 HTTP status/header/body 透传。systemone 请求在 extractor 路由层限制为 512KiB，上游 JSON 响应限制为 4MiB。Jev 使用独立 provider（建议名 `zen-jev`），使既有 provider/model 维度的 metrics、timeseries、recorder、quota 和 trace 自然隔离。响应中的 `usage.input_tokens`、`usage.output_tokens`、可选 `cached_tokens` 进入现有 token 统计与 key usage tracker。
 
 ## Alternatives considered
 

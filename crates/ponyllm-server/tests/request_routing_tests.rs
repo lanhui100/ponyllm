@@ -1114,7 +1114,7 @@ async fn test_custom_request_body_limit_rejection_with_helpful_error() {
         .await
         .unwrap();
 
-    assert_eq!(resp.status(), 400);
+    assert_eq!(resp.status(), 413);
     let err_json: serde_json::Value = resp.json().await.unwrap();
     let err_msg = err_json["error"]["message"].as_str().unwrap();
     assert!(err_msg.contains("Request body length limit exceeded") || err_msg.contains("length limit exceeded"));

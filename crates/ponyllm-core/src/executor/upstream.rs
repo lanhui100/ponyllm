@@ -73,6 +73,7 @@ pub struct UpstreamExecutor {
     /// get the session headers. Defaults to off so non-zen upstreams keep
     /// byte-identical wire headers to before.
     opencode_zen: bool,
+    systemone: bool,
 }
 
 impl std::fmt::Debug for UpstreamExecutor {
@@ -739,6 +740,7 @@ impl UpstreamExecutor {
             session_id: new_upstream_session_id(),
             client_label: "ponyllm".to_string(),
             opencode_zen: false,
+            systemone: false,
         }
     }
 
@@ -747,6 +749,11 @@ impl UpstreamExecutor {
     /// resolved provider + target URL; everything else stays untouched.
     pub fn with_opencode_zen(mut self, enabled: bool) -> Self {
         self.opencode_zen = enabled;
+        self
+    }
+
+    pub fn with_systemone(mut self, enabled: bool) -> Self {
+        self.systemone = enabled;
         self
     }
 
@@ -1034,17 +1041,22 @@ impl UpstreamExecutor {
             return Err(CoreError::Internal(format!("API key for '{}' is empty", key.id)));
         }
 
-        headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
+        // systemone only needs Bearer + Zen client headers; do not send
+        // Anthropic x-api-key or anthropic-version to a custom endpoint.
+        if self.systemone {
+            let bearer_val = HeaderValue::from_str(&format!("Bearer {}", clean_key))
+                .map_err(|e| CoreError::Internal(format!("Invalid characters in API key for '{}': {}", key.id, e)))?;
+            headers.insert(AUTHORIZATION, bearer_val);
+        } else {
+            headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
+            let bearer_val = HeaderValue::from_str(&format!("Bearer {}", clean_key))
+                .map_err(|e| CoreError::Internal(format!("Invalid characters in API key for '{}': {}", key.id, e)))?;
+            headers.insert(AUTHORIZATION, bearer_val);
+            let x_api_val = HeaderValue::from_str(clean_key)
+                .map_err(|e| CoreError::Internal(format!("Invalid characters in API key for '{}': {}", key.id, e)))?;
+            headers.insert("x-api-key", x_api_val);
+        }
 
-        // Bearer header for OpenAI/DeepSeek
-        let bearer_val = HeaderValue::from_str(&format!("Bearer {}", clean_key))
-            .map_err(|e| CoreError::Internal(format!("Invalid characters in API key for '{}': {}", key.id, e)))?;
-        headers.insert(AUTHORIZATION, bearer_val);
-
-        // x-api-key header for Anthropic
-        let x_api_val = HeaderValue::from_str(clean_key)
-            .map_err(|e| CoreError::Internal(format!("Invalid characters in API key for '{}': {}", key.id, e)))?;
-        headers.insert("x-api-key", x_api_val);
 
         // OpenCode zen routing gate: `x-opencode-session` is mandatory
         // (MissingSessionID 400 otherwise). Aliases cover the native
@@ -1156,7 +1168,12 @@ impl UpstreamExecutor {
                     if status.is_success() {
                         self.pool.record_success(&key.id);
                         self.emit_headers(&key.id, attempt_idx, attempt_start.elapsed());
-                        let json_val = resp.json::<Value>().await?;
+                        const MAX_UPSTREAM_JSON_BYTES: usize = 4 * 1024 * 1024;
+                        let bytes = resp.bytes().await?;
+                        if bytes.len() > MAX_UPSTREAM_JSON_BYTES {
+                            return Err(CoreError::Internal("upstream JSON response exceeds 4 MiB".to_string()));
+                        }
+                        let json_val: Value = serde_json::from_slice(&bytes)?;
                         return Ok((json_val, key.id.clone()));
                     }
 

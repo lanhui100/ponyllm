@@ -49,16 +49,19 @@ where
                     }
                 };
 
+                let is_too_large = err_msg.to_ascii_lowercase().contains("length limit exceeded")
+                    || err_msg.to_ascii_lowercase().contains("payload too large");
                 let is_anthropic = uri_path.ends_with("/messages") || uri_path.contains("/messages/");
+                let status = if is_too_large { StatusCode::PAYLOAD_TOO_LARGE } else { StatusCode::BAD_REQUEST };
                 let resp = if is_anthropic {
                     render_anthropic_error(
-                        StatusCode::BAD_REQUEST,
+                        status,
                         "invalid_request_error",
                         &err_msg,
                     )
                 } else {
                     render_openai_error(
-                        StatusCode::BAD_REQUEST,
+                        status,
                         "invalid_request_error",
                         "invalid_payload",
                         &err_msg,
