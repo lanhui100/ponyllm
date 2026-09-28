@@ -31,7 +31,8 @@ Kubernetes `NetworkPolicy` 只对 Pod 流量生效，不能对 selector-less Ser
 
 - **现状 Pod 配置形态（2026-09-28 切换）**：`base_url = "http://100.95.193.103:8899/pony_31abcbd448a003be0ea27524d60973d8/opencode/zen/v1"`，不带 `proxy=` 字段，直接经 devserver 隧道转发至可用 VPS。
 - **历史腾讯节点形态（备忘）**：`base_url = "http://pproxy-host.ponyllm.svc:8899/opencode/zen/v1"` + `proxy = "http://user:<PPROXY_CLIENT_TOKEN>@pproxy-host.ponyllm.svc:8899"`。
-- **持久卷（PVC）同步关键提醒**：因为线上 Pod 挂载了持久卷 `/var/lib/ponyllm`（PVC `ponyllm-data`）且采用了 `seed-if-missing` 策略，**仅修改 k8s Secret 不会自动覆盖运行中已存在的配置文件**！必须同时通过运行时更新或清空 PVC 触发重新播种，否则 Pod 重启后仍会读取老配置导致 429 冷却死锁。
+- **持久卷（PVC）同步与轮转机制（2026-09-28 更新）**：线上 Pod 挂载了持久卷 `/var/lib/ponyllm`（PVC `ponyllm-data`）。为避免 Secret 轮转死锁，现 Deployment 已升级：可通过注入环境变量 `FORCE_CONFIG_SYNC=1` 触发从只读 Secret 强制原子同步到 PVC；若未配置该变量，则保持仅在文件不存在时做初始播种。
+- **安全审计加固闭环（2026-09-28）**：已完成 4 路红队全面加固，包含代理凭据日志/状态脱敏、NetworkPolicy 严密阻断多云 IMDS、Keel 最小权限收敛、探针主动调用 Bearer 强鉴权与 Ingress 精确匹配。完整报告见 `.agents/notes/implemented/architecture/2026-09-28-k3s-multi-dimensional-adversarial-security-hardening.md`。
 
 ## 验收
 

@@ -9,6 +9,13 @@ spec:
   headers:
     customResponseHeaders:
       Strict-Transport-Security: max-age=31536000; includeSubDomains; preload
+      # CSP 现状说明：当前为全站统一的宽松基线（connect-src 允许 https:/wss:，
+      # script/style 保留 'unsafe-inline' 以兼容现有控制台内联代码）。
+      # 未来收紧方向：API 数据面（/v1/*、/models*、/messages*、/responses*、
+      # /api/admin/*）应收敛为 default-src 'none' + 仅 JSON 响应头（靠后端
+      # Content-Type: application/json），移除 unsafe-inline 与 https:/wss: 通配；
+      # 静态控制台（/、/app/*、/assets/* 及 /connect 等页面）再单独挂一条更严但
+      # 仍允许自有静态资源的 CSP。本文件暂保留现状避免误伤业务，仅作方向声明。
       Content-Security-Policy: >-
         default-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'self';
         script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline';
@@ -31,6 +38,20 @@ spec:
     scheme: https
     permanent: true
 ---
+# 受权管理接口边缘粗筛：仅运维出口可达，身份鉴权仍由后端 auth_middleware 负责。
+# sourceRange 为占位（TEST-NET-1 文档段），需运维填入真实运维出口 IP/CIDR 后再生效。
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: ponyllm-admin-allowlist
+  namespace: ponyllm
+  labels:
+    app.kubernetes.io/name: ponyllm
+spec:
+  ipAllowList:
+    sourceRange:
+      - 192.0.2.10/32 # PLACEHOLDER: 填运维出口 IP/CIDR
+---
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
 metadata:
@@ -44,6 +65,11 @@ spec:
     burst: 60
     sourceCriterion:
       ipStrategy:
+        # EdgeOne 双层代理说明：经 EdgeOne 回源后 Traefik 看到的通常是 EdgeOne
+        # 边缘节点 IP，直连 depth:1 会把限流键算到代理 IP 上（误伤/误放）。
+        # 正确做法是在 Traefik 静态配置补 trustedIPs（EdgeOne 回源段）+ depth:2，
+        # 取 X-Forwarded-For 倒数第 2 跳的真实客户端 IP。本文件为 Middleware CRD，
+        # 配不了静态 trustedIPs，故此处保持 depth:1 不动，由运维在 Traefik 层补齐。
         depth: 1
 ---
 apiVersion: traefik.io/v1alpha1
@@ -58,4 +84,6 @@ spec:
     amount: 30
     sourceCriterion:
       ipStrategy:
+        # 同上：EdgeOne 双层代理下需 Traefik 静态 trustedIPs + depth:2；
+        # 静态配置需运维在 Traefik 层补，不在本文件改，此处保持 depth:1。
         depth: 1

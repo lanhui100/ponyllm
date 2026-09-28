@@ -9,12 +9,18 @@ spec:
   podSelector:
     matchLabels:
       app.kubernetes.io/name: ponyllm
+      app.kubernetes.io/component: gateway
   policyTypes:
     - Egress
   egress:
-    # 1. 允许集群内 DNS 解析
+    # 1. 允许集群内 DNS 解析。注意：同一条 egress 规则内 to[] 与 ports[] 是 AND 语义的
+    # 交集（目的必须同时匹配 to 且端口匹配 ports），首条仅放行发往 kube-dns:53 的
+    # 流量；若改用 namespaceSelector:{} + podSelector 的组合写法，需确认 CNI 对
+    # 跨 namespace podSelector 交集的实现语义，误拆成两条规则会放大放行面。
     - to:
-        - namespaceSelector: {}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
           podSelector:
             matchLabels:
               k8s-app: kube-dns
@@ -23,12 +29,24 @@ spec:
           protocol: UDP
         - port: 53
           protocol: TCP
-    # 2. 允许集群内相互通信与监控抓取
+    # 2. 允许集群内相互通信与监控抓取：收敛为仅 ponyllm 自己 + monitor 命名空间
+    #（matchLabels kubernetes.io/metadata.name 精确匹配），不再放行全集群
+    #（旧 namespaceSelector:{} 会放行任意命名空间，风险靠 review 确认已消除）。
     - to:
-        - namespaceSelector: {}
-    # 3. 允许出海与公网大模型访问，严格禁止访问腾讯云 IMDS 实例元数据 (169.254.0.0/16)
+        - podSelector: {}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ponyllm
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitor
+    # 3. 允许出海与公网大模型访问，严格禁止访问云实例元数据（IMDS）：
+    # 腾讯云 169.254.0.0/16、阿里云 100.100.100.200/32、通用 link-local 变体 192.0.0.192/32。
+    # 注意：K8s NetworkPolicy 为白名单机制，未在此显式声明放行的 IPv6 及其他私网流量默认全部阻断（Default-Deny）。
     - to:
         - ipBlock:
             cidr: 0.0.0.0/0
             except:
               - 169.254.0.0/16
+              - 100.100.100.200/32
+              - 192.0.0.192/32

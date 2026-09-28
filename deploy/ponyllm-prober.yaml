@@ -39,6 +39,12 @@ spec:
                 secretKeyRef:
                   name: ponyllm-probe-credentials
                   key: api-key
+            - name: PROBE_MGMT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: ponyllm-probe-credentials
+                  key: mgmt-token
+                  optional: true
           command: ["python3", "/opt/prober/prober.py"]
           ports:
             - containerPort: 9115
@@ -60,7 +66,8 @@ spec:
           configMap:
             name: ponyllm-prober-script
         - name: runtime-data
-          emptyDir: {}
+          emptyDir:
+            sizeLimit: 64Mi
 ---
 apiVersion: v1
 kind: Service

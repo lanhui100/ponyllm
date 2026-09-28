@@ -40,7 +40,17 @@ fi
 echo "  OK"
 
 echo "[2/5] 确保 opencode 路由存在..."
-AT=$(grep '^admin_token' "$CONFIG" | sed 's/admin_token = "//;s/"//')
+AT="${PPROXY_ADMIN_TOKEN:-}"
+if [ -z "$AT" ]; then
+  if [ -f "$CONFIG" ]; then
+    AT=$(awk -F'=' '/^admin_token/ {gsub(/[ "]/, "", $2); print $2}' "$CONFIG" || true)
+  fi
+fi
+if [ -z "$AT" ]; then
+  echo "ERROR: 未设置 PPROXY_ADMIN_TOKEN 且无法从 $CONFIG 获取 admin_token。"
+  exit 1
+fi
+
 EXIST=$(curl -s -m 5 -H "Authorization: Bearer $AT" "$ADMIN/api/routes" | grep -c "\"name\":\"$ROUTE_NAME\"") || true
 if [ "$EXIST" = "0" ]; then
   CODE=$(curl -s -m 8 -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $AT" \

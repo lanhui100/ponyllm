@@ -3657,9 +3657,32 @@ pub async fn handle_admin_antigravity_pending(
     )
 )]
 pub async fn handle_admin_proxy_status(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
-    // 1. First probe local pproxy (127.0.0.1:8899)
+    // 1. First check configured provider/gateway proxy if any
+    let configured_proxy: Option<String> = {
+        let cfg = state.config.read();
+        cfg.proxy.clone().or_else(|| {
+            cfg.providers.values().find_map(|p| p.proxy.clone())
+        })
+    };
+
+    if let Some(cfg_proxy) = configured_proxy {
+        let latency_ms = measure_proxy_latency(&cfg_proxy).await;
+        let sanitized = ponyllm_core::sanitize_proxy_url(&cfg_proxy);
+        if latency_ms.is_some() {
+            return Json(ProxyStatusView {
+                available: true,
+                proxy_url: Some(sanitized.clone()),
+                proxy_type: "configured".to_string(),
+                description: format!("网关已配置出海代理 ({}) 运行中", sanitized),
+                latency_ms,
+                hint: "已生效。Antigravity 授权换票及后续模型调用均默认走此代理。".to_string(),
+            });
+        }
+    }
+
+    // 2. Next probe local pproxy (127.0.0.1:8899)
     let pproxy_addr = std::net::SocketAddr::from(([127, 0, 0, 1], 8899));
     let pproxy_active = std::net::TcpStream::connect_timeout(&pproxy_addr, std::time::Duration::from_millis(50)).is_ok();
 
@@ -3677,20 +3700,21 @@ pub async fn handle_admin_proxy_status(
         });
     }
 
-    // 2. Check system/env proxy
+    // 3. Check system/env proxy
     if let Some(sys_proxy) = ponyllm_core::detect_system_proxy() {
+        let sanitized = ponyllm_core::sanitize_proxy_url(&sys_proxy);
         let latency_ms = measure_proxy_latency(&sys_proxy).await;
         return Json(ProxyStatusView {
             available: true,
-            proxy_url: Some(sys_proxy.clone()),
+            proxy_url: Some(sanitized.clone()),
             proxy_type: "system".to_string(),
-            description: format!("系统/环境出海代理 ({}) 运行中", sys_proxy),
+            description: format!("系统/环境出海代理 ({}) 运行中", sanitized),
             latency_ms,
             hint: "已探测到系统代理。Antigravity 请求将使用此代理。".to_string(),
         });
     }
 
-    // 3. No proxy found
+    // 4. No proxy found
     Json(ProxyStatusView {
         available: false,
         proxy_url: None,

@@ -33,6 +33,33 @@ spec:
   issuerRef:
     name: letsencrypt-prod
     kind: ClusterIssuer
+  duration: 2160h # 90d，与 letsencrypt-prod 90 天签发周期对齐
+  renewBefore: 720h # 30d，提前 30 天续期
+  privateKey:
+    algorithm: ECDSA
+    size: 384
+    rotationPolicy: Always
+  revisionHistoryLimit: 3
+---
+# TLS 安全基线：强制 TLS1.2+、SNI 严格校验，仅保留 ECDHE+AEAD/PFS 套件。
+# 由 ponyllm-https IngressRoute tls.options 引用。
+apiVersion: traefik.io/v1alpha1
+kind: TLSOption
+metadata:
+  name: ponyllm-tls-opts
+  namespace: ponyllm
+  labels:
+    app.kubernetes.io/name: ponyllm
+spec:
+  minVersion: VersionTLS12
+  sniStrict: true
+  cipherSuites:
+    - TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256
+    - TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
+    - TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384
+    - TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384
+    - TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305
+    - TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305
 ---
 apiVersion: traefik.io/v1alpha1
 kind: IngressRoute
@@ -46,8 +73,11 @@ spec:
     - web
   routes:
     # 1. 显式放行 ACME HTTP-01 Challenge，直通有效容器服务，绝不跳转 HTTPS，绝不挂载安全校验中间件
-    - match: Host(`tokens.ponyjob.top`) && PathPrefix(`/.well-known/acme-challenge`)
+    #    挂 ratelimit 防 Challenge 路径被扫刷爆后端（不挂 redirect/security-headers，避免影响签发）。
+    - match: Host(`tokens.ponyjob.top`) && PathPrefix(`/.well-known/acme-challenge/`)
       kind: Rule
+      middlewares:
+        - name: ponyllm-ratelimit
       services:
         - name: ponyllm-pod-service
           port: 8080
@@ -72,13 +102,19 @@ spec:
     - websecure
   routes:
     # 1. 显式放行 ACME HTTP-01/TLS Challenge 直通有效容器服务
-    - match: Host(`tokens.ponyjob.top`) && PathPrefix(`/.well-known/acme-challenge`)
+    #    挂 ratelimit + security-headers：限流防扫刷，安全头与全站一致。
+    - match: Host(`tokens.ponyjob.top`) && PathPrefix(`/.well-known/acme-challenge/`)
       kind: Rule
+      middlewares:
+        - name: ponyllm-security-headers
+        - name: ponyllm-ratelimit
       services:
         - name: ponyllm-pod-service
           port: 8080
     # 2. Web 控制台静态页面（挂载安全响应头，防点击劫持与 MIME 嗅探）
-    - match: Host(`tokens.ponyjob.top`) && (Path(`/`) || PathPrefix(`/app`) || PathPrefix(`/assets`) || Path(`/connect`) || Path(`/dashboard`) || Path(`/recorder`) || Path(`/governance`) || Path(`/favicon.svg`) || Path(`/favicon.ico`))
+    #    精确匹配收敛：Path(`/x`)+PathPrefix(`/x/`) 组合，杜绝 PathPrefix(`/app`) 对
+    #    /app-evil、/assets-evil 类路径的过匹配。
+    - match: Host(`tokens.ponyjob.top`) && (Path(`/`) || Path(`/app`) || PathPrefix(`/app/`) || Path(`/assets`) || PathPrefix(`/assets/`) || Path(`/connect`) || Path(`/dashboard`) || Path(`/recorder`) || Path(`/governance`) || Path(`/favicon.svg`) || Path(`/favicon.ico`))
       kind: Rule
       middlewares:
         - name: ponyllm-security-headers
@@ -87,8 +123,11 @@ spec:
           port: 8080
           responseForwarding:
             flushInterval: "100ms"
-    # 3. 核心白名单：业务数据面、探活、遥测流及 Web 控制台受权管理接口（全部由后端 auth_middleware 鉴权）
-    - match: Host(`tokens.ponyjob.top`) && (PathPrefix(`/v1/`) || PathPrefix(`/api/admin/`) || Path(`/health`) || PathPrefix(`/models`) || PathPrefix(`/messages`) || PathPrefix(`/responses`))
+    # 3. 核心白名单：业务数据面、探活、遥测流（全部由后端 auth_middleware 鉴权）
+    #    精确匹配收敛：Path(`/x`)+PathPrefix(`/x/`) 组合，杜绝 PathPrefix(`/models`)
+    #    对 /models-evil、/messages-evil、/responses-evil 类路径的过匹配。
+    #    /api/admin/ 已拆至独立路由 #4，不在此放行。
+    - match: Host(`tokens.ponyjob.top`) && (PathPrefix(`/v1/`) || Path(`/health`) || Path(`/models`) || PathPrefix(`/models/`) || Path(`/messages`) || PathPrefix(`/messages/`) || Path(`/responses`) || PathPrefix(`/responses/`))
       kind: Rule
       middlewares:
         - name: ponyllm-security-headers
@@ -100,6 +139,30 @@ spec:
           weight: 100
           responseForwarding:
             flushInterval: "100ms"
-    # 注意：未匹配的其他路径（包括 /api/admin/*, /v1/telemetry/* 及未授权目录）Traefik 将默认返回 404，不透传后端
+    # 4. 受权管理接口独立路由：边缘只做 IPAllowList 粗筛，身份鉴权仍由后端 auth_middleware 负责。
+    #    sourceRange 为占位，需运维填入真实运维出口 IP/CIDR 后再生效。
+    - match: Host(`tokens.ponyjob.top`) && (Path(`/api/admin`) || PathPrefix(`/api/admin/`))
+      kind: Rule
+      middlewares:
+        - name: ponyllm-security-headers
+        - name: ponyllm-admin-allowlist
+        - name: ponyllm-ratelimit
+        - name: ponyllm-inflightreq
+      services:
+        - name: ponyllm-pod-service
+          port: 8080
+          weight: 100
+          responseForwarding:
+            flushInterval: "100ms"
+    # 注意（边缘行为如实声明，修正旧注释的失实表述）：
+    # - 未命中上述路由的其他路径由 Traefik 默认返回 404，不透传后端。
+    # - 但 /v1/telemetry/*（命中 PathPrefix(`/v1/`)）与 /api/admin/*（命中独立路由 #4）
+    #   是显式放行的，鉴权完全依赖后端 auth_middleware，边缘只做路由+限流/IPAllowList，
+    #   不做身份校验，更不对这两类路径做 404。
+    # - 文档漂移点同步声明：旧注释曾写“/api/admin/*、/v1/telemetry/* 及未授权目录默认 404”，
+    #   与实际路由相悖，系虚假安全感，已按本注释为准修正。
   tls:
     secretName: tokens-ponyjob-top-tls
+    options:
+      name: ponyllm-tls-opts
+      namespace: ponyllm

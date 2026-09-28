@@ -537,6 +537,27 @@ pub const DEFAULT_UPSTREAM_TOTAL_TIMEOUT: Duration = Duration::from_secs(1200);
 /// or the attempt is judged dead (TRANSPORT) and failover kicks in. Far
 /// smaller than the total budget because a healthy provider starts emitting
 /// headers in seconds, while the *body* may legitimately stream for 20 min.
+/// Sanitize a proxy URL for safe logging and display, redacting any username/password.
+pub fn sanitize_proxy_url(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.contains("://") {
+        if let Ok(mut url) = reqwest::Url::parse(trimmed) {
+            if url.password().is_some() {
+                let _ = url.set_password(Some("***"));
+            }
+            if !url.username().is_empty() {
+                let _ = url.set_username("***");
+            }
+            return url.to_string();
+        }
+    }
+    if let Some((_userinfo, host)) = trimmed.split_once('@') {
+        format!("***@{}", host)
+    } else {
+        trimmed.to_string()
+    }
+}
+
 pub const DEFAULT_UPSTREAM_TTFB_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Create an optimized, connection-pooled HTTP client for upstream LLM providers.
@@ -577,7 +598,7 @@ pub fn try_create_upstream_http_client_with_timeout(
         let trimmed = proxy_str.trim();
         if !trimmed.is_empty() {
             let proxy = reqwest::Proxy::all(trimmed)
-                .map_err(|e| format!("无法解析代理地址 '{}': {}", trimmed, e))?;
+                .map_err(|e| format!("无法解析代理地址 '{}': {}", sanitize_proxy_url(trimmed), e))?;
             let proxy = proxy.no_proxy(reqwest::NoProxy::from_string("localhost,127.0.0.1"));
             builder = builder.proxy(proxy);
         }
@@ -629,7 +650,7 @@ pub fn create_probe_http_client_with_options(proxy_url: Option<&str>) -> reqwest
                 builder.proxy(proxy)
             }
             Err(e) => {
-                tracing::warn!(error = %e, proxy = %trimmed, "Invalid probe proxy, probing direct");
+                tracing::warn!(error = %e, proxy = %sanitize_proxy_url(trimmed), "Invalid probe proxy, probing direct");
                 builder.no_proxy()
             }
         },
@@ -1946,5 +1967,21 @@ mod zen_tools_tests {
         let free = json!({"model": "mimo-v2.5-free", "messages": []});
         let out = plain.inject_zen_free_tier_tools(CHAT_URL, std::borrow::Cow::Borrowed(&free));
         assert!(out.get("tools").is_none());
+    }
+
+    #[test]
+    fn test_sanitize_proxy_url() {
+        assert_eq!(
+            sanitize_proxy_url("http://user:secret123@100.105.241.39:8899"),
+            "http://***:***@100.105.241.39:8899/"
+        );
+        assert_eq!(
+            sanitize_proxy_url("http://127.0.0.1:8899"),
+            "http://127.0.0.1:8899/"
+        );
+        assert_eq!(
+            sanitize_proxy_url("user:pass@host:8080"),
+            "***@host:8080"
+        );
     }
 }

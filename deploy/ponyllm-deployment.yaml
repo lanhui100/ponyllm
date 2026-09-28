@@ -26,12 +26,13 @@ metadata:
     app.kubernetes.io/name: ponyllm
     app.kubernetes.io/component: gateway
   annotations:
-    # Keel 自动部署注解：当 GHCR 镜像有新 commit tag (如 sha-xxxx) 或 latest 发布时自动优雅滚动
-    keel.sh/policy: force
+    # Keel 自动部署注解：从 force 降级为 minor 语义化保护，杜绝 1m 高频轮询未经验签的盲目滚动
+    keel.sh/policy: minor
     keel.sh/trigger: poll
-    keel.sh/pollSchedule: "@every 1m"
+    keel.sh/pollSchedule: "@every 10m"
 spec:
   replicas: 1
+  revisionHistoryLimit: 3
   strategy:
     type: RollingUpdate
     rollingUpdate:
@@ -67,6 +68,13 @@ spec:
       initContainers:
         - name: init-config-and-snapshot
           image: crpi-3cfwwtc3um8h6d3q.cn-hangzhou.personal.cr.aliyuncs.com/job-copilot/api-v2@sha256:9276fefe165792a7f5e4cf408e4175b357646369685c79fef3e9c2d823258a01
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -77,14 +85,16 @@ spec:
             - /bin/sh
             - -c
             - |
-              # Seed config only when absent: /var/lib/ponyllm now persists on a PVC,
-              # so admin/web writes (key delete, provider edits, token rotation) must
-              # survive pod restarts instead of being re-copied from the Secret.
-              if [ ! -f /var/lib/ponyllm/ponyllm.toml ]; then
-                cp /etc/ponyllm-ro/ponyllm.toml /var/lib/ponyllm/ponyllm.toml 2>/dev/null || true
+              set -euo pipefail
+              # 解决 PVC 与 Secret 轮转死锁：若配置了 FORCE_CONFIG_SYNC=true 或 PVC 缺损，从只读 Secret 覆写
+              # 正常情况：PVC 文件不存在时进行初始化播种；支持 Secret 轮转时优雅同步。
+              if [ "${FORCE_CONFIG_SYNC:-0}" = "1" ] || [ ! -f /var/lib/ponyllm/ponyllm.toml ]; then
+                cp /etc/ponyllm-ro/ponyllm.toml /var/lib/ponyllm/ponyllm.toml.tmp
+                mv -f /var/lib/ponyllm/ponyllm.toml.tmp /var/lib/ponyllm/ponyllm.toml
               fi
               if [ ! -f /var/lib/ponyllm/telemetry-snapshot.json ]; then
-                cp /etc/telemetry-init/telemetry-snapshot.json /var/lib/ponyllm/telemetry-snapshot.json 2>/dev/null || true
+                cp /etc/telemetry-init/telemetry-snapshot.json /var/lib/ponyllm/telemetry-snapshot.json.tmp
+                mv -f /var/lib/ponyllm/telemetry-snapshot.json.tmp /var/lib/ponyllm/telemetry-snapshot.json
               fi
           volumeMounts:
             - name: config-ro
@@ -118,11 +128,18 @@ spec:
           lifecycle:
             preStop:
               exec:
-                # 预留 15s 给 IngressRoute / iptables / EndpointSlice 充分收敛剔除旧端点，杜绝新请求路由至已下线 Pod
-                command: ["/bin/sh", "-c", "sleep 15"]
+                # 预留 25s 给 IngressRoute / iptables / EndpointSlice 充分收敛剔除旧端点，杜绝新请求路由至已下线 Pod
+                # （terminationGracePeriodSeconds 180，preStop 25 < grace，留足主进程 drain 时间）
+                command: ["/bin/sh", "-c", "sleep 25"]
           ports:
             - containerPort: 8080
               name: http
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            failureThreshold: 30
+            periodSeconds: 5
           readinessProbe:
             httpGet:
               path: /health
@@ -133,15 +150,17 @@ spec:
             httpGet:
               path: /health
               port: 8080
-            initialDelaySeconds: 10
-            periodSeconds: 15
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 5
           resources:
             requests:
-              cpu: 100m
-              memory: 128Mi
+              cpu: 200m
+              memory: 256Mi
             limits:
-              cpu: 1000m
-              memory: 512Mi
+              cpu: 2000m
+              memory: 1024Mi
           volumeMounts:
             - name: runtime-data
               mountPath: /tmp
@@ -164,7 +183,8 @@ spec:
           persistentVolumeClaim:
             claimName: ponyllm-data
         - name: runtime-data
-          emptyDir: {}
+          emptyDir:
+            sizeLimit: 256Mi
         - name: favicon
           configMap:
             # 清单见 deploy/ponyllm-favicon.yaml（生成于 scripts/gen-favicon.sh）。

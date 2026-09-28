@@ -19,6 +19,10 @@ lcov.info
 *.profdata
 # 调试符号（target 外兜底，target 本身已忽略）：
 *.pdb
+# Python 字节码缓存：
+__pycache__/
+*.pyc
+
 # IDE/编辑器目录：
 .idea/
 .vscode/

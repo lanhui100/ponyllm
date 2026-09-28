@@ -28,10 +28,12 @@ rules:
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["get", "list", "watch"]
-  # 轮询私有镜像仓库 digest 所需的最小只读权限（仅 imagePullSecrets 凭据，无写权限）
+  # 轮询私有镜像仓库 digest 所需的最小只读权限：仅允许读取 imagePullSecret
+  # `aliyun-registry`，Keel 不得读网关 key 等其他 Secret（最小权限 PoLP）。
   - apiGroups: [""]
     resources: ["secrets"]
-    verbs: ["get", "list"]
+    resourceNames: ["aliyun-registry"]
+    verbs: ["get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
