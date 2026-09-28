@@ -60,9 +60,14 @@ pub struct HaOpsCounters {
     /// Admin config saves rejected by the store's optimistic concurrency.
     #[serde(default)]
     pub admin_save_conflicts_total: u64,
-    /// Runtime config atomic reloads (file mtime / Secret-content hash watcher).
+    /// Runtime config atomic reloads (file mtime / Secret raw-bytes-hash watcher).
     #[serde(default)]
     pub config_reload_total: u64,
+    /// Last observed refresh-lock hold duration, in seconds (gauge). 0 while
+    /// no refresh round has completed since process start. Phase 2 watches
+    /// this to prove "any moment at most one refresher" (P1-arch S3-3).
+    #[serde(default)]
+    pub refresh_lock_hold_seconds: u64,
 }
 
 /// Compute p50/p95/max over inter-chunk gaps in milliseconds.
@@ -127,6 +132,7 @@ pub struct MetricsCollector {
     refresh_persist_failure: AtomicU64,
     admin_save_conflicts: AtomicU64,
     config_reload: AtomicU64,
+    refresh_lock_hold_seconds: AtomicU64,
 }
 
 impl MetricsCollector {
@@ -195,6 +201,12 @@ impl MetricsCollector {
     /// A runtime config atomic reload happened (file/Secret watcher).
     pub fn record_config_reload(&self) {
         self.config_reload.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record the last observed refresh-lock hold duration (seconds). Gauge
+    /// semantics: overwrite with the latest hold.
+    pub fn record_refresh_lock_hold_secs(&self, secs: u64) {
+        self.refresh_lock_hold_seconds.store(secs, Ordering::Relaxed);
     }
 
     /// Record one completed (or interrupted) SSE stream for future A/B reuse.
@@ -293,6 +305,7 @@ impl MetricsCollector {
                 refresh_persist_failure_total: self.refresh_persist_failure.load(Ordering::Relaxed),
                 admin_save_conflicts_total: self.admin_save_conflicts.load(Ordering::Relaxed),
                 config_reload_total: self.config_reload.load(Ordering::Relaxed),
+                refresh_lock_hold_seconds: self.refresh_lock_hold_seconds.load(Ordering::Relaxed),
             },
         }
     }
@@ -324,6 +337,7 @@ impl MetricsCollector {
             refresh_persist_failure_total: self.refresh_persist_failure.load(Ordering::Relaxed),
             admin_save_conflicts_total: self.admin_save_conflicts.load(Ordering::Relaxed),
             config_reload_total: self.config_reload.load(Ordering::Relaxed),
+            refresh_lock_hold_seconds: self.refresh_lock_hold_seconds.load(Ordering::Relaxed),
         }
     }
 
@@ -359,6 +373,7 @@ impl MetricsCollector {
         self.refresh_persist_failure.store(snap.refresh_persist_failure_total, Ordering::Relaxed);
         self.admin_save_conflicts.store(snap.admin_save_conflicts_total, Ordering::Relaxed);
         self.config_reload.store(snap.config_reload_total, Ordering::Relaxed);
+        self.refresh_lock_hold_seconds.store(snap.refresh_lock_hold_seconds, Ordering::Relaxed);
     }
 }
 
@@ -413,4 +428,6 @@ pub struct MetricsCounterSnapshot {
     pub admin_save_conflicts_total: u64,
     #[serde(default)]
     pub config_reload_total: u64,
+    #[serde(default)]
+    pub refresh_lock_hold_seconds: u64,
 }

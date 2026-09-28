@@ -33,6 +33,11 @@ pub const DEFAULT_ANTIGRAVITY_CLIENT_SECRET: &str = match std::str::from_utf8(&[
 pub const ANTIGRAVITY_USER_AGENT: &str = "antigravity/cli/1.1.24 windows/amd64";
 pub const ANTIGRAVITY_GOOG_API_CLIENT: &str = "gl-node/22.14.0 gdcl/1.1.24";
 
+/// Hard budget for one refresh + persist critical section while holding the
+/// cross-replica serialization lock (P1-arch S2-2). Kept in lock-step with the
+/// server-side advisory-lock query timeout (60s).
+pub const REFRESH_CRITICAL_TIMEOUT: Duration = Duration::from_secs(60);
+
 pub const DEFAULT_ANTIGRAVITY_OAUTH_SCOPES: &[&str] = &[
     "https://www.googleapis.com/auth/cloud-platform",
     "https://www.googleapis.com/auth/userinfo.email",
@@ -372,23 +377,49 @@ impl AntigravityTokenManager {
                 None => None,
             };
 
-        let refresh_res = self.do_refresh_token().await;
+        // Refresh + persist run inside a hard 60s budget (P1-arch S2-2): the
+        // global serialization lock must never be held longer than that, even
+        // when the OAuth HTTP call hangs. On timeout the gate guard is dropped
+        // (lock released), the singleflight slot broadcasts Transient, and the
+        // caller falls back to the existing cooling/retry semantics.
+        let critical = tokio::time::timeout(
+            REFRESH_CRITICAL_TIMEOUT,
+            async {
+                let refresh_res = self.do_refresh_token().await;
 
-        // Persist within the lock hold: write the rotated token back to the
-        // truth source BEFORE another replica can take the lock, so the next
-        // refresher starts from the newest material.
-        if refresh_res.is_ok() {
-            let persist_opt = self.persist_hook.read().clone();
-            if let Some(hook) = persist_opt {
-                if let Err(e) = hook(self.key_id.clone()).await {
-                    tracing::error!(
-                        key_id = %self.key_id,
-                        error = %e,
-                        "antigravity refresh write-back failed (token kept in memory; rebuild guard applies)"
-                    );
+                // Persist within the lock hold: write the rotated token back
+                // to the truth source BEFORE another replica can take the
+                // lock, so the next refresher starts from the newest material.
+                if refresh_res.is_ok() {
+                    let persist_opt = self.persist_hook.read().clone();
+                    if let Some(hook) = persist_opt {
+                        if let Err(e) = hook(self.key_id.clone()).await {
+                            tracing::error!(
+                                key_id = %self.key_id,
+                                error = %e,
+                                "antigravity refresh write-back failed (token kept in memory; rebuild guard applies)"
+                            );
+                        }
+                    }
                 }
+                refresh_res
+            },
+        )
+        .await;
+        let refresh_res = match critical {
+            Ok(res) => res,
+            Err(_) => {
+                tracing::warn!(
+                    key_id = %self.key_id,
+                    "antigravity refresh+persist critical section exceeded {:?}; releasing serialization lock",
+                    REFRESH_CRITICAL_TIMEOUT
+                );
+                Err(CoreError::Internal(format!(
+                    "Antigravity refresh critical section timed out for '{}'",
+                    self.key_id
+                )))
             }
-        }
+        };
         drop(_gate_guard);
 
         let broadcast_res = match &refresh_res {
