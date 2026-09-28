@@ -1,0 +1,85 @@
+# Keel — k8s 集群内轻量级拉取式 (Pull-based) 自动更新控制器
+#
+# 安全审计加固（对抗审查整改）：
+# 1. 命名空间隔离：从 kube-system 移至独立 namespace: keel。
+# 2. 最小权限原则（PoLP）：彻底剥离全集群 Secrets 读取权限！
+# 3. 租户隔离：将全集群 ClusterRole 降级为仅针对 ponyllm 命名空间的 Role，
+#    严禁跨命名空间提权或横向移动。
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: keel
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: keel
+  namespace: keel
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: keel-workload-updater
+  namespace: ponyllm
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: keel-workload-updater
+  namespace: ponyllm
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: keel-workload-updater
+subjects:
+  - kind: ServiceAccount
+    name: keel
+    namespace: keel
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: keel
+  namespace: keel
+  labels:
+    app: keel
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: keel
+  template:
+    metadata:
+      labels:
+        app: keel
+    spec:
+      serviceAccountName: keel
+      containers:
+        - name: keel
+          image: keelhq/keel:0.16.1
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/keel"]
+          env:
+            - name: POLL
+              value: "true"
+            - name: POLL_SCHEDULE
+              value: "@every 1m"
+            - name: NOTIFICATION_LEVEL
+              value: "info"
+            # 限制仅监听 ponyllm 命名空间，不跨空间探测
+            - name: NAMESPACES
+              value: "ponyllm"
+          resources:
+            limits:
+              cpu: 100m
+              memory: 128Mi
+            requests:
+              cpu: 50m
+              memory: 64Mi

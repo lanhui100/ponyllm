@@ -25,6 +25,11 @@ metadata:
   labels:
     app.kubernetes.io/name: ponyllm
     app.kubernetes.io/component: gateway
+  annotations:
+    # Keel 自动部署注解：当 GHCR 镜像有新 commit tag (如 sha-xxxx) 或 latest 发布时自动优雅滚动
+    keel.sh/policy: force
+    keel.sh/trigger: poll
+    keel.sh/pollSchedule: "@every 1m"
 spec:
   replicas: 1
   strategy:
@@ -42,9 +47,11 @@ spec:
         app.kubernetes.io/name: ponyllm
         app.kubernetes.io/component: gateway
     spec:
-      # 60s 足够排空多数在途请求；长请求（upstream_timeout 1200s）会被截断，
-      # 由客户端重试兜底。360s 曾因 Recreate 导致每次重启业务中断 3-6 分钟。
-      terminationGracePeriodSeconds: 60
+      # 锁定调度到 PV 所在节点，杜绝 RWO PVC 跨节点调度导致的 Multi-Attach / volume affinity 冲突
+      nodeSelector:
+        kubernetes.io/hostname: devserver
+      # 180s 优雅停机窗口：保护 LLM 长文本 / 慢思考（Reasoning）流式连接自然吐完，避免硬杀导致用户端连接被掐断
+      terminationGracePeriodSeconds: 180
       automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
@@ -111,7 +118,8 @@ spec:
           lifecycle:
             preStop:
               exec:
-                command: ["/bin/sh", "-c", "sleep 5"]
+                # 预留 15s 给 IngressRoute / iptables / EndpointSlice 充分收敛剔除旧端点，杜绝新请求路由至已下线 Pod
+                command: ["/bin/sh", "-c", "sleep 15"]
           ports:
             - containerPort: 8080
               name: http

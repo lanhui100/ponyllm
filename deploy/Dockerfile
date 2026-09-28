@@ -1,6 +1,10 @@
-FROM crpi-3cfwwtc3um8h6d3q.cn-hangzhou.personal.cr.aliyuncs.com/job-copilot/api-v2:preprod
+FROM debian:bookworm-slim
 
-USER root
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY target/release/ponyllm /usr/local/bin/ponyllm
 COPY web/dist /opt/ponyllm/web/dist
 RUN chmod +x /usr/local/bin/ponyllm
