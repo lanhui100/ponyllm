@@ -402,7 +402,7 @@ async fn test_auth_rotate_no_store_headers_and_effect() {
 
     // Check disk persistence
     let store = FileConfigStore::new(&harness.config_path);
-    let disk_cfg = store.load().unwrap();
+    let disk_cfg = store.load().await.unwrap().0;
     assert_eq!(disk_cfg.gateway.api_key, new_token);
     assert_eq!(disk_cfg.config_version, 1);
 }
@@ -443,7 +443,7 @@ async fn test_strategy_put_bumps_config_version() {
 
     // Verify disk was bumped
     let store = FileConfigStore::new(&harness.config_path);
-    let disk_cfg = store.load().unwrap();
+    let disk_cfg = store.load().await.unwrap().0;
     assert_eq!(disk_cfg.config_version, 1);
     assert_eq!(
         disk_cfg.gateway.default_strategy,

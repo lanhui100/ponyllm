@@ -834,7 +834,7 @@ async fn test_write_queue_concurrency() {
 
     // Verify all 10 models exist and config_version reached 10
     let store = FileConfigStore::new(&harness.config_path);
-    let final_cfg = store.load().unwrap();
+    let final_cfg = store.load().await.unwrap().0;
     assert_eq!(final_cfg.config_version, 10);
     assert_eq!(final_cfg.providers["openai"].models.len(), 11); // 1 initial + 10 added
 }

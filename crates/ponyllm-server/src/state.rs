@@ -3,10 +3,12 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 use ponyllm_core::error::{CoreError, Result};
 use ponyllm_core::executor::{EventSink, EventSinkCtx};
+use ponyllm_core::pool::refresh_gate::RefreshGate;
 use ponyllm_core::pool::{
-    is_context_capacity_compatible, parse_context_capacity_tokens, BillingMode, EconomyScorer,
-    GatewayRoutingStrategy, HotCacheTracker, KeyPool, ModelTier, ModelThinkingSpec, NodeLatencyMetrics, PricingConfig,
-    SpeedScorer, UpstreamProtocol,
+    is_context_capacity_compatible, parse_context_capacity_tokens, AntigravityTokenManager,
+    BillingMode, EconomyScorer, GatewayRoutingStrategy, HotCacheTracker, KeyPool, ModelTier,
+    ModelThinkingSpec, NodeLatencyMetrics, PricingConfig, RefreshPersistHook, SpeedScorer,
+    UpstreamProtocol,
 };
 use ponyllm_core::{canonicalize_model_name, model_aliases};
 
@@ -15,9 +17,19 @@ use ponyllm_core::telemetry::{
     StreamProjection, TimeseriesProjection,
 };
 use ponyllm_core::telemetry::{FlightRecorder, GatewayEvent};
+use ponyllm_config::ConfigFile;
+use crate::admin_store::ConfigStoreError;
 use crate::config::{GatewayConfig, ProviderConfig};
 use crate::frames::FrameConverter;
 use crate::routes::models::ParsedRequestModel;
+
+/// Config backend polling interval surfaced as overview `hot_reload_ms`
+/// (file backend legacy mtime watcher).
+pub const FILE_CONFIG_POLL_MS: u64 = 500;
+
+/// How long a recently refreshed in-memory token is considered "newer" than
+/// the Secret truth source during rebuild freshness checks.
+const TOKEN_FRESHNESS_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// 空字符串视为禁用；显式路径优先，随 `event_log_dir` 次之。
 fn resolve_snapshot_path(config: &GatewayConfig) -> Option<std::path::PathBuf> {
@@ -271,6 +283,20 @@ pub struct AppState {
     pub telemetry_snapshot_path: Option<std::path::PathBuf>,
     /// Pending usage state snapshots waiting for pools to be registered
     pub pending_restored_usages: Arc<RwLock<HashMap<String, ponyllm_core::pool::usage::KeyUsageStateSnapshot>>>,
+    /// Config backend polling interval surfaced as overview `hot_reload_ms`.
+    /// file=500 (legacy mtime watcher), kubernetes=2000 (Secret poll).
+    pub config_poll_ms: u64,
+    /// Draining flag for graceful shutdown: once `true`, the config poller
+    /// stops, the antigravity keepalive worker skips rounds, and refresh
+    /// write-backs are suppressed.
+    pub shutdown_rx: Arc<tokio::sync::watch::Receiver<bool>>,
+    /// Cross-replica antigravity refresh serialization gate (injected by the
+    /// CLI when `PONYLLM_LOCK_DATABASE_URL` is set).
+    pub refresh_gate: Arc<RwLock<Option<Arc<dyn RefreshGate>>>>,
+    /// key_id → instant of the last successful refresh in THIS process.
+    /// Drives the rebuild token-freshness guard and the invalid_grant
+    /// reconciliation buffer.
+    pub last_antigravity_refresh: Arc<tokio::sync::Mutex<HashMap<String, std::time::Instant>>>,
 }
 
 impl std::fmt::Debug for dyn crate::admin_store::ConfigStore {
@@ -401,6 +427,10 @@ impl AppState {
             admin_write_lock: Arc::new(tokio::sync::Mutex::new(())),
             telemetry_snapshot_path,
             pending_restored_usages,
+            config_poll_ms: FILE_CONFIG_POLL_MS,
+            shutdown_rx: Arc::new(tokio::sync::watch::channel(false).1),
+            refresh_gate: Arc::new(RwLock::new(None)),
+            last_antigravity_refresh: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         }
     }
 
@@ -452,6 +482,30 @@ impl AppState {
     ) -> Self {
         self.config_store = Some(store);
         self
+    }
+
+    /// Override the config backend polling interval (overview `hot_reload_ms`).
+    pub fn with_config_poll_ms(mut self, ms: u64) -> Self {
+        self.config_poll_ms = ms;
+        self
+    }
+
+    /// Share the graceful-shutdown watch: when the sender flips to `true`,
+    /// this process is draining (stop polling / refresh / persist).
+    pub fn with_shutdown_rx(mut self, rx: tokio::sync::watch::Receiver<bool>) -> Self {
+        self.shutdown_rx = Arc::new(rx);
+        self
+    }
+
+    /// Install (or clear) the cross-replica refresh serialization gate.
+    pub fn with_refresh_gate(self, gate: Option<Arc<dyn RefreshGate>>) -> Self {
+        *self.refresh_gate.write() = gate;
+        self
+    }
+
+    /// True once the graceful-shutdown signal fired: the process is draining.
+    pub fn is_draining(&self) -> bool {
+        *self.shutdown_rx.borrow()
     }
 
     /// Return the HTTP client for the given provider and model target.
@@ -634,6 +688,7 @@ impl AppState {
             "Gateway configuration reloaded. Active providers: {:?}",
             pools_guard.keys().collect::<Vec<_>>()
         );
+        self.metrics.record_config_reload();
 
         *config_guard = new_config;
         drop(config_guard);
@@ -642,46 +697,174 @@ impl AppState {
         self.attach_antigravity_rotation_hooks_all();
     }
 
-    /// Persist a rotated Antigravity refresh token in the background.
+    /// Rebuild-time freshness guard (HA review S1-3): before the config
+    /// watcher replaces the pools from a freshly loaded (possibly stale)
+    /// Secret snapshot, protect Antigravity refresh tokens that THIS process
+    /// rotated recently (in-memory token newer than the truth source) from
+    /// being clobbered by the older Secret value.
     ///
-    /// NOTE: this is a *system* write, intentionally NOT gated by
-    /// `admin_write_enabled`. The rotation hook fires on upstream token
-    /// refresh; gating it would let credentials rot in read-only
-    /// deployments. It only rewrites the single rotated key entry
-    /// (never adds/removes providers or keys) and serializes on the same
-    /// `admin_write_lock` as the admin CUD path.
+    /// Mutates `config_file`'s provider key `api_key` fields in place when the
+    /// manager for that key holds a token refreshed within
+    /// [`TOKEN_FRESHNESS_WINDOW`] that differs from the loaded value.
+    pub async fn apply_token_freshness_guard(&self, config_file: &mut ConfigFile) {
+        // Snapshot the managers' current refresh tokens (read-only, short-lived).
+        let current: HashMap<(String, String), String> = {
+            let pools = self.pools.read();
+            let mut map = HashMap::new();
+            for (prov_name, pool) in pools.iter() {
+                for entry in pool.snapshot_keys() {
+                    if let Some(mgr) = entry.antigravity_manager() {
+                        map.insert(
+                            (prov_name.clone(), entry.id.clone()),
+                            mgr.credential_snapshot().refresh_token,
+                        );
+                    }
+                }
+            }
+            map
+        };
+        let recent: HashMap<String, std::time::Instant> = {
+            let map = self.last_antigravity_refresh.lock().await;
+            map.clone()
+        };
+
+        for (prov_name, p_sec) in config_file.providers.iter_mut() {
+            for k in p_sec.keys.iter_mut() {
+                let Some(in_memory_token) =
+                    current.get(&(prov_name.clone(), k.id.clone())).cloned()
+                else {
+                    continue; // no live manager for this key
+                };
+                let Some(refresh_time) = recent.get(&k.id) else {
+                    continue; // not refreshed in this process
+                };
+                if refresh_time.elapsed() > TOKEN_FRESHNESS_WINDOW {
+                    continue; // refresh is old; the Secret is authoritative
+                }
+                if in_memory_token.is_empty() || in_memory_token == k.api_key {
+                    continue; // no divergence to protect
+                }
+                tracing::warn!(
+                    provider = %prov_name,
+                    key_id = %k.id,
+                    "rebuild freshness guard: using in-memory refresh token (newer than Secret snapshot)"
+                );
+                k.api_key = in_memory_token;
+            }
+        }
+    }
+
+    /// Attach the multi-node HA wiring to one Antigravity manager:
+    /// 1. the cross-replica refresh serialization gate (if configured);
+    /// 2. the persist-within-lock hook — a *system* write, intentionally NOT
+    ///    gated by `admin_write_enabled` (gating it would let credentials rot
+    ///    in read-only deployments). It only rewrites the single rotated key
+    ///    entry (never adds/removes providers or keys), serializes on the same
+    ///    `admin_write_lock` as the admin CUD path, and retries bounded times
+    ///    on optimistic-concurrency conflicts.
+    ///
+    /// The legacy detached rotation-hook persistence is suppressed (no-op) —
+    /// the persist hook now owns write-back so it completes *inside* the
+    /// refresh gate's critical section (see S1-3 of the HA review).
     pub fn attach_antigravity_rotation_hook(
         &self,
         provider_name: &str,
-        mgr: &Arc<ponyllm_core::pool::AntigravityTokenManager>,
+        mgr: &Arc<AntigravityTokenManager>,
     ) {
+        // 1. Serialization gate (cross-replica).
+        if let Some(gate) = self.refresh_gate.read().clone() {
+            mgr.set_refresh_gate(Some(gate));
+        }
+        // 2. Persist-within-lock write-back.
         if let Some(ref store) = self.config_store {
             let store_clone = store.clone();
             let prov_name = provider_name.to_string();
             let write_lock = self.admin_write_lock.clone();
-            mgr.set_rotation_hook(Arc::new(move |key_id, new_rf| {
+            let metrics = self.metrics.clone();
+            let last_map = self.last_antigravity_refresh.clone();
+            let shutdown = self.shutdown_rx.clone();
+            let mgr_clone = mgr.clone();
+            // Suppress the legacy detached rotation-hook persistence.
+            mgr.set_rotation_hook(Arc::new(|_, _| {}));
+            let persist: RefreshPersistHook = Arc::new(move |key_id: String| {
                 let store = store_clone.clone();
                 let prov = prov_name.clone();
-                let k_id = key_id.to_string();
-                let n_rf = new_rf.to_string();
                 let write_lock = write_lock.clone();
-                tokio::spawn(async move {
-                    let _guard = write_lock.lock().await;
-                    if let Ok(mut cfg) = store.load() {
-                        if let Some(p) = cfg.providers.get_mut(&prov) {
-                            if let Some(k) = p.keys.iter_mut().find(|k| k.id == k_id) {
-                                k.api_key = n_rf;
-                                cfg.config_version += 1;
-                                if let Err(e) = store.save(&cfg) {
-                                    tracing::error!(%e, provider = %prov, key_id = %k_id, "failed to persist rotated Antigravity token");
-                                } else {
-                                    tracing::info!(provider = %prov, key_id = %k_id, "successfully persisted rotated Antigravity token");
+                let metrics = metrics.clone();
+                let last_map = last_map.clone();
+                let shutdown = shutdown.clone();
+                let mgr = mgr_clone.clone();
+                Box::pin(async move {
+                    if *shutdown.borrow() {
+                        return Ok(()); // draining: no writes during drain
+                    }
+                    let token = mgr.credential_snapshot().refresh_token.clone();
+                    if token.trim().is_empty() {
+                        return Ok(());
+                    }
+                    let attempts: u32 = 3;
+                    for attempt in 0..attempts {
+                        let _guard = write_lock.lock().await;
+                        match store.load().await {
+                            Ok((mut cfg, version)) => {
+                                let Some(k) = cfg
+                                    .providers
+                                    .get_mut(&prov)
+                                    .and_then(|p| p.keys.iter_mut().find(|k| k.id == key_id))
+                                else {
+                                    return Ok(()); // key vanished: nothing to persist
+                                };
+                                if k.api_key == token {
+                                    // Nothing changed (non-rotated refresh):
+                                    // note freshness, skip the write to avoid
+                                    // Secret/config_version churn.
+                                    let mut map = last_map.lock().await;
+                                    map.insert(key_id.clone(), std::time::Instant::now());
+                                    return Ok(());
                                 }
+                                k.api_key = token.clone();
+                                cfg.config_version += 1;
+                                match store.save(&cfg, &version).await {
+                                    Ok(()) => {
+                                        let mut map = last_map.lock().await;
+                                        map.insert(key_id.clone(), std::time::Instant::now());
+                                        tracing::info!(
+                                            provider = %prov,
+                                            key_id = %key_id,
+                                            "persisted rotated Antigravity refresh token (within lock)"
+                                        );
+                                        return Ok(());
+                                    }
+                                    Err(ConfigStoreError::Conflict { .. })
+                                        if attempt + 1 < attempts =>
+                                    {
+                                        // Re-load next attempt for a fresh version.
+                                        tokio::time::sleep(std::time::Duration::from_millis(
+                                            100 * (1 << attempt),
+                                        ))
+                                        .await;
+                                        continue;
+                                    }
+                                    Err(e) => {
+                                        metrics.record_refresh_persist_failure();
+                                        return Err(format!("token write-back failed: {}", e));
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                metrics.record_refresh_persist_failure();
+                                return Err(format!("config load failed for write-back: {}", e));
                             }
                         }
                     }
-                });
-            }));
+                    metrics.record_refresh_persist_failure();
+                    Err(format!(
+                        "token write-back failed after {} attempts",
+                        attempts
+                    ))
+                })
+            });
+            mgr.set_persist_hook(Some(persist));
         }
     }
 
@@ -741,6 +924,9 @@ impl AppState {
 
     /// Execute a single pass of token refresh + quota query for all Antigravity keys across pools.
     pub async fn perform_antigravity_keepalive_cycle(&self) {
+        if self.is_draining() {
+            return; // graceful shutdown: no refresh work during drain
+        }
         // Collect Antigravity key managers without holding locks across async operations.
         let key_entries: Vec<(String, String, Arc<ponyllm_core::pool::AntigravityTokenManager>, Option<String>)> = {
             let pools = self.pools.read();
@@ -767,11 +953,15 @@ impl AppState {
         );
 
         for (provider, key_id, mgr, base_url) in key_entries {
+            if self.is_draining() {
+                return;
+            }
             // Stagger calls by 1.5s to avoid burst hammering upstream OAuth/API endpoints.
             tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
 
-            // 1. Force refresh token: resets upstream Google 180-day inactivity window
-            // and triggers rotation hook if Google issues a new refresh token.
+            // 1. Force refresh token: resets upstream Google 180-day inactivity
+            // window. The refresh serialization gate inside the manager decides
+            // whether THIS replica runs the OAuth call this round.
             match mgr.force_refresh_token().await {
                 Ok(_) => {
                     tracing::debug!(
@@ -780,7 +970,38 @@ impl AppState {
                         "Antigravity OAuth token refreshed successfully in keepalive cycle"
                     );
                 }
+                Err(ponyllm_core::error::CoreError::RefreshSkipped { .. }) => {
+                    // Another replica holds the serialization lock: skip this
+                    // round (quota included) and let its write-back propagate.
+                    tracing::info!(
+                        provider = %provider,
+                        key_id = %key_id,
+                        "Antigravity refresh skipped in keepalive cycle (lock held by another replica); skipping quota this round"
+                    );
+                    continue;
+                }
                 Err(ponyllm_core::error::CoreError::AuthInvalid { ref reason, .. }) => {
+                    // invalid_grant reconciliation buffer (HA review S2-2/S3-3):
+                    // if this process successfully refreshed AND persisted this
+                    // key within the freshness window, the rejection may be a
+                    // stale-propagation artifact from the lock holder's rotation.
+                    // Do NOT quarantine on the first hit; let the lock holder's
+                    // write-back land and re-check next round.
+                    let recently_persisted = {
+                        let map = self.last_antigravity_refresh.lock().await;
+                        map.get(&key_id)
+                            .map(|t| t.elapsed() < TOKEN_FRESHNESS_WINDOW)
+                            .unwrap_or(false)
+                    };
+                    if recently_persisted {
+                        tracing::warn!(
+                            provider = %provider,
+                            key_id = %key_id,
+                            reason = %reason,
+                            "invalid_grant while a recent successful refresh exists — deferring quarantine (propagation window)"
+                        );
+                        continue;
+                    }
                     tracing::warn!(
                         provider = %provider,
                         key_id = %key_id,
@@ -793,12 +1014,15 @@ impl AppState {
                     continue;
                 }
                 Err(e) => {
-                    tracing::debug!(
+                    // Transient (network/5xx) OR gate-unavailable: skip the
+                    // whole round (quota included) — fail soft, never burn.
+                    tracing::warn!(
                         provider = %provider,
                         key_id = %key_id,
                         error = %e,
-                        "Transient error refreshing Antigravity token during keepalive cycle; continuing"
+                        "Transient error refreshing Antigravity token during keepalive cycle; skipping this round"
                     );
+                    continue;
                 }
             }
 

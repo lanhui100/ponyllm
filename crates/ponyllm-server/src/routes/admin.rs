@@ -28,7 +28,11 @@ use utoipa::ToSchema;
 use crate::config::{ModelSpec, ProviderConfig};
 use crate::state::AppState;
 
-const HOT_RELOAD_MS: u64 = 500;
+/// Config backend polling interval (ms), now carried by
+/// `AppState::config_poll_ms` per backend (file=500, kubernetes=2000). Kept
+/// as a doc constant for the contract test and overview schema.
+#[allow(dead_code)]
+const HOT_RELOAD_MS: u64 = crate::state::FILE_CONFIG_POLL_MS;
 
 // ---------- response views (utoipa schemas; example values are placeholders,
 // never real key shapes — security P2-3/openapi_no_real_secret) ----------
@@ -858,7 +862,9 @@ fn auth_mode(state: &AppState) -> &'static str {
     }
 }
 
-fn load_store_config(state: &AppState) -> Result<ConfigFile, axum::response::Response> {
+async fn load_store_config(
+    state: &AppState,
+) -> Result<(ConfigFile, crate::admin_store::ConfigVersion), axum::response::Response> {
     let store = state.config_store.as_ref().ok_or_else(|| {
         (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -866,7 +872,7 @@ fn load_store_config(state: &AppState) -> Result<ConfigFile, axum::response::Res
         )
             .into_response()
     })?;
-    store.load().map_err(|e| {
+    store.load().await.map_err(|e| {
         tracing::error!(%e, "config store load failed");
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -876,7 +882,11 @@ fn load_store_config(state: &AppState) -> Result<ConfigFile, axum::response::Res
     })
 }
 
-fn save_store_config(state: &AppState, cfg: &mut ConfigFile) -> Result<u64, axum::response::Response> {
+async fn save_store_config(
+    state: &AppState,
+    cfg: &mut ConfigFile,
+    store_version: &crate::admin_store::ConfigVersion,
+) -> Result<u64, axum::response::Response> {
     let store = state.config_store.as_ref().ok_or_else(|| {
         (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -885,13 +895,33 @@ fn save_store_config(state: &AppState, cfg: &mut ConfigFile) -> Result<u64, axum
             .into_response()
     })?;
     cfg.config_version += 1;
-    store.save(cfg).map_err(|e| {
+    store.save(cfg, store_version).await.map_err(|e| {
         tracing::error!(%e, "config store save failed");
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": {"message": "config store save failed", "code": "admin_store_save_failed"}})),
-        )
-            .into_response()
+        match e {
+            crate::admin_store::ConfigStoreError::Conflict { .. } => {
+                // Optimistic-concurrency race against another writer (second
+                // replica, refresh write-back, or an external Secret patch):
+                // surface the existing If-Match 412 precondition_failed
+                // contract so web clients retry with the fresh version.
+                state.metrics.record_admin_save_conflict();
+                tracing::warn!("config store version conflict mapped to 412");
+                (
+                    StatusCode::PRECONDITION_FAILED,
+                    Json(json!({
+                        "error": {
+                            "message": "config store version conflict: concurrent writer updated the configuration; reload and retry",
+                            "code": "precondition_failed"
+                        }
+                    })),
+                )
+                    .into_response()
+            }
+            _ => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": {"message": "config store save failed", "code": "admin_store_save_failed"}})),
+            )
+                .into_response(),
+        }
     })?;
     Ok(cfg.config_version)
 }
@@ -1069,8 +1099,8 @@ fn build_pool_entry(
 
 #[utoipa::path(get, path = "/api/admin/overview", responses((status = 200, body = OverviewView)))]
 pub async fn handle_admin_overview(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let file = match load_store_config(&state) {
-        Ok(f) => f,
+    let (file, _store_version) = match load_store_config(&state).await {
+        Ok((f, ver)) => (f, ver),
         Err(resp) => return resp.into_response(),
     };
     let cfg = state.config.read();
@@ -1094,7 +1124,7 @@ pub async fn handle_admin_overview(State(state): State<Arc<AppState>>) -> impl I
         keys: keys_total,
         keys_active,
         strategy: cfg.default_strategy.to_string(),
-        hot_reload_ms: HOT_RELOAD_MS,
+        hot_reload_ms: state.config_poll_ms,
         admin_write_enabled: cfg.admin_write_enabled,
         config_version: file.config_version,
         auth_compat: match cfg.auth_compat {
@@ -1143,8 +1173,8 @@ pub async fn handle_admin_create_provider(
         return resp;
     }
     let _lock = state.admin_write_lock.lock().await;
-    let mut file = match load_store_config(&state) {
-        Ok(f) => f,
+    let (mut file, store_version) = match load_store_config(&state).await {
+        Ok((f, ver)) => (f, ver),
         Err(resp) => return resp,
     };
     if let Err(resp) = check_if_match(&headers, file.config_version) {
@@ -1250,7 +1280,7 @@ pub async fn handle_admin_create_provider(
     };
     file.providers.insert(name.clone(), p_sec);
 
-    if let Err(resp) = save_store_config(&state, &mut file) {
+    if let Err(resp) = save_store_config(&state, &mut file, &store_version).await {
         return resp;
     }
 
@@ -1313,8 +1343,8 @@ pub async fn handle_admin_update_provider(
         return resp;
     }
     let _lock = state.admin_write_lock.lock().await;
-    let mut file = match load_store_config(&state) {
-        Ok(f) => f,
+    let (mut file, store_version) = match load_store_config(&state).await {
+        Ok((f, ver)) => (f, ver),
         Err(resp) => return resp,
     };
     if let Err(resp) = check_if_match(&headers, file.config_version) {
@@ -1436,7 +1466,7 @@ pub async fn handle_admin_update_provider(
 
     let updated_p = p.clone();
 
-    let new_ver = match save_store_config(&state, &mut file) {
+    let new_ver = match save_store_config(&state, &mut file, &store_version).await {
         Ok(v) => v,
         Err(resp) => return resp,
     };
@@ -1498,8 +1528,8 @@ pub async fn handle_admin_delete_provider(
         return resp;
     }
     let _lock = state.admin_write_lock.lock().await;
-    let mut file = match load_store_config(&state) {
-        Ok(f) => f,
+    let (mut file, store_version) = match load_store_config(&state).await {
+        Ok((f, ver)) => (f, ver),
         Err(resp) => return resp,
     };
     if let Err(resp) = check_if_match(&headers, file.config_version) {
@@ -1514,7 +1544,7 @@ pub async fn handle_admin_delete_provider(
             .into_response();
     }
 
-    let new_ver = match save_store_config(&state, &mut file) {
+    let new_ver = match save_store_config(&state, &mut file, &store_version).await {
         Ok(v) => v,
         Err(resp) => return resp,
     };
@@ -1630,8 +1660,8 @@ pub async fn handle_admin_create_model(
         return resp;
     }
     let _lock = state.admin_write_lock.lock().await;
-    let mut file = match load_store_config(&state) {
-        Ok(f) => f,
+    let (mut file, store_version) = match load_store_config(&state).await {
+        Ok((f, ver)) => (f, ver),
         Err(resp) => return resp,
     };
     if let Err(resp) = check_if_match(&headers, file.config_version) {
@@ -1777,7 +1807,7 @@ pub async fn handle_admin_create_model(
     p_sec.models.push(model_name.clone());
     p_sec.model_configs.push(m_cfg);
 
-    if let Err(resp) = save_store_config(&state, &mut file) {
+    if let Err(resp) = save_store_config(&state, &mut file, &store_version).await {
         return resp;
     }
 
@@ -1869,8 +1899,8 @@ pub async fn handle_admin_update_model(
         return resp;
     }
     let _lock = state.admin_write_lock.lock().await;
-    let mut file = match load_store_config(&state) {
-        Ok(f) => f,
+    let (mut file, store_version) = match load_store_config(&state).await {
+        Ok((f, ver)) => (f, ver),
         Err(resp) => return resp,
     };
     if let Err(resp) = check_if_match(&headers, file.config_version) {
@@ -2064,7 +2094,7 @@ pub async fn handle_admin_update_model(
         p_sec.models.push(name.clone());
     }
 
-    if let Err(resp) = save_store_config(&state, &mut file) {
+    if let Err(resp) = save_store_config(&state, &mut file, &store_version).await {
         return resp;
     }
 
@@ -2147,8 +2177,8 @@ pub async fn handle_admin_delete_model(
         return resp;
     }
     let _lock = state.admin_write_lock.lock().await;
-    let mut file = match load_store_config(&state) {
-        Ok(f) => f,
+    let (mut file, store_version) = match load_store_config(&state).await {
+        Ok((f, ver)) => (f, ver),
         Err(resp) => return resp,
     };
     if let Err(resp) = check_if_match(&headers, file.config_version) {
@@ -2198,7 +2228,7 @@ pub async fn handle_admin_delete_model(
         updated_default_model = Some(p_sec.default_model.clone());
     }
 
-    let new_ver = match save_store_config(&state, &mut file) {
+    let new_ver = match save_store_config(&state, &mut file, &store_version).await {
         Ok(v) => v,
         Err(resp) => return resp,
     };
@@ -2223,8 +2253,8 @@ pub async fn handle_admin_delete_model(
 
 #[utoipa::path(get, path = "/api/admin/keys", responses((status = 200, body = [KeyView])))]
 pub async fn handle_admin_keys(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let file = match load_store_config(&state) {
-        Ok(f) => f,
+    let (file, _store_version) = match load_store_config(&state).await {
+        Ok((f, ver)) => (f, ver),
         Err(resp) => return resp,
     };
     let mut views: Vec<KeyView> = Vec::new();
@@ -2286,8 +2316,8 @@ pub async fn handle_admin_create_key(
         return resp;
     }
     let _lock = state.admin_write_lock.lock().await;
-    let mut file = match load_store_config(&state) {
-        Ok(f) => f,
+    let (mut file, store_version) = match load_store_config(&state).await {
+        Ok((f, ver)) => (f, ver),
         Err(resp) => return resp,
     };
     if let Err(resp) = check_if_match(&headers, file.config_version) {
@@ -2330,7 +2360,7 @@ pub async fn handle_admin_create_key(
         weight: final_weight,
     });
 
-    let new_ver = match save_store_config(&state, &mut file) {
+    let new_ver = match save_store_config(&state, &mut file, &store_version).await {
         Ok(v) => v,
         Err(resp) => return resp,
     };
@@ -2391,8 +2421,8 @@ pub async fn handle_admin_update_key(
         return resp;
     }
     let _lock = state.admin_write_lock.lock().await;
-    let mut file = match load_store_config(&state) {
-        Ok(f) => f,
+    let (mut file, store_version) = match load_store_config(&state).await {
+        Ok((f, ver)) => (f, ver),
         Err(resp) => return resp,
     };
     if let Err(resp) = check_if_match(&headers, file.config_version) {
@@ -2444,7 +2474,7 @@ pub async fn handle_admin_update_key(
         (parse_pool_strategy(&p_sec.strategy), key_sec.clone(), p_sec.keys.clone())
     };
 
-    let new_ver = match save_store_config(&state, &mut file) {
+    let new_ver = match save_store_config(&state, &mut file, &store_version).await {
         Ok(v) => v,
         Err(resp) => return resp,
     };
@@ -2529,8 +2559,8 @@ pub async fn handle_admin_delete_key(
         return resp;
     }
     let _lock = state.admin_write_lock.lock().await;
-    let mut file = match load_store_config(&state) {
-        Ok(f) => f,
+    let (mut file, store_version) = match load_store_config(&state).await {
+        Ok((f, ver)) => (f, ver),
         Err(resp) => return resp,
     };
     if let Err(resp) = check_if_match(&headers, file.config_version) {
@@ -2570,7 +2600,7 @@ pub async fn handle_admin_delete_key(
         (parse_pool_strategy(&p_sec.strategy), p_sec.keys.clone())
     };
 
-    let new_ver = match save_store_config(&state, &mut file) {
+    let new_ver = match save_store_config(&state, &mut file, &store_version).await {
         Ok(v) => v,
         Err(resp) => return resp,
     };
@@ -2610,8 +2640,8 @@ pub async fn handle_admin_test_key(
     if let Err(resp) = check_admin_write_enabled(&state) {
         return resp;
     }
-    let file = match load_store_config(&state) {
-        Ok(f) => f,
+    let (file, _store_version) = match load_store_config(&state).await {
+        Ok((f, ver)) => (f, ver),
         Err(resp) => return resp,
     };
 
@@ -3052,13 +3082,15 @@ pub async fn handle_admin_test_key(
 
 #[utoipa::path(get, path = "/api/admin/strategy", responses((status = 200, body = StrategyView)))]
 pub async fn handle_admin_get_strategy(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let cfg = state.config.read();
-    let file = match load_store_config(&state) {
-        Ok(f) => f,
+    // Snapshot the strategy before any await so the parking_lot config guard
+    // is not held across the (now async) store load.
+    let strategy = state.config.read().default_strategy.to_string();
+    let (file, _store_version) = match load_store_config(&state).await {
+        Ok((f, ver)) => (f, ver),
         Err(resp) => return resp.into_response(),
     };
     Json(StrategyView {
-        strategy: cfg.default_strategy.to_string(),
+        strategy,
         config_version: file.config_version,
     })
     .into_response()
@@ -3088,8 +3120,8 @@ pub async fn handle_admin_put_strategy(
         )
             .into_response();
     };
-    let mut file = match load_store_config(&state) {
-        Ok(f) => f,
+    let (mut file, store_version) = match load_store_config(&state).await {
+        Ok((f, ver)) => (f, ver),
         Err(resp) => return resp,
     };
 
@@ -3101,7 +3133,7 @@ pub async fn handle_admin_put_strategy(
     }
 
     file.gateway.default_strategy = new_strategy;
-    let new_version = match save_store_config(&state, &mut file) {
+    let new_version = match save_store_config(&state, &mut file, &store_version).await {
         Ok(v) => v,
         Err(resp) => return resp,
     };
@@ -3115,8 +3147,8 @@ pub async fn handle_admin_put_strategy(
 
 #[utoipa::path(get, path = "/api/admin/service/status", responses((status = 200, body = ServiceStatusView)))]
 pub async fn handle_admin_service_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let file = match load_store_config(&state) {
-        Ok(f) => f,
+    let (file, _store_version) = match load_store_config(&state).await {
+        Ok((f, ver)) => (f, ver),
         Err(resp) => return resp,
     };
     let cfg = state.config.read();
@@ -3169,8 +3201,8 @@ pub async fn handle_gateway_keys_list(State(state): State<Arc<AppState>>) -> imp
     if let Err(resp) = check_admin_write_enabled(&state) {
         return resp;
     }
-    let file = match load_store_config(&state) {
-        Ok(f) => f,
+    let (file, _store_version) = match load_store_config(&state).await {
+        Ok((f, ver)) => (f, ver),
         Err(resp) => return resp,
     };
     let mut views: Vec<GatewayKeyView> = file
@@ -3206,8 +3238,8 @@ pub async fn handle_gateway_keys_issue(
         return resp;
     }
     let _lock = state.admin_write_lock.lock().await;
-    let mut file = match load_store_config(&state) {
-        Ok(f) => f,
+    let (mut file, store_version) = match load_store_config(&state).await {
+        Ok((f, ver)) => (f, ver),
         Err(resp) => return resp,
     };
     if let Err(resp) = check_if_match(&headers, file.config_version) {
@@ -3254,7 +3286,7 @@ pub async fn handle_gateway_keys_issue(
     entry.expires_at = payload.expires_at;
     file.gateway.gateway_keys.push(entry);
 
-    let new_ver = match save_store_config(&state, &mut file) {
+    let new_ver = match save_store_config(&state, &mut file, &store_version).await {
         Ok(v) => v,
         Err(resp) => return resp,
     };
@@ -3319,8 +3351,8 @@ pub async fn handle_gateway_keys_revoke(
         return resp;
     }
     let _lock = state.admin_write_lock.lock().await;
-    let mut file = match load_store_config(&state) {
-        Ok(f) => f,
+    let (mut file, store_version) = match load_store_config(&state).await {
+        Ok((f, ver)) => (f, ver),
         Err(resp) => return resp,
     };
     if let Err(resp) = check_if_match(&headers, file.config_version) {
@@ -3339,7 +3371,7 @@ pub async fn handle_gateway_keys_revoke(
     // no audit row here — the id is immediately free for re-issuance.
     let removed = file.gateway.gateway_keys.remove(idx);
 
-    let new_ver = match save_store_config(&state, &mut file) {
+    let new_ver = match save_store_config(&state, &mut file, &store_version).await {
         Ok(v) => v,
         Err(resp) => return resp,
     };
@@ -3402,13 +3434,13 @@ pub async fn handle_admin_auth_rotate(
             .into_response();
     }
     let _lock = state.admin_write_lock.lock().await;
-    let mut file = match load_store_config(&state) {
-        Ok(f) => f,
+    let (mut file, store_version) = match load_store_config(&state).await {
+        Ok((f, ver)) => (f, ver),
         Err(resp) => return resp,
     };
     let new_token = ponyllm_config::generate_secure_api_key();
     file.gateway.api_key = new_token.clone();
-    let new_version = match save_store_config(&state, &mut file) {
+    let new_version = match save_store_config(&state, &mut file, &store_version).await {
         Ok(v) => v,
         Err(resp) => return resp,
     };
@@ -3910,8 +3942,8 @@ pub async fn handle_admin_authorize_antigravity(
         return resp;
     }
     let _lock = state.admin_write_lock.lock().await;
-    let mut file = match load_store_config(&state) {
-        Ok(f) => f,
+    let (mut file, store_version) = match load_store_config(&state).await {
+        Ok((f, ver)) => (f, ver),
         Err(resp) => return resp,
     };
 
@@ -4080,7 +4112,7 @@ pub async fn handle_admin_authorize_antigravity(
         (p_sec.base_url.clone(), effective_priority, effective_weight)
     };
 
-    let new_ver = match save_store_config(&state, &mut file) {
+    let new_ver = match save_store_config(&state, &mut file, &store_version).await {
         Ok(v) => v,
         Err(resp) => return resp,
     };
@@ -4329,8 +4361,8 @@ pub async fn handle_admin_provider_upstream_models(
             )
                 .into_response();
         }
-        let file = match load_store_config(&state) {
-            Ok(f) => f,
+        let (file, _store_version) = match load_store_config(&state).await {
+            Ok((f, ver)) => (f, ver),
             Err(resp) => return resp,
         };
         let Some(p_sec) = file.providers.get(&name) else {
@@ -4391,8 +4423,8 @@ pub async fn handle_admin_provider_upstream_models(
     }
 
     // Chat / Responses / unset: OpenAI-style GET {base}/v1/models.
-    let file = match load_store_config(&state) {
-        Ok(f) => f,
+    let (file, _store_version) = match load_store_config(&state).await {
+        Ok((f, ver)) => (f, ver),
         Err(resp) => return resp,
     };
     let Some(p_sec) = file.providers.get(&name) else {

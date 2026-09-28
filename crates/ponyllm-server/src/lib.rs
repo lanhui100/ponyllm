@@ -10,6 +10,9 @@ pub mod extractors;
 pub mod frames;
 pub mod segments;
 pub mod admin_store;
+pub mod config_poller;
+pub mod refresh_lock;
+pub mod serve;
 pub mod telemetry_snapshot;
 pub mod egress;
 

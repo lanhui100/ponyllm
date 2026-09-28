@@ -29,8 +29,20 @@ reqwest = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
 sha2 = { workspace = true }
+# Multi-node HA: async ConfigStore trait (async-trait), Kubernetes Secret
+# backend (kube/k8s-openapi v1_31), antigravity refresh serialization lock
+# (tokio-postgres advisory lock).
+async-trait = { workspace = true }
+kube = { workspace = true }
+k8s-openapi = { workspace = true }
+tokio-postgres = { workspace = true }
+# base64 仅用于测试断言 Secret 线格式；生产编解码走 k8s-openapi ByteString。
 
 [dev-dependencies]
 tempfile = { workspace = true }
+base64 = { workspace = true }
+serde_yaml = "0.9"
+# Deterministic apiserver REST mock for KubernetesConfigStore 409/CAS tests.
+wiremock = "0.6"
 
 
