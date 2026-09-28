@@ -204,8 +204,14 @@ pub fn create_app(state: Arc<AppState>) -> Router {
         .route("/v1/messages", post(handle_messages))
         .route("/responses", post(handle_responses))
         .route("/v1/responses", post(handle_responses))
-        .route("/systemone", post(handle_systemone))
-        .route("/v1/systemone", post(handle_systemone))
+        .route(
+            "/systemone",
+            post(handle_systemone).layer(DefaultBodyLimit::max(crate::routes::systemone::SYSTEMONE_MAX_JSON_BYTES)),
+        )
+        .route(
+            "/v1/systemone",
+            post(handle_systemone).layer(DefaultBodyLimit::max(crate::routes::systemone::SYSTEMONE_MAX_JSON_BYTES)),
+        )
         .route("/telemetry/recorder", get(handle_get_recorder))
         .route("/v1/telemetry/recorder", get(handle_get_recorder))
         .route("/telemetry/recorder/{request_id}", get(handle_get_recorder_frame))
@@ -303,25 +309,64 @@ fn build_web_router(web_enabled: bool, web_dist_dir: &str) -> Router<Arc<AppStat
         .fallback(ServeFile::new(index.clone()));
 
     let assets_dir = dist.join("assets");
-    let favicon_svg = dist.join("favicon.svg");
-    let mut router = Router::new()
+    let router = Router::new()
         .route("/", axum::routing::get_service(ServeFile::new(index.clone())))
         .route("/connect", axum::routing::get_service(ServeFile::new(index.clone())))
         .route("/dashboard", axum::routing::get_service(ServeFile::new(index.clone())))
         .route("/recorder", axum::routing::get_service(ServeFile::new(index.clone())))
         .route("/governance", axum::routing::get_service(ServeFile::new(index.clone())))
         .nest_service("/app", serve);
-
-    if favicon_svg.is_file() {
-        router = router
-            .route("/favicon.svg", axum::routing::get_service(ServeFile::new(favicon_svg.clone())))
-            .route("/favicon.ico", axum::routing::get_service(ServeFile::new(favicon_svg)));
-    }
+    let router = mount_favicon_routes(router, &dist);
 
     if assets_dir.is_dir() {
-        router = router.nest_service("/assets", ServeDir::new(assets_dir));
+        return router.nest_service("/assets", ServeDir::new(assets_dir));
     }
     router
+}
+
+/// Favicon routes: served straight from dist with an explicit `Cache-Control`
+/// so browsers stop relying on heuristic freshness. Note browsers keep a
+/// per-origin favicon cache that largely ignores Cache-Control — the `?v=`
+/// query on the index.html links is the release-level cache bust.
+/// - `/favicon.svg` → real SVG, `image/svg+xml` (Chrome/Firefox/Edge).
+/// - `/favicon.ico` → real multi-size ICO when the dist ships one
+///   (`image/x-icon` from the extension, Safari / legacy browsers); else falls
+///   back to the SVG file so the implicit `/favicon.ico` request never 404s
+///   (legacy dists — ServeFile then reports `image/svg+xml`, old behavior).
+/// Missing favicon → routes left unregistered (browsers tolerate 404).
+fn mount_favicon_routes(
+    router: Router<Arc<AppState>>,
+    dist: &std::path::Path,
+) -> Router<Arc<AppState>> {
+    let favicon_cache = axum::middleware::from_fn(|req, next: axum::middleware::Next| async move {
+        let mut res = next.run(req).await;
+        // 只给成功响应加缓存头；错误响应（如启动后文件消失的 404）不做可缓存处理。
+        if res.status().is_success() {
+            res.headers_mut().insert(
+                axum::http::header::CACHE_CONTROL,
+                HeaderValue::from_static("public, max-age=86400"),
+            );
+        }
+        res
+    });
+
+    let svg_path = dist.join("favicon.svg");
+    if !svg_path.is_file() {
+        return router;
+    }
+    let ico_path = dist.join("favicon.ico");
+    // Real ICO wins; legacy dists fall back to the SVG bytes.
+    let ico_file = if ico_path.is_file() { ico_path } else { svg_path.clone() };
+
+    router
+        .route(
+            "/favicon.svg",
+            axum::routing::get_service(ServeFile::new(svg_path)).layer(favicon_cache.clone()),
+        )
+        .route(
+            "/favicon.ico",
+            axum::routing::get_service(ServeFile::new(ico_file)).layer(favicon_cache),
+        )
 }
 
 async fn web_disabled() -> impl IntoResponse {

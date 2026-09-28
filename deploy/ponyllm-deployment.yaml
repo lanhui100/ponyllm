@@ -55,9 +55,11 @@ spec:
           type: RuntimeDefault
       imagePullSecrets:
         - name: aliyun-registry
+      # 注意：initContainer 与主容器共用同一镜像 digest，换镜像时必须同步更新两处
+      # （本文件 :60 与 :91）。新镜像才带新 favicon 路由（app.rs）与 ?v=2 的 index.html。
       initContainers:
         - name: init-config-and-snapshot
-          image: crpi-3cfwwtc3um8h6d3q.cn-hangzhou.personal.cr.aliyuncs.com/job-copilot/api-v2@sha256:ba88c9d29878189e7cb877edaf97a65a4508c11e27d43b13b3c5966864746aab
+          image: crpi-3cfwwtc3um8h6d3q.cn-hangzhou.personal.cr.aliyuncs.com/job-copilot/api-v2@sha256:9276fefe165792a7f5e4cf408e4175b357646369685c79fef3e9c2d823258a01
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -88,7 +90,7 @@ spec:
               mountPath: /tmp
       containers:
         - name: ponyllm
-          image: crpi-3cfwwtc3um8h6d3q.cn-hangzhou.personal.cr.aliyuncs.com/job-copilot/api-v2@sha256:ba88c9d29878189e7cb877edaf97a65a4508c11e27d43b13b3c5966864746aab
+          image: crpi-3cfwwtc3um8h6d3q.cn-hangzhou.personal.cr.aliyuncs.com/job-copilot/api-v2@sha256:9276fefe165792a7f5e4cf408e4175b357646369685c79fef3e9c2d823258a01
           imagePullPolicy: IfNotPresent
           env:
             - name: PONYLLM_PROBE_ALLOWLIST
@@ -157,6 +159,9 @@ spec:
           emptyDir: {}
         - name: favicon
           configMap:
+            # 清单见 deploy/ponyllm-favicon.yaml（生成于 scripts/gen-favicon.sh）。
+            # 部署顺序：先 apply 该 ConfigMap，再 apply 本 Deployment；subPath 挂载
+            # 不随 ConfigMap 更新热生效，改图标后需滚动重启本 Deployment。
             name: ponyllm-favicon
             defaultMode: 292
         - name: telemetry-init

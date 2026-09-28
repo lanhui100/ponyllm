@@ -36,6 +36,37 @@ fn write_fake_dist(dir: &std::path::Path) {
     std::fs::write(dir.join("app.js"), "console.log(1)").unwrap();
 }
 
+/// Minimal valid ICO (single 16x16 PNG-compressed entry), produced by
+/// scripts/gen-favicon.sh's pipeline; used to assert the `/favicon.ico` route
+/// serves a REAL ICO (never SVG bytes mislabeled as ICO).
+const FAKE_ICO: &[u8] = b"\x00\x00\x01\x00\x01\x00\x10\x10\x00\x00\x00\x00\
+\x20\x00\x56\x00\x00\x00\x16\x00\x00\x00\x89\x50\
+\x4e\x47\x0d\x0a\x1a\x0a\x00\x00\x00\x0d\x49\x48\
+\x44\x52\x00\x00\x00\x10\x00\x00\x00\x10\x08\x06\
+\x00\x00\x00\x1f\xf3\xff\x61\x00\x00\x00\x1d\x49\
+\x44\x41\x54\x78\x9c\x63\xe4\x17\xd7\xfa\xcf\x40\
+\x01\x60\xa2\x44\xf3\xa8\x01\xa3\x06\x8c\x1a\x30\
+\x98\x0c\x00\x00\x91\x94\x01\x6f\x85\x33\xe4\xf0\
+\x00\x00\x00\x00\x49\x45\x4e\x44\xae\x42\x60\x82";
+
+const FAVICON_SVG: &[u8] = b"<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 32 32\"><rect width=\"32\" height=\"32\" fill=\"#0F172A\"/></svg>";
+
+fn write_favicon_dist(dir: &std::path::Path, with_ico: bool) {
+    std::fs::create_dir_all(dir).unwrap();
+    std::fs::write(dir.join("index.html"), "<html>pony console</html>").unwrap();
+    std::fs::write(dir.join("favicon.svg"), FAVICON_SVG).unwrap();
+    if with_ico {
+        std::fs::write(dir.join("favicon.ico"), FAKE_ICO).unwrap();
+    }
+}
+
+fn assert_cache_control(resp: &reqwest::Response) {
+    assert_eq!(
+        resp.headers().get("cache-control").unwrap().to_str().unwrap(),
+        "public, max-age=86400"
+    );
+}
+
 #[tokio::test]
 async fn web_hosting_serves_spa_and_keeps_api_priority() {
     let tmp = tempfile::tempdir().unwrap();
@@ -240,4 +271,126 @@ async fn web_hosting_secured_static_bypass_but_api_guarded() {
         .await
         .unwrap();
     assert_eq!(authed.status(), 200);
+}
+
+/// Favicon contract: real ICO served with `image/x-icon` + explicit cache
+/// header; `/favicon.svg` serves SVG with `image/svg+xml`; the `?v=` cache-bust
+/// query does not change routing.
+#[tokio::test]
+async fn web_hosting_favicon_real_ico_and_cache_headers() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_favicon_dist(tmp.path(), true);
+    let addr = spawn_gateway(test_config_with_web(true, tmp.path().to_str().unwrap())).await;
+    let client = reqwest::Client::new();
+
+    let svg = client
+        .get(format!("http://{}/favicon.svg", addr))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(svg.status(), 200);
+    assert!(svg
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .contains("image/svg+xml"));
+    assert_cache_control(&svg);
+    assert_eq!(svg.bytes().await.unwrap().as_ref(), FAVICON_SVG);
+
+    // Versioned URL (index.html links carry ?v=) must resolve identically.
+    let versioned = client
+        .get(format!("http://{}/favicon.svg?v=2", addr))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(versioned.status(), 200);
+
+    // HEAD follows the same route (tower-http ServeFile handles it) with headers.
+    let head = client
+        .head(format!("http://{}/favicon.svg", addr))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(head.status(), 200);
+    assert_cache_control(&head);
+
+    let ico = client
+        .get(format!("http://{}/favicon.ico", addr))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ico.status(), 200);
+    assert!(ico
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .contains("image/x-icon"));
+    assert_cache_control(&ico);
+    let body = ico.bytes().await.unwrap();
+    assert_eq!(&body[..4], b"\x00\x00\x01\x00", "/favicon.ico must be a real ICO");
+    assert_eq!(body.as_ref(), FAKE_ICO);
+
+    // Versioned .ico URL too.
+    let ico_versioned = client
+        .get(format!("http://{}/favicon.ico?v=2", addr))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ico_versioned.status(), 200);
+    assert!(ico_versioned
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .contains("image/x-icon"));
+}
+
+/// Legacy dists (no favicon.ico shipped): `/favicon.ico` falls back to the SVG
+/// bytes so the implicit browser request never 404s (old behavior preserved).
+#[tokio::test]
+async fn web_hosting_favicon_fallback_svg_when_no_ico() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_favicon_dist(tmp.path(), false);
+    let addr = spawn_gateway(test_config_with_web(true, tmp.path().to_str().unwrap())).await;
+    let client = reqwest::Client::new();
+
+    let ico = client
+        .get(format!("http://{}/favicon.ico", addr))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ico.status(), 200);
+    assert!(ico
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .contains("image/svg+xml"));
+    assert_cache_control(&ico);
+    assert_eq!(ico.bytes().await.unwrap().as_ref(), FAVICON_SVG);
+}
+
+/// No favicon shipped at all: routes are unregistered and browsers get a plain
+/// 404 (never the SPA fallback, never an auth error).
+#[tokio::test]
+async fn web_hosting_favicon_missing_is_404() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_fake_dist(tmp.path());
+    let addr = spawn_gateway(test_config_with_web(true, tmp.path().to_str().unwrap())).await;
+    let client = reqwest::Client::new();
+
+    for path in ["/favicon.svg", "/favicon.ico"] {
+        let resp = client
+            .get(format!("http://{}{}", addr, path))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 404, "path: {path}");
+    }
 }
