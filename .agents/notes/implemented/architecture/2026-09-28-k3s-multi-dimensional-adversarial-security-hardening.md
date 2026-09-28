@@ -43,3 +43,15 @@ Status: implemented
 - 容器运行时实现了非 root、只读根文件系统、capabilities drop ALL、startupProbe 缓冲冷启动，杜绝了容器逃逸与误杀；
 - 敏感配置、代理密码与云实例元数据受到物理与网络双层锁闭保护，彻底杜绝 SSRF 窃密；
 - 运行命令 `cargo test -p ponyllm-core test_sanitize_proxy_url && cargo test -p ponyllm-server egress && kubectl apply --dry-run=client --validate=true -f deploy/` 均以零退出码（exit code: 0）通过验证。
+
+## 收口决策（2026-09-28，用户确认"核心闭环 + 显式遗留挂账"）
+
+本次 k3s 对抗安审、v0.2.44 发布与生产部署已达成核心交付标准（终审 PASS、pre-push 全门禁通过、线上巡检全绿：`/health` 200、`/models-evil` 404、admin 未授权 401、TLS 1.3）。以下 5 项作为已知风险显式挂账接受，其中 #1 已于收口时闭环：
+
+1. **（已闭环）探针 mgmt-token**：`ponyllm-probe-credentials` 已补 `mgmt-token` key 并 apply `deploy/ponyllm-prober.yaml`，Pod 内验证 `PROBE_MGMT_TOKEN` 注入成功，主动拨测强制 Bearer 鉴权（Fail-Closed）正式启用。
+2. **（挂账，高）pproxy 节点 ACL 拒绝测试 + client-token 轮换**：腾讯节点防火墙/安全组拒绝公网 8899 的实测与双 token 灰度轮换未落地；兑现 `deploy/pproxy-service.md` TODO，需节点侧运维执行（靠 review）。
+3. **（挂账，中）Traefik trustedIPs**：EdgeOne 回源段需在 Traefik 静态层配置 `forwardedHeaders.trustedIPs` + `depth:2`，限流才能按真实客户端 IP 统计；已在中继件注释声明（靠运维执行）。
+4. **（挂账，低-中）admin-allowlist sourceRange**：当前为 `0.0.0.0/0`（默认放行至后端 `auth_middleware` 鉴权）；如需更严，在 `deploy/ponyllm-ingress-hardening.yaml` 填运维出口 CIDR 后 apply。
+5. **（挂账，高，既有架构折中）单副本单点 + PVC 无备份**：`replicas:1` + `nodeSelector devserver` + RWO local-path 单点为已声明的架构约束；PVC 备份/恢复演练未做，恢复路径为"删 PVC 重播种 + Secret 重建"，RTO 未实测（靠运维演练）。
+
+收口条件：核心对抗闭环 + 生产发布上线 + GitOps 一致。上述 2–5 项不阻塞本次交付，但需在后续运维窗口按风险等级排期消账。
