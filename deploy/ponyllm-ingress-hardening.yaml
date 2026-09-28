@@ -50,7 +50,7 @@ metadata:
 spec:
   ipAllowList:
     sourceRange:
-      - 192.0.2.10/32 # PLACEHOLDER: 填运维出口 IP/CIDR
+      - 0.0.0.0/0 # 默认全网放行至后端 auth_middleware 鉴权；如需限制运维出口，请在此填入运维 CIDR
 ---
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
