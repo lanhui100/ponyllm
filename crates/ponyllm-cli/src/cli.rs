@@ -83,6 +83,11 @@ pub enum Commands {
         #[arg(short, long)]
         config: Option<String>,
 
+        /// Config truth-source backend: `file` (local TOML, default) or
+        /// `kubernetes` (Secret `ponyllm-live-config`, multi-node HA).
+        #[arg(long, value_parser = ["file", "kubernetes"], default_value = "file")]
+        config_backend: String,
+
         /// Override bind address and port (e.g. 0.0.0.0:8080 or 127.0.0.1:8080)
         #[arg(short = 'b', long)]
         bind: Option<String>,
@@ -123,6 +128,11 @@ pub enum Commands {
         /// Path to configuration file
         #[arg(short, long)]
         config: Option<String>,
+
+        /// Config truth-source backend: `file` (default) or `kubernetes`
+        /// (Secret `ponyllm-live-config`, multi-node HA).
+        #[arg(long, value_parser = ["file", "kubernetes"], default_value = "file")]
+        config_backend: String,
 
         /// Override listening port (default: 18080, non-standard high port to avoid conflicts)
         #[arg(short = 'p', long, default_value_t = 18080)]
@@ -169,6 +179,11 @@ pub enum Commands {
         /// Path to configuration file (must match the one `serve` was started with)
         #[arg(short, long)]
         config: Option<String>,
+
+        /// Config truth-source backend: `file` (default) or `kubernetes`
+        /// (Secret `ponyllm-live-config`, multi-node HA).
+        #[arg(long, value_parser = ["file", "kubernetes"], default_value = "file")]
+        config_backend: String,
 
         /// Override bind address and port (e.g. 0.0.0.0:8080 or 127.0.0.1:8080)
         #[arg(short = 'b', long)]

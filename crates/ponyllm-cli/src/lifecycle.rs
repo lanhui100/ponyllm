@@ -332,6 +332,7 @@ pub async fn wait_process_alive_and_ready(
 /// 重启：先停（无实例也继续），再以后台方式拉起，覆盖 pidfile。
 pub async fn restart_serve(
     config: Option<&str>,
+    config_backend: String,
     bind: Option<String>,
     address: Option<String>,
     port: Option<u16>,
@@ -403,6 +404,10 @@ pub async fn restart_serve(
         args.push("--config".to_string());
         args.push(c.to_string());
     }
+    // Always carry the config backend so `restart` reproduces the serve
+    // invocation (multi-node HA kubernetes backend included).
+    args.push("--config-backend".to_string());
+    args.push(config_backend);
     if let Some(b) = bind {
         args.push("--bind".to_string());
         args.push(b);

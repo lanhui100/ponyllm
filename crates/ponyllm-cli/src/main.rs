@@ -160,6 +160,7 @@ fn build_gateway_config_and_pools(
 
 struct ServerOptions {
     config: Option<String>,
+    config_backend: String,
     bind: Option<String>,
     address: Option<String>,
     port: Option<u16>,
@@ -170,6 +171,20 @@ struct ServerOptions {
     is_web_focused: bool,
     open_browser: bool,
     debug: bool,
+}
+
+/// [`ponyllm_server::config_poller::ConfigSource`] over the admin config
+/// store: poll the Secret, derive a content-hash identity.
+struct StoreConfigSource {
+    store: std::sync::Arc<dyn ponyllm_server::admin_store::ConfigStore>,
+}
+
+#[async_trait::async_trait]
+impl ponyllm_server::config_poller::ConfigSource for StoreConfigSource {
+    async fn snapshot(&self) -> Result<(String, ConfigFile), String> {
+        let (cfg, _version) = self.store.load().await.map_err(|e| e.to_string())?;
+        Ok((ponyllm_server::config_poller::content_hash(&cfg), cfg))
+    }
 }
 
 fn open_in_browser(url: &str) {
@@ -220,7 +235,39 @@ async fn run_server(opts: ServerOptions) -> Result<(), Box<dyn std::error::Error
     }
 
     let resolved_config = resolve_path(opts.config.as_deref());
-    let mut config_file = ConfigFile::load_or_default(resolved_config.to_str())?;
+
+    // Config truth-source backend (multi-node HA): `file` (default, local
+    // TOML) or `kubernetes` (Secret `ponyllm-live-config`). The backend's
+    // initial load replaces the local file load for kubernetes.
+    let config_backend = opts.config_backend.clone();
+    let store: std::sync::Arc<dyn ponyllm_server::admin_store::ConfigStore> =
+        match config_backend.as_str() {
+            "file" => std::sync::Arc::new(ponyllm_server::admin_store::FileConfigStore::new(
+                resolved_config.to_str().unwrap_or("ponyllm.toml"),
+            )),
+            "kubernetes" => {
+                let k = ponyllm_server::admin_store::KubernetesConfigStore::from_env(
+                    "ponyllm-live-config",
+                )
+                .await
+                .map_err(|e| -> Box<dyn std::error::Error> {
+                    format!("kubernetes config backend init failed: {}", e).into()
+                })?;
+                std::sync::Arc::new(k)
+            }
+            other => {
+                return Err(format!("unknown --config-backend '{}' (file|kubernetes)", other).into())
+            }
+        };
+
+    let mut config_file = if config_backend == "kubernetes" {
+        let (cfg, _version) = store.load().await.map_err(|e| -> Box<dyn std::error::Error> {
+            format!("kubernetes config backend load failed: {}", e).into()
+        })?;
+        cfg
+    } else {
+        ConfigFile::load_or_default(resolved_config.to_str())?
+    };
 
     let final_bind = if let Some(b) = opts.bind {
         b
@@ -277,13 +324,30 @@ async fn run_server(opts: ServerOptions) -> Result<(), Box<dyn std::error::Error
         gw_config.telemetry_snapshot_path = snap.map(|p| p.to_string_lossy().into_owned());
     }
 
-    let state = Arc::new(
-        AppState::new(gw_config.clone()).with_config_store(Arc::new(
-            ponyllm_server::admin_store::FileConfigStore::new(
-                resolved_config.to_str().unwrap_or("ponyllm.toml"),
-            ),
-        )),
-    );
+    // Graceful-shutdown watch: `true` = draining. Shared with the config
+    // poller (stops), the antigravity worker (skips), the refresh persist
+    // hook (no writes) and the axum graceful shutdown future.
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
+    let mut state = AppState::new(gw_config.clone())
+        .with_config_store(store.clone())
+        .with_config_poll_ms(if config_backend == "kubernetes" {
+            ponyllm_server::config_poller::KUBERNETES_POLL_INTERVAL_MS
+        } else {
+            ponyllm_server::state::FILE_CONFIG_POLL_MS
+        })
+        .with_shutdown_rx(shutdown_rx.clone());
+    // Cross-replica antigravity refresh serialization: enabled only when the
+    // operator provides the lock DB (multi-node deployments; Phase 2+).
+    if std::env::var("PONYLLM_LOCK_DATABASE_URL").map(|v| !v.trim().is_empty()).unwrap_or(false) {
+        let gate: std::sync::Arc<dyn ponyllm_core::pool::refresh_gate::RefreshGate> =
+            std::sync::Arc::new(ponyllm_server::refresh_lock::PostgresRefreshLock::new(
+                Some(state.metrics.clone()),
+            ));
+        state = state.with_refresh_gate(Some(gate));
+        tracing::info!("antigravity refresh serialization enabled (PONYLLM_LOCK_DATABASE_URL set)");
+    }
+    let state = Arc::new(state);
     for (p_name, pool) in pools {
         state.register_pool(&p_name, pool);
     }
@@ -302,48 +366,100 @@ async fn run_server(opts: ServerOptions) -> Result<(), Box<dyn std::error::Error
     // Only pin when the CLI flag was explicitly given (P2-1).
     let watcher_web_enabled = opts.no_web.then_some(false);
     let watcher_web_dist_dir = opts.web_dist_dir.clone();
-    tokio::spawn(async move {
-        let mut last_modified = std::fs::metadata(&watcher_path)
-            .and_then(|m| m.modified())
-            .ok();
-
-        loop {
-            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-
-            let current_modified = std::fs::metadata(&watcher_path)
+    if config_backend == "kubernetes" {
+        // Kubernetes backend: 2s content-hash poll of the Secret truth source.
+        let poll_store = store.clone();
+        let st_poll = state.clone();
+        let st_change = state.clone();
+        tokio::spawn(async move {
+            let source = StoreConfigSource { store: poll_store };
+            let bind = watcher_bind.clone();
+            let retries = watcher_retries;
+            let web_enabled = watcher_web_enabled;
+            let web_dist_dir = watcher_web_dist_dir.clone();
+            let on_change = move |mut new_cfg_file: ConfigFile| {
+                let st = st_change.clone();
+                let bind = bind.clone();
+                let web_dist_dir = web_dist_dir.clone();
+                tokio::spawn(async move {
+                    // Rebuild-time freshness guard (HA S1-3): never let a
+                    // stale Secret snapshot clobber a token we just rotated.
+                    st.apply_token_freshness_guard(&mut new_cfg_file).await;
+                    let (new_gw_cfg, new_pools) = build_gateway_config_and_pools(
+                        &new_cfg_file,
+                        Some(bind),
+                        retries,
+                        None,
+                        web_enabled,
+                        web_dist_dir,
+                    );
+                    st.reload_config_with_pools(new_gw_cfg, new_pools);
+                    tracing::info!(
+                        "kubernetes config change applied (hot reload) — config_reload_total incremented"
+                    );
+                    println!(
+                        "\n🔄 [配置热更新] Secret 内容变更，网关已完成零停机平滑热重载！"
+                    );
+                });
+            };
+            let stop_flag = st_poll.clone();
+            ponyllm_server::config_poller::run_config_poller(
+                &source,
+                std::time::Duration::from_millis(ponyllm_server::config_poller::KUBERNETES_POLL_INTERVAL_MS),
+                on_change,
+                move || *stop_flag.shutdown_rx.borrow(),
+            )
+            .await;
+        });
+    } else {
+        // File backend: legacy mtime watcher (500ms), stops on drain.
+        tokio::spawn(async move {
+            let mut last_modified = std::fs::metadata(&watcher_path)
                 .and_then(|m| m.modified())
                 .ok();
 
-            if current_modified.is_some() && current_modified != last_modified {
-                last_modified = current_modified;
-                tokio::time::sleep(tokio::time::Duration::from_millis(250)).await;
+            loop {
+                if *watcher_state.shutdown_rx.borrow() {
+                    tracing::info!("config file watcher stopped (draining)");
+                    return;
+                }
+                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
-                if let Ok(content) = std::fs::read_to_string(&watcher_path) {
-                    if let Ok(new_cfg_file) = toml::from_str::<ConfigFile>(&content) {
-                        let (new_gw_cfg, new_pools) = build_gateway_config_and_pools(
-                            &new_cfg_file,
-                            Some(watcher_bind.clone()),
-                            watcher_retries,
-                            None,
-                            // Pin the process-level switch across hot reloads.
-                            watcher_web_enabled,
-                            watcher_web_dist_dir.clone(),
-                        );
-                        watcher_state.reload_config_with_pools(new_gw_cfg, new_pools);
-                        println!(
-                            "\n🔄 [配置热更新] 检测到 '{}' 发生物理变更，网关已完成零停机平滑热重载！",
-                            watcher_path.display()
-                        );
-                    } else {
-                        eprintln!(
-                            "⚠️ [配置热更新] '{}' 语法解析失败，跳过本次重载以保持服务稳定",
-                            watcher_path.display()
-                        );
+                let current_modified = std::fs::metadata(&watcher_path)
+                    .and_then(|m| m.modified())
+                    .ok();
+
+                if current_modified.is_some() && current_modified != last_modified {
+                    last_modified = current_modified;
+                    tokio::time::sleep(tokio::time::Duration::from_millis(250)).await;
+
+                    if let Ok(content) = std::fs::read_to_string(&watcher_path) {
+                        if let Ok(new_cfg_file) = toml::from_str::<ConfigFile>(&content) {
+                            let (new_gw_cfg, new_pools) = build_gateway_config_and_pools(
+                                &new_cfg_file,
+                                Some(watcher_bind.clone()),
+                                watcher_retries,
+                                None,
+                                // Pin the process-level switch across hot reloads.
+                                watcher_web_enabled,
+                                watcher_web_dist_dir.clone(),
+                            );
+                            watcher_state.reload_config_with_pools(new_gw_cfg, new_pools);
+                            println!(
+                                "\n🔄 [配置热更新] 检测到 '{}' 发生物理变更，网关已完成零停机平滑热重载！",
+                                watcher_path.display()
+                            );
+                        } else {
+                            eprintln!(
+                                "⚠️ [配置热更新] '{}' 语法解析失败，跳过本次重载以保持服务稳定",
+                                watcher_path.display()
+                            );
+                        }
                     }
                 }
             }
-        }
-    });
+        });
+    }
 
     let app = create_app(state);
     let listener = tokio::net::TcpListener::bind(&gw_config.bind_addr).await?;
@@ -488,11 +604,73 @@ async fn run_server(opts: ServerOptions) -> Result<(), Box<dyn std::error::Error
     if let Some(warn) = ponyllm_cli::lifecycle::claim_pidfile(&resolved_config) {
         eprintln!("{}", warn);
     }
-    let serve_result = axum::serve(listener, app).await;
-    ponyllm_cli::lifecycle::release_pidfile(&resolved_config);
-    serve_result?;
+
+    // Graceful shutdown (P1-OPS-001): SIGTERM/SIGINT → stop accepting new
+    // connections → drain in-flight requests (SSE included) up to the drain
+    // deadline → force exit. The drain deadline must stay below the
+    // Deployment `terminationGracePeriodSeconds` minus `preStop` sleep.
+    let mut serve_task = tokio::spawn(ponyllm_server::serve::serve_with_shutdown(
+        listener,
+        app,
+        shutdown_rx,
+        ponyllm_server::serve::DEFAULT_DRAIN_TIMEOUT,
+    ));
+
+    // Wait for a termination signal or a natural server exit.
+    let signaled = tokio::select! {
+        _ = shutdown_signal() => {
+            tracing::info!("termination signal received; starting graceful drain");
+            let _ = shutdown_tx.send(true);
+            true
+        }
+        res = &mut serve_task => {
+            // The server finished on its own (listener error etc.).
+            ponyllm_cli::lifecycle::release_pidfile(&resolved_config);
+            return match res {
+                Ok(result) => result.map_err(|e| -> Box<dyn std::error::Error> { e.into() }),
+                Err(e) => Err(e.into()),
+            };
+        }
+    };
+    debug_assert!(signaled);
+
+    // Draining: wait for the serve task to finish (drain deadline is inside
+    // serve_with_shutdown). On timeout, the task is aborted (connections
+    // force-closed) — the client-retry contract from the HA ADR applies.
+    match tokio::time::timeout(ponyllm_server::serve::DEFAULT_DRAIN_TIMEOUT, serve_task).await {
+        Ok(res) => {
+            ponyllm_cli::lifecycle::release_pidfile(&resolved_config);
+            // `res: Result<io::Result<()>, JoinError>`; serve already applied
+            // its internal drain deadline, so unwind join first.
+            res.map_err(|e| -> Box<dyn std::error::Error> { e.into() })?
+                .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+        }
+        Err(_) => {
+            tracing::warn!("graceful drain did not finish in time; aborting serve task");
+            ponyllm_cli::lifecycle::release_pidfile(&resolved_config);
+        }
+    }
 
     Ok(())
+}
+
+/// Cross-platform SIGTERM/SIGINT wait. Unix installs real handlers; other
+/// platforms fall back to Ctrl-C.
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut terminate = signal(SignalKind::terminate()).expect("SIGTERM handler");
+        let mut interrupt = signal(SignalKind::interrupt()).expect("SIGINT handler");
+        tokio::select! {
+            _ = terminate.recv() => {},
+            _ = interrupt.recv() => {},
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
 }
 
 #[tokio::main]
@@ -1014,6 +1192,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Commands::Serve {
             config,
+            config_backend,
             bind,
             address,
             port,
@@ -1025,6 +1204,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         } => {
             run_server(ServerOptions {
                 config,
+                config_backend,
                 bind,
                 address,
                 port,
@@ -1040,6 +1220,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Commands::Web {
             config,
+            config_backend,
             port,
             address,
             bind,
@@ -1051,6 +1232,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         } => {
             run_server(ServerOptions {
                 config,
+                config_backend,
                 bind,
                 address: Some(address),
                 port: Some(port),
@@ -1073,9 +1255,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
-        Commands::Restart { config, bind, address, port, api_key, retries, no_web, web_dist_dir } => {
+        Commands::Restart { config, config_backend, bind, address, port, api_key, retries, no_web, web_dist_dir } => {
             match ponyllm_cli::lifecycle::restart_serve(
                 config.as_deref(),
+                config_backend,
                 bind,
                 address,
                 port,

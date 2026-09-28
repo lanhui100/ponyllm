@@ -35,3 +35,5 @@ tar = { workspace = true }
 tempfile = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
+# ConfigSource impl for the kubernetes config-backend poller (multi-node HA).
+async-trait = { workspace = true }
