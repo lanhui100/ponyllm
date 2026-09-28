@@ -30,7 +30,7 @@ cleanup() {
 trap cleanup EXIT
 
 echo "[k3d-smoke] creating cluster $CLUSTER"
-k3d cluster create "$CLUSTER" --agents 0 --wait >/dev/null 2>&1
+k3d cluster create "$CLUSTER" --agents 0 --api-port 127.0.0.1:6555 --wait >/dev/null 2>&1
 kubectl create namespace "$NS" >/dev/null 2>&1 || true
 
 # Seed the Secret with the sample config (base64).
@@ -57,9 +57,11 @@ EOF
 kubectl -n "$NS" apply -f /tmp/ponyllm-smoke-secret.yaml >/dev/null
 
 echo "[k3d-smoke] running kubernetes_store_k3d_tests against $CLUSTER"
+K3D_KUBECONFIG_FILE="/tmp/ponyllm-smoke-kubeconfig.yaml"
+k3d kubeconfig get "$CLUSTER" > "$K3D_KUBECONFIG_FILE"
 (
   cd "$ROOT_DIR"
-  KUBECONFIG="$(k3d kubeconfig get "$CLUSTER")" \
+  KUBECONFIG="$K3D_KUBECONFIG_FILE" \
     cargo test -p ponyllm-server --test kubernetes_store_k3d_tests -- --ignored --nocapture
 )
 

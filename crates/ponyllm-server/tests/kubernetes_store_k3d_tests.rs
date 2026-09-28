@@ -19,10 +19,9 @@ use ponyllm_server::admin_store::{
     SecretApi,
 };
 
-fn build_store() -> KubernetesConfigStore {
-    let config = tokio::runtime::Runtime::new()
-        .expect("runtime")
-        .block_on(kube::Config::infer())
+async fn build_store() -> KubernetesConfigStore {
+    let config = kube::Config::infer()
+        .await
         .expect("kube config infer (KUBECONFIG)");
     let client = kube::Client::try_from(config).expect("kube client");
     let api: Arc<dyn SecretApi> = Arc::new(KubeSecretApi::new(client, "ponyllm"));
@@ -32,7 +31,7 @@ fn build_store() -> KubernetesConfigStore {
 #[tokio::test]
 #[ignore = "requires a real cluster (scripts/k3d-smoke.sh)"]
 async fn real_apiserver_patch_cas_semantics() {
-    let store = build_store();
+    let store = build_store().await;
 
     // 1) load: the Secret is present and parses.
     let (cfg, version) = store.load().await.expect("load ponyllm-live-config");
