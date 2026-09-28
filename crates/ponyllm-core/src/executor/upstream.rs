@@ -959,6 +959,14 @@ impl UpstreamExecutor {
                 tracing::info!(key_id = %key.id, "Antigravity 401 healed by forced refresh; retrying same key");
                 StaleTokenRecovery::RetrySameKey
             }
+            Err(CoreError::RefreshSkipped { .. }) => {
+                // Another replica holds the refresh serialization lock: the
+                // token is being refreshed (and persisted) right now. Retry
+                // the same key once instead of cooling a healthy key; the
+                // `refreshed_keys` guard prevents a loop within one request.
+                tracing::warn!(key_id = %key.id, "Antigravity forced refresh skipped (lock held by another replica); retrying same key");
+                StaleTokenRecovery::RetrySameKey
+            }
             Err(CoreError::AuthInvalid { reason, .. }) => {
                 // refresh_token burned (invalid_grant): permanent isolate,
                 // still guarded by the pool mass-disable breaker.

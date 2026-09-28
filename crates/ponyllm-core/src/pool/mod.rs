@@ -9,6 +9,7 @@ pub mod hot_cache;
 pub mod scoring;
 pub mod thinking;
 pub mod antigravity;
+pub mod refresh_gate;
 pub mod usage;
 
 pub use entry::*;

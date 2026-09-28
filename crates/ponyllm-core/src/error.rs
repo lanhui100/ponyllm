@@ -57,6 +57,13 @@ pub enum CoreError {
     #[error("Antigravity credential '{key_id}' rejected by OAuth endpoint: {reason}")]
     AuthInvalid { key_id: String, reason: String },
 
+    /// Antigravity refresh skipped because the cross-replica serialization
+    /// lock is held by another replica (or the lock backend is unavailable —
+    /// we fail closed). The key is NOT dead; the caller should skip this
+    /// round and let the lock holder's write-back propagate.
+    #[error("Antigravity refresh for '{key_id}' skipped: serialization lock held by another replica")]
+    RefreshSkipped { key_id: String },
+
     #[error("Capacity exhausted: required context '{required_context}', {message}")]
     CapacityExhausted {
         required_context: String,
@@ -103,6 +110,7 @@ impl CoreError {
         match self {
             CoreError::AllRetriesFailed { kind, .. } => kind.clone(),
             CoreError::AuthInvalid { .. } => GatewayErrorKind::AuthInvalid,
+            CoreError::RefreshSkipped { .. } => GatewayErrorKind::UpstreamUnavailable,
             CoreError::CapacityExhausted { .. } => GatewayErrorKind::CapacityExhausted,
             CoreError::UnsupportedModality { .. } => GatewayErrorKind::ClientBadRequest,
             CoreError::NoAvailableKey(_) => GatewayErrorKind::RateLimitExceeded { retry_after: None },

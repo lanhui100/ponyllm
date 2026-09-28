@@ -23,6 +23,9 @@ dashmap = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
 utoipa = { workspace = true }
+# Cross-replica refresh serialization seam (multi-node HA): async-trait keeps
+# the trait dyn-safe so ponyllm-server can inject its PG/in-memory gates.
+async-trait = { workspace = true }
 
 [dev-dependencies]
 axum = { workspace = true }

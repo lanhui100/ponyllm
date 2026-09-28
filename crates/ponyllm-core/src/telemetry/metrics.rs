@@ -38,6 +38,33 @@ pub struct StreamFlowSummary {
     pub total_chunks: u64,
 }
 
+/// Multi-node HA operational counters (2026-09-28). Mirrors the JSON counter
+/// names the Phase 2/4 acceptance queries with `curl | jq`:
+/// refresh_lock_acquired_total / refresh_lock_skipped_total /
+/// refresh_lock_error_total / refresh_persist_failure_total /
+/// admin_save_conflicts_total / config_reload_total.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct HaOpsCounters {
+    /// Refreshes that acquired the cross-replica serialization lock.
+    #[serde(default)]
+    pub refresh_lock_acquired_total: u64,
+    /// Refreshes skipped because another replica held the lock.
+    #[serde(default)]
+    pub refresh_lock_skipped_total: u64,
+    /// Refreshes skipped because the lock backend was unavailable (fail closed).
+    #[serde(default)]
+    pub refresh_lock_error_total: u64,
+    /// Successful upstream refreshes whose token write-back ultimately failed.
+    #[serde(default)]
+    pub refresh_persist_failure_total: u64,
+    /// Admin config saves rejected by the store's optimistic concurrency.
+    #[serde(default)]
+    pub admin_save_conflicts_total: u64,
+    /// Runtime config atomic reloads (file mtime / Secret-content hash watcher).
+    #[serde(default)]
+    pub config_reload_total: u64,
+}
+
 /// Compute p50/p95/max over inter-chunk gaps in milliseconds.
 /// Sorts a copy; empty input yields Nones. Pure helper for reuse in tests and TUI.
 pub fn gap_percentiles(mut gaps_ms: Vec<f64>) -> (Option<f64>, Option<f64>, Option<f64>) {
@@ -68,6 +95,9 @@ pub struct MetricsSummary {
     pub total_tokens: u64,
     #[serde(default)]
     pub stream: StreamFlowSummary,
+    /// Multi-node HA operational counters (see [`HaOpsCounters`]).
+    #[serde(default)]
+    pub ha_ops: HaOpsCounters,
 }
 
 #[derive(Debug, Default)]
@@ -90,6 +120,13 @@ pub struct MetricsCollector {
     max_gap_ms: AtomicU64,
     tps_sum_milli: AtomicU64,
     tps_samples: AtomicU64,
+    // Multi-node HA counters.
+    refresh_lock_acquired: AtomicU64,
+    refresh_lock_skipped: AtomicU64,
+    refresh_lock_error: AtomicU64,
+    refresh_persist_failure: AtomicU64,
+    admin_save_conflicts: AtomicU64,
+    config_reload: AtomicU64,
 }
 
 impl MetricsCollector {
@@ -123,6 +160,41 @@ impl MetricsCollector {
     /// will retry with another key or fall back to the next provider.
     pub fn record_failover(&self) {
         self.failover_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    // ---- Multi-node HA counters (2026-09-28) ------------------------------
+
+    /// An upstream refresh acquired the cross-replica serialization lock.
+    pub fn record_refresh_lock_acquired(&self) {
+        self.refresh_lock_acquired.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// An upstream refresh was skipped because another replica held the lock.
+    pub fn record_refresh_lock_skipped(&self) {
+        self.refresh_lock_skipped.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// An upstream refresh was skipped because the lock backend failed
+    /// (fail-closed: never refresh unlocked).
+    pub fn record_refresh_lock_error(&self) {
+        self.refresh_lock_error.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A successful refresh whose token write-back to the truth source failed
+    /// after bounded retries.
+    pub fn record_refresh_persist_failure(&self) {
+        self.refresh_persist_failure
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// An admin config save was rejected by optimistic concurrency (412).
+    pub fn record_admin_save_conflict(&self) {
+        self.admin_save_conflicts.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A runtime config atomic reload happened (file/Secret watcher).
+    pub fn record_config_reload(&self) {
+        self.config_reload.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Record one completed (or interrupted) SSE stream for future A/B reuse.
@@ -214,6 +286,14 @@ impl MetricsCollector {
                 total_bytes: self.bytes_sum.load(Ordering::Relaxed),
                 total_chunks: self.chunks_sum.load(Ordering::Relaxed),
             },
+            ha_ops: HaOpsCounters {
+                refresh_lock_acquired_total: self.refresh_lock_acquired.load(Ordering::Relaxed),
+                refresh_lock_skipped_total: self.refresh_lock_skipped.load(Ordering::Relaxed),
+                refresh_lock_error_total: self.refresh_lock_error.load(Ordering::Relaxed),
+                refresh_persist_failure_total: self.refresh_persist_failure.load(Ordering::Relaxed),
+                admin_save_conflicts_total: self.admin_save_conflicts.load(Ordering::Relaxed),
+                config_reload_total: self.config_reload.load(Ordering::Relaxed),
+            },
         }
     }
 
@@ -238,6 +318,12 @@ impl MetricsCollector {
             max_gap_ms: self.max_gap_ms.load(Ordering::Relaxed),
             tps_sum_milli: self.tps_sum_milli.load(Ordering::Relaxed),
             tps_samples: self.tps_samples.load(Ordering::Relaxed),
+            refresh_lock_acquired_total: self.refresh_lock_acquired.load(Ordering::Relaxed),
+            refresh_lock_skipped_total: self.refresh_lock_skipped.load(Ordering::Relaxed),
+            refresh_lock_error_total: self.refresh_lock_error.load(Ordering::Relaxed),
+            refresh_persist_failure_total: self.refresh_persist_failure.load(Ordering::Relaxed),
+            admin_save_conflicts_total: self.admin_save_conflicts.load(Ordering::Relaxed),
+            config_reload_total: self.config_reload.load(Ordering::Relaxed),
         }
     }
 
@@ -267,6 +353,12 @@ impl MetricsCollector {
         };
         self.tps_sum_milli.store(safe_tps_sum, Ordering::Relaxed);
         self.tps_samples.store(safe_tps_samples, Ordering::Relaxed);
+        self.refresh_lock_acquired.store(snap.refresh_lock_acquired_total, Ordering::Relaxed);
+        self.refresh_lock_skipped.store(snap.refresh_lock_skipped_total, Ordering::Relaxed);
+        self.refresh_lock_error.store(snap.refresh_lock_error_total, Ordering::Relaxed);
+        self.refresh_persist_failure.store(snap.refresh_persist_failure_total, Ordering::Relaxed);
+        self.admin_save_conflicts.store(snap.admin_save_conflicts_total, Ordering::Relaxed);
+        self.config_reload.store(snap.config_reload_total, Ordering::Relaxed);
     }
 }
 
@@ -309,4 +401,16 @@ pub struct MetricsCounterSnapshot {
     pub tps_sum_milli: u64,
     #[serde(default)]
     pub tps_samples: u64,
+    #[serde(default)]
+    pub refresh_lock_acquired_total: u64,
+    #[serde(default)]
+    pub refresh_lock_skipped_total: u64,
+    #[serde(default)]
+    pub refresh_lock_error_total: u64,
+    #[serde(default)]
+    pub refresh_persist_failure_total: u64,
+    #[serde(default)]
+    pub admin_save_conflicts_total: u64,
+    #[serde(default)]
+    pub config_reload_total: u64,
 }

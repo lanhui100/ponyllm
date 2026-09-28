@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 use chrono::{DateTime, Utc};
@@ -6,6 +8,7 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, Mutex};
 use crate::error::{CoreError, Result};
+use super::refresh_gate::{RefreshGate, RefreshGateGuard};
 
 pub const DEFAULT_ANTIGRAVITY_ENDPOINT: &str = "https://daily-cloudcode-pa.googleapis.com";
 pub const DEFAULT_ANTIGRAVITY_OAUTH_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
@@ -150,6 +153,15 @@ enum RefreshOutcome {
 
 pub type RefreshTokenRotatedHook = Arc<dyn Fn(&str, &str) + Send + Sync>;
 
+/// Persistence hook invoked *inside* the refresh gate's critical section,
+/// immediately after a successful upstream refresh and before the gate is
+/// released. The server installs this to write the rotated token back to the
+/// config truth source (bounded retries, metrics). Returning `Err` records a
+/// `refresh_persist_failure_total` on the server side; the in-memory token is
+/// still kept (the rebuild path guards against stale-Secret overwrites).
+pub type RefreshPersistHook =
+    Arc<dyn Fn(String) -> Pin<Box<dyn Future<Output = std::result::Result<(), String>> + Send>> + Send + Sync>;
+
 #[derive(Clone)]
 pub struct AntigravityTokenManager {
     key_id: String,
@@ -157,6 +169,11 @@ pub struct AntigravityTokenManager {
     client: reqwest::Client,
     refresh_lock: Arc<Mutex<Option<broadcast::Sender<RefreshOutcome>>>>,
     rotation_hook: Arc<RwLock<Option<RefreshTokenRotatedHook>>>,
+    /// Cross-replica serialization gate (multi-node HA). `None` = unlocked
+    /// single-instance deployment.
+    refresh_gate: Arc<RwLock<Option<Arc<dyn RefreshGate>>>>,
+    /// Persist-within-lock hook (see [`RefreshPersistHook`]).
+    persist_hook: Arc<RwLock<Option<RefreshPersistHook>>>,
 }
 
 impl AntigravityTokenManager {
@@ -171,11 +188,23 @@ impl AntigravityTokenManager {
             client,
             refresh_lock: Arc::new(Mutex::new(None)),
             rotation_hook: Arc::new(RwLock::new(None)),
+            refresh_gate: Arc::new(RwLock::new(None)),
+            persist_hook: Arc::new(RwLock::new(None)),
         }
     }
 
     pub fn set_rotation_hook(&self, hook: RefreshTokenRotatedHook) {
         *self.rotation_hook.write() = Some(hook);
+    }
+
+    /// Install (or clear) the cross-replica refresh serialization gate.
+    pub fn set_refresh_gate(&self, gate: Option<Arc<dyn RefreshGate>>) {
+        *self.refresh_gate.write() = gate;
+    }
+
+    /// Install (or clear) the persist-within-lock hook.
+    pub fn set_persist_hook(&self, hook: Option<RefreshPersistHook>) {
+        *self.persist_hook.write() = hook;
     }
 
     /// Probe-scoped clone sharing credential/token-cache/rotation hook but
@@ -190,6 +219,8 @@ impl AntigravityTokenManager {
             client: client.clone(),
             refresh_lock: self.refresh_lock.clone(),
             rotation_hook: self.rotation_hook.clone(),
+            refresh_gate: self.refresh_gate.clone(),
+            persist_hook: self.persist_hook.clone(),
         }
     }
 
@@ -308,7 +339,58 @@ impl AntigravityTokenManager {
             completed: false,
         };
 
+        // Multi-node HA: every refresh round (keepalive OR request-driven 401
+        // recovery) must serialize through the same cross-replica gate before
+        // touching the OAuth endpoint. The guard is kept alive across
+        // refresh + persist; dropping it releases the lock.
+        // NOTE: clone out of the parking_lot guard FIRST — holding the guard
+        // across an `.await` makes the future non-Send.
+        let gate_opt = self.refresh_gate.read().clone();
+        let _gate_guard: Option<Box<dyn RefreshGateGuard + Send + Sync>> = match gate_opt {
+                Some(gate) => match gate.try_acquire(&self.key_id).await {
+                    Ok(Some(g)) => Some(g),
+                    Ok(None) => {
+                        tracing::info!(
+                            key_id = %self.key_id,
+                            "antigravity refresh skipped: serialization lock held by another replica"
+                        );
+                        return Err(CoreError::RefreshSkipped {
+                            key_id: self.key_id.clone(),
+                        });
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            key_id = %self.key_id,
+                            error = %e,
+                            "antigravity refresh skipped: lock backend unavailable (fail closed)"
+                        );
+                        return Err(CoreError::RefreshSkipped {
+                            key_id: self.key_id.clone(),
+                        });
+                    }
+                },
+                None => None,
+            };
+
         let refresh_res = self.do_refresh_token().await;
+
+        // Persist within the lock hold: write the rotated token back to the
+        // truth source BEFORE another replica can take the lock, so the next
+        // refresher starts from the newest material.
+        if refresh_res.is_ok() {
+            let persist_opt = self.persist_hook.read().clone();
+            if let Some(hook) = persist_opt {
+                if let Err(e) = hook(self.key_id.clone()).await {
+                    tracing::error!(
+                        key_id = %self.key_id,
+                        error = %e,
+                        "antigravity refresh write-back failed (token kept in memory; rebuild guard applies)"
+                    );
+                }
+            }
+        }
+        drop(_gate_guard);
+
         let broadcast_res = match &refresh_res {
             Ok(tok) => RefreshOutcome::Token(tok.clone()),
             Err(CoreError::AuthInvalid { reason, .. }) => {
@@ -1218,5 +1300,174 @@ mod tests {
         assert_eq!(result.credential.refresh_token, "1//0test_refresh");
         assert_eq!(result.credential.access_token, Some("ya29.test_access".to_string()));
         assert_eq!(result.email, Some("user@example.com".to_string()));
+    }
+}
+
+
+#[cfg(test)]
+mod ha_gate_tests {
+    use super::*;
+
+    use crate::pool::refresh_gate::RefreshGateError;
+
+    #[derive(Debug, Default)]
+    struct SkipGate;
+    impl RefreshGateGuard for SkipGate {}
+
+    #[async_trait::async_trait]
+    impl RefreshGate for SkipGate {
+        async fn try_acquire(
+            &self,
+            _key_id: &str,
+        ) -> std::result::Result<
+            Option<Box<dyn RefreshGateGuard + Send + Sync>>,
+            RefreshGateError,
+        > {
+            Ok(None) // another replica holds the lock
+        }
+    }
+
+    /// Lock held by another replica ⇒ the refresh is skipped with
+    /// `RefreshSkipped` and the persist hook is NOT invoked.
+    #[tokio::test]
+    async fn test_refresh_gate_skip_returns_refresh_skipped_and_skips_persist() {
+        let cred = AntigravityCredential {
+            access_token: None,
+            refresh_token: "rf".to_string(),
+            client_id: "id".to_string(),
+            client_secret: "sec".to_string(),
+            project_id: "proj".to_string(),
+            expiry: None,
+        };
+        let mgr = Arc::new(AntigravityTokenManager::new("ag-gate-skip", cred, reqwest::Client::new()));
+        mgr.set_refresh_gate(Some(Arc::new(SkipGate)));
+        let persist_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let pc = persist_calls.clone();
+        mgr.set_persist_hook(Some(Arc::new(move |_key_id| {
+            let pc = pc.clone();
+            Box::pin(async move {
+                pc.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            })
+        })));
+
+        let err = mgr.force_refresh_token().await.unwrap_err();
+        assert!(
+            matches!(err, CoreError::RefreshSkipped { .. }),
+            "expected RefreshSkipped, got {:?}",
+            err
+        );
+        assert_eq!(persist_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[derive(Debug)]
+    struct AcquireGate {
+        released: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    struct AcquireGuard {
+        released: Arc<std::sync::atomic::AtomicBool>,
+    }
+    impl RefreshGateGuard for AcquireGuard {}
+    impl Drop for AcquireGuard {
+        fn drop(&mut self) {
+            self.released.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl RefreshGate for AcquireGate {
+        async fn try_acquire(
+            &self,
+            _key_id: &str,
+        ) -> std::result::Result<
+            Option<Box<dyn RefreshGateGuard + Send + Sync>>,
+            RefreshGateError,
+        > {
+            Ok(Some(Box::new(AcquireGuard {
+                released: self.released.clone(),
+            })))
+        }
+    }
+
+    /// Lock acquired ⇒ refresh proceeds and the persist hook runs while the
+    /// guard is still held (the guard's release flag must be false at persist
+    /// time and true after the call returns).
+    #[tokio::test]
+    async fn test_refresh_gate_acquire_persists_within_lock_hold() {
+        // Local OAuth token server so do_refresh_token completes without the
+        // real internet.
+        let router = axum::Router::new().route(
+            "/token",
+            axum::routing::post(|| async {
+                axum::Json(serde_json::json!({
+                    "access_token": "ya29.new_access",
+                    "expires_in": 3600,
+                    "refresh_token": "1//rotated_rf"
+                }))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        let token_url = format!("http://{}/token", addr);
+        // Override the OAuth endpoint for this process (test-only; other
+        // concurrent tests tolerate the override — they never assert it).
+        std::env::set_var("ANTIGRAVITY_OAUTH_TOKEN_URL_OVERRIDE", &token_url);
+
+        let cred = AntigravityCredential {
+            access_token: None,
+            refresh_token: "rf".to_string(),
+            client_id: "id".to_string(),
+            client_secret: "sec".to_string(),
+            project_id: "proj".to_string(),
+            expiry: None,
+        };
+        let mgr = Arc::new(AntigravityTokenManager::new(
+            "ag-gate-acquire",
+            cred,
+            reqwest::Client::new(),
+        ));
+        let released = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        mgr.set_refresh_gate(Some(Arc::new(AcquireGate {
+            released: released.clone(),
+        })));
+
+        // Persist hook captures whether the guard is still held.
+        let persist_ok = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let released_at_persist = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let po = persist_ok.clone();
+        let rap = released_at_persist.clone();
+        let released_in_hook = released.clone();
+        mgr.set_persist_hook(Some(Arc::new(move |_key_id| {
+            let po = po.clone();
+            let rap = rap.clone();
+            let released_in_hook = released_in_hook.clone();
+            Box::pin(async move {
+                po.store(true, std::sync::atomic::Ordering::SeqCst);
+                rap.store(
+                    released_in_hook.load(std::sync::atomic::Ordering::SeqCst),
+                    std::sync::atomic::Ordering::SeqCst,
+                );
+                Ok(())
+            })
+        })));
+
+        let token = mgr.force_refresh_token().await.expect("refresh succeeds");
+        assert_eq!(token, "ya29.new_access");
+        assert!(persist_ok.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(
+            !released_at_persist.load(std::sync::atomic::Ordering::SeqCst),
+            "persist must run while the gate guard is still held"
+        );
+        // After the call the guard has been dropped → released.
+        assert!(released.load(std::sync::atomic::Ordering::SeqCst));
+        // Rotation (refresh_token rotated) landed in memory.
+        assert_eq!(
+            mgr.credential_snapshot().refresh_token,
+            "1//rotated_rf"
+        );
     }
 }

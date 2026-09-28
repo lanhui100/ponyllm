@@ -58,6 +58,17 @@ uuid = { version = "1.13", features = ["v4", "serde"] }
 # truth; no ORM: the migration runner uses the low-level driver directly.
 tokio-postgres = "0.7"
 
+# Multi-node HA (2026-09-28): trait methods that must stay dyn-compatible.
+async-trait = "0.1"
+
+# Kubernetes Secret config backend (KubernetesConfigStore). kube 0.95 pairs
+# with k8s-openapi 0.23 which carries the `v1_31` feature matching the k3s
+# production cluster (k3s v1.31.6). rustls-tls only — no native-tls/openssl.
+kube = { version = "0.95", default-features = false, features = ["client", "rustls-tls"] }
+k8s-openapi = { version = "0.23", features = ["v1_31"] }
+# Secret wire encoding (base64 standard alphabet with padding).
+base64 = "0.22"
+
 # Internal workspace crates
 ponyllm-protocol = { path = "crates/ponyllm-protocol" }
 ponyllm-core = { path = "crates/ponyllm-core" }
