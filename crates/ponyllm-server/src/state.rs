@@ -715,20 +715,37 @@ impl AppState {
     /// Mutates `config_file`'s provider key `api_key` fields in place when the
     /// manager for that key holds a token refreshed within
     /// [`TOKEN_FRESHNESS_WINDOW`] that differs from the loaded value.
-    pub async fn apply_token_freshness_guard(&self, config_file: &mut ConfigFile) {
-        // Cross-replica rotation clock from the truth source (best-effort:
-        // the file backend has none, and a read failure degrades to the
-        // in-memory window below).
-        let secret_rotated_at: Option<u64> = match &self.config_store {
-            Some(store) => match store.load_rotated_at().await {
-                Ok(v) => v,
-                Err(e) => {
-                    tracing::warn!(error = %e, "rotated_at read failed; freshness guard falls back to in-memory window");
-                    None
-                }
-            },
+    /// Read the cross-replica rotation clock (Best-effort: the file backend
+    /// has none, and a read failure degrades to the in-memory window below).
+    /// Untrusted FUTURE timestamps (P11-sec S2-2) are treated as absent and
+    /// warned about — a marker ahead of this node's wall clock is either clock
+    /// skew or tampering, and must not keep a dead key alive forever.
+    pub async fn trusted_rotated_at(&self) -> Option<u64> {
+        const FUTURE_TOLERANCE_SECS: u64 = 60;
+        let Some(marker) = (match &self.config_store {
+            Some(store) => store.load_rotated_at().await.ok().flatten(),
             None => None,
+        }) else {
+            return None;
         };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        if marker > now.saturating_add(FUTURE_TOLERANCE_SECS) {
+            tracing::warn!(
+                marker,
+                now,
+                "rotated_at marker is in the future; treating as untrusted (clock skew or tampering)"
+            );
+            return None;
+        }
+        Some(marker)
+    }
+
+    pub async fn apply_token_freshness_guard(&self, config_file: &mut ConfigFile) {
+        // Cross-replica rotation clock from the truth source.
+        let secret_rotated_at: Option<u64> = self.trusted_rotated_at().await;
         // Snapshot the managers' current refresh tokens (read-only, short-lived).
         let current: HashMap<(String, String), String> = {
             let pools = self.pools.read();
@@ -1089,16 +1106,10 @@ async fn advance_rotated_at(
                             .duration_since(std::time::UNIX_EPOCH)
                             .unwrap_or_default()
                             .as_secs();
-                        match &self.config_store {
-                            Some(store) => store
-                                .load_rotated_at()
-                                .await
-                                .ok()
-                                .flatten()
-                                .map(|r| now_epoch.saturating_sub(r) < 300)
-                                .unwrap_or(false),
-                            None => false,
-                        }
+                        self.trusted_rotated_at()
+                            .await
+                            .map(|r| now_epoch.saturating_sub(r) < 300)
+                            .unwrap_or(false)
                     };
                     if recently_persisted || secret_recently_rotated {
                         tracing::warn!(

@@ -108,18 +108,30 @@ impl PostgresRefreshLock {
                 );
                 tokio_postgres::connect(&dsn, NoTls).await
                     .map(|(client, connection)| spawn_pg_connection(client, connection))
-                    .map_err(|e| sanitize_connect_error(&e))?
+                    .map_err(|e| {
+            // Diagnostic detail is safe: tokio-postgres CONNECT errors carry
+            // io/TLS text, never the DSN (which is parsed into Config before
+            // the attempt). The returned error stays fully sanitized.
+            tracing::warn!(error = %e, "refresh lock PG connect failed (detail)");
+            sanitize_connect_error(&e)
+        })?
             }
             _ => {
                 let config = rustls::ClientConfig::builder()
-                    .with_root_certificates(self::load_native_roots())
+                    .with_root_certificates(self::load_lock_roots())
                     .with_no_client_auth();
                 let tls = postgres_rustls::MakeTlsConnector::new(
                     tokio_rustls::TlsConnector::from(std::sync::Arc::new(config)),
                 );
                 tokio_postgres::connect(&dsn, tls).await
                     .map(|(client, connection)| spawn_pg_connection(client, connection))
-                    .map_err(|e| sanitize_connect_error(&e))?
+                    .map_err(|e| {
+            // Diagnostic detail is safe: tokio-postgres CONNECT errors carry
+            // io/TLS text, never the DSN (which is parsed into Config before
+            // the attempt). The returned error stays fully sanitized.
+            tracing::warn!(error = %e, "refresh lock PG connect failed (detail)");
+            sanitize_connect_error(&e)
+        })?
             }
         };
         Ok(client)
@@ -166,12 +178,44 @@ where
     client
 }
 
-/// System roots (best-effort): rustls-native-certs reads the OS trust store.
-/// Unreadable certs degrade to whatever loaded; an EMPTY store makes the
-/// handshake fail closed against the PG server cert — the correct posture for
-/// a lock DB.
-fn load_native_roots() -> rustls::RootCertStore {
+/// Trust roots for the lock DB TLS channel (best-effort, additive):
+/// 1. `PONYLLM_LOCK_CA_FILE` — a PEM bundle with the lock DB's CA (self-signed
+///    or internal), when the operator provides one;
+/// 2. the OS native trust store (rustls-native-certs).
+/// An empty-but-present store is fine only when `PONYLLM_LOCK_CA_FILE` is set;
+/// otherwise the handshake fails closed against the PG server cert — the
+/// correct posture for a lock DB (P11-sec S2-1: `require` is verify-full
+/// semantics, NOT libpq's encrypt-only).
+fn load_lock_roots() -> rustls::RootCertStore {
     let mut store = rustls::RootCertStore::empty();
+    if let Some(ca_path) = std::env::var("PONYLLM_LOCK_CA_FILE")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+    {
+        match std::fs::File::open(&ca_path) {
+            Ok(mut file) => {
+                let mut reader = std::io::BufReader::new(&mut file);
+                let certs: Vec<_> = rustls_pemfile::certs(&mut reader)
+                    .filter_map(Result::ok)
+                    .collect();
+                if certs.is_empty() {
+                    tracing::warn!(ca_file = %ca_path, "PONYLLM_LOCK_CA_FILE contained no PEM certs — lock DB handshake will fail closed");
+                } else {
+                    for cert in certs.clone() {
+                        let _ = store.add(cert);
+                    }
+                    tracing::info!(
+                        ca_file = %ca_path,
+                        certs = certs.len(),
+                        "lock DB TLS: loaded custom CA bundle"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::warn!(ca_file = %ca_path, error = %e, "PONYLLM_LOCK_CA_FILE not readable — lock DB handshake will fail closed");
+            }
+        }
+    }
     let result = rustls_native_certs::load_native_certs();
     for cert in result.certs {
         let _ = store.add(cert);
@@ -215,7 +259,7 @@ fn spawn_idle_warmup(state: Arc<Mutex<PgConnectionState>>) {
             })
         } else {
             let config = rustls::ClientConfig::builder()
-                .with_root_certificates(load_native_roots())
+                .with_root_certificates(load_lock_roots())
                 .with_no_client_auth();
             let tls = postgres_rustls::MakeTlsConnector::new(
                 tokio_rustls::TlsConnector::from(std::sync::Arc::new(config)),
@@ -227,6 +271,14 @@ fn spawn_idle_warmup(state: Arc<Mutex<PgConnectionState>>) {
                 c
             })
         };
+        if client.is_none() {
+            // Loud-but-sanitized: a silent warmup failure would hide why the
+            // gate is always Unavailable (P11-sec S3-5). Never the DSN.
+            tracing::warn!(
+                "refresh lock idle warmup connect failed ({}); the gate will fail closed ",
+                sanitized_connect_message()
+            );
+        }
         if let Some(client) = client {
             // Park it as idle (only if nothing else parked meanwhile).
             let mut guard = state.lock().await;
@@ -373,6 +425,7 @@ impl RefreshGate for PostgresRefreshLock {
 pub struct InMemoryRefreshLock {
     shared: Arc<Mutex<bool>>,
     metrics: Option<Arc<MetricsCollector>>,
+    draining: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl InMemoryRefreshLock {
@@ -380,7 +433,16 @@ impl InMemoryRefreshLock {
         shared: Arc<Mutex<bool>>,
         metrics: Option<Arc<MetricsCollector>>,
     ) -> Self {
-        Self { shared, metrics }
+        Self {
+            shared,
+            metrics,
+            draining: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
+    }
+
+    pub fn with_draining(mut self, draining: Arc<std::sync::atomic::AtomicBool>) -> Self {
+        self.draining = draining;
+        self
     }
 
     pub fn fresh() -> Self {
@@ -414,6 +476,14 @@ impl RefreshGate for InMemoryRefreshLock {
         &self,
         _key_id: &str,
     ) -> Result<Option<Box<dyn RefreshGateGuard + Send + Sync>>, RefreshGateError> {
+        if self.draining.load(std::sync::atomic::Ordering::Relaxed) {
+            if let Some(m) = &self.metrics {
+                m.record_refresh_lock_error();
+            }
+            return Err(RefreshGateError::Unavailable(
+                "graceful drain in progress: refresh serialization suspended".to_string(),
+            ));
+        }
         let mut held = self.shared.lock().await;
         if *held {
             if let Some(m) = &self.metrics {
@@ -481,6 +551,27 @@ mod tests {
         assert_eq!(summary.ha_ops.refresh_lock_acquired_total, 1);
         assert_eq!(summary.ha_ops.refresh_lock_skipped_total, 1);
         assert!(summary.ha_ops.refresh_lock_hold_seconds >= 0);
+    }
+
+    /// Drain short-circuit must mirror the production gate: once draining,
+    /// the InMemory double also refuses acquisition (P11-sec S3-1).
+    #[tokio::test]
+    async fn in_memory_lock_refuses_acquisition_while_draining() {
+        let draining = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let gate = InMemoryRefreshLock::fresh().with_draining(draining.clone());
+
+        let guard = gate.try_acquire("k-1").await.expect("gate query ok");
+        assert!(guard.is_some(), "not draining: acquire must succeed");
+
+        draining.store(true, std::sync::atomic::Ordering::SeqCst);
+        let err = match gate.try_acquire("k-2").await {
+            Ok(_) => panic!("draining gate must refuse acquisition"),
+            Err(e) => e,
+        };
+        assert!(
+            err.to_string().contains("drain"),
+            "draining refusal must be identifiable: {err}"
+        );
     }
 
     #[test]

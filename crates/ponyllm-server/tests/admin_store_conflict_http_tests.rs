@@ -23,6 +23,8 @@ use reqwest::StatusCode;
 #[derive(Default)]
 struct FakeSecretApi {
     force_conflict: std::sync::atomic::AtomicBool,
+    /// When true, GET answers NotFound (config truth source deleted).
+    not_found: std::sync::atomic::AtomicBool,
     rv: std::sync::atomic::AtomicU64,
     toml: std::sync::Mutex<String>,
 }
@@ -31,6 +33,7 @@ impl FakeSecretApi {
     fn seed(toml: String) -> Arc<Self> {
         Arc::new(Self {
             force_conflict: std::sync::atomic::AtomicBool::new(false),
+            not_found: std::sync::atomic::AtomicBool::new(false),
             rv: std::sync::atomic::AtomicU64::new(100),
             toml: std::sync::Mutex::new(toml),
         })
@@ -40,6 +43,11 @@ impl FakeSecretApi {
 #[async_trait]
 impl SecretApi for FakeSecretApi {
     async fn get(&self, _name: &str) -> Result<SecretSnapshot, ConfigStoreError> {
+        if self.not_found.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(ConfigStoreError::NotFound(
+                "secrets \"ponyllm-live-config\" not found".to_string(),
+            ));
+        }
         let mut data = BTreeMap::new();
         data.insert(
             "ponyllm.toml".to_string(),
@@ -211,5 +219,36 @@ async fn overview_hot_reload_ms_echoes_kubernetes_poll_interval() {
     assert_eq!(
         overview["hot_reload_ms"], 2000,
         "kubernetes backend must report its 2s poll interval: {overview}"
+    );
+}
+
+/// NotFound seam (P11-sec S3-2): a deleted truth source must surface as
+/// HTTP 503 with `config_store_unavailable` (distinct from InvalidData/500)
+/// so ops can tell "Secret deleted" from "config broken".
+#[tokio::test]
+async fn store_not_found_maps_to_http_503_config_store_unavailable() {
+    let fake = FakeSecretApi::seed(ponyllm_config::generate_sample_config().to_string());
+    fake.not_found
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let (base, _state) = spawn_gateway_with_poll(fake, 500).await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .get(format!("{}/api/admin/overview", base))
+        .header("Authorization", "Bearer test-token")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::SERVICE_UNAVAILABLE,
+        "deleted truth source must map to 503"
+    );
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "config_store_unavailable");
+    let message = body["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        !message.contains("ponyllm-live-config") && !message.contains("not found"),
+        "503 body must not leak the Secret name: {body}"
     );
 }
