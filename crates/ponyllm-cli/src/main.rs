@@ -8,6 +8,7 @@ use std::sync::Arc;
 use clap::Parser;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use ponyllm_core::pool::{ApiKeyEntry, GatewayRoutingStrategy, KeyPool, RoutingStrategy};
+use ponyllm_server::config_poller::ConfigSource;
 use ponyllm_server::{create_app, AppState, GatewayConfig, ProviderConfig};
 use ponyllm_cli::cli::{
     format_web_status_url, Cli, Commands, KeyCommands, KeysCommands, ModelCommands,
@@ -173,17 +174,25 @@ struct ServerOptions {
     debug: bool,
 }
 
-/// [`ponyllm_server::config_poller::ConfigSource`] over the admin config
-/// store: poll the Secret, derive a content-hash identity.
-struct StoreConfigSource {
-    store: std::sync::Arc<dyn ponyllm_server::admin_store::ConfigStore>,
+/// [`ponyllm_server::config_poller::ConfigSource`] over the Kubernetes
+/// config store: poll the Secret and derive the identity from the RAW config
+/// bytes (SHA-256 over `data['ponyllm.toml']` BEFORE parsing — P1-arch S1-1).
+/// Hashing the parsed config would be nondeterministic (HashMap iteration
+/// order), so this is the only stable change signal.
+struct KubeStoreSource {
+    store: std::sync::Arc<ponyllm_server::admin_store::KubernetesConfigStore>,
+}
+
+impl KubeStoreSource {
+    fn new(store: std::sync::Arc<ponyllm_server::admin_store::KubernetesConfigStore>) -> Self {
+        Self { store }
+    }
 }
 
 #[async_trait::async_trait]
-impl ponyllm_server::config_poller::ConfigSource for StoreConfigSource {
+impl ponyllm_server::config_poller::ConfigSource for KubeStoreSource {
     async fn snapshot(&self) -> Result<(String, ConfigFile), String> {
-        let (cfg, _version) = self.store.load().await.map_err(|e| e.to_string())?;
-        Ok((ponyllm_server::config_poller::content_hash(&cfg), cfg))
+        self.store.load_raw_hash().await.map_err(|e| e.to_string())
     }
 }
 
@@ -240,6 +249,12 @@ async fn run_server(opts: ServerOptions) -> Result<(), Box<dyn std::error::Error
     // TOML) or `kubernetes` (Secret `ponyllm-live-config`). The backend's
     // initial load replaces the local file load for kubernetes.
     let config_backend = opts.config_backend.clone();
+    // The kubernetes backend also yields the startup raw-bytes content hash,
+    // which seeds the poller's change-detection baseline (P1-arch S3-1: a
+    // Secret change between startup and the first poll must still fire).
+    let mut poller_initial_identity: Option<String> = None;
+    let mut kube_source: Option<std::sync::Arc<ponyllm_server::admin_store::KubernetesConfigStore>> =
+        None;
     let store: std::sync::Arc<dyn ponyllm_server::admin_store::ConfigStore> =
         match config_backend.as_str() {
             "file" => std::sync::Arc::new(ponyllm_server::admin_store::FileConfigStore::new(
@@ -253,7 +268,12 @@ async fn run_server(opts: ServerOptions) -> Result<(), Box<dyn std::error::Error
                 .map_err(|e| -> Box<dyn std::error::Error> {
                     format!("kubernetes config backend init failed: {}", e).into()
                 })?;
-                std::sync::Arc::new(k)
+                let kube_arc = std::sync::Arc::new(k);
+                kube_source = Some(kube_arc.clone());
+                // The store handed to AppState IS the Kubernetes store; the
+                // poller additionally wraps it in KubeStoreSource for the
+                // raw-bytes-hash identity.
+                kube_arc.clone() as std::sync::Arc<dyn ponyllm_server::admin_store::ConfigStore>
             }
             other => {
                 return Err(format!("unknown --config-backend '{}' (file|kubernetes)", other).into())
@@ -261,9 +281,15 @@ async fn run_server(opts: ServerOptions) -> Result<(), Box<dyn std::error::Error
         };
 
     let mut config_file = if config_backend == "kubernetes" {
-        let (cfg, _version) = store.load().await.map_err(|e| -> Box<dyn std::error::Error> {
+        let src = KubeStoreSource::new(
+            kube_source
+                .clone()
+                .expect("kube source set for kubernetes backend"),
+        );
+        let (hash, cfg) = src.snapshot().await.map_err(|e| -> Box<dyn std::error::Error> {
             format!("kubernetes config backend load failed: {}", e).into()
         })?;
+        poller_initial_identity = Some(hash);
         cfg
     } else {
         ConfigFile::load_or_default(resolved_config.to_str())?
@@ -337,15 +363,24 @@ async fn run_server(opts: ServerOptions) -> Result<(), Box<dyn std::error::Error
             ponyllm_server::state::FILE_CONFIG_POLL_MS
         })
         .with_shutdown_rx(shutdown_rx.clone());
+    // Graceful-drain flag for the refresh gate: once true, the gate refuses
+    // acquisitions so no OAuth refresh starts during drain (P1-arch S3-4).
+    let draining = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     // Cross-replica antigravity refresh serialization: enabled only when the
     // operator provides the lock DB (multi-node deployments; Phase 2+).
     if std::env::var("PONYLLM_LOCK_DATABASE_URL").map(|v| !v.trim().is_empty()).unwrap_or(false) {
+        let lock = ponyllm_server::refresh_lock::PostgresRefreshLock::new(Some(state.metrics.clone()))
+            .with_draining(draining.clone());
         let gate: std::sync::Arc<dyn ponyllm_core::pool::refresh_gate::RefreshGate> =
-            std::sync::Arc::new(ponyllm_server::refresh_lock::PostgresRefreshLock::new(
-                Some(state.metrics.clone()),
-            ));
+            std::sync::Arc::new(lock);
         state = state.with_refresh_gate(Some(gate));
         tracing::info!("antigravity refresh serialization enabled (PONYLLM_LOCK_DATABASE_URL set)");
+    } else {
+        // Fail loud: a multi-replica deployment missing the lock DB silently
+        // regresses to concurrent refreshes on one egress IP.
+        tracing::warn!(
+            "antigravity refresh serialization DISABLED: PONYLLM_LOCK_DATABASE_URL is not set.              Multi-replica deployments MUST set it (same-egress-IP concurrent refresh risk)."
+        );
     }
     let state = Arc::new(state);
     for (p_name, pool) in pools {
@@ -367,12 +402,17 @@ async fn run_server(opts: ServerOptions) -> Result<(), Box<dyn std::error::Error
     let watcher_web_enabled = opts.no_web.then_some(false);
     let watcher_web_dist_dir = opts.web_dist_dir.clone();
     if config_backend == "kubernetes" {
-        // Kubernetes backend: 2s content-hash poll of the Secret truth source.
-        let poll_store = store.clone();
+        // Kubernetes backend: 2s raw-bytes-hash poll of the Secret truth source.
+        let source = KubeStoreSource::new(
+            kube_source
+                .clone()
+                .expect("kube source for kubernetes backend"),
+        );
         let st_poll = state.clone();
         let st_change = state.clone();
+        let initial_identity = poller_initial_identity.take();
         tokio::spawn(async move {
-            let source = StoreConfigSource { store: poll_store };
+            let source = source;
             let bind = watcher_bind.clone();
             let retries = watcher_retries;
             let web_enabled = watcher_web_enabled;
@@ -406,6 +446,7 @@ async fn run_server(opts: ServerOptions) -> Result<(), Box<dyn std::error::Error
             ponyllm_server::config_poller::run_config_poller(
                 &source,
                 std::time::Duration::from_millis(ponyllm_server::config_poller::KUBERNETES_POLL_INTERVAL_MS),
+                initial_identity,
                 on_change,
                 move || *stop_flag.shutdown_rx.borrow(),
             )
@@ -620,6 +661,7 @@ async fn run_server(opts: ServerOptions) -> Result<(), Box<dyn std::error::Error
     let signaled = tokio::select! {
         _ = shutdown_signal() => {
             tracing::info!("termination signal received; starting graceful drain");
+            draining.store(true, std::sync::atomic::Ordering::SeqCst);
             let _ = shutdown_tx.send(true);
             true
         }
