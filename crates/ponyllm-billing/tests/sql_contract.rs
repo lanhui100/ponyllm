@@ -13,12 +13,14 @@ fn migrations() -> Migrations {
 }
 
 fn all_sql() -> String {
-    migrations()
+    let sql: String = migrations()
         .files()
         .iter()
         .map(|file| file.sql())
         .collect::<Vec<_>>()
-        .join("\n")
+        .join("\n");
+    // Normalize CRLF so multiline markers match identically on Windows checkouts.
+    sql.replace("\r\n", "\n")
 }
 
 /// Full-line `--` comments stripped, so prose cannot satisfy a marker and prose
