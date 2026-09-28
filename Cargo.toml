@@ -68,6 +68,12 @@ kube = { version = "0.95", default-features = false, features = ["client", "rust
 k8s-openapi = { version = "0.23", features = ["v1_31"] }
 # Secret wire encoding (base64 standard alphabet with padding).
 base64 = "0.22"
+# Advisory-lock PG connection TLS (postgres_rustls over the same rustls 0.23
+# chain kube already pulls in; native system roots via rustls-native-certs).
+postgres_rustls = "0.1"
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+rustls = { version = "0.23", default-features = false, features = ["logging", "std", "tls12", "ring"] }
+rustls-native-certs = "0.8"
 
 # Internal workspace crates
 ponyllm-protocol = { path = "crates/ponyllm-protocol" }

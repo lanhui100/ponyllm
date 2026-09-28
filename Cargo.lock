@@ -1895,7 +1895,10 @@ dependencies = [
  "ponyllm-config",
  "ponyllm-core",
  "ponyllm-protocol",
+ "postgres_rustls",
  "reqwest",
+ "rustls",
+ "rustls-native-certs",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -1904,6 +1907,7 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tokio-postgres",
+ "tokio-rustls",
  "tokio-stream",
  "toml",
  "tower 0.5.3",
@@ -1943,6 +1947,18 @@ dependencies = [
  "fallible-iterator",
  "postgres-protocol",
  "uuid",
+]
+
+[[package]]
+name = "postgres_rustls"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0be4c5d09a4d8147b8f380292d8846f2d8ab5ee7eb9e8a6de4e9b04ea83d1903"
+dependencies = [
+ "sha2 0.10.9",
+ "tokio",
+ "tokio-postgres",
+ "tokio-rustls",
 ]
 
 [[package]]

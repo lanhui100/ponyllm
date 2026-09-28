@@ -874,11 +874,18 @@ async fn load_store_config(
     })?;
     store.load().await.map_err(|e| {
         tracing::error!(%e, "config store load failed");
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": {"message": "config store load failed", "code": "admin_store_load_failed"}})),
-        )
-            .into_response()
+        match e {
+            crate::admin_store::ConfigStoreError::NotFound(_) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"error": {"message": "config truth source missing (Secret deleted?)", "code": "config_store_unavailable"}})),
+            )
+                .into_response(),
+            _ => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": {"message": "config store load failed", "code": "admin_store_load_failed"}})),
+            )
+                .into_response(),
+        }
     })
 }
 
@@ -916,6 +923,11 @@ async fn save_store_config(
                 )
                     .into_response()
             }
+            crate::admin_store::ConfigStoreError::NotFound(_) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"error": {"message": "config truth source missing (Secret deleted?)", "code": "config_store_unavailable"}})),
+            )
+                .into_response(),
             _ => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"error": {"message": "config store save failed", "code": "admin_store_save_failed"}})),

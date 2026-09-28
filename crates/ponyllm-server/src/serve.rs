@@ -18,9 +18,16 @@ use tokio::sync::watch;
 pub const DEFAULT_DRAIN_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Serve forever until `shutdown_rx` flips to `true`, then gracefully drain
-/// in-flight connections (SSE streams included) up to `drain_timeout`, after
-/// which the listener is force-closed (long upstreams are truncated — the
-/// client-retry contract documented in the HA ADR).
+/// in-flight connections (SSE streams included) up to `drain_timeout`.
+///
+/// Note on "force close": dropping the `axum::serve` future stops the accept
+/// loop but in-flight connection tasks spawned by hyper survive until the
+/// PROCESS exits (the CLI's outer timeout then returns and the tokio runtime
+/// shuts down, which does the real truncation — matching kubelet's kill after
+/// `terminationGracePeriodSeconds`). The in-process drain deadline therefore
+/// only guarantees the server GIVES UP waiting; client-side EOF/RST is
+/// process-exit-dependent (HA ADR: long upstreams are truncated, clients
+/// retry).
 pub async fn serve_with_shutdown(
     listener: tokio::net::TcpListener,
     router: Router,

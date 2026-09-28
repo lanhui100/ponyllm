@@ -40,12 +40,15 @@ impl ConfigVersion {
 }
 
 /// Store-level error model. `Conflict` is the optimistic-concurrency signal
-/// (map to HTTP 412 at the admin layer); everything else is a real backend
+/// (map to HTTP 412 at the admin layer); `NotFound` is a missing truth source
+/// (operator accident — map to 503 with a distinct code so ops can tell
+/// "Secret deleted" from "config broken"); everything else is a real backend
 /// failure (map to 500).
 #[derive(Debug)]
 pub enum ConfigStoreError {
     Io(std::io::Error),
     InvalidData(String),
+    NotFound(String),
     Conflict {
         expected: Option<ConfigVersion>,
         current: Option<ConfigVersion>,
@@ -57,6 +60,7 @@ impl std::fmt::Display for ConfigStoreError {
         match self {
             ConfigStoreError::Io(e) => write!(f, "config store io error: {}", e),
             ConfigStoreError::InvalidData(m) => write!(f, "config store invalid data: {}", m),
+            ConfigStoreError::NotFound(m) => write!(f, "config store missing: {}", m),
             ConfigStoreError::Conflict { expected, current } => write!(
                 f,
                 "config store version conflict (expected {:?}, current {:?})",
@@ -94,6 +98,18 @@ pub trait ConfigStore: Send + Sync {
     /// Persist the configuration atomically, guarded by `version` (the token
     /// returned by the most recent [`ConfigStore::load`]).
     async fn save(&self, config: &ConfigFile, version: &ConfigVersion) -> StoreResult<()>;
+
+    /// Last Antigravity rotation marker (epoch seconds), when the backend can
+    /// store it. Default no-op (`None`) keeps single-instance backends
+    /// unchanged; the Kubernetes backend persists it as a Secret data key so
+    /// every replica shares one cross-replica rotation clock.
+    async fn load_rotated_at(&self) -> StoreResult<Option<u64>> {
+        Ok(None)
+    }
+    /// Persist the Antigravity rotation marker (epoch seconds). Default no-op.
+    async fn patch_rotated_at(&self, _epoch_secs: u64) -> StoreResult<()> {
+        Ok(())
+    }
 }
 
 /// Filesystem-backed store: resolves the config path once at construction.
@@ -210,7 +226,7 @@ fn map_kube_err(e: kube::Error, expected_rv: Option<&str>) -> ConfigStoreError {
             current: None,
         },
         kube::Error::Api(ref api) if api.code == 404 => {
-            ConfigStoreError::InvalidData(format!("Secret not found: {}", api.message))
+            ConfigStoreError::NotFound(api.message.clone())
         }
         other => ConfigStoreError::Io(std::io::Error::other(other.to_string())),
     }
@@ -297,6 +313,39 @@ impl KubernetesConfigStore {
         }
     }
 
+    /// Load the config together with a **raw-bytes content hash** of the
+    /// `data['ponyllm.toml']` payload (SHA-256 over the base64-decoded bytes,
+    /// computed BEFORE parsing). This is the stable change-detection identity
+    /// for the kubernetes poller: raw bytes only change when the Secret
+    /// content changes, whereas hashing the *parsed* config is nondeterministic
+    /// (HashMap iteration order varies per parse — P1-arch S1-1).
+    pub async fn load_raw_hash(&self) -> StoreResult<(String, ConfigFile)> {
+        use sha2::{Digest, Sha256};
+        let snap = self.api.get(&self.secret_name).await?;
+        let raw = snap
+            .data
+            .get(self.data_key.as_str())
+            .ok_or_else(|| {
+                ConfigStoreError::InvalidData(format!(
+                    "Secret '{}' has no data key '{}'",
+                    self.secret_name, self.data_key
+                ))
+            })?
+            .clone();
+        let mut hasher = Sha256::new();
+        hasher.update(&raw);
+        let digest = hasher.finalize();
+        let identity = digest
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect::<String>();
+        let content = String::from_utf8(raw)
+            .map_err(|e| ConfigStoreError::InvalidData(format!("config not UTF-8: {}", e)))?;
+        let config = toml::from_str::<ConfigFile>(&content)
+            .map_err(|e| ConfigStoreError::InvalidData(e.to_string()))?;
+        Ok((identity, config))
+    }
+
     /// Build the store from the ambient kube environment (in-cluster service
     /// account, or local kubeconfig for dev). Secret: `ponyllm-live-config`,
     /// data key: `ponyllm.toml`.
@@ -329,8 +378,32 @@ impl KubernetesConfigStore {
     }
 }
 
+
+/// `rotated_at` auxiliary data key (epoch seconds) written beside the config
+/// so every replica shares one cross-replica Antigravity rotation clock.
+const ROTATED_AT_KEY: &str = "rotated_at";
+
+impl KubernetesConfigStore {
+    /// Read the shared Antigravity rotation marker (epoch seconds), if any.
+    async fn load_rotated_at_raw(&self) -> StoreResult<Option<u64>> {
+        let snap = self.api.get(&self.secret_name).await?;
+        match snap.data.get(ROTATED_AT_KEY) {
+            None => Ok(None),
+            Some(bytes) => {
+                let text = std::str::from_utf8(bytes).map_err(|e| {
+                    ConfigStoreError::InvalidData(format!("rotated_at not UTF-8: {}", e))
+                })?;
+                text.trim()
+                    .parse::<u64>()
+                    .map(Some)
+                    .map_err(|e| ConfigStoreError::InvalidData(format!("rotated_at invalid: {}", e)))
+            }
+        }
+    }
+}
+
 #[async_trait]
-impl ConfigStore for KubernetesConfigStore {
+impl crate::admin_store::ConfigStore for KubernetesConfigStore {
     async fn load(&self) -> StoreResult<(ConfigFile, ConfigVersion)> {
         let snap = self.api.get(&self.secret_name).await?;
         let raw = snap
@@ -347,7 +420,15 @@ impl ConfigStore for KubernetesConfigStore {
             .map_err(|e| ConfigStoreError::InvalidData(format!("config not UTF-8: {}", e)))?;
         let config = toml::from_str::<ConfigFile>(&content)
             .map_err(|e| ConfigStoreError::InvalidData(e.to_string()))?;
-        let version = ConfigVersion::Kubernetes(snap.resource_version.unwrap_or_default());
+        // A Secret without a resourceVersion cannot participate in optimistic
+        // concurrency; refuse loudly instead of saving with an empty
+        // precondition (which the apiserver treats as an unconditional write).
+        let version = ConfigVersion::Kubernetes(snap.resource_version.ok_or_else(|| {
+            ConfigStoreError::InvalidData(format!(
+                "Secret '{}' has no metadata.resourceVersion",
+                self.secret_name
+            ))
+        })?);
         Ok((config, version))
     }
 
@@ -367,6 +448,29 @@ impl ConfigStore for KubernetesConfigStore {
         data.insert(self.data_key.clone(), content.into_bytes());
         self.api
             .patch_data(&self.secret_name, &resource_version, &data)
+            .await
+    }
+
+    /// The cross-replica rotation clock: `data['rotated_at']` (epoch seconds).
+    async fn load_rotated_at(&self) -> StoreResult<Option<u64>> {
+        self.load_rotated_at_raw().await
+    }
+
+    /// Persist the rotation clock under optimistic concurrency: re-GET for a
+    /// fresh resourceVersion, then merge-patch the marker. Conflicts surface
+    /// as [`ConfigStoreError::Conflict`] for the caller's bounded retry.
+    async fn patch_rotated_at(&self, epoch_secs: u64) -> StoreResult<()> {
+        let snap = self.api.get(&self.secret_name).await?;
+        let rv = snap.resource_version.ok_or_else(|| {
+            ConfigStoreError::InvalidData(format!(
+                "Secret '{}' has no metadata.resourceVersion",
+                self.secret_name
+            ))
+        })?;
+        let mut data = BTreeMap::new();
+        data.insert(ROTATED_AT_KEY.to_string(), epoch_secs.to_string().into_bytes());
+        self.api
+            .patch_data(&self.secret_name, &rv, &data)
             .await
     }
 }

@@ -1,0 +1,215 @@
+//! HTTP-layer seam test (P1-qa S2-1 / A2): the admin write path must map a
+//! STORE-level optimistic-concurrency conflict (ConfigStoreError::Conflict)
+//! to HTTP 412 `precondition_failed` AND increment `admin_save_conflicts_total`
+//! — distinct from the existing If-Match header precondition tests.
+//!
+//! Uses a fake `SecretApi` (force-conflict switch) behind a real
+//! `KubernetesConfigStore`, injected into a real `create_app` router, so the
+//! whole "wiremock-level 409 → store Conflict → HTTP 412 + metric" chain is
+//! exercised without a cluster.
+
+use std::collections::BTreeMap;
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use ponyllm_server::admin_store::{
+    ConfigStoreError, ConfigVersion, KubernetesConfigStore, SecretApi, SecretSnapshot,
+};
+use ponyllm_server::{create_app, AppState, GatewayConfig};
+use reqwest::StatusCode;
+
+/// SecretApi double mirroring admin_store's test fake (kept local so the
+/// integration test owns its switch).
+#[derive(Default)]
+struct FakeSecretApi {
+    force_conflict: std::sync::atomic::AtomicBool,
+    rv: std::sync::atomic::AtomicU64,
+    toml: std::sync::Mutex<String>,
+}
+
+impl FakeSecretApi {
+    fn seed(toml: String) -> Arc<Self> {
+        Arc::new(Self {
+            force_conflict: std::sync::atomic::AtomicBool::new(false),
+            rv: std::sync::atomic::AtomicU64::new(100),
+            toml: std::sync::Mutex::new(toml),
+        })
+    }
+}
+
+#[async_trait]
+impl SecretApi for FakeSecretApi {
+    async fn get(&self, _name: &str) -> Result<SecretSnapshot, ConfigStoreError> {
+        let mut data = BTreeMap::new();
+        data.insert(
+            "ponyllm.toml".to_string(),
+            self.toml.lock().unwrap().clone().into_bytes(),
+        );
+        Ok(SecretSnapshot {
+            resource_version: Some(self.rv.load(std::sync::atomic::Ordering::SeqCst).to_string()),
+            data,
+        })
+    }
+
+    async fn patch_data(
+        &self,
+        _name: &str,
+        resource_version: &str,
+        _data: &BTreeMap<String, Vec<u8>>,
+    ) -> Result<(), ConfigStoreError> {
+        if self.force_conflict.load(std::sync::atomic::Ordering::SeqCst)
+            || self.rv.load(std::sync::atomic::Ordering::SeqCst).to_string() != resource_version
+        {
+            return Err(ConfigStoreError::Conflict {
+                expected: Some(ConfigVersion::Kubernetes(resource_version.to_string())),
+                current: Some(ConfigVersion::Kubernetes(
+                    self.rv.load(std::sync::atomic::Ordering::SeqCst).to_string(),
+                )),
+            });
+        }
+        self.rv.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn namespace(&self) -> &str {
+        "ponyllm"
+    }
+}
+
+fn gateway_config() -> GatewayConfig {
+    let mut cfg = GatewayConfig::default();
+    cfg.admin_write_enabled = true;
+    cfg
+}
+
+async fn spawn_gateway_with_poll(fake: Arc<FakeSecretApi>, config_poll_ms: u64) -> (String, Arc<AppState>) {
+    let store = Arc::new(KubernetesConfigStore::with_api(
+        fake,
+        "ponyllm-live-config",
+        "ponyllm.toml",
+    ));
+    let state = Arc::new(
+        AppState::new(gateway_config())
+            .with_config_store(store)
+            .with_config_poll_ms(config_poll_ms),
+    );
+    let app = create_app(state.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (format!("http://{}", addr), state)
+}
+
+/// A valid `If-Match` write that then hits a STORE conflict must answer 412
+/// with `precondition_failed` and count `admin_save_conflicts_total`.
+#[tokio::test]
+async fn store_conflict_maps_to_http_412_and_counts_metric() {
+    let fake = FakeSecretApi::seed(ponyllm_config::generate_sample_config().to_string());
+    fake.force_conflict
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let (base, state) = spawn_gateway_with_poll(fake, 500).await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .put(format!("{}/api/admin/strategy", base))
+        .header("Authorization", "Bearer test-token")
+        .header("If-Match", "\"0\"")
+        .json(&serde_json::json!({"strategy": "speed"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::PRECONDITION_FAILED, "store Conflict must map to 412");
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(
+        body["error"]["code"],
+        "precondition_failed",
+        "412 body must carry the web contract code: {body}"
+    );
+
+    // The metric must have been incremented by the store-conflict path.
+    let metrics: serde_json::Value = client
+        .get(format!("{}/v1/telemetry/metrics", base))
+        .header("Authorization", "Bearer test-token")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        metrics["ha_ops"]["admin_save_conflicts_total"], 1,
+        "store-conflict path must increment admin_save_conflicts_total"
+    );
+
+    // The in-memory gateway config must NOT have been replaced by the failed write.
+    let strategy = state.config.read().default_strategy;
+    assert_eq!(
+        strategy,
+        ponyllm_core::pool::GatewayRoutingStrategy::Economy,
+        "failed write must not mutate the live config"
+    );
+}
+
+/// The same write WITHOUT a store conflict succeeds (200), does not 412, and
+/// does not increment the conflict metric — the A2 success leg.
+#[tokio::test]
+async fn store_success_path_answers_200_without_conflict_metric() {
+    let fake = FakeSecretApi::seed(ponyllm_config::generate_sample_config().to_string());
+    let (base, state) = spawn_gateway_with_poll(fake, 500).await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .put(format!("{}/api/admin/strategy", base))
+        .header("Authorization", "Bearer test-token")
+        .header("If-Match", "\"0\"")
+        .json(&serde_json::json!({"strategy": "speed"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "clean write must succeed");
+    assert_eq!(
+        state.config.read().default_strategy,
+        ponyllm_core::pool::GatewayRoutingStrategy::Speed,
+        "successful write must update the live config"
+    );
+
+    let metrics: serde_json::Value = client
+        .get(format!("{}/v1/telemetry/metrics", base))
+        .header("Authorization", "Bearer test-token")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        metrics["ha_ops"]["admin_save_conflicts_total"], 0,
+        "clean write must not count as a conflict"
+    );
+}
+
+/// Positive contract for the kubernetes backend (P1-qa S3-1): the overview
+/// endpoint echoes the per-backend polling interval (2000 for kubernetes) —
+/// the file backend's 500 is asserted in admin_contract_tests.
+#[tokio::test]
+async fn overview_hot_reload_ms_echoes_kubernetes_poll_interval() {
+    let fake = FakeSecretApi::seed(ponyllm_config::generate_sample_config().to_string());
+    let (base, _state) = spawn_gateway_with_poll(fake, 2000).await;
+    let client = reqwest::Client::new();
+
+    let overview: serde_json::Value = client
+        .get(format!("{}/api/admin/overview", base))
+        .header("Authorization", "Bearer test-token")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        overview["hot_reload_ms"], 2000,
+        "kubernetes backend must report its 2s poll interval: {overview}"
+    );
+}

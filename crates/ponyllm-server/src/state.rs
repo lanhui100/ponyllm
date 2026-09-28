@@ -18,7 +18,7 @@ use ponyllm_core::telemetry::{
 };
 use ponyllm_core::telemetry::{FlightRecorder, GatewayEvent};
 use ponyllm_config::ConfigFile;
-use crate::admin_store::ConfigStoreError;
+use crate::admin_store::{ConfigStore, ConfigStoreError};
 use crate::config::{GatewayConfig, ProviderConfig};
 use crate::frames::FrameConverter;
 use crate::routes::models::ParsedRequestModel;
@@ -30,6 +30,10 @@ pub const FILE_CONFIG_POLL_MS: u64 = 500;
 /// How long a recently refreshed in-memory token is considered "newer" than
 /// the Secret truth source during rebuild freshness checks.
 const TOKEN_FRESHNESS_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Consecutive `invalid_grant` hits (with no intervening successful refresh)
+/// before a key is quarantined — the propagation-window buffer.
+const INVALID_GRANT_QUARANTINE_N: u32 = 3;
 
 /// 空字符串视为禁用；显式路径优先，随 `event_log_dir` 次之。
 fn resolve_snapshot_path(config: &GatewayConfig) -> Option<std::path::PathBuf> {
@@ -297,6 +301,10 @@ pub struct AppState {
     /// Drives the rebuild token-freshness guard and the invalid_grant
     /// reconciliation buffer.
     pub last_antigravity_refresh: Arc<tokio::sync::Mutex<HashMap<String, std::time::Instant>>>,
+    /// key_id → consecutive `invalid_grant` count with no intervening
+    /// successful refresh. Quarantine only after N consecutive hits (the
+    /// propagation-window buffer from the HA review).
+    pub antigravity_invalid_grant_count: Arc<tokio::sync::Mutex<HashMap<String, u32>>>,
 }
 
 impl std::fmt::Debug for dyn crate::admin_store::ConfigStore {
@@ -431,6 +439,7 @@ impl AppState {
             shutdown_rx: Arc::new(tokio::sync::watch::channel(false).1),
             refresh_gate: Arc::new(RwLock::new(None)),
             last_antigravity_refresh: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            antigravity_invalid_grant_count: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         }
     }
 
@@ -707,6 +716,19 @@ impl AppState {
     /// manager for that key holds a token refreshed within
     /// [`TOKEN_FRESHNESS_WINDOW`] that differs from the loaded value.
     pub async fn apply_token_freshness_guard(&self, config_file: &mut ConfigFile) {
+        // Cross-replica rotation clock from the truth source (best-effort:
+        // the file backend has none, and a read failure degrades to the
+        // in-memory window below).
+        let secret_rotated_at: Option<u64> = match &self.config_store {
+            Some(store) => match store.load_rotated_at().await {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!(error = %e, "rotated_at read failed; freshness guard falls back to in-memory window");
+                    None
+                }
+            },
+            None => None,
+        };
         // Snapshot the managers' current refresh tokens (read-only, short-lived).
         let current: HashMap<(String, String), String> = {
             let pools = self.pools.read();
@@ -738,8 +760,21 @@ impl AppState {
                 let Some(refresh_time) = recent.get(&k.id) else {
                     continue; // not refreshed in this process
                 };
-                if refresh_time.elapsed() > TOKEN_FRESHNESS_WINDOW {
-                    continue; // refresh is old; the Secret is authoritative
+                // In-memory freshness window (fallback when the store has no
+                // rotated_at clock).
+                let within_window = refresh_time.elapsed() <= TOKEN_FRESHNESS_WINDOW;
+                // Authoritative cross-replica check: this process refreshed
+                // AFTER the Secret's last rotation marker.
+                let refresh_epoch = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs()
+                    .saturating_sub(refresh_time.elapsed().as_secs());
+                let newer_than_secret = secret_rotated_at
+                    .map(|s| refresh_epoch > s)
+                    .unwrap_or(false);
+                if !within_window && !newer_than_secret {
+                    continue; // refresh is old and predates the Secret clock
                 }
                 if in_memory_token.is_empty() || in_memory_token == k.api_key {
                     continue; // no divergence to protect
@@ -784,6 +819,9 @@ impl AppState {
             let last_map = self.last_antigravity_refresh.clone();
             let shutdown = self.shutdown_rx.clone();
             let mgr_clone = mgr.clone();
+            // Throttle rotated_at Secret patches (key_id → last patch time).
+            let throttled_patch: Arc<tokio::sync::Mutex<HashMap<String, std::time::Instant>>> =
+                Arc::new(tokio::sync::Mutex::new(HashMap::new()));
             // Suppress the legacy detached rotation-hook persistence.
             mgr.set_rotation_hook(Arc::new(|_, _| {}));
             let persist: RefreshPersistHook = Arc::new(move |key_id: String| {
@@ -794,6 +832,7 @@ impl AppState {
                 let last_map = last_map.clone();
                 let shutdown = shutdown.clone();
                 let mgr = mgr_clone.clone();
+                let throttled_patch = throttled_patch.clone();
                 Box::pin(async move {
                     if *shutdown.borrow() {
                         return Ok(()); // draining: no writes during drain
@@ -802,6 +841,14 @@ impl AppState {
                     if token.trim().is_empty() {
                         return Ok(());
                     }
+                    // Freshness is recorded on ANY successful upstream refresh,
+                    // regardless of whether the write-back persists — the
+                    // in-memory token is newer than the Secret snapshot even
+                    // when the write failed (sec P1 S2-2 scenario B), so the
+                    // rebuild freshness guard must still protect it.
+                    let mut freshness = last_map.lock().await;
+                    freshness.insert(key_id.clone(), std::time::Instant::now());
+                    drop(freshness);
                     let attempts: u32 = 3;
                     for attempt in 0..attempts {
                         let _guard = write_lock.lock().await;
@@ -816,18 +863,22 @@ impl AppState {
                                 };
                                 if k.api_key == token {
                                     // Nothing changed (non-rotated refresh):
-                                    // note freshness, skip the write to avoid
-                                    // Secret/config_version churn.
-                                    let mut map = last_map.lock().await;
-                                    map.insert(key_id.clone(), std::time::Instant::now());
+                                    // advance the cross-replica rotation clock
+                                    // (throttled) so peers see "recently
+                                    // refreshed" without config churn.
+                                    Self::advance_rotated_at(
+                                        store.clone(),
+                                        &key_id,
+                                        throttled_patch.clone(),
+                                    )
+                                    .await;
                                     return Ok(());
                                 }
                                 k.api_key = token.clone();
                                 cfg.config_version += 1;
                                 match store.save(&cfg, &version).await {
                                     Ok(()) => {
-                                        let mut map = last_map.lock().await;
-                                        map.insert(key_id.clone(), std::time::Instant::now());
+                                        Self::advance_rotated_at(store.clone(), &key_id, throttled_patch.clone()).await;
                                         tracing::info!(
                                             provider = %prov,
                                             key_id = %key_id,
@@ -868,6 +919,41 @@ impl AppState {
         }
     }
 
+/// Advance the cross-replica Antigravity rotation clock (`rotated_at` Secret
+/// data key), throttled to at most one patch per key per 10 minutes so a
+/// routine refresh does not churn the Secret's resourceVersion every round.
+/// Best-effort: a failed patch only warns — the in-memory freshness map and
+/// the local `rotated_at` read still cover the common paths.
+async fn advance_rotated_at(
+    store: std::sync::Arc<dyn ConfigStore>,
+    key_id: &str,
+    throttled: std::sync::Arc<tokio::sync::Mutex<HashMap<String, std::time::Instant>>>,
+) {
+    const ROTATED_AT_THROTTLE: std::time::Duration = std::time::Duration::from_secs(600);
+    {
+        let map = throttled.lock().await;
+        if let Some(last) = map.get(key_id) {
+            if last.elapsed() < ROTATED_AT_THROTTLE {
+                return; // recently patched
+            }
+        }
+    }
+    let now_epoch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    match store.patch_rotated_at(now_epoch).await {
+        Ok(()) => {
+            throttled.lock().await.insert(key_id.to_string(), std::time::Instant::now());
+        }
+        Err(e) => {
+            // Conflict is expected when another writer bumped the Secret; the
+            // next refresh round retries the patch. Log, never fail the
+            // refresh (the token itself was already persisted).
+            tracing::warn!(key_id, error = %e, "rotated_at patch failed (non-fatal)");
+        }
+    }
+}
     /// Automatically scan all registered pools and attach rotation hooks for any
     /// AntigravityTokenManagers.
     pub fn attach_antigravity_rotation_hooks_all(&self) {
@@ -964,6 +1050,10 @@ impl AppState {
             // whether THIS replica runs the OAuth call this round.
             match mgr.force_refresh_token().await {
                 Ok(_) => {
+                    {
+                        let mut map = self.antigravity_invalid_grant_count.lock().await;
+                        map.remove(&key_id);
+                    }
                     tracing::debug!(
                         provider = %provider,
                         key_id = %key_id,
@@ -982,23 +1072,56 @@ impl AppState {
                 }
                 Err(ponyllm_core::error::CoreError::AuthInvalid { ref reason, .. }) => {
                     // invalid_grant reconciliation buffer (HA review S2-2/S3-3):
-                    // if this process successfully refreshed AND persisted this
-                    // key within the freshness window, the rejection may be a
-                    // stale-propagation artifact from the lock holder's rotation.
-                    // Do NOT quarantine on the first hit; let the lock holder's
-                    // write-back land and re-check next round.
+                    // if this process refreshed the key recently, OR the Secret
+                    // rotated_at clock shows another replica refreshed it
+                    // recently, the rejection may be a stale-propagation
+                    // artifact from the lock holder's rotation. Quarantine only
+                    // after INVALID_GRANT_QUARANTINE_N consecutive hits with no
+                    // intervening successful refresh and no recent rotation.
                     let recently_persisted = {
                         let map = self.last_antigravity_refresh.lock().await;
                         map.get(&key_id)
                             .map(|t| t.elapsed() < TOKEN_FRESHNESS_WINDOW)
                             .unwrap_or(false)
                     };
-                    if recently_persisted {
+                    let secret_recently_rotated = {
+                        let now_epoch = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs();
+                        match &self.config_store {
+                            Some(store) => store
+                                .load_rotated_at()
+                                .await
+                                .ok()
+                                .flatten()
+                                .map(|r| now_epoch.saturating_sub(r) < 300)
+                                .unwrap_or(false),
+                            None => false,
+                        }
+                    };
+                    if recently_persisted || secret_recently_rotated {
                         tracing::warn!(
                             provider = %provider,
                             key_id = %key_id,
                             reason = %reason,
-                            "invalid_grant while a recent successful refresh exists — deferring quarantine (propagation window)"
+                            "invalid_grant while a recent refresh/rotation exists — deferring quarantine (propagation window)"
+                        );
+                        continue;
+                    }
+                    let hits = {
+                        let mut map = self.antigravity_invalid_grant_count.lock().await;
+                        let n = map.entry(key_id.clone()).or_insert(0);
+                        *n += 1;
+                        *n
+                    };
+                    if hits < INVALID_GRANT_QUARANTINE_N {
+                        tracing::warn!(
+                            provider = %provider,
+                            key_id = %key_id,
+                            hits,
+                            reason = %reason,
+                            "invalid_grant seen but below quarantine threshold; keeping key alive"
                         );
                         continue;
                     }
@@ -1006,7 +1129,8 @@ impl AppState {
                         provider = %provider,
                         key_id = %key_id,
                         reason = %reason,
-                        "Antigravity key permanently rejected (invalid_grant) during keepalive cycle"
+                        "Antigravity key permanently rejected (invalid_grant, {} consecutive) during keepalive cycle",
+                        hits
                     );
                     if let Some(pool) = self.pools.read().get(&provider) {
                         pool.record_error(&key_id, ponyllm_core::pool::PoolErrorType::AuthInvalid { reason: Some(reason.clone()) });

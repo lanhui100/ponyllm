@@ -36,6 +36,10 @@ async-trait = { workspace = true }
 kube = { workspace = true }
 k8s-openapi = { workspace = true }
 tokio-postgres = { workspace = true }
+postgres_rustls = { workspace = true }
+tokio-rustls = { workspace = true }
+rustls = { workspace = true }
+rustls-native-certs = { workspace = true }
 # base64 仅用于测试断言 Secret 线格式；生产编解码走 k8s-openapi ByteString。
 
 [dev-dependencies]

@@ -192,9 +192,10 @@ async fn k8s_roundtrip_advances_and_reloads() {
     assert_eq!(version2, ConfigVersion::Kubernetes("100".to_string()));
 }
 
-/// 404 (Secret absent) surfaces as InvalidData, not Conflict.
+/// 404 (Secret absent) surfaces as `NotFound` (distinct from `InvalidData`)
+/// so ops can tell "Secret deleted" from "config broken".
 #[tokio::test]
-async fn k8s_missing_secret_is_invalid_data() {
+async fn k8s_missing_secret_is_not_found() {
     let server = MockServer::start().await;
 
     Mock::given(method("GET"))
@@ -211,9 +212,74 @@ async fn k8s_missing_secret_is_invalid_data() {
     let store = store_over(&server).await;
     let err = store.load().await.expect_err("load must fail");
     assert!(
-        matches!(err, ConfigStoreError::InvalidData(_)),
-        "404 must be InvalidData, got {:?}",
+        matches!(err, ConfigStoreError::NotFound(_)),
+        "404 must be NotFound, got {:?}",
         err
+    );
+}
+
+/// A Secret without `metadata.resourceVersion` must be rejected explicitly
+/// (never silently saved with an empty precondition).
+#[tokio::test]
+async fn k8s_secret_without_resource_version_is_invalid_data() {
+    let server = MockServer::start().await;
+
+    let mut no_rv = secret_json(sample_toml(), "100");
+    no_rv["metadata"].as_object_mut().unwrap().remove("resourceVersion");
+    Mock::given(method("GET"))
+        .and(path(SECRET_PATH))
+        .respond_with(ResponseTemplate::new(200).set_body_json(no_rv))
+        .mount(&server)
+        .await;
+
+    let store = store_over(&server).await;
+    let err = store.load().await.expect_err("load must fail");
+    assert!(
+        matches!(err, ConfigStoreError::InvalidData(_)),
+        "missing resourceVersion must be InvalidData, got {:?}",
+        err
+    );
+}
+
+/// rotated_at marker round trip: patch advances the marker under CAS and a
+/// fresh load reads it back (cross-replica rotation clock).
+#[tokio::test]
+async fn k8s_rotated_at_roundtrip() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path(SECRET_PATH))
+        .respond_with(ResponseTemplate::new(200).set_body_json(secret_json(sample_toml(), "100")))
+        .mount(&server)
+        .await;
+    Mock::given(method("PATCH"))
+        .and(path(SECRET_PATH))
+        .respond_with(ResponseTemplate::new(200).set_body_json(secret_json(sample_toml(), "101")))
+        .mount(&server)
+        .await;
+
+    let store = store_over(&server).await;
+    assert_eq!(store.load_rotated_at().await.unwrap(), None);
+    store.patch_rotated_at(1_700_000_000).await.expect("patch marker");
+    // Note: load_rotated_at re-reads from the wiremock GET (rv=100, no marker)
+    // — the PATCH response is what the store returns; the marker read reflects
+    // the NEXT GET. The trait-level fake test covers the read-back.
+    let _ = store;
+    // The wiremock PATCH with a marker was accepted: verified via
+    // received_requests below.
+    let requests = server.received_requests().await.expect("requests");
+    let patches: Vec<_> = requests
+        .iter()
+        .filter(|r| r.method == wiremock::http::Method::PATCH && r.url.path() == SECRET_PATH)
+        .collect();
+    assert_eq!(patches.len(), 1, "one marker patch expected");
+    let body: serde_json::Value = serde_json::from_slice(&patches[0].body).unwrap();
+    assert!(body["data"]["rotated_at"].is_string(), "patch must carry rotated_at data key");
+    // The patch must still carry the resourceVersion CAS precondition.
+    assert_eq!(
+        body["metadata"]["resourceVersion"].as_str(),
+        Some("100"),
+        "rotated_at patch must carry the current resourceVersion"
     );
 }
 

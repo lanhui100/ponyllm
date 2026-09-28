@@ -30,13 +30,18 @@ pub trait ConfigSource: Send + Sync {
 
 /// Run the poll loop until `shutdown` returns true. `on_change` is invoked
 /// (with the freshly loaded config) exactly once per content change.
+///
+/// `initial_identity` seeds the change-detection baseline: pass the identity
+/// of the config the process loaded at startup so a Secret change that lands
+/// between startup and the first poll is still detected (P1-arch S3-1).
 pub async fn run_config_poller(
     source: &dyn ConfigSource,
     interval: Duration,
+    initial_identity: Option<String>,
     mut on_change: impl FnMut(ConfigFile),
     shutdown: impl Fn() -> bool,
 ) {
-    let mut last_identity: Option<String> = None;
+    let mut last_identity = initial_identity;
     loop {
         if shutdown() {
             tracing::info!("config poller stopped (draining)");
@@ -47,7 +52,7 @@ pub async fn run_config_poller(
                 if last_identity.as_deref() != Some(identity.as_str()) {
                     if last_identity.is_some() {
                         tracing::info!(
-                            "config change detected via content hash (identity={})",
+                            "config change detected via content identity (identity={})",
                             &identity[..identity.len().min(12)]
                         );
                         on_change(config);
@@ -58,7 +63,8 @@ pub async fn run_config_poller(
             }
             Err(e) => {
                 // Read failure must never disturb live traffic: log and keep
-                // polling.
+                // polling. A missing truth source (NotFound) surfaces as a
+                // distinct message so ops see "Secret deleted" continuously.
                 tracing::warn!("config poll failed (ignored): {}", e);
             }
         }
@@ -66,14 +72,15 @@ pub async fn run_config_poller(
     }
 }
 
-/// Content-hash identity for a loaded config: canonical TOML serialization
-/// hashed with SHA-256. Deterministic for identical content, so every replica
-/// derives the same identity and metadata-only Secret changes do not churn.
-pub fn content_hash(config: &ConfigFile) -> String {
+/// Raw-bytes content identity: SHA-256 over the config payload bytes, computed
+/// BEFORE any parsing/serialization. This is the ONLY stable change signal for
+/// the kubernetes poller — hashing a parsed `ConfigFile` is nondeterministic
+/// because `providers: HashMap` serializes in per-instance random order
+/// (P1-arch S1-1: an 8-provider config would fire a false "change" every 2s).
+pub fn raw_bytes_hash(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
-    let canonical = toml::to_string_pretty(config).unwrap_or_default();
     let mut hasher = Sha256::new();
-    hasher.update(canonical.as_bytes());
+    hasher.update(bytes);
     let digest = hasher.finalize();
     digest
         .iter()
@@ -119,7 +126,7 @@ mod tests {
     async fn poller_three_states() {
         let changes = Arc::new(std::sync::Mutex::new(Vec::new()));
         let counter = Arc::new(AtomicUsize::new(0));
-        let identity_a = content_hash(&cfg_with_strategy(true));
+        let identity_a = "identity-a".to_string();
 
         // State 1: initial snapshot establishes baseline (no change callback).
         // State 2: identical identity → no callback.
@@ -127,7 +134,7 @@ mod tests {
         let states = vec![
             (identity_a.clone(), cfg_with_strategy(true)),
             (identity_a.clone(), cfg_with_strategy(true)),
-            (content_hash(&cfg_with_strategy(false)), cfg_with_strategy(false)),
+            ("identity-b".to_string(), cfg_with_strategy(false)),
         ];
         let src = FakeSource {
             state: Arc::new(tokio::sync::Mutex::new(states)),
@@ -135,7 +142,7 @@ mod tests {
         let c = counter.clone();
         let ch = changes.clone();
         let handle = tokio::spawn(async move {
-            run_config_poller(&src, Duration::from_millis(5), move |cfg| {
+            run_config_poller(&src, Duration::from_millis(5), None, move |cfg| {
                 ch.lock().unwrap().push(cfg);
                 c.fetch_add(1, Ordering::SeqCst);
             }, || false)
@@ -168,7 +175,7 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let c = calls.clone();
         let handle = tokio::spawn(async move {
-            run_config_poller(&src, Duration::from_millis(2), move |_| {
+            run_config_poller(&src, Duration::from_millis(2), None, move |_| {
                 c.fetch_add(1, Ordering::SeqCst);
             }, || false)
             .await;
@@ -183,14 +190,14 @@ mod tests {
     async fn poller_stops_when_shutdown_fires() {
         let src = FakeSource {
             state: Arc::new(tokio::sync::Mutex::new(vec![(
-                content_hash(&cfg_with_strategy(true)),
+                "identity".to_string(),
                 cfg_with_strategy(true),
             )])),
         };
         let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let stop = shutdown.clone();
         let handle = tokio::spawn(async move {
-            run_config_poller(&src, Duration::from_millis(2), |_| {}, move || {
+            run_config_poller(&src, Duration::from_millis(2), None, |_| {}, move || {
                 stop.load(Ordering::SeqCst)
             })
             .await;
@@ -204,11 +211,71 @@ mod tests {
     }
 
     #[test]
-    fn content_hash_stable_for_same_config_and_sensitive_to_change() {
-        let a = content_hash(&cfg_with_strategy(true));
-        let a2 = content_hash(&cfg_with_strategy(true));
+    fn raw_bytes_hash_stable_for_same_content_and_sensitive_to_change() {
+        let a = raw_bytes_hash(b"ponyllm.toml v1");
+        let a2 = raw_bytes_hash(b"ponyllm.toml v1");
         assert_eq!(a, a2);
-        let b = content_hash(&cfg_with_strategy(false));
+        let b = raw_bytes_hash(b"ponyllm.toml v2");
         assert_ne!(a, b);
+    }
+
+    /// S1 regression (P1-arch S1-1): the raw-byte identity is stable even when
+    /// re-parsing the same TOML would serialize in a different order — i.e.
+    /// the poller must NOT fire on identical raw content. Simulated by feeding
+    /// the same raw identity twice then a changed one: exactly one callback.
+    #[tokio::test]
+    async fn poller_identity_is_raw_bytes_not_parsed_serialization() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c = calls.clone();
+        let src = FakeSource {
+            state: Arc::new(tokio::sync::Mutex::new(vec![
+                ("same-raw-hash".to_string(), cfg_with_strategy(true)),
+                ("same-raw-hash".to_string(), cfg_with_strategy(true)),
+                ("changed-raw-hash".to_string(), cfg_with_strategy(false)),
+            ])),
+        };
+        let handle = tokio::spawn(async move {
+            run_config_poller(&src, Duration::from_millis(5), None, move |_| {
+                c.fetch_add(1, Ordering::SeqCst);
+            }, || false)
+            .await;
+        });
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        handle.abort();
+        let _ = handle.await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "identical raw content must not fire changes");
+    }
+
+    /// Startup baseline (P1-arch S3-1): seeding `initial_identity` means a
+    /// change that lands right after startup is still detected (no silent
+    /// baseline swallow).
+    #[tokio::test]
+    async fn poller_initial_identity_seeds_baseline() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c = calls.clone();
+        let src = FakeSource {
+            state: Arc::new(tokio::sync::Mutex::new(vec![
+                // First poll returns the SAME content the process started with:
+                // seeded baseline -> no callback.
+                ("startup-hash".to_string(), cfg_with_strategy(true)),
+                // Content changed since startup -> callback fires even though
+                // this is the poller's first observable snapshot.
+                ("new-hash".to_string(), cfg_with_strategy(false)),
+            ])),
+        };
+        let handle = tokio::spawn(async move {
+            run_config_poller(
+                &src,
+                Duration::from_millis(5),
+                Some("startup-hash".to_string()),
+                move |_| { c.fetch_add(1, Ordering::SeqCst); },
+                || false,
+            )
+            .await;
+        });
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        handle.abort();
+        let _ = handle.await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 }
