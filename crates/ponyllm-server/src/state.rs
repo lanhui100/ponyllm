@@ -721,7 +721,6 @@ impl AppState {
     /// warned about — a marker ahead of this node's wall clock is either clock
     /// skew or tampering, and must not keep a dead key alive forever.
     pub async fn trusted_rotated_at(&self) -> Option<u64> {
-        const FUTURE_TOLERANCE_SECS: u64 = 60;
         let Some(marker) = (match &self.config_store {
             Some(store) => store.load_rotated_at().await.ok().flatten(),
             None => None,
@@ -732,7 +731,7 @@ impl AppState {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        if marker > now.saturating_add(FUTURE_TOLERANCE_SECS) {
+        if !rotated_at_is_trusted(marker, now) {
             tracing::warn!(
                 marker,
                 now,
@@ -1878,3 +1877,27 @@ pub use ponyllm_core::{
     normalize_chat_completions_url, normalize_messages_url, normalize_responses_url,
     normalize_systemone_url,
 };
+
+/// Pure predicate for the cross-replica rotation clock: a marker more than
+/// 60s ahead of the local wall clock is untrusted (clock skew/tampering).
+const ROTATED_AT_FUTURE_TOLERANCE_SECS: u64 = 60;
+fn rotated_at_is_trusted(marker: u64, now: u64) -> bool {
+    marker <= now.saturating_add(ROTATED_AT_FUTURE_TOLERANCE_SECS)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rotated_at_is_trusted;
+
+    #[test]
+    fn rotated_at_future_marker_beyond_tolerance_is_untrusted() {
+        let now = 1_700_000_000u64;
+        // Normal (recent or slightly ahead within tolerance) is trusted.
+        assert!(rotated_at_is_trusted(now, now));
+        assert!(rotated_at_is_trusted(now - 300, now));
+        assert!(rotated_at_is_trusted(now + 60, now));
+        // Beyond the 60s tolerance: tampering / clock skew -> untrusted.
+        assert!(!rotated_at_is_trusted(now + 61, now));
+        assert!(!rotated_at_is_trusted(now + 3600, now));
+    }
+}
