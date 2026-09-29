@@ -254,16 +254,32 @@ jobs:
           fi
 
       - name: Apply manifest
-        run: kubectl apply -f deploy/ponyllm-deployment.yaml
+        run: |
+          # --validate=false：跳过 API server OpenAPI 大 payload 下载（GitHub
+          # runner → 175.24.73.251:6443 偶发 http2 连接中断）；清单已由
+          # pre-commit/CI 多轮验证。网络瞬断用 3 次重试兜底。
+          for i in 1 2 3; do
+            if kubectl apply --validate=false -f deploy/ponyllm-deployment.yaml; then
+              exit 0
+            fi
+            echo "apply attempt $i failed; retrying in 5s"
+            sleep 5
+          done
+          exit 1
 
       - name: Wait for rollout (auto-rollback on failure)
         run: |
-          if ! kubectl -n ponyllm rollout status deploy/ponyllm-gateway --timeout=300s; then
-            echo "::warning::Rollout failed — rolling back to previous revision"
-            kubectl -n ponyllm rollout undo deploy/ponyllm-gateway
-            kubectl -n ponyllm rollout status deploy/ponyllm-gateway --timeout=300s
-            exit 1
-          fi
+          for i in 1 2 3; do
+            if kubectl -n ponyllm rollout status deploy/ponyllm-gateway --timeout=300s; then
+              exit 0
+            fi
+            echo "rollout status attempt $i failed; retrying in 5s"
+            sleep 5
+          done
+          echo "::warning::Rollout failed — rolling back to previous revision"
+          kubectl -n ponyllm rollout undo deploy/ponyllm-gateway
+          kubectl -n ponyllm rollout status deploy/ponyllm-gateway --timeout=300s
+          exit 1
 
       - name: Post-deploy smoke
         if: env.PONYLLM_API_KEY != ''
