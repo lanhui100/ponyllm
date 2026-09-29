@@ -80,7 +80,7 @@ SM=$("${KUBECTL[@]}" -n "$NS" get deploy ponyllm-gateway -o jsonpath='{.spec.tem
 CMA=$("${KUBECTL[@]}" -n "$NS" get deploy ponyllm-gateway -o jsonpath='{.spec.template.spec.containers[?(@.name=="ponyllm")].env[?(@.name=="PONYLLM_LOCK_CA_FILE")].value}')
 [ "$CMA" = "/etc/ponyllm-lock/ca.crt" ] || { echo "FAIL LOCK_CA_FILE=$CMA"; exit 1; }
 "${KUBECTL[@]}" -n "$NS" get deploy ponyllm-gateway -o jsonpath='{.spec.template.spec.containers[?(@.name=="ponyllm")].volumeMounts[*].name}' \
-  | grep -qx "lock-tls" || { echo "FAIL lock-tls not mounted"; exit 1; }
+  | grep -qw "lock-tls" || { echo "FAIL lock-tls not mounted"; exit 1; }
 echo "OK shape: ScheduleAnyway(1,hostname) / no nodeSelector / no PVC / no init / SA+lock env+lock-tls / non-root"
 
 echo "== [2/7] replicas=4、4 节点分布、目标节点集 =="
@@ -93,7 +93,7 @@ N_USED=$(echo "$USED" | grep -c .)
 [ "$N_USED" = "4" ] || { echo "FAIL replicas on $N_USED nodes (want 4)"; exit 1; }
 ALLOWED="devserver jobcopilot-preprod proserver tencent"
 for n in $USED; do
-  echo "$ALLOWED" | grep -qx "$n" || { echo "FAIL pod scheduled on non-target node '$n'"; exit 1; }
+  echo "$ALLOWED" | grep -qw "$n" || { echo "FAIL pod scheduled on non-target node '$n'"; exit 1; }
 done
 echo "OK 4/4 ready, on target nodes: $(echo "$USED" | tr '\n' ' ')"
 # arch S2-1：izbp* 节点可调度性提示（执行阶段由运维打 taint 收口）
