@@ -198,12 +198,18 @@ print(d['refresh_lock_acquired_total'], d['refresh_lock_skipped_total'], d['refr
 E0=$(snap_ha) || true
 sleep 30
 E1=$(snap_ha) || true
+# P33 S3：快照非空校验——任一为空则说明 metrics 端点不可达，直接 FAIL
+# （防"双空快照 Δ==0"的平凡通过）。
+if [ -z "$E0" ] || [ -z "$E1" ]; then
+  echo "FAIL metrics 不可达（E0='$E0' E1='$E1'）——无法判定锁错误 delta，中止"
+  exit 1
+fi
 A0=$(echo "$E0" | awk '{print $1}'); S0=$(echo "$E0" | awk '{print $2}'); R0=$(echo "$E0" | awk '{print $3}')
 A1=$(echo "$E1" | awk '{print $1}'); S1=$(echo "$E1" | awk '{print $2}'); R1=$(echo "$E1" | awk '{print $3}')
 echo "  30s 窗口: acquired $A0->$A1 | skipped $S0->$S1 | errors $R0->$R1"
 [ "$R0" = "$R1" ] || { echo "FAIL refresh_lock_error_total delta $((R1 - R0)) != 0"; exit 1; }
 if [ "$((A1 - A0))" -eq 0 ] && [ "$((S1 - S0))" -eq 0 ]; then
-  echo "WARN 窗口内无任何刷新活动（acquired/skipped 均无增量）——本守卫不构成平凡通过；请在下个 keepalive/401 窗口复查"
+  echo "WARN 本窗口无刷新活动，Δ==0 证据不足，请于下个 keepalive/401 窗口复查"
 else
   echo "OK 有刷新活动且锁 errors Δ==0（acquired/skipped 见上）"
 fi
