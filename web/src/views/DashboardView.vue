@@ -31,11 +31,38 @@ async function handleRefreshAntigravityQuotas() {
   if (antigravityKeys.value.length === 0 || isRefreshingAntigravity.value) return;
   isRefreshingAntigravity.value = true;
   try {
-    // 串行错峰探测，防止所有 Key 同时并发刷新触发 OAuth 跨节点串行锁冲突
-    for (const k of antigravityKeys.value) {
-      await testSingleKey(k.id);
-      await new Promise((resolve) => setTimeout(resolve, 200));
+    // 并发度为 2 的受控错峰探测队列，兼顾探测性能与跨节点锁平滑度
+    const queue = [...antigravityKeys.value];
+    const concurrency = Math.min(2, queue.length);
+    const workers = Array.from({ length: concurrency }, async (_, workerIdx) => {
+      if (workerIdx > 0) {
+        await new Promise((resolve) => setTimeout(resolve, workerIdx * 150));
+      }
+      while (queue.length > 0) {
+        const k = queue.shift();
+        if (!k) break;
+        await testSingleKey(k.id);
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+    });
+    await Promise.all(workers);
+
+    // 检查是否有由于跨节点锁冲突处于 lock_busy 状态的 Key，自动延迟 1.5s 补测收敛一次
+    const busyKeys = antigravityKeys.value.filter((k) => {
+      const res = keyTestResults.value[k.id];
+      const errCode = (res?.error_code || '').toLowerCase();
+      const errMsg = (res?.message || '').toLowerCase();
+      return errCode.includes('lock_busy') || errMsg.includes('serialization lock') || errMsg.includes('held by another replica');
+    });
+
+    if (busyKeys.length > 0) {
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      for (const k of busyKeys) {
+        await testSingleKey(k.id);
+        await new Promise((resolve) => setTimeout(resolve, 150));
+      }
     }
+
     // 探测完成后重新拉取 Key 状态：若上游已恢复额度，后端已解除冷却并推入 Active 状态
     await fetchAdminConfig();
   } finally {

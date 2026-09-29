@@ -279,27 +279,29 @@ impl AntigravityTokenManager {
         match self.get_valid_token_inner(force).await {
             Ok(token) => Ok(token),
             Err(CoreError::RefreshSkipped { key_id }) => {
-                // If lock held by another replica, retry up to ~6s with backoff.
-                // Another replica is actively holding the lock to refresh and persist.
+                // If lock is held by another replica, wait briefly with jittered backoff.
+                // Bounded total wait ~1.5s (3 attempts) to avoid cascade timeouts in request pipelines.
                 let mut attempts = 0;
-                let delays_ms = [200, 400, 800, 1200, 1500, 2000];
-                for &delay in &delays_ms {
+                let base_delays_ms = [150, 350, 700];
+                for &base in &base_delays_ms {
                     attempts += 1;
+                    // Jitter ±20% based on timestamp nanos
+                    let jitter = (std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.subsec_nanos() % 50)
+                        .unwrap_or(0)) as u64;
+                    let delay = base + jitter;
                     tokio::time::sleep(Duration::from_millis(delay)).await;
-                    // Check if token was populated in cache or if lock is now available
-                    let snapshot = self.cred.read().clone();
-                    if !Self::credential_needs_refresh(&snapshot) {
-                        if let Some(token) = snapshot.access_token {
+
+                    match self.get_valid_token_inner(false).await {
+                        Ok(token) => {
                             tracing::info!(
                                 key_id = %self.key_id,
                                 attempts,
-                                "Antigravity token acquired after waiting for lock holder"
+                                "Antigravity token acquired after brief lock wait"
                             );
                             return Ok(token);
                         }
-                    }
-                    match self.get_valid_token_inner(false).await {
-                        Ok(token) => return Ok(token),
                         Err(CoreError::RefreshSkipped { .. }) => continue,
                         Err(e) => return Err(e),
                     }

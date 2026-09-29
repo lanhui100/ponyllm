@@ -123,7 +123,15 @@ const totalAccounts = computed(() => props.keys.length);
 function isKeyUnavailable(k: KeyView): boolean {
   if (k.state === 'disabled') return true;
   const testResult = props.keyTestResults[k.id];
-  if (testResult && testResult.success === false) return true;
+  if (testResult && testResult.success === false) {
+    // 跨副本锁冲突（lock_busy）属于瞬时状态同步中，不计为账号不可用/禁用，避免就绪徽章抖动
+    const errCode = (testResult.error_code || '').toLowerCase();
+    const errMsg = (testResult.message || '').toLowerCase();
+    if (errCode.includes('lock_busy') || errMsg.includes('serialization lock') || errMsg.includes('held by another replica')) {
+      return false;
+    }
+    return true;
+  }
   return false;
 }
 

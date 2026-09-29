@@ -528,5 +528,99 @@ async fn test_antigravity_keepalive_invalid_grant_circuit_breaker() {
     );
 }
 
+#[tokio::test]
+async fn test_admin_test_key_lock_busy_returns_429() {
+    let harness = OAuthHarness::new(true).await;
+    let pool = Arc::new(ponyllm_core::pool::KeyPool::new(
+        "antigravity",
+        ponyllm_core::pool::RoutingStrategy::Priority,
+    ));
+    let cred = ponyllm_core::pool::AntigravityCredential {
+        access_token: None,
+        refresh_token: "test-rf".to_string(),
+        client_id: "test-id".to_string(),
+        client_secret: "test-secret".to_string(),
+        project_id: "test-project".to_string(),
+        expiry: None,
+    };
+    let mgr = Arc::new(ponyllm_core::pool::AntigravityTokenManager::new(
+        "ag-lock-busy-key",
+        cred,
+        reqwest::Client::new(),
+    ));
+
+    #[derive(Debug)]
+    struct AlwaysSkipGate;
+    impl ponyllm_core::pool::refresh_gate::RefreshGateGuard for AlwaysSkipGate {}
+    #[async_trait::async_trait]
+    impl ponyllm_core::pool::refresh_gate::RefreshGate for AlwaysSkipGate {
+        async fn try_acquire(
+            &self,
+            _key_id: &str,
+        ) -> Result<
+            Option<Box<dyn ponyllm_core::pool::refresh_gate::RefreshGateGuard + Send + Sync>>,
+            ponyllm_core::pool::refresh_gate::RefreshGateError,
+        > {
+            Ok(None)
+        }
+    }
+    mgr.set_refresh_gate(Some(Arc::new(AlwaysSkipGate)));
+
+    pool.add_key(ponyllm_core::pool::ApiKeyEntry::new_antigravity(
+        "ag-lock-busy-key",
+        mgr,
+        1,
+        1,
+    ));
+    harness.state.register_pool("antigravity", pool);
+
+    if let Some(store) = &harness.state.config_store {
+        let (mut file, ver) = store.load().await.unwrap();
+        let p_sec = ponyllm_config::ProviderSection {
+            base_url: "https://daily-cloudcode-pa.googleapis.com".to_string(),
+            default_model: "claude-sonnet-4-6".to_string(),
+            strategy: "round_robin".to_string(),
+            billing_mode: ponyllm_core::BillingMode::Metered,
+            input_price: 0.0,
+            cached_price: 0.0,
+            output_price: 0.0,
+            models: vec!["claude-sonnet-4-6".to_string()],
+            model_configs: Vec::new(),
+            keys: vec![ponyllm_config::KeySection {
+                id: "ag-lock-busy-key".to_string(),
+                api_key: "1//dummy_rf".to_string(),
+                priority: 1,
+                weight: 1,
+            }],
+            default_protocol: Some(ponyllm_core::UpstreamProtocol::Antigravity),
+            chat_url: None,
+            responses_url: None,
+            messages_url: None,
+            proxy: None,
+            timeout_secs: None,
+        };
+        file.providers.insert("antigravity".to_string(), p_sec);
+        store.save(&file, &ver).await.unwrap();
+    }
+
+    let app = ponyllm_server::create_app(harness.state.clone());
+    let req = axum::http::Request::builder()
+        .method("POST")
+        .uri("/api/admin/keys/ag-lock-busy-key/test")
+        .header("authorization", "Bearer admin-secret-token")
+        .body(axum::body::Body::empty())
+        .unwrap();
+
+    let resp = tower::ServiceExt::oneshot(app, req).await.unwrap();
+    assert_eq!(resp.status(), axum::http::StatusCode::OK);
+
+    let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+    let val: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(val.get("success").and_then(|v| v.as_bool()), Some(false));
+    assert_eq!(val.get("http_status").and_then(|v| v.as_u64()), Some(429));
+    assert_eq!(val.get("error_code").and_then(|v| v.as_str()), Some("lock_busy"));
+}
+
+
 
 

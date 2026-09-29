@@ -1230,16 +1230,23 @@ impl UpstreamExecutor {
                 Err(e) => {
                     // Antigravity token-resolution failures carry their own
                     // kind: dead credentials isolate, transient refresh
-                    // faults only cool (P0-3). Static keys keep the legacy
-                    // fail-closed behavior.
-                    let pool_err = match &e {
-                        CoreError::AuthInvalid { reason, .. } => PoolErrorType::AuthInvalid { reason: Some(reason.clone()) },
-                        _ if key.is_antigravity() => PoolErrorType::NetworkError,
-                        _ => PoolErrorType::AuthInvalid { reason: None },
-                    };
-                    self.pool.record_error(&key.id, pool_err);
+                    // faults only cool (P0-3).
+                    // RefreshSkipped means cross-replica lock is currently held by another replica:
+                    // do NOT cool this key as the key credential is healthy and being updated.
+                    if !matches!(&e, CoreError::RefreshSkipped { .. }) {
+                        let pool_err = match &e {
+                            CoreError::AuthInvalid { reason, .. } => PoolErrorType::AuthInvalid { reason: Some(reason.clone()) },
+                            _ if key.is_antigravity() => PoolErrorType::NetworkError,
+                            _ => PoolErrorType::AuthInvalid { reason: None },
+                        };
+                        self.pool.record_error(&key.id, pool_err);
+                    }
                     last_error = e.to_string();
-                    last_kind = GatewayErrorKind::AuthInvalid;
+                    last_kind = if matches!(&e, CoreError::RefreshSkipped { .. }) {
+                        GatewayErrorKind::UpstreamUnavailable
+                    } else {
+                        GatewayErrorKind::AuthInvalid
+                    };
                     attempt_kinds.push(last_kind.clone());
                     self.emit_both(&key.id, attempt_idx, None, last_kind.clone(), last_error.clone(), None, attempt_start.elapsed());
                     continue;
@@ -1438,16 +1445,23 @@ impl UpstreamExecutor {
                 Err(e) => {
                     // Antigravity token-resolution failures carry their own
                     // kind: dead credentials isolate, transient refresh
-                    // faults only cool (P0-3). Static keys keep the legacy
-                    // fail-closed behavior.
-                    let pool_err = match &e {
-                        CoreError::AuthInvalid { reason, .. } => PoolErrorType::AuthInvalid { reason: Some(reason.clone()) },
-                        _ if key.is_antigravity() => PoolErrorType::NetworkError,
-                        _ => PoolErrorType::AuthInvalid { reason: None },
-                    };
-                    self.pool.record_error(&key.id, pool_err);
+                    // faults only cool (P0-3).
+                    // RefreshSkipped means cross-replica lock is currently held by another replica:
+                    // do NOT cool this key as the key credential is healthy and being updated.
+                    if !matches!(&e, CoreError::RefreshSkipped { .. }) {
+                        let pool_err = match &e {
+                            CoreError::AuthInvalid { reason, .. } => PoolErrorType::AuthInvalid { reason: Some(reason.clone()) },
+                            _ if key.is_antigravity() => PoolErrorType::NetworkError,
+                            _ => PoolErrorType::AuthInvalid { reason: None },
+                        };
+                        self.pool.record_error(&key.id, pool_err);
+                    }
                     last_error = e.to_string();
-                    last_kind = GatewayErrorKind::AuthInvalid;
+                    last_kind = if matches!(&e, CoreError::RefreshSkipped { .. }) {
+                        GatewayErrorKind::UpstreamUnavailable
+                    } else {
+                        GatewayErrorKind::AuthInvalid
+                    };
                     attempt_kinds.push(last_kind.clone());
                     self.emit_both(&key.id, attempt_idx, None, last_kind.clone(), last_error.clone(), None, attempt_start.elapsed());
                     continue;
