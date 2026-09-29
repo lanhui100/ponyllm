@@ -2,7 +2,7 @@
 
 > 描述当前生产发布链路（2026-09-29 实测校准）。本手册是发布链路事实的唯一权威；
 > 其他文件若与本手册冲突，以本手册为准并修正该文件。发布链路任何变更（registry /
-> 命名 / tag 规范 / 构建方式）必须同步更新本手册（见提案 ADR 的迁移检查项）。
+> 命名 / tag 规范 / 构建方式 / 凭据存放）必须同步更新本手册。
 
 ## 1. 发布链路全图
 
@@ -13,25 +13,30 @@
   │    builder = rust:1.91-bookworm（glibc 2.36 内 cargo build --release --bin ponyllm）
   │    runtime = debian:bookworm-slim（定 pin digest；与 builder glibc 版本匹配）
   │    web = COPY web/dist → /opt/ponyllm/web/dist（先 pnpm --dir web build）
+  │    注：本仓库没有 web 自动构建流水线；web build 是发布操作员本地手工步骤。
   │
   ├─ docker push 阿里云 ACR：
   │    crpi-3cfwwtc3um8h6d3q.cn-hangzhou.personal.cr.aliyuncs.com/job-copilot/api-v2:<tag>
-  │    tag 命名规范：<semver>-<suffix>（例：v0.2.45-ha1）
+  │    tag 命名规范：<semver>[-<suffix>]（例：v0.2.45-ha1；后缀可选，见 §2）
   │
   └─ 生产 Deployment（deploy/ponyllm-deployment.yaml）纯 digest 引用
        （image: …api-v2@sha256:…）—— tag 仅是载体，运行版本以 digest 为准。
        Keel（deploy/keel-autodeploy.yaml，keelhq/keel:0.20.0）poll 模式
        （keel.sh/trigger: poll, pollSchedule: @every 10m, policy: minor）监听
        digest 变化 → RollingUpdate(maxSurge:1 / maxUnavailable:0) 滚动。
-       4 副本跨节点滚动零中断已实证（T18）。
+       注：Keel 只在 digest 变化时触发滚动（watch/diff 判定），不是每次 poll 都
+       重建；滚动本身仍受 Deployment 策略与 maxUnavailable=0 约束，运维侧
+       rollout status 为准（T18 4 副本跨节点滚动零中断已实证）。
 ```
 
-镜像由**本仓库 `deploy/Dockerfile` 本地构建后手动 push 到 ACR**。GitHub Actions 的
-`build-and-push-image`（`.github/workflows/ci.yml`）构建同一 Dockerfile 但推往
-**GHCR**（`ghcr.io/<repo>:latest|sha-<short>`）；**生产不使用 GHCR 镜像**。
+**GHCR 与 ACR 是同一 Dockerfile 的两次独立构建**（arch S3-1）：GitHub Actions 的
+`build-and-push-image`（`.github/workflows/ci.yml`）构建后推往 **GHCR**
+（`ghcr.io/<repo>:latest|sha-<short>`），产物 digest 与本地 ACR 构建**不同**；
+生产只认 `crpi-…/job-copilot/api-v2@sha256:…`，两者不可互换、不可混用。
 
 关联文件（只引用不复述）：构建定义 `deploy/Dockerfile`、Deployment 形态
-`deploy/ponyllm-deployment.yaml`、Keel 部署 `deploy/keel-autodeploy.yaml`。
+`deploy/ponyllm-deployment.yaml`、Keel 部署 `deploy/keel-autodeploy.yaml`、
+回滚预案 `deploy/ponyllm-phase2-rollback.md`。
 
 ## 2. 镜像坐标归属
 
@@ -41,31 +46,42 @@
 | namespace | `job-copilot` | |
 | repo | `api-v2` | |
 | 完整坐标 | `crpi-…/job-copilot/api-v2` | 部署用 `@sha256:` digest 引用 |
-| 当前生产 digest | `sha256:3bfad2f9dd7c7c67ffe66ca524d9e38b3b4c04e286a394cf09b85ec70acbf070` | 见 §4 检查表取号命令 |
-| 回滚 digest（Phase 1 前） | `sha256:b1788e90fe7ff3a04356a7e7f5d83d6ab72deffdd1dbdfe11e7430e146bbdbec` | R2 用 |
+| 现网运行 digest | 取号：`kubectl -n ponyllm get deploy ponyllm-gateway -o jsonpath='{.spec.template.spec.containers[0].image}'` | 本手册不写死易变 digest（单一真值源在集群） |
+| 历史回滚 digest | 见 `deploy/ponyllm-phase2-rollback.md` R2 | 本手册不重复 |
 
-**凭据存放**（未落任何明文）：
+**凭据存放与获取**（未落任何明文；本手册只写位置与方式，需 `jq`）：
 - 集群拉取：Secret `ponyllm/aliyun-registry`（`imagePullSecrets`），由 Deployment
-  `imagePullSecrets` 引用。
-- 本地推送：`docker login crpi-…` 凭据从同一 Secret 提取（提取命令只读、输出含密，
-  用时在受控终端执行，禁止写入任何文件/日志）：
-  `kubectl -n ponyllm get secret aliyun-registry -o jsonpath='{.data.\.dockerconfigjson}' | base64 -d | jq -r '.auths | keys[]'`
+  `imagePullSecrets` 引用，运行期自动生效。
+- 本地推送（docker login）：
+  ```bash
+  kubectl -n ponyllm get secret aliyun-registry -o jsonpath='{.data.\.dockerconfigjson}' | base64 -d > /tmp/acr.json && chmod 600 /tmp/acr.json
+  docker login crpi-3cfwwtc3um8h6d3q.cn-hangzhou.personal.cr.aliyuncs.com \
+    -u "$(jq -r '.auths | to_entries[0].value.username' /tmp/acr.json)" \
+    --password-stdin <<< "$(jq -r '.auths | to_entries[0].value.password' /tmp/acr.json)"
+  rm -f /tmp/acr.json   # 用完即删
+  ```
+  **受控终端约束**：上述命令输出/临时文件含明文凭据，只在操作者本机受控终端执行，
+  禁止落入日志、消息、仓库或任何共享/备份路径；`/tmp/acr.json` 用完即删。
 
 ## 3. 发布检查表（机械可查，逐条非零退出）
 
-发布前在仓库根目录执行 `bash scripts/release-gate.sh --tag <新tag> --digest <新digest> --rollback-digest <现网digest>`（全部门禁，见 §6）；随后按序人工执行：
+发布前先在仓库根目录跑 `bash scripts/release-gate.sh --tag <tag> --digest <digest>
+--rollback-digest <现网digest>`（§6 门禁）；随后按序人工执行（`<镜像>=<完整坐标>:<tag>`）：
 
 | # | 检查 | 命令（非零退出即失败） |
 |---|---|---|
-| 1 | 构建产物 glibc 兼容 bookworm-slim（运行镜像 glibc 2.36） | `docker run --rm --entrypoint ldd <镜像>:<tag> /usr/local/bin/ponyllm >/dev/null`（无 GLIBC_2.39 not found 即过） |
-| 2 | 取新镜像 digest | `docker inspect --format '{{index .RepoDigests 0}}' <镜像>:<tag>` |
-| 3 | 新镜像容器冒烟（/health 200；需注入 live-config 等价 env） | `docker run --rm -d --name pg-smoke -e PONYLLM_PROBE_ALLOWLIST=none <镜像>:<tag> serve --bind 0.0.0.0:8080 && sleep 2 && docker exec pg-smoke sh -c 'wget -qO- http://127.0.0.1:8080/health 2>/dev/null \|\| curl -s http://127.0.0.1:8080/health'`；结束 `docker rm -f pg-smoke` |
-| 4 | 部署清单 digest 与目标一致后 `set image` | `kubectl -n ponyllm set image deploy ponyllm-gateway ponyllm=<镜像>@sha256:<digest>` |
+| 1 | 构建产物 glibc 与 bookworm-slim（2.36）兼容，无 GLIBC_2.39 缺失 | `! docker run --rm --entrypoint ldd <镜像> /usr/local/bin/ponyllm 2>&1 \| grep -q 'GLIBC_2.39 not found'`（grep 无命中 → 整体退出 0） |
+| 2 | 取新镜像 digest | `docker inspect --format '{{index .RepoDigests 0}}' <镜像>` |
+| 3 | 新镜像宿主侧冒烟（/health；一次性配置，不挂真实 Secret） | `docker run --rm -d --name pg-smoke --entrypoint sh -p 127.0.0.1:18080:8080 <镜像> -c 'ponyllm init --non-interactive --output /tmp/ponyllm.toml && exec ponyllm serve --bind 0.0.0.0:8080 --config /tmp/ponyllm.toml' && sleep 3 && curl -sf http://127.0.0.1:18080/health`；结束清理：`docker rm -f pg-smoke`（curl 失败也要清理：`RC=$?; docker rm -f pg-smoke >/dev/null; exit $RC`）。已实测：返回 `{"status":"ok"}`（T22） |
+| 4 | 部署清单 digest 与目标一致后 `set image` | `kubectl -n ponyllm set image deploy ponyllm-gateway ponyllm=<完整坐标>@<digest>` |
 | 5 | 滚动完成 | `kubectl -n ponyllm rollout status deploy ponyllm-gateway --timeout=300s` |
-| 6 | verify 全量门禁 | `PONYLLM_ADMIN_TOKEN=<网关admin token> bash scripts/phase3-verify.sh --pod-ips` |
-| 7 | kill-drill（单 Pod 摘除零中断） | `PONYLLM_ADMIN_TOKEN=<…> bash scripts/phase3-verify.sh --pod-ips --kill-drill` |
-| 8 | 观察基线记录（各 Pod 计数器起点 + 时间） | 见 verify 输出与 T18 基线样例；记录到 24h 观察日志 |
-| 9 | 回滚 digest 预填（release-gate.sh 已校验） | 回滚命令见 `deploy/ponyllm-phase2-rollback.md` R0'/R0/R1 |
+| 6 | **运行镜像 == 目标 digest 复核**（sec S3-3，与清单对照） | `kubectl -n ponyllm get deploy ponyllm-gateway -o jsonpath='{.spec.template.spec.containers[0].image}'`（输出须含 `@<digest>`） |
+| 7 | verify 全量门禁 | `PONYLLM_ADMIN_TOKEN=<网关admin token> bash scripts/phase3-verify.sh --pod-ips` |
+| 8 | kill-drill（单 Pod 摘除零中断） | `PONYLLM_ADMIN_TOKEN=<…> bash scripts/phase3-verify.sh --pod-ips --kill-drill` |
+| 9 | 观察基线记录（各 Pod 计数器起点 + 时间） | **靠 review**：记录到 24h 观察日志（verify 头部方法学：计数器随 Pod 重建归零，基线在 rollout/演练后重记录） |
+| 10 | 回滚 digest 预填（release-gate 已校验） | 回滚命令见 `deploy/ponyllm-phase2-rollback.md` R0'/R0/R1 |
+
+依赖：`docker`、`jq`、`kubectl`、`curl`。
 
 ## 4. web 入口归属
 
@@ -74,21 +90,27 @@
   `Path(/|/app|/app/|/assets|/assets/|/connect|/dashboard|/recorder|/governance|/favicon.*)`
   路由到 `ponyllm-pod-service:8080`（同一 Deployment 的 Pod）。
 - Pod 内控制台：同一镜像内 `/opt/ponyllm/web/dist`（build 时 COPY），经 `serve`
-  的 `/app/*` 挂载。静态入口与 Pod 内控制台服务**同一份构建产物**。
+  的 `/app/*` 挂载。静态入口与 Pod 内控制台服务**同一份构建产物、同一个镜像**。
 - favicon：`deploy/ponyllm-favicon.yaml` ConfigMap 以 subPath 挂载覆盖
   `/opt/ponyllm/web/dist/favicon.{svg,ico}`；ConfigMap 变更不随镜像热生效，
   需滚动重启（subPath 语义）。
 
-## 5. 发布偏差声明
+## 5. 发布偏差与禁用声明
 
-历史文档
-`.agents/notes/implemented/process/2026-09-28-zero-downtime-rolling-update-and-pull-based-cd.md`
-描述的"GHCR + build-and-push-image 自动推镜像 + sha-<GITHUB_SHA> 标签治理"与实际链路
-（**本地构建 → ACR 手动 push → `<semver>-<suffix>` 标签 → digest 引用 → Keel poll 滚动**）
-不一致，以本手册为准。GHCR 的 `build-and-push-image` 仍存在（CI 侧制品），但**不参与
-生产发布**。
+- 历史文档
+  `.agents/notes/implemented/process/2026-09-28-zero-downtime-rolling-update-and-pull-based-cd.md`
+  描述的"GHCR + build-and-push-image 自动推镜像 + sha-<GITHUB_SHA> 标签治理"与实测
+  链路（**本地构建 → ACR 手动 push → `<semver>[-<suffix>]` 标签 → digest 引用 →
+  Keel poll 滚动**）不一致，以本手册为准。
+- **GHCR 镜像（含 `latest` 与 `sha-…` 标签）在全部环境禁用**（sec S3-1）：GHCR 构建
+  产物不参与任何环境的部署与回滚；生产/预演/测试一律使用 `crpi-…/job-copilot/api-v2@sha256:…`。
 
-## 6. 发布门禁
+## 6. 发布门禁层级（sec S3-3）
 
-`bash scripts/release-gate.sh`（见 scripts/release-gate.sh 自身注释）在 §3 检查表
-之前运行；未通过禁止 push/上线。
+```
+release-gate.sh（§6 机械门禁：tag/digest 格式+本地+远端存在性+清单一致+verify bash -n+回滚预填）
+  → runbook §3 人工检查表（1-10，逐条非零退出命令）
+    → phase3-verify.sh --pod-ips 全量（含 [6/7] 并发写 412 刻意写测试）
+      → kill-drill → 观察基线 → 24h 观察
+```
+未通过 release-gate **禁止** push/上线；§3 任一条失败即中止并按 R0'/R0/R1 回滚。
