@@ -55,3 +55,13 @@ Server Encryption Hashes: All hashes match
 - 上游错误：均为业务侧（sense 429 限流、ppx/ppx-cc TTFB 超时/忙），与改造无关；有一条已知噪音 `写入 pidfile 失败: Read-only file system`（只读根文件系统预期行为）。
 - 锁库：新旧 Pod 替换由 hostssl-only 清单滚动引起（Recreate，revision 1→2），新 Pod `bb9qk` Running/Ready、0 重启；事件无 FailedScheduling/FailedMount/Unhealthy。
 - 单副本 skipped=0 仍为平凡真；跨副本互斥判定留待 Phase 3。
+
+## 84 分钟窗口增补（2026-09-29 03:05 UTC，Pod stable ~83m，restarts=0）
+
+- reload 日志：仅 A3 验证的 6 次（02:07×2、02:10、02:12、02:42、02:43 各一对 detect+reload），identity 仅基线 `90faddd675b1`（2 次）与验证改动 `bfaad5524346`（1 次）——无 2s 误触发风暴（S1 原始字节哈希生产级复证）。
+- `invalid_grant`：0（80m 窗口）。
+- error 327 行分类：全部为上游业务错误（ppx/ppx-cc TTFB timeout、sense 429 限流），无 panic、无系统级错误、无锁/冲突/持久化失败。
+- 锁库新旧 Pod 替换（`7flmk`→`bb9qk`）：由 hostssl-only 清单滚动（deploy revision 1→2，Recreate）引起，事件全 Normal，无 Failed/Unhealthy；新 Pod Running/Ready、0 重启。
+- 节点内存余量（`kubectl top nodes`）：devserver 34%、jobcopilot-preprod 51%、proserver 31%、tencent 55% —— 4 目标节点各 +1 副本（256Mi req / 1Gi lim）无压力。
+- 单副本 skipped=0 仍为平凡真；跨副本互斥判定留待 Phase 3。
+- 公网 /health=200。
