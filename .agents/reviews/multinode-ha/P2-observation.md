@@ -141,3 +141,7 @@ Server Encryption Hashes: All hashes match
 ## Phase 3 观察 +85m（2026-09-29 05:45 UTC，基线后约 2h）
 - 4 副本 Running/Ready 全 1/1、restarts 全 0；公网 /health=200。
 - 85m 窗口：reload 日志 0（无外部变更，无风暴）；invalid_grant/panic 0。
+
+## Phase 3 观察 +90m（2026-09-29 05:47 UTC，基线后约 2h03m）
+- 4 副本 Running/Ready 全 1/1、restarts 全 0；公网 /health=200。
+- 90m 窗口：reload 日志 0（无外部变更，无风暴）；invalid_grant/panic 0；锁 skip 事件 0（keepalive 周期内无新刷新轮次，属正常）。
