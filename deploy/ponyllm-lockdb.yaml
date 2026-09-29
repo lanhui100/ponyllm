@@ -1,0 +1,213 @@
+# ponyllm-lockdb — dedicated PostgreSQL for the antigravity refresh
+# serialization lock (Phase 2, Option A). Ephemeral (emptyDir): advisory locks
+# are session state; a lost pod re-initializes identically.
+#
+# - TLS: CA + server cert from Secret `ponyllm-lock-tls` (SAN =
+#   job-copilot-lockdb.ponyllm.svc[.cluster.local]). A root init-container
+#   pre-stages certs + pg_hba into a /certs emptyDir (postgres must OWN the
+#   key; PGDATA stays EMPTY for initdb). Server args reference absolute
+#   /certs paths so BOTH the entrypoint's temp server and the final server
+#   run ssl=on (the temp server inherits the args).
+# - Credentials: superuser + ponyllm_lock role passwords live in Secret
+#   `ponyllm-lock-dsn`; the gateway consumes only PONYLLM_LOCK_DATABASE_URL.
+# - ponyllm_lock: LOGIN + CONNECT on ponyllm_lock only — no tables, no schema
+#   grants (advisory locks need nothing else).
+apiVersion: v1
+kind: Service
+metadata:
+  name: job-copilot-lockdb
+  namespace: ponyllm
+  labels:
+    app.kubernetes.io/name: ponyllm-lockdb
+spec:
+  selector:
+    app.kubernetes.io/name: ponyllm-lockdb
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
+      protocol: TCP
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ponyllm-lockdb-init
+  namespace: ponyllm
+data:
+  init-lockdb.sh: |
+    #!/bin/sh
+    # Runs via /docker-entrypoint-initdb.d (fresh PGDATA only): create the
+    # CONNECT-only role + database. Cert/pg_hba are staged by the root
+    # init-container (they must exist before the entrypoint's temp server
+    # starts; PGDATA is kept empty for initdb).
+    set -e
+    PGDATA="${PGDATA:-/pgdata}"
+    psql -v ON_ERROR_STOP=1 -U postgres -d postgres \
+      -c "DO \$\$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='ponyllm_lock') THEN CREATE ROLE ponyllm_lock LOGIN PASSWORD '${PONYLLM_LOCK_ROLE_PASSWORD}' NOSUPERUSER NOCREATEDB NOCREATEROLE; END IF; END \$\$;"
+    if ! psql -U postgres -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname='ponyllm_lock'" | grep -q 1; then
+      psql -v ON_ERROR_STOP=1 -U postgres -d postgres -c "CREATE DATABASE ponyllm_lock OWNER postgres;"
+    fi
+    psql -v ON_ERROR_STOP=1 -U postgres -d postgres \
+      -c "REVOKE ALL ON DATABASE ponyllm_lock FROM PUBLIC; GRANT CONNECT ON DATABASE ponyllm_lock TO ponyllm_lock;"
+    psql -v ON_ERROR_STOP=1 -U postgres -d ponyllm_lock \
+      -c "REVOKE ALL ON SCHEMA public FROM PUBLIC;"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ponyllm-lockdb
+  namespace: ponyllm
+  labels:
+    app.kubernetes.io/name: ponyllm-lockdb
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ponyllm-lockdb
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ponyllm-lockdb
+    spec:
+      automountServiceAccountToken: false
+      imagePullSecrets:
+        - name: aliyun-registry
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        # Stage TLS + pg_hba into /certs (postgres-owned) and make /pgdata
+        # postgres-owned while keeping it EMPTY for initdb.
+        - name: stage-tls
+          image: crpi-3cfwwtc3um8h6d3q.cn-hangzhou.personal.cr.aliyuncs.com/job-copilot/pgvector-pgvector@sha256:8da0bfa6b43d628d5a28d77e24b4df66a3c13e2777deb653a7a95ccc35d2001d
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -e
+              chown 999:999 /pgdata /certs
+              chmod 0700 /pgdata
+              cp /etc/ponyllm-lock-tls/ca.crt     /certs/ca.crt
+              cp /etc/ponyllm-lock-tls/server.crt /certs/server.crt
+              cp /etc/ponyllm-lock-tls/server.key /certs/server.key
+              cat > /certs/pg_hba.conf <<'HBA'
+              local all all trust
+              host  all all 0.0.0.0/0 scram-sha-256
+              host  all all ::/0     scram-sha-256
+              HBA
+              chown 999:999 /certs/ca.crt /certs/server.crt /certs/server.key /certs/pg_hba.conf
+              chmod 600 /certs/server.key
+              chmod 644 /certs/ca.crt /certs/server.crt /certs/pg_hba.conf
+              ls -ld /pgdata /certs
+          securityContext:
+            runAsUser: 0
+            runAsNonRoot: false
+            allowPrivilegeEscalation: false
+            # Postgres uid 999 must own the dirs; drop-all strips root's
+            # default read-bypass, so CHOWN/FOWNER/DAC_OVERRIDE are required.
+            capabilities:
+              drop: [ALL]
+              add: ["CHOWN", "FOWNER", "DAC_OVERRIDE"]
+          volumeMounts:
+            - name: pgdata
+              mountPath: /pgdata
+            - name: cert
+              mountPath: /certs
+            - name: tls
+              mountPath: /etc/ponyllm-lock-tls
+              readOnly: true
+      containers:
+        - name: postgres
+          image: crpi-3cfwwtc3um8h6d3q.cn-hangzhou.personal.cr.aliyuncs.com/job-copilot/pgvector-pgvector@sha256:8da0bfa6b43d628d5a28d77e24b4df66a3c13e2777deb653a7a95ccc35d2001d
+          # Standard entrypoint: initdb (empty PGDATA) -> initdb.d DDL ->
+          # final postgres with our absolute TLS/hba paths. The temp server
+          # inherits the same args, so it starts TLS-enabled too.
+          command: ["docker-entrypoint.sh"]
+          args:
+            - postgres
+            - -c
+            - ssl=on
+            - -c
+            - ssl_cert_file=/certs/server.crt
+            - -c
+            - ssl_key_file=/certs/server.key
+            - -c
+            - ssl_ca_file=/certs/ca.crt
+            - -c
+            - hba_file=/certs/pg_hba.conf
+            - -c
+            - listen_addresses=*
+          env:
+            - name: PGDATA
+              value: /pgdata
+            - name: POSTGRES_USER
+              value: postgres
+            - name: POSTGRES_DB
+              value: postgres
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: ponyllm-lock-dsn
+                  key: PONYLLM_LOCK_SUPER_PASSWORD
+            - name: PONYLLM_LOCK_ROLE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: ponyllm-lock-dsn
+                  key: PONYLLM_LOCK_ROLE_PASSWORD
+          ports:
+            - name: postgres
+              containerPort: 5432
+              protocol: TCP
+          startupProbe:
+            exec:
+              command: ["pg_isready", "-h", "127.0.0.1", "-p", "5432", "-U", "postgres"]
+            failureThreshold: 60
+            periodSeconds: 5
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-h", "127.0.0.1", "-p", "5432", "-U", "postgres"]
+            periodSeconds: 5
+            failureThreshold: 6
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-h", "127.0.0.1", "-p", "5432", "-U", "postgres"]
+            periodSeconds: 10
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: pgdata
+              mountPath: /pgdata
+            - name: cert
+              mountPath: /certs
+            - name: init-cm
+              mountPath: /docker-entrypoint-initdb.d/init-lockdb.sh
+              subPath: init-lockdb.sh
+              readOnly: true
+      volumes:
+        - name: pgdata
+          emptyDir: {}
+        - name: cert
+          emptyDir: {}
+        - name: tls
+          secret:
+            secretName: ponyllm-lock-tls
+            defaultMode: 0444
+        - name: init-cm
+          configMap:
+            name: ponyllm-lockdb-init
+            defaultMode: 0444
