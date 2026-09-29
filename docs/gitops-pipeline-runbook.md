@@ -70,9 +70,9 @@
 
 | # | 检查 | 命令（非零退出即失败） |
 |---|---|---|
-| 1 | 构建产物 glibc 与 bookworm-slim（2.36）兼容，无 GLIBC_2.39 缺失 | `! docker run --rm --entrypoint ldd <镜像> /usr/local/bin/ponyllm 2>&1 \| grep -q 'GLIBC_2.39 not found'`（grep 无命中 → 整体退出 0） |
-| 2 | 取新镜像 digest | `docker inspect --format '{{index .RepoDigests 0}}' <镜像>` |
-| 3 | 新镜像宿主侧冒烟（/health；一次性配置，不挂真实 Secret） | `docker run --rm -d --name pg-smoke --entrypoint sh -p 127.0.0.1:18080:8080 <镜像> -c 'ponyllm init --non-interactive --output /tmp/ponyllm.toml && exec ponyllm serve --bind 0.0.0.0:8080 --config /tmp/ponyllm.toml' && sleep 3 && curl -sf http://127.0.0.1:18080/health`；结束清理：`docker rm -f pg-smoke`（curl 失败也要清理：`RC=$?; docker rm -f pg-smoke >/dev/null; exit $RC`）。已实测：返回 `{"status":"ok"}`（T22） |
+| 1 | 构建产物 glibc 与 bookworm-slim（2.36）兼容，无 GLIBC_x.y 缺失 | `! docker run --rm --entrypoint ldd <镜像> /usr/local/bin/ponyllm 2>&1 \| grep -qE 'GLIBC_[0-9]+\.[0-9]+[^ ]* not found'`（ERE 版本通用化；真实 ldd 输出形如 `version 'GLIBC_2.39' not found`，字面模式会假绿——T24 已实测对照） |
+| 2 | 取新镜像 digest | `docker inspect --format '{{index .RepoDigests 0}}' <镜像>`（输出应等于 `$IMAGE@$TARGET_DIGEST`） |
+| 3 | 新镜像宿主侧冒烟（/health；一次性配置，不挂真实 Secret） | 单条原子命令（任何结果必清理）：`CID=$(docker run --rm -d --name pg-smoke --entrypoint sh -p 127.0.0.1:18080:8080 <镜像> -c 'ponyllm init --non-interactive --output /tmp/ponyllm.toml && exec ponyllm serve --bind 0.0.0.0:8080 --config /tmp/ponyllm.toml'); sleep 3; curl -sf http://127.0.0.1:18080/health; RC=$?; docker rm -f pg-smoke >/dev/null; exit $RC`（curl 失败 exit 7 同样走清理行）。已实测：`{"status":"ok"}`（T22/T24） |
 | 4 | 部署清单 digest 与目标一致后 `set image` | `kubectl -n ponyllm set image deploy ponyllm-gateway ponyllm=<完整坐标>@<digest>` |
 | 5 | 滚动完成 | `kubectl -n ponyllm rollout status deploy ponyllm-gateway --timeout=300s` |
 | 6 | **运行镜像 == 目标 digest 复核**（sec S3-3，与清单对照） | `kubectl -n ponyllm get deploy ponyllm-gateway -o jsonpath='{.spec.template.spec.containers[0].image}'`（输出须含 `@<digest>`） |
