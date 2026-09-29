@@ -140,7 +140,7 @@ jobs:
             type=raw,value=latest
             type=sha,prefix=sha-,format=short
 
-      - name: Build and push Docker image
+      - name: Build and push Docker image (GHCR)
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -148,5 +148,36 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # ---- GitOps 生产推送（阿里云容器镜像仓库）----
+      # 生产 Deployment（deploy/ponyllm-deployment.yaml）经 Keel 轮询该仓库的
+      # `latest` 标签自动零停机滚动。凭据为 GitHub Secrets
+      # （ALIYUN_REGISTRY_USERNAME / ALIYUN_REGISTRY_PASSWORD）。
+      - name: Log in to Aliyun Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: crpi-3cfwwtc3um8h6d3q.cn-hangzhou.personal.cr.aliyuncs.com
+          username: ${{ secrets.ALIYUN_REGISTRY_USERNAME }}
+          password: ${{ secrets.ALIYUN_REGISTRY_PASSWORD }}
+
+      - name: Extract metadata for Aliyun prod image
+        id: meta-aliyun
+        uses: docker/metadata-action@v5
+        with:
+          images: crpi-3cfwwtc3um8h6d3q.cn-hangzhou.personal.cr.aliyuncs.com/job-copilot/api-v2
+          tags: |
+            type=raw,value=latest
+            type=sha,prefix=sha-,format=short
+
+      - name: Build and push Docker image (Aliyun prod)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile
+          push: true
+          tags: ${{ steps.meta-aliyun.outputs.tags }}
+          labels: ${{ steps.meta-aliyun.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

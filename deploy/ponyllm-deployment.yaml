@@ -40,8 +40,15 @@ metadata:
     app.kubernetes.io/name: ponyllm
     app.kubernetes.io/component: gateway
   annotations:
-    # Keel 自动部署注解：从 force 降级为 minor 语义化保护，杜绝 1m 高频轮询未经验签的盲目滚动
-    keel.sh/policy: minor
+    # Keel 自动部署注解（GitOps 修订 2026-09-29）：
+    # 镜像引用从 digest 钉住改为 `latest` 标签 + force 策略 —— 前提已收严：
+    #   1) 唯一推流方 = CI（main push 全量测试门禁通过后才构建推送）；
+    #   2) 滚动零停机（maxUnavailable:0 / maxSurge:1 + /health 就绪探针）；
+    #   3) revisionHistoryLimit:3 保留回滚（rollout undo 回上一 digest）。
+    # 历史教训（force 盲目滚动）的成因——未经验签的手工推送——已被"CI 独占推送"
+    # 消除；`latest` 为可变标签，运行镜像真相 = 最近一次 CI 产物，审计靠
+    # sha-<short> 标签与 deployment.kubernetes.io/revision 追溯。
+    keel.sh/policy: force
     keel.sh/trigger: poll
     keel.sh/pollSchedule: "@every 10m"
 spec:
@@ -97,7 +104,7 @@ spec:
       # 本地文件（见 deploy/ponyllm-phase2-rollback.md）。
       containers:
         - name: ponyllm
-          image: crpi-3cfwwtc3um8h6d3q.cn-hangzhou.personal.cr.aliyuncs.com/job-copilot/api-v2@sha256:49ebca49aeb234a8ff5f09c3ffe7eb0324d626efcd478040496e21277f068a46
+          image: crpi-3cfwwtc3um8h6d3q.cn-hangzhou.personal.cr.aliyuncs.com/job-copilot/api-v2:latest
           imagePullPolicy: IfNotPresent
           env:
             # Phase 2 保留：锁库（独立 ponyllm-lockdb，TLS=require）DSN 经 Secret
