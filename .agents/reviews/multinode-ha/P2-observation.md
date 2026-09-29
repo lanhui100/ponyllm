@@ -65,3 +65,9 @@ Server Encryption Hashes: All hashes match
 - 节点内存余量（`kubectl top nodes`）：devserver 34%、jobcopilot-preprod 51%、proserver 31%、tencent 55% —— 4 目标节点各 +1 副本（256Mi req / 1Gi lim）无压力。
 - 单副本 skipped=0 仍为平凡真；跨副本互斥判定留待 Phase 3。
 - 公网 /health=200。
+
+## 155 分钟窗口增补（2026-09-29 03:09 UTC，Pod stable ~95m，restarts=0）
+
+- reload：4 次（全部对应 A3 验证改动，无新增）；invalid_grant=0；公网 /health=200。
+- 任务板：task-1~task-16 全部 completed；T15 小修复已提交并经 P33-arch 复核通过。
+- Phase 3 状态：变更集草稿 + T10/T12/T14/T16 四轮审核收敛完成（replicas=4/topology/R0'/verify 门禁/回滚对应性），待 24h 观察期满 + 用户授权低峰执行窗口后 apply。
