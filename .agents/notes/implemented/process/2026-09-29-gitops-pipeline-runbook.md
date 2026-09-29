@@ -1,6 +1,6 @@
 # Agent Note: GitOps 发布流水线现状与文档缺口
 
-Status: proposed
+Status: implemented
 
 ## Problem
 
@@ -48,9 +48,9 @@ ponyllm 生产发布实际走的是一条"半 GitOps"链路，但**没有任何�
 
 ## Acceptance criteria
 
-- [ ] `docs/` 新增发布流水线手册，覆盖 Proposal 1-5 节。
-- [ ] 手册中的每条"机械可查"断言配一条非零退出命令；其余显式标注"靠 review"。
-- [ ] 本条 note 的 Status 在手册合并后按 write-adr 时序规则迁移。
+- [x] `docs/` 新增发布流水线手册，覆盖 Proposal 1-5 节。
+- [x] 手册中的每条"机械可查"断言配非零退出命令（runbook §3/§6 + scripts/release-gate.sh）。
+- [x] 本条 note 的 Status 已迁移为 implemented（手册与门禁已合并）。
 
 ## Risks
 
