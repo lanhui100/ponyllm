@@ -44,3 +44,11 @@ emptyDir；izbp1iv2fqhiaa3og50r0bz 打 phase3-exclude=true:NoSchedule taint。
 
 24h 观察窗口自 04:44Z 起算：HA 计数器随 Pod 重建归零（方法学见
 scripts/phase3-verify.sh 头部）；reload 基线 = 上表；任意外部变更→reload +1 需对账。
+
+## 观察（进行中，2026-09-29 05:44 UTC，基线后约 2h）
+
+- 4 副本 Running/Ready 全 1/1、restarts 全 0；公网 /health=200。
+- 90m 窗口：reload 日志 0（无外部变更，无风暴）；invalid_grant/panic 0。
+- 锁 skip 事件 0（keepalive 24h 周期内无新刷新轮次，属正常；互斥已由执行期
+  skipped=5 实证）。
+- 详细数据点见 `.agents/reviews/multinode-ha/P2-observation.md`（约每 5 分钟一记）。
