@@ -53,7 +53,11 @@ spec:
         kubernetes.io/hostname: devserver
       # 180s 优雅停机窗口：保护 LLM 长文本 / 慢思考（Reasoning）流式连接自然吐完，避免硬杀导致用户端连接被掐断
       terminationGracePeriodSeconds: 180
-      automountServiceAccountToken: false
+      # Phase 2：专用最小权限 SA 提供 kube 读/写 ponyllm-live-config 的 token
+      # （kube-rs in-cluster 客户端需要挂载 SA token，故 pod 级 automount 打开；
+      #  该 pod 只使用 ponyllm-gateway-sa，Role 白名单禁 list/watch/create/delete）
+      serviceAccountName: ponyllm-gateway-sa
+      automountServiceAccountToken: true
       securityContext:
         runAsNonRoot: true
         runAsUser: 10001
@@ -110,6 +114,17 @@ spec:
           image: crpi-3cfwwtc3um8h6d3q.cn-hangzhou.personal.cr.aliyuncs.com/job-copilot/api-v2@sha256:3bfad2f9dd7c7c67ffe66ca524d9e38b3b4c04e286a394cf09b85ec70acbf070
           imagePullPolicy: IfNotPresent
           env:
+            # Phase 2 锁库（独立 ponyllm-lockdb，TLS=require）：DSN 经 Secret
+            # 注入（不进 live-config toml、不落明文）；CA 经 Secret 卷挂载。
+            - name: PONYLLM_LOCK_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: ponyllm-lock-dsn
+                  key: PONYLLM_LOCK_DATABASE_URL
+            - name: PONYLLM_LOCK_CA_FILE
+              value: /etc/ponyllm-lock/ca.crt
+            - name: PONYLLM_LOCK_SSLMODE
+              value: "require"
             - name: PONYLLM_PROBE_ALLOWLIST
               value: "pproxy-host.ponyllm.svc,pproxy-host.ponyllm.svc.cluster.local"
           securityContext:
@@ -118,13 +133,15 @@ spec:
             capabilities:
               drop:
                 - ALL
+          # Phase 2：配置真相源为 Secret ponyllm-live-config（kubernetes 后端，
+          # 2s 原始字节哈希轮询热更新）；本地文件仅作回滚路径保留。
           command:
             - /usr/local/bin/ponyllm
+          args:
             - serve
+            - --config-backend=kubernetes
             - --bind
             - 0.0.0.0:8080
-            - --config
-            - /var/lib/ponyllm/ponyllm.toml
           lifecycle:
             preStop:
               exec:
@@ -162,6 +179,9 @@ spec:
               cpu: 2000m
               memory: 1024Mi
           volumeMounts:
+            - name: lock-tls
+              mountPath: /etc/ponyllm-lock
+              readOnly: true
             - name: runtime-data
               mountPath: /tmp
             - name: ponyllm-data
@@ -175,10 +195,20 @@ spec:
               subPath: favicon.ico
               readOnly: true
       volumes:
+        # Phase 2 播种源 = ponyllm-live-config（159 版本真相；ponyllm-config 已陈旧
+        # 仅列为废弃资产）。init 容器仍保留，仅用于 PVC 缺失/强制时的回滚播种。
         - name: config-ro
           secret:
-            secretName: ponyllm-config
+            secretName: ponyllm-live-config
             defaultMode: 256
+        # 锁库 TLS 根证书（仅 ca.crt 子路径；server.key 不进入网关）。
+        - name: lock-tls
+          secret:
+            secretName: ponyllm-lock-tls
+            defaultMode: 420
+            items:
+              - key: ca.crt
+                path: ca.crt
         - name: ponyllm-data
           persistentVolumeClaim:
             claimName: ponyllm-data
