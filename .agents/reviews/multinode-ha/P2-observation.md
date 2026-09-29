@@ -45,3 +45,13 @@ Server Encryption Hashes: All hashes match
 - 实况 412 写验证执行记录
 - preflight NTP 循环修 + pg_hba hostssl 巡检
 - PONYLLM_LOCK_CA_FILE / rotated_at 未来时间戳（Phase 1.2 已定稿待落地项，见 task-4 增量）
+
+## 75 分钟窗口增补（2026-09-29 02:55 UTC，Pod stable ~74m）
+
+- Pod `fc75cb8d7-9s85z`：Running/Ready、0 重启；公网 /health=200。
+- reload 日志：仅 A3 验证的 6 次改动（02:07/02:10/02:12/02:42/02:43 五次变更+还原），近 8 分钟 0 reload，近 30 分钟 identity 仅 `90faddd675b1`（基线）与 `bfaad5524346`（验证改动）两值 → 无 2s 误触发风暴（S1 生产级复证）。
+- `invalid_grant`：0（80m 窗口）。
+- 锁/冲突匹配仅 4 行，均为 A2 人工并发验证痕迹（陈旧 If-Match 412 ×2、并发 1×200+1×412 ×2），无自然冲突。
+- 上游错误：均为业务侧（sense 429 限流、ppx/ppx-cc TTFB 超时/忙），与改造无关；有一条已知噪音 `写入 pidfile 失败: Read-only file system`（只读根文件系统预期行为）。
+- 锁库：新旧 Pod 替换由 hostssl-only 清单滚动引起（Recreate，revision 1→2），新 Pod `bb9qk` Running/Ready、0 重启；事件无 FailedScheduling/FailedMount/Unhealthy。
+- 单副本 skipped=0 仍为平凡真；跨副本互斥判定留待 Phase 3。
