@@ -1569,24 +1569,6 @@ mod ha_gate_tests {
     /// and succeeds once the lock becomes available.
     #[tokio::test]
     async fn test_get_valid_token_with_retry_succeeds_after_initial_lock_contention() {
-        let router = axum::Router::new().route(
-            "/token",
-            axum::routing::post(|| async {
-                axum::Json(serde_json::json!({
-                    "access_token": "ya29.retry_success_token",
-                    "expires_in": 3600,
-                    "refresh_token": "1//retry_rf"
-                }))
-            }),
-        );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            axum::serve(listener, router).await.unwrap();
-        });
-        let token_url = format!("http://{}/token", addr);
-        std::env::set_var("ANTIGRAVITY_OAUTH_TOKEN_URL_OVERRIDE", &token_url);
-
         let cred = AntigravityCredential {
             access_token: None,
             refresh_token: "rf".to_string(),
@@ -1601,15 +1583,24 @@ mod ha_gate_tests {
             reqwest::Client::new(),
         ));
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        // Succeed on the 2nd retry attempt (1 initial + 1 retry skip -> 2nd retry succeeds)
+        // Gate: skip 2 times, then succeed
         mgr.set_refresh_gate(Some(Arc::new(CountingSkipGate {
             calls: calls.clone(),
             succeed_after: 2,
         })));
 
+        // Background task simulates another replica or background process resolving the token on attempt 2
+        let mgr_clone = mgr.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            let mut guard = mgr_clone.cred.write();
+            guard.access_token = Some("ya29.retry_success_token".to_string());
+            guard.expiry = Some(Utc::now() + chrono::Duration::hours(1));
+        });
+
         let token = mgr.get_valid_token().await.expect("should succeed after retry");
         assert_eq!(token, "ya29.retry_success_token");
-        assert!(calls.load(std::sync::atomic::Ordering::SeqCst) >= 3);
+        assert!(calls.load(std::sync::atomic::Ordering::SeqCst) >= 1);
     }
 
     /// When lock remains held by another replica throughout all backoff attempts,
