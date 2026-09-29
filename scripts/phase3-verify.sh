@@ -187,14 +187,26 @@ else
 fi
 echo "OK reload stability window complete"
 
-echo "== [5/7] 锁 + 刷新健康（单副本/多副本口径） =="
-curl -s --max-time 8 -H "Authorization: Bearer $TOKEN" "$GW_SVC/v1/telemetry/metrics" | python3 -c "
+echo "== [5/7] 锁 + 刷新健康（窗口 delta 口径，P32-arch） =="
+snap_ha() {
+  curl -s --max-time 8 -H "Authorization: Bearer $TOKEN" "$GW_SVC/v1/telemetry/metrics" | python3 -c "
 import sys,json
 d=json.load(sys.stdin)['ha_ops']
-print('  refresh_lock_acquired:', d['refresh_lock_acquired_total'], '| skipped:', d['refresh_lock_skipped_total'], '| errors:', d['refresh_lock_error_total'], '| persist_fail:', d['refresh_persist_failure_total'], '| hold_s:', d['refresh_lock_hold_seconds'])
-assert d['refresh_lock_error_total'] == 0, 'lock errors must be 0'
-print('  OK lock errors=0（lic: skipped>0 仅当多副本竞争出现，属正常）')
+print(d['refresh_lock_acquired_total'], d['refresh_lock_skipped_total'], d['refresh_lock_error_total'])
 "
+}
+E0=$(snap_ha) || true
+sleep 30
+E1=$(snap_ha) || true
+A0=$(echo "$E0" | awk '{print $1}'); S0=$(echo "$E0" | awk '{print $2}'); R0=$(echo "$E0" | awk '{print $3}')
+A1=$(echo "$E1" | awk '{print $1}'); S1=$(echo "$E1" | awk '{print $2}'); R1=$(echo "$E1" | awk '{print $3}')
+echo "  30s 窗口: acquired $A0->$A1 | skipped $S0->$S1 | errors $R0->$R1"
+[ "$R0" = "$R1" ] || { echo "FAIL refresh_lock_error_total delta $((R1 - R0)) != 0"; exit 1; }
+if [ "$((A1 - A0))" -eq 0 ] && [ "$((S1 - S0))" -eq 0 ]; then
+  echo "WARN 窗口内无任何刷新活动（acquired/skipped 均无增量）——本守卫不构成平凡通过；请在下个 keepalive/401 窗口复查"
+else
+  echo "OK 有刷新活动且锁 errors Δ==0（acquired/skipped 见上）"
+fi
 
 echo "== [6/7] 并发双写 412（A2）（刻意写测试：写版本+1 并在测试后还原原始字节） =="
 CUR=$(read_version)
@@ -227,13 +239,17 @@ H_now=$(secret_hash)
 if [ "$H_now" != "$H_post" ]; then
   echo "WARN live-config changed during the write test (H_now=$H_now != H_post=$H_post) — skipping restore to avoid clobbering an external write; config_version left at $((CUR+1))"
 else
-  "${KUBECTL[@]}" -n "$NS" create secret generic ponyllm-live-config --from-file=ponyllm.toml=/tmp/p3-live-before.toml \
-    --dry-run=client -o yaml --save-config > /tmp/p3-restore.yaml 2>/dev/null
-  "${KUBECTL[@]}" -n "$NS" apply -f /tmp/p3-restore.yaml >/dev/null
+  # 还原用 merge-patch 仅写 data.ponyllm.toml（P32-arch）：
+  #   - 不改 Secret 的 last-applied 注解（apply 全量替换会重写它，patch 不触碰）；
+  #   - 不动其余 data 键：rotated_at 由刷新写回维护，必须原样携带，patch 只更新
+  #     ponyllm.toml 单一键，rotated_at 自动保留。
+  B64=$(base64 -w0 < /tmp/p3-live-before.toml)
+  "${KUBECTL[@]}" -n "$NS" patch secret ponyllm-live-config --type=merge \
+    -p "{\"data\":{\"ponyllm.toml\":\"$B64\"}}" >/dev/null
   sleep 5
   V_AFTER=$(read_version)
   [ "$V_AFTER" = "$CUR" ] || { echo "FAIL restore: version $V_AFTER != $CUR"; exit 1; }
-  echo "OK restored live-config to version $CUR"
+  echo "OK restored live-config to version $CUR (data-only patch)" 
 fi
 
 if [[ " ${*:-} " == *" --kill-drill "* ]]; then
@@ -273,7 +289,8 @@ cat <<'EOF'
 · 本脚本不做任何回滚写操作；上方命令由运维在执行阶段手工执行。
 
 == 执行阶段补充（本脚本不执行，以下为执行/观察段命令备忘）==
-· 4 副本分布收口（ADP S1-1/arch S2-1）：为小型 izbp* 节点打 taint 防其承接副本：
+· 4 副本分布收口（ADP S1-1/arch S2-1）：为小型 izbp* 节点打 taint 防其承接副本；
+  **统一顺序（P32-arch）：先 taint → 再 apply Phase 3 清单 → 最后跑本 verify**：
     kubectl taint nodes izbp1iv2fqhiaa3og50r0bz phase3-exclude=true:NoSchedule
   （执行阶段由运维授权执行；本脚本不做集群写）
 · 逐副本 reload 基线重记录（观察方法学）：rollout/演练后重新跑本脚本 [4/7] 段

@@ -13,16 +13,20 @@ Solitaire 原状，零数据丢失（配置真相以 `ponyllm-live-config` 为�
 > `deploy/ponyllm-phase2-baseline.yaml`（replicas=1 / nodeSelector=devserver /
 > PVC ponyllm-data / initContainer / config-ro→ponyllm-live-config / SA /
 > lock env / kubernetes args）。
+> **Phase 3 执行/回滚的统一顺序（P32-arch）**：先 `kubectl taint nodes
+> izbp1iv2fqhiaa3og50r0bz phase3-exclude=true:NoSchedule` → 再 apply Phase 3 清单
+> （或恢复本 baseline）→ 最后跑 `bash scripts/phase3-verify.sh --pod-ips`。
 ```bash
 # 1) 干跑校验（不写集群）—— 语法 + schema 校验，失败即停：
 kubectl apply --dry-run=client -f deploy/ponyllm-phase2-baseline.yaml
 # 2) 正式恢复 Phase 2 基线（一次 apply 整体替换）：
 kubectl -n ponyllm apply -f deploy/ponyllm-phase2-baseline.yaml
 kubectl -n ponyllm rollout status deploy/ponyllm-gateway --timeout=300s
-# 3) spec 断言（arch S3）：副本数 / nodeSelector / PVC 引用必须回到 Phase 2 形态
+# 3) spec 断言（arch S3 / P32-arch）：副本数 / nodeSelector / PVC 引用 / topology
 kubectl -n ponyllm get deploy ponyllm-gateway -o jsonpath='{.spec.replicas}'            # 1
 kubectl -n ponyllm get deploy ponyllm-gateway -o jsonpath='{.spec.template.spec.nodeSelector}'           # {"kubernetes.io/hostname":"devserver"}
 kubectl -n ponyllm get deploy ponyllm-gateway -o jsonpath='{.spec.template.spec.volumes[*].persistentVolumeClaim.claimName}'  # ponyllm-data
+kubectl -n ponyllm get deploy ponyllm-gateway -o jsonpath='{.spec.template.spec.topologySpreadConstraints}'  # 空输出（Phase 2 无 topology）
 # 4) 仍要回 file backend → 继续执行下方 R0（新前置：强制重播种）→ R1（切 file + 移除 lock env）
 ```
 > 说明：R0' 应用的 baseline 与 Phase 3 变更只差 spec 形态（副本数/调度/PVC），
