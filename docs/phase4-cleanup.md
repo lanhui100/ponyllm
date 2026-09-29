@@ -14,14 +14,17 @@ mkdir -p "$BK" && chmod 700 "$BK"
 kubectl -n ponyllm get svc ponyllm-gateway -o yaml > "$BK/svc-ponyllm-gateway.yaml"
 kubectl -n ponyllm get ep ponyllm-gateway -o yaml  > "$BK/ep-ponyllm-gateway.yaml"
 kubectl -n ponyllm get pvc ponyllm-data -o yaml  > "$BK/pvc-ponyllm-data.yaml"
-# Secret 备份【降级为仅 metadata】（sec S2-1）：ponyllm-config 的 data 是 8 组
-# provider key 明文 base64，kubectl get -o yaml 会裸存——禁止。只留来源元数据：
-kubectl -n ponyllm get secret ponyllm-config -o jsonpath='{.metadata}' > "$BK/secret-ponyllm-config.metadata.json"
-# 权限断言（非零退出 = 失守）：
-stat -c '%a' "$BK" | grep -qx 700 && stat -c '%a' "$BK"/* | grep -vqE '^600$|^644$' && echo "FAIL 备份权限异常" && exit 1 || true
-# 30 天后删除备份（明确命令；含 Secret 元数据与 svc/pvc yaml——不再是关键凭据，
-# 但按纪律到期即清）：
-#   find /root/ponyllm-phase4-backup-* -maxdepth 0 -type d -mtime +30 -exec rm -rf {} +
+# Secret 备份【降级为元数据子集】（sec S2-1，T29）：ponyllm-config 的 data 是 8 组
+# provider key 明文 base64；且全量 {.metadata} 含 last-applied-configuration 注解
+# （实测 16163B，内嵌全部 data base64）——禁取全量。仅记录 name/时间/版本/标签：
+kubectl -n ponyllm get secret ponyllm-config -o json | jq -c '{name: .metadata.name, createdAt: .metadata.creationTimestamp, resourceVersion: .metadata.resourceVersion, labels: .metadata.labels}' > "$BK/secret-ponyllm-config.meta.json"   # 实测输出 {name/createdAt/resourceVersion/labels}，无注解无 data（T29）
+# 权限断言（独立正向断言，禁 644 豁免）：
+[ "$(stat -c '%a' "$BK")" = "700" ] || { echo "FAIL 备份目录权限非 700"; exit 1; }
+if find "$BK" -type f ! -perm 600 | grep -q .; then echo "FAIL 备份存在非 600 权限文件"; exit 1; fi
+# 备份内容断言（T29）：元数据子集文件不得含 ponyllm.toml data 键/凭据字样：
+if grep -q 'ponyllm.toml\|api_key' "$BK/secret-ponyllm-config.meta.json"; then echo "FAIL 备份混入凭据内容"; exit 1; fi
+# 30 天后删除备份（可执行命令；到期即清）：
+find /root/ponyllm-phase4-backup-* -maxdepth 0 -type d -mtime +30 -exec rm -rf {} +
 ```
 
 ## 0.5 执行前附加断言（arch S3）
