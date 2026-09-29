@@ -2,6 +2,9 @@
 
 Status: implemented
 
+> **发布链路事实以 `docs/gitops-pipeline-runbook.md` 为准**（本笔记的历史决策描述
+> 与实测链路存在偏差，见 runbook §5 偏差声明）。
+
 ## Problem
 
 公开 GitHub 仓库直接配置 Push 式 CD（直连 k8s 的 KUBECONFIG）存在严重安全隐患：外部 PR 或被攻陷的依赖可利用 GitHub Actions 环境窃取集群特权凭证或执行供应链投毒。同时，集群当前 Deployment 存在多节点拓扑下 RWO PVC（`ponyllm-data`）滚动死锁风险：当新 Pod 调度至其他节点时，因 RWO 无法并发跨节点挂载导致新 Pod 卡死在 ContainerCreating；若直接强杀旧 Pod 则触发 404/502 断流。

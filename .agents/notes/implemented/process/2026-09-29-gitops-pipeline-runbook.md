@@ -29,15 +29,6 @@ ponyllm 生产发布实际走的是"半 GitOps"链路，但此前没有任何一
 替代的"迁移到 CI 全自动推镜像（GHCR build-and-push-image 入生产）"列为后续独立
 提案，本轮不做（涉及 ACR 凭据进 CI 的安全评审）。
 
-## 链路事实（2026-09-29 实测校准）
-
-- 镜像坐标：`crpi-3cfwwtc3um8h6d3q.cn-hangzhou.personal.cr.aliyuncs.com/job-copilot/api-v2`。
-- 生产 Deployment 当前 digest：`sha256:3bfad2f9…`（纯 digest 引用，tag 仅载体）。
-- Keel：`deploy/keel-autodeploy.yaml`（keelhq/keel:0.20.0），poll 模式
-  （keel.sh/trigger: poll / pollSchedule: @every 10m / policy: minor）。
-- GHCR 的 `.github/workflows/ci.yml build-and-push-image` 推 `ghcr.io/<repo>:latest|sha-…`，
-  与生产无关。
-
 ## Alternatives considered
 
 - 仅在 ADR 里顺手记录：ADR 是决策记录不是操作手册，检索面不对，落选。
@@ -47,8 +38,16 @@ ponyllm 生产发布实际走的是"半 GitOps"链路，但此前没有任何一
 
 ## Consequences
 
+- **链路事实以 `docs/gitops-pipeline-runbook.md` 为准**（单一真值源）；易变 digest
+  等常量不在此笔记维护，现网 digest 取号命令见 runbook §2。
+- 2026-09-29 时点快照（仅快照，非权威）：生产镜像坐标
+  `crpi-3cfwwtc3um8h6d3q.cn-hangzhou.personal.cr.aliyuncs.com/job-copilot/api-v2`；
+  运行 digest 经 `kubectl -n ponyllm get deploy ponyllm-gateway -o
+  jsonpath='{.spec.template.spec.containers[0].image}'` 取号；Keel
+  `deploy/keel-autodeploy.yaml`（keelhq/keel:0.20.0，poll 模式）；GHCR
+  `build-and-push-image` 与生产无关。
 - 机械验证：`scripts/release-gate.sh` bash -n 通过；负向自测（坏 tag/缺参/坏回滚
-  digest）退出码 1/1/2 符合预期。
+  digest）退出码 1/1/2 符合预期；runbook §3 冒烟命令实测返回 `{"status":"ok"}`（T22）。
 - 漂移缓解：发布链路任何变更（registry/命名/tag 规范/构建方式）必须同步更新手册，
   本迁移检查项已随笔记归档执行。
 - ACR 凭据：本手册不含任何明文，仅记录存放处（Secret ponyllm/aliyun-registry）与
