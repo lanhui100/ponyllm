@@ -219,3 +219,11 @@ Server Encryption Hashes: All hashes match
 ## Phase 4 观察 +370m（2026-09-29 10:54 UTC，基线 04:44Z 后约 6h10m，7 天窗口 D1）
 - 4 副本 Running/Ready 全 1/1、restarts 全 0；公网 /health=200。
 - 370m 窗口：reload 日志 0（无外部变更，无风暴）；invalid_grant/panic 0。
+
+## ⚠️ 基线重置（2026-09-29 部署 + 重平衡，7 天窗口自新基线重起算）
+
+- **部署事件**：新镜像 `sha256:80f102ca…`（用户侧提交更新后部署），RollingUpdate 完成（4/4 Ready、Available=True、health 200）。
+- **分布漂移**（部署滚动后 ScheduleAnyway 偏好）：初始 4 副本落 devserver×2 + jobcopilot-preprod + tencent，**proserver 空缺**（arch S2-1 预警的偏好漂移形态）。
+- **重平衡**（Lead 执行，零中断——其余 3 副本在位）：删 devserver 多余副本 → Deployment 重建 → 新 Pod `sjbrb` 落 **proserver**；稳态 = 4 节点各 1（devserver `qcpxp` / jobcopilot-preprod `kwgfm` / tencent `rvgt9` / proserver `sjbrb`）。
+- **新观察基线**：2026-09-29T15:20 UTC（重平衡后稳定）；4 Pod 均 restarts=0；A7/A10 计数器自新 Pod 归零起算，采集命令见 docs/phase4-observation.md（需 operator 带 admin token 执行 A7-3/A7-4）。
+- 前段观察（04:44Z 基线，6h+ 全绿）已留档作参考，不再作为 7 天窗口起算点。
