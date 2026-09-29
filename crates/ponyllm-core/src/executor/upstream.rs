@@ -367,8 +367,33 @@ pub fn parse_reset_duration(body: &str) -> Option<Duration> {
 /// neither the reason code nor a long reset window and must keep the short
 /// rate-limit path. Only a quota body with an advertised reset of 5+ minutes
 /// is treated as a windowed quota even without the explicit reason code.
+///
+/// Transient rate-limit signals are detected FIRST (word-boundary tokenized,
+/// with `_` kept inside tokens so identifiers like `user_rpm` in a genuine
+/// account message cannot be misread), because upstreams such as Sense/商汤
+/// mislabel an RPM rejection as `type: "quota_exceeded_error"` while the
+/// `message` only says `"rpm exhausted"`.
 pub fn is_quota_exhausted_body(body: &str) -> bool {
     let lower = body.to_ascii_lowercase();
+
+    // Per-minute / per-second / concurrency rate limits must never be
+    // misclassified as account quota exhaustion, even if the upstream
+    // provider errantly uses `type: "quota_exceeded_error"`.
+    // `_` is kept inside a token so `rpm_user`/`corp_tpm` identifiers stay
+    // intact, while `/` splits `tpm/rpm` into two rate-limit words.
+    let is_rate_limit_signal = lower.contains("rate_limit")
+        || lower.contains("rate limit")
+        || lower.contains("requests per minute")
+        || lower.contains("tokens per minute")
+        || lower.contains("queries per second")
+        || lower.contains("concurrency")
+        || lower
+            .split(|c: char| !c.is_alphanumeric() && c != '_')
+            .any(|word| matches!(word, "rpm" | "tpm" | "qps"));
+    if is_rate_limit_signal {
+        return false;
+    }
+
     lower.contains("quota_exhausted")
         || lower.contains("individual quota")
         || (lower.contains("quota")
@@ -1750,6 +1775,103 @@ mod session_header_tests {
             kind
         );
         assert!(matches!(pool_err, PoolErrorType::RateLimit { .. }));
+
+        // Sense (商汤) returns `type: "quota_exceeded_error"` even when only RPM is exhausted.
+        // It must be classified as a RateLimitExceeded, allowing pool failover / retry,
+        // rather than shutting down the key as QuotaExhausted.
+        let sense_rpm_body = r#"{"error":{"message":"rpm exhausted","type":"quota_exceeded_error","code":"8"}}"#;
+        let (kind, pool_err) = classify_too_many_requests(sense_rpm_body, None);
+        assert!(
+            matches!(kind, GatewayErrorKind::RateLimitExceeded { .. }),
+            "Sense RPM error must be classified as RateLimitExceeded, got {:?}",
+            kind
+        );
+        assert!(matches!(pool_err, PoolErrorType::RateLimit { .. }));
+
+        let sense_tpm_body = r#"{"error":{"message":"inference exceeds tpm/rpm limit","type":"rate_limit_error","code":"429003"}}"#;
+        let (kind, pool_err) = classify_too_many_requests(sense_tpm_body, None);
+        assert!(
+            matches!(kind, GatewayErrorKind::RateLimitExceeded { .. }),
+            "Sense TPM/RPM error must be classified as RateLimitExceeded, got {:?}",
+            kind
+        );
+        assert!(matches!(pool_err, PoolErrorType::RateLimit { .. }));
+    }
+
+    #[test]
+    fn rate_limit_signal_wins_over_quota_wording() {
+        // A mixed body that carries both a transient rate-limit signal and
+        // quota wording must keep the rate-limit path: the rate-limit signal
+        // is the actionable, recoverable interpretation (anti-hammering),
+        // whereas shutting the key down would block failover.
+        let mixed = r#"{"error":{"message":"quota_exhausted but rpm reached","type":"quota_exceeded_error","code":"8"}}"#;
+        let (kind, pool_err) = classify_too_many_requests(mixed, None);
+        assert!(
+            matches!(kind, GatewayErrorKind::RateLimitExceeded { .. }),
+            "mixed quota+rpm body must classify as RateLimitExceeded, got {:?}",
+            kind
+        );
+        assert!(matches!(pool_err, PoolErrorType::RateLimit { .. }));
+    }
+
+    #[test]
+    fn identifier_like_rpm_user_stays_genuine_quota() {
+        // `_` is kept inside tokens, so an identifier such as `rpm_user` must
+        // NOT be read as an `rpm` rate-limit signal: a genuine account quota
+        // message mentioning such an identifier stays on the quota path.
+        let genuine = r#"{"error":{"message":"quota_exhausted for account rpm_user","type":"insufficient_balance","code":"402"}}"#;
+        assert!(
+            is_quota_exhausted_body(genuine),
+            "identifier `rpm_user` must not suppress a genuine quota signal"
+        );
+    }
+
+    #[test]
+    fn qps_and_concurrency_bodies_stay_rate_limit() {
+        let qps = r#"{"error":{"message":"qps exceeded","type":"rate_limit_error"}}"#;
+        assert!(!is_quota_exhausted_body(qps), "qps body must be a rate limit");
+
+        let concurrency = r#"{"error":{"message":"concurrency limit reached","type":"rate_limit_error"}}"#;
+        assert!(
+            !is_quota_exhausted_body(concurrency),
+            "concurrency body must be a rate limit"
+        );
+
+        let spaced = r#"{"error":{"message":"Rate limit reached","type":"rate_limit_error"}}"#;
+        assert!(
+            !is_quota_exhausted_body(spaced),
+            "space-variant `rate limit` must be a rate limit"
+        );
+    }
+
+    #[test]
+    fn huge_malformed_body_never_panics_and_stays_bounded() {
+        // The call site truncates upstream bodies to 64 KiB, but the matcher
+        // must still behave on arbitrarily long / malformed input without
+        // panicking or blowing up (defense in depth for hostile upstreams).
+        let mut huge = String::with_capacity(1 << 20);
+        huge.push_str("{\"error\":{\"message\":\"");
+        for _ in 0..((1 << 20) - 128) {
+            huge.push('x');
+        }
+        huge.push_str("rpm exhausted");
+        huge.push_str("\"}}");
+        assert!(
+            !is_quota_exhausted_body(&huge),
+            "huge body ending in rpm signal must be a rate limit"
+        );
+
+        let mut huge_quota = String::with_capacity(1 << 20);
+        huge_quota.push_str("{\"error\":{\"message\":\"");
+        for _ in 0..((1 << 20) - 128) {
+            huge_quota.push('x');
+        }
+        huge_quota.push_str("QUOTA_EXHAUSTED resets in 15h");
+        huge_quota.push_str("\"}}");
+        assert!(
+            is_quota_exhausted_body(&huge_quota),
+            "huge body ending in explicit QUOTA_EXHAUSTED must stay quota"
+        );
     }
 
     #[test]
