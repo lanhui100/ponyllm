@@ -3,6 +3,27 @@
 目标：任何 Phase 2 验证失败或观察期异常，恢复「单副本 + 本地文件 + nodeSelector」的
 Solitaire 原状，零数据丢失（配置真相以 `ponyllm-live-config` 为准，PVC 文件保留副本）。
 
+## Phase 3 时代的回滚顺序（先看这里）
+
+自 Phase 3（4 副本 / 无 nodeSelector / topology / 无 PVC）回滚时，**第一步永远是 R0'**
+恢复 Phase 2 单副本 kubernetes 基线；需要进一步回 file backend 才走原 R0/R1。
+
+### R0'（S1 必做，T11）：恢复 Phase 2 kubernetes 基线
+> 基线清单由 2f0f8fb 的 deploy/ponyllm-deployment.yaml 提取为
+> `deploy/ponyllm-phase2-baseline.yaml`（replicas=1 / nodeSelector=devserver /
+> PVC ponyllm-data / initContainer / config-ro→ponyllm-live-config / SA /
+> lock env / kubernetes args）。
+```bash
+# 1) 干跑校验（不写集群）—— 语法 + schema 校验，失败即停：
+kubectl apply --dry-run=client -f deploy/ponyllm-phase2-baseline.yaml
+# 2) 正式恢复 Phase 2 基线（一次 apply 整体替换）：
+kubectl -n ponyllm apply -f deploy/ponyllm-phase2-baseline.yaml
+kubectl -n ponyllm rollout status deploy/ponyllm-gateway --timeout=300s
+# 3) 仍要回 file backend → 继续执行下方 R0（强制重播种）→ R1（切 file + 移除 lock env）
+```
+> 说明：R0' 应用的 baseline 与 Phase 3 变更只差 spec 形态（副本数/调度/PVC），
+> 配置真相源（live-config）与锁库不变；apply 属整文件替换，dry-run 先行。
+
 ## 现状基线（回滚前记录）
 - Deployment `ponyllm-gateway`（ns ponyllm）：image `crpi-.../job-copilot/api-v2@sha256:3bfad2f9…`，
   serviceAccountName=ponyllm-gateway-sa，args `serve --config-backend=kubernetes --bind 0.0.0.0:8080`，
