@@ -15,6 +15,7 @@ Status: implemented
 1. **业务前台 Token 换取引入有界等待重试与请求管线防击穿**：
    - 区分后台 keepalive 巡检与前台业务/探测请求：后台巡检（`perform_antigravity_keepalive_cycle`）保持快速跳过，不阻塞后台 loop。
    - 在 `get_valid_token_inner()` 中，当遇到非强制刷新的 `RefreshSkipped` 时，进行有界退避重试（3 次尝试，间隔 [150ms, 350ms, 700ms] + 抖动，总耗时控制在 ~1.5s 以内），等待持锁副本刷新释放锁，严防级联超时击穿 15s TTFB 预算。
+   - **序列化锁获取后二次快照复查**：gate 放行后、触网刷新前再读一次 `cred` 快照——等待锁期间另一副本可能已完成刷新并持久化，直接返回新 token，从构造上消除冗余 OAuth 往返（亦是 `ha_gate` retry 测试在慢 runner 上竞态的根治）。
    - 在 `UpstreamExecutor::build_headers` 中，针对 `RefreshSkipped` 异常不计入 `PoolErrorType::NetworkError` 冷却惩罚，避免健康 Key 因瞬态锁冲突被误关。
 2. **精细化后端错误分类与状态码**：
    - 在 `/api/admin/keys/:id/test` 中，将 `CoreError::RefreshSkipped` 归类为 `error_code: "lock_busy"`，`http_status: 429`，消息明确提示“锁正由其他副本持有，正在刷新中”，禁止归入 `auth_failed`。

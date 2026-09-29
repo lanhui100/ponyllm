@@ -436,6 +436,24 @@ impl AntigravityTokenManager {
                 None => None,
             };
 
+        // Post-gate re-check: while we waited to acquire the cross-replica
+        // serialization lock, another replica may have already refreshed and
+        // persisted a valid token. Re-reading the snapshot here avoids a
+        // needless (and in tests, mockless) OAuth round-trip, and makes the
+        // "wait for lock holder, then succeed" path race-free by construction.
+        if !force {
+            let snapshot = self.cred.read().clone();
+            if !Self::credential_needs_refresh(&snapshot) {
+                if let Some(token) = snapshot.access_token {
+                    tracing::info!(
+                        key_id = %self.key_id,
+                        "Antigravity token ready after serialization-lock wait; skipping refresh"
+                    );
+                    return Ok(token);
+                }
+            }
+        }
+
         // Refresh + persist run inside a hard 60s budget (P1-arch S2-2): the
         // global serialization lock must never be held longer than that, even
         // when the OAuth HTTP call hangs. On timeout the gate guard is dropped
@@ -1603,10 +1621,17 @@ mod ha_gate_tests {
             reqwest::Client::new(),
         ));
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        // Gate: skip 2 times, then succeed
+        // Gate NEVER grants (usize::MAX): the lock holder keeps skipping, and
+        // `get_valid_token` converges through the retry loop's snapshot
+        // pre-check once the background task populates the token (attempt 3 at
+        // ~1.2s > the 500ms write). This keeps the test deterministic and free
+        // of any live OAuth endpoint (a gate-granted refresh would hit the
+        // network — flaky on slow runners); the gate-granted-refresh path is
+        // covered by the sibling `…_detects_cached_token_during_wait` /
+        // `…_times_out…` tests.
         mgr.set_refresh_gate(Some(Arc::new(CountingSkipGate {
             calls: calls.clone(),
-            succeed_after: 2,
+            succeed_after: usize::MAX,
         })));
 
         // Background task simulates another replica or background process resolving the token on attempt 2
