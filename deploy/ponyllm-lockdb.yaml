@@ -96,9 +96,9 @@ spec:
               cp /etc/ponyllm-lock-tls/server.crt /certs/server.crt
               cp /etc/ponyllm-lock-tls/server.key /certs/server.key
               cat > /certs/pg_hba.conf <<'HBA'
-              local all all trust
-              host  all all 0.0.0.0/0 scram-sha-256
-              host  all all ::/0     scram-sha-256
+              local   all all trust
+              hostssl all all 0.0.0.0/0 scram-sha-256
+              hostssl all all ::/0     scram-sha-256
               HBA
               chown 999:999 /certs/ca.crt /certs/server.crt /certs/server.key /certs/pg_hba.conf
               chmod 600 /certs/server.key
