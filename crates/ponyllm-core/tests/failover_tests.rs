@@ -241,6 +241,7 @@ async fn test_all_keys_failed_reports_attempted_keys_trajectory() {
     assert!(err_msg.contains("key-alpha"), "Error message should mention key-alpha, got: {}", err_msg);
     assert!(err_msg.contains("key-beta"), "Error message should mention key-beta, got: {}", err_msg);
     assert!(err_msg.contains("key-gamma"), "Error message should mention key-gamma, got: {}", err_msg);
+    assert!(err_msg.contains("failures: 3 rate limited"), "Error message should summarize failures, got: {}", err_msg);
 }
 
 #[test]

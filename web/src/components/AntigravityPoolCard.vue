@@ -467,7 +467,16 @@ const slotMatrix = computed<HeatSlotItem[]>(() => {
           isCooling: false,
         };
       }
-      if (errCode.includes('auth') || errMsg.includes('invalid_grant')) {
+      if (errCode.includes('lock_busy') || errMsg.includes('serialization lock') || errMsg.includes('held by another replica')) {
+        return {
+          key: k,
+          level: 'low',
+          heatClass: 'bg-sky-400/80 hover:bg-sky-300 ring-1 ring-sky-400/50',
+          tooltipText: `账号: ${email}${tierBadge}\n状态: 跨节点锁同步中 (等待另一副本刷新)\n提示: ${testResult.message}${usageSummary}`,
+          isCooling: false,
+        };
+      }
+      if (errCode === 'invalid_grant' || errMsg.includes('invalid_grant') || errMsg.includes('token has been expired') || errMsg.includes('revoked')) {
         return {
           key: k,
           level: 'auth_invalid' as any,
@@ -861,8 +870,8 @@ function getProgressColor(percent: number): { bar: string; text: string; bg: str
     <!-- 三栏指标网格：账号可用性 / Gemini实时容量 / 周期真实额度统计 -->
     <div class="pool-metric-grid grid grid-cols-1 md:grid-cols-3 gap-5">
       <!-- 栏 1: 账号可用性与恢复倒计时 -->
-      <div class="flex flex-col justify-between p-3.5 rounded-lg bg-slate-50/60 border border-slate-100/80">
-        <div class="flex items-center justify-between text-xs text-slate-500 mb-2 font-medium">
+      <div class="flex min-h-0 flex-col justify-between p-3.5 rounded-lg bg-slate-50/60 border border-slate-100/80">
+        <div class="flex shrink-0 self-start w-full items-center justify-between text-xs text-slate-500 mb-2 font-medium">
           <span class="inline-flex items-center gap-1 text-slate-700">
             <Icons name="check" size="14" class="text-slate-700" />
             账户可用性状态
@@ -954,8 +963,8 @@ function getProgressColor(percent: number): { bar: string; text: string; bg: str
       </div>
 
       <!-- 栏 2: Gemini 容量 (5小时即时窗口 + 周度长效续航) -->
-      <div class="flex flex-col justify-between p-3.5 rounded-lg bg-slate-50/60 border border-slate-100/80">
-        <div class="flex items-center justify-between text-xs text-slate-500 mb-2.5 font-medium">
+      <div class="flex min-h-0 flex-col justify-between p-3.5 rounded-lg bg-slate-50/60 border border-slate-100/80">
+        <div class="flex shrink-0 self-start w-full items-center justify-between text-xs text-slate-500 mb-2.5 font-medium">
           <span class="inline-flex items-center gap-1 text-slate-700">
             <Icons name="sparkles" size="14" class="text-slate-700" />
             Gemini 容量水位

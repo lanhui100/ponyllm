@@ -3622,7 +3622,7 @@ mod tests {
         assert_eq!(classify_stream_timeout_tag("upstream stream stalled after 120s without bytes", 130_000), "tail-stall");
         assert_eq!(classify_stream_timeout_tag("upstream stream stalled after 120s without bytes", 90_000), "tail-stall");
         // TTFB guard.
-        assert_eq!(classify_stream_timeout_tag("upstream TTFB timeout after 60s (no response headers)", 61_000), "ttfb-timeout");
+        assert_eq!(classify_stream_timeout_tag("upstream TTFB timeout after 15s (no response headers)", 16_000), "ttfb-timeout");
         // Vercel 120s hard-cap suspect: body decode error + ~120s elapsed.
         assert_eq!(classify_stream_timeout_tag("upstream transport error: error decoding response body", 120_002), "total-budget-120s-suspect");
         assert_eq!(classify_stream_timeout_tag("upstream transport error: error decoding response body", 123_900), "total-budget-120s-suspect");

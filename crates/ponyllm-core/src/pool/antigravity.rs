@@ -258,9 +258,12 @@ impl AntigravityTokenManager {
         }
     }
 
-    /// Get valid access token with Singleflight coalesced refresh
+    /// Get valid access token with Singleflight coalesced refresh.
+    /// In multi-node HA, if the refresh lock is held by another replica,
+    /// retries briefly with backoff to allow the other replica to finish
+    /// refreshing and propagating the token before giving up.
     pub async fn get_valid_token(&self) -> Result<String> {
-        self.get_valid_token_inner(false).await
+        self.get_valid_token_with_retry(false).await
     }
 
     /// Force a refresh even when the cached token looks valid, still
@@ -269,6 +272,42 @@ impl AntigravityTokenManager {
     /// local clock does.
     pub async fn force_refresh_token(&self) -> Result<String> {
         self.get_valid_token_inner(true).await
+    }
+
+    async fn get_valid_token_with_retry(&self, force: bool) -> Result<String> {
+        // Fast path attempt
+        match self.get_valid_token_inner(force).await {
+            Ok(token) => Ok(token),
+            Err(CoreError::RefreshSkipped { key_id }) => {
+                // If lock held by another replica, retry up to ~6s with backoff.
+                // Another replica is actively holding the lock to refresh and persist.
+                let mut attempts = 0;
+                let delays_ms = [200, 400, 800, 1200, 1500, 2000];
+                for &delay in &delays_ms {
+                    attempts += 1;
+                    tokio::time::sleep(Duration::from_millis(delay)).await;
+                    // Check if token was populated in cache or if lock is now available
+                    let snapshot = self.cred.read().clone();
+                    if !Self::credential_needs_refresh(&snapshot) {
+                        if let Some(token) = snapshot.access_token {
+                            tracing::info!(
+                                key_id = %self.key_id,
+                                attempts,
+                                "Antigravity token acquired after waiting for lock holder"
+                            );
+                            return Ok(token);
+                        }
+                    }
+                    match self.get_valid_token_inner(false).await {
+                        Ok(token) => return Ok(token),
+                        Err(CoreError::RefreshSkipped { .. }) => continue,
+                        Err(e) => return Err(e),
+                    }
+                }
+                Err(CoreError::RefreshSkipped { key_id })
+            }
+            Err(e) => Err(e),
+        }
     }
 
     async fn get_valid_token_inner(&self, force: bool) -> Result<String> {
@@ -1339,7 +1378,7 @@ mod tests {
 mod ha_gate_tests {
     use super::*;
 
-    use crate::pool::refresh_gate::RefreshGateError;
+    use crate::pool::refresh_gate::{NoopRefreshGateGuard, RefreshGateError};
 
     #[derive(Debug, Default)]
     struct SkipGate;
@@ -1500,5 +1539,137 @@ mod ha_gate_tests {
             mgr.credential_snapshot().refresh_token,
             "1//rotated_rf"
         );
+    }
+
+    #[derive(Debug)]
+    struct CountingSkipGate {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+        succeed_after: usize,
+    }
+
+    #[async_trait::async_trait]
+    impl RefreshGate for CountingSkipGate {
+        async fn try_acquire(
+            &self,
+            _key_id: &str,
+        ) -> std::result::Result<
+            Option<Box<dyn RefreshGateGuard + Send + Sync>>,
+            RefreshGateError,
+        > {
+            let count = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if count >= self.succeed_after {
+                Ok(Some(Box::new(NoopRefreshGateGuard)))
+            } else {
+                Ok(None)
+            }
+        }
+    }
+
+    /// When lock is initially held by another replica, `get_valid_token` retries
+    /// and succeeds once the lock becomes available.
+    #[tokio::test]
+    async fn test_get_valid_token_with_retry_succeeds_after_initial_lock_contention() {
+        let router = axum::Router::new().route(
+            "/token",
+            axum::routing::post(|| async {
+                axum::Json(serde_json::json!({
+                    "access_token": "ya29.retry_success_token",
+                    "expires_in": 3600,
+                    "refresh_token": "1//retry_rf"
+                }))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        let token_url = format!("http://{}/token", addr);
+        std::env::set_var("ANTIGRAVITY_OAUTH_TOKEN_URL_OVERRIDE", &token_url);
+
+        let cred = AntigravityCredential {
+            access_token: None,
+            refresh_token: "rf".to_string(),
+            client_id: "id".to_string(),
+            client_secret: "sec".to_string(),
+            project_id: "proj".to_string(),
+            expiry: None,
+        };
+        let mgr = Arc::new(AntigravityTokenManager::new(
+            "ag-retry-success",
+            cred,
+            reqwest::Client::new(),
+        ));
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        // Succeed on the 2nd retry attempt (1 initial + 1 retry skip -> 2nd retry succeeds)
+        mgr.set_refresh_gate(Some(Arc::new(CountingSkipGate {
+            calls: calls.clone(),
+            succeed_after: 2,
+        })));
+
+        let token = mgr.get_valid_token().await.expect("should succeed after retry");
+        assert_eq!(token, "ya29.retry_success_token");
+        assert!(calls.load(std::sync::atomic::Ordering::SeqCst) >= 3);
+    }
+
+    /// When lock remains held by another replica throughout all backoff attempts,
+    /// `get_valid_token` eventually returns `RefreshSkipped`.
+    #[tokio::test]
+    async fn test_get_valid_token_with_retry_times_out_and_returns_refresh_skipped() {
+        let cred = AntigravityCredential {
+            access_token: None,
+            refresh_token: "rf".to_string(),
+            client_id: "id".to_string(),
+            client_secret: "sec".to_string(),
+            project_id: "proj".to_string(),
+            expiry: None,
+        };
+        let mgr = Arc::new(AntigravityTokenManager::new(
+            "ag-retry-timeout",
+            cred,
+            reqwest::Client::new(),
+        ));
+        mgr.set_refresh_gate(Some(Arc::new(SkipGate)));
+
+        let err = mgr.get_valid_token().await.unwrap_err();
+        assert!(
+            matches!(err, CoreError::RefreshSkipped { .. }),
+            "expected RefreshSkipped after retry exhaustion, got {:?}",
+            err
+        );
+    }
+
+    /// If another replica refreshed and populated the credential in memory while
+    /// this replica was waiting for the lock, `get_valid_token` picks up the cached token
+    /// immediately without acquiring the lock.
+    #[tokio::test]
+    async fn test_get_valid_token_with_retry_detects_cached_token_during_wait() {
+        let cred = AntigravityCredential {
+            access_token: None,
+            refresh_token: "rf".to_string(),
+            client_id: "id".to_string(),
+            client_secret: "sec".to_string(),
+            project_id: "proj".to_string(),
+            expiry: None,
+        };
+        let mgr = Arc::new(AntigravityTokenManager::new(
+            "ag-cached-during-wait",
+            cred,
+            reqwest::Client::new(),
+        ));
+        // Always skip gate
+        mgr.set_refresh_gate(Some(Arc::new(SkipGate)));
+
+        // Spawn a background task to simulate another replica / hot-reload writing the token into cred
+        let mgr_clone = mgr.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            let mut guard = mgr_clone.cred.write();
+            guard.access_token = Some("ya29.injected_by_peer".to_string());
+            guard.expiry = Some(Utc::now() + chrono::Duration::hours(1));
+        });
+
+        let token = mgr.get_valid_token().await.expect("should pick up cached token during wait");
+        assert_eq!(token, "ya29.injected_by_peer");
     }
 }

@@ -90,6 +90,50 @@ impl std::fmt::Debug for UpstreamExecutor {
 /// Gateway-owned User-Agent advertised to upstreams (not a generic SDK name).
 /// OpenCode Go requires callers to identify with their own agent string for
 /// abuse monitoring; the reqwest default would be flagged as generic.
+fn summarize_attempt_failures(kinds: &[GatewayErrorKind]) -> String {
+    if kinds.is_empty() {
+        return String::new();
+    }
+    let mut network_timeout = 0;
+    let mut quota_exhausted = 0;
+    let mut rate_limited = 0;
+    let mut auth_invalid = 0;
+    let mut other = 0;
+
+    for k in kinds {
+        match k {
+            GatewayErrorKind::UpstreamUnavailable => network_timeout += 1,
+            GatewayErrorKind::QuotaExhausted => quota_exhausted += 1,
+            GatewayErrorKind::RateLimitExceeded { .. } => rate_limited += 1,
+            GatewayErrorKind::AuthInvalid => auth_invalid += 1,
+            _ => other += 1,
+        }
+    }
+
+    let mut parts = Vec::new();
+    if network_timeout > 0 {
+        parts.push(format!("{} timeout/network", network_timeout));
+    }
+    if quota_exhausted > 0 {
+        parts.push(format!("{} quota exhausted", quota_exhausted));
+    }
+    if rate_limited > 0 {
+        parts.push(format!("{} rate limited", rate_limited));
+    }
+    if auth_invalid > 0 {
+        parts.push(format!("{} auth invalid", auth_invalid));
+    }
+    if other > 0 {
+        parts.push(format!("{} other error", other));
+    }
+
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!(" (failures: {})", parts.join(", "))
+    }
+}
+
 pub fn ponyllm_user_agent() -> String {
     format!("ponyllm/{}", env!("CARGO_PKG_VERSION"))
 }
@@ -558,7 +602,7 @@ pub fn sanitize_proxy_url(raw: &str) -> String {
     }
 }
 
-pub const DEFAULT_UPSTREAM_TTFB_TIMEOUT: Duration = Duration::from_secs(60);
+pub const DEFAULT_UPSTREAM_TTFB_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Create an optimized, connection-pooled HTTP client for upstream LLM providers.
 /// Enables TCP nodelay, Keep-Alive probing, and idle connection reuse to minimize TTFT.
@@ -1121,6 +1165,7 @@ impl UpstreamExecutor {
         let mut last_error = String::new();
         let mut last_kind = GatewayErrorKind::Internal;
         let mut attempted_keys = Vec::new();
+        let mut attempt_kinds = Vec::new();
         // Antigravity keys already force-refreshed once this request (P0-3
         // stale-token recovery): a second 401 on the same key is genuine.
         let mut refreshed_keys: Vec<String> = Vec::new();
@@ -1141,10 +1186,11 @@ impl UpstreamExecutor {
                         return Err(e);
                     }
                     self.emit_both("", attempt_idx, None, last_kind.clone(), last_error.clone(), None, attempt_start.elapsed());
+                    let aggregated_error = format!("{}{}", summarize_attempt_failures(&attempt_kinds), if last_error.is_empty() { String::new() } else { format!(": {}", last_error) });
                     return Err(CoreError::AllRetriesFailed {
                         retries: attempt,
                         attempted_keys,
-                        last_error,
+                        last_error: aggregated_error,
                         kind: last_kind,
                     });
                 }
@@ -1169,6 +1215,7 @@ impl UpstreamExecutor {
                     self.pool.record_error(&key.id, pool_err);
                     last_error = e.to_string();
                     last_kind = GatewayErrorKind::AuthInvalid;
+                    attempt_kinds.push(last_kind.clone());
                     self.emit_both(&key.id, attempt_idx, None, last_kind.clone(), last_error.clone(), None, attempt_start.elapsed());
                     continue;
                 }
@@ -1181,6 +1228,7 @@ impl UpstreamExecutor {
                 Err(err_str) => {
                     last_error = format!("Network error with {}: {}", key.id, err_str);
                     last_kind = GatewayErrorKind::UpstreamUnavailable;
+                    attempt_kinds.push(last_kind.clone());
                     self.pool.record_error(&key.id, PoolErrorType::NetworkError);
                     if let Some(delay) = transient_retry_delay(&self.pool, &key.id, attempt, max_attempts, None) {
                         attempted_keys.retain(|id| id != &key.id);
@@ -1228,6 +1276,7 @@ impl UpstreamExecutor {
                     if status_code == 429 {
                         let (kind, pool_err) = classify_too_many_requests(&err_body, retry_after);
                         last_kind = kind;
+                        attempt_kinds.push(last_kind.clone());
                         let transient_retry_after = match &pool_err {
                             PoolErrorType::RateLimit { retry_after } => *retry_after,
                             _ => None,
@@ -1249,26 +1298,32 @@ impl UpstreamExecutor {
                             StaleTokenRecovery::RetrySameKey => {
                                 attempted_keys.retain(|id| id != &key.id);
                                 last_kind = GatewayErrorKind::AuthInvalid;
+                                attempt_kinds.push(last_kind.clone());
                                 self.emit_both(&key.id, attempt_idx, Some(status_code), last_kind.clone(), last_error.clone(), Some(err_body), attempt_start.elapsed());
                                 continue;
                             }
                             StaleTokenRecovery::Recorded(kind) => {
                                 last_kind = kind;
+                                attempt_kinds.push(last_kind.clone());
                             }
                             StaleTokenRecovery::Passthrough => {
                                 last_kind = GatewayErrorKind::AuthInvalid;
+                                attempt_kinds.push(last_kind.clone());
                                 self.pool.record_error(&key.id, PoolErrorType::AuthInvalid { reason: None });
                             }
                         }
                     } else if status_code == 403 {
                         let (kind, pool_err) = classify_forbidden(&err_body, retry_after);
                         last_kind = kind;
+                        attempt_kinds.push(last_kind.clone());
                         self.pool.record_error(&key.id, pool_err);
                     } else if status_code == 402 {
                         last_kind = GatewayErrorKind::QuotaExhausted;
+                        attempt_kinds.push(last_kind.clone());
                         self.pool.record_error(&key.id, PoolErrorType::QuotaExhausted { retry_after });
                     } else if status.is_server_error() {
                         last_kind = GatewayErrorKind::UpstreamUnavailable;
+                        attempt_kinds.push(last_kind.clone());
                         self.pool.record_error(&key.id, PoolErrorType::ServerError);
                         if let Some(delay) = transient_retry_delay(&self.pool, &key.id, attempt, max_attempts, None) {
                             attempted_keys.retain(|id| id != &key.id);
@@ -1296,10 +1351,11 @@ impl UpstreamExecutor {
                 }
         }
 
+        let aggregated_error = format!("{}{}", summarize_attempt_failures(&attempt_kinds), if last_error.is_empty() { String::new() } else { format!(": {}", last_error) });
         Err(CoreError::AllRetriesFailed {
             retries: max_attempts,
             attempted_keys,
-            last_error,
+            last_error: aggregated_error,
             kind: last_kind,
         })
     }
@@ -1317,6 +1373,7 @@ impl UpstreamExecutor {
         let mut last_error = String::new();
         let mut last_kind = GatewayErrorKind::Internal;
         let mut attempted_keys = Vec::new();
+        let mut attempt_kinds = Vec::new();
         // Antigravity keys already force-refreshed once this request (P0-3
         // stale-token recovery): a second 401 on the same key is genuine.
         let mut refreshed_keys: Vec<String> = Vec::new();
@@ -1337,10 +1394,11 @@ impl UpstreamExecutor {
                         return Err(e);
                     }
                     self.emit_both("", attempt_idx, None, last_kind.clone(), last_error.clone(), None, attempt_start.elapsed());
+                    let aggregated_error = format!("{}{}", summarize_attempt_failures(&attempt_kinds), if last_error.is_empty() { String::new() } else { format!(": {}", last_error) });
                     return Err(CoreError::AllRetriesFailed {
                         retries: attempt,
                         attempted_keys,
-                        last_error,
+                        last_error: aggregated_error,
                         kind: last_kind,
                     });
                 }
@@ -1365,6 +1423,7 @@ impl UpstreamExecutor {
                     self.pool.record_error(&key.id, pool_err);
                     last_error = e.to_string();
                     last_kind = GatewayErrorKind::AuthInvalid;
+                    attempt_kinds.push(last_kind.clone());
                     self.emit_both(&key.id, attempt_idx, None, last_kind.clone(), last_error.clone(), None, attempt_start.elapsed());
                     continue;
                 }
@@ -1377,6 +1436,7 @@ impl UpstreamExecutor {
                 Err(err_str) => {
                     last_error = format!("Network error with {}: {}", key.id, err_str);
                     last_kind = GatewayErrorKind::UpstreamUnavailable;
+                    attempt_kinds.push(last_kind.clone());
                     self.pool.record_error(&key.id, PoolErrorType::NetworkError);
                     if let Some(delay) = transient_retry_delay(&self.pool, &key.id, attempt, max_attempts, None) {
                         attempted_keys.retain(|id| id != &key.id);
@@ -1417,6 +1477,7 @@ impl UpstreamExecutor {
                     if status_code == 429 {
                         let (kind, pool_err) = classify_too_many_requests(&err_body, retry_after);
                         last_kind = kind;
+                        attempt_kinds.push(last_kind.clone());
                         let transient_retry_after = match &pool_err {
                             PoolErrorType::RateLimit { retry_after } => *retry_after,
                             _ => None,
@@ -1438,26 +1499,32 @@ impl UpstreamExecutor {
                             StaleTokenRecovery::RetrySameKey => {
                                 attempted_keys.retain(|id| id != &key.id);
                                 last_kind = GatewayErrorKind::AuthInvalid;
+                                attempt_kinds.push(last_kind.clone());
                                 self.emit_both(&key.id, attempt_idx, Some(status_code), last_kind.clone(), last_error.clone(), Some(err_body), attempt_start.elapsed());
                                 continue;
                             }
                             StaleTokenRecovery::Recorded(kind) => {
                                 last_kind = kind;
+                                attempt_kinds.push(last_kind.clone());
                             }
                             StaleTokenRecovery::Passthrough => {
                                 last_kind = GatewayErrorKind::AuthInvalid;
+                                attempt_kinds.push(last_kind.clone());
                                 self.pool.record_error(&key.id, PoolErrorType::AuthInvalid { reason: None });
                             }
                         }
                     } else if status_code == 403 {
                         let (kind, pool_err) = classify_forbidden(&err_body, retry_after);
                         last_kind = kind;
+                        attempt_kinds.push(last_kind.clone());
                         self.pool.record_error(&key.id, pool_err);
                     } else if status_code == 402 {
                         last_kind = GatewayErrorKind::QuotaExhausted;
+                        attempt_kinds.push(last_kind.clone());
                         self.pool.record_error(&key.id, PoolErrorType::QuotaExhausted { retry_after });
                     } else if status.is_server_error() {
                         last_kind = GatewayErrorKind::UpstreamUnavailable;
+                        attempt_kinds.push(last_kind.clone());
                         self.pool.record_error(&key.id, PoolErrorType::ServerError);
                         if let Some(delay) = transient_retry_delay(&self.pool, &key.id, attempt, max_attempts, None) {
                             attempted_keys.retain(|id| id != &key.id);
@@ -1486,10 +1553,11 @@ impl UpstreamExecutor {
             }
         }
 
+        let aggregated_error = format!("{}{}", summarize_attempt_failures(&attempt_kinds), if last_error.is_empty() { String::new() } else { format!(": {}", last_error) });
         Err(CoreError::AllRetriesFailed {
             retries: max_attempts,
             attempted_keys,
-            last_error,
+            last_error: aggregated_error,
             kind: last_kind,
         })
     }

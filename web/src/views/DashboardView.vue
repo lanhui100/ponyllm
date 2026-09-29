@@ -31,9 +31,11 @@ async function handleRefreshAntigravityQuotas() {
   if (antigravityKeys.value.length === 0 || isRefreshingAntigravity.value) return;
   isRefreshingAntigravity.value = true;
   try {
-    await Promise.allSettled(
-      antigravityKeys.value.map((k) => testSingleKey(k.id))
-    );
+    // 串行错峰探测，防止所有 Key 同时并发刷新触发 OAuth 跨节点串行锁冲突
+    for (const k of antigravityKeys.value) {
+      await testSingleKey(k.id);
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    }
     // 探测完成后重新拉取 Key 状态：若上游已恢复额度，后端已解除冷却并推入 Active 状态
     await fetchAdminConfig();
   } finally {

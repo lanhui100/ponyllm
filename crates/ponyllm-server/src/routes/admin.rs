@@ -2897,16 +2897,34 @@ pub async fn handle_admin_test_key(
                     usage: None,
                 }
             }
-            Err(e) => KeyTestView {
+            Err(ponyllm_core::error::CoreError::RefreshSkipped { .. }) => KeyTestView {
                 success: false,
                 latency_ms,
-                http_status: Some(401),
-                error_code: Some("auth_failed".to_string()),
-                message: format!("OAuth token refresh failed: {}", e),
+                http_status: Some(429),
+                error_code: Some("lock_busy".to_string()),
+                message: "OAuth token refresh lock is currently held by another replica; retry shortly".to_string(),
                 quota: None,
                 quota_groups: None,
                 usage: None,
             },
+            Err(e) => {
+                let is_invalid_grant = matches!(&e, ponyllm_core::error::CoreError::AuthInvalid { .. })
+                    || e.to_string().to_ascii_lowercase().contains("invalid_grant");
+                KeyTestView {
+                    success: false,
+                    latency_ms,
+                    http_status: Some(401),
+                    error_code: Some(if is_invalid_grant {
+                        "invalid_grant".to_string()
+                    } else {
+                        "auth_failed".to_string()
+                    }),
+                    message: format!("OAuth token refresh failed: {}", e),
+                    quota: None,
+                    quota_groups: None,
+                    usage: None,
+                }
+            }
         };
 
         return Json(test_view).into_response();
