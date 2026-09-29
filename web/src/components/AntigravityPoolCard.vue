@@ -815,7 +815,7 @@ function getProgressColor(percent: number): { bar: string; text: string; bg: str
     <!-- 卡片头部 -->
     <div class="flex flex-wrap items-center justify-between gap-3 pb-4 mb-4 border-b border-slate-200/60">
       <div class="flex items-center gap-2.5">
-        <div class="flex items-center justify-center w-7 h-7 rounded-lg bg-amber-500/10 text-amber-600">
+        <div class="flex items-center justify-center text-slate-800">
           <Icons name="zap" size="16" />
         </div>
         <div>
@@ -859,24 +859,24 @@ function getProgressColor(percent: number): { bar: string; text: string; bg: str
     </div>
 
     <!-- 三栏指标网格：账号可用性 / Gemini实时容量 / 周期真实额度统计 -->
-    <div class="grid grid-cols-1 md:grid-cols-3 gap-5">
+    <div class="pool-metric-grid grid grid-cols-1 md:grid-cols-3 gap-5">
       <!-- 栏 1: 账号可用性与恢复倒计时 -->
       <div class="flex flex-col justify-between p-3.5 rounded-lg bg-slate-50/60 border border-slate-100/80">
-        <div>
-          <div class="flex items-center justify-between text-xs text-slate-500 mb-2 font-medium">
-            <span class="inline-flex items-center gap-1 text-slate-700">
-              <Icons name="check" size="14" class="text-emerald-600" />
-              账户可用性状态
-            </span>
-            <span
-              class="px-2 py-0.5 text-[11px] font-semibold rounded-full text-white shadow-xs font-mono tracking-tight"
-              :class="activeKeys.length > 0 ? 'bg-emerald-600' : 'bg-rose-600'"
-              data-testid="account-ready-badge"
-            >
-              {{ activeKeys.length }}/{{ totalAccounts }} 账号就绪
-            </span>
-          </div>
+        <div class="flex items-center justify-between text-xs text-slate-500 mb-2 font-medium">
+          <span class="inline-flex items-center gap-1 text-slate-700">
+            <Icons name="check" size="14" class="text-slate-700" />
+            账户可用性状态
+          </span>
+          <span
+            class="px-2 py-0.5 text-[11px] font-semibold rounded-full text-white shadow-xs font-mono tracking-tight"
+            :class="activeKeys.length > 0 ? 'bg-emerald-600' : 'bg-rose-600'"
+            data-testid="account-ready-badge"
+          >
+            {{ activeKeys.length }}/{{ totalAccounts }} 账号就绪
+          </span>
+        </div>
 
+        <div class="flex flex-1 flex-col justify-center">
           <div class="flex items-baseline gap-2 mb-2">
             <span class="text-3xl font-bold font-mono tracking-tight text-slate-900 tabular-nums">
               {{ availabilityRate }}%
@@ -955,17 +955,17 @@ function getProgressColor(percent: number): { bar: string; text: string; bg: str
 
       <!-- 栏 2: Gemini 容量 (5小时即时窗口 + 周度长效续航) -->
       <div class="flex flex-col justify-between p-3.5 rounded-lg bg-slate-50/60 border border-slate-100/80">
-        <div>
-          <div class="flex items-center justify-between text-xs text-slate-500 mb-2.5 font-medium">
-            <span class="inline-flex items-center gap-1 text-slate-700">
-              <Icons name="sparkles" size="14" class="text-sky-600" />
-              Gemini 容量水位
-            </span>
-            <UiTooltip content="5h 窗口由上游即时限流桶驱动，周度窗口由自然周/7天配额桶驱动，共同表征就绪账号的爆发余量与周期续航。">
-              <span class="text-[11px] text-slate-400 cursor-help">即时 + 周度窗口 ⓘ</span>
-            </UiTooltip>
-          </div>
+        <div class="flex items-center justify-between text-xs text-slate-500 mb-2.5 font-medium">
+          <span class="inline-flex items-center gap-1 text-slate-700">
+            <Icons name="sparkles" size="14" class="text-slate-700" />
+            Gemini 容量水位
+          </span>
+          <UiTooltip content="5h 窗口由上游即时限流桶驱动，周度窗口由自然周/7天配额桶驱动，共同表征就绪账号的爆发余量与周期续航。">
+            <span class="text-[11px] text-slate-400 cursor-help">即时 + 周度窗口 ⓘ</span>
+          </UiTooltip>
+        </div>
 
+        <div class="flex flex-1 flex-col justify-center">
           <!-- 5 小时窗口水位 -->
           <div class="space-y-1.5 mb-4">
             <div class="flex items-center justify-between text-xs">
@@ -1017,7 +1017,7 @@ function getProgressColor(percent: number): { bar: string; text: string; bg: str
         <div>
           <div class="flex items-center justify-between text-xs text-slate-500 mb-2 font-medium">
             <span class="inline-flex items-center gap-1 text-slate-700">
-              <Icons name="activity" size="14" class="text-amber-600" />
+              <Icons name="activity" size="14" class="text-slate-700" />
               账号周期额度测定
             </span>
             <span class="text-[11px] text-slate-400">完整周期加权</span>

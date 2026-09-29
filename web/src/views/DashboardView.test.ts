@@ -143,8 +143,10 @@ describe('DashboardView Full Feature Integration', () => {
     expect(container.textContent).toContain('7天');
     expect(container.textContent).toContain('30天');
     expect(container.textContent).toContain('deepseek');
-    expect(container.textContent).toContain('输入 Token');
-    expect(container.textContent).toContain('输出 Token');
+    expect(container.textContent).toContain('输入');
+    expect(container.textContent).not.toContain('输入 Token');
+    expect(container.textContent).toContain('输出');
+    expect(container.textContent).not.toContain('输出 Token');
     expect(container.textContent).toContain('缓存命中');
 
     // 4. Verify Trend Charts presence and Token 3-dimension switch (without '按')

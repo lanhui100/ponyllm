@@ -108,16 +108,16 @@ const ttft = computed(() => {
 const avgTps = computed(() => {
   if (isAllTime.value) {
     const v = props.metrics?.stream?.avg_tps;
-    return v !== undefined && v !== null && v > 0 ? `${Math.round(v)} tok/s` : '--';
+    return v !== undefined && v !== null && v > 0 ? `${Math.round(v)} t/s` : '--';
   }
   // 选定周期下，优先读取后端在该时间段内聚合的真实生成速率
   const histTps = props.historyData?.avg_tps;
   if (histTps !== undefined && histTps !== null && histTps > 0) {
-    return `${Math.round(histTps)} tok/s`;
+    return `${Math.round(histTps)} t/s`;
   }
   // 若无或无请求活跃，优雅回退到全局流式 tps
   const fallback = props.metrics?.stream?.avg_tps;
-  return fallback !== undefined && fallback !== null && fallback > 0 ? `${Math.round(fallback)} tok/s` : '--';
+  return fallback !== undefined && fallback !== null && fallback > 0 ? `${Math.round(fallback)} t/s` : '--';
 });
 
 const errorRate = computed(() => {
@@ -135,9 +135,6 @@ const errorRate = computed(() => {
     <div class="flex items-center justify-between mb-3.5">
       <div class="flex items-center gap-2">
         <span class="text-[13px] font-semibold text-slate-700">核心指标概览</span>
-        <span class="text-xs text-slate-600">
-          ({{ rangeOptions.find((o) => o.key === (range ?? '24h'))?.label }})
-        </span>
       </div>
       <div class="segment-track inline-flex items-center bg-slate-200/60 p-0.5 rounded-lg border border-slate-300/40">
         <button
@@ -165,7 +162,7 @@ const errorRate = computed(() => {
       <div class="swiss-card p-5 bg-white/45 backdrop-blur-xs transition-all duration-200 border border-white/40">
         <div class="flex items-center justify-between text-[13px] text-slate-500 mb-2.5">
           <span class="font-semibold text-slate-700 inline-flex items-center gap-1.5">
-            <Icons name="activity" size="16" class="text-orange-600" />
+            <Icons name="activity" size="16" class="text-slate-700" />
             调用次数
           </span>
         </div>
@@ -181,7 +178,7 @@ const errorRate = computed(() => {
       <div class="swiss-card p-5 bg-white/45 backdrop-blur-xs transition-all duration-200 border border-white/40">
         <div class="flex items-center justify-between text-[13px] text-slate-500 mb-1.5">
           <span class="font-semibold text-slate-700 inline-flex items-center gap-1.5">
-            <Icons name="sparkles" size="16" class="text-sky-700" />
+            <Icons name="sparkles" size="16" class="text-slate-700" />
             Token量
           </span>
         </div>
@@ -190,13 +187,11 @@ const errorRate = computed(() => {
           {{ completionTokens.toLocaleString() }}
           <span class="text-sm font-normal text-slate-500 font-sans">tok</span>
         </div>
-        <!-- 下方：输入、输出、缓存三个维度 (以K/M整数单位呈现，缓存附带百分比) -->
-        <div class="text-[12px] text-slate-600 font-medium flex flex-wrap items-center gap-x-2 gap-y-0.5" :title="`输入: ${promptTokens.toLocaleString()} · 输出: ${completionTokens.toLocaleString()} · 缓存: ${cachedTokens.toLocaleString()} (${cacheHitRate})`">
-          <span>输入: <span class="font-mono text-slate-800 font-semibold">{{ formatTokensInt(promptTokens) }}</span></span>
-          <span class="text-slate-300">·</span>
-          <span>输出: <span class="font-mono text-slate-800 font-semibold">{{ formatTokensInt(completionTokens) }}</span></span>
-          <span class="text-slate-300">·</span>
-          <span>缓存: <span class="font-mono text-emerald-700 font-semibold">{{ formatTokensInt(cachedTokens) }}</span> <span class="text-3xs font-mono text-emerald-600 font-bold ml-0.5">({{ cacheHitRate }})</span></span>
+        <!-- 下方：输入、输出、缓存三个维度，以语义图标承载标签 -->
+        <div class="text-[12px] text-slate-600 font-medium flex items-center gap-3" :title="`输入: ${promptTokens.toLocaleString()} · 输出: ${completionTokens.toLocaleString()} · 缓存: ${cachedTokens.toLocaleString()} (${cacheHitRate})`">
+          <span class="inline-flex items-center gap-1 font-mono text-slate-700" :aria-label="`输入 ${promptTokens.toLocaleString()}`"><Icons name="arrow-down-left" size="12" class="text-emerald-600" /><span>{{ formatTokensInt(promptTokens) }}</span></span>
+          <span class="inline-flex items-center gap-1 font-mono text-slate-700" :aria-label="`输出 ${completionTokens.toLocaleString()}`"><Icons name="arrow-up-right" size="12" class="text-amber-600" /><span>{{ formatTokensInt(completionTokens) }}</span></span>
+          <span class="inline-flex items-center gap-1 font-mono text-slate-700" :aria-label="`缓存 ${cachedTokens.toLocaleString()}，命中率 ${cacheHitRate}`"><Icons name="database" size="12" class="text-sky-600" /><span>{{ formatTokensInt(cachedTokens) }}</span> <span class="text-[10px]">({{ cacheHitRate }})</span></span>
         </div>
       </div>
 
@@ -204,7 +199,7 @@ const errorRate = computed(() => {
       <div class="swiss-card p-5 bg-white/45 backdrop-blur-xs transition-all duration-200 border border-white/40">
         <div class="flex items-center justify-between text-[13px] text-slate-500 mb-2.5">
           <span class="font-semibold text-slate-700 inline-flex items-center gap-1.5">
-            <Icons name="zap" size="16" class="text-amber-600" />
+            <Icons name="zap" size="16" class="text-slate-700" />
             延迟
           </span>
         </div>
@@ -212,7 +207,7 @@ const errorRate = computed(() => {
           {{ ttft }}
         </div>
         <div class="text-[13px] text-slate-500 font-medium">
-          {{ isAllTime ? '累计平均首字延迟 (TTFT)' : '所选周期平均首字延迟 (TTFT)' }}
+          TTFT
         </div>
       </div>
 
@@ -220,7 +215,7 @@ const errorRate = computed(() => {
       <div class="swiss-card p-5 bg-white/45 backdrop-blur-xs transition-all duration-200 border border-white/40">
         <div class="flex items-center justify-between text-[13px] text-slate-500 mb-2.5">
           <span class="font-semibold text-slate-700 inline-flex items-center gap-1.5">
-            <Icons name="sparkles" size="16" class="text-teal-700" />
+            <Icons name="sparkles" size="16" class="text-slate-700" />
             速率
           </span>
         </div>
@@ -228,7 +223,7 @@ const errorRate = computed(() => {
           {{ avgTps }}
         </div>
         <div class="text-[13px] text-slate-500 font-medium">
-          {{ isAllTime ? '累计平均生成速率 (TPS)' : '所选周期平均生成速率 (TPS)' }}
+          TPS
         </div>
       </div>
 
@@ -239,7 +234,7 @@ const errorRate = computed(() => {
             <Icons
               name="warning"
               size="15"
-              :class="errorRate !== '0.0%' ? 'text-rose-600' : 'text-slate-500'"
+              class="text-slate-700"
             />
             故障率
           </span>

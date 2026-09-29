@@ -105,16 +105,16 @@ function getProviderTps(p: any): string {
   const val = p.avg_tps ?? p.tps;
   const hasCalls = (p.stream_count ?? 0) > 0 || (p.total_requests ?? 0) > 0;
   if (!hasCalls || val === undefined || val === null || val <= 0) return '--';
-  return `${Math.round(val)} tok/s`;
+  return `${Math.round(val)} t/s`;
 }
 </script>
 
 <template>
   <div class="swiss-card bg-white/45 backdrop-blur-xs p-6 mb-6 transition-all duration-200 border border-white/40">
     <!-- 头部区域：标题与周期 Switch -->
-    <div class="flex flex-wrap items-center justify-between gap-3 pb-4 mb-4 bg-white/35 rounded-lg px-3 pt-3">
+    <div class="flex flex-wrap items-center justify-between gap-3 pb-4 mb-4">
       <div class="flex items-center gap-2.5">
-        <div class="w-8 h-8 rounded-lg bg-orange-100 text-orange-600 flex items-center justify-center">
+        <div class="flex items-center text-slate-900">
           <Icons name="server" size="16" />
         </div>
         <div>
@@ -163,16 +163,16 @@ function getProviderTps(p: any): string {
     <div v-else class="overflow-x-auto">
       <table class="w-full text-left text-[14px]">
         <thead>
-          <tr class="text-slate-500 bg-white/60 font-medium text-[13px]">
-            <th class="pb-3 pt-2 px-2 font-semibold whitespace-nowrap rounded-l-lg">提供商</th>
-            <th class="pb-3 pt-2 font-semibold whitespace-nowrap">连通性状态 (最近调用)</th>
-            <th class="pb-3 pt-2 font-semibold whitespace-nowrap text-slate-700">输入 Token</th>
-            <th class="pb-3 pt-2 font-semibold whitespace-nowrap text-sky-700">输出 Token</th>
-            <th class="pb-3 pt-2 font-semibold whitespace-nowrap text-emerald-700">缓存命中</th>
-            <th class="pb-3 pt-2 font-semibold whitespace-nowrap">流调用数</th>
-            <th class="pb-3 pt-2 font-semibold whitespace-nowrap">平均 TTFT</th>
-            <th class="pb-3 pt-2 font-semibold whitespace-nowrap">平均 TPS</th>
-            <th class="pb-3 pt-2 px-2 font-semibold text-right whitespace-nowrap rounded-r-lg">错误数</th>
+          <tr class="text-slate-500 font-medium text-[13px]">
+            <th class="pb-3 pt-2 px-2 font-semibold whitespace-nowrap"><span class="inline-flex items-center gap-1.5"><Icons name="server" size="14" />提供商</span></th>
+            <th class="pb-3 pt-2 font-semibold whitespace-nowrap"><span class="inline-flex items-center gap-1.5"><Icons name="activity" size="14" />连通性状态</span></th>
+            <th class="pb-3 pt-2 font-semibold whitespace-nowrap"><span class="inline-flex items-center gap-1.5"><Icons name="arrow-down-left" size="14" />输入</span></th>
+            <th class="pb-3 pt-2 font-semibold whitespace-nowrap"><span class="inline-flex items-center gap-1.5"><Icons name="arrow-up-right" size="14" />输出</span></th>
+            <th class="pb-3 pt-2 font-semibold whitespace-nowrap"><span class="inline-flex items-center gap-1.5"><Icons name="database" size="14" />缓存命中</span></th>
+            <th class="pb-3 pt-2 font-semibold whitespace-nowrap"><span class="inline-flex items-center gap-1.5"><Icons name="repeat" size="14" />调用次数</span></th>
+            <th class="pb-3 pt-2 font-semibold whitespace-nowrap"><span class="inline-flex items-center gap-1.5"><Icons name="zap" size="14" />平均 TTFT</span></th>
+            <th class="pb-3 pt-2 font-semibold whitespace-nowrap"><span class="inline-flex items-center gap-1.5"><Icons name="sparkles" size="14" />平均 TPS</span></th>
+            <th class="pb-3 pt-2 px-2 font-semibold text-right whitespace-nowrap"><span class="inline-flex items-center gap-1.5 justify-end"><Icons name="warning" size="14" />错误数</span></th>
           </tr>
         </thead>
         <tbody>
@@ -183,7 +183,7 @@ function getProviderTps(p: any): string {
           >
             <!-- Provider 名称 -->
             <td class="py-3.5 px-2 font-bold text-slate-900 whitespace-nowrap">
-              <span class="px-2.5 py-1 rounded-md bg-slate-200/60 text-slate-900 font-mono text-[13px] font-semibold">
+              <span class="text-slate-600 font-mono text-[13px] font-semibold">
                 {{ name }}
               </span>
             </td>
@@ -194,20 +194,21 @@ function getProviderTps(p: any): string {
                 :slots="p.uptime_bars?.slots"
                 :latest-latency-ms="p.uptime_bars?.latest_latency_ms"
                 :is-provider="true"
+                :flat="true"
                 bar-height="h-4"
               />
             </td>
 
-            <!-- 输入 Token -->
+            <!-- 输入 -->
             <td class="py-3.5 whitespace-nowrap">
-              <span class="font-mono font-semibold text-slate-800">
+              <span class="font-mono font-semibold text-slate-600">
                 {{ formatTokens(getProviderPromptTokens(name, p)) }}
               </span>
             </td>
 
-            <!-- 输出 Token -->
+            <!-- 输出 -->
             <td class="py-3.5 whitespace-nowrap">
-              <span class="font-mono font-bold text-sky-700">
+              <span class="font-mono font-semibold text-slate-600">
                 {{ formatTokens(getProviderCompletionTokens(name, p)) }}
               </span>
             </td>
@@ -215,37 +216,36 @@ function getProviderTps(p: any): string {
             <!-- 缓存命中 -->
             <td class="py-3.5 whitespace-nowrap">
               <div class="flex items-baseline gap-1.5">
-                <span class="font-mono font-semibold text-emerald-700">
+                <span class="font-mono font-semibold text-slate-600">
                   {{ formatTokens(getProviderCachedTokens(name, p)) }}
                 </span>
                 <span
                   v-if="getProviderCachedTokens(name, p) > 0"
-                  class="text-xs font-mono font-bold text-emerald-600"
+                  class="text-xs font-mono font-semibold text-slate-500"
                 >
                   ({{ getProviderCachedPercent(name, p) }})
                 </span>
               </div>
             </td>
 
-            <!-- 流调用数 -->
-            <td class="py-3.5 text-slate-700 font-mono text-[13px] whitespace-nowrap">
+            <!-- 调用次数 -->
+            <td class="py-3.5 text-slate-600 font-mono text-[13px] whitespace-nowrap">
               {{ p.stream_count ?? 0 }}
             </td>
 
             <!-- 平均 TTFT -->
-            <td class="py-3.5 text-slate-700 font-mono text-[13px] whitespace-nowrap">
+            <td class="py-3.5 text-slate-600 font-mono text-[13px] whitespace-nowrap">
               {{ getProviderTtft(p) }}
             </td>
 
             <!-- 平均 TPS -->
-            <td class="py-3.5 text-slate-700 font-mono text-[13px] whitespace-nowrap">
+            <td class="py-3.5 text-slate-600 font-mono text-[13px] whitespace-nowrap">
               {{ getProviderTps(p) }}
             </td>
 
             <!-- 错误数 -->
             <td
-              class="py-3.5 text-right font-mono text-[13px] font-semibold whitespace-nowrap"
-              :class="(p.error_count ?? 0) > 0 ? 'text-rose-600' : 'text-slate-500'"
+              class="py-3.5 text-right font-mono text-[13px] font-semibold whitespace-nowrap text-rose-600"
             >
               {{ p.error_count ?? 0 }}
             </td>

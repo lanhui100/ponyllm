@@ -153,10 +153,10 @@ function getSlotTooltip(slot: ConnectivitySlot): string {
     <div
       v-if="showLatency"
       data-testid="latest-latency"
-      class="text-[13px] font-mono font-medium"
-      :class="latencyClasses"
+      class="text-[13px] font-mono font-medium tabular-nums"
+      :class="[latencyClasses, isProvider ? 'w-[8ch] text-right' : '']"
     >
-      {{ hasValidLatency ? `${latestLatencyMs!.toFixed(1)} ms` : '--' }}
+      {{ hasValidLatency ? `${isProvider ? Math.round(latestLatencyMs!) : latestLatencyMs!.toFixed(1)} ms` : '--' }}
     </div>
 
     <!-- 24 小时平均速度指示 (t/s) -->
