@@ -215,3 +215,7 @@ Server Encryption Hashes: All hashes match
 - 4 副本 Running/Ready 全 1/1、restarts 全 0；公网 /health=200。
 - 360m 窗口：reload 日志 0（无外部变更，无风暴）；invalid_grant/panic 0。
 - A7-3 现网口径：a=34/e=0/p=0（新公式 100%）；A7-2 冲突=0。
+
+## Phase 4 观察 +370m（2026-09-29 10:54 UTC，基线 04:44Z 后约 6h10m，7 天窗口 D1）
+- 4 副本 Running/Ready 全 1/1、restarts 全 0；公网 /health=200。
+- 370m 窗口：reload 日志 0（无外部变更，无风暴）；invalid_grant/panic 0。
