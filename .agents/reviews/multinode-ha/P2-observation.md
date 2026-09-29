@@ -210,3 +210,8 @@ Server Encryption Hashes: All hashes match
 - 4 副本 Running/Ready 全 1/1、restarts 全 0；公网 /health=200；lockdb Running/0 重启（7h35m）。
 - 300m 窗口：reload 日志 0（无外部变更，无风暴）；invalid_grant/panic 0；锁错误/persist_failure/配置冲突 0。
 - Phase 3 24h 观察窗口未满（已 5.5h/24h）；Phase 4（7 天观察+清理）待组建 Agent Team。
+
+## Phase 4 观察 +360m（2026-09-29 10:41 UTC，基线 04:44Z 后约 6h，7 天窗口 D1 进行中）
+- 4 副本 Running/Ready 全 1/1、restarts 全 0；公网 /health=200。
+- 360m 窗口：reload 日志 0（无外部变更，无风暴）；invalid_grant/panic 0。
+- A7-3 现网口径：a=34/e=0/p=0（新公式 100%）；A7-2 冲突=0。
