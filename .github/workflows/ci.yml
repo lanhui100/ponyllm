@@ -181,3 +181,9 @@ jobs:
           labels: ${{ steps.meta-aliyun.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          # 阿里云 ACR 拒绝 buildx 默认 provenance/sbom 生成的 OCI attestation
+          # manifest（application/vnd.oci.empty.v1+json → denied: unknown
+          # manifest class）。关闭后推送纯平台 manifest，与 ACR 兼容
+          # （GHCR 步骤保留 provenance，二者要求不同）。
+          provenance: false
+          sbom: false
