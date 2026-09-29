@@ -40,17 +40,12 @@ metadata:
     app.kubernetes.io/name: ponyllm
     app.kubernetes.io/component: gateway
   annotations:
-    # Keel 自动部署注解（GitOps 修订 2026-09-29）：
-    # 镜像引用从 digest 钉住改为 `latest` 标签 + force 策略 —— 前提已收严：
-    #   1) 唯一推流方 = CI（main push 全量测试门禁通过后才构建推送）；
-    #   2) 滚动零停机（maxUnavailable:0 / maxSurge:1 + /health 就绪探针）；
-    #   3) revisionHistoryLimit:3 保留回滚（rollout undo 回上一 digest）。
-    # 历史教训（force 盲目滚动）的成因——未经验签的手工推送——已被"CI 独占推送"
-    # 消除；`latest` 为可变标签，运行镜像真相 = 最近一次 CI 产物，审计靠
-    # sha-<short> 标签与 deployment.kubernetes.io/revision 追溯。
-    keel.sh/policy: force
-    keel.sh/trigger: poll
-    keel.sh/pollSchedule: "@every 10m"
+    # 部署机制（2026-09-29 修订）：CI deploy job 直接驱动 —— 镜像推送后
+    # 由 CI 把 registry digest 钉入本清单（[skip ci] commit-back，清单即真相）
+    # 并 kubectl apply，确定性零停机滚动（maxUnavailable:0 / maxSurge:1 +
+    # /health 就绪探针）。曾试用 Keel `latest`+force 自动滚动，实证不可靠
+    # （相同标签不产生 spec 变更 + IfNotPresent 节点缓存旧 digest → 混合版本），
+    # 已移除 Keel 注解。回滚：kubectl rollout undo（revisionHistoryLimit:3）。
 spec:
   # Phase 3 (ADR §4)：4 副本 → devserver / jobcopilot-preprod / proserver / tencent
   # 各 1 个；配合下方 ScheduleAnyway topology，keel/手动滚动不卡死。

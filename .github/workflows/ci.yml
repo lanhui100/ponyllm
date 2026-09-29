@@ -172,6 +172,7 @@ jobs:
             type=sha,prefix=sha-,format=short
 
       - name: Build and push Docker image (Aliyun prod)
+        id: build-aliyun
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -187,3 +188,86 @@ jobs:
           # （GHCR 步骤保留 provenance，二者要求不同）。
           provenance: false
           sbom: false
+
+  # ---- GitOps 生产部署（CI deploy job，确定性 digest 钉）----
+  # 实证（2026-09-29）：Keel 的 `latest`+force 自动滚动不可靠——
+  #   1) 相同标签不产生 spec 变更 → 滚动不触发/不完整；
+  #   2) IfNotPresent + 可变标签 → 节点缓存旧 digest → 混合版本。
+  # 改由 CI 直接驱动：镜像推送成功后，本 job 解析 sha-<short> 标签的
+  # registry digest → 钉入 deploy/ponyllm-deployment.yaml（[skip ci]
+  # commit-back，清单即真相）→ kubectl apply → rollout 验证 → 冒烟。
+  # 集群凭据：KUBECONFIG_BASE64（最小权限 ci-deployer，仅 ponyllm 命名
+  # 空间 deployments/services + pods 只读）；冒烟用 PONYLLM_API_KEY。
+  deploy:
+    name: GitOps Deploy (prod)
+    needs: build-and-push-image
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v4
+
+      - name: Configure kubeconfig (scoped ci-deployer)
+        run: |
+          mkdir -p "$HOME/.kube"
+          echo "${{ secrets.KUBECONFIG_BASE64 }}" | base64 -d > "$HOME/.kube/config"
+          chmod 600 "$HOME/.kube/config"
+
+      - name: Log in to Aliyun registry (resolve digest)
+        uses: docker/login-action@v3
+        with:
+          registry: crpi-3cfwwtc3um8h6d3q.cn-hangzhou.personal.cr.aliyuncs.com
+          username: ${{ secrets.ALIYUN_REGISTRY_USERNAME }}
+          password: ${{ secrets.ALIYUN_REGISTRY_PASSWORD }}
+
+      - name: Resolve pushed image digest
+        id: resolve
+        run: |
+          IMG="crpi-3cfwwtc3um8h6d3q.cn-hangzhou.personal.cr.aliyuncs.com/job-copilot/api-v2"
+          DIGEST="$(docker pull "${IMG}:sha-${GITHUB_SHA::7}" 2>&1 | grep -oE 'Digest: sha256:[0-9a-f]{64}' | tail -1 | cut -d' ' -f2)"
+          [ -n "$DIGEST" ] || { echo "FAIL: could not resolve digest for sha-${GITHUB_SHA::7}"; exit 1; }
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+          echo "resolved: $IMG@$DIGEST"
+
+      - name: Pin digest into manifest
+        run: |
+          DIGEST="${{ steps.resolve.outputs.digest }}"
+          IMG="crpi-3cfwwtc3um8h6d3q.cn-hangzhou.personal.cr.aliyuncs.com/job-copilot/api-v2@$DIGEST"
+          sed -i "s|image: crpi-3cfwwtc3um8h6d3q.cn-hangzhou.personal.cr.aliyuncs.com/job-copilot/api-v2@sha256:[0-9a-f]*|image: $IMG|" deploy/ponyllm-deployment.yaml
+          grep -m1 "^.*image:" deploy/ponyllm-deployment.yaml
+
+      - name: Commit digest pin back to main (skip CI)
+        run: |
+          git config user.name "ponyllm-ci"
+          git config user.email "ci@ponyllm.local"
+          git add deploy/ponyllm-deployment.yaml
+          if git diff --cached --quiet; then
+            echo "no manifest change (digest already current)"
+          else
+            git commit -m "deploy(prod): pin image digest sha256:${GITHUB_SHA::7} [skip ci]"
+            git push origin main
+          fi
+
+      - name: Apply manifest
+        run: kubectl apply -f deploy/ponyllm-deployment.yaml
+
+      - name: Wait for rollout (auto-rollback on failure)
+        run: |
+          if ! kubectl -n ponyllm rollout status deploy/ponyllm-gateway --timeout=300s; then
+            echo "::warning::Rollout failed — rolling back to previous revision"
+            kubectl -n ponyllm rollout undo deploy/ponyllm-gateway
+            kubectl -n ponyllm rollout status deploy/ponyllm-gateway --timeout=300s
+            exit 1
+          fi
+
+      - name: Post-deploy smoke
+        if: secrets.PONYLLM_API_KEY != ''
+        run: |
+          export PONYLLM_API_KEY="${{ secrets.PONYLLM_API_KEY }}"
+          export PONYLLM_BASE_URL=https://tokens.ponyjob.top
+          bash scripts/post-deploy-smoke.sh

@@ -1,0 +1,49 @@
+# CI 部署身份（GitOps deploy job 使用）——最小权限：
+#   仅 ponyllm 命名空间内 deployments/services 的读写 + pods 只读（rollout 状态）。
+#   无 secrets/configmaps 读取、无跨命名空间权限、无集群级权限。
+# 凭据形态：ServiceAccount + 长期 token Secret；kubeconfig 由运维导出后
+# base64 存入 GitHub Secrets（KUBECONFIG_BASE64），不经本清单落盘。
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ci-deployer
+  namespace: ponyllm
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: ci-deployer
+  namespace: ponyllm
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ci-deployer
+  namespace: ponyllm
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: ci-deployer
+subjects:
+  - kind: ServiceAccount
+    name: ci-deployer
+    namespace: ponyllm
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ci-deployer-token
+  namespace: ponyllm
+  annotations:
+    kubernetes.io/service-account.name: ci-deployer
+type: kubernetes.io/service-account.token
