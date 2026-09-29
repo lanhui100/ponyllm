@@ -266,8 +266,9 @@ jobs:
           fi
 
       - name: Post-deploy smoke
-        if: secrets.PONYLLM_API_KEY != ''
+        if: env.PONYLLM_API_KEY != ''
+        env:
+          PONYLLM_API_KEY: ${{ secrets.PONYLLM_API_KEY }}
+          PONYLLM_BASE_URL: https://tokens.ponyjob.top
         run: |
-          export PONYLLM_API_KEY="${{ secrets.PONYLLM_API_KEY }}"
-          export PONYLLM_BASE_URL=https://tokens.ponyjob.top
           bash scripts/post-deploy-smoke.sh
