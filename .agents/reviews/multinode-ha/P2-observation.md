@@ -84,3 +84,7 @@ Server Encryption Hashes: All hashes match
 - reload 散布（5/3/3/1）：Pod 错峰就绪 + 轮询窗口差异，非风暴（[4/7] 稳定性 PASS 已排除 2s 虚触发）。
 - 计数器为进程内内存：任一 Pod 重建即归零，须重记基线；24h 采集节奏：每 4h 快照 per-pod 计数器 + restarts + /health，落本文件。
 - rotate_at / rotated_at 时钟：单调前进中（詳 Phase 2 基线）。
+
+## Phase 3 观察 +20m（2026-09-29 04:58 UTC，基线后 14m）
+- 4 副本 Running/Ready 全 1/1、restarts 全 0；锁库 Running/0 重启；公网 /health=200。
+- 20m 窗口：reload 日志 0（无外部变更，无风暴）；invalid_grant/panic 0。
