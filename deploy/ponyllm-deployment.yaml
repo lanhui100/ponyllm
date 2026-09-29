@@ -99,7 +99,7 @@ spec:
       # 本地文件（见 deploy/ponyllm-phase2-rollback.md）。
       containers:
         - name: ponyllm
-          image: crpi-3cfwwtc3um8h6d3q.cn-hangzhou.personal.cr.aliyuncs.com/job-copilot/api-v2@sha256:d5997da473b7b955d3b8ca71c7f3146b87254439049e0099839e9c1d48f43a98
+          image: crpi-3cfwwtc3um8h6d3q.cn-hangzhou.personal.cr.aliyuncs.com/job-copilot/api-v2@sha256:80f102caf1e0c80517f6998e0cb26162231ef2c47adcfefbef3166312aeb76cc
           imagePullPolicy: IfNotPresent
           env:
             # Phase 2 保留：锁库（独立 ponyllm-lockdb，TLS=require）DSN 经 Secret
