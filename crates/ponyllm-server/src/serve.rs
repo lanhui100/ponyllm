@@ -10,6 +10,7 @@
 use std::time::Duration;
 
 use axum::Router;
+use std::future::IntoFuture;
 use tokio::sync::watch;
 
 /// Drain budget: after the shutdown signal, the server waits at most this
@@ -19,6 +20,10 @@ pub const DEFAULT_DRAIN_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Serve forever until `shutdown_rx` flips to `true`, then gracefully drain
 /// in-flight connections (SSE streams included) up to `drain_timeout`.
+///
+/// The drain budget starts ONLY after the shutdown signal: with no signal the
+/// server runs indefinitely (a timeout around the whole serve future would
+/// deterministically kill every long-lived process — production 503, 2026-09-29).
 ///
 /// Note on "force close": dropping the `axum::serve` future stops the accept
 /// loop but in-flight connection tasks spawned by hyper survive until the
@@ -34,22 +39,29 @@ pub async fn serve_with_shutdown(
     shutdown_rx: watch::Receiver<bool>,
     drain_timeout: Duration,
 ) -> std::io::Result<()> {
+    let signal_rx = shutdown_rx.clone();
     let shutdown_future = async move {
-        let mut shutdown_rx = shutdown_rx;
-        loop {
-            if *shutdown_rx.borrow() {
-                return;
-            }
-            if shutdown_rx.changed().await.is_err() {
-                // Sender dropped → nothing will ever flip the flag; keep
-                // serving (the server task outlives any signal wiring).
-                futures_util::future::pending::<()>().await;
-            }
-        }
+        wait_shutdown_flag(shutdown_rx).await;
     };
-    let serve = axum::serve(listener, router.into_make_service()).with_graceful_shutdown(
-        shutdown_future,
+    // `WithGracefulShutdown` is only `IntoFuture`: materialize a real future
+    // first so it can be pinned, selected on, and re-timed across phases.
+    let mut serve = Box::pin(
+        axum::serve(listener, router.into_make_service())
+            .with_graceful_shutdown(shutdown_future)
+            .into_future(),
     );
+    // Phase 1: normal operation, deliberately NO deadline.
+    tokio::select! {
+        result = &mut serve => {
+            // The server ended on its own (listener error etc.) with no
+            // shutdown signal in play.
+            return result;
+        }
+        _ = wait_shutdown_flag(signal_rx) => {
+            // Signal arrived: fall through to the bounded drain below.
+        }
+    }
+    // Phase 2: drain budget ticks only from the signal onward.
     match tokio::time::timeout(drain_timeout, serve).await {
         Ok(result) => result,
         Err(_elapsed) => {
@@ -58,6 +70,21 @@ pub async fn serve_with_shutdown(
                 "graceful drain deadline exceeded; forcing shutdown (long streams truncated)"
             );
             Ok(())
+        }
+    }
+}
+
+/// Resolve once `rx` flips to `true`; never resolve if the sender is dropped
+/// (the server task then outlives any signal wiring and keeps serving).
+async fn wait_shutdown_flag(mut rx: watch::Receiver<bool>) {
+    loop {
+        if *rx.borrow() {
+            return;
+        }
+        if rx.changed().await.is_err() {
+            // Sender dropped → nothing will ever flip the flag; keep
+            // serving (the server task outlives any signal wiring).
+            futures_util::future::pending::<()>().await;
         }
     }
 }
@@ -76,6 +103,40 @@ mod tests {
             serve_with_shutdown(listener, app, rx, Duration::from_secs(5)).await
         });
         tokio::time::sleep(Duration::from_millis(30)).await;
+        tx.send(true).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), handle)
+            .await
+            .expect("server must exit after shutdown signal")
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn serve_with_shutdown_survives_past_drain_deadline_without_signal() {
+        // Regression (production 503, 2026-09-29): the drain budget must not
+        // tick while the server is healthy — with no signal the server stays up
+        // indefinitely, even far beyond `drain_timeout`.
+        let (tx, rx) = watch::channel(false);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = Router::new().route("/health", get(|| async { "ok" }));
+        let handle = tokio::spawn(async move {
+            serve_with_shutdown(listener, app, rx, Duration::from_millis(100)).await
+        });
+        // Live well past the drain budget with no signal: still serving.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(
+            !handle.is_finished(),
+            "server must not exit without a shutdown signal"
+        );
+        let body = reqwest::get(format!("http://{addr}/health"))
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert_eq!(body, "ok");
+        // A real signal still drains promptly.
         tx.send(true).unwrap();
         tokio::time::timeout(Duration::from_secs(2), handle)
             .await

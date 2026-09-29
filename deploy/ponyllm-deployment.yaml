@@ -67,7 +67,7 @@ spec:
       # （本文件 :60 与 :91）。新镜像才带新 favicon 路由（app.rs）与 ?v=2 的 index.html。
       initContainers:
         - name: init-config-and-snapshot
-          image: crpi-3cfwwtc3um8h6d3q.cn-hangzhou.personal.cr.aliyuncs.com/job-copilot/api-v2@sha256:9276fefe165792a7f5e4cf408e4175b357646369685c79fef3e9c2d823258a01
+          image: crpi-3cfwwtc3um8h6d3q.cn-hangzhou.personal.cr.aliyuncs.com/job-copilot/api-v2@sha256:3bfad2f9dd7c7c67ffe66ca524d9e38b3b4c04e286a394cf09b85ec70acbf070
           resources:
             requests:
               cpu: 10m
@@ -107,7 +107,7 @@ spec:
               mountPath: /tmp
       containers:
         - name: ponyllm
-          image: crpi-3cfwwtc3um8h6d3q.cn-hangzhou.personal.cr.aliyuncs.com/job-copilot/api-v2@sha256:9276fefe165792a7f5e4cf408e4175b357646369685c79fef3e9c2d823258a01
+          image: crpi-3cfwwtc3um8h6d3q.cn-hangzhou.personal.cr.aliyuncs.com/job-copilot/api-v2@sha256:3bfad2f9dd7c7c67ffe66ca524d9e38b3b4c04e286a394cf09b85ec70acbf070
           imagePullPolicy: IfNotPresent
           env:
             - name: PONYLLM_PROBE_ALLOWLIST

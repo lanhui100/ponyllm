@@ -550,7 +550,8 @@ mod tests {
         let summary = metrics.get_summary();
         assert_eq!(summary.ha_ops.refresh_lock_acquired_total, 1);
         assert_eq!(summary.ha_ops.refresh_lock_skipped_total, 1);
-        assert!(summary.ha_ops.refresh_lock_hold_seconds >= 0);
+        // The hold gauge is sampled by dedicated metrics tests; no numeric
+        // threshold is meaningful here.
     }
 
     /// Drain short-circuit must mirror the production gate: once draining,
