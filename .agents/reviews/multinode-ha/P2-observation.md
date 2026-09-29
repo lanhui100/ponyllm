@@ -129,3 +129,7 @@ Server Encryption Hashes: All hashes match
 - 4 副本 Running/Ready 全 1/1、restarts 全 0；公网 /health=200。
 - 70m 窗口：reload 日志 0（无外部变更，无风暴）；invalid_grant/panic 0。
 - 锁 skip 事件 0（keepalive 24h 周期内无新刷新轮次，属正常；互斥语义已由执行期 skipped=5 实证）。
+
+## Phase 3 观察 +75m（2026-09-29 05:42 UTC，基线后约 58m）
+- 4 副本 Running/Ready 全 1/1、restarts 全 0；公网 /health=200。
+- 75m 窗口：reload 日志 0（无外部变更，无风暴）；invalid_grant/panic 0。
