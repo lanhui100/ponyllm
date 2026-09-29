@@ -76,3 +76,18 @@ T10 采纳清单的 ① 断言（S3-1/S3-4）与 ③ 回滚凭据面（P2 S2-1�
 
 - 只读审阅 diff 与 runbook 文本；R0'/R1/R2 命令均未执行（写操作，执行阶段由运维执行）。
 - 回滚验收的 sha256 门（90faddd…）与 config_version==159 为 runbook 自述值，未在集群复核（需写/读快照内容，超出本次只读范围）。
+
+---
+
+## 归档记录（Lead 收口，2026-09-29）
+
+本报告结论的处置决定：
+
+| 项 | 决定 |
+|---|---|
+| S2-1（R1 播种源维持 live-config / 移除 config-ro + PVC 重建重播种演练） | **转入 T13 必做**，实施后由 sec-reviewer 定向复核 |
+| S3-1（auth can-i 16 项矩阵脚本化，scripts/rbac-audit.sh） | **已采纳**，随 T13 落地 |
+| S3-2（Phase 4 清理卡：孤儿 `ponyllm-config` + `ponyllm-data`） | 维持（Phase 4 排期） |
+| 拆 Secret（T0/T10/P3 系列 S2-1，4× 写面残余） | **维持驳回**：单真相源 + 补偿控制（apiserver audit patch 告警等）已定，4× 写面残余风险由 ADR 记录在案 |
+
+状态：**报告已归档**。T13 完成后 sec-reviewer 定向复核两项落点：① R1 卷补丁的 `secretName`（须为 `ponyllm-live-config` 或移除 config-ro + 重播种演练断言）；② `scripts/rbac-audit.sh` 矩阵完整性（16 项、非零退出、期望值注释）。
