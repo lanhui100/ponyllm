@@ -19,7 +19,11 @@ kubectl apply --dry-run=client -f deploy/ponyllm-phase2-baseline.yaml
 # 2) 正式恢复 Phase 2 基线（一次 apply 整体替换）：
 kubectl -n ponyllm apply -f deploy/ponyllm-phase2-baseline.yaml
 kubectl -n ponyllm rollout status deploy/ponyllm-gateway --timeout=300s
-# 3) 仍要回 file backend → 继续执行下方 R0（强制重播种）→ R1（切 file + 移除 lock env）
+# 3) spec 断言（arch S3）：副本数 / nodeSelector / PVC 引用必须回到 Phase 2 形态
+kubectl -n ponyllm get deploy ponyllm-gateway -o jsonpath='{.spec.replicas}'            # 1
+kubectl -n ponyllm get deploy ponyllm-gateway -o jsonpath='{.spec.template.spec.nodeSelector}'           # {"kubernetes.io/hostname":"devserver"}
+kubectl -n ponyllm get deploy ponyllm-gateway -o jsonpath='{.spec.template.spec.volumes[*].persistentVolumeClaim.claimName}'  # ponyllm-data
+# 4) 仍要回 file backend → 继续执行下方 R0（新前置：强制重播种）→ R1（切 file + 移除 lock env）
 ```
 > 说明：R0' 应用的 baseline 与 Phase 3 变更只差 spec 形态（副本数/调度/PVC），
 > 配置真相源（live-config）与锁库不变；apply 属整文件替换，dry-run 先行。
@@ -32,7 +36,7 @@ kubectl -n ponyllm rollout status deploy/ponyllm-gateway --timeout=300s
 
 ## 回滚命令集（按序执行，全部幂等/可复核）
 
-### R0 回滚前置（必做，杜绝陈旧 refresh_token 批量 invalid_grant）
+### R0 回滚前置（新增前置步骤，必做：杜绝陈旧 refresh_token 批量 invalid_grant）
 > PVC 文件在 Phase 2 期间已停止被 persist 写（真相源=Secret），其内为迁移时点的
 > refresh_token；**直接回滚加载旧 token → 首次刷新 invalid_grant，N=3 缓冲后批量永久隔离**。
 > 回滚第一动作必须是：让 file 后端**从 live-config 强制重播种**再启动。
@@ -49,6 +53,7 @@ kubectl -n ponyllm exec deploy/ponyllm-gateway -- rm -f /var/lib/ponyllm/ponyllm
 # 0) 先执行 R0 的重播种前置
 # 1) 切回本地文件配置 + 移除锁库 env（R1 必须移除 PONYLLM_LOCK_*：
 #    若保留又下线 lockdb → 网关 refresh 全部 fail-closed 跳过直至 token 过期）
+#    config-ro 播种源保持 ponyllm-live-config（sec S2-1）：绝不切回陈旧 ponyllm-config(125)
 kubectl -n ponyllm patch deploy ponyllm-gateway --type=strategic -p '{
   "spec":{"template":{"spec":{
     "containers":[{"name":"ponyllm",
@@ -57,7 +62,7 @@ kubectl -n ponyllm patch deploy ponyllm-gateway --type=strategic -p '{
       {"$patch":"replace","name":"ponyllm","env":[{"name":"PONYLLM_PROBE_ALLOWLIST","value":"pproxy-host.ponyllm.svc,pproxy-host.ponyllm.svc.cluster.local"}]}],
     "serviceAccountName":"default",
     "automountServiceAccountToken":false,
-    "volumes":[{"$patch":"replace","name":"config-ro","secret":{"secretName":"ponyllm-config","defaultMode":256}}]
+    "volumes":[{"$patch":"replace","name":"config-ro","secret":{"secretName":"ponyllm-live-config","defaultMode":256}}]
   }}}
 }'
 kubectl -n ponyllm rollout status deploy/ponyllm-gateway --timeout=300s
@@ -71,7 +76,7 @@ kubectl -n ponyllm delete deploy ponyllm-lockdb; kubectl -n ponyllm delete svc j
 ```bash
 # 回旧生产镜像 digest（Phase 1 前行为），并执行 R1 的 args/SA/init 还原
 kubectl -n ponyllm patch deploy ponyllm-gateway --type=strategic -p \
-  '{"spec":{"template":{"spec":{"containers":[{"name":"ponyllm","image":"crpi-.../api-v2@sha256:b1788e90…"}]}}}}'
+  '{"spec":{"template":{"spec":{"containers":[{"name":"ponyllm","image":"crpi-3cfwwtc3um8h6d3q.cn-hangzhou.personal.cr.aliyuncs.com/job-copilot/api-v2@sha256:b1788e90fe7ff3a04356a7e7f5d83d6ab72deffdd1dbdfe11e7430e146bbdbec"}]}}}}'
 ```
 
 ### R3 保留现场（诊断用，不要先删）
@@ -83,7 +88,21 @@ kubectl -n ponyllm patch deploy ponyllm-gateway --type=strategic -p \
 - **回滚后 24h**：无 invalid_grant 隔离事件（`kubectl logs | grep -c invalid_grant` = 0）、antigravity 刷新成功率 >95%（metrics：acquired 增长 / persist_failure=0）。
 - A9（Phase 0a 静态加密）证据：见 `.agents/notes/implemented/…` Lead 的实施记录（若未入库，回滚演练前必须补）。
 
+### PVC 重建重播种演练（回滚验收新增段，sec S2-1）
+> 模拟 PVC 被清/重建时，init 容器必须从 **live-config（159）** 重播种且逐字节一致。
+```bash
+# 1) 删除 PVC 内配置（演练目标文件；Phase 3 已移除 PVC 挂载，此演练在 R0' 恢复
+#    PVC/initContainer 后的 Phase 2 形态下进行）：
+kubectl -n ponyllm exec deploy/ponyllm-gateway -- rm -f /var/lib/ponyllm/ponyllm.toml
+# 2) 重启 Pod 触发 init 播种（file 不存在分支）：
+kubectl -n ponyllm rollout restart deploy/ponyllm-gateway && kubectl -n ponyllm rollout status deploy/ponyllm-gateway --timeout=300s
+# 3) 断言：重播种后 PVC 文件 == live-config 内容（逐字节）
+kubectl -n ponyllm exec deploy/ponyllm-gateway -- sha256sum /var/lib/ponyllm/ponyllm.toml   # 90faddd675b1860ee04399c382bc253c7f3485b10a8617517567f34d1ad7f93c
+#    与 live-config 比对：
+kubectl -n ponyllm get secret ponyllm-live-config -o jsonpath='{.data.ponyllm\.toml}' | base64 -d | sha256sum   # 相同
+```
+
 ## 备注
-- `ponyllm-config`（125）已陈旧：回滚播种仅当 PVC 被清时触发——若发生，先
-  `kubectl cp <gw-pod>:/var/lib/ponyllm/ponyllm.toml` 备份，或用 live-config 手动播种（159）。
+- `ponyllm-config`（125）为**废弃资产**：禁止作为播种源/继续更新；其引用的唯一去处是
+  遗留挂载历史（已切 live-config）。Phase 4 清理（连同旧 PVC）。
 - 回滚不删除 Secrets `ponyllm-live-config/ponyllm-lock-*`（后续重放 Phase 2 免重建）。
