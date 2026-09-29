@@ -90,6 +90,10 @@ jobs:
       packages: write
     # 严格防护：仅在 main 分支 push 时构建并推镜像，PR 绝不执行，杜绝外部 PR 投毒与凭据读取
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    outputs:
+      # 阿里云推送的 manifest digest，直接供 deploy job 钉入清单，
+      # 避免 runner 二次 docker pull（实测对国内仓库偶发网络瞬断）。
+      aliyun-digest: ${{ steps.build-aliyun.outputs.digest }}
 
     steps:
       - name: Checkout repository
@@ -228,11 +232,15 @@ jobs:
       - name: Resolve pushed image digest
         id: resolve
         run: |
-          IMG="crpi-3cfwwtc3um8h6d3q.cn-hangzhou.personal.cr.aliyuncs.com/job-copilot/api-v2"
-          DIGEST="$(docker pull "${IMG}:sha-${GITHUB_SHA::7}" 2>&1 | grep -oE 'Digest: sha256:[0-9a-f]{64}' | tail -1 | cut -d' ' -f2)"
+          DIGEST="${{ needs.build-and-push-image.outputs.aliyun-digest }}"
+          if [ -z "$DIGEST" ]; then
+            echo "job output empty; falling back to docker pull"
+            IMG="crpi-3cfwwtc3um8h6d3q.cn-hangzhou.personal.cr.aliyuncs.com/job-copilot/api-v2"
+            DIGEST="$(docker pull "${IMG}:sha-${GITHUB_SHA::7}" 2>&1 | grep -oE 'Digest: sha256:[0-9a-f]{64}' | tail -1 | cut -d' ' -f2)"
+          fi
           [ -n "$DIGEST" ] || { echo "FAIL: could not resolve digest for sha-${GITHUB_SHA::7}"; exit 1; }
           echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
-          echo "resolved: $IMG@$DIGEST"
+          echo "resolved: crpi-3cfwwtc3um8h6d3q.cn-hangzhou.personal.cr.aliyuncs.com/job-copilot/api-v2@$DIGEST"
 
       - name: Pin digest into manifest
         run: |
