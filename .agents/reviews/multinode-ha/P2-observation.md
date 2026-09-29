@@ -71,3 +71,16 @@ Server Encryption Hashes: All hashes match
 - reload：4 次（全部对应 A3 验证改动，无新增）；invalid_grant=0；公网 /health=200。
 - 任务板：task-1~task-16 全部 completed；T15 小修复已提交并经 P33-arch 复核通过。
 - Phase 3 状态：变更集草稿 + T10/T12/T14/T16 四轮审核收敛完成（replicas=4/topology/R0'/verify 门禁/回滚对应性），待 24h 观察期满 + 用户授权低峰执行窗口后 apply。
+
+## Phase 3 观察基线（UTC 04:44:09Z 起算，4 副本）
+
+- Pod（restarts 全 0）：
+  - proserver `2np94`：reload=3 / acquired=1 / skipped=5 / errors=0
+  - devserver `2z59f`：reload=5 / acquired=6 / skipped=0 / errors=0 / admin_save_conflicts=1（A2 并发双写正控产物）
+  - jobcopilot-preprod `fd7hs`：reload=1 / acquired=6 / skipped=0 / errors=0
+  - tencent `ftmtw`：reload=3 / acquired=1 / skipped=5 / errors=0
+- persist_failure / invalid_grant：全 0（基线列，后续非 0 即告警）。
+- 跨副本互斥（A5）：proserver/tencent skipped=5（见他人持全局锁而跳过），24 尝试 = 14 acquired + 10 skipped，零重叠。
+- reload 散布（5/3/3/1）：Pod 错峰就绪 + 轮询窗口差异，非风暴（[4/7] 稳定性 PASS 已排除 2s 虚触发）。
+- 计数器为进程内内存：任一 Pod 重建即归零，须重记基线；24h 采集节奏：每 4h 快照 per-pod 计数器 + restarts + /health，落本文件。
+- rotate_at / rotated_at 时钟：单调前进中（詳 Phase 2 基线）。
