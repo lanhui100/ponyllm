@@ -293,6 +293,24 @@ impl AntigravityTokenManager {
                     let delay = base + jitter;
                     tokio::time::sleep(Duration::from_millis(delay)).await;
 
+                    // Pre-check the populated snapshot: the lock holder (this or
+                    // another replica) may have already written the refreshed
+                    // token while we slept. Returning it here avoids a second
+                    // gate acquisition that could race into a redundant OAuth
+                    // refresh (cf. ha_gate retry contention test regression on
+                    // slow runners).
+                    let snapshot = self.cred.read().clone();
+                    if !Self::credential_needs_refresh(&snapshot) {
+                        if let Some(token) = snapshot.access_token {
+                            tracing::info!(
+                                key_id = %self.key_id,
+                                attempts,
+                                "Antigravity token acquired after brief lock wait"
+                            );
+                            return Ok(token);
+                        }
+                    }
+
                     match self.get_valid_token_inner(false).await {
                         Ok(token) => {
                             tracing::info!(
