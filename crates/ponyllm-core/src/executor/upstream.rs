@@ -1430,7 +1430,13 @@ impl UpstreamExecutor {
             let attempt_start = Instant::now();
             let attempt_idx = attempt as u32;
             let select_start = Instant::now();
-            let key = match self.pool.select_key_excluding_with_limits(&attempted_keys, self.rate_limits.as_ref()) {
+            let affinity_seed = body.get("messages")
+                .and_then(|m| m.as_array())
+                .and_then(|arr| arr.first())
+                .and_then(|first| first.get("content").and_then(|c| c.as_str()))
+                .and_then(crate::pool::hot_cache::PrefixFingerprint::compute)
+                .map(|fp| fp.as_u64());
+            let key = match self.pool.select_key_with_affinity(affinity_seed, &attempted_keys, self.rate_limits.as_ref()) {
                 Ok(k) => k,
                 Err(e) => {
                     // Full-pool exhaustion: when window-shaped (per-minute/quota,
@@ -1689,7 +1695,13 @@ impl UpstreamExecutor {
             let attempt_start = Instant::now();
             let attempt_idx = attempt as u32;
             let select_start = Instant::now();
-            let key = match self.pool.select_key_excluding_with_limits(&attempted_keys, self.rate_limits.as_ref()) {
+            let affinity_seed = body.get("messages")
+                .and_then(|m| m.as_array())
+                .and_then(|arr| arr.first())
+                .and_then(|first| first.get("content").and_then(|c| c.as_str()))
+                .and_then(crate::pool::hot_cache::PrefixFingerprint::compute)
+                .map(|fp| fp.as_u64());
+            let key = match self.pool.select_key_with_affinity(affinity_seed, &attempted_keys, self.rate_limits.as_ref()) {
                 Ok(k) => k,
                 Err(e) => {
                     // Full-pool exhaustion: when window-shaped (per-minute/quota,

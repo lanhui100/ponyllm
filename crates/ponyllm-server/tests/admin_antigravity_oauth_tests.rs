@@ -587,12 +587,12 @@ async fn test_admin_test_key_lock_busy_returns_429() {
             output_price: 0.0,
             models: vec!["claude-sonnet-4-6".to_string()],
             model_configs: Vec::new(),
-            keys: vec![ponyllm_config::KeySection {
-                id: "ag-lock-busy-key".to_string(),
-                api_key: "1//dummy_rf".to_string(),
-                priority: 1,
-                weight: 1,
-            }],
+            keys: vec![ponyllm_config::KeySection::new(
+                "ag-lock-busy-key",
+                "1//dummy_rf",
+                1,
+                1,
+            )],
             default_protocol: Some(ponyllm_core::UpstreamProtocol::Antigravity),
             chat_url: None,
             responses_url: None,

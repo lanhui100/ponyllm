@@ -28,18 +28,18 @@ impl QuotaHarness {
         let config_path = temp_dir.path().join("ponyllm.toml");
 
         let raw_keys = vec![
-            KeySection {
-                id: "q-active".to_string(),
-                api_key: "sk-probe-active-token-abcdef1234567890".to_string(),
-                priority: 1,
-                weight: 10,
-            },
-            KeySection {
-                id: "q-cool".to_string(),
-                api_key: "sk-probe-cooling-token-xyz9876543210".to_string(),
-                priority: 2,
-                weight: 10,
-            },
+            KeySection::new(
+                "q-active",
+                "sk-probe-active-token-abcdef1234567890",
+                1,
+                10,
+            ),
+            KeySection::new(
+                "q-cool",
+                "sk-probe-cooling-token-xyz9876543210",
+                2,
+                10,
+            ),
         ];
 
         let provider_sec = ProviderSection {

@@ -47,30 +47,30 @@ impl TestHarness {
         let config_path = temp_dir.path().join("ponyllm.toml");
 
         let raw_keys = vec![
-            KeySection {
-                id: "k-sk-standard".to_string(),
-                api_key: "sk-proj-live-token-abcdef1234567890".to_string(),
-                priority: 1,
-                weight: 10,
-            },
-            KeySection {
-                id: "k-non-sk".to_string(),
-                api_key: "custom-vendor-secret-token-xyz987654".to_string(),
-                priority: 2,
-                weight: 20,
-            },
-            KeySection {
-                id: "k-exact-eight".to_string(),
-                api_key: "12345678".to_string(),
-                priority: 3,
-                weight: 30,
-            },
-            KeySection {
-                id: "k-short-five".to_string(),
-                api_key: "abc12".to_string(),
-                priority: 4,
-                weight: 40,
-            },
+            KeySection::new(
+                "k-sk-standard",
+                "sk-proj-live-token-abcdef1234567890",
+                1,
+                10,
+            ),
+            KeySection::new(
+                "k-non-sk",
+                "custom-vendor-secret-token-xyz987654",
+                2,
+                20,
+            ),
+            KeySection::new(
+                "k-exact-eight",
+                "12345678",
+                3,
+                30,
+            ),
+            KeySection::new(
+                "k-short-five",
+                "abc12",
+                4,
+                40,
+            ),
         ];
 
         let provider_sec = ProviderSection {

@@ -1199,7 +1199,8 @@ fn build_pool_entry(
                 state.http_client_for_provider(provider_name),
             ));
             attach_rotation_hook(state, provider_name, &mgr);
-            return ApiKeyEntry::new_antigravity(&key.id, mgr, key.priority, key.weight);
+            return ApiKeyEntry::new_antigravity(&key.id, mgr, key.priority, key.weight)
+                .with_account_id(key.account_id.clone());
         }
         tracing::warn!(
             provider = %provider_name,
@@ -1208,6 +1209,7 @@ fn build_pool_entry(
         );
     }
     ApiKeyEntry::new(&key.id, &key.api_key, key.priority, key.weight)
+        .with_account_id(key.account_id.clone())
 }
 
 // ---------- handlers ----------
@@ -2546,6 +2548,7 @@ pub async fn handle_admin_create_key(
     p_sec.keys.push(KeySection {
         id: key_id.clone(),
         api_key: payload.api_key.clone(),
+        account_id: None,
         priority: final_priority,
         weight: final_weight,
     });
@@ -2564,6 +2567,7 @@ pub async fn handle_admin_create_key(
                 &KeySection {
                     id: key_id.clone(),
                     api_key: payload.api_key.clone(),
+                    account_id: None,
                     priority: final_priority,
                     weight: final_weight,
                 },
@@ -4315,6 +4319,7 @@ pub async fn handle_admin_authorize_antigravity(
             p_sec.keys.push(KeySection {
                 id: final_id.clone(),
                 api_key: auth_res.credential.refresh_token.clone(),
+                account_id: None,
                 priority: effective_priority,
                 weight: effective_weight,
             });

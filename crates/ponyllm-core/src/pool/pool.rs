@@ -171,17 +171,10 @@ impl KeyPool {
         self.select_key_excluding_with_limits(excluded_key_ids, None)
     }
 
-    /// Select the next active, healthy, budget-available key.
-    ///
-    /// Same semantics as [`KeyPool::select_key_excluding`], plus the
-    /// short-window budget filter: a key whose meter is at its RPM/TPM limit
-    /// (or at its concurrency cap) is treated exactly like a cooling key —
-    /// skipped and surfaced through [`KeyPool::exhausted_by_window_with_limits`]
-    /// / [`KeyPool::window_refill_in_with_limits`]. `limits = None` disables
-    /// the budget dimension (legacy behavior). `rpm`/`tpm`/`concurrency` of
-    /// `None` or `0` mean "no limit" on that axis (see [`RateLimits`]).
-    pub fn select_key_excluding_with_limits(
+    /// Select key with KV-cache / session affinity, gracefully falling back to other accounts on congestion.
+    pub fn select_key_with_affinity(
         &self,
+        affinity_seed: Option<u64>,
         excluded_key_ids: &[String],
         limits: Option<&RateLimits>,
     ) -> Result<Arc<ApiKeyEntry>> {
@@ -200,7 +193,53 @@ impl KeyPool {
             return Err(CoreError::NoAvailableKey(self.provider.clone()));
         }
 
+        // If affinity seed is provided, group candidate keys by effective account boundary
+        if let Some(seed) = affinity_seed {
+            let mut accounts: Vec<String> = active_keys
+                .iter()
+                .map(|k| k.effective_account_id().to_string())
+                .collect();
+            accounts.sort();
+            accounts.dedup();
+
+            if !accounts.is_empty() {
+                // Consistent hash: select preferred account
+                let chosen_idx = (seed as usize) % accounts.len();
+                let chosen_account = &accounts[chosen_idx];
+
+                // Keys inside this tenant account
+                let account_keys: Vec<Arc<ApiKeyEntry>> = active_keys
+                    .iter()
+                    .filter(|k| k.effective_account_id() == chosen_account)
+                    .cloned()
+                    .collect();
+
+                if !account_keys.is_empty() {
+                    // Internal balance inside the chosen account to preserve concurrency & RPM
+                    return Ok(Self::select_from_active(account_keys, &self.strategy, &self.rr_counter));
+                }
+            }
+        }
+
+        // Fallback / standard selection
         Ok(Self::select_from_active(active_keys, &self.strategy, &self.rr_counter))
+    }
+
+    /// Select the next active, healthy, budget-available key.
+    ///
+    /// Same semantics as [`KeyPool::select_key_excluding`], plus the
+    /// short-window budget filter: a key whose meter is at its RPM/TPM limit
+    /// (or at its concurrency cap) is treated exactly like a cooling key —
+    /// skipped and surfaced through [`KeyPool::exhausted_by_window_with_limits`]
+    /// / [`KeyPool::window_refill_in_with_limits`]. `limits = None` disables
+    /// the budget dimension (legacy behavior). `rpm`/`tpm`/`concurrency` of
+    /// `None` or `0` mean "no limit" on that axis (see [`RateLimits`]).
+    pub fn select_key_excluding_with_limits(
+        &self,
+        excluded_key_ids: &[String],
+        limits: Option<&RateLimits>,
+    ) -> Result<Arc<ApiKeyEntry>> {
+        self.select_key_with_affinity(None, excluded_key_ids, limits)
     }
 
     /// True when the key may receive a request right now under the given
@@ -262,6 +301,11 @@ impl KeyPool {
                         return k.clone();
                     }
                 }
+                active_keys[0].clone()
+            }
+            RoutingStrategy::ConsistentHashAffinity => {
+                // If strategy is explicitly ConsistentHashAffinity but selected via active fallback:
+                // default to priority or first available
                 active_keys[0].clone()
             }
         }
@@ -717,5 +761,37 @@ mod tests {
         let max = pool.longest_window_refill_in_with_limits(Some(&limits)).unwrap();
         // Monotonic-clock drift shaves microseconds off `set_cooldown`'s 60s.
         assert!(max >= Duration::from_secs(59), "max must be ~60s, got {max:?}");
+    }
+
+    #[test]
+    fn test_select_key_with_affinity_and_soft_spillover() {
+        let pool = KeyPool::new("deepseek", RoutingStrategy::RoundRobin);
+        // Account A has two keys (k1, k2), Account B has one key (k3)
+        let k1 = ApiKeyEntry::new("k1", "sk-1", 1, 10).with_account_id(Some("acct_a".into()));
+        let k2 = ApiKeyEntry::new("k2", "sk-2", 1, 10).with_account_id(Some("acct_a".into()));
+        let k3 = ApiKeyEntry::new("k3", "sk-3", 1, 10).with_account_id(Some("acct_b".into()));
+
+        pool.add_key(k1);
+        pool.add_key(k2);
+        pool.add_key(k3);
+
+        // Session 1 consistent hash maps to one account consistently
+        let seed_1 = 42u64;
+        let selected_1 = pool.select_key_with_affinity(Some(seed_1), &[], None).unwrap();
+        let selected_2 = pool.select_key_with_affinity(Some(seed_1), &[], None).unwrap();
+        // Both selections stay within the same account!
+        assert_eq!(selected_1.effective_account_id(), selected_2.effective_account_id());
+
+        // Soft spillover test: if keys in that chosen account are excluded or cooling down,
+        // it gracefully spills over to the other account instead of failing.
+        let chosen_account = selected_1.effective_account_id();
+        let excluded: Vec<String> = if chosen_account == "acct_a" {
+            vec!["k1".into(), "k2".into()]
+        } else {
+            vec!["k3".into()]
+        };
+
+        let spillover = pool.select_key_with_affinity(Some(seed_1), &excluded, None).unwrap();
+        assert_ne!(spillover.effective_account_id(), chosen_account);
     }
 }

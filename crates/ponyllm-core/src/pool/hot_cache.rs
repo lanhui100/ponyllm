@@ -9,7 +9,30 @@ const MIN_CACHE_PROMPT_LEN: usize = 1024;
 const DEFAULT_CACHE_TTL: Duration = Duration::from_secs(300); // 5 minutes
 const MAX_ENTRIES_PER_SHARD: usize = 2048;
 
-/// 24-byte compact prefix fingerprint
+/// Prefix fingerprint computed strictly from the first stable prefix (1536 chars).
+/// This ensures subsequent turns in multi-turn dialogues still hit the same prefix fingerprint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PrefixFingerprint(pub u64);
+
+impl PrefixFingerprint {
+    pub const PREFIX_LEN: usize = 1536;
+
+    pub fn compute(prompt: &str) -> Option<Self> {
+        if prompt.len() < MIN_CACHE_PROMPT_LEN {
+            return None;
+        }
+        let prefix = safe_char_slice(prompt, 0, Self::PREFIX_LEN);
+        let mut hasher = DefaultHasher::new();
+        prefix.hash(&mut hasher);
+        Some(Self(hasher.finish()))
+    }
+
+    pub fn as_u64(&self) -> u64 {
+        self.0
+    }
+}
+
+/// 24-byte compact prefix fingerprint (legacy format kept for full exact matches)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CacheFingerprint {
     pub len: u32,
@@ -111,8 +134,35 @@ impl HotCacheTracker {
         (fp.head_hash ^ fp.tail_hash) as usize % NUM_SHARDS
     }
 
+    fn shard_idx_u64(&self, val: u64) -> usize {
+        (val ^ (val >> 32)) as usize % NUM_SHARDS
+    }
+
     /// Record a prompt dispatch to a specific provider
     pub fn record_dispatch(&self, prompt: &str, provider: &str) {
+        if let Some(pfp) = PrefixFingerprint::compute(prompt) {
+            // Also map through prefix fingerprint for stable multi-turn session affinity
+            let fp = CacheFingerprint {
+                len: 0,
+                head_hash: pfp.0,
+                tail_hash: 0,
+                mid_hash: 0,
+            };
+            let idx = self.shard_idx_u64(pfp.0);
+            if let Ok(mut map) = self.shards[idx].write() {
+                if map.len() >= MAX_ENTRIES_PER_SHARD {
+                    let now = Instant::now();
+                    map.retain(|_, entry| now.duration_since(entry.last_seen) < self.ttl);
+                }
+                map.insert(
+                    fp,
+                    CacheEntry {
+                        provider_name: provider.to_string(),
+                        last_seen: Instant::now(),
+                    },
+                );
+            }
+        }
         if let Some(fp) = CacheFingerprint::compute(prompt) {
             let idx = self.shard_idx(&fp);
             if let Ok(mut map) = self.shards[idx].write() {
@@ -133,6 +183,24 @@ impl HotCacheTracker {
 
     /// Probe if a prompt prefix matches a recently used hot provider
     pub fn probe_cached_provider(&self, prompt: &str) -> Option<String> {
+        // First check prefix fingerprint (matches multi-turn appended conversations)
+        if let Some(pfp) = PrefixFingerprint::compute(prompt) {
+            let idx = self.shard_idx_u64(pfp.0);
+            if let Ok(map) = self.shards[idx].read() {
+                let pseudo_fp = CacheFingerprint {
+                    len: 0,
+                    head_hash: pfp.0,
+                    tail_hash: 0,
+                    mid_hash: 0,
+                };
+                if let Some(entry) = map.get(&pseudo_fp) {
+                    if entry.last_seen.elapsed() < self.ttl {
+                        return Some(entry.provider_name.clone());
+                    }
+                }
+            }
+        }
+
         let fp = CacheFingerprint::compute(prompt)?;
         let idx = self.shard_idx(&fp);
         let map = self.shards[idx].read().ok()?;

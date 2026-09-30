@@ -54,12 +54,12 @@ impl WriteTestHarness {
         let config_path = temp_dir.path().join("ponyllm.toml");
         let api_key = "admin-secret-token".to_string();
 
-        let raw_keys = vec![KeySection {
-            id: "key-1".to_string(),
-            api_key: "sk-proj-live-token-abcdef1234567890".to_string(),
-            priority: 1,
-            weight: 10,
-        }];
+        let raw_keys = vec![KeySection::new(
+            "key-1",
+            "sk-proj-live-token-abcdef1234567890",
+            1,
+            10,
+        )];
 
         let provider_sec = ProviderSection {
     rate_limits: None,
@@ -951,12 +951,7 @@ async fn test_provider_upstream_models() {
     let config_path = temp_dir.path().join("ponyllm.toml");
     let api_key = "admin-secret-token".to_string();
 
-    let key = || KeySection {
-        id: "k1".to_string(),
-        api_key: "sk-test-1234567890".to_string(),
-        priority: 1,
-        weight: 10,
-    };
+    let key = || KeySection::new("k1", "sk-test-1234567890", 1, 10);
     let mut providers = HashMap::new();
     for (pname, base, proto) in [
         ("openai", format!("{}/v1", mock_base), None),
@@ -1183,12 +1178,7 @@ async fn test_dial_test_blocked_target_refused() {
         output_price: 0.0,
         models: vec!["m".to_string()],
         model_configs: vec![],
-        keys: vec![KeySection {
-            id: "k-meta".to_string(),
-            api_key: "sk-test-1234567890".to_string(),
-            priority: 1,
-            weight: 10,
-        }],
+        keys: vec![KeySection::new("k-meta", "sk-test-1234567890", 1, 10)],
         default_protocol: None,
         chat_url: None,
         responses_url: None,

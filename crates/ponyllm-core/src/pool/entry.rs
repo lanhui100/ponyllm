@@ -107,6 +107,7 @@ pub struct ApiKeyEntry {
     pub id: String,
     pub api_key: String,
     pub auth: KeyAuth,
+    pub account_id: Option<String>,
     pub priority: u32,
     pub weight: u32,
     pub stats: KeyStats,
@@ -124,6 +125,7 @@ impl std::fmt::Debug for ApiKeyEntry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ApiKeyEntry")
             .field("id", &self.id)
+            .field("account_id", &self.account_id)
             .field("api_key", &crate::telemetry::FlightRecorder::sanitize_key(&self.api_key))
             .field("auth", &self.auth)
             .field("priority", &self.priority)
@@ -139,12 +141,23 @@ impl ApiKeyEntry {
             id: id.into(),
             api_key: k.clone(),
             auth: KeyAuth::Static(k),
+            account_id: None,
             priority,
             weight,
             stats: KeyStats::default(),
             usage_tracker: Arc::new(crate::pool::usage::KeyUsageTracker::new()),
             short_meter: Arc::new(crate::pool::meter::ShortWindowMeter::new()),
         }
+    }
+
+    pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
+        self.account_id = account_id;
+        self
+    }
+
+    /// Effective tenant/account identity: returns configured account_id, or falls back to key id.
+    pub fn effective_account_id(&self) -> &str {
+        self.account_id.as_deref().unwrap_or(&self.id)
     }
 
     pub fn new_antigravity(
@@ -157,6 +170,7 @@ impl ApiKeyEntry {
             id: id.into(),
             api_key: String::new(),
             auth: KeyAuth::Antigravity(manager),
+            account_id: None,
             priority,
             weight,
             stats: KeyStats::default(),

@@ -755,10 +755,29 @@ fn default_strategy() -> String {
 pub struct KeySection {
     pub id: String,
     pub api_key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
     #[serde(default = "default_priority")]
     pub priority: u32,
     #[serde(default = "default_weight")]
     pub weight: u32,
+}
+
+impl KeySection {
+    pub fn new(id: impl Into<String>, api_key: impl Into<String>, priority: u32, weight: u32) -> Self {
+        Self {
+            id: id.into(),
+            api_key: api_key.into(),
+            account_id: None,
+            priority,
+            weight,
+        }
+    }
+
+    /// Return the explicit account_id if configured, otherwise fallback to id (self-contained account boundary).
+    pub fn effective_account_id(&self) -> &str {
+        self.account_id.as_deref().unwrap_or(&self.id)
+    }
 }
 
 fn default_priority() -> u32 {
@@ -1119,6 +1138,7 @@ impl ConfigFile {
             p.keys.push(KeySection {
                 id: id.to_string(),
                 api_key: api_key.to_string(),
+                account_id: None,
                 priority,
                 weight,
             });

@@ -270,6 +270,7 @@ pub async fn handle_key_auth_agy(
             p_sec.keys.push(KeySection {
                 id: final_id.clone(),
                 api_key: auth_res.credential.refresh_token.clone(),
+                account_id: auth_res.email.clone(),
                 priority,
                 weight,
             });

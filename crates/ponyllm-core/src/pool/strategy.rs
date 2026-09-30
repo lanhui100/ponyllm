@@ -7,6 +7,9 @@ pub enum RoutingStrategy {
     RoundRobin,
     Priority,
     WeightedRoundRobin,
+    /// KV Cache & Session affinity: consistent hash maps session/prompt-prefix to a tenant account,
+    /// balance within that account, and softly spills over to remaining accounts on congestion/429.
+    ConsistentHashAffinity,
 }
 
 /// Global or per-request gateway strategy mode

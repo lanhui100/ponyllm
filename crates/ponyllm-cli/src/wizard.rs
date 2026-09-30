@@ -188,6 +188,7 @@ pub fn run_interactive_init(output_path: &str) -> Result<(), Box<dyn std::error:
             keys.push(KeySection {
                 id: key_id,
                 api_key,
+                account_id: None,
                 priority,
                 weight,
             });
