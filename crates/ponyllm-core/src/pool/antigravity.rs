@@ -165,6 +165,8 @@ enum RefreshOutcome {
     /// Network error / non-401 upstream status / parse failure: transient,
     /// must never permanently isolate the key.
     Transient(String),
+    /// Cross-replica lock contention: another replica is currently refreshing this key.
+    RefreshSkipped,
 }
 
 pub type RefreshTokenRotatedHook = Arc<dyn Fn(&str, &str) + Send + Sync>;
@@ -253,6 +255,16 @@ impl AntigravityTokenManager {
         Self::credential_needs_refresh(&self.cred.read())
     }
 
+    /// Invalidate in-memory cached access token so future attempts won't reuse a known stale token.
+    pub fn invalidate_token(&self) {
+        self.cred.write().access_token = None;
+    }
+
+    #[doc(hidden)]
+    pub fn update_credential_for_test(&self, update: impl FnOnce(&mut AntigravityCredential)) {
+        update(&mut *self.cred.write());
+    }
+
     /// Pure predicate over a credential snapshot: never holds a lock while
     /// evaluating, so fast-path/double-check callers cannot nest `read()`
     /// guards on the same thread.
@@ -291,17 +303,17 @@ impl AntigravityTokenManager {
             Ok(token) => Ok(token),
             Err(CoreError::RefreshSkipped { key_id }) => {
                 // If lock is held by another replica, wait briefly with jittered backoff.
-                // Bounded total wait ~1.5s (3 attempts) to avoid cascade timeouts in request pipelines.
                 let mut attempts = 0;
-                let base_delays_ms = [150, 350, 700];
+                let base_delays_ms = [200, 400, 800, 1200, 1600];
                 for &base in &base_delays_ms {
                     attempts += 1;
-                    // Jitter ±20% based on timestamp nanos
-                    let jitter = (std::time::SystemTime::now()
+                    // Proportional jitter ±15% based on timestamp nanos
+                    let span = (base * 15) / 100;
+                    let offset = (std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.subsec_nanos() % 50)
-                        .unwrap_or(0)) as u64;
-                    let delay = base + jitter;
+                        .map(|d| d.subsec_nanos() as u64 % (2 * span + 1))
+                        .unwrap_or(span)) as i64 - span as i64;
+                    let delay = (base as i64 + offset).max(50) as u64;
                     tokio::time::sleep(Duration::from_millis(delay)).await;
 
                     // Pre-check the populated snapshot: the lock holder (this or
@@ -370,12 +382,15 @@ impl AntigravityTokenManager {
         if let Some(ref sender) = *lock {
             let mut rx = sender.subscribe();
             drop(lock); // Release mutex so other tasks can wait on rx
-            let recv_res = tokio::time::timeout(Duration::from_secs(12), rx.recv()).await;
+            let recv_res = tokio::time::timeout(REFRESH_CRITICAL_TIMEOUT + Duration::from_secs(2), rx.recv()).await;
             return match recv_res {
                 Ok(Ok(RefreshOutcome::Token(token))) => Ok(token),
                 Ok(Ok(RefreshOutcome::InvalidGrant(reason))) => Err(CoreError::AuthInvalid {
                     key_id: self.key_id.clone(),
                     reason,
+                }),
+                Ok(Ok(RefreshOutcome::RefreshSkipped)) => Err(CoreError::RefreshSkipped {
+                    key_id: self.key_id.clone(),
                 }),
                 Ok(Ok(RefreshOutcome::Transient(message))) => Err(CoreError::Internal(message)),
                 Ok(Err(e)) => Err(CoreError::Internal(format!("Failed to receive token broadcast: {}", e))),
@@ -429,6 +444,10 @@ impl AntigravityTokenManager {
                             key_id = %self.key_id,
                             "antigravity refresh skipped: serialization lock held by another replica"
                         );
+                        guard.completed = true;
+                        let mut lock = self.refresh_lock.lock().await;
+                        *lock = None;
+                        let _ = tx.send(RefreshOutcome::RefreshSkipped);
                         return Err(CoreError::RefreshSkipped {
                             key_id: self.key_id.clone(),
                         });
@@ -439,6 +458,10 @@ impl AntigravityTokenManager {
                             error = %e,
                             "antigravity refresh skipped: lock backend unavailable (fail closed)"
                         );
+                        guard.completed = true;
+                        let mut lock = self.refresh_lock.lock().await;
+                        *lock = None;
+                        let _ = tx.send(RefreshOutcome::RefreshSkipped);
                         return Err(CoreError::RefreshSkipped {
                             key_id: self.key_id.clone(),
                         });
@@ -460,6 +483,10 @@ impl AntigravityTokenManager {
                         key_id = %self.key_id,
                         "Antigravity token ready after serialization-lock wait; skipping refresh"
                     );
+                    guard.completed = true;
+                    let mut lock = self.refresh_lock.lock().await;
+                    *lock = None;
+                    let _ = tx.send(RefreshOutcome::Token(token.clone()));
                     return Ok(token);
                 }
             }
@@ -515,6 +542,7 @@ impl AntigravityTokenManager {
             Err(CoreError::AuthInvalid { reason, .. }) => {
                 RefreshOutcome::InvalidGrant(reason.clone())
             }
+            Err(CoreError::RefreshSkipped { .. }) => RefreshOutcome::RefreshSkipped,
             Err(e) => RefreshOutcome::Transient(e.to_string()),
         };
 
@@ -1676,13 +1704,23 @@ mod ha_gate_tests {
             cred,
             reqwest::Client::new(),
         ));
-        mgr.set_refresh_gate(Some(Arc::new(SkipGate)));
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        mgr.set_refresh_gate(Some(Arc::new(CountingSkipGate {
+            calls: calls.clone(),
+            succeed_after: usize::MAX,
+        })));
 
         let err = mgr.get_valid_token().await.unwrap_err();
         assert!(
             matches!(err, CoreError::RefreshSkipped { .. }),
             "expected RefreshSkipped after retry exhaustion, got {:?}",
             err
+        );
+        // 1 fast-path try_acquire attempt + 5 retry ladder attempts = exactly 6 attempts
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            6,
+            "must perform exactly 1 initial + 5 retry backoff attempts"
         );
     }
 

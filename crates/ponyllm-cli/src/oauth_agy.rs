@@ -248,6 +248,7 @@ pub async fn handle_key_auth_agy(
                 messages_url: None,
                 proxy: None,
                 timeout_secs: None,
+                ttfb_timeout_secs: None,
                 keys: vec![],
                 model_configs: vec![],
             }

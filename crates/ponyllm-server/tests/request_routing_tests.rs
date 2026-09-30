@@ -134,6 +134,7 @@ async fn test_model_echo_policy_and_auto_routing() {
             messages_url: None,
             proxy: None,
             timeout_secs: None,
+            ttfb_timeout_secs: None,
         },
     );
 
@@ -166,6 +167,7 @@ async fn test_model_echo_policy_and_auto_routing() {
             messages_url: None,
             proxy: None,
             timeout_secs: None,
+            ttfb_timeout_secs: None,
         },
     );
 
@@ -297,6 +299,7 @@ fn test_is_anthropic_upstream_heuristic_lock() {
             messages_url: None,
             proxy: None,
             timeout_secs: None,
+            ttfb_timeout_secs: None,
         },
     );
     config.providers.insert(
@@ -318,6 +321,7 @@ fn test_is_anthropic_upstream_heuristic_lock() {
             messages_url: None,
             proxy: None,
             timeout_secs: None,
+            ttfb_timeout_secs: None,
         },
     );
     let state = AppState::new(config);
@@ -379,6 +383,7 @@ fn test_protocol_resolution_priority_and_overrides() {
             messages_url,
             proxy: None,
             timeout_secs: None,
+            ttfb_timeout_secs: None,
         }
     }
 
@@ -450,6 +455,7 @@ fn test_models_listing_exposes_native_protocol() {
             messages_url: None,
             proxy: None,
             timeout_secs: None,
+            ttfb_timeout_secs: None,
         },
     );
     let state = AppState::new(config);
@@ -491,6 +497,7 @@ fn test_native_protocol_wins_ties_for_passthrough_first() {
                 messages_url: None,
             proxy: None,
             timeout_secs: None,
+            ttfb_timeout_secs: None,
             },
         );
     }
@@ -538,6 +545,7 @@ fn test_inbound_native_endpoint_wins_over_provider_default() {
             messages_url: Some("https://api.deepseek.com/anthropic".to_string()),
             proxy: None,
             timeout_secs: None,
+            ttfb_timeout_secs: None,
         },
     );
     let state = AppState::new(config);
@@ -567,9 +575,11 @@ fn test_inbound_native_endpoint_wins_over_provider_default() {
 
 #[test]
 fn test_exhausted_message_distinguishes_local_pool() {
+    use ponyllm_core::error::GatewayErrorKind;
     use ponyllm_server::extractors::format_exhausted_message;
     let local = format_exhausted_message(
         "gemini-3.8-flash",
+        &GatewayErrorKind::RateLimitExceeded { retry_after: None },
         "No available key for provider 'opencode' (all keys cooling down or disabled)",
         true,
         "req_1",
@@ -577,7 +587,13 @@ fn test_exhausted_message_distinguishes_local_pool() {
     assert!(local.contains("Local key pool exhausted"));
     assert!(local.contains("for model 'gemini-3.8-flash'"));
     assert!(local.contains("req_1"));
-    let upstream = format_exhausted_message("gemini-3.8-flash", "HTTP 500 from k1: boom", false, "req_2");
+    let upstream = format_exhausted_message(
+        "gemini-3.8-flash",
+        &GatewayErrorKind::UpstreamUnavailable,
+        "HTTP 500 from k1: boom",
+        false,
+        "req_2",
+    );
     assert!(upstream.contains("All candidate upstream providers exhausted"));
     assert!(upstream.contains("for model 'gemini-3.8-flash'"));
 }
@@ -651,6 +667,7 @@ async fn test_cross_provider_transparent_failover() {
             messages_url: None,
             proxy: None,
             timeout_secs: None,
+            ttfb_timeout_secs: None,
         },
     );
 
@@ -683,6 +700,7 @@ async fn test_cross_provider_transparent_failover() {
             messages_url: None,
             proxy: None,
             timeout_secs: None,
+            ttfb_timeout_secs: None,
         },
     );
 
@@ -781,6 +799,7 @@ async fn test_anthropic_messages_routing_and_model_echo() {
             messages_url: None,
             proxy: None,
             timeout_secs: None,
+            ttfb_timeout_secs: None,
         },
     );
 
@@ -884,6 +903,7 @@ async fn test_gateway_configuration_hot_reload() {
             messages_url: None,
             proxy: None,
             timeout_secs: None,
+            ttfb_timeout_secs: None,
         },
     );
 
@@ -941,6 +961,7 @@ async fn test_gateway_configuration_hot_reload() {
             messages_url: None,
             proxy: None,
             timeout_secs: None,
+            ttfb_timeout_secs: None,
         },
     );
 
@@ -1061,6 +1082,7 @@ async fn test_large_payload_handling_with_1m_context_support() {
             messages_url: None,
             proxy: None,
             timeout_secs: None,
+            ttfb_timeout_secs: None,
         },
     );
 
@@ -1118,6 +1140,7 @@ async fn test_custom_request_body_limit_rejection_with_helpful_error() {
             messages_url: None,
             proxy: None,
             timeout_secs: None,
+            ttfb_timeout_secs: None,
         },
     );
 
@@ -1210,6 +1233,7 @@ async fn test_responses_cross_provider_failover() {
             messages_url: None,
             proxy: None,
             timeout_secs: None,
+            ttfb_timeout_secs: None,
             },
         );
     }
@@ -1256,6 +1280,7 @@ fn cross_protocol_provider(base_url: String, model: &str, proto: UpstreamProtoco
         messages_url: None,
         proxy: None,
         timeout_secs: None,
+        ttfb_timeout_secs: None,
     }
 }
 
@@ -1887,6 +1912,7 @@ fn priority_provider(name: &str, priority: Option<u32>, input_price: f64) -> (St
             messages_url: None,
             proxy: None,
             timeout_secs: None,
+            ttfb_timeout_secs: None,
         },
     )
 }

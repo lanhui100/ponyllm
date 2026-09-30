@@ -84,6 +84,7 @@ impl QuotaHarness {
             messages_url: None,
             proxy: None,
             timeout_secs: None,
+            ttfb_timeout_secs: None,
         };
 
         let mut providers = HashMap::new();
@@ -148,6 +149,7 @@ impl QuotaHarness {
                 messages_url: None,
                 proxy: None,
                 timeout_secs: None,
+                ttfb_timeout_secs: None,
             },
         );
 

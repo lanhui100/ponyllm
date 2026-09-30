@@ -491,3 +491,651 @@ fn test_detect_system_proxy() {
     }
 }
 
+#[tokio::test]
+async fn test_executor_ttfb_timeout_override_and_disabled() {
+    assert_eq!(
+        DEFAULT_UPSTREAM_TTFB_TIMEOUT,
+        Duration::from_secs(90),
+        "Default TTFB timeout must be 90s"
+    );
+
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(|_body: String| async {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            (
+                axum::http::StatusCode::OK,
+                Json(json!({
+                    "id": "chatcmpl-test",
+                    "object": "chat.completion",
+                    "choices": [{"message": {"role": "assistant", "content": "pong"}}]
+                })),
+            )
+                .into_response()
+        }),
+    );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let endpoint = format!("http://{}/v1/chat/completions", addr);
+    let pool = Arc::new(KeyPool::new("test-prov", RoutingStrategy::RoundRobin));
+    pool.add_key(ApiKeyEntry::new("k1", "sk-test", 1, 10));
+    let payload = json!({"messages": [{"role": "user", "content": "ping"}]});
+
+    // 1. Tight TTFB timeout (50ms) must fail when server sleeps 200ms
+    let tight_exec = UpstreamExecutor::new(pool.clone(), 1)
+        .with_ttfb_timeout(Some(Duration::from_millis(50)));
+    let err = tight_exec
+        .execute_json_request(&endpoint, &payload)
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("upstream TTFB timeout after 50ms"),
+        "expected TTFB timeout error message, got {}",
+        err
+    );
+
+    // 2. Generous TTFB timeout (500ms) must succeed
+    let generous_exec = UpstreamExecutor::new(pool.clone(), 1)
+        .with_ttfb_timeout(Some(Duration::from_millis(500)));
+    let resp = generous_exec
+        .execute_json_request(&endpoint, &payload)
+        .await
+        .unwrap();
+    assert_eq!(resp["choices"][0]["message"]["content"], "pong");
+
+    // 3. Disabled TTFB timeout (None) must succeed
+    let disabled_exec = UpstreamExecutor::new(pool.clone(), 1)
+        .with_ttfb_timeout(None);
+    let resp_disabled = disabled_exec
+        .execute_json_request(&endpoint, &payload)
+        .await
+        .unwrap();
+    assert_eq!(resp_disabled["choices"][0]["message"]["content"], "pong");
+}
+
+#[tokio::test]
+async fn test_executor_ttfb_timeout_multi_key_failover() {
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(|headers: axum::http::HeaderMap| async move {
+            let auth = headers
+                .get(axum::http::header::AUTHORIZATION)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default();
+            if auth.contains("sk-k1") {
+                // Key 1 triggers TTFB timeout
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                (
+                    axum::http::StatusCode::OK,
+                    Json(json!({"choices": [{"message": {"content": "from-k1"}}]})),
+                )
+                    .into_response()
+            } else {
+                // Key 2 succeeds within budget
+                (
+                    axum::http::StatusCode::OK,
+                    Json(json!({"choices": [{"message": {"content": "from-k2"}}]})),
+                )
+                    .into_response()
+            }
+        }),
+    );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let endpoint = format!("http://{}/v1/chat/completions", addr);
+    let pool = Arc::new(KeyPool::new("test-prov", RoutingStrategy::Priority));
+    pool.add_key(ApiKeyEntry::new("k1", "sk-k1", 1, 10));
+    pool.add_key(ApiKeyEntry::new("k2", "sk-k2", 10, 10));
+    let payload = json!({"messages": [{"role": "user", "content": "ping"}]});
+
+    // UpstreamExecutor with 2 attempts and 50ms TTFB timeout
+    let exec = UpstreamExecutor::new(pool.clone(), 2)
+        .with_ttfb_timeout(Some(Duration::from_millis(50)));
+    let resp = exec
+        .execute_json_request(&endpoint, &payload)
+        .await
+        .unwrap();
+
+    // Must successfully fail over to k2
+    assert_eq!(resp["choices"][0]["message"]["content"], "from-k2");
+    // Verify k1 error and k2 success recorded
+    let keys = pool.snapshot_keys();
+    let k1 = keys.iter().find(|k| k.id == "k1").unwrap();
+    assert_eq!(k1.stats.failed_requests.load(Ordering::SeqCst), 1);
+    let k2 = keys.iter().find(|k| k.id == "k2").unwrap();
+    assert_eq!(k2.stats.successful_requests.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn test_executor_ttfb_timeout_stream_request() {
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(|| async move {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            (
+                [("content-type", "text/event-stream")],
+                "data: {\"choices\": [{\"delta\": {\"content\": \"hello\"}}]}\n\ndata: [DONE]\n\n",
+            )
+                .into_response()
+        }),
+    );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let endpoint = format!("http://{}/v1/chat/completions", addr);
+    let pool = Arc::new(KeyPool::new("test-prov", RoutingStrategy::RoundRobin));
+    pool.add_key(ApiKeyEntry::new("k1", "sk-test", 1, 10));
+    let payload = json!({"stream": true, "messages": [{"role": "user", "content": "ping"}]});
+
+    // 1. Tight TTFB (50ms) on stream request must timeout
+    let tight_exec = UpstreamExecutor::new(pool.clone(), 1)
+        .with_ttfb_timeout(Some(Duration::from_millis(50)));
+    let err = tight_exec
+        .execute_stream_request(&endpoint, &payload)
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("upstream TTFB timeout after 50ms"),
+        "expected TTFB timeout for stream request, got {}",
+        err
+    );
+
+    // 2. Generous TTFB (500ms) on stream request must succeed
+    let generous_exec = UpstreamExecutor::new(pool.clone(), 1)
+        .with_ttfb_timeout(Some(Duration::from_millis(500)));
+    let resp = generous_exec
+        .execute_stream_request(&endpoint, &payload)
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+}
+
+#[tokio::test]
+async fn test_executor_ttfb_timeout_does_not_kill_slow_body_streaming() {
+    use bytes::Bytes;
+
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(|| async move {
+            let stream = futures::stream::unfold(0, |count| async move {
+                if count >= 3 {
+                    None
+                } else {
+                    if count > 0 {
+                        // Delay between body chunks
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                    let chunk = format!("data: chunk {}\n\n", count);
+                    Some((Ok::<Bytes, std::convert::Infallible>(Bytes::from(chunk)), count + 1))
+                }
+            });
+            (
+                [("content-type", "text/event-stream")],
+                axum::body::Body::from_stream(stream),
+            )
+                .into_response()
+        }),
+    );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let endpoint = format!("http://{}/v1/chat/completions", addr);
+    let pool = Arc::new(KeyPool::new("test-prov", RoutingStrategy::RoundRobin));
+    pool.add_key(ApiKeyEntry::new("k1", "sk-test", 1, 10));
+    let payload = json!({"stream": true, "messages": [{"role": "user", "content": "ping"}]});
+
+    // TTFB timeout is 60ms. Total body streaming takes ~100ms.
+    // Since headers arrive immediately (TTFB < 10ms), this must NOT timeout!
+    let exec = UpstreamExecutor::new(pool.clone(), 1)
+        .with_ttfb_timeout(Some(Duration::from_millis(60)));
+    let resp = exec
+        .execute_stream_request(&endpoint, &payload)
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let full_body = resp.text().await.unwrap();
+    assert!(full_body.contains("chunk 0"));
+    assert!(full_body.contains("chunk 1"));
+    assert!(full_body.contains("chunk 2"));
+}
+
+#[test]
+fn test_summarize_attempt_failures_distinguishes_lock_contention() {
+    use ponyllm_core::error::GatewayErrorKind;
+    use ponyllm_core::executor::summarize_attempt_failures;
+
+    // 1. Only lock contention: must NOT report timeout/network
+    let summary1 = summarize_attempt_failures(&[
+        GatewayErrorKind::LockContention,
+        GatewayErrorKind::LockContention,
+    ]);
+    assert_eq!(summary1, " (failures: 2 lock busy/contention)");
+    assert!(!summary1.contains("timeout/network"));
+
+    // 2. Mixed lock contention and timeout/network: both reported independently
+    let summary2 = summarize_attempt_failures(&[
+        GatewayErrorKind::UpstreamUnavailable,
+        GatewayErrorKind::LockContention,
+        GatewayErrorKind::RateLimitExceeded { retry_after: None },
+    ]);
+    assert_eq!(
+        summary2,
+        " (failures: 1 timeout/network, 1 lock busy/contention, 1 rate limited)"
+    );
+
+    // 3. Only timeout/network: does not mention lock busy/contention
+    let summary3 = summarize_attempt_failures(&[GatewayErrorKind::UpstreamUnavailable]);
+    assert_eq!(summary3, " (failures: 1 timeout/network)");
+    assert!(!summary3.contains("lock busy"));
+}
+
+#[tokio::test]
+async fn test_refresh_skipped_produces_lock_contention_in_executor() {
+    use ponyllm_core::pool::refresh_gate::{RefreshGate, RefreshGateGuard, RefreshGateError};
+    use ponyllm_core::error::GatewayErrorKind;
+
+    #[derive(Debug, Default)]
+    struct MockSkipGate;
+    impl RefreshGateGuard for MockSkipGate {}
+
+    #[async_trait::async_trait]
+    impl RefreshGate for MockSkipGate {
+        async fn try_acquire(
+            &self,
+            _key_id: &str,
+        ) -> std::result::Result<Option<Box<dyn RefreshGateGuard + Send + Sync>>, RefreshGateError> {
+            Ok(None) // Always simulate another replica holding the lock
+        }
+    }
+
+    let cred = AntigravityCredential {
+        access_token: None, // Missing token forces refresh
+        refresh_token: "rf-token".to_string(),
+        client_id: "client-id".to_string(),
+        client_secret: "client-secret".to_string(),
+        project_id: "proj-1".to_string(),
+        expiry: None,
+    };
+    let mgr = Arc::new(AntigravityTokenManager::new(
+        "ag-lock-busy-key",
+        cred,
+        reqwest::Client::new(),
+    ));
+    mgr.set_refresh_gate(Some(Arc::new(MockSkipGate)));
+
+    let pool = Arc::new(KeyPool::new("antigravity-prov", RoutingStrategy::RoundRobin));
+    let key = ApiKeyEntry::new_antigravity("ag-lock-busy-key", mgr, 1, 10);
+    pool.add_key(key);
+
+    let exec = UpstreamExecutor::new(pool.clone(), 1);
+    let payload = json!({"messages": [{"role": "user", "content": "ping"}]});
+    let err = exec
+        .execute_json_request("https://api.example.com/v1/chat/completions", &payload)
+        .await
+        .unwrap_err();
+
+    // 1. Error kind must be LockContention, NOT UpstreamUnavailable
+    assert_eq!(err.kind(), GatewayErrorKind::LockContention);
+
+    // 2. Formatted message must contain "lock busy/contention" and NOT "timeout/network"
+    let err_msg = err.to_string();
+    assert!(
+        err_msg.contains("lock busy/contention"),
+        "expected 'lock busy/contention' in error message, got: {}",
+        err_msg
+    );
+    assert!(
+        !err_msg.contains("timeout/network"),
+        "error message should NOT report lock contention as timeout/network, got: {}",
+        err_msg
+    );
+
+    // 3. Healthy key encountering lock contention MUST remain Active (never cooled)
+    let key_entry = pool.snapshot_keys().into_iter().find(|k| k.id == "ag-lock-busy-key").unwrap();
+    assert_eq!(key_entry.current_state(), ponyllm_core::pool::KeyState::Active);
+}
+
+#[tokio::test]
+async fn test_singleflight_propagates_refresh_skipped_without_leaking_internal() {
+    use ponyllm_core::pool::refresh_gate::{RefreshGate, RefreshGateGuard, RefreshGateError};
+
+    #[derive(Debug, Default)]
+    struct DelayedSkipGate;
+    impl RefreshGateGuard for DelayedSkipGate {}
+
+    #[async_trait::async_trait]
+    impl RefreshGate for DelayedSkipGate {
+        async fn try_acquire(
+            &self,
+            _key_id: &str,
+        ) -> std::result::Result<Option<Box<dyn RefreshGateGuard + Send + Sync>>, RefreshGateError> {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            Ok(None)
+        }
+    }
+
+    let cred = AntigravityCredential {
+        access_token: None,
+        refresh_token: "rf-token".to_string(),
+        client_id: "client-id".to_string(),
+        client_secret: "client-secret".to_string(),
+        project_id: "proj-1".to_string(),
+        expiry: None,
+    };
+    let mgr = Arc::new(AntigravityTokenManager::new(
+        "ag-concurrent-key",
+        cred,
+        reqwest::Client::new(),
+    ));
+    mgr.set_refresh_gate(Some(Arc::new(DelayedSkipGate)));
+
+    let m1 = mgr.clone();
+    let m2 = mgr.clone();
+
+    let (res1, res2) = tokio::join!(
+        tokio::spawn(async move { m1.get_valid_token().await }),
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            m2.get_valid_token().await
+        }),
+    );
+
+    let err1 = res1.unwrap().unwrap_err();
+    let err2 = res2.unwrap().unwrap_err();
+
+    // BOTH leader and follower MUST receive RefreshSkipped, NOT Internal!
+    assert!(matches!(err1, CoreError::RefreshSkipped { .. }), "leader got: {:?}", err1);
+    assert!(matches!(err2, CoreError::RefreshSkipped { .. }), "follower got: {:?}", err2);
+}
+
+#[tokio::test]
+async fn test_antigravity_401_recovery_lock_contention_does_not_burn_key() {
+    use ponyllm_core::error::GatewayErrorKind;
+    use ponyllm_core::pool::refresh_gate::{RefreshGate, RefreshGateGuard, RefreshGateError};
+    use ponyllm_core::pool::KeyState;
+
+    // Upstream server returns 401
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        loop {
+            if let Ok((mut socket, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let mut buf = [0u8; 1024];
+                    let _ = socket.read(&mut buf).await;
+                    let resp = "HTTP/1.1 401 Unauthorized\r\nContent-Length: 26\r\n\r\n{\"error\": \"invalid_token\"}";
+                    let _ = socket.write_all(resp.as_bytes()).await;
+                });
+            }
+        }
+    });
+
+    #[derive(Debug, Default)]
+    struct MockSkipGate;
+    impl RefreshGateGuard for MockSkipGate {}
+
+    #[async_trait::async_trait]
+    impl RefreshGate for MockSkipGate {
+        async fn try_acquire(
+            &self,
+            _key_id: &str,
+        ) -> std::result::Result<Option<Box<dyn RefreshGateGuard + Send + Sync>>, RefreshGateError> {
+            Ok(None)
+        }
+    }
+
+    let cred = AntigravityCredential {
+        access_token: Some("stale-token".to_string()),
+        refresh_token: "rf-token".to_string(),
+        client_id: "client-id".to_string(),
+        client_secret: "client-secret".to_string(),
+        project_id: "proj-1".to_string(),
+        expiry: Some(chrono::Utc::now() + chrono::Duration::hours(1)),
+    };
+    let mgr = Arc::new(AntigravityTokenManager::new(
+        "ag-401-key",
+        cred,
+        reqwest::Client::new(),
+    ));
+    mgr.set_refresh_gate(Some(Arc::new(MockSkipGate)));
+
+    let pool = Arc::new(KeyPool::new("antigravity-prov", RoutingStrategy::RoundRobin));
+    let key = ApiKeyEntry::new_antigravity("ag-401-key", mgr.clone(), 1, 10);
+    pool.add_key(key);
+
+    let exec = UpstreamExecutor::new(pool.clone(), 1);
+    let payload = json!({"messages": [{"role": "user", "content": "ping"}]});
+    let target_url = format!("http://{}/v1/chat/completions", addr);
+    let err = exec
+        .execute_json_request(&target_url, &payload)
+        .await
+        .unwrap_err();
+
+    assert_eq!(err.kind(), GatewayErrorKind::LockContention);
+
+    // Stale token in memory should be invalidated
+    assert!(mgr.credential_snapshot().access_token.is_none());
+
+    // The key MUST NOT be cooling or burned (Active)!
+    let key_entry = pool.snapshot_keys().into_iter().find(|k| k.id == "ag-401-key").unwrap();
+    assert_eq!(key_entry.current_state(), KeyState::Active);
+}
+
+#[tokio::test]
+async fn test_executor_mixed_lock_contention_and_network_timeout() {
+    use ponyllm_core::pool::refresh_gate::{RefreshGate, RefreshGateGuard, RefreshGateError};
+    use ponyllm_core::pool::KeyState;
+
+    #[derive(Debug, Default)]
+    struct MockSkipGate;
+    impl RefreshGateGuard for MockSkipGate {}
+
+    #[async_trait::async_trait]
+    impl RefreshGate for MockSkipGate {
+        async fn try_acquire(
+            &self,
+            _key_id: &str,
+        ) -> std::result::Result<Option<Box<dyn RefreshGateGuard + Send + Sync>>, RefreshGateError> {
+            Ok(None)
+        }
+    }
+
+    let cred = AntigravityCredential {
+        access_token: None,
+        refresh_token: "rf-token".to_string(),
+        client_id: "client-id".to_string(),
+        client_secret: "client-secret".to_string(),
+        project_id: "proj-1".to_string(),
+        expiry: None,
+    };
+    let mgr = Arc::new(AntigravityTokenManager::new(
+        "key-1-lock",
+        cred,
+        reqwest::Client::new(),
+    ));
+    mgr.set_refresh_gate(Some(Arc::new(MockSkipGate)));
+
+    let pool = Arc::new(KeyPool::new("prov", RoutingStrategy::RoundRobin));
+    // Key 1: Antigravity key with lock contention (remains Active)
+    let key1 = ApiKeyEntry::new_antigravity("key-1-lock", mgr, 1, 10);
+    // Key 2: Regular key pointing to unreachable network target (will cool down after reaching threshold)
+    let key2 = ApiKeyEntry::new("key-2-net", "sk-test", 1, 10);
+    key2.stats.consecutive_failures.store(2, std::sync::atomic::Ordering::Relaxed);
+    pool.add_key(key1);
+    pool.add_key(key2);
+
+    let exec = UpstreamExecutor::new(pool.clone(), 2);
+    let payload = json!({"messages": [{"role": "user", "content": "ping"}]});
+    // Port 1 is closed/unreachable
+    let err = exec
+        .execute_json_request("http://127.0.0.1:1/v1/chat/completions", &payload)
+        .await
+        .unwrap_err();
+
+    let err_msg = err.to_string();
+    assert!(err_msg.contains("1 lock busy/contention"), "got: {}", err_msg);
+    assert!(err_msg.contains("1 timeout/network"), "got: {}", err_msg);
+
+    // Key 1 must be Active (not cooled)
+    let k1 = pool.snapshot_keys().into_iter().find(|k| k.id == "key-1-lock").unwrap();
+    assert_eq!(k1.current_state(), KeyState::Active);
+
+    // Key 2 must be CoolingDown (network error cooled it)
+    let k2 = pool.snapshot_keys().into_iter().find(|k| k.id == "key-2-net").unwrap();
+    assert_eq!(k2.current_state(), KeyState::CoolingDown);
+}
+
+#[tokio::test]
+async fn test_streaming_refresh_skipped_produces_lock_contention() {
+    use ponyllm_core::error::GatewayErrorKind;
+    use ponyllm_core::pool::refresh_gate::{RefreshGate, RefreshGateGuard, RefreshGateError};
+    use ponyllm_core::pool::KeyState;
+
+    #[derive(Debug, Default)]
+    struct MockSkipGate;
+    impl RefreshGateGuard for MockSkipGate {}
+
+    #[async_trait::async_trait]
+    impl RefreshGate for MockSkipGate {
+        async fn try_acquire(
+            &self,
+            _key_id: &str,
+        ) -> std::result::Result<Option<Box<dyn RefreshGateGuard + Send + Sync>>, RefreshGateError> {
+            Ok(None)
+        }
+    }
+
+    let cred = AntigravityCredential {
+        access_token: None,
+        refresh_token: "rf-token".to_string(),
+        client_id: "client-id".to_string(),
+        client_secret: "client-secret".to_string(),
+        project_id: "proj-1".to_string(),
+        expiry: None,
+    };
+    let mgr = Arc::new(AntigravityTokenManager::new(
+        "ag-stream-lock-key",
+        cred,
+        reqwest::Client::new(),
+    ));
+    mgr.set_refresh_gate(Some(Arc::new(MockSkipGate)));
+
+    let pool = Arc::new(KeyPool::new("antigravity-prov", RoutingStrategy::RoundRobin));
+    let key = ApiKeyEntry::new_antigravity("ag-stream-lock-key", mgr, 1, 10);
+    pool.add_key(key);
+
+    let exec = UpstreamExecutor::new(pool.clone(), 1);
+    let payload = json!({"messages": [{"role": "user", "content": "ping"}], "stream": true});
+    let err = exec
+        .execute_stream_request_with_timing_and_key("https://api.example.com/v1/chat/completions", &payload)
+        .await
+        .unwrap_err();
+
+    assert_eq!(err.kind(), GatewayErrorKind::LockContention);
+    let key_entry = pool.snapshot_keys().into_iter().find(|k| k.id == "ag-stream-lock-key").unwrap();
+    assert_eq!(key_entry.current_state(), KeyState::Active);
+}
+
+#[tokio::test]
+async fn test_singleflight_post_gate_recheck_notifies_followers() {
+    use ponyllm_core::pool::refresh_gate::{RefreshGate, RefreshGateGuard, RefreshGateError};
+    use ponyllm_core::pool::KeyState;
+
+    #[derive(Debug, Default)]
+    struct DummyGuard;
+    impl RefreshGateGuard for DummyGuard {}
+
+    struct RecheckSimulatingGate {
+        mgr: Arc<parking_lot::Mutex<Option<Arc<AntigravityTokenManager>>>>,
+    }
+
+    impl std::fmt::Debug for RecheckSimulatingGate {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "RecheckSimulatingGate")
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl RefreshGate for RecheckSimulatingGate {
+        async fn try_acquire(
+            &self,
+            _key_id: &str,
+        ) -> std::result::Result<Option<Box<dyn RefreshGateGuard + Send + Sync>>, RefreshGateError> {
+            // Wait so follower coroutine can subscribe to singleflight broadcast
+            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+            if let Some(m) = self.mgr.lock().as_ref() {
+                m.update_credential_for_test(|c| {
+                    c.access_token = Some("post-gate-valid-token-777".to_string());
+                    c.expiry = Some(chrono::Utc::now() + chrono::Duration::hours(1));
+                });
+            }
+            Ok(Some(Box::new(DummyGuard)))
+        }
+    }
+
+    let cred = AntigravityCredential {
+        access_token: None, // Missing token forces refresh
+        refresh_token: "rf-token".to_string(),
+        client_id: "client-id".to_string(),
+        client_secret: "client-secret".to_string(),
+        project_id: "proj-1".to_string(),
+        expiry: None,
+    };
+    let mgr_holder = Arc::new(parking_lot::Mutex::new(None));
+    let mgr = Arc::new(AntigravityTokenManager::new(
+        "ag-recheck-key",
+        cred,
+        reqwest::Client::new(),
+    ));
+    *mgr_holder.lock() = Some(mgr.clone());
+    mgr.set_refresh_gate(Some(Arc::new(RecheckSimulatingGate { mgr: mgr_holder })));
+
+    let pool = Arc::new(KeyPool::new("prov", RoutingStrategy::RoundRobin));
+    let key = ApiKeyEntry::new_antigravity("ag-recheck-key", mgr.clone(), 1, 10);
+    pool.add_key(key);
+
+    let m1 = mgr.clone();
+    let m2 = mgr.clone();
+
+    let (res1, res2) = tokio::join!(
+        tokio::spawn(async move { m1.get_valid_token().await }),
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            m2.get_valid_token().await
+        }),
+    );
+
+    let tok1 = res1.unwrap().expect("leader got valid token via post-gate recheck");
+    let tok2 = res2.unwrap().expect("follower got valid token via broadcast from leader");
+
+    assert_eq!(tok1, "post-gate-valid-token-777");
+    assert_eq!(tok2, "post-gate-valid-token-777");
+
+    let key_entry = pool.snapshot_keys().into_iter().find(|k| k.id == "ag-recheck-key").unwrap();
+    assert_eq!(key_entry.current_state(), KeyState::Active);
+    assert_eq!(key_entry.stats.consecutive_failures.load(std::sync::atomic::Ordering::Relaxed), 0);
+}
+
+
+
+

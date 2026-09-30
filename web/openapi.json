@@ -1506,6 +1506,15 @@
             "format": "int64",
             "description": "Optional total upstream timeout override (seconds, 60~1800).",
             "minimum": 0
+          },
+          "ttfb_timeout_secs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Optional TTFB budget override in seconds for this provider (0 = disabled).",
+            "minimum": 0
           }
         }
       },
@@ -2129,6 +2138,15 @@
           },
           "strategy": {
             "type": "string"
+          },
+          "ttfb_timeout_secs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Optional TTFB budget override in seconds for this provider (0 = disabled).",
+            "minimum": 0
           }
         }
       },
@@ -2600,6 +2618,15 @@
             ],
             "format": "int64",
             "description": "Optional total upstream timeout override (seconds, 60~1800).",
+            "minimum": 0
+          },
+          "ttfb_timeout_secs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Optional TTFB budget override in seconds for this provider (0 = disabled).",
             "minimum": 0
           }
         }

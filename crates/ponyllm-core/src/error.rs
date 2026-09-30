@@ -12,6 +12,8 @@ pub enum GatewayErrorKind {
     AuthInvalid,
     /// Upstream returned 5xx server error, gateway timeout, or connection failure.
     UpstreamUnavailable,
+    /// Distributed/local token refresh lock held by another replica or busy.
+    LockContention,
     /// Upstream rejected with 400 Bad Request due to invalid client parameter.
     ClientBadRequest,
     /// Context window required (e.g. 1M) exceeds capacity across all matching providers.
@@ -90,6 +92,7 @@ impl GatewayErrorKind {
             GatewayErrorKind::QuotaExhausted => "quota_exhausted",
             GatewayErrorKind::AuthInvalid => "auth_invalid",
             GatewayErrorKind::UpstreamUnavailable => "upstream_unavailable",
+            GatewayErrorKind::LockContention => "lock_contention",
             GatewayErrorKind::ClientBadRequest => "client_bad_request",
             GatewayErrorKind::CapacityExhausted => "capacity_exhausted",
             GatewayErrorKind::ModelNotFound => "model_not_found",
@@ -110,7 +113,7 @@ impl CoreError {
         match self {
             CoreError::AllRetriesFailed { kind, .. } => kind.clone(),
             CoreError::AuthInvalid { .. } => GatewayErrorKind::AuthInvalid,
-            CoreError::RefreshSkipped { .. } => GatewayErrorKind::UpstreamUnavailable,
+            CoreError::RefreshSkipped { .. } => GatewayErrorKind::LockContention,
             CoreError::CapacityExhausted { .. } => GatewayErrorKind::CapacityExhausted,
             CoreError::UnsupportedModality { .. } => GatewayErrorKind::ClientBadRequest,
             CoreError::NoAvailableKey(_) => GatewayErrorKind::RateLimitExceeded { retry_after: None },
@@ -143,3 +146,19 @@ impl CoreError {
 }
 
 pub type Result<T> = std::result::Result<T, CoreError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_refresh_skipped_maps_to_lock_contention() {
+        let err = CoreError::RefreshSkipped {
+            key_id: "test-key".to_string(),
+        };
+        assert_eq!(err.kind(), GatewayErrorKind::LockContention);
+        assert_eq!(err.kind().kind_name(), "lock_contention");
+        assert!(err.kind().triggers_failover());
+    }
+}
+

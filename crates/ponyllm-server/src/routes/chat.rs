@@ -355,16 +355,20 @@ pub async fn handle_chat_completions(
         // routing): a suffixed request (`deepseek-v4-flash[1m]:economy`) must
         // hit the same model-level rate_limits as the plain name, otherwise
         // the model-level budget silently never applies.
-        let rate_limits = state
-            .config
-            .read()
-            .providers
-            .get(&target.provider_name)
-            .and_then(|p| p.effective_rate_limits(&parsed.clean_model_name));
+        let (rate_limits, ttfb_timeout) = {
+            let cfg = state.config.read();
+            let rl = cfg
+                .providers
+                .get(&target.provider_name)
+                .and_then(|p| p.effective_rate_limits(&parsed.clean_model_name));
+            let ttfb = cfg.effective_ttfb_timeout(&target.provider_name);
+            (rl, ttfb)
+        };
         let executor = UpstreamExecutor::with_client(pool.clone(), http_client, max_retries)
             .with_downstream_headers(&headers)
             .with_opencode_zen(is_opencode_zen_target(&target.provider_name, &target_url))
             .with_rate_limits(rate_limits)
+            .with_ttfb_timeout(ttfb_timeout)
             .with_event_sink(sink_ctx.clone(), state.event_sink(sink_ctx));
 
         // Empty-STOP is an upstream transient unrelated to credential health
@@ -764,22 +768,10 @@ pub async fn handle_chat_completions(
     }
 
     // All candidate providers exhausted
-    let latency = start_time.elapsed();
-    state.emit(
-        &ctx,
-        None,
-        GatewayEvent::RequestFailed {
-            status_code: 502,
-            latency_ms: latency.as_secs_f64() * 1000.0,
-            error: last_error.clone(),
-            request_snippet: last_req_snippet,
-        },
-    );
-
     // Correlate the client-visible error with the black-box frame: the
     // request_id is embedded in the message and exposed as a header, so
     // `ponyllm telemetry` output can be grepped for the failing request.
-    let msg = crate::extractors::format_exhausted_message(&requested_raw_model, &last_error, last_pool_exhausted, &request_id);
+    let msg = crate::extractors::format_exhausted_message(&requested_raw_model, &last_kind, &last_error, last_pool_exhausted, &request_id);
     let mut resp = crate::extractors::project_openai_error(&last_kind, &msg);
     if let Some(secs) = last_retry_after {
         if let Ok(v) = HeaderValue::from_str(&secs.to_string()) {
@@ -789,6 +781,18 @@ pub async fn handle_chat_completions(
     if let Ok(v) = HeaderValue::from_str(&request_id) {
         resp.headers_mut().insert("x-ponyllm-request-id", v);
     }
+
+    let latency = start_time.elapsed();
+    state.emit(
+        &ctx,
+        None,
+        GatewayEvent::RequestFailed {
+            status_code: resp.status().as_u16(),
+            latency_ms: latency.as_secs_f64() * 1000.0,
+            error: last_error.clone(),
+            request_snippet: last_req_snippet,
+        },
+    );
     resp
 }
 
@@ -914,6 +918,13 @@ pub(crate) fn retry_unlock_hint(
     match kind {
         GatewayErrorKind::RateLimitExceeded { .. } | GatewayErrorKind::QuotaExhausted => {
             pool_longest_unlock(pool, limits)
+        }
+        GatewayErrorKind::LockContention => {
+            // Under cross-replica lock contention, the key is healthy (not cooled down),
+            // so earliest_unlock() is None. The lock holder finishes refresh+persist in ~2-3s.
+            // Providing a 2s hint (+1s ceiling in retry_after_secs = 3s) enables standard
+            // client SDKs to successfully back off and retry.
+            Some(std::time::Duration::from_secs(2))
         }
         _ => pool.earliest_unlock(),
     }

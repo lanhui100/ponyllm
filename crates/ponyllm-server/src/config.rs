@@ -155,6 +155,9 @@ pub struct ProviderConfig {
     /// Optional total upstream timeout override for this provider (seconds, 60~1800).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_secs: Option<u64>,
+    /// Optional TTFB budget override in seconds for this provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttfb_timeout_secs: Option<u64>,
     /// Optional provider-level default short-window rate limits, inherited by
     /// every model without its own override (runtime mirror of
     /// `ponyllm-config::ProviderSection::rate_limits`).
@@ -184,6 +187,7 @@ impl Default for ProviderConfig {
             messages_url: None,
             proxy: None,
             timeout_secs: None,
+            ttfb_timeout_secs: None,
             rate_limits: None,
         }
     }
@@ -416,6 +420,9 @@ pub struct GatewayConfig {
     /// budget; the gateway replaces it with TTFB + tail-stall detection.
     #[serde(default = "default_upstream_timeout_secs")]
     pub upstream_timeout_secs: u64,
+    /// Optional TTFB budget in seconds for upstream calls. None resolves to 90s. Some(0) disables.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_ttfb_timeout_secs: Option<u64>,
     #[serde(default = "default_request_body_limit")]
     pub request_body_limit: usize,
     /// Hourly JSONL event-log directory. `None` (default) keeps events in the
@@ -487,6 +494,7 @@ impl Default for GatewayConfig {
             max_retries: 3,
             flight_recorder_capacity: 100,
             upstream_timeout_secs: default_upstream_timeout_secs(),
+            upstream_ttfb_timeout_secs: None,
             request_body_limit: default_request_body_limit(),
             event_log_dir: None,
             event_log_retention_days: default_event_log_retention_days(),
@@ -504,4 +512,109 @@ impl Default for GatewayConfig {
         }
     }
 }
+
+impl GatewayConfig {
+    /// Resolves the effective TTFB timeout for a given provider.
+    /// Priority:
+    /// 1. Provider-level `ttfb_timeout_secs`: Some(0) => None (disabled), Some(s) => Some(s)
+    /// 2. Gateway-level `upstream_ttfb_timeout_secs`: Some(0) => None (disabled), Some(s) => Some(s)
+    /// 3. Global default: 90 seconds (Some(Duration::from_secs(90)))
+    pub fn effective_ttfb_timeout(&self, provider_name: &str) -> Option<std::time::Duration> {
+        if let Some(prov) = self.providers.get(provider_name) {
+            if let Some(secs) = prov.ttfb_timeout_secs {
+                return if secs == 0 {
+                    None
+                } else {
+                    Some(std::time::Duration::from_secs(secs))
+                };
+            }
+        }
+        if let Some(secs) = self.upstream_ttfb_timeout_secs {
+            if secs == 0 {
+                None
+            } else {
+                Some(std::time::Duration::from_secs(secs))
+            }
+        } else {
+            Some(ponyllm_core::DEFAULT_UPSTREAM_TTFB_TIMEOUT)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_gateway_config_effective_ttfb_timeout() {
+        let mut cfg = GatewayConfig::default();
+        let mut prov_default = ProviderConfig::default();
+        prov_default.base_url = "https://api.example.com".to_string();
+        cfg.providers.insert("default_prov".to_string(), prov_default);
+
+        let mut prov_custom = ProviderConfig::default();
+        prov_custom.ttfb_timeout_secs = Some(120);
+        cfg.providers.insert("custom_prov".to_string(), prov_custom);
+
+        let mut prov_disabled = ProviderConfig::default();
+        prov_disabled.ttfb_timeout_secs = Some(0);
+        cfg.providers.insert("disabled_prov".to_string(), prov_disabled);
+
+        let mut prov_tight = ProviderConfig::default();
+        prov_tight.ttfb_timeout_secs = Some(10);
+        cfg.providers.insert("tight_prov".to_string(), prov_tight);
+
+        // 1. Default fallback is 90s
+        assert_eq!(
+            cfg.effective_ttfb_timeout("default_prov"),
+            Some(ponyllm_core::DEFAULT_UPSTREAM_TTFB_TIMEOUT)
+        );
+        // Provider not explicitly in config also falls back to gateway default (90s)
+        assert_eq!(
+            cfg.effective_ttfb_timeout("unknown_prov"),
+            Some(ponyllm_core::DEFAULT_UPSTREAM_TTFB_TIMEOUT)
+        );
+
+        // 2. Provider override (120s)
+        assert_eq!(
+            cfg.effective_ttfb_timeout("custom_prov"),
+            Some(std::time::Duration::from_secs(120))
+        );
+
+        // 3. Provider override to 0 (disabled)
+        assert_eq!(cfg.effective_ttfb_timeout("disabled_prov"), None);
+
+        // 4. Gateway override (45s)
+        cfg.upstream_ttfb_timeout_secs = Some(45);
+        assert_eq!(
+            cfg.effective_ttfb_timeout("default_prov"),
+            Some(std::time::Duration::from_secs(45))
+        );
+        // Custom provider (120s) still overrides gateway (45s)
+        assert_eq!(
+            cfg.effective_ttfb_timeout("custom_prov"),
+            Some(std::time::Duration::from_secs(120))
+        );
+        // Provider=0 still overrides gateway
+        assert_eq!(cfg.effective_ttfb_timeout("disabled_prov"), None);
+
+        // 5. Tight provider (10s) overrides gateway (60s)
+        cfg.upstream_ttfb_timeout_secs = Some(60);
+        assert_eq!(
+            cfg.effective_ttfb_timeout("tight_prov"),
+            Some(std::time::Duration::from_secs(10))
+        );
+
+        // 6. Gateway disabled (0)
+        cfg.upstream_ttfb_timeout_secs = Some(0);
+        assert_eq!(cfg.effective_ttfb_timeout("default_prov"), None);
+        assert_eq!(
+            cfg.effective_ttfb_timeout("custom_prov"),
+            Some(std::time::Duration::from_secs(120))
+        );
+        assert_eq!(cfg.effective_ttfb_timeout("disabled_prov"), None);
+    }
+}
+
+
 

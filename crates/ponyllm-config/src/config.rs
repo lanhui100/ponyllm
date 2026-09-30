@@ -55,6 +55,10 @@ pub struct GatewaySection {
     /// connection for the whole budget.
     #[serde(default = "default_upstream_timeout_secs")]
     pub upstream_timeout_secs: u64,
+    /// Optional TTFB (Time to First Byte / response headers) budget in seconds for upstream calls.
+    /// Defaults to None (resolves to 90s). Setting to `Some(0)` disables the TTFB timeout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_ttfb_timeout_secs: Option<u64>,
     #[serde(default = "default_api_key")]
     pub api_key: String,
     #[serde(default)]
@@ -413,6 +417,7 @@ impl Default for GatewaySection {
             max_retries: default_retries(),
             flight_recorder_capacity: default_capacity(),
             upstream_timeout_secs: default_upstream_timeout_secs(),
+            upstream_ttfb_timeout_secs: None,
             api_key: default_api_key(),
             default_strategy: GatewayRoutingStrategy::Economy,
             request_body_limit: default_request_body_limit(),
@@ -611,6 +616,11 @@ pub struct ProviderSection {
     /// Optional total upstream timeout override for this provider (seconds, 60~1800).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_secs: Option<u64>,
+    /// Optional TTFB (Time to First Byte / response headers) budget override in seconds for this provider.
+    /// Defaults to None (inherits gateway `upstream_ttfb_timeout_secs` or 90s).
+    /// Explicitly setting to `Some(0)` disables the TTFB timeout for this provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttfb_timeout_secs: Option<u64>,
     /// Optional provider-level default short-window rate limits, inherited by
     /// every model that does not set its own override (see
     /// [`ProviderSection::effective_rate_limits`]).
@@ -879,6 +889,32 @@ pub fn validate_model_sampling(temperature: Option<f32>, top_p: Option<f32>) -> 
 }
 
 impl ConfigFile {
+    /// Resolves the effective TTFB timeout for a given provider.
+    /// Priority:
+    /// 1. Provider-level `ttfb_timeout_secs`: Some(0) => None (disabled), Some(s) => Some(s)
+    /// 2. Gateway-level `upstream_ttfb_timeout_secs`: Some(0) => None (disabled), Some(s) => Some(s)
+    /// 3. Global default: 90 seconds (Some(Duration::from_secs(90)))
+    pub fn effective_ttfb_timeout(&self, provider_name: &str) -> Option<std::time::Duration> {
+        if let Some(prov) = self.providers.get(provider_name) {
+            if let Some(secs) = prov.ttfb_timeout_secs {
+                return if secs == 0 {
+                    None
+                } else {
+                    Some(std::time::Duration::from_secs(secs))
+                };
+            }
+        }
+        if let Some(secs) = self.gateway.upstream_ttfb_timeout_secs {
+            if secs == 0 {
+                None
+            } else {
+                Some(std::time::Duration::from_secs(secs))
+            }
+        } else {
+            Some(ponyllm_core::DEFAULT_UPSTREAM_TTFB_TIMEOUT)
+        }
+    }
+
     pub fn resolve_path(path: Option<&str>) -> std::path::PathBuf {
         ponyllm_core::resolve_config_path(path.map(Path::new))
     }
@@ -993,6 +1029,7 @@ impl ConfigFile {
             messages_url: None,
             proxy: None,
             timeout_secs: None,
+            ttfb_timeout_secs: None,
             rate_limits: None,
         });
         entry.base_url = base_url.to_string();
@@ -1358,6 +1395,7 @@ mod tests {
             messages_url: None,
             proxy: None,
             timeout_secs: None,
+            ttfb_timeout_secs: None,
             rate_limits: Some(RateLimits {
                 rpm: Some(10),
                 tpm: Some(1_000_000),
@@ -1408,8 +1446,110 @@ mod tests {
             messages_url: None,
             proxy: None,
             timeout_secs: None,
+            ttfb_timeout_secs: None,
             rate_limits: None,
         };
         assert_eq!(none_prov.effective_rate_limits("nope"), None);
     }
+
+    #[test]
+    fn test_ttfb_timeout_resolution_and_defaults() {
+        let toml_str = r#"
+[gateway]
+bind = "127.0.0.1:8080"
+
+[providers.default_prov]
+base_url = "https://api.example.com"
+default_model = "test-model"
+
+[providers.custom_prov]
+base_url = "https://api.example.com"
+default_model = "test-model"
+ttfb_timeout_secs = 120
+
+[providers.disabled_prov]
+base_url = "https://api.example.com"
+default_model = "test-model"
+ttfb_timeout_secs = 0
+"#;
+        let cfg: ConfigFile = toml::from_str(toml_str).unwrap();
+
+        // 1. Default fallback is 90s
+        assert_eq!(
+            cfg.effective_ttfb_timeout("default_prov"),
+            Some(std::time::Duration::from_secs(90))
+        );
+        // Provider not explicitly in config also falls back to gateway default (90s)
+        assert_eq!(
+            cfg.effective_ttfb_timeout("unknown_prov"),
+            Some(std::time::Duration::from_secs(90))
+        );
+
+        // 2. Provider override (120s)
+        assert_eq!(
+            cfg.effective_ttfb_timeout("custom_prov"),
+            Some(std::time::Duration::from_secs(120))
+        );
+
+        // 3. Provider override to 0 (disabled)
+        assert_eq!(cfg.effective_ttfb_timeout("disabled_prov"), None);
+
+        // 4. Gateway override
+        let mut gw_override = cfg.clone();
+        gw_override.gateway.upstream_ttfb_timeout_secs = Some(45);
+        assert_eq!(
+            gw_override.effective_ttfb_timeout("default_prov"),
+            Some(std::time::Duration::from_secs(45))
+        );
+        // Custom provider still overrides gateway
+        assert_eq!(
+            gw_override.effective_ttfb_timeout("custom_prov"),
+            Some(std::time::Duration::from_secs(120))
+        );
+
+        // 5. Gateway disabled (0)
+        let mut gw_disabled = cfg.clone();
+        gw_disabled.gateway.upstream_ttfb_timeout_secs = Some(0);
+        assert_eq!(gw_disabled.effective_ttfb_timeout("default_prov"), None);
+        // Custom provider still overrides disabled gateway
+        assert_eq!(
+            gw_disabled.effective_ttfb_timeout("custom_prov"),
+            Some(std::time::Duration::from_secs(120))
+        );
+
+        // 6. Provider=0 (disabled) explicitly overrides non-zero gateway (45s)
+        assert_eq!(gw_override.effective_ttfb_timeout("disabled_prov"), None);
+
+        // 7. TOML deserialization with [gateway] upstream_ttfb_timeout_secs and tight provider override
+        let toml_gw_str = r#"
+[gateway]
+bind = "127.0.0.1:8080"
+upstream_ttfb_timeout_secs = 60
+
+[providers.default_prov]
+base_url = "https://api.example.com"
+default_model = "test-model"
+
+[providers.tight_prov]
+base_url = "https://api.example.com"
+default_model = "test-model"
+ttfb_timeout_secs = 10
+
+[providers.disabled_prov]
+base_url = "https://api.example.com"
+default_model = "test-model"
+ttfb_timeout_secs = 0
+"#;
+        let cfg_gw: ConfigFile = toml::from_str(toml_gw_str).unwrap();
+        assert_eq!(
+            cfg_gw.effective_ttfb_timeout("default_prov"),
+            Some(std::time::Duration::from_secs(60))
+        );
+        assert_eq!(
+            cfg_gw.effective_ttfb_timeout("tight_prov"),
+            Some(std::time::Duration::from_secs(10))
+        );
+        assert_eq!(cfg_gw.effective_ttfb_timeout("disabled_prov"), None);
+    }
 }
+

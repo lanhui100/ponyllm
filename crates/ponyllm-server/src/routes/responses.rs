@@ -331,16 +331,20 @@ pub async fn handle_responses(
         // Resolve the budget under the CLEAN model name (matching pricing and
         // routing): a suffixed request (`deepseek-v4-flash[1m]:economy`) must
         // hit the same model-level rate_limits as the plain name.
-        let rate_limits = state
-            .config
-            .read()
-            .providers
-            .get(&provider_name)
-            .and_then(|p| p.effective_rate_limits(&parsed.clean_model_name));
+        let (rate_limits, ttfb_timeout) = {
+            let cfg = state.config.read();
+            let rl = cfg
+                .providers
+                .get(&provider_name)
+                .and_then(|p| p.effective_rate_limits(&parsed.clean_model_name));
+            let ttfb = cfg.effective_ttfb_timeout(&provider_name);
+            (rl, ttfb)
+        };
         let executor = UpstreamExecutor::with_client(pool.clone(), http_client, max_retries)
             .with_downstream_headers(&headers)
             .with_opencode_zen(is_opencode_zen_target(&provider_name, &target_url))
             .with_rate_limits(rate_limits)
+            .with_ttfb_timeout(ttfb_timeout)
             .with_event_sink(sink_ctx.clone(), state.event_sink(sink_ctx));
 
         // Handle streaming request: pass through upstream SSE unchanged
@@ -655,19 +659,7 @@ pub async fn handle_responses(
         }
     }
 
-    let latency = start_time.elapsed();
-    state.emit(
-        &ctx,
-        None,
-        GatewayEvent::RequestFailed {
-            status_code: 502,
-            latency_ms: latency.as_secs_f64() * 1000.0,
-            error: last_error.clone(),
-            request_snippet: last_req_snippet,
-        },
-    );
-
-    let msg = crate::extractors::format_exhausted_message(&requested_raw_model, &last_error, last_pool_exhausted, &request_id);
+    let msg = crate::extractors::format_exhausted_message(&requested_raw_model, &last_kind, &last_error, last_pool_exhausted, &request_id);
     let mut err_resp = crate::extractors::project_openai_error(&last_kind, &msg);
     if let Some(secs) = last_retry_after {
         if let Ok(v) = HeaderValue::from_str(&secs.to_string()) {
@@ -675,6 +667,18 @@ pub async fn handle_responses(
         }
     }
     inject_telemetry_headers(&mut err_resp, &request_id, &stages);
+
+    let latency = start_time.elapsed();
+    state.emit(
+        &ctx,
+        None,
+        GatewayEvent::RequestFailed {
+            status_code: err_resp.status().as_u16(),
+            latency_ms: latency.as_secs_f64() * 1000.0,
+            error: last_error.clone(),
+            request_snippet: last_req_snippet,
+        },
+    );
     err_resp
 }
 

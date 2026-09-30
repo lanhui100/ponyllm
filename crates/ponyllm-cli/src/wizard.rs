@@ -240,6 +240,7 @@ pub fn run_interactive_init(output_path: &str) -> Result<(), Box<dyn std::error:
             messages_url: preset_messages_url,
             proxy: provider_proxy,
             timeout_secs: None,
+            ttfb_timeout_secs: None,
         });
 
         let add_another_provider = Confirm::new("是否继续配置其他大模型提供商?")
@@ -257,6 +258,7 @@ pub fn run_interactive_init(output_path: &str) -> Result<(), Box<dyn std::error:
             max_retries: 3,
             flight_recorder_capacity: 200,
             upstream_timeout_secs: default_upstream_timeout_secs(),
+            upstream_ttfb_timeout_secs: None,
             api_key: api_token,
             default_strategy,
             request_body_limit: default_request_body_limit(),

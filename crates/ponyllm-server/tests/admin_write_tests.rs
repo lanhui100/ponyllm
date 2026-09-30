@@ -103,6 +103,7 @@ impl WriteTestHarness {
             messages_url: None,
             proxy: None,
             timeout_secs: None,
+            ttfb_timeout_secs: None,
         };
 
         let mut providers = HashMap::new();
@@ -171,6 +172,7 @@ impl WriteTestHarness {
                 messages_url: None,
                 proxy: None,
                 timeout_secs: None,
+                ttfb_timeout_secs: None,
             },
         );
 
@@ -989,6 +991,7 @@ async fn test_provider_upstream_models() {
                 messages_url: None,
                 proxy: None,
                 timeout_secs: None,
+                ttfb_timeout_secs: None,
             },
         );
     }
@@ -1023,6 +1026,7 @@ async fn test_provider_upstream_models() {
                 messages_url: None,
                 proxy: None,
                 timeout_secs: None,
+                ttfb_timeout_secs: None,
             },
         );
     }
@@ -1191,6 +1195,7 @@ async fn test_dial_test_blocked_target_refused() {
         messages_url: None,
         proxy: None,
         timeout_secs: None,
+        ttfb_timeout_secs: None,
     };
     let mut providers = HashMap::new();
     providers.insert("meta".to_string(), provider_sec);
@@ -1225,6 +1230,7 @@ async fn test_dial_test_blocked_target_refused() {
             messages_url: None,
             proxy: None,
             timeout_secs: None,
+            ttfb_timeout_secs: None,
         },
     );
 

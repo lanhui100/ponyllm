@@ -138,24 +138,94 @@ pub fn parse_thinking_header(headers: &axum::http::HeaderMap) -> Option<ponyllm_
 #[cfg(test)]
 mod security_tests {
     #[test]
-    fn exhaustion_messages_redact_key_lists() {
+    fn exhaustion_messages_redact_key_lists_and_emails() {
         assert_eq!(super::redact_internal_identifiers("failed keys [\"key-5105\"]"), "failed keys [redacted]");
+        assert_eq!(
+            super::redact_internal_identifiers("failed keys [\"k1\"] then keys [\"k2\"]"),
+            "failed keys [redacted] then keys [redacted]"
+        );
         assert_eq!(super::redact_internal_identifiers("upstream timeout"), "upstream timeout");
+        assert_eq!(
+            super::redact_internal_identifiers("Antigravity refresh for 'engineer@company.com' skipped: serialization lock held by another replica"),
+            "Antigravity refresh for '[redacted]' skipped: serialization lock held by another replica"
+        );
+        assert_eq!(
+            super::redact_internal_identifiers("Antigravity credential 'dev-ops@internal.net' rejected by OAuth"),
+            "Antigravity credential '[redacted]' rejected by OAuth"
+        );
+        assert_eq!(
+            super::redact_internal_identifiers("Network error with account@domain.org: connect timeout"),
+            "Network error with [redacted]: connect timeout"
+        );
+    }
+
+    #[test]
+    fn format_exhausted_message_identifies_lock_contention() {
+        let msg = super::format_exhausted_message(
+            "gemini-2.5-pro",
+            &ponyllm_core::error::GatewayErrorKind::LockContention,
+            "Request failed after 1 attempts across keys [\"k1\"]: 1 lock busy/contention",
+            false,
+            "req-123",
+        );
+        assert!(msg.contains("gateway lock contention, retry shortly"));
+        assert!(!msg.contains("upstream-side failure"));
+        assert!(msg.contains("keys [redacted]"));
     }
 }
 
+fn redact_emails(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut current_word = String::new();
+
+    let flush_word = |word: &str, out: &mut String| {
+        if let Some(at_idx) = word.find('@') {
+            let user = &word[..at_idx];
+            let domain = &word[at_idx + 1..];
+            if !user.is_empty() && domain.contains('.') && domain.len() >= 3 {
+                out.push_str("[redacted]");
+                return;
+            }
+        }
+        out.push_str(word);
+    };
+
+    for c in text.chars() {
+        if c.is_alphanumeric() || c == '@' || c == '.' || c == '_' || c == '-' || c == '+' {
+            current_word.push(c);
+        } else {
+            if !current_word.is_empty() {
+                flush_word(&current_word, &mut out);
+                current_word.clear();
+            }
+            out.push(c);
+        }
+    }
+    if !current_word.is_empty() {
+        flush_word(&current_word, &mut out);
+    }
+    out
+}
+
 fn redact_internal_identifiers(raw: &str) -> String {
-    // Key IDs and retry internals are useful in server logs but must not cross
-    // the API boundary. Keep the error class while removing pool topology.
-    let lower = raw.to_ascii_lowercase();
-    let Some(start) = lower.find("keys [") else {
-        return raw.to_string();
-    };
-    let Some(end_rel) = raw[start..].find(']') else {
-        return raw.to_string();
-    };
-    let end = start + end_rel + 1;
-    format!("{}keys [redacted]{}", &raw[..start], &raw[end..])
+    // Key IDs, accounts, and retry internals are useful in server logs but must not cross
+    // the API boundary. Keep the error class while removing pool topology and PII.
+    let mut result = redact_emails(raw);
+
+    // Redact all occurrences of keys [...]
+    let mut search_from = 0;
+    while let Some(start_rel) = result[search_from..].to_ascii_lowercase().find("keys [") {
+        let start = search_from + start_rel;
+        if let Some(end_rel) = result[start..].find(']') {
+            let end = start + end_rel + 1;
+            result = format!("{}keys [redacted]{}", &result[..start], &result[end..]);
+            search_from = start + "keys [redacted]".len();
+        } else {
+            break;
+        }
+    }
+
+    result
 }
 
 /// Build the client-visible exhaustion message, distinguishing local pool
@@ -167,6 +237,7 @@ fn redact_internal_identifiers(raw: &str) -> String {
 /// (`CoreError::NoAvailableKey`), never from substring matching.
 pub fn format_exhausted_message(
     model: &str,
+    kind: &ponyllm_core::error::GatewayErrorKind,
     last_error: &str,
     pool_exhausted: bool,
     request_id: &str,
@@ -175,6 +246,11 @@ pub fn format_exhausted_message(
     if pool_exhausted {
         format!(
             "Local key pool exhausted for model '{}' (gateway-side cooling, no upstream attempt in this request; no Active keys, check `ponyllm status`). Last error: {} (request_id: {})",
+            model, safe_error, request_id
+        )
+    } else if matches!(kind, ponyllm_core::error::GatewayErrorKind::LockContention) {
+        format!(
+            "All candidate upstream providers exhausted for model '{}' (gateway lock contention, retry shortly). Last error: {} (request_id: {})",
             model, safe_error, request_id
         )
     } else {
@@ -225,6 +301,11 @@ pub fn project_openai_error(
             "api_error",
             "upstream_unavailable",
         ),
+        GatewayErrorKind::LockContention => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "api_error",
+            "lock_contention",
+        ),
         GatewayErrorKind::ClientBadRequest => (
             StatusCode::BAD_REQUEST,
             "invalid_request_error",
@@ -261,6 +342,10 @@ pub fn project_anthropic_error(
             "rate_limit_error",
         ),
         GatewayErrorKind::UpstreamUnavailable => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "overloaded_error",
+        ),
+        GatewayErrorKind::LockContention => (
             StatusCode::SERVICE_UNAVAILABLE,
             "overloaded_error",
         ),
@@ -389,6 +474,27 @@ mod tests {
         let val = serde_json::json!({"model": "gpt-4o", "messages": [{"role": "user", "content": big_content}]});
         let snippet = format_request_snippet(&val);
         assert!(snippet.contains("...[TRUNCATED]"));
+    }
+
+    #[tokio::test]
+    async fn test_project_error_lock_contention() {
+        use axum::body::to_bytes;
+        use ponyllm_core::error::GatewayErrorKind;
+
+        // 1. OpenAI projection: 503 and "lock_contention"
+        let resp = project_openai_error(&GatewayErrorKind::LockContention, "serialization lock busy");
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"]["code"], "lock_contention");
+        assert_eq!(body["error"]["type"], "api_error");
+
+        // 2. Anthropic projection: 503 and "overloaded_error"
+        let resp_anth = project_anthropic_error(&GatewayErrorKind::LockContention, "serialization lock busy");
+        assert_eq!(resp_anth.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let bytes_anth = to_bytes(resp_anth.into_body(), usize::MAX).await.unwrap();
+        let body_anth: serde_json::Value = serde_json::from_slice(&bytes_anth).unwrap();
+        assert_eq!(body_anth["error"]["type"], "overloaded_error");
     }
 }
 

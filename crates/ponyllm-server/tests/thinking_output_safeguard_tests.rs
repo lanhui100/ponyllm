@@ -94,6 +94,7 @@ async fn test_thinking_output_safeguard_chat_flooring() {
             messages_url: None,
             proxy: None,
             timeout_secs: None,
+            ttfb_timeout_secs: None,
         },
     );
 
@@ -221,6 +222,7 @@ async fn test_thinking_output_safeguard_messages_flooring() {
             messages_url: None,
             proxy: None,
             timeout_secs: None,
+            ttfb_timeout_secs: None,
         },
     );
 

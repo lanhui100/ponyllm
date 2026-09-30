@@ -48,6 +48,7 @@ async fn systemone_passthrough_preserves_body_and_records_usage() {
             messages_url: None,
             proxy: None,
             timeout_secs: None,
+            ttfb_timeout_secs: None,
         },
     );
     config.providers.insert(
@@ -69,6 +70,7 @@ async fn systemone_passthrough_preserves_body_and_records_usage() {
             messages_url: None,
             proxy: None,
             timeout_secs: None,
+            ttfb_timeout_secs: None,
         },
     );
     config.gateway_keys = Vec::new();
@@ -143,6 +145,7 @@ async fn spawn_systemone_test_gateway() -> (SocketAddr, Arc<AppState>) {
         models: vec!["jev-1.13-free".to_string()], model_specs: vec![],
         default_protocol: Some(UpstreamProtocol::Systemone), chat_url: None,
         responses_url: None, messages_url: None, proxy: None, timeout_secs: None,
+        ttfb_timeout_secs: None,
     });
     let state = Arc::new(AppState::new(config));
     let pool = Arc::new(KeyPool::new("zen-jev", RoutingStrategy::RoundRobin));

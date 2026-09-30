@@ -73,9 +73,14 @@ pub async fn handle_systemone(
         let target_url = target.systemone_url();
         let sink_ctx = EventSinkCtx { request_id: request_id.clone(), endpoint: endpoint.clone(), provider: provider.clone(), model: Some(model.clone()), start, stages: stages.clone(), request_snippet: request_snippet.clone() };
         let client = state.http_client_for_target(&provider, &target.physical_model);
-        let executor = UpstreamExecutor::with_client(pool.clone(), client, state.config.read().max_retries)
+        let (max_retries, ttfb_timeout) = {
+            let cfg = state.config.read();
+            (cfg.max_retries, cfg.effective_ttfb_timeout(&provider))
+        };
+        let executor = UpstreamExecutor::with_client(pool.clone(), client, max_retries)
             .with_opencode_zen(is_opencode_zen_target(&provider, &target_url))
             .with_systemone(true)
+            .with_ttfb_timeout(ttfb_timeout)
             .with_event_sink(sink_ctx.clone(), state.event_sink(sink_ctx));
 
         match executor.execute_json_request_with_key(&target_url, &upstream_body).await {
@@ -102,17 +107,17 @@ pub async fn handle_systemone(
                 }
                 last_kind = err.kind();
                 last_pool_exhausted = matches!(err, CoreError::NoAvailableKey(_));
-                last_retry_after = crate::extractors::retry_after_secs(&last_kind, pool.earliest_unlock());
+                last_retry_after = crate::extractors::retry_after_secs(&last_kind, crate::routes::chat::retry_unlock_hint(&last_kind, &pool, None));
                 last_error = err.to_string();
             }
         }
     }
 
-    let latency = start.elapsed();
-    state.emit(&ctx, last_provider, GatewayEvent::RequestFailed { status_code: 502, latency_ms: latency.as_secs_f64() * 1000.0, error: last_error.clone(), request_snippet });
-    let message = format_exhausted_message(&model, &last_error, last_pool_exhausted, &request_id);
+    let message = format_exhausted_message(&model, &last_kind, &last_error, last_pool_exhausted, &request_id);
     let mut response = project_openai_error(&last_kind, &message);
     if let Some(secs) = last_retry_after { if let Ok(value) = secs.to_string().parse() { response.headers_mut().insert("retry-after", value); } }
+    let latency = start.elapsed();
+    state.emit(&ctx, last_provider, GatewayEvent::RequestFailed { status_code: response.status().as_u16(), latency_ms: latency.as_secs_f64() * 1000.0, error: last_error.clone(), request_snippet });
     response
 }
 

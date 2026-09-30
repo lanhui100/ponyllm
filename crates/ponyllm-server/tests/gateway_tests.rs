@@ -25,6 +25,7 @@ fn make_mock_provider_config(base_url: &str, default_model: &str, models: Vec<&s
         messages_url: None,
         proxy: None,
         timeout_secs: None,
+        ttfb_timeout_secs: None,
     }
 }
 
@@ -533,4 +534,96 @@ async fn test_model_default_sampling_applied() {
     assert_eq!(resp2.status(), 200);
     let body2: serde_json::Value = resp2.json().await.unwrap();
     assert_eq!(body2["choices"][0]["message"]["content"], "t=0.100000 p=0.200000");
+}
+
+#[tokio::test]
+async fn test_gateway_ttfb_timeout_returns_503_and_provider_override() {
+    let mock_upstream = Router::new().route(
+        "/v1/chat/completions",
+        post(|Json(_): Json<serde_json::Value>| async move {
+            tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+            axum::Json(json!({
+                "id": "chatcmpl-mock-slow",
+                "object": "chat.completion",
+                "created": 1710000000,
+                "model": "test-model",
+                "choices": [{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": "slow response"
+                    },
+                    "finish_reason": "stop"
+                }]
+            }))
+        }),
+    );
+    let mock_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mock_addr = mock_listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(mock_listener, mock_upstream).await.unwrap();
+    });
+
+    let mut config = GatewayConfig::default();
+    config.max_retries = 1;
+
+    // Provider 1: tight TTFB timeout of 1 second
+    let mut p_slow = make_mock_provider_config(&format!("http://{}", mock_addr), "test-model", vec!["slow-model"]);
+    p_slow.ttfb_timeout_secs = Some(1);
+    config.providers.insert("slow_prov".to_string(), p_slow);
+
+    // Provider 2: TTFB timeout disabled (0)
+    let mut p_disabled = make_mock_provider_config(&format!("http://{}", mock_addr), "test-model", vec!["disabled-model"]);
+    p_disabled.ttfb_timeout_secs = Some(0);
+    config.providers.insert("disabled_prov".to_string(), p_disabled);
+
+    let state = Arc::new(AppState::new(config));
+    let pool_slow = Arc::new(KeyPool::new("slow_prov", RoutingStrategy::RoundRobin));
+    pool_slow.add_key(ApiKeyEntry::new("k1", "sk-test", 1, 10));
+    state.register_pool("slow_prov", pool_slow);
+
+    let pool_disabled = Arc::new(KeyPool::new("disabled_prov", RoutingStrategy::RoundRobin));
+    pool_disabled.add_key(ApiKeyEntry::new("k2", "sk-test", 1, 10));
+    state.register_pool("disabled_prov", pool_disabled);
+
+    let gateway_app = create_app(state);
+    let gateway_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let gateway_addr = gateway_listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(gateway_listener, gateway_app).await.unwrap();
+    });
+    let client = reqwest::Client::new();
+
+    // 1. Request to slow-model (1s TTFB) against 1.2s upstream must fail with 503
+    let resp_slow = client
+        .post(format!("http://{}/v1/chat/completions", gateway_addr))
+        .json(&json!({
+            "model": "slow-model",
+            "messages": [{"role": "user", "content": "hi"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp_slow.status(), 503);
+    let body_slow: serde_json::Value = resp_slow.json().await.unwrap();
+    assert_eq!(body_slow["error"]["code"], "upstream_unavailable");
+    assert!(
+        body_slow["error"]["message"].as_str().unwrap().contains("TTFB timeout"),
+        "expected TTFB timeout in error message, got: {:?}",
+        body_slow
+    );
+
+    // 2. Request to disabled-model (TTFB disabled = 0) against 1.2s upstream must succeed with 200
+    let resp_ok = client
+        .post(format!("http://{}/v1/chat/completions", gateway_addr))
+        .json(&json!({
+            "model": "disabled-model",
+            "messages": [{"role": "user", "content": "hi"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp_ok.status(), 200);
+    let body_ok: serde_json::Value = resp_ok.json().await.unwrap();
+    assert_eq!(body_ok["choices"][0]["message"]["content"], "slow response");
 }

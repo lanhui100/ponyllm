@@ -26,6 +26,7 @@ fn make_provider(base_url: &str, default_model: &str) -> ProviderConfig {
         messages_url: None,
         proxy: None,
         timeout_secs: None,
+        ttfb_timeout_secs: None,
     }
 }
 

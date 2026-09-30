@@ -73,6 +73,9 @@ pub struct ProviderView {
     /// model without its own override. `None` = no limit at provider level.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rate_limits: Option<AdminRateLimits>,
+    /// Optional TTFB budget override in seconds for this provider (0 = disabled).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttfb_timeout_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default, ToSchema)]
@@ -352,6 +355,9 @@ pub struct CreateProviderPayload {
     /// Optional total upstream timeout override (seconds, 60~1800).
     #[serde(default)]
     pub timeout_secs: Option<u64>,
+    /// Optional TTFB budget override in seconds for this provider (0 = disabled).
+    #[serde(default)]
+    pub ttfb_timeout_secs: Option<u64>,
     /// Provider-level default short-window rate limits inherited by models
     /// without their own override. `None` = no provider-level limit.
     #[serde(default)]
@@ -402,6 +408,9 @@ pub struct UpdateProviderPayload {
     /// Optional total upstream timeout override (seconds, 60~1800).
     #[serde(default)]
     pub timeout_secs: Option<u64>,
+    /// Optional TTFB budget override in seconds for this provider (0 = disabled).
+    #[serde(default)]
+    pub ttfb_timeout_secs: Option<u64>,
     /// Provider-level default short-window rate limits. `Some(Some(..))`
     /// replaces the whole object; explicit `null` (`Some(None)`) clears the
     /// provider-level default back to unlimited; absent (`None`) leaves it
@@ -1264,6 +1273,7 @@ pub async fn handle_admin_providers(State(state): State<Arc<AppState>>) -> impl 
             responses_url: p.responses_url.clone(),
             messages_url: p.messages_url.clone(),
             rate_limits: p.rate_limits.map(Into::into),
+            ttfb_timeout_secs: p.ttfb_timeout_secs,
         })
         .collect();
     views.sort_by(|a, b| a.name.cmp(&b.name));
@@ -1395,6 +1405,7 @@ pub async fn handle_admin_create_provider(
         messages_url: payload.messages_url.clone(),
         proxy: payload.proxy.clone(),
         timeout_secs: payload.timeout_secs,
+        ttfb_timeout_secs: payload.ttfb_timeout_secs,
     };
     file.providers.insert(name.clone(), p_sec);
 
@@ -1419,6 +1430,7 @@ pub async fn handle_admin_create_provider(
         messages_url: payload.messages_url.clone(),
         proxy: payload.proxy,
         timeout_secs: payload.timeout_secs,
+        ttfb_timeout_secs: payload.ttfb_timeout_secs,
     };
     state.config.write().providers.insert(name.clone(), p_cfg);
 
@@ -1447,6 +1459,7 @@ pub async fn handle_admin_create_provider(
             responses_url: payload.responses_url,
             messages_url: payload.messages_url,
             rate_limits: payload.rate_limits,
+            ttfb_timeout_secs: payload.ttfb_timeout_secs,
         }),
     )
         .into_response()
@@ -1528,6 +1541,9 @@ pub async fn handle_admin_update_provider(
     }
     if let Some(t) = payload.timeout_secs {
         p.timeout_secs = Some(t);
+    }
+    if let Some(t) = payload.ttfb_timeout_secs {
+        p.ttfb_timeout_secs = Some(t);
     }
     match payload.rate_limits {
         Some(Some(rl)) => {
@@ -1618,6 +1634,7 @@ pub async fn handle_admin_update_provider(
         p_cfg.messages_url = updated_p.messages_url.clone();
         p_cfg.proxy = updated_p.proxy.clone();
         p_cfg.timeout_secs = updated_p.timeout_secs;
+        p_cfg.ttfb_timeout_secs = updated_p.ttfb_timeout_secs;
         p_cfg.rate_limits = updated_p.rate_limits;
     }
 
@@ -1647,6 +1664,7 @@ pub async fn handle_admin_update_provider(
         responses_url: updated_p.responses_url,
         messages_url: updated_p.messages_url,
         rate_limits: updated_p.rate_limits.map(Into::into),
+        ttfb_timeout_secs: updated_p.ttfb_timeout_secs,
     };
 
     (
@@ -4266,6 +4284,7 @@ pub async fn handle_admin_authorize_antigravity(
                 messages_url: None,
                 proxy: None,
                 timeout_secs: None,
+                ttfb_timeout_secs: None,
                 keys: vec![],
                 model_configs: vec![],
             }
@@ -4330,11 +4349,13 @@ pub async fn handle_admin_authorize_antigravity(
                 messages_url: p_sec.messages_url.clone(),
                 proxy: p_sec.proxy.clone(),
                 timeout_secs: p_sec.timeout_secs,
+                ttfb_timeout_secs: p_sec.ttfb_timeout_secs,
             }
         });
         entry.default_protocol = p_sec.default_protocol;
         entry.proxy = p_sec.proxy.clone();
         entry.timeout_secs = p_sec.timeout_secs;
+        entry.ttfb_timeout_secs = p_sec.ttfb_timeout_secs;
         for m in &p_sec.models {
             if !entry.models.contains(m) {
                 entry.models.push(m.clone());

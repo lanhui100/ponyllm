@@ -599,6 +599,7 @@ async fn test_admin_test_key_lock_busy_returns_429() {
             messages_url: None,
             proxy: None,
             timeout_secs: None,
+            ttfb_timeout_secs: None,
         };
         file.providers.insert("antigravity".to_string(), p_sec);
         store.save(&file, &ver).await.unwrap();

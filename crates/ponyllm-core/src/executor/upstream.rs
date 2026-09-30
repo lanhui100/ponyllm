@@ -79,6 +79,10 @@ pub struct UpstreamExecutor {
     /// (legacy unlimited behavior). Feeds both the budget-filtered key
     /// selection and the window-exhaustion wait/Retry-After.
     rate_limits: Option<crate::pool::RateLimits>,
+    /// Optional TTFB timeout budget for upstream calls.
+    /// `Some(duration)` enforces response headers arrive within `duration`.
+    /// `None` disables TTFB guard (call bounded only by total timeout).
+    ttfb_timeout: Option<Duration>,
 }
 
 impl std::fmt::Debug for UpstreamExecutor {
@@ -95,7 +99,7 @@ impl std::fmt::Debug for UpstreamExecutor {
 /// Gateway-owned User-Agent advertised to upstreams (not a generic SDK name).
 /// OpenCode Go requires callers to identify with their own agent string for
 /// abuse monitoring; the reqwest default would be flagged as generic.
-fn summarize_attempt_failures(kinds: &[GatewayErrorKind]) -> String {
+pub fn summarize_attempt_failures(kinds: &[GatewayErrorKind]) -> String {
     if kinds.is_empty() {
         return String::new();
     }
@@ -103,11 +107,13 @@ fn summarize_attempt_failures(kinds: &[GatewayErrorKind]) -> String {
     let mut quota_exhausted = 0;
     let mut rate_limited = 0;
     let mut auth_invalid = 0;
+    let mut lock_contention = 0;
     let mut other = 0;
 
     for k in kinds {
         match k {
             GatewayErrorKind::UpstreamUnavailable => network_timeout += 1,
+            GatewayErrorKind::LockContention => lock_contention += 1,
             GatewayErrorKind::QuotaExhausted => quota_exhausted += 1,
             GatewayErrorKind::RateLimitExceeded { .. } => rate_limited += 1,
             GatewayErrorKind::AuthInvalid => auth_invalid += 1,
@@ -118,6 +124,9 @@ fn summarize_attempt_failures(kinds: &[GatewayErrorKind]) -> String {
     let mut parts = Vec::new();
     if network_timeout > 0 {
         parts.push(format!("{} timeout/network", network_timeout));
+    }
+    if lock_contention > 0 {
+        parts.push(format!("{} lock busy/contention", lock_contention));
     }
     if quota_exhausted > 0 {
         parts.push(format!("{} quota exhausted", quota_exhausted));
@@ -745,7 +754,7 @@ pub fn sanitize_proxy_url(raw: &str) -> String {
     }
 }
 
-pub const DEFAULT_UPSTREAM_TTFB_TIMEOUT: Duration = Duration::from_secs(15);
+pub const DEFAULT_UPSTREAM_TTFB_TIMEOUT: Duration = Duration::from_secs(90);
 
 /// Create an optimized, connection-pooled HTTP client for upstream LLM providers.
 /// Enables TCP nodelay, Keep-Alive probing, and idle connection reuse to minimize TTFT.
@@ -950,6 +959,7 @@ impl UpstreamExecutor {
             opencode_zen: false,
             systemone: false,
             rate_limits: None,
+            ttfb_timeout: Some(DEFAULT_UPSTREAM_TTFB_TIMEOUT),
         }
     }
 
@@ -974,6 +984,14 @@ impl UpstreamExecutor {
         self
     }
 
+    /// Adopt an explicit TTFB timeout budget for upstream calls.
+    /// `Some(duration)` enforces that response headers arrive within `duration`.
+    /// `None` disables the TTFB guard (upstream call only bounded by total timeout).
+    pub fn with_ttfb_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.ttfb_timeout = timeout;
+        self
+    }
+
     /// Adopt downstream session identity for upstream routing/caching.
     /// Extracts `x-opencode-session` (or affinity aliases) once, so every
     /// per-key retry inside this executor reuses the same session instead of
@@ -985,22 +1003,30 @@ impl UpstreamExecutor {
     }
 
     /// Send one upstream request guarded by the TTFB budget: the response
-    /// headers must arrive within [`DEFAULT_UPSTREAM_TTFB_TIMEOUT`] or the
+    /// headers must arrive within [`self.ttfb_timeout`] or the
     /// attempt is judged dead. The reqwest client itself still owns the
     /// larger *total* budget (20 min default) that covers the whole body
     /// stream; this guard only cuts the "provider never answered" case short
-    /// so failover happens in seconds, not minutes.
+    /// so failover happens in seconds, not minutes. If `self.ttfb_timeout` is None,
+    /// the TTFB guard is disabled and the request is only bounded by the client total timeout.
     async fn send_guarded(
         &self,
         req: reqwest::RequestBuilder,
     ) -> std::result::Result<reqwest::Response, String> {
-        match tokio::time::timeout(DEFAULT_UPSTREAM_TTFB_TIMEOUT, req.send()).await {
-            Ok(Ok(r)) => Ok(r),
-            Ok(Err(e)) => Err(e.to_string()),
-            Err(_elapsed) => Err(format!(
-                "upstream TTFB timeout after {:?} (no response headers)",
-                DEFAULT_UPSTREAM_TTFB_TIMEOUT
-            )),
+        if let Some(timeout) = self.ttfb_timeout {
+            match tokio::time::timeout(timeout, req.send()).await {
+                Ok(Ok(r)) => Ok(r),
+                Ok(Err(e)) => Err(e.to_string()),
+                Err(_elapsed) => Err(format!(
+                    "upstream TTFB timeout after {:?} (no response headers)",
+                    timeout
+                )),
+            }
+        } else {
+            match req.send().await {
+                Ok(r) => Ok(r),
+                Err(e) => Err(e.to_string()),
+            }
         }
     }
 
@@ -1224,11 +1250,14 @@ impl UpstreamExecutor {
             }
             Err(CoreError::RefreshSkipped { .. }) => {
                 // Another replica holds the refresh serialization lock: the
-                // token is being refreshed (and persisted) right now. Retry
-                // the same key once instead of cooling a healthy key; the
-                // `refreshed_keys` guard prevents a loop within one request.
-                tracing::warn!(key_id = %key.id, "Antigravity forced refresh skipped (lock held by another replica); retrying same key");
-                StaleTokenRecovery::RetrySameKey
+                // token is being refreshed (and persisted) right now.
+                // Invalidate our stale in-memory token so subsequent calls don't reuse it.
+                // Do NOT retry the same key immediately in this request with the stale token
+                // (which would 401 again and falsely trip the Passthrough AuthInvalid death penalty),
+                // and do NOT cool this healthy key. Fail over to other candidate keys with LockContention.
+                mgr.invalidate_token();
+                tracing::warn!(key_id = %key.id, "Antigravity forced refresh skipped (lock held by another replica); failing over to next candidate key");
+                StaleTokenRecovery::Recorded(GatewayErrorKind::LockContention)
             }
             Err(CoreError::AuthInvalid { reason, .. }) => {
                 // refresh_token burned (invalid_grant): permanent isolate,
@@ -1459,11 +1488,7 @@ impl UpstreamExecutor {
                         self.pool.record_error(&key.id, pool_err);
                     }
                     last_error = e.to_string();
-                    last_kind = if matches!(&e, CoreError::RefreshSkipped { .. }) {
-                        GatewayErrorKind::UpstreamUnavailable
-                    } else {
-                        GatewayErrorKind::AuthInvalid
-                    };
+                    last_kind = e.kind();
                     attempt_kinds.push(last_kind.clone());
                     self.emit_both(&key.id, attempt_idx, None, last_kind.clone(), last_error.clone(), None, attempt_start.elapsed());
                     continue;
@@ -1721,11 +1746,7 @@ impl UpstreamExecutor {
                         self.pool.record_error(&key.id, pool_err);
                     }
                     last_error = e.to_string();
-                    last_kind = if matches!(&e, CoreError::RefreshSkipped { .. }) {
-                        GatewayErrorKind::UpstreamUnavailable
-                    } else {
-                        GatewayErrorKind::AuthInvalid
-                    };
+                    last_kind = e.kind();
                     attempt_kinds.push(last_kind.clone());
                     self.emit_both(&key.id, attempt_idx, None, last_kind.clone(), last_error.clone(), None, attempt_start.elapsed());
                     continue;

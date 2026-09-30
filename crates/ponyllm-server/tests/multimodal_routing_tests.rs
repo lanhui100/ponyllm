@@ -40,6 +40,7 @@ fn make_multimodal_provider(
         messages_url: None,
         proxy: None,
         timeout_secs: None,
+        ttfb_timeout_secs: None,
     }
 }
 
