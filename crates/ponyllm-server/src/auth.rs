@@ -38,7 +38,7 @@ pub enum Resource {
 /// Unknown paths fail closed inside `/api/admin/` (→ [`Resource::AdminWrite`])
 /// and pass through elsewhere (the router answers 404/405 itself).
 pub fn classify_resource(method: &str, path: &str, query: Option<&str>) -> Resource {
-    if path == "/health" || path == "/oauth2callback" {
+    if path == "/health" || path == "/metrics" || path == "/oauth2callback" {
         return Resource::Exempt;
     }
     let is_get = method.eq_ignore_ascii_case("GET") || method.eq_ignore_ascii_case("HEAD");

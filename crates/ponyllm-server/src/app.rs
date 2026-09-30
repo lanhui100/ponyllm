@@ -100,11 +100,9 @@ async fn auth_middleware(
     use crate::auth::{authenticate, classify_resource, scope_allows, AuthVerdict, Resource};
     use ponyllm_config::AuthCompat;
 
-    let method = req.method().as_str().to_string();
     let path = req.uri().path().to_string();
-    let query = req.uri().query().map(|q| q.to_string());
-    // /health and /oauth2callback endpoints are exempt from authentication
-    if path == "/health" || path == "/oauth2callback" {
+    // /health, /metrics and /oauth2callback endpoints are exempt from authentication
+    if path == "/health" || path == "/metrics" || path == "/oauth2callback" {
         return next.run(req).await;
     }
 
@@ -121,6 +119,20 @@ async fn auth_middleware(
     // `validate_bind_auth_combo`).
     let open = (legacy_key.is_empty() || legacy_key.eq_ignore_ascii_case("none")) && entries.is_empty();
     if open {
+        return next.run(req).await;
+    }
+
+    let (method, path, query) = {
+        let uri = req.uri();
+        (
+            req.method().as_str().to_string(),
+            uri.path().to_string(),
+            uri.query().map(|q| q.to_string()),
+        )
+    };
+
+    let resource = classify_resource(&method, &path, query.as_deref());
+    if matches!(resource, Resource::Exempt) {
         return next.run(req).await;
     }
 
@@ -190,9 +202,10 @@ pub fn create_app(state: Arc<AppState>) -> Router {
 
     let body_limit = state.config.read().request_body_limit;
 
-    // API routes: guarded by auth_middleware (Bearer / x-api-key, /health exempt).
+    // API routes: guarded by auth_middleware (Bearer / x-api-key, /health & /metrics exempt).
     let api = Router::new()
         .route("/health", get(handle_health))
+        .route("/metrics", get(crate::routes::telemetry::handle_get_prometheus_metrics))
         .route("/oauth2callback", get(crate::routes::handle_oauth2_callback))
         .route("/models", get(handle_list_models))
         .route("/models/{model_id}", get(handle_get_model))

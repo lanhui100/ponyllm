@@ -84,6 +84,26 @@ async fn test_telemetry_history_and_stream_uptime_bars() {
         .body(Body::empty())
         .unwrap();
 
-    let resp3 = tower::ServiceExt::oneshot(app, req3).await.unwrap();
+    let resp3 = tower::ServiceExt::oneshot(app.clone(), req3).await.unwrap();
     assert_eq!(resp3.status(), StatusCode::BAD_REQUEST);
+
+    // 4. Test GET /metrics (Prometheus plaintext endpoint, exempt from auth)
+    let req4 = Request::builder()
+        .uri("/metrics")
+        .body(Body::empty())
+        .unwrap();
+
+    let resp4 = tower::ServiceExt::oneshot(app, req4).await.unwrap();
+    assert_eq!(resp4.status(), StatusCode::OK);
+    assert_eq!(
+        resp4.headers().get("content-type").unwrap().to_str().unwrap(),
+        "text/plain; version=0.0.4; charset=utf-8"
+    );
+    let bytes4 = axum::body::to_bytes(resp4.into_body(), usize::MAX).await.unwrap();
+    let text = String::from_utf8(bytes4.to_vec()).unwrap();
+    assert!(text.contains("# HELP ponyllm_requests_total"));
+    assert!(text.contains("ponyllm_requests_total 1"));
+    assert!(text.contains("ponyllm_requests_successful_total 1"));
+    assert!(text.contains("ponyllm_tokens_total{type=\"completion\"} 80"));
+    assert!(text.contains("ponyllm_tokens_total{type=\"total\"} 200"));
 }

@@ -23,6 +23,10 @@ metadata:
   labels:
     app.kubernetes.io/name: ponyllm
     app.kubernetes.io/component: gateway
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/path: "/metrics"
+    prometheus.io/port: "8080"
 spec:
   type: ClusterIP
   selector:
@@ -153,6 +157,10 @@ spec:
         app.kubernetes.io/name: ponyllm
         app.kubernetes.io/component: gateway
         ponyllm.io/node-role: dev
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: "/metrics"
+        prometheus.io/port: "8080"
     spec:
       # 单副本节点绑定：按 handover 5:4:1:1 加权，各节点 1 个 gateway。
       nodeSelector:
@@ -309,6 +317,10 @@ spec:
         app.kubernetes.io/name: ponyllm
         app.kubernetes.io/component: gateway
         ponyllm.io/node-role: preprod
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: "/metrics"
+        prometheus.io/port: "8080"
     spec:
       nodeSelector:
         kubernetes.io/hostname: jobcopilot-preprod

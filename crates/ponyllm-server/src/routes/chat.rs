@@ -369,7 +369,7 @@ pub async fn handle_chat_completions(
             .with_opencode_zen(is_opencode_zen_target(&target.provider_name, &target_url))
             .with_rate_limits(rate_limits)
             .with_ttfb_timeout(ttfb_timeout)
-            .with_event_sink(sink_ctx.clone(), state.event_sink(sink_ctx));
+            .with_event_sink(sink_ctx.clone(), state.event_sink(sink_ctx.clone()));
 
         // Empty-STOP is an upstream transient unrelated to credential health
         // (fails pre-commit, fails fast): give it its own, larger budget so a
@@ -383,15 +383,47 @@ pub async fn handle_chat_completions(
             let current_executor = executor;
             let mut stream_attempt = 0;
             let max_stream_attempts = current_executor.max_retries.max(pool.total_key_count()).max(1);
+            // R2: keys already tried by empty-STOP retries — fed back into
+            // the executor so the next attempt selects a fresh key.
+            let mut empty_stop_tried_keys: Vec<String> = Vec::new();
+            // R2: mutable upstream envelope — refreshed with a new
+            // requestId/trajectory per retry so each attempt is an
+            // independent upstream trial (sessionId stays stable for KV cache).
+            let mut attempt_req_val = req_val.clone();
+            // R3: consecutive first-frame empty STOPs — a deterministic
+            // prompt×model signature that must converge early instead of
+            // burning the full 12-attempt budget.
+            let mut consecutive_first_frame_stops: usize = 0;
 
             loop {
                 stream_attempt += 1;
-                match current_executor.execute_stream_request_with_timing_and_key(&target_url, &req_val).await {
+                // R2: rebuild the attempt executor with the tried-keys list.
+                // `UpstreamExecutor` is cheap (Arc pool + client clone); the
+                // event sink/observer is re-attached so telemetry is unchanged.
+                let attempt_executor = UpstreamExecutor::with_client(
+                    pool.clone(),
+                    current_executor.client.clone(),
+                    current_executor.max_retries,
+                )
+                .with_downstream_headers(&headers)
+                .with_opencode_zen(is_opencode_zen_target(&target.provider_name, &target_url))
+                .with_rate_limits(rate_limits)
+                .with_ttfb_timeout(ttfb_timeout)
+                .with_excluded_keys(&empty_stop_tried_keys)
+                .with_event_sink(sink_ctx.clone(), state.event_sink(sink_ctx.clone()));
+                match attempt_executor.execute_stream_request_with_timing_and_key(&target_url, &attempt_req_val).await {
                     Ok((upstream_resp, attempt_start, winning_key_id)) => {
+                        // R2: this key is now consumed for empty-STOP
+                        // purposes even if the preamble below succeeds.
+                        if !empty_stop_tried_keys.iter().any(|k| k == &winning_key_id) {
+                            empty_stop_tried_keys.push(winning_key_id.clone());
+                        }
                         let raw_stream = stall_guard(upstream_resp.bytes_stream(), DEFAULT_TAIL_STALL_IDLE);
 
                         // For Antigravity upstream, verify preamble before committing downstream headers.
                         // If upstream emitted an immediate empty STOP, retry with another key.
+                        // `first_frame_stop` feeds the R3 deterministic detector.
+                        let mut first_frame_stop = false;
                         let (final_raw_stream, is_empty_stop_retry) = if target.upstream_protocol == ponyllm_core::pool::UpstreamProtocol::Antigravity {
                             match verify_antigravity_stream_preamble(raw_stream, std::time::Duration::from_secs(10)).await {
                                 Ok(AntigravityPreambleResult::Ready { buffered, tail }) => {
@@ -400,12 +432,25 @@ pub async fn handle_chat_completions(
                                     let boxed: Box<dyn futures_util::Stream<Item = Result<bytes::Bytes, crate::streaming::StallError>> + Send + Unpin> = Box::new(chained);
                                     (boxed, false)
                                 }
-                                Ok(AntigravityPreambleResult::TransientEmptyStop { frames }) => {
+                                Ok(AntigravityPreambleResult::TransientEmptyStop { frames, shape }) => {
+                                    // R1: one line must answer key / latency /
+                                    // frame shape. `attempt_start` is the
+                                    // winning attempt's dispatch instant;
+                                    // elapsed ≈ single-attempt upstream cost.
+                                    // R3: `frames == 0` means the terminal STOP
+                                    // was the first significant frame.
+                                    first_frame_stop = frames == 0;
                                     tracing::warn!(
                                         provider = %target.provider_name,
+                                        key_id = %winning_key_id,
                                         frames,
                                         stream_attempt,
                                         max_stream_attempts,
+                                        attempt_ms = attempt_start.elapsed().as_millis() as u64,
+                                        finish_reason = ?shape.finish_reason,
+                                        signature_only = shape.signature_only,
+                                        had_usage = shape.had_usage,
+                                        skipped_frames = shape.skipped_frames,
                                         "Antigravity stream preamble completed with empty STOP! Triggering transparent gateway retry."
                                     );
                                     let boxed: Box<dyn futures_util::Stream<Item = Result<bytes::Bytes, crate::streaming::StallError>> + Send + Unpin> = Box::new(futures_util::stream::empty());
@@ -444,6 +489,29 @@ pub async fn handle_chat_completions(
                         };
 
                         if is_empty_stop_retry {
+                            // R3: consecutive first-frame stops => the prompt×
+                            // model deterministically yields zero content.
+                            // Converge early and fail over to the next routed
+                            // target instead of burning the full budget.
+                            if first_frame_stop {
+                                consecutive_first_frame_stops += 1;
+                            } else {
+                                consecutive_first_frame_stops = 0;
+                            }
+                            if consecutive_first_frame_stops >= crate::streaming::DETERMINISTIC_EMPTY_STOP_THRESHOLD {
+                                tracing::warn!(
+                                    provider = %target.provider_name,
+                                    attempts = stream_attempt,
+                                    consecutive_first_frame_stops,
+                                    "Antigravity deterministic empty STOP (first-frame, zero content); converging early to trigger failover"
+                                );
+                                last_kind = ponyllm_core::error::GatewayErrorKind::UpstreamUnavailable;
+                                last_error = format!(
+                                    "Antigravity deterministic empty STOP for model '{}' ({} consecutive first-frame zero-content STOPs across distinct keys; try a different model or prompt)",
+                                    target.physical_model, consecutive_first_frame_stops
+                                );
+                                break;
+                            }
                             if stream_attempt < max_empty_stop_attempts {
                                 let delay = empty_stop_retry_delay(stream_attempt);
                                 tracing::warn!(
@@ -454,6 +522,11 @@ pub async fn handle_chat_completions(
                                     "Antigravity empty-STOP before commit; backing off and retrying transparently"
                                 );
                                 tokio::time::sleep(delay).await;
+                                // R2: fresh upstream identity for the next
+                                // attempt (sessionId preserved for KV cache).
+                                if target.upstream_protocol == ponyllm_core::pool::UpstreamProtocol::Antigravity {
+                                    ponyllm_protocol::translator::refresh_antigravity_request_ids(&mut attempt_req_val);
+                                }
                                 continue;
                             }
                             tracing::warn!(
@@ -547,7 +620,12 @@ pub async fn handle_chat_completions(
                     Err(err) => {
                         tracing::warn!("Provider '{}' stream failed ({}). Attempting fallback...", target.provider_name, err);
                         last_kind = err.kind();
-                        last_pool_exhausted = matches!(err, CoreError::NoAvailableKey(_));
+                        // R2: an empty-STOP retry loop that consumed every key
+                        // surfaces NoAvailableKey from the executor, but pool
+                        // keys are NOT cooling — the request simply tried them
+                        // all. Report it as an upstream failure (failover),
+                        // never as local pool exhaustion.
+                        last_pool_exhausted = matches!(err, CoreError::NoAvailableKey(_)) && empty_stop_tried_keys.is_empty();
                         last_retry_after = crate::extractors::retry_after_secs(&last_kind, retry_unlock_hint(&last_kind, &pool, rate_limits.as_ref()));
                         last_error = err.to_string();
                         break;
@@ -565,25 +643,69 @@ pub async fn handle_chat_completions(
                 // Transparent same-target retry: the stream collector reports an
                 // upstream transient empty STOP as an error string; failover alone
                 // would 502 a single-provider setup for a blithe upstream blip.
+                // R2: fresh key per attempt (excluded list) + fresh upstream
+                // requestId per attempt. R3: deterministic early convergence
+                // via the shared collect_empty_stop_policy.
                 let mut collect_attempt = 0usize;
+                let mut collect_tried_keys: Vec<String> = Vec::new();
+                let mut collect_req_val = req_val.clone();
+                let mut collect_consecutive_first_frame: usize = 0;
                 loop {
                     collect_attempt += 1;
-                    match executor.execute_stream_request_with_timing_and_key(&target_url, &req_val).await {
+                    let collect_executor = UpstreamExecutor::with_client(
+                        pool.clone(),
+                        executor.client.clone(),
+                        executor.max_retries,
+                    )
+                    .with_downstream_headers(&headers)
+                    .with_opencode_zen(is_opencode_zen_target(&target.provider_name, &target_url))
+                    .with_rate_limits(rate_limits)
+                    .with_ttfb_timeout(ttfb_timeout)
+                    .with_excluded_keys(&collect_tried_keys)
+                    .with_event_sink(sink_ctx.clone(), state.event_sink(sink_ctx.clone()));
+                    match collect_executor.execute_stream_request_with_timing_and_key(&target_url, &collect_req_val).await {
                         Ok((resp, _instant, kid)) => {
+                            if !collect_tried_keys.iter().any(|k| k == &kid) {
+                                collect_tried_keys.push(kid.clone());
+                            }
                             let raw_stream = resp.bytes_stream();
                             match collect_antigravity_sse_to_json(raw_stream).await {
                                 Ok(v) => break (Ok(v), Some(kid)),
-                                Err(e) if is_transient_empty_stop_error(&e) && collect_attempt < max_empty_stop_attempts => {
-                                    let delay = empty_stop_retry_delay(collect_attempt);
-                                    tracing::warn!(
-                                        provider = %target.provider_name,
-                                        error = %e,
-                                        collect_attempt,
-                                        max_empty_stop_attempts,
-                                        backoff_ms = delay.as_millis() as u64,
-                                        "Non-stream Antigravity collect hit transient empty STOP; backing off and retrying"
-                                    );
-                                    tokio::time::sleep(delay).await;
+                                Err(e) if is_transient_empty_stop_error(&e) => {
+                                    match collect_empty_stop_policy(&e, collect_attempt, max_empty_stop_attempts, &mut collect_consecutive_first_frame, &target.physical_model) {
+                                        Some(CollectRetryAction::Retry { delay }) => {
+                                            tracing::warn!(
+                                                provider = %target.provider_name,
+                                                key_id = %kid,
+                                                error = %e,
+                                                collect_attempt,
+                                                max_empty_stop_attempts,
+                                                backoff_ms = delay.as_millis() as u64,
+                                                "Non-stream Antigravity collect hit transient empty STOP; backing off and retrying"
+                                            );
+                                            tokio::time::sleep(delay).await;
+                                            ponyllm_protocol::translator::refresh_antigravity_request_ids(&mut collect_req_val);
+                                        }
+                                        Some(CollectRetryAction::Deterministic { message }) => {
+                                            tracing::warn!(
+                                                provider = %target.provider_name,
+                                                collect_attempt,
+                                                collect_consecutive_first_frame,
+                                                "Non-stream Antigravity collect hit deterministic empty STOP; converging early to trigger failover"
+                                            );
+                                            last_kind = ponyllm_core::error::GatewayErrorKind::UpstreamUnavailable;
+                                            last_error = message;
+                                            break (Err(CoreError::Internal(last_error.clone())), Some(kid));
+                                        }
+                                        None => {
+                                            tracing::warn!(
+                                                provider = %target.provider_name,
+                                                error = %e,
+                                                "Antigravity stream collection failed"
+                                            );
+                                            break (Err(CoreError::Internal(format!("Antigravity stream collect failed: {}", e))), Some(kid));
+                                        }
+                                    }
                                 }
                                 Err(e) => {
                                     tracing::warn!(
@@ -909,6 +1031,61 @@ pub(crate) fn pool_longest_unlock(
 ///   `KeyPool::earliest_unlock`) and never leak the window-refill estimate.
 ///
 /// Shared by the chat/messages/responses routes (single home in this module).
+/// Outcome of one non-stream Antigravity collect retry round (R2/R3 shared
+/// by the chat/messages/responses routes): whether to keep retrying, and the
+/// terminal error when the loop must stop.
+pub(crate) enum CollectRetryAction {
+    /// Sleep already done by the caller contract — actually the delay is
+    /// returned here so tests can assert without sleeping; routes sleep then
+    /// `continue`.
+    Retry { delay: std::time::Duration },
+    /// Deterministic empty STOP: stop retrying, fail over with this message.
+    Deterministic { message: String },
+}
+
+/// Shared R2/R3 policy for the non-stream Antigravity collect loops.
+///
+/// - Parses the collector error: transient empty STOP with `frames<=1` counts
+///   toward the deterministic threshold; any other error (or a legacy string
+///   without the trailer) is purely transient.
+/// - `consecutive_first_frame_stops` is updated in place; reaching
+///   [`crate::streaming::DETERMINISTIC_EMPTY_STOP_THRESHOLD`] yields
+///   [`CollectRetryAction::Deterministic`].
+/// - Otherwise yields `Retry` while `attempt < max_attempts`, else `None`
+///   (caller falls through to its terminal-error branch).
+pub(crate) fn collect_empty_stop_policy(
+    collector_error: &str,
+    attempt: usize,
+    max_attempts: usize,
+    consecutive_first_frame_stops: &mut usize,
+    physical_model: &str,
+) -> Option<CollectRetryAction> {
+    if !crate::streaming::is_transient_empty_stop_error(collector_error) || attempt >= max_attempts {
+        return None;
+    }
+    // R3: only a first-frame stop (frames 0/1) is deterministic evidence. A
+    // legacy string without the trailer parses to None => transient.
+    let first_frame = crate::streaming::empty_stop_frame_count(collector_error)
+        .map(|n| n <= 1)
+        .unwrap_or(false);
+    if first_frame {
+        *consecutive_first_frame_stops += 1;
+    } else {
+        *consecutive_first_frame_stops = 0;
+    }
+    if *consecutive_first_frame_stops >= crate::streaming::DETERMINISTIC_EMPTY_STOP_THRESHOLD {
+        return Some(CollectRetryAction::Deterministic {
+            message: format!(
+                "Antigravity deterministic empty STOP for model '{}' ({} consecutive first-frame zero-content STOPs across distinct keys; try a different model or prompt)",
+                physical_model, *consecutive_first_frame_stops
+            ),
+        });
+    }
+    Some(CollectRetryAction::Retry {
+        delay: crate::streaming::empty_stop_retry_delay(attempt),
+    })
+}
+
 pub(crate) fn retry_unlock_hint(
     kind: &ponyllm_core::error::GatewayErrorKind,
     pool: &ponyllm_core::pool::KeyPool,
@@ -1009,5 +1186,51 @@ mod route_wait_tests {
             hint >= std::time::Duration::from_secs(4) && hint <= std::time::Duration::from_secs(5),
             "got {hint:?}"
         );
+    }
+
+    #[test]
+    fn collect_empty_stop_policy_transient_then_deterministic() {
+        // R3: first-frame stops ([frames=0/1]) count up; the Kth consecutive
+        // one flips to Deterministic. A late stop (frames=5) resets.
+        let mut consec = 0usize;
+        let first = "Antigravity stream completed with zero text and zero tool calls (transient empty STOP) [frames=0]";
+        let late = "Antigravity stream completed with zero text and zero tool calls (transient empty STOP) [frames=5]";
+
+        for attempt in 1..crate::streaming::DETERMINISTIC_EMPTY_STOP_THRESHOLD {
+            match collect_empty_stop_policy(first, attempt, 12, &mut consec, "m") {
+                Some(CollectRetryAction::Retry { .. }) => {}
+                other => panic!("attempt {attempt} must stay Retry, got {}", other.is_some()),
+            }
+        }
+        assert_eq!(consec, crate::streaming::DETERMINISTIC_EMPTY_STOP_THRESHOLD - 1);
+        match collect_empty_stop_policy(first, crate::streaming::DETERMINISTIC_EMPTY_STOP_THRESHOLD, 12, &mut consec, "gemini-3.8-flash-high") {
+            Some(CollectRetryAction::Deterministic { message }) => {
+                assert!(message.contains("deterministic"), "message: {message}");
+                assert!(message.contains("gemini-3.8-flash-high"), "message: {message}");
+            }
+            _ => panic!("threshold attempt must converge"),
+        }
+
+        // Late-frame stop resets the streak and stays transient.
+        let mut consec2 = 2usize;
+        match collect_empty_stop_policy(late, 3, 12, &mut consec2, "m") {
+            Some(CollectRetryAction::Retry { .. }) => {}
+            _ => panic!("late stop must reset to Retry"),
+        }
+        assert_eq!(consec2, 0);
+
+        // Legacy string without trailer: transient, never deterministic.
+        let mut consec3 = 2usize;
+        let legacy = "Antigravity stream completed with zero text and zero tool calls (transient empty STOP)";
+        match collect_empty_stop_policy(legacy, 3, 12, &mut consec3, "m") {
+            Some(CollectRetryAction::Retry { .. }) => {}
+            _ => panic!("legacy string must stay Retry"),
+        }
+        assert_eq!(consec3, 0);
+
+        // Budget exhausted or non-empty-stop error: None (caller terminal path).
+        let mut consec4 = 0usize;
+        assert!(collect_empty_stop_policy(first, 12, 12, &mut consec4, "m").is_none());
+        assert!(collect_empty_stop_policy("boom", 1, 12, &mut consec4, "m").is_none());
     }
 }

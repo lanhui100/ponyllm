@@ -747,6 +747,26 @@ pub fn chat_to_antigravity_request(
     Ok(envelope)
 }
 
+/// Refresh the identity fields of an already-translated Antigravity envelope
+/// so an empty-STOP retry is an independent upstream trial (R2).
+///
+/// Regenerates `requestId` and `labels.trajectory_id`; `request.sessionId`
+/// is deliberately preserved so upstream KV-cache affinity survives the
+/// retry. Returns `false` when the value is not an Antigravity envelope
+/// (no `request` object) and nothing was changed.
+pub fn refresh_antigravity_request_ids(envelope: &mut Value) -> bool {
+    let trajectory_id = Uuid::new_v4().to_string();
+    let request_id = generate_antigravity_request_id(&trajectory_id, 1);
+    let Some(request) = envelope.get_mut("request") else {
+        return false;
+    };
+    if let Some(labels) = request.get_mut("labels") {
+        labels["trajectory_id"] = Value::String(trajectory_id);
+    }
+    envelope["requestId"] = Value::String(request_id);
+    true
+}
+
 /// Convert Anthropic MessageRequest into Antigravity CLI envelope
 /// (`thinking` semantics identical to [`chat_to_antigravity_request`]).
 pub fn messages_to_antigravity_request(
@@ -1610,5 +1630,36 @@ mod tests {
             .expect("enveloped chunk must translate");
         assert_eq!(chunk.choices[0].delta.content.as_deref(), Some("1,"));
         assert_eq!(chunk.usage.as_ref().unwrap().total_tokens, 17);
+    }
+
+    #[test]
+    fn test_refresh_antigravity_request_ids_rotates_identity_keeps_session() {
+        // R2: retry must be an independent upstream trial (new requestId +
+        // trajectory) while preserving sessionId for KV-cache affinity.
+        let mut req = ChatCompletionRequest::default();
+        req.model = "gemini-3.8-flash-high".to_string();
+        req.messages.push(ChatMessage::User(crate::openai::chat::UserMessage {
+            content: "Hi".into(),
+            name: None,
+        }));
+        let mut env =
+            chat_to_antigravity_request(&req, "gemini-3.8-flash-high", "proj-1", None, "salt-1")
+                .unwrap();
+        let old_request_id = env["requestId"].as_str().unwrap().to_string();
+        let old_trajectory = env["request"]["labels"]["trajectory_id"].as_str().unwrap().to_string();
+        let old_session = env["request"]["sessionId"].as_str().unwrap().to_string();
+
+        assert!(refresh_antigravity_request_ids(&mut env));
+        assert_ne!(env["requestId"].as_str().unwrap(), old_request_id);
+        assert_ne!(
+            env["request"]["labels"]["trajectory_id"].as_str().unwrap(),
+            old_trajectory
+        );
+        assert_eq!(env["request"]["sessionId"].as_str().unwrap(), old_session);
+
+        // Non-envelopes are left untouched.
+        let mut plain = json!({"model": "x"});
+        assert!(!refresh_antigravity_request_ids(&mut plain));
+        assert_eq!(plain, json!({"model": "x"}));
     }
 }
