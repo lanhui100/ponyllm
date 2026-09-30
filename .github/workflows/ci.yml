@@ -262,10 +262,14 @@ jobs:
           git add deploy/ponyllm-deployment.yaml
           if git diff --cached --quiet; then
             echo "no manifest change (digest already current)"
-          else
-            git commit -m "deploy(prod): pin image digest sha256:${GITHUB_SHA::7} [skip ci]"
-            git push origin main
+            exit 0
           fi
+          git commit -m "deploy(prod): pin image digest sha256:${GITHUB_SHA::7} [skip ci]"
+          # 并发 push（docs/[skip ci] 等）会造成非快进拒绝（fetch first）：
+          # fetch+rebase 吸收远端新提交后重推（实证 2026-09-30 一次 race）
+          git fetch origin main
+          git rebase origin/main
+          git push origin main
 
       - name: Apply manifests
         run: |
