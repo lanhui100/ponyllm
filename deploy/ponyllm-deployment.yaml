@@ -1,16 +1,19 @@
-# ponyllm-gateway — PHASE 3 DRAFT (multi-node stateless HA, 4 replicas)
+# ponyllm-gateway — 加权多节点部署（4 节点绑定 Deployment，Traefik 5:4:1:1 加权）
 #
 # ============================================================================
-# PHASE 3 变更集（T9 草案，尚未 apply）——相对 Phase 2 基线（2f0f8fb）的差异：
-#   1. replicas 1 → 4                     (ADR §4)
-#   2. 移除 nodeSelector                   (ADR §7 Phase 3；成因= RWO PVC，已随本变更移除)
-#   3. 新增 topologySpreadConstraints      (ADR S1-1 裁决：ScheduleAnyway)
-#   4. 移除 PVC ponyllm-data + initContainer（config 播种 + telemetry 播种）
-#      → telemetry-snapshot 落盘改 emptyDir (ADR §2 / §7)
-#   5. 保留：SA/RBAC、lock env×3、args=kubernetes backend、favicon、探针、资源、
-#      preStop/grace、keel 注解。
-# 回滚：见 deploy/ponyllm-phase2-rollback.md R0/R1（缩回 replicas=1 + 恢复
-# nodeSelector 的 Phase 2 基线清单）；旧 PVC 对象删除在 Phase 4 进行。
+# 架构（2026-09-30，ADR：.agents/notes/implemented/architecture/2026-09-30-*）：
+#   1. 4 个 Deployment 各 1 replica，nodeSelector 绑定节点（devserver /
+#      jobcopilot-preprod / proserver / tencent），以 ponyllm.io/node-role
+#      区分；Traefik IngressRoute（deploy/ponyllm-ingress-routes.yaml）按
+#      weight 5:4:1:1 加权分发。
+#   2. Fallback：readinessProbe(/health) 摘除不健康 Pod → Traefik 自动将该
+#      Service weight 归零，剩余 Service 按比例重分配（非显式 failover）。
+#   3. ponyllm-pod-service 保留为聚合 Service（覆盖全部 4 个 Pod，供
+#      admin/内部流量等非加权场景）。
+# 部署机制：CI deploy job 直接驱动 —— 镜像推送后 sed 把 registry digest 钉入
+#   本清单（4 个 image 行，[skip ci] commit-back，清单即真相）并 kubectl apply。
+# 回滚：恢复 1 Deployment 4 replicas + 原 IngressRoute 后 kubectl apply；
+#   revisionHistoryLimit: 3 保留历史。
 # ============================================================================
 apiVersion: v1
 kind: Service
@@ -31,25 +34,108 @@ spec:
       targetPort: 8080
       protocol: TCP
 ---
-apiVersion: apps/v1
-kind: Deployment
+apiVersion: v1
+kind: Service
 metadata:
-  name: ponyllm-gateway
+  name: ponyllm-svc-dev
   namespace: ponyllm
   labels:
     app.kubernetes.io/name: ponyllm
     app.kubernetes.io/component: gateway
-  annotations:
-    # 部署机制（2026-09-29 修订）：CI deploy job 直接驱动 —— 镜像推送后
-    # 由 CI 把 registry digest 钉入本清单（[skip ci] commit-back，清单即真相）
-    # 并 kubectl apply，确定性零停机滚动（maxUnavailable:0 / maxSurge:1 +
-    # /health 就绪探针）。曾试用 Keel `latest`+force 自动滚动，实证不可靠
-    # （相同标签不产生 spec 变更 + IfNotPresent 节点缓存旧 digest → 混合版本），
-    # 已移除 Keel 注解。回滚：kubectl rollout undo（revisionHistoryLimit:3）。
+    ponyllm.io/node-role: dev
 spec:
-  # Phase 3 (ADR §4)：4 副本 → devserver / jobcopilot-preprod / proserver / tencent
-  # 各 1 个；配合下方 ScheduleAnyway topology，keel/手动滚动不卡死。
-  replicas: 4
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: ponyllm
+    app.kubernetes.io/component: gateway
+    ponyllm.io/node-role: dev
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+      protocol: TCP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ponyllm-svc-preprod
+  namespace: ponyllm
+  labels:
+    app.kubernetes.io/name: ponyllm
+    app.kubernetes.io/component: gateway
+    ponyllm.io/node-role: preprod
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: ponyllm
+    app.kubernetes.io/component: gateway
+    ponyllm.io/node-role: preprod
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+      protocol: TCP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ponyllm-svc-proserver
+  namespace: ponyllm
+  labels:
+    app.kubernetes.io/name: ponyllm
+    app.kubernetes.io/component: gateway
+    ponyllm.io/node-role: proserver
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: ponyllm
+    app.kubernetes.io/component: gateway
+    ponyllm.io/node-role: proserver
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+      protocol: TCP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ponyllm-svc-tencent
+  namespace: ponyllm
+  labels:
+    app.kubernetes.io/name: ponyllm
+    app.kubernetes.io/component: gateway
+    ponyllm.io/node-role: tencent
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: ponyllm
+    app.kubernetes.io/component: gateway
+    ponyllm.io/node-role: tencent
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+      protocol: TCP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ponyllm-gateway-dev
+  namespace: ponyllm
+  labels:
+    app.kubernetes.io/name: ponyllm
+    app.kubernetes.io/component: gateway
+    ponyllm.io/node-role: dev
+  annotations:
+    # 部署机制：CI deploy job 驱动 —— 镜像推送后由 CI 把 registry digest 钉入
+    # 本清单（[skip ci] commit-back，清单即真相）并 kubectl apply；确定性零停机
+    # 滚动（maxUnavailable:0 / maxSurge:1 + /health 就绪探针）。曾试用 Keel
+    # `latest`+force 自动滚动，实证不可靠（相同标签不产生 spec 变更 +
+    # IfNotPresent 节点缓存旧 digest → 混合版本），已移除 Keel 注解。
+    # 回滚：kubectl rollout undo（revisionHistoryLimit:3）。
+spec:
+  replicas: 1
   revisionHistoryLimit: 3
   strategy:
     type: RollingUpdate
@@ -60,28 +146,19 @@ spec:
     matchLabels:
       app.kubernetes.io/name: ponyllm
       app.kubernetes.io/component: gateway
+      ponyllm.io/node-role: dev
   template:
     metadata:
       labels:
         app.kubernetes.io/name: ponyllm
         app.kubernetes.io/component: gateway
+        ponyllm.io/node-role: dev
     spec:
-      # Phase 3 (ADR S1-1 裁决 / §7)：移除 nodeSelector —— RWO PVC 已移除，无
-      # Multi-Attach/volume-affinity 死锁成因；改偏好型拓扑打散：
-      #   maxSkew=1 / kubernetes.io/hostname / ScheduleAnyway
-      # (DoNotSchedule 会与 maxSurge=1 冲突：第 5 个 surge Pod 任何节点都 skew=2
-      #  → 永久 Pending；ScheduleAnyway 在 4 节点正常时仍各 1 副本。)
-      topologySpreadConstraints:
-        - maxSkew: 1
-          topologyKey: kubernetes.io/hostname
-          whenUnsatisfiable: ScheduleAnyway
-          labelSelector:
-            matchLabels:
-              app.kubernetes.io/name: ponyllm
-              app.kubernetes.io/component: gateway
+      # 单副本节点绑定：按 handover 5:4:1:1 加权，各节点 1 个 gateway。
+      nodeSelector:
+        kubernetes.io/hostname: devserver
       # 180s 优雅停机窗口：保护 LLM 长文本 / 慢思考（Reasoning）流式连接自然吐完，避免硬杀导致用户端连接被掐断
       terminationGracePeriodSeconds: 180
-      # Phase 2 保留：专用最小权限 SA（Role 白名单仅 get/patch ponyllm-live-config）
       serviceAccountName: ponyllm-gateway-sa
       automountServiceAccountToken: true
       securityContext:
@@ -93,17 +170,13 @@ spec:
           type: RuntimeDefault
       imagePullSecrets:
         - name: aliyun-registry
-      # Phase 3 (ADR §7)：initContainer 移除 —— kubernetes 后端经 kube client 直读
-      # live-config，无本地播种需求；telemetry-snapshot 落盘降级为每副本 emptyDir
-      # （ADR §2），计费真相在 billing PG 不受影响。回滚路径依赖 live-config 而非
-      # 本地文件（见 deploy/ponyllm-phase2-rollback.md）。
       containers:
         - name: ponyllm
           image: crpi-3cfwwtc3um8h6d3q.cn-hangzhou.personal.cr.aliyuncs.com/job-copilot/api-v2@sha256:80f102caf1e0c80517f6998e0cb26162231ef2c47adcfefbef3166312aeb76cc
           imagePullPolicy: IfNotPresent
           env:
-            # Phase 2 保留：锁库（独立 ponyllm-lockdb，TLS=require）DSN 经 Secret
-            # 注入（不落明文）；CA 经 Secret 卷挂载。
+            # 锁库（独立 ponyllm-lockdb，TLS=require）DSN 经 Secret 注入
+            # （不落明文）；CA 经 Secret 卷挂载。
             - name: PONYLLM_LOCK_DATABASE_URL
               valueFrom:
                 secretKeyRef:
@@ -121,7 +194,7 @@ spec:
             capabilities:
               drop:
                 - ALL
-          # Phase 2 保留：配置真相源 = Secret ponyllm-live-config（kubernetes 后端，
+          # 配置真相源 = Secret ponyllm-live-config（kubernetes 后端，
           # 2s 原始字节哈希轮询热更新）。
           command:
             - /usr/local/bin/ponyllm
@@ -134,7 +207,7 @@ spec:
             preStop:
               exec:
                 # 预留 25s 给 IngressRoute / iptables / EndpointSlice 充分收敛剔除旧端点，杜绝新请求路由至已下线 Pod
-                # （terminationGracePeriodSeconds 180，preStop 25 < grace；Phase 2 起主进程另有 60s drain 超时）
+                # （terminationGracePeriodSeconds 180，preStop 25 < grace；主进程另有 60s drain 超时）
                 command: ["/bin/sh", "-c", "sleep 25"]
           ports:
             - containerPort: 8080
@@ -160,8 +233,6 @@ spec:
             timeoutSeconds: 3
             failureThreshold: 5
           resources:
-            # Phase 3 (ADR §4)：请求保持 200m/256Mi、limits 1Gi（实测单副本 ~495Mi，
-            # 4 副本 ~2Gi；执行前按 kubectl top node 复核余量——tencent 余量最小）。
             requests:
               cpu: 200m
               memory: 256Mi
@@ -174,8 +245,7 @@ spec:
               readOnly: true
             - name: runtime-data
               mountPath: /tmp
-            # Phase 3 (ADR §2)：telemetry-snapshot 落盘降级为每副本 emptyDir
-            # （无共享可写状态；重启即失，进程级快照互相覆盖无意义）。
+            # telemetry-snapshot 落盘为每副本 emptyDir（无共享可写状态；重启即失）。
             - name: ponyllm-state
               mountPath: /var/lib/ponyllm
             - name: favicon
@@ -187,7 +257,7 @@ spec:
               subPath: favicon.ico
               readOnly: true
       volumes:
-        # Phase 2 保留：锁库 TLS 根证书（仅 ca.crt 子路径）。
+        # 锁库 TLS 根证书（仅 ca.crt 子路径）。
         - name: lock-tls
           secret:
             secretName: ponyllm-lock-tls
@@ -198,8 +268,6 @@ spec:
         - name: runtime-data
           emptyDir:
             sizeLimit: 256Mi
-        # Phase 3 (ADR §2/§7)：RWO PVC（ponyllm-data）移除 → emptyDir；PVC 对象
-        # 的删除在 Phase 4（清理旧 ponyllm-data 与废弃 ponyllm-config Secret）。
         - name: ponyllm-state
           emptyDir:
             sizeLimit: 64Mi
@@ -208,5 +276,435 @@ spec:
             # 清单见 deploy/ponyllm-favicon.yaml（生成于 scripts/gen-favicon.sh）。
             # 部署顺序：先 apply 该 ConfigMap，再 apply 本 Deployment；subPath 挂载
             # 不随 ConfigMap 更新热生效，改图标后需滚动重启本 Deployment。
+            name: ponyllm-favicon
+            defaultMode: 292
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ponyllm-gateway-preprod
+  namespace: ponyllm
+  labels:
+    app.kubernetes.io/name: ponyllm
+    app.kubernetes.io/component: gateway
+    ponyllm.io/node-role: preprod
+  annotations:
+    # 部署机制：同 ponyllm-gateway-dev（CI digest 钉 + kubectl apply，清单即真相）。
+spec:
+  replicas: 1
+  revisionHistoryLimit: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ponyllm
+      app.kubernetes.io/component: gateway
+      ponyllm.io/node-role: preprod
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ponyllm
+        app.kubernetes.io/component: gateway
+        ponyllm.io/node-role: preprod
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: jobcopilot-preprod
+      terminationGracePeriodSeconds: 180
+      serviceAccountName: ponyllm-gateway-sa
+      automountServiceAccountToken: true
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      imagePullSecrets:
+        - name: aliyun-registry
+      containers:
+        - name: ponyllm
+          image: crpi-3cfwwtc3um8h6d3q.cn-hangzhou.personal.cr.aliyuncs.com/job-copilot/api-v2@sha256:80f102caf1e0c80517f6998e0cb26162231ef2c47adcfefbef3166312aeb76cc
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: PONYLLM_LOCK_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: ponyllm-lock-dsn
+                  key: PONYLLM_LOCK_DATABASE_URL
+            - name: PONYLLM_LOCK_CA_FILE
+              value: /etc/ponyllm-lock/ca.crt
+            - name: PONYLLM_LOCK_SSLMODE
+              value: "require"
+            - name: PONYLLM_PROBE_ALLOWLIST
+              value: "pproxy-host.ponyllm.svc,pproxy-host.ponyllm.svc.cluster.local"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          command:
+            - /usr/local/bin/ponyllm
+          args:
+            - serve
+            - --config-backend=kubernetes
+            - --bind
+            - 0.0.0.0:8080
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/bin/sh", "-c", "sleep 25"]
+          ports:
+            - containerPort: 8080
+              name: http
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            failureThreshold: 30
+            periodSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 5
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: 2000m
+              memory: 1024Mi
+          volumeMounts:
+            - name: lock-tls
+              mountPath: /etc/ponyllm-lock
+              readOnly: true
+            - name: runtime-data
+              mountPath: /tmp
+            - name: ponyllm-state
+              mountPath: /var/lib/ponyllm
+            - name: favicon
+              mountPath: /opt/ponyllm/web/dist/favicon.svg
+              subPath: favicon.svg
+              readOnly: true
+            - name: favicon
+              mountPath: /opt/ponyllm/web/dist/favicon.ico
+              subPath: favicon.ico
+              readOnly: true
+      volumes:
+        - name: lock-tls
+          secret:
+            secretName: ponyllm-lock-tls
+            defaultMode: 420
+            items:
+              - key: ca.crt
+                path: ca.crt
+        - name: runtime-data
+          emptyDir:
+            sizeLimit: 256Mi
+        - name: ponyllm-state
+          emptyDir:
+            sizeLimit: 64Mi
+        - name: favicon
+          configMap:
+            name: ponyllm-favicon
+            defaultMode: 292
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ponyllm-gateway-proserver
+  namespace: ponyllm
+  labels:
+    app.kubernetes.io/name: ponyllm
+    app.kubernetes.io/component: gateway
+    ponyllm.io/node-role: proserver
+  annotations:
+    # 部署机制：同 ponyllm-gateway-dev（CI digest 钉 + kubectl apply，清单即真相）。
+spec:
+  replicas: 1
+  revisionHistoryLimit: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ponyllm
+      app.kubernetes.io/component: gateway
+      ponyllm.io/node-role: proserver
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ponyllm
+        app.kubernetes.io/component: gateway
+        ponyllm.io/node-role: proserver
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: proserver
+      terminationGracePeriodSeconds: 180
+      serviceAccountName: ponyllm-gateway-sa
+      automountServiceAccountToken: true
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      imagePullSecrets:
+        - name: aliyun-registry
+      containers:
+        - name: ponyllm
+          image: crpi-3cfwwtc3um8h6d3q.cn-hangzhou.personal.cr.aliyuncs.com/job-copilot/api-v2@sha256:80f102caf1e0c80517f6998e0cb26162231ef2c47adcfefbef3166312aeb76cc
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: PONYLLM_LOCK_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: ponyllm-lock-dsn
+                  key: PONYLLM_LOCK_DATABASE_URL
+            - name: PONYLLM_LOCK_CA_FILE
+              value: /etc/ponyllm-lock/ca.crt
+            - name: PONYLLM_LOCK_SSLMODE
+              value: "require"
+            - name: PONYLLM_PROBE_ALLOWLIST
+              value: "pproxy-host.ponyllm.svc,pproxy-host.ponyllm.svc.cluster.local"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          command:
+            - /usr/local/bin/ponyllm
+          args:
+            - serve
+            - --config-backend=kubernetes
+            - --bind
+            - 0.0.0.0:8080
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/bin/sh", "-c", "sleep 25"]
+          ports:
+            - containerPort: 8080
+              name: http
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            failureThreshold: 30
+            periodSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 5
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: 2000m
+              memory: 1024Mi
+          volumeMounts:
+            - name: lock-tls
+              mountPath: /etc/ponyllm-lock
+              readOnly: true
+            - name: runtime-data
+              mountPath: /tmp
+            - name: ponyllm-state
+              mountPath: /var/lib/ponyllm
+            - name: favicon
+              mountPath: /opt/ponyllm/web/dist/favicon.svg
+              subPath: favicon.svg
+              readOnly: true
+            - name: favicon
+              mountPath: /opt/ponyllm/web/dist/favicon.ico
+              subPath: favicon.ico
+              readOnly: true
+      volumes:
+        - name: lock-tls
+          secret:
+            secretName: ponyllm-lock-tls
+            defaultMode: 420
+            items:
+              - key: ca.crt
+                path: ca.crt
+        - name: runtime-data
+          emptyDir:
+            sizeLimit: 256Mi
+        - name: ponyllm-state
+          emptyDir:
+            sizeLimit: 64Mi
+        - name: favicon
+          configMap:
+            name: ponyllm-favicon
+            defaultMode: 292
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ponyllm-gateway-tencent
+  namespace: ponyllm
+  labels:
+    app.kubernetes.io/name: ponyllm
+    app.kubernetes.io/component: gateway
+    ponyllm.io/node-role: tencent
+  annotations:
+    # 部署机制：同 ponyllm-gateway-dev（CI digest 钉 + kubectl apply，清单即真相）。
+    # tencent 为 control-plane（4C4G，带宽瓶颈）——weight=1 最低流量占比。
+spec:
+  replicas: 1
+  revisionHistoryLimit: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ponyllm
+      app.kubernetes.io/component: gateway
+      ponyllm.io/node-role: tencent
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ponyllm
+        app.kubernetes.io/component: gateway
+        ponyllm.io/node-role: tencent
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: tencent
+      terminationGracePeriodSeconds: 180
+      serviceAccountName: ponyllm-gateway-sa
+      automountServiceAccountToken: true
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      imagePullSecrets:
+        - name: aliyun-registry
+      containers:
+        - name: ponyllm
+          image: crpi-3cfwwtc3um8h6d3q.cn-hangzhou.personal.cr.aliyuncs.com/job-copilot/api-v2@sha256:80f102caf1e0c80517f6998e0cb26162231ef2c47adcfefbef3166312aeb76cc
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: PONYLLM_LOCK_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: ponyllm-lock-dsn
+                  key: PONYLLM_LOCK_DATABASE_URL
+            - name: PONYLLM_LOCK_CA_FILE
+              value: /etc/ponyllm-lock/ca.crt
+            - name: PONYLLM_LOCK_SSLMODE
+              value: "require"
+            - name: PONYLLM_PROBE_ALLOWLIST
+              value: "pproxy-host.ponyllm.svc,pproxy-host.ponyllm.svc.cluster.local"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          command:
+            - /usr/local/bin/ponyllm
+          args:
+            - serve
+            - --config-backend=kubernetes
+            - --bind
+            - 0.0.0.0:8080
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/bin/sh", "-c", "sleep 25"]
+          ports:
+            - containerPort: 8080
+              name: http
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            failureThreshold: 30
+            periodSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 5
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: 2000m
+              memory: 1024Mi
+          volumeMounts:
+            - name: lock-tls
+              mountPath: /etc/ponyllm-lock
+              readOnly: true
+            - name: runtime-data
+              mountPath: /tmp
+            - name: ponyllm-state
+              mountPath: /var/lib/ponyllm
+            - name: favicon
+              mountPath: /opt/ponyllm/web/dist/favicon.svg
+              subPath: favicon.svg
+              readOnly: true
+            - name: favicon
+              mountPath: /opt/ponyllm/web/dist/favicon.ico
+              subPath: favicon.ico
+              readOnly: true
+      volumes:
+        - name: lock-tls
+          secret:
+            secretName: ponyllm-lock-tls
+            defaultMode: 420
+            items:
+              - key: ca.crt
+                path: ca.crt
+        - name: runtime-data
+          emptyDir:
+            sizeLimit: 256Mi
+        - name: ponyllm-state
+          emptyDir:
+            sizeLimit: 64Mi
+        - name: favicon
+          configMap:
             name: ponyllm-favicon
             defaultMode: 292

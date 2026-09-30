@@ -101,6 +101,10 @@ spec:
   entryPoints:
     - websecure
   routes:
+    # 加权数据面（2026-09-30）：路由 #2/#3/#4 按 dev:preprod:proserver:tencent
+    # = 5:4:1:1 加权分发（weight 为相对值）。fallback：readinessProbe(/health)
+    # 摘除不健康 Pod → Traefik 自动将该 Service weight 归零，剩余 Service 按
+    # 比例重分配（非显式 failover，如实声明）。
     # 1. 显式放行 ACME HTTP-01/TLS Challenge 直通有效容器服务
     #    挂 ratelimit + security-headers：限流防扫刷，安全头与全站一致。
     - match: Host(`tokens.ponyjob.top`) && PathPrefix(`/.well-known/acme-challenge/`)
@@ -119,8 +123,24 @@ spec:
       middlewares:
         - name: ponyllm-security-headers
       services:
-        - name: ponyllm-pod-service
+        - name: ponyllm-svc-dev
           port: 8080
+          weight: 5
+          responseForwarding:
+            flushInterval: "100ms"
+        - name: ponyllm-svc-preprod
+          port: 8080
+          weight: 4
+          responseForwarding:
+            flushInterval: "100ms"
+        - name: ponyllm-svc-proserver
+          port: 8080
+          weight: 1
+          responseForwarding:
+            flushInterval: "100ms"
+        - name: ponyllm-svc-tencent
+          port: 8080
+          weight: 1
           responseForwarding:
             flushInterval: "100ms"
     # 3. 核心白名单：业务数据面、探活、遥测流（全部由后端 auth_middleware 鉴权）
@@ -134,9 +154,24 @@ spec:
         - name: ponyllm-ratelimit
         - name: ponyllm-inflightreq
       services:
-        - name: ponyllm-pod-service
+        - name: ponyllm-svc-dev
           port: 8080
-          weight: 100
+          weight: 5
+          responseForwarding:
+            flushInterval: "100ms"
+        - name: ponyllm-svc-preprod
+          port: 8080
+          weight: 4
+          responseForwarding:
+            flushInterval: "100ms"
+        - name: ponyllm-svc-proserver
+          port: 8080
+          weight: 1
+          responseForwarding:
+            flushInterval: "100ms"
+        - name: ponyllm-svc-tencent
+          port: 8080
+          weight: 1
           responseForwarding:
             flushInterval: "100ms"
     # 4. 受权管理接口独立路由：边缘只做 IPAllowList 粗筛，身份鉴权仍由后端 auth_middleware 负责。
@@ -149,9 +184,24 @@ spec:
         - name: ponyllm-ratelimit
         - name: ponyllm-inflightreq
       services:
-        - name: ponyllm-pod-service
+        - name: ponyllm-svc-dev
           port: 8080
-          weight: 100
+          weight: 5
+          responseForwarding:
+            flushInterval: "100ms"
+        - name: ponyllm-svc-preprod
+          port: 8080
+          weight: 4
+          responseForwarding:
+            flushInterval: "100ms"
+        - name: ponyllm-svc-proserver
+          port: 8080
+          weight: 1
+          responseForwarding:
+            flushInterval: "100ms"
+        - name: ponyllm-svc-tencent
+          port: 8080
+          weight: 1
           responseForwarding:
             flushInterval: "100ms"
     # 注意（边缘行为如实声明，修正旧注释的失实表述）：
