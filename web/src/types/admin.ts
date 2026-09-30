@@ -31,6 +31,22 @@ export interface ProviderView {
   messages_url?: string | null;
 }
 
+/** 短窗频率限额（M3 统一额度计量内核）：per-key 60s 滑动窗口 + 并发。
+    snake_case 对齐 Admin API `/api/admin/models/{name}` 的 `rate_limits` 字段；
+    `null` 表示未配置（继承 provider 级默认/上游不限）。 */
+export interface RateLimits {
+  /** 每分钟请求数上限（requests per minute）。 */
+  rpm?: number | null;
+  /** 每分钟 token 上限（tokens per minute）。 */
+  tpm?: number | null;
+  /** 滑动窗口秒数，默认 60。 */
+  window_secs?: number | null;
+  /** 同 key 并发在途上限。 */
+  concurrency?: number | null;
+  /** 缓存 token 是否计入 TPM（按上游口径，默认 false）。 */
+  count_cached?: boolean | null;
+}
+
 export type PricingMode = 'uniform' | 'peak_valley';
 
 export interface PricingPeriod {
@@ -64,6 +80,8 @@ export interface ModelView {
   display_name?: string | null;
   /** Explicit routing preference for this model under this provider: larger = tried first among same-named models. */
   priority?: number | null;
+  /** 短窗频率限额（RPM/TPM/窗口/并发），见 [`RateLimits`]。 */
+  rate_limits?: RateLimits | null;
 }
 
 export interface UpstreamModelItem {
@@ -222,6 +240,8 @@ export interface CreateModelPayload {
   display_name?: string | null;
   /** Explicit routing preference for this model under this provider (larger = tried first). */
   priority?: number | null;
+  /** 短窗频率限额（RPM/TPM/窗口/并发）。 */
+  rate_limits?: RateLimits | null;
 }
 
 export interface UpdateModelPayload {
@@ -246,6 +266,8 @@ export interface UpdateModelPayload {
   display_name?: string | null;
   /** Explicit routing preference for this model under this provider (larger = tried first). */
   priority?: number | null;
+  /** 短窗频率限额（RPM/TPM/窗口/并发），null 时服务商按该字段是否配置决定是否覆盖 heredoc provider 默认。 */
+  rate_limits?: RateLimits | null;
 }
 
 export interface CreateKeyPayload {

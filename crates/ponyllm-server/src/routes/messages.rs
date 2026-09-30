@@ -19,7 +19,7 @@ use ponyllm_protocol::translator::{
 use parking_lot::Mutex;
 use std::str::FromStr;
 use crate::extractors::{format_request_snippet, AppJson};
-use crate::routes::chat::{inject_routing_headers, inject_telemetry_headers};
+use crate::routes::chat::{inject_routing_headers, inject_telemetry_headers, retry_unlock_hint};
 use crate::routes::models::ParsedRequestModel;
 use crate::state::AppState;
 use crate::streaming::{
@@ -390,9 +390,22 @@ pub async fn handle_messages(
             request_snippet: req_snippet.clone(),
         };
         let http_client = state.http_client_for_target(&target.provider_name, &target.physical_model);
+        // Resolve this target's effective short-window budget (provider default
+        // merged with the model override) so budget-filtered key selection and
+        // the window-exhaustion Retry-After are honest.
+        // Resolve the budget under the CLEAN model name (matching pricing and
+        // routing): a suffixed request (`deepseek-v4-flash[1m]:economy`) must
+        // hit the same model-level rate_limits as the plain name.
+        let rate_limits = state
+            .config
+            .read()
+            .providers
+            .get(&target.provider_name)
+            .and_then(|p| p.effective_rate_limits(&parsed.clean_model_name));
         let executor = UpstreamExecutor::with_client(pool.clone(), http_client, max_retries)
             .with_downstream_headers(&headers)
             .with_opencode_zen(is_opencode_zen_target(&target.provider_name, &target_url))
+            .with_rate_limits(rate_limits)
             .with_event_sink(sink_ctx.clone(), state.event_sink(sink_ctx));
 
         // Empty-STOP is an upstream transient unrelated to credential health
@@ -571,7 +584,7 @@ pub async fn handle_messages(
                         tracing::warn!("Provider '{}' stream failed ({}). Attempting fallback...", target.provider_name, err);
                         last_kind = err.kind();
                         last_pool_exhausted = matches!(err, CoreError::NoAvailableKey(_));
-                        last_retry_after = crate::extractors::retry_after_secs(&last_kind, pool.earliest_unlock());
+                        last_retry_after = crate::extractors::retry_after_secs(&last_kind, retry_unlock_hint(&last_kind, &pool, rate_limits.as_ref()));
                         last_error = err.to_string();
                         break;
                     }
@@ -693,7 +706,7 @@ pub async fn handle_messages(
                                     // upstream fault (503, retryable) and try the
                                     // next routed target. Mirrors the chat route.
                                     last_kind = ponyllm_core::error::GatewayErrorKind::UpstreamUnavailable;
-                                    last_retry_after = crate::extractors::retry_after_secs(&last_kind, pool.earliest_unlock());
+                                    last_retry_after = crate::extractors::retry_after_secs(&last_kind, retry_unlock_hint(&last_kind, &pool, rate_limits.as_ref()));
                                     last_error = format!("Upstream {} response failed: {}", target.provider_name, e);
                                     continue;
                                 }
@@ -791,7 +804,7 @@ pub async fn handle_messages(
                     tracing::warn!("Provider '{}' json request failed ({}). Attempting fallback...", target.provider_name, err);
                     last_kind = err.kind();
                     last_pool_exhausted = matches!(err, CoreError::NoAvailableKey(_));
-                    last_retry_after = crate::extractors::retry_after_secs(&last_kind, pool.earliest_unlock());
+                    last_retry_after = crate::extractors::retry_after_secs(&last_kind, retry_unlock_hint(&last_kind, &pool, rate_limits.as_ref()));
                     last_error = err.to_string();
                     continue;
                 }

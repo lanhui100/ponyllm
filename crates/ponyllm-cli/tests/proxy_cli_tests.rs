@@ -80,6 +80,7 @@ fn test_config_atomic_save_and_reload() {
     if let Some(p) = cfg.providers.get_mut("test-p") {
         p.proxy = Some("http://127.0.0.1:8899".to_string());
         p.upsert_model_config(ModelConfig {
+    rate_limits: None,
             priority: None,
             name: "m1".to_string(),
             proxy: Some("direct".to_string()),

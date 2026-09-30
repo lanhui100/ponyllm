@@ -62,6 +62,7 @@ impl WriteTestHarness {
         }];
 
         let provider_sec = ProviderSection {
+    rate_limits: None,
             base_url: "https://api.openai.com/v1".to_string(),
             default_model: "gpt-4o".to_string(),
             strategy: "round_robin".to_string(),
@@ -71,6 +72,7 @@ impl WriteTestHarness {
             output_price: 10.0,
             models: vec!["gpt-4o".to_string()],
             model_configs: vec![ModelConfig {
+    rate_limits: None,
                 priority: None,
                 name: "gpt-4o".to_string(),
                 tier: ModelTier::Standard,
@@ -125,6 +127,7 @@ impl WriteTestHarness {
         gw_config.admin_write_enabled = admin_write_enabled;
 
         let model_spec = ModelSpec {
+    rate_limits: None,
             priority: None,
             name: "gpt-4o".to_string(),
             tier: ModelTier::Standard,
@@ -152,6 +155,7 @@ impl WriteTestHarness {
         gw_config.providers.insert(
             "openai".to_string(),
             ProviderConfig {
+    rate_limits: None,
                 base_url: "https://api.openai.com/v1".to_string(),
                 default_model: "gpt-4o".to_string(),
                 strategy: "round_robin".to_string(),
@@ -968,6 +972,7 @@ async fn test_provider_upstream_models() {
         providers.insert(
             pname.to_string(),
             ProviderSection {
+    rate_limits: None,
                 base_url: base,
                 default_model: "m-a".to_string(),
                 strategy: "round_robin".to_string(),
@@ -1002,6 +1007,7 @@ async fn test_provider_upstream_models() {
         gw_config.providers.insert(
             pname.clone(),
             ProviderConfig {
+    rate_limits: None,
                 base_url: psec.base_url.clone(),
                 default_model: psec.default_model.clone(),
                 strategy: psec.strategy.clone(),
@@ -1163,6 +1169,7 @@ async fn test_dial_test_blocked_target_refused() {
     let api_key = "admin-secret-token".to_string();
 
     let provider_sec = ProviderSection {
+    rate_limits: None,
         base_url: "http://169.254.169.254/".to_string(),
         default_model: "m".to_string(),
         strategy: "round_robin".to_string(),
@@ -1202,6 +1209,7 @@ async fn test_dial_test_blocked_target_refused() {
     gw_config.providers.insert(
         "meta".to_string(),
         ProviderConfig {
+    rate_limits: None,
             base_url: "http://169.254.169.254/".to_string(),
             default_model: "m".to_string(),
             strategy: "round_robin".to_string(),
@@ -1254,4 +1262,129 @@ async fn test_dial_test_blocked_target_refused() {
     assert_eq!(um.status(), StatusCode::BAD_REQUEST);
     let um_err: serde_json::Value = um.json().await.unwrap();
     assert_eq!(um_err["error"]["code"], "egress_blocked");
+}
+
+// -----------------------------------------------------------------------------
+// Test: rate_limits read/write (M2, ADR 2026-09-30 quota governance kernel)
+// -----------------------------------------------------------------------------
+#[tokio::test]
+async fn test_admin_rate_limits_write_read_and_persist() {
+    let harness = WriteTestHarness::new(true).await;
+    let client = reqwest::Client::new();
+    let auth = format!("Bearer {}", harness.api_key);
+
+    // Baseline: model view carries no rate_limits yet (optional field).
+    let list = client
+        .get(format!("http://{}/api/admin/models", harness.addr))
+        .header("Authorization", &auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(list.status(), StatusCode::OK);
+    let models: Vec<serde_json::Value> = list.json().await.unwrap();
+    assert_eq!(models.len(), 1);
+    assert!(models[0].get("rate_limits").is_none(), "baseline must omit rate_limits");
+
+    // 1. PUT model rate_limits (If-Match against config_version=0 -> save to 1).
+    let put = client
+        .put(format!("http://{}/api/admin/models/gpt-4o", harness.addr))
+        .header("Authorization", &auth)
+        .header("If-Match", "\"0\"")
+        .json(&serde_json::json!({
+            "provider": "openai",
+            "rate_limits": {
+                "rpm": 10,
+                "tpm": 2_000_000,
+                "window_secs": 60,
+                "concurrency": 4,
+                "count_cached": false
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(put.status(), StatusCode::OK);
+    let updated: serde_json::Value = put.json().await.unwrap();
+    assert_eq!(updated["rate_limits"]["rpm"], 10);
+    assert_eq!(updated["rate_limits"]["tpm"], 2_000_000);
+    assert_eq!(updated["rate_limits"]["window_secs"], 60);
+    assert_eq!(updated["rate_limits"]["concurrency"], 4);
+    assert_eq!(updated["rate_limits"]["count_cached"], false);
+
+    // 2. GET (list) reflects the write through the runtime mirror.
+    let list = client
+        .get(format!("http://{}/api/admin/models", harness.addr))
+        .header("Authorization", &auth)
+        .send()
+        .await
+        .unwrap();
+    let models: Vec<serde_json::Value> = list.json().await.unwrap();
+    let m = models.iter().find(|m| m["name"] == "gpt-4o").unwrap();
+    assert_eq!(m["rate_limits"]["rpm"], 10);
+    assert_eq!(m["rate_limits"]["count_cached"], false);
+
+    // 3. GET provider/{name}/models also reflects it.
+    let pm = client
+        .get(format!("http://{}/api/admin/providers/openai/models", harness.addr))
+        .header("Authorization", &auth)
+        .send()
+        .await
+        .unwrap();
+    let pm_models: Vec<serde_json::Value> = pm.json().await.unwrap();
+    assert_eq!(pm_models[0]["rate_limits"]["tpm"], 2_000_000);
+
+    // 4. Persistence: the on-disk TOML (config store truth) carries it.
+    let on_disk = std::fs::read_to_string(&harness.config_path).unwrap();
+    assert!(
+        on_disk.contains("rpm = 10") && on_disk.contains("window_secs = 60"),
+        "rate_limits must be persisted to the config store: {}",
+        on_disk
+    );
+
+    // 5. Provider-level default: PUT /api/admin/providers/{name} (ver 1 -> 2).
+    let pp = client
+        .put(format!("http://{}/api/admin/providers/openai", harness.addr))
+        .header("Authorization", &auth)
+        .header("If-Match", "\"1\"")
+        .json(&serde_json::json!({
+            "rate_limits": { "rpm": 60, "window_secs": 30 }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(pp.status(), StatusCode::OK);
+    let pv: serde_json::Value = pp.json().await.unwrap();
+    assert_eq!(pv["rate_limits"]["rpm"], 60);
+    assert_eq!(pv["rate_limits"]["window_secs"], 30);
+
+    let list = client
+        .get(format!("http://{}/api/admin/providers", harness.addr))
+        .header("Authorization", &auth)
+        .send()
+        .await
+        .unwrap();
+    let provs: Vec<serde_json::Value> = list.json().await.unwrap();
+    let openai = provs.iter().find(|p| p["name"] == "openai").unwrap();
+    assert_eq!(openai["rate_limits"]["rpm"], 60);
+}
+
+#[tokio::test]
+async fn test_admin_rate_limits_rejects_zero_window() {
+    let harness = WriteTestHarness::new(true).await;
+    let client = reqwest::Client::new();
+    let auth = format!("Bearer {}", harness.api_key);
+
+    let resp = client
+        .put(format!("http://{}/api/admin/models/gpt-4o", harness.addr))
+        .header("Authorization", &auth)
+        .header("If-Match", "\"0\"")
+        .json(&serde_json::json!({
+            "rate_limits": { "rpm": 5, "window_secs": 0 }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "invalid_rate_limits");
 }

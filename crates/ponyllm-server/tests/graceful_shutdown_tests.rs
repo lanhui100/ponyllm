@@ -28,7 +28,8 @@ async fn sse_handler(stream: SseStream) -> axum::response::Response {
 }
 
 fn make_provider(base_url: &str, default_model: &str) -> ProviderConfig {
-    ProviderConfig {
+        ProviderConfig {
+    rate_limits: None,
         base_url: base_url.to_string(),
         default_model: default_model.to_string(),
         strategy: "round_robin".to_string(),

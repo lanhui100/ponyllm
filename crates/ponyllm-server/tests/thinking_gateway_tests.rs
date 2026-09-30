@@ -57,6 +57,7 @@ async fn test_thinking_scrubbing_for_non_reasoning_models() {
     config.providers.insert(
         "openai".to_string(),
         ProviderConfig {
+    rate_limits: None,
             base_url: format!("http://{}", upstream_addr),
             default_model: "gpt-4o".to_string(),
             strategy: "round_robin".to_string(),
@@ -66,6 +67,7 @@ async fn test_thinking_scrubbing_for_non_reasoning_models() {
             output_price: 10.0,
             models: vec!["gpt-4o".to_string()],
             model_specs: vec![ModelSpec {
+    rate_limits: None,
                 priority: None,
                 name: "gpt-4o".to_string(),
                 tier: ModelTier::Standard,
@@ -203,6 +205,7 @@ async fn test_thinking_forwarding_and_clamping_for_reasoning_models() {
     config.providers.insert(
         "openai".to_string(),
         ProviderConfig {
+    rate_limits: None,
             base_url: format!("http://{}", upstream_addr),
             default_model: "o3-mini".to_string(),
             strategy: "round_robin".to_string(),
@@ -212,6 +215,7 @@ async fn test_thinking_forwarding_and_clamping_for_reasoning_models() {
             output_price: 4.4,
             models: vec!["o3-mini".to_string()],
             model_specs: vec![ModelSpec {
+    rate_limits: None,
                 priority: None,
                 name: "o3-mini".to_string(),
                 tier: ModelTier::Standard,
@@ -329,6 +333,7 @@ async fn test_cross_protocol_thinking_translation() {
     config.providers.insert(
         "anthropic".to_string(),
         ProviderConfig {
+    rate_limits: None,
             base_url: format!("http://{}", upstream_addr),
             default_model: "claude-opus-5".to_string(),
             strategy: "round_robin".to_string(),
@@ -338,6 +343,7 @@ async fn test_cross_protocol_thinking_translation() {
             output_price: 75.0,
             models: vec!["claude-opus-5".to_string()],
             model_specs: vec![ModelSpec {
+    rate_limits: None,
                 priority: None,
                 name: "claude-opus-5".to_string(),
                 tier: ModelTier::Flagship,
@@ -436,6 +442,7 @@ async fn test_thinking_precedence_header_wins() {
     config.providers.insert(
         "deepseek".to_string(),
         ProviderConfig {
+    rate_limits: None,
             base_url: format!("http://{}", upstream_addr),
             default_model: "deepseek-reasoner".to_string(),
             strategy: "round_robin".to_string(),
@@ -445,6 +452,7 @@ async fn test_thinking_precedence_header_wins() {
             output_price: 2.19,
             models: vec!["deepseek-reasoner".to_string()],
             model_specs: vec![ModelSpec {
+    rate_limits: None,
                 priority: None,
                 name: "deepseek-reasoner".to_string(),
                 tier: ModelTier::Flagship,
@@ -544,6 +552,7 @@ async fn test_responses_upstream_thinking_serialization_omits_top_level_reasonin
     config.providers.insert(
         "zen-provider".to_string(),
         ProviderConfig {
+    rate_limits: None,
             base_url: format!("http://{}", upstream_addr),
             default_model: "fable-5.1".to_string(),
             strategy: "priority".to_string(),
@@ -553,6 +562,7 @@ async fn test_responses_upstream_thinking_serialization_omits_top_level_reasonin
             output_price: 0.0,
             models: vec!["fable-5.1".to_string()],
             model_specs: vec![ModelSpec {
+    rate_limits: None,
                 priority: None,
                 name: "fable-5.1".to_string(),
                 tier: ModelTier::Flagship,

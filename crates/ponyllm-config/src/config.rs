@@ -14,6 +14,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::commercial::CommercialConfig;
 
+/// Re-export the canonical short-window rate-limits type (defined in
+/// `ponyllm-core::pool` so the scheduler can consume it without a dependency
+/// cycle; `ponyllm-config` owns the TOML surface and resolution helpers).
+pub use ponyllm_core::pool::RateLimits;
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ConfigFile {
     #[serde(default)]
@@ -484,6 +489,14 @@ pub struct ModelConfig {
     /// Optional total upstream timeout override for this model (seconds, 60~1800).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_secs: Option<u64>,
+    /// Optional short-window rate limits for this model (per-key RPM/TPM
+    /// sliding-window budget + concurrency cap), overriding the provider-level
+    /// default field-by-field. `None` inherits the provider default (or stays
+    /// unlimited). See [`RateLimits`] for field semantics. Quotas are account
+    /// level; the model config is the configuration source for them (ADR
+    /// `2026-09-30-unified-quota-metering-governance-kernel`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limits: Option<RateLimits>,
 }
 
 pub fn default_context_window() -> String {
@@ -521,6 +534,7 @@ impl Default for ModelConfig {
             thinking_max: None,
             proxy: None,
             timeout_secs: None,
+            rate_limits: None,
         }
     }
 }
@@ -550,6 +564,7 @@ impl ModelConfig {
             thinking_max: None,
             proxy: None,
             timeout_secs: None,
+            rate_limits: None,
         }
     }
 
@@ -596,6 +611,11 @@ pub struct ProviderSection {
     /// Optional total upstream timeout override for this provider (seconds, 60~1800).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_secs: Option<u64>,
+    /// Optional provider-level default short-window rate limits, inherited by
+    /// every model that does not set its own override (see
+    /// [`ProviderSection::effective_rate_limits`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limits: Option<RateLimits>,
 }
 
 impl ProviderSection {
@@ -661,6 +681,21 @@ impl ProviderSection {
             return cfg.clone();
         }
         ModelConfig::new(model_name)
+    }
+
+    /// Effective short-window rate limits for a model: the model-level
+    /// override wins field-by-field over the provider-level default; `None`
+    /// when neither is configured (unlimited). Window/cached-accounting
+    /// defaults (`60s` / `count_cached = true`) are applied at scheduling
+    /// time via [`RateLimits::window_secs_effective`] and
+    /// [`RateLimits::count_cached_effective`].
+    pub fn effective_rate_limits(&self, model_name: &str) -> Option<RateLimits> {
+        let model_limits = self
+            .model_configs
+            .iter()
+            .find(|m| m.name == model_name)
+            .and_then(|m| m.rate_limits);
+        RateLimits::resolve(self.rate_limits.as_ref(), model_limits.as_ref())
     }
 
     pub fn upsert_model_config(&mut self, cfg: ModelConfig) {
@@ -958,6 +993,7 @@ impl ConfigFile {
             messages_url: None,
             proxy: None,
             timeout_secs: None,
+            rate_limits: None,
         });
         entry.base_url = base_url.to_string();
         entry.default_model = default_model.to_string();
@@ -1228,5 +1264,152 @@ mod tests {
         plain.priority = None;
         let serialized = toml::to_string(&plain).unwrap();
         assert!(!serialized.contains("priority"), "None priority must be skipped: {}", serialized);
+    }
+
+    #[test]
+    fn test_rate_limits_toml_roundtrip_and_legacy_default() {
+        // A model with rate_limits persists it verbatim through TOML.
+        let mut cfg = ModelConfig::new("gpt-6-sol");
+        cfg.rate_limits = Some(RateLimits {
+            rpm: Some(10),
+            tpm: Some(2_000_000),
+            window_secs: Some(60),
+            concurrency: Some(4),
+            count_cached: Some(false),
+        });
+        let toml_str = toml::to_string(&cfg).unwrap();
+        let back: ModelConfig = toml::from_str(&toml_str).unwrap();
+        let rl = back.rate_limits.expect("rate_limits must survive TOML roundtrip");
+        assert_eq!(rl.rpm, Some(10));
+        assert_eq!(rl.tpm, Some(2_000_000));
+        assert_eq!(rl.window_secs, Some(60));
+        assert_eq!(rl.concurrency, Some(4));
+        assert_eq!(rl.count_cached, Some(false));
+
+        // Legacy models without the field deserialize to `None` (unlimited).
+        let legacy_toml = "name = \"gpt-6-sol\"\ntier = \"Standard\"\n";
+        let legacy: ModelConfig = toml::from_str(legacy_toml).unwrap();
+        assert_eq!(legacy.rate_limits, None);
+
+        // Partial tables: missing fields default to `None` (per-field inherit).
+        let partial: ModelConfig = toml::from_str(
+            "name = \"m\"\n\n[rate_limits]\nrpm = 5\n",
+        )
+        .unwrap();
+        let rl = partial.rate_limits.expect("partial table still parses");
+        assert_eq!(rl.rpm, Some(5));
+        assert_eq!(rl.tpm, None);
+        assert_eq!(rl.window_secs, None);
+        assert_eq!(rl.count_cached, None);
+
+        // `None` never leaks into the serialized form.
+        let mut plain = ModelConfig::new("plain");
+        plain.rate_limits = None;
+        let serialized = toml::to_string(&plain).unwrap();
+        assert!(
+            !serialized.contains("rate_limits"),
+            "None rate_limits must be skipped: {}",
+            serialized
+        );
+    }
+
+    #[test]
+    fn test_rate_limits_zero_means_unlimited_and_window_default() {
+        // 0 (and None) fold to "unlimited" for numeric budgets.
+        let z = RateLimits {
+            rpm: Some(0),
+            tpm: Some(0),
+            window_secs: None,
+            concurrency: Some(0),
+            count_cached: None,
+        };
+        assert!(z.is_unlimited());
+        assert_eq!(z.rpm_effective(), None);
+        assert_eq!(z.tpm_effective(), None);
+        assert_eq!(z.concurrency_effective(), None);
+        // Window / cached accounting defaults.
+        assert_eq!(z.window_secs_effective(), RateLimits::DEFAULT_WINDOW_SECS);
+        assert!(z.count_cached_effective());
+        // Validation rejects a degenerate 0 window but accepts 0 budgets.
+        assert!(z.validate().is_ok());
+        let bad_window = RateLimits {
+            window_secs: Some(0),
+            ..Default::default()
+        };
+        assert!(bad_window.validate().is_err());
+    }
+
+    #[test]
+    fn test_effective_rate_limits_model_overrides_provider_fieldwise() {
+        let mut prov = ProviderSection {
+            base_url: "https://api.example.com".to_string(),
+            default_model: "m1".to_string(),
+            strategy: "priority".to_string(),
+            billing_mode: BillingMode::Metered,
+            input_price: 1.0,
+            cached_price: 0.5,
+            output_price: 2.0,
+            models: vec!["m1".to_string()],
+            model_configs: Vec::new(),
+            keys: Vec::new(),
+            default_protocol: None,
+            chat_url: None,
+            responses_url: None,
+            messages_url: None,
+            proxy: None,
+            timeout_secs: None,
+            rate_limits: Some(RateLimits {
+                rpm: Some(10),
+                tpm: Some(1_000_000),
+                window_secs: Some(120),
+                concurrency: Some(2),
+                count_cached: Some(true),
+            }),
+        };
+        // No model override: full provider default.
+        let resolved = prov.effective_rate_limits("m1").unwrap();
+        assert_eq!(resolved.rpm, Some(10));
+        assert_eq!(resolved.window_secs, Some(120));
+
+        // Model override wins field-by-field; untouched fields inherit.
+        prov.model_configs.push(ModelConfig {
+            name: "m1".to_string(),
+            rate_limits: Some(RateLimits {
+                rpm: Some(30),
+                tpm: None,
+                window_secs: None,
+                concurrency: None,
+                count_cached: Some(false),
+            }),
+            ..ModelConfig::new("m1")
+        });
+        let resolved = prov.effective_rate_limits("m1").unwrap();
+        assert_eq!(resolved.rpm, Some(30), "model rpm must override provider");
+        assert_eq!(resolved.tpm, Some(1_000_000), "provider tpm inherited");
+        assert_eq!(resolved.window_secs, Some(120), "provider window inherited");
+        assert_eq!(resolved.concurrency, Some(2), "provider concurrency inherited");
+        assert_eq!(resolved.count_cached, Some(false), "model count_cached overrides");
+
+        // Unknown model without any limits: None (unlimited).
+        let none_prov = ProviderSection {
+            base_url: String::new(),
+            default_model: String::new(),
+            strategy: "priority".to_string(),
+            billing_mode: BillingMode::Metered,
+            input_price: 0.0,
+            cached_price: 0.0,
+            output_price: 0.0,
+            models: Vec::new(),
+            model_configs: Vec::new(),
+            keys: Vec::new(),
+            default_protocol: None,
+            chat_url: None,
+            responses_url: None,
+            messages_url: None,
+            proxy: None,
+            timeout_secs: None,
+            rate_limits: None,
+        };
+        assert_eq!(none_prov.effective_rate_limits("nope"), None);
     }
 }

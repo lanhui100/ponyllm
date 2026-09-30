@@ -74,6 +74,7 @@ impl TestHarness {
         ];
 
         let provider_sec = ProviderSection {
+    rate_limits: None,
             base_url: "https://api.openai.com/v1".to_string(),
             default_model: "gpt-4o".to_string(),
             strategy: "round_robin".to_string(),
@@ -83,6 +84,7 @@ impl TestHarness {
             output_price: 10.0,
             models: vec!["gpt-4o".to_string()],
             model_configs: vec![ModelConfig {
+    rate_limits: None,
                 priority: None,
                 name: "gpt-4o".to_string(),
                 tier: ModelTier::Standard,
@@ -143,6 +145,7 @@ impl TestHarness {
         gw_config.admin_write_enabled = true;
 
         let model_spec = ModelSpec {
+    rate_limits: None,
             priority: None,
             name: "gpt-4o".to_string(),
             tier: ModelTier::Standard,
@@ -170,6 +173,7 @@ impl TestHarness {
         gw_config.providers.insert(
             "openai".to_string(),
             ProviderConfig {
+    rate_limits: None,
                 base_url: "https://api.openai.com/v1".to_string(),
                 default_model: "gpt-4o".to_string(),
                 strategy: "round_robin".to_string(),

@@ -4,29 +4,34 @@ use ponyllm_server::state::AppState;
 #[test]
 fn test_effective_proxy_resolution() {
     let mut provider = ProviderConfig {
+    rate_limits: None,
         base_url: "https://api.example.com".to_string(),
         default_model: "default-model".to_string(),
         proxy: Some("http://127.0.0.1:8899".to_string()),
         model_specs: vec![
             ModelSpec {
+    rate_limits: None,
                 priority: None,
                 name: "inherited-model".to_string(),
                 proxy: None,
                 ..Default::default()
             },
             ModelSpec {
+    rate_limits: None,
                 priority: None,
                 name: "custom-proxy-model".to_string(),
                 proxy: Some("http://127.0.0.1:10808".to_string()),
                 ..Default::default()
             },
             ModelSpec {
+    rate_limits: None,
                 priority: None,
                 name: "direct-model".to_string(),
                 proxy: Some("direct".to_string()),
                 ..Default::default()
             },
             ModelSpec {
+    rate_limits: None,
                 priority: None,
                 name: "none-model".to_string(),
                 proxy: Some("none".to_string()),
@@ -84,17 +89,20 @@ fn test_app_state_http_client_routing_and_pooling() {
     config.providers.insert(
         "opencode-zen".to_string(),
         ProviderConfig {
+    rate_limits: None,
             base_url: "https://access.ponyjob.top".to_string(),
             default_model: "zen-chat".to_string(),
             proxy: None, // Provider is direct
             model_specs: vec![
                 ModelSpec {
+    rate_limits: None,
                     priority: None,
                     name: "zen-chat".to_string(),
                     proxy: None, // direct
                     ..Default::default()
                 },
                 ModelSpec {
+    rate_limits: None,
                     priority: None,
                     name: "muse-spark".to_string(),
                     proxy: Some("http://127.0.0.1:8899".to_string()), // needs proxy!
@@ -108,17 +116,20 @@ fn test_app_state_http_client_routing_and_pooling() {
     config.providers.insert(
         "foreign-provider".to_string(),
         ProviderConfig {
+    rate_limits: None,
             base_url: "https://api.foreign.com".to_string(),
             default_model: "claude-3-7".to_string(),
             proxy: Some("http://127.0.0.1:8899".to_string()), // provider uses 8899
             model_specs: vec![
                 ModelSpec {
+    rate_limits: None,
                     priority: None,
                     name: "claude-3-7".to_string(),
                     proxy: None, // inherits 8899
                     ..Default::default()
                 },
                 ModelSpec {
+    rate_limits: None,
                     priority: None,
                     name: "claude-direct".to_string(),
                     proxy: Some("direct".to_string()), // forces direct

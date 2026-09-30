@@ -111,6 +111,11 @@ pub struct ApiKeyEntry {
     pub weight: u32,
     pub stats: KeyStats,
     pub usage_tracker: Arc<crate::pool::usage::KeyUsageTracker>,
+    /// Per-key 60s short-window meter (requests/tokens + in-flight
+    /// concurrency), consumed by the pool scheduler for budget filtering and
+    /// by the executor for attempt/success accounting (M1/M2, ADR
+    /// `2026-09-30-unified-quota-metering-governance-kernel`).
+    pub short_meter: Arc<crate::pool::meter::ShortWindowMeter>,
 }
 
 // Manual Debug: `#[derive(Debug)]` would print `api_key` verbatim into
@@ -138,6 +143,7 @@ impl ApiKeyEntry {
             weight,
             stats: KeyStats::default(),
             usage_tracker: Arc::new(crate::pool::usage::KeyUsageTracker::new()),
+            short_meter: Arc::new(crate::pool::meter::ShortWindowMeter::new()),
         }
     }
 
@@ -155,11 +161,18 @@ impl ApiKeyEntry {
             weight,
             stats: KeyStats::default(),
             usage_tracker: Arc::new(crate::pool::usage::KeyUsageTracker::new()),
+            short_meter: Arc::new(crate::pool::meter::ShortWindowMeter::new()),
         }
     }
 
     pub fn is_antigravity(&self) -> bool {
         matches!(self.auth, KeyAuth::Antigravity(_))
+    }
+
+    /// The key's short-window meter (shared accessor for the scheduler and
+    /// the executor accounting path).
+    pub fn meter(&self) -> &crate::pool::meter::ShortWindowMeter {
+        self.short_meter.as_ref()
     }
 
     pub fn antigravity_manager(&self) -> Option<Arc<AntigravityTokenManager>> {

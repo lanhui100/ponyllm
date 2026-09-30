@@ -10,6 +10,7 @@ pub mod scoring;
 pub mod thinking;
 pub mod antigravity;
 pub mod refresh_gate;
+pub mod meter;
 pub mod usage;
 
 pub use entry::*;
@@ -22,6 +23,7 @@ pub use hot_cache::*;
 pub use scoring::*;
 pub use thinking::*;
 pub use antigravity::*;
+pub use meter::*;
 pub use usage::*;
 
 

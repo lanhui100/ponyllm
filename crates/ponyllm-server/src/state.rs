@@ -51,6 +51,31 @@ fn resolve_snapshot_path(config: &GatewayConfig) -> Option<std::path::PathBuf> {
     None
 }
 
+/// 收集 live per-key 周期用量归档（5h/周/月 四要素，来源为既有
+/// `KeyUsageTracker::query_windows` → `CycleStats`，见 2026-09-25 四要素 ADR）。
+/// 归档写入方：周期保存点（`spawn_snapshot_saver`）与 `save_telemetry_snapshot`。
+fn collect_live_key_cycles(
+    pools: &RwLock<HashMap<String, Arc<ponyllm_core::pool::KeyPool>>>,
+    now_ms: u64,
+) -> HashMap<String, crate::telemetry_snapshot::KeyUsageCycleArchive> {
+    let mut cycles = HashMap::new();
+    let pool_map = pools.read();
+    for pool in pool_map.values() {
+        for key in pool.snapshot_keys() {
+            let (window_5h, weekly, monthly) = key.usage_tracker.query_windows(now_ms);
+            cycles.insert(
+                key.id.clone(),
+                crate::telemetry_snapshot::KeyUsageCycleArchive {
+                    window_5h: crate::telemetry_snapshot::window_usage_to_cycle_stats(&window_5h),
+                    weekly: crate::telemetry_snapshot::window_usage_to_cycle_stats(&weekly),
+                    monthly: crate::telemetry_snapshot::window_usage_to_cycle_stats(&monthly),
+                },
+            );
+        }
+    }
+    cycles
+}
+
 fn spawn_snapshot_saver(
     path: std::path::PathBuf,
     timeseries: Arc<TimeseriesProjection>,
@@ -63,7 +88,11 @@ fn spawn_snapshot_saver(
         .name("ponyllm-telemetry-snapshot".to_string())
         .spawn(move || loop {
             std::thread::sleep(std::time::Duration::from_secs(10));
-            let key_usages = {
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            let (key_usages, live_cycles) = {
                 let mut usages = HashMap::new();
                 let pool_map = pools.read();
                 for pool in pool_map.values() {
@@ -71,7 +100,11 @@ fn spawn_snapshot_saver(
                         usages.insert(key.id.clone(), key.usage_tracker.export_snapshot());
                     }
                 }
-                usages
+                drop(pool_map);
+                // Live per-key CycleStats (5h/周/月) feed the persisted
+                // `key_usage_cycles` archive (read-modify-write inside the
+                // save keeps prior archives and merges live).
+                (usages, collect_live_key_cycles(&pools, now_ms))
             };
             let snap = crate::telemetry_snapshot::TelemetrySnapshot {
                 version: crate::telemetry_snapshot::SNAPSHOT_VERSION,
@@ -82,7 +115,7 @@ fn spawn_snapshot_saver(
                 streams: streams.snapshot_nodes(),
                 key_usages,
             };
-            if let Err(e) = crate::telemetry_snapshot::save_snapshot(&path, &snap) {
+            if let Err(e) = crate::telemetry_snapshot::save_snapshot_with_live_cycles(&path, &snap, live_cycles) {
                 tracing::warn!("telemetry snapshot save failed: {}", e);
             }
         })
@@ -472,7 +505,12 @@ impl AppState {
                 usages
             },
         };
-        crate::telemetry_snapshot::save_snapshot(&path, &snap)
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let live_cycles = collect_live_key_cycles(&self.pools, now_ms);
+        crate::telemetry_snapshot::save_snapshot_with_live_cycles(&path, &snap, live_cycles)
     }
 
 

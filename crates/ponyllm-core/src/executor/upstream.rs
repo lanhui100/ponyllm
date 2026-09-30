@@ -74,6 +74,11 @@ pub struct UpstreamExecutor {
     /// byte-identical wire headers to before.
     opencode_zen: bool,
     systemone: bool,
+    /// Resolved short-window budget (provider default merged with the model
+    /// override) plumbed by the routes. `None` = budget dimension disabled
+    /// (legacy unlimited behavior). Feeds both the budget-filtered key
+    /// selection and the window-exhaustion wait/Retry-After.
+    rate_limits: Option<crate::pool::RateLimits>,
 }
 
 impl std::fmt::Debug for UpstreamExecutor {
@@ -195,6 +200,103 @@ fn transient_retry_delay(
     }
     let base = retry_after.map(|d| d.min(Duration::from_secs(5)));
     Some(base.unwrap_or(Duration::from_millis(1200)))
+}
+
+/// Upper bound for the transparent pool-wait on full window exhaustion.
+///
+/// Far smaller than the downstream DSH stream idle timeout (~300s), so a
+/// gateway that holds the request while the pool's per-minute window breathes
+/// never trips the client's stream timeout. Beyond this bound the gateway
+/// gives up and answers 429 + honest Retry-After instead.
+pub const DEFAULT_POOL_WAIT_MAX: Duration = Duration::from_secs(90);
+
+/// Pool-level failover backoff for **multi-key** pools: after a 429 records
+/// an error on one key, pause briefly before switching to the next key so a
+/// per-minute window shared across the account's keys is not swept in
+/// milliseconds (the observed 17-30× amplification on sense/deepseek-v4-flash).
+///
+/// Bounded to `min(earliest_unlock, 2s)` — a healthy candidate is still
+/// reached in ~2s while the window breathes, and a key that unlocks sooner is
+/// only paused until it does. Singleton pools keep their own
+/// [`transient_retry_delay`] semantics and return `None` here.
+fn pool_failover_backoff(pool: &KeyPool) -> Option<Duration> {
+    if pool.total_key_count() <= 1 {
+        return None;
+    }
+    Some(
+        pool.earliest_unlock()
+            .map(|d| d.min(Duration::from_secs(2)))
+            .unwrap_or(Duration::from_millis(1200)),
+    )
+}
+
+/// Per-attempt short-window meter guard: admits the attempt into the key's
+/// window AND in-flight/concurrency slot at construction, then releases the
+/// slot and settles token usage exactly once at drop, whatever the exit path
+/// (success return / failover continue / terminal error).
+///
+/// Request/token accounting is split to close the RPM TOCTOU: the request is
+/// counted at admission (`record_attempt(0)`, so a concurrent select on the
+/// same key immediately sees the consumed RPM slot) while `tokens` is filled
+/// by the JSON success path from the upstream `usage` and settled via
+/// [`ShortWindowMeter::add_tokens`] (token-only, no extra request). The stream
+/// path has no usage at this layer (routes record tokens via `record_tokens`
+/// into the long-window tracker), so it stays `tokens = 0` — RPM and
+/// concurrency are still accurately accounted for every attempt.
+struct AttemptMeterGuard<'a> {
+    meter: &'a crate::pool::meter::ShortWindowMeter,
+    /// Token usage reported by THIS attempt (0 = request-only accounting).
+    tokens: u64,
+}
+
+impl<'a> AttemptMeterGuard<'a> {
+    /// Admit one attempt: count the request into the window now (RPM slot
+    /// consumed immediately — no admission-to-settlement gap) and take the
+    /// key's in-flight/concurrency slot.
+    fn admit(meter: &'a crate::pool::meter::ShortWindowMeter) -> Self {
+        meter.record_attempt(0);
+        meter.in_flight_inc();
+        Self { meter, tokens: 0 }
+    }
+}
+
+impl Drop for AttemptMeterGuard<'_> {
+    fn drop(&mut self) {
+        self.meter.in_flight_dec();
+        if self.tokens > 0 {
+            self.meter.add_tokens(self.tokens);
+        }
+    }
+}
+
+/// Best-effort token count from an upstream JSON success body, across the
+/// common wire shapes (OpenAI chat/responses `usage.total_tokens`,
+/// Anthropic `usage.input_tokens`+`output_tokens`, prompt/completion split).
+/// `0` when the shape is unrecognized or absent.
+fn extract_response_tokens(body: &Value) -> u64 {
+    let Some(usage) = body.get("usage") else {
+        return 0;
+    };
+    if let Some(t) = usage.get("total_tokens").and_then(Value::as_u64) {
+        return t;
+    }
+    let sum = |a: Option<u64>, b: Option<u64>| match (a, b) {
+        (Some(x), Some(y)) => Some(x.saturating_add(y)),
+        _ => None,
+    };
+    if let Some(t) = sum(
+        usage.get("input_tokens").and_then(Value::as_u64),
+        usage.get("output_tokens").and_then(Value::as_u64),
+    ) {
+        return t;
+    }
+    if let Some(t) = sum(
+        usage.get("prompt_tokens").and_then(Value::as_u64),
+        usage.get("completion_tokens").and_then(Value::as_u64),
+    ) {
+        return t;
+    }
+    0
 }
 
 /// Whether a terminal 400 body looks like Google's transient geo-gate
@@ -428,6 +530,22 @@ fn classify_too_many_requests(
             PoolErrorType::RateLimit { retry_after },
         )
     }
+}
+
+/// Whether a failure body (429/402/403) means the *account balance* is gone
+/// rather than a time-window being closed. Balance exhaustion never recovers
+/// by waiting for a sliding window, so the transparent pool-wait must be
+/// suppressed: fail fast with the existing classification.
+///
+/// Deliberately broad token matching ("balance"/"credit"/"budget"/"payment
+/// required") — these only run against upstream error bodies, where a hit is
+/// far more likely a billing signal than an innocent identifier.
+pub fn is_balance_exhausted_body(body: &str) -> bool {
+    let lower = body.to_ascii_lowercase();
+    lower.contains("balance")
+        || lower.contains("credit")
+        || lower.contains("budget")
+        || lower.contains("payment required")
 }
 
 /// Outcome of the stale-token recovery attempt for an Antigravity 401.
@@ -831,7 +949,16 @@ impl UpstreamExecutor {
             client_label: "ponyllm".to_string(),
             opencode_zen: false,
             systemone: false,
+            rate_limits: None,
         }
+    }
+
+    /// Adopt the resolved short-window budget (provider + model `rate_limits`)
+    /// for budget-filtered key selection and window-exhaustion handling.
+    /// `None` keeps the legacy unlimited behavior.
+    pub fn with_rate_limits(mut self, limits: Option<crate::pool::RateLimits>) -> Self {
+        self.rate_limits = limits;
+        self
     }
 
     /// Opt into the opencode zen session treatment for this executor.
@@ -875,6 +1002,73 @@ impl UpstreamExecutor {
                 DEFAULT_UPSTREAM_TTFB_TIMEOUT
             )),
         }
+    }
+
+    /// Transparent pool-wait hook for full-pool exhaustion.
+    ///
+    /// Called when `select_key_excluding_with_limits` can no longer produce a
+    /// key. The transparent hold is **budget-driven only**: with no
+    /// `rate_limits` configured (`None`, legacy), a full-pool `NoAvailableKey`
+    /// is pure cooldown and must fail fast so cross-provider failover is not
+    /// delayed by a hold of up to [`DEFAULT_POOL_WAIT_MAX`]. With a budget
+    /// configured, when the exhaustion is *window-shaped* (per-minute/quota/
+    /// cooldown — recoverable by waiting; see
+    /// [`KeyPool::exhausted_by_window_with_limits`]) and not balance/auth,
+    /// hold the request for at most [`DEFAULT_POOL_WAIT_MAX`] until the pool's
+    /// earliest refill/unlock ([`KeyPool::window_refill_in_with_limits`]), then
+    /// allow exactly one fresh rescue pass (`attempted_keys` cleared,
+    /// `pool_wait_done` set so the loop cannot spin). When the needed wait
+    /// exceeds the cap — or the exhaustion is not window-shaped (all keys
+    /// permanently disabled) — return `false` so the caller fails immediately
+    /// with 429 + honest Retry-After.
+    ///
+    /// Returns `true` when the caller should `continue` the retry loop after
+    /// a bounded sleep.
+    async fn maybe_window_wait(
+        &self,
+        pool_wait_done: &mut bool,
+        attempted_keys: &mut Vec<String>,
+        balance_exhausted: bool,
+    ) -> bool {
+        if balance_exhausted || *pool_wait_done {
+            return false;
+        }
+        // Only budget-driven exhaustion is waitable. With `rate_limits = None`
+        // (pure cooldown / unconfigured budget) keep the legacy fail-fast:
+        // a hold here would delay cross-provider failover up to
+        // DEFAULT_POOL_WAIT_MAX for a state that only cooldown expiry fixes.
+        if self.rate_limits.is_none() {
+            return false;
+        }
+        // Only window/cooldown exhaustion is waitable; an all-disabled
+        // (auth) pool reports false here and fails immediately.
+        if !self
+            .pool
+            .exhausted_by_window_with_limits(self.rate_limits.as_ref())
+        {
+            return false;
+        }
+        let hold = self
+            .pool
+            .window_refill_in_with_limits(self.rate_limits.as_ref())
+            .or_else(|| self.pool.earliest_unlock());
+        let Some(hold) = hold else {
+            // No key can ever refill (all disabled): fail immediately.
+            return false;
+        };
+        if hold > DEFAULT_POOL_WAIT_MAX {
+            return false;
+        }
+        tracing::info!(
+            provider = %self.pool.provider,
+            hold_ms = hold.as_millis(),
+            wait_max_ms = DEFAULT_POOL_WAIT_MAX.as_millis(),
+            "pool window-exhausted: transparent wait then single rescue retry"
+        );
+        tokio::time::sleep(hold).await;
+        *pool_wait_done = true;
+        attempted_keys.clear();
+        true
     }
 
     /// Attach an opt-in event sink. Emits `KeySelected`, `UpstreamHeaders`
@@ -1194,6 +1388,12 @@ impl UpstreamExecutor {
         // Antigravity keys already force-refreshed once this request (P0-3
         // stale-token recovery): a second 401 on the same key is genuine.
         let mut refreshed_keys: Vec<String> = Vec::new();
+        // 402 / balance-wording upstream body: waiting for a window cannot
+        // fix an empty balance, so full-pool exhaustion must fail fast.
+        let mut balance_exhausted = false;
+        // Transparent-wait guard: at most one bounded hold on full pool
+        // window exhaustion, so the rescue retry cannot spin forever.
+        let mut pool_wait_done = false;
 
         let max_attempts = self.max_retries.max(self.pool.total_key_count()).max(1);
 
@@ -1201,9 +1401,18 @@ impl UpstreamExecutor {
             let attempt_start = Instant::now();
             let attempt_idx = attempt as u32;
             let select_start = Instant::now();
-            let key = match self.pool.select_key_excluding(&attempted_keys) {
+            let key = match self.pool.select_key_excluding_with_limits(&attempted_keys, self.rate_limits.as_ref()) {
                 Ok(k) => k,
                 Err(e) => {
+                    // Full-pool exhaustion: when window-shaped (per-minute/quota,
+                    // not balance/auth-disabled), transparently wait up to
+                    // DEFAULT_POOL_WAIT_MAX then retry the pool once.
+                    if self
+                        .maybe_window_wait(&mut pool_wait_done, &mut attempted_keys, balance_exhausted)
+                        .await
+                    {
+                        continue;
+                    }
                     // First-attempt pool exhaustion surfaces structurally so
                     // callers never string-match on the aggregated message.
                     if attempt == 0 {
@@ -1223,6 +1432,14 @@ impl UpstreamExecutor {
 
             attempted_keys.push(key.id.clone());
             self.emit_key_selected(&key.id, select_start.elapsed());
+
+            // Short-window metering: admit this attempt now — the request is
+            // counted into the window immediately (RPM slot visible to the
+            // next select; closes the admission-to-settlement TOCTOU) and the
+            // key's in-flight/concurrency slot is taken. The drop-guard
+            // releases the slot and settles `tokens` exactly once at the end
+            // of this iteration (success return / failover continue / error).
+            let mut attempt_meter = AttemptMeterGuard::admit(key.meter());
 
             let effective_body = self.inject_zen_free_tier_tools(url, Self::prepare_effective_body(&key, body));
             let headers = match self.build_headers(&key, Some(effective_body.as_ref())).await {
@@ -1283,6 +1500,8 @@ impl UpstreamExecutor {
                             return Err(CoreError::Internal("upstream JSON response exceeds 4 MiB".to_string()));
                         }
                         let json_val: Value = serde_json::from_slice(&bytes)?;
+                        // Report usage into the short-window meter (TPM budget).
+                        attempt_meter.tokens = extract_response_tokens(&json_val);
                         return Ok((json_val, key.id.clone()));
                     }
 
@@ -1306,6 +1525,11 @@ impl UpstreamExecutor {
                     last_error = format!("HTTP {} from {}: {}", status_code, key.id, err_body);
 
                     if status_code == 429 {
+                        // Balance-wording 429 (billing, not window): sets the
+                        // fail-fast flag; the classification below is kept.
+                        if is_balance_exhausted_body(&err_body) {
+                            balance_exhausted = true;
+                        }
                         let (kind, pool_err) = classify_too_many_requests(&err_body, retry_after);
                         last_kind = kind;
                         attempt_kinds.push(last_kind.clone());
@@ -1323,6 +1547,16 @@ impl UpstreamExecutor {
                                 self.emit_both(&key.id, attempt_idx, Some(status_code), last_kind.clone(), last_error.clone(), Some(err_body), attempt_start.elapsed());
                                 tokio::time::sleep(delay).await;
                                 continue;
+                            }
+                        }
+                        // Pool-level failover backoff: multi-key pools pause
+                        // briefly before switching keys so a per-minute window
+                        // shared across the account's keys is not swept in
+                        // milliseconds (eliminates the observed 17-30× 429
+                        // amplification on sense/deepseek-v4-flash).
+                        if attempt + 1 < max_attempts {
+                            if let Some(delay) = pool_failover_backoff(&self.pool) {
+                                tokio::time::sleep(delay).await;
                             }
                         }
                     } else if status_code == 401 {
@@ -1345,11 +1579,19 @@ impl UpstreamExecutor {
                             }
                         }
                     } else if status_code == 403 {
+                        // Balance-wording 403 (billing, not window): fail-fast
+                        // flag only; the classification below is kept.
+                        if is_balance_exhausted_body(&err_body) {
+                            balance_exhausted = true;
+                        }
                         let (kind, pool_err) = classify_forbidden(&err_body, retry_after);
                         last_kind = kind;
                         attempt_kinds.push(last_kind.clone());
                         self.pool.record_error(&key.id, pool_err);
                     } else if status_code == 402 {
+                        // 402 Payment Required is balance exhaustion by
+                        // definition: never transparent-wait on it.
+                        balance_exhausted = true;
                         last_kind = GatewayErrorKind::QuotaExhausted;
                         attempt_kinds.push(last_kind.clone());
                         self.pool.record_error(&key.id, PoolErrorType::QuotaExhausted { retry_after });
@@ -1409,6 +1651,12 @@ impl UpstreamExecutor {
         // Antigravity keys already force-refreshed once this request (P0-3
         // stale-token recovery): a second 401 on the same key is genuine.
         let mut refreshed_keys: Vec<String> = Vec::new();
+        // 402 / balance-wording upstream body: waiting for a window cannot
+        // fix an empty balance, so full-pool exhaustion must fail fast.
+        let mut balance_exhausted = false;
+        // Transparent-wait guard: at most one bounded hold on full pool
+        // window exhaustion, so the rescue retry cannot spin forever.
+        let mut pool_wait_done = false;
 
         let max_attempts = self.max_retries.max(self.pool.total_key_count()).max(1);
 
@@ -1416,9 +1664,18 @@ impl UpstreamExecutor {
             let attempt_start = Instant::now();
             let attempt_idx = attempt as u32;
             let select_start = Instant::now();
-            let key = match self.pool.select_key_excluding(&attempted_keys) {
+            let key = match self.pool.select_key_excluding_with_limits(&attempted_keys, self.rate_limits.as_ref()) {
                 Ok(k) => k,
                 Err(e) => {
+                    // Full-pool exhaustion: when window-shaped (per-minute/quota,
+                    // not balance/auth-disabled), transparently wait up to
+                    // DEFAULT_POOL_WAIT_MAX then retry the pool once.
+                    if self
+                        .maybe_window_wait(&mut pool_wait_done, &mut attempted_keys, balance_exhausted)
+                        .await
+                    {
+                        continue;
+                    }
                     // First-attempt pool exhaustion surfaces structurally so
                     // callers never string-match on the aggregated message.
                     if attempt == 0 {
@@ -1438,6 +1695,13 @@ impl UpstreamExecutor {
 
             attempted_keys.push(key.id.clone());
             self.emit_key_selected(&key.id, select_start.elapsed());
+
+            // Short-window metering: admit this attempt now — the request is
+            // counted into the window immediately and the key's
+            // in-flight/concurrency slot is taken; the drop-guard releases
+            // the slot exactly once at the end of this iteration. The stream
+            // path has no usage here, so `tokens` stays 0 (known limitation).
+            let _attempt_meter = AttemptMeterGuard::admit(key.meter());
 
             let effective_body = self.inject_zen_free_tier_tools(url, Self::prepare_effective_body(&key, body));
             let headers = match self.build_headers(&key, Some(effective_body.as_ref())).await {
@@ -1514,6 +1778,11 @@ impl UpstreamExecutor {
                     last_error = format!("HTTP {} from {}: {}", status_code, key.id, err_body);
 
                     if status_code == 429 {
+                        // Balance-wording 429 (billing, not window): sets the
+                        // fail-fast flag; the classification below is kept.
+                        if is_balance_exhausted_body(&err_body) {
+                            balance_exhausted = true;
+                        }
                         let (kind, pool_err) = classify_too_many_requests(&err_body, retry_after);
                         last_kind = kind;
                         attempt_kinds.push(last_kind.clone());
@@ -1531,6 +1800,16 @@ impl UpstreamExecutor {
                                 self.emit_both(&key.id, attempt_idx, Some(status_code), last_kind.clone(), last_error.clone(), Some(err_body), attempt_start.elapsed());
                                 tokio::time::sleep(delay).await;
                                 continue;
+                            }
+                        }
+                        // Pool-level failover backoff: multi-key pools pause
+                        // briefly before switching keys so a per-minute window
+                        // shared across the account's keys is not swept in
+                        // milliseconds (eliminates the observed 17-30× 429
+                        // amplification on sense/deepseek-v4-flash).
+                        if attempt + 1 < max_attempts {
+                            if let Some(delay) = pool_failover_backoff(&self.pool) {
+                                tokio::time::sleep(delay).await;
                             }
                         }
                     } else if status_code == 401 {
@@ -1553,11 +1832,19 @@ impl UpstreamExecutor {
                             }
                         }
                     } else if status_code == 403 {
+                        // Balance-wording 403 (billing, not window): fail-fast
+                        // flag only; the classification below is kept.
+                        if is_balance_exhausted_body(&err_body) {
+                            balance_exhausted = true;
+                        }
                         let (kind, pool_err) = classify_forbidden(&err_body, retry_after);
                         last_kind = kind;
                         attempt_kinds.push(last_kind.clone());
                         self.pool.record_error(&key.id, pool_err);
                     } else if status_code == 402 {
+                        // 402 Payment Required is balance exhaustion by
+                        // definition: never transparent-wait on it.
+                        balance_exhausted = true;
                         last_kind = GatewayErrorKind::QuotaExhausted;
                         attempt_kinds.push(last_kind.clone());
                         self.pool.record_error(&key.id, PoolErrorType::QuotaExhausted { retry_after });
@@ -2090,6 +2377,239 @@ mod session_header_tests {
         let prepared = UpstreamExecutor::prepare_effective_body(&key2, &pre_serialized_body);
         assert_eq!(prepared["project"], "project-of-key-2");
         assert_eq!(prepared["requestId"], "agent/u/1/t/1");
+    }
+}
+
+#[cfg(test)]
+mod pool_wait_tests {
+    use super::*;
+    use crate::pool::{KeyPool, RateLimits, RoutingStrategy};
+
+    #[test]
+    fn extract_response_tokens_across_wire_shapes() {
+        // OpenAI chat / responses: usage.total_tokens wins.
+        assert_eq!(
+            extract_response_tokens(&json!({"usage": {"prompt_tokens": 5, "completion_tokens": 7, "total_tokens": 12}})),
+            12
+        );
+        // Anthropic messages: input + output.
+        assert_eq!(
+            extract_response_tokens(&json!({"usage": {"input_tokens": 3, "output_tokens": 4}})),
+            7
+        );
+        // prompt/completion split without total.
+        assert_eq!(
+            extract_response_tokens(&json!({"usage": {"prompt_tokens": 10, "completion_tokens": 20}})),
+            30
+        );
+        // Missing/absent usage -> 0 (request-only accounting).
+        assert_eq!(extract_response_tokens(&json!({"choices": []})), 0);
+        assert_eq!(extract_response_tokens(&json!({"usage": {}})), 0);
+    }
+
+    #[test]
+    fn attempt_meter_guard_counts_request_at_admission() {
+        let pool = KeyPool::new("p", RoutingStrategy::RoundRobin);
+        pool.add_key(ApiKeyEntry::new("k1", "t", 1, 10));
+        let keys = pool.snapshot_keys();
+        let meter = keys[0].meter();
+        {
+            // Admission counts the request into the window immediately (RPM
+            // slot visible to the next select — no admission-to-settlement
+            // TOCTOU) and takes the in-flight slot.
+            let mut guard = AttemptMeterGuard::admit(meter);
+            assert_eq!(meter.requests_in_window(), 1);
+            assert_eq!(meter.in_flight(), 1);
+            guard.tokens = 100;
+        }
+        // Drop: in-flight released; tokens settled (token-only, no extra
+        // request) when > 0.
+        assert_eq!(meter.in_flight(), 0);
+        assert_eq!(meter.tokens_in_window(), 100);
+        assert_eq!(meter.requests_in_window(), 1);
+    }
+
+    #[test]
+    fn attempt_meter_guard_skips_tokens_when_zero() {
+        let pool = KeyPool::new("p", RoutingStrategy::RoundRobin);
+        pool.add_key(ApiKeyEntry::new("k1", "t", 1, 10));
+        let keys = pool.snapshot_keys();
+        let meter = keys[0].meter();
+        {
+            // Stream path: tokens stays 0 (no usage at this layer) — the drop
+            // still releases the in-flight slot but settles no tokens.
+            let _guard = AttemptMeterGuard::admit(meter);
+            assert_eq!(meter.requests_in_window(), 1);
+            assert_eq!(meter.in_flight(), 1);
+        }
+        assert_eq!(meter.in_flight(), 0);
+        assert_eq!(meter.tokens_in_window(), 0);
+        assert_eq!(meter.requests_in_window(), 1);
+    }
+
+    #[test]
+    fn balance_wording_bodies_are_fail_fast_signals() {
+        // Billing language anywhere in the body marks balance exhaustion;
+        // window language alone must NOT.
+        for body in [
+            "Insufficient balance. Please top up.",
+            r#"{"error":{"message":"your account credit is exhausted","code":"402"}}"#,
+            "Budget exceeded for this project",
+            "Payment required to continue using the API",
+            "402 payment required",
+        ] {
+            assert!(is_balance_exhausted_body(body), "body: {body}");
+        }
+        for body in [
+            "TPM quota exceeded",
+            "Individual quota reached. Resets in 15h21m26s.",
+            "rpm exhausted",
+        ] {
+            assert!(!is_balance_exhausted_body(body), "body: {body}");
+        }
+    }
+
+    #[test]
+    fn pool_failover_backoff_bounded_and_singleton_none() {
+        // Singleton pools keep transient-retry semantics: no pool-level pause.
+        let single = KeyPool::new("p", RoutingStrategy::RoundRobin);
+        single.add_key(ApiKeyEntry::new("k1", "sk-1", 1, 10));
+        assert_eq!(pool_failover_backoff(&single), None);
+
+        // Multi-key pool with no active cooldown: default ~1.2s bound.
+        let multi = KeyPool::new("p", RoutingStrategy::RoundRobin);
+        multi.add_key(ApiKeyEntry::new("k1", "sk-1", 1, 10));
+        multi.add_key(ApiKeyEntry::new("k2", "sk-2", 1, 10));
+        let d = pool_failover_backoff(&multi).expect("multi-key pool gets a backoff");
+        assert_eq!(d, Duration::from_millis(1200));
+
+        // A key with a long cooldown caps the pause at 2s (never waits out a
+        // 15h quota reset before failing over).
+        multi.set_key_cooldown("k1", Duration::from_secs(3600));
+        let d = pool_failover_backoff(&multi).expect("backoff still present");
+        assert_eq!(d, Duration::from_secs(2));
+
+        // A key unlocking sooner bounds the pause to that unlock.
+        multi.set_key_cooldown("k2", Duration::from_millis(500));
+        let d = pool_failover_backoff(&multi).expect("backoff still present");
+        assert!(d <= Duration::from_millis(500), "got {d:?}");
+    }
+
+    #[tokio::test]
+    async fn window_wait_suppressed_for_balance_and_beyond_cap() {
+        // Balance case: a window-shaped pool (k1 cooling) is still waitable,
+        // but the 402/balance flag short-circuits to fail-fast.
+        let pool = Arc::new(KeyPool::new("p", RoutingStrategy::RoundRobin));
+        pool.add_key(ApiKeyEntry::new("k1", "sk-1", 1, 10));
+        pool.add_key(ApiKeyEntry::new("k2", "sk-2", 1, 10));
+        pool.set_key_cooldown("k1", Duration::from_secs(60));
+        let executor = UpstreamExecutor::new(pool, 1);
+        let mut done = false;
+        let mut keys = vec!["k1".to_string()];
+        assert!(!executor.maybe_window_wait(&mut done, &mut keys, true).await);
+        assert!(!done);
+        assert_eq!(keys, vec!["k1".to_string()]);
+
+        // Beyond-cap case: BOTH keys cooling > cap => window-exhausted with a
+        // hold that exceeds DEFAULT_POOL_WAIT_MAX -> fail fast (429).
+        let pool2 = Arc::new(KeyPool::new("p", RoutingStrategy::RoundRobin));
+        pool2.add_key(ApiKeyEntry::new("k1", "sk-1", 1, 10));
+        pool2.add_key(ApiKeyEntry::new("k2", "sk-2", 1, 10));
+        pool2.set_key_cooldown("k1", Duration::from_secs(3600));
+        pool2.set_key_cooldown("k2", Duration::from_secs(7200));
+        let executor2 = UpstreamExecutor::new(pool2, 1);
+        let mut done2 = false;
+        let mut keys2 = vec!["k1".to_string(), "k2".to_string()];
+        assert!(!executor2.maybe_window_wait(&mut done2, &mut keys2, false).await);
+        assert!(!done2);
+    }
+
+    #[tokio::test]
+    async fn window_wait_holds_once_then_allows_single_rescue() {
+        let pool = Arc::new(KeyPool::new("p", RoutingStrategy::RoundRobin));
+        pool.add_key(ApiKeyEntry::new("k1", "sk-1", 1, 10));
+        pool.add_key(ApiKeyEntry::new("k2", "sk-2", 1, 10));
+        pool.set_key_cooldown("k1", Duration::from_millis(300));
+        pool.set_key_cooldown("k2", Duration::from_millis(600));
+        // A budget must be configured for the window-shaped hold to apply.
+        let executor = UpstreamExecutor::new(pool, 1).with_rate_limits(Some(RateLimits::default()));
+
+        let mut done = false;
+        let mut keys = vec!["k1".to_string(), "k2".to_string()];
+        assert!(
+            executor
+                .maybe_window_wait(&mut done, &mut keys, false)
+                .await
+        );
+        assert!(done, "guard latches after the single rescue");
+        assert!(keys.is_empty(), "rescue pass clears attempted keys");
+
+        // A second exhaustion must not wait again.
+        let mut keys2 = vec!["k1".to_string()];
+        assert!(
+            !executor
+                .maybe_window_wait(&mut done, &mut keys2, false)
+                .await
+        );
+        assert_eq!(keys2, vec!["k1".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn window_wait_fails_fast_without_rate_limits() {
+        // No budget configured (legacy): a full-pool pure-cooldown exhaustion
+        // must fail fast — a transparent hold here would delay cross-provider
+        // failover by up to DEFAULT_POOL_WAIT_MAX for a state that only
+        // cooldown expiry fixes.
+        let pool = Arc::new(KeyPool::new("p", RoutingStrategy::RoundRobin));
+        pool.add_key(ApiKeyEntry::new("k1", "sk-1", 1, 10));
+        pool.add_key(ApiKeyEntry::new("k2", "sk-2", 1, 10));
+        pool.set_key_cooldown("k1", Duration::from_secs(30));
+        pool.set_key_cooldown("k2", Duration::from_secs(60));
+        let executor = UpstreamExecutor::new(pool, 1); // rate_limits: None
+        let mut done = false;
+        let mut keys = vec!["k1".to_string(), "k2".to_string()];
+        assert!(
+            !executor
+                .maybe_window_wait(&mut done, &mut keys, false)
+                .await,
+            "limits=None must not hold on pure cooldown"
+        );
+        assert!(!done);
+        assert_eq!(keys, vec!["k1".to_string(), "k2".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn cooled_pool_waits_but_all_disabled_fails_fast() {
+        // A window-shaped pool (cooldowns, no permanent disable) waits once
+        // when a budget is configured.
+        let pool = Arc::new(KeyPool::new("p", RoutingStrategy::RoundRobin));
+        pool.add_key(ApiKeyEntry::new("k1", "sk-1", 1, 10));
+        pool.set_key_cooldown("k1", Duration::from_millis(250));
+        let executor = UpstreamExecutor::new(pool, 1).with_rate_limits(Some(RateLimits::default()));
+        let mut done = false;
+        let mut keys: Vec<String> = Vec::new();
+        assert!(
+            executor
+                .maybe_window_wait(&mut done, &mut keys, false)
+                .await
+        );
+        assert!(done);
+
+        // All-keys-disabled (auth/verify, never refills): no wait, fail fast,
+        // with or without a budget.
+        let pool2 = Arc::new(KeyPool::new("p", RoutingStrategy::RoundRobin));
+        let k = ApiKeyEntry::new("k1", "sk-1", 1, 10);
+        k.record_failure(PoolErrorType::AuthInvalid { reason: None });
+        pool2.add_key(k);
+        let executor2 = UpstreamExecutor::new(pool2, 1).with_rate_limits(Some(RateLimits::default()));
+        let mut done2 = false;
+        let mut keys2: Vec<String> = Vec::new();
+        assert!(
+            !executor2
+                .maybe_window_wait(&mut done2, &mut keys2, false)
+                .await
+        );
+        assert!(!done2);
     }
 }
 

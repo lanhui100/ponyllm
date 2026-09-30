@@ -9,7 +9,8 @@ use ponyllm_server::{create_app, AppState, GatewayConfig, ProviderConfig};
 use serde_json::json;
 
 fn make_provider(base_url: &str, default_model: &str) -> ProviderConfig {
-    ProviderConfig {
+        ProviderConfig {
+    rate_limits: None,
         base_url: base_url.to_string(),
         default_model: default_model.to_string(),
         strategy: "round_robin".to_string(),

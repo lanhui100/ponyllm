@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use ponyllm_core::pool::{
     default_cached_price, default_input_price, default_output_price, BillingMode,
     GatewayRoutingStrategy, ModelTier, ModelThinkingSpec, PricingConfig, PricingMode, PricingPeriod,
-    UpstreamProtocol,
+    RateLimits, UpstreamProtocol,
 };
 use ponyllm_protocol::common::ReasoningEffort;
 use serde::{Deserialize, Serialize};
@@ -62,6 +62,12 @@ pub struct ModelSpec {
     /// Optional total upstream timeout override for this model (seconds, 60~1800).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_secs: Option<u64>,
+    /// Optional short-window rate limits for this model (per-key RPM/TPM
+    /// sliding-window budget + concurrency cap). Mirrors the disk-level
+    /// `ModelConfig::rate_limits` on the runtime side so the executor can
+    /// resolve effective limits without re-parsing the config file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limits: Option<RateLimits>,
 }
 
 impl ModelSpec {
@@ -108,6 +114,7 @@ impl Default for ModelSpec {
             thinking_max: None,
             proxy: None,
             timeout_secs: None,
+            rate_limits: None,
         }
     }
 }
@@ -148,6 +155,11 @@ pub struct ProviderConfig {
     /// Optional total upstream timeout override for this provider (seconds, 60~1800).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_secs: Option<u64>,
+    /// Optional provider-level default short-window rate limits, inherited by
+    /// every model without its own override (runtime mirror of
+    /// `ponyllm-config::ProviderSection::rate_limits`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limits: Option<RateLimits>,
 }
 
 fn default_strategy() -> String {
@@ -172,6 +184,7 @@ impl Default for ProviderConfig {
             messages_url: None,
             proxy: None,
             timeout_secs: None,
+            rate_limits: None,
         }
     }
 }
@@ -262,7 +275,21 @@ impl ProviderConfig {
             thinking_max: None,
             proxy: None,
             timeout_secs: None,
+            rate_limits: None,
         }
+    }
+
+    /// Effective short-window rate limits for a model: model-level override
+    /// merged field-by-field over the provider-level default (runtime mirror
+    /// of `ponyllm-config::ProviderSection::effective_rate_limits`). `None`
+    /// when neither is configured (unlimited).
+    pub fn effective_rate_limits(&self, model_name: &str) -> Option<RateLimits> {
+        let model_limits = self
+            .model_specs
+            .iter()
+            .find(|m| m.name == model_name)
+            .and_then(|m| m.rate_limits);
+        RateLimits::resolve(self.rate_limits.as_ref(), model_limits.as_ref())
     }
 
     /// Resolves the effective proxy configuration for a model under this provider.

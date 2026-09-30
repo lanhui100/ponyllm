@@ -223,6 +223,7 @@ pub fn run_interactive_init(output_path: &str) -> Result<(), Box<dyn std::error:
         }
 
         providers.insert(p_name.to_string(), ProviderSection {
+    rate_limits: None,
             base_url,
             default_model: model,
             strategy: strat.to_string(),

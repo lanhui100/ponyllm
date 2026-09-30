@@ -348,9 +348,23 @@ pub async fn handle_chat_completions(
             request_snippet: req_snippet.clone(),
         };
         let http_client = state.http_client_for_target(&target.provider_name, &target.physical_model);
+        // Resolve this target's effective short-window budget (provider default
+        // merged with the model override) so budget-filtered key selection and
+        // the window-exhaustion Retry-After are honest.
+        // Resolve the budget under the CLEAN model name (matching pricing and
+        // routing): a suffixed request (`deepseek-v4-flash[1m]:economy`) must
+        // hit the same model-level rate_limits as the plain name, otherwise
+        // the model-level budget silently never applies.
+        let rate_limits = state
+            .config
+            .read()
+            .providers
+            .get(&target.provider_name)
+            .and_then(|p| p.effective_rate_limits(&parsed.clean_model_name));
         let executor = UpstreamExecutor::with_client(pool.clone(), http_client, max_retries)
             .with_downstream_headers(&headers)
             .with_opencode_zen(is_opencode_zen_target(&target.provider_name, &target_url))
+            .with_rate_limits(rate_limits)
             .with_event_sink(sink_ctx.clone(), state.event_sink(sink_ctx));
 
         // Empty-STOP is an upstream transient unrelated to credential health
@@ -530,7 +544,7 @@ pub async fn handle_chat_completions(
                         tracing::warn!("Provider '{}' stream failed ({}). Attempting fallback...", target.provider_name, err);
                         last_kind = err.kind();
                         last_pool_exhausted = matches!(err, CoreError::NoAvailableKey(_));
-                        last_retry_after = crate::extractors::retry_after_secs(&last_kind, pool.earliest_unlock());
+                        last_retry_after = crate::extractors::retry_after_secs(&last_kind, retry_unlock_hint(&last_kind, &pool, rate_limits.as_ref()));
                         last_error = err.to_string();
                         break;
                     }
@@ -652,7 +666,7 @@ pub async fn handle_chat_completions(
                                 Ok(cr) => cr,
                                 Err(e) => {
                                     last_kind = ponyllm_core::error::GatewayErrorKind::UpstreamUnavailable;
-                                    last_retry_after = crate::extractors::retry_after_secs(&last_kind, pool.earliest_unlock());
+                                    last_retry_after = crate::extractors::retry_after_secs(&last_kind, retry_unlock_hint(&last_kind, &pool, rate_limits.as_ref()));
                                     last_error = format!("Upstream {} response failed: {}", target.provider_name, e);
                                     continue;
                                 }
@@ -741,7 +755,7 @@ pub async fn handle_chat_completions(
                     tracing::warn!("Provider '{}' json request failed ({}). Attempting fallback...", target.provider_name, err);
                     last_kind = err.kind();
                     last_pool_exhausted = matches!(err, CoreError::NoAvailableKey(_));
-                    last_retry_after = crate::extractors::retry_after_secs(&last_kind, pool.earliest_unlock());
+                    last_retry_after = crate::extractors::retry_after_secs(&last_kind, retry_unlock_hint(&last_kind, &pool, rate_limits.as_ref()));
                     last_error = err.to_string();
                     continue;
                 }
@@ -837,4 +851,152 @@ fn uuid_simple() -> String {
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     format!("{:x}", nanos)
+}
+
+/// Honest pool-wide unlock hint for `Retry-After`: the LONGEST per-key
+/// cooldown still outstanding, so the downstream client knows when the whole
+/// pool can serve again rather than when the *first* key recovers.
+///
+/// The executor's transparent wait uses the earliest unlock (it holds the
+/// request until a key frees); once that wait is exhausted and the gateway
+/// answers 429, `max(unlock)` is the honest "pool as a whole" recovery time.
+/// Still clamped at 60s by [`crate::extractors::retry_after_secs`].
+///
+/// Used ONLY for window-type failures (rate-limit / quota exhaustion) via
+/// [`retry_unlock_hint`]: an unrelated 5xx with a cooling key must not inflate
+/// `Retry-After` with the whole-pool estimate.
+/// Window refill is folded in as `max(cooldown, longest_window_refill)` so a
+/// window-exhausted pool (keys Active but at RPM/TPM budget, no cooldown)
+/// still advertises an honest Retry-After.
+pub(crate) fn pool_longest_unlock(
+    pool: &ponyllm_core::pool::KeyPool,
+    limits: Option<&ponyllm_core::pool::RateLimits>,
+) -> Option<std::time::Duration> {
+    // Longest per-key cooldown still outstanding (classic cooling recovery).
+    let cooldown_max = pool
+        .snapshot_keys()
+        .iter()
+        .filter_map(|k| k.cooldown_remaining())
+        .max();
+    // Longest wait until the WHOLE pool is schedulable again under the
+    // budget (covers keys that are Active-but-window-exhausted and have no
+    // cooldown). `0` = at least one key schedulable now (healthy), so it is
+    // filtered out here to avoid advertising a spurious Retry-After on
+    // non-exhausted failures.
+    let window_max = pool
+        .longest_window_refill_in_with_limits(limits)
+        .filter(|d| !d.is_zero());
+    match (cooldown_max, window_max) {
+        (Some(a), Some(b)) => Some(a.max(b)),
+        (a, b) => a.or(b),
+    }
+}
+
+/// Unlock hint feeding [`crate::extractors::retry_after_secs`], resolved by
+/// the terminal failure kind:
+///
+/// - **Window-type failures** ([`GatewayErrorKind::RateLimitExceeded`] /
+///   [`GatewayErrorKind::QuotaExhausted`]): the whole pool is budget- or
+///   cooldown-blocked, so advertise the LONGEST unlock (`max` semantics via
+///   [`pool_longest_unlock`]) — an honest "pool as a whole" recovery time.
+/// - **Every other failure** (unrelated 5xx/502/upstream fault): a cooling
+///   key must not inflate `Retry-After` for a failure that is not about the
+///   quota, so keep the earliest unlock (`min` semantics via
+///   `KeyPool::earliest_unlock`) and never leak the window-refill estimate.
+///
+/// Shared by the chat/messages/responses routes (single home in this module).
+pub(crate) fn retry_unlock_hint(
+    kind: &ponyllm_core::error::GatewayErrorKind,
+    pool: &ponyllm_core::pool::KeyPool,
+    limits: Option<&ponyllm_core::pool::RateLimits>,
+) -> Option<std::time::Duration> {
+    use ponyllm_core::error::GatewayErrorKind;
+    match kind {
+        GatewayErrorKind::RateLimitExceeded { .. } | GatewayErrorKind::QuotaExhausted => {
+            pool_longest_unlock(pool, limits)
+        }
+        _ => pool.earliest_unlock(),
+    }
+}
+
+#[cfg(test)]
+mod route_wait_tests {
+    use super::*;
+    use ponyllm_core::pool::{ApiKeyEntry, KeyPool, RateLimits, RoutingStrategy};
+
+    #[test]
+    fn longest_unlock_takes_max_of_cooldown_and_window_refill() {
+        // Healthy pool: no cooldown, no window exhaust -> None (no Retry-After).
+        let healthy = KeyPool::new("p", RoutingStrategy::RoundRobin);
+        healthy.add_key(ApiKeyEntry::new("k1", "sk-1", 1, 10));
+        assert_eq!(pool_longest_unlock(&healthy, None), None);
+
+        // A cooling key dominates the window warning (cooldown decays in
+        // real time, so assert a bounded range instead of an exact value).
+        let cooling = KeyPool::new("p", RoutingStrategy::RoundRobin);
+        cooling.add_key(ApiKeyEntry::new("k1", "sk-1", 1, 10));
+        cooling.set_key_cooldown("k1", std::time::Duration::from_secs(30));
+        let cold = pool_longest_unlock(&cooling, None).expect("cooling pool reports a Retry-After");
+        assert!(cold >= std::time::Duration::from_secs(29) && cold <= std::time::Duration::from_secs(30), "got {cold:?}");
+
+        // An Active-but-window-exhausted pool (limits on) folds the longest
+        // refill in so Retry-After is still honest.
+        let windowed = KeyPool::new("p", RoutingStrategy::RoundRobin);
+        windowed.add_key(ApiKeyEntry::new("k1", "sk-1", 1, 10));
+        windowed.add_key(ApiKeyEntry::new("k2", "sk-2", 1, 10));
+        let limits = RateLimits { rpm: Some(1), tpm: None, window_secs: Some(60), concurrency: None, count_cached: None };
+        // Consume each key's whole RPM=1 budget so both are Active but
+        // window-blocked (~until their 60s window ages out).
+        for k in windowed.snapshot_keys() {
+            k.meter().record_attempt(1);
+        }
+        let got = pool_longest_unlock(&windowed, Some(&limits));
+        assert!(got.is_some(), "window-exhausted pool should advertise a Retry-After");
+        assert!(!got.is_none());
+    }
+
+    #[test]
+    fn retry_unlock_hint_uses_max_only_for_window_type_failures() {
+        use ponyllm_core::error::GatewayErrorKind;
+        // Window-exhausted pool (Active but at budget, no cooldown): the
+        // window-type failure must advertise the refill estimate.
+        let windowed = KeyPool::new("p", RoutingStrategy::RoundRobin);
+        windowed.add_key(ApiKeyEntry::new("k1", "sk-1", 1, 10));
+        let limits = RateLimits { rpm: Some(1), tpm: None, window_secs: Some(60), concurrency: None, count_cached: None };
+        windowed.snapshot_keys()[0].meter().record_attempt(1);
+        let max_hint = retry_unlock_hint(
+            &GatewayErrorKind::RateLimitExceeded { retry_after: None },
+            &windowed,
+            Some(&limits),
+        );
+        assert!(max_hint.is_some(), "window-type failure advertises the pool unlock");
+
+        // Same window-exhausted pool, but an UNRELATED failure: the
+        // window-refill estimate must NOT leak in (min semantics) — no
+        // cooldown exists, so no Retry-After from the pool side.
+        let min_hint = retry_unlock_hint(&GatewayErrorKind::Internal, &windowed, Some(&limits));
+        assert_eq!(min_hint, None, "non-window failure must ignore window refill");
+
+        // QuotaExhausted is also window-type: max semantics apply.
+        let quota_hint = retry_unlock_hint(&GatewayErrorKind::QuotaExhausted, &windowed, Some(&limits));
+        assert!(quota_hint.is_some(), "QuotaExhausted advertises the pool unlock");
+    }
+
+    #[test]
+    fn retry_unlock_hint_keeps_earliest_for_unrelated_cooldown() {
+        use ponyllm_core::error::GatewayErrorKind;
+        // Two cooling keys (30s and 5s): an unrelated 5xx failure must
+        // advertise the EARLIEST unlock (~5s), not the longest (30s).
+        let pool = KeyPool::new("p", RoutingStrategy::RoundRobin);
+        pool.add_key(ApiKeyEntry::new("k1", "sk-1", 1, 10));
+        pool.add_key(ApiKeyEntry::new("k2", "sk-2", 1, 10));
+        pool.set_key_cooldown("k1", std::time::Duration::from_secs(30));
+        pool.set_key_cooldown("k2", std::time::Duration::from_secs(5));
+        let hint = retry_unlock_hint(&GatewayErrorKind::UpstreamUnavailable, &pool, None)
+            .expect("a cooling key still advertises an unlock");
+        assert!(
+            hint >= std::time::Duration::from_secs(4) && hint <= std::time::Duration::from_secs(5),
+            "got {hint:?}"
+        );
+    }
 }

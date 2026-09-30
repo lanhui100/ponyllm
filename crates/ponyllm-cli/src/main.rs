@@ -108,6 +108,7 @@ fn build_gateway_config_and_pools(
                 thinking_max: m.thinking_max,
                 proxy: m.proxy,
                 timeout_secs: m.timeout_secs,
+                rate_limits: m.rate_limits,
             })
             .collect();
 
@@ -129,6 +130,7 @@ fn build_gateway_config_and_pools(
                 messages_url: p_sec.messages_url.clone(),
                 proxy: p_sec.proxy.clone(),
                 timeout_secs: p_sec.timeout_secs,
+                rate_limits: p_sec.rate_limits,
             },
         );
 
@@ -1128,6 +1130,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     thinking_max: None,
                     proxy: model_proxy.clone(),
                     timeout_secs: None,
+                    rate_limits: None,
                 };
 
                 cfg.upsert_model_config(&provider, model_cfg)

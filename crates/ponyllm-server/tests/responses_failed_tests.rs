@@ -20,7 +20,8 @@ use ponyllm_core::pool::*;
 use ponyllm_server::{create_app, AppState, GatewayConfig, ProviderConfig};
 
 fn provider(base_url: String, model: &str, proto: UpstreamProtocol, price: f64) -> ProviderConfig {
-    ProviderConfig {
+        ProviderConfig {
+    rate_limits: None,
         base_url,
         default_model: model.to_string(),
         strategy: "priority".to_string(),

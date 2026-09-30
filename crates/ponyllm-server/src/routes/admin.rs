@@ -18,7 +18,7 @@ use axum::response::IntoResponse;
 use axum::Json;
 use ponyllm_config::{ConfigFile, KeyScope, KeySection, ModelConfig, ProviderSection};
 use ponyllm_core::pool::{
-    ApiKeyEntry, BillingMode, KeyPool, ModelTier, PricingMode, PricingPeriod,
+    ApiKeyEntry, BillingMode, KeyPool, ModelTier, PricingMode, PricingPeriod, RateLimits,
     UpstreamProtocol,
 };
 use serde::{Deserialize, Serialize};
@@ -69,6 +69,10 @@ pub struct ProviderView {
     pub chat_url: Option<String>,
     pub responses_url: Option<String>,
     pub messages_url: Option<String>,
+    /// Provider-level default short-window rate limits, inherited by every
+    /// model without its own override. `None` = no limit at provider level.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limits: Option<AdminRateLimits>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default, ToSchema)]
@@ -138,6 +142,56 @@ impl From<AdminPricingPeriod> for PricingPeriod {
     }
 }
 
+/// Admin wire form of the short-window account rate limits (ADR
+/// `2026-09-30-unified-quota-metering-governance-kernel`).
+///
+/// Every field is optional. On a model, an absent field inherits the provider
+/// default; on a provider, an absent field means "no limit" for that axis.
+/// `rpm`/`tpm`/`concurrency` treat `0` identically to `None` (unlimited).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default, ToSchema)]
+pub struct AdminRateLimits {
+    /// Max requests admitted per sliding window (`None`/`0` = unlimited).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rpm: Option<u32>,
+    /// Max tokens admitted per sliding window (`None`/`0` = unlimited).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tpm: Option<u64>,
+    /// Sliding window size in seconds (`None` = 60).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_secs: Option<u64>,
+    /// Max in-flight concurrent requests (`None`/`0` = unlimited).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub concurrency: Option<u32>,
+    /// Whether cache-hit tokens count toward the TPM budget
+    /// (`None` = `true`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub count_cached: Option<bool>,
+}
+
+impl From<RateLimits> for AdminRateLimits {
+    fn from(r: RateLimits) -> Self {
+        Self {
+            rpm: r.rpm,
+            tpm: r.tpm,
+            window_secs: r.window_secs,
+            concurrency: r.concurrency,
+            count_cached: r.count_cached,
+        }
+    }
+}
+
+impl From<AdminRateLimits> for RateLimits {
+    fn from(r: AdminRateLimits) -> Self {
+        Self {
+            rpm: r.rpm,
+            tpm: r.tpm,
+            window_secs: r.window_secs,
+            concurrency: r.concurrency,
+            count_cached: r.count_cached,
+        }
+    }
+}
+
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ModelView {
     pub provider: String,
@@ -175,6 +229,11 @@ pub struct ModelView {
     /// (larger = tried first among same-named models; `None` = no preference).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority: Option<u32>,
+    /// Short-window account rate limits for this model (RPM/TPM sliding-window
+    /// budget + concurrency cap). `None` = no model override; the model
+    /// inherits the provider-level default. See [`AdminRateLimits`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limits: Option<AdminRateLimits>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -293,10 +352,27 @@ pub struct CreateProviderPayload {
     /// Optional total upstream timeout override (seconds, 60~1800).
     #[serde(default)]
     pub timeout_secs: Option<u64>,
+    /// Provider-level default short-window rate limits inherited by models
+    /// without their own override. `None` = no provider-level limit.
+    #[serde(default)]
+    pub rate_limits: Option<AdminRateLimits>,
 }
 
 fn default_model_str() -> String {
     "default".to_string()
+}
+
+/// Patch-field deserializer distinguishing an explicit JSON `null` from an
+/// absent key: `Some(None)` = present-but-null (clears), `None` = absent
+/// (leave untouched). Required because serde's default `Option<T>` handling
+/// maps both missing and `null` to `None`, which cannot express "clear".
+fn deserialize_optional_rate_limits<'de, D>(
+    deserializer: D,
+) -> Result<Option<Option<AdminRateLimits>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Some(Option::<AdminRateLimits>::deserialize(deserializer)?))
 }
 fn default_strategy_str() -> String {
     "priority".to_string()
@@ -326,6 +402,12 @@ pub struct UpdateProviderPayload {
     /// Optional total upstream timeout override (seconds, 60~1800).
     #[serde(default)]
     pub timeout_secs: Option<u64>,
+    /// Provider-level default short-window rate limits. `Some(Some(..))`
+    /// replaces the whole object; explicit `null` (`Some(None)`) clears the
+    /// provider-level default back to unlimited; absent (`None`) leaves it
+    /// untouched. All-`None` fields = unlimited for those axes.
+    #[serde(default, deserialize_with = "deserialize_optional_rate_limits")]
+    pub rate_limits: Option<Option<AdminRateLimits>>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -376,6 +458,11 @@ pub struct CreateModelPayload {
     /// preference (0), preserving pre-priority ordering.
     #[serde(default)]
     pub priority: Option<u32>,
+    /// Short-window rate limits for this model (RPM/TPM budget + concurrency
+    /// cap), overriding the provider default field-by-field. `None` = inherit
+    /// provider default (or unlimited).
+    #[serde(default)]
+    pub rate_limits: Option<AdminRateLimits>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -426,6 +513,13 @@ pub struct UpdateModelPayload {
     /// existing value untouched on update.
     #[serde(default)]
     pub priority: Option<u32>,
+    /// Short-window rate limits for this model (`Some(Some(..))` replaces the
+    /// whole object; explicit `null` (`Some(None)`) clears the model override
+    /// back to "inherit provider default"; absent (`None`) leaves it
+    /// untouched. All-`None` fields = unlimited for those axes, overriding any
+    /// provider default).
+    #[serde(default, deserialize_with = "deserialize_optional_rate_limits")]
+    pub rate_limits: Option<Option<AdminRateLimits>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1169,6 +1263,7 @@ pub async fn handle_admin_providers(State(state): State<Arc<AppState>>) -> impl 
             chat_url: p.chat_url.clone(),
             responses_url: p.responses_url.clone(),
             messages_url: p.messages_url.clone(),
+            rate_limits: p.rate_limits.map(Into::into),
         })
         .collect();
     views.sort_by(|a, b| a.name.cmp(&b.name));
@@ -1272,7 +1367,18 @@ pub async fn handle_admin_create_provider(
         }
     }
 
+    if let Some(ref rl) = payload.rate_limits {
+        if let Err(msg) = RateLimits::from(*rl).validate() {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": {"message": msg, "code": "invalid_rate_limits"}})),
+            )
+                .into_response();
+        }
+    }
+
     let p_sec = ProviderSection {
+        rate_limits: payload.rate_limits.map(Into::into),
         base_url: payload.base_url.clone(),
         default_model: default_model.clone(),
         strategy: strategy.clone(),
@@ -1297,6 +1403,7 @@ pub async fn handle_admin_create_provider(
     }
 
     let p_cfg = ProviderConfig {
+        rate_limits: payload.rate_limits.map(Into::into),
         base_url: payload.base_url.clone(),
         default_model: default_model.clone(),
         strategy: strategy.clone(),
@@ -1339,6 +1446,7 @@ pub async fn handle_admin_create_provider(
             chat_url: payload.chat_url,
             responses_url: payload.responses_url,
             messages_url: payload.messages_url,
+            rate_limits: payload.rate_limits,
         }),
     )
         .into_response()
@@ -1421,6 +1529,23 @@ pub async fn handle_admin_update_provider(
     if let Some(t) = payload.timeout_secs {
         p.timeout_secs = Some(t);
     }
+    match payload.rate_limits {
+        Some(Some(rl)) => {
+            if let Err(msg) = RateLimits::from(rl).validate() {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": {"message": msg, "code": "invalid_rate_limits"}})),
+                )
+                    .into_response();
+            }
+            p.rate_limits = Some(RateLimits::from(rl));
+        }
+        // Explicit `null`: clear the provider-level default back to unlimited.
+        Some(None) => {
+            p.rate_limits = None;
+        }
+        None => {}
+    }
 
     // H2: same format validation as create (strategy/billing/URLs), then the
     // egress guard on the effective URLs. Field-level validation must run
@@ -1493,6 +1618,7 @@ pub async fn handle_admin_update_provider(
         p_cfg.messages_url = updated_p.messages_url.clone();
         p_cfg.proxy = updated_p.proxy.clone();
         p_cfg.timeout_secs = updated_p.timeout_secs;
+        p_cfg.rate_limits = updated_p.rate_limits;
     }
 
     if payload.strategy.is_some() || payload.proxy.is_some() {
@@ -1520,6 +1646,7 @@ pub async fn handle_admin_update_provider(
         chat_url: updated_p.chat_url,
         responses_url: updated_p.responses_url,
         messages_url: updated_p.messages_url,
+        rate_limits: updated_p.rate_limits.map(Into::into),
     };
 
     (
@@ -1614,6 +1741,7 @@ pub async fn handle_admin_provider_models(
                 top_p: m.top_p,
                 display_name: m.display_name.clone(),
                 priority: m.priority,
+                rate_limits: m.rate_limits.map(Into::into),
             }
         })
         .collect();
@@ -1656,6 +1784,7 @@ pub async fn handle_admin_models(State(state): State<Arc<AppState>>) -> impl Int
                 top_p: m.top_p,
                 display_name: m.display_name.clone(),
                 priority: m.priority,
+                rate_limits: m.rate_limits.map(Into::into),
             });
         }
     }
@@ -1785,7 +1914,18 @@ pub async fn handle_admin_create_model(
         }
     }
 
+    if let Some(ref rl) = payload.rate_limits {
+        if let Err(msg) = RateLimits::from(*rl).validate() {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": {"message": msg, "code": "invalid_rate_limits"}})),
+            )
+                .into_response();
+        }
+    }
+
     let m_cfg = ModelConfig {
+        rate_limits: payload.rate_limits.map(Into::into),
         name: model_name.clone(),
         tier,
         priority: payload.priority,
@@ -1824,6 +1964,7 @@ pub async fn handle_admin_create_model(
     }
 
     let m_spec = ModelSpec {
+        rate_limits: payload.rate_limits.map(Into::into),
         name: model_name.clone(),
         tier,
         priority: payload.priority,
@@ -1895,6 +2036,7 @@ pub async fn handle_admin_create_model(
             temperature: payload.temperature,
             top_p: payload.top_p,
             priority: payload.priority,
+            rate_limits: payload.rate_limits,
         }),
     )
         .into_response()
@@ -1977,6 +2119,15 @@ pub async fn handle_admin_update_model(
         )
             .into_response();
     }
+    if let Some(Some(ref rl)) = payload.rate_limits {
+        if let Err(msg) = RateLimits::from(*rl).validate() {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": {"message": msg, "code": "invalid_rate_limits"}})),
+            )
+                .into_response();
+        }
+    }
 
     let mut existing_config = p_sec
         .model_configs
@@ -1984,6 +2135,7 @@ pub async fn handle_admin_update_model(
         .find(|m| m.name == name)
         .cloned()
         .unwrap_or_else(|| ModelConfig {
+            rate_limits: None,
             name: name.clone(),
             tier: ModelTier::Standard,
             priority: None,
@@ -2079,6 +2231,12 @@ pub async fn handle_admin_update_model(
     if payload.priority.is_some() {
         existing_config.priority = payload.priority;
     }
+    // `Some(Some(..))` replaces the whole rate_limits object; explicit
+    // `null` (`Some(None)`) clears the override back to `None` (inherit
+    // provider default); absent (`None`) leaves it untouched.
+    if payload.rate_limits.is_some() {
+        existing_config.rate_limits = payload.rate_limits.flatten().map(Into::into);
+    }
 
     // H2: same URL/proxy gate as model create, on the effective values.
     if let Some(ref bu) = existing_config.base_url {
@@ -2111,6 +2269,7 @@ pub async fn handle_admin_update_model(
     }
 
     let m_spec = ModelSpec {
+        rate_limits: existing_config.rate_limits,
         name: name.clone(),
         tier: existing_config.tier,
         priority: existing_config.priority,
@@ -2174,6 +2333,7 @@ pub async fn handle_admin_update_model(
         temperature: existing_config.temperature,
         top_p: existing_config.top_p,
         priority: existing_config.priority,
+        rate_limits: existing_config.rate_limits.map(Into::into),
     })
     .into_response()
 }
@@ -4086,6 +4246,7 @@ pub async fn handle_admin_authorize_antigravity(
     let (provider_base_url, effective_priority, effective_weight) = {
         let p_sec = file.providers.entry(target_provider.clone()).or_insert_with(|| {
             ProviderSection {
+    rate_limits: None,
                 base_url: ponyllm_core::pool::DEFAULT_ANTIGRAVITY_ENDPOINT.to_string(),
                 default_model: "claude-sonnet-4-6".to_string(),
                 strategy: "priority".to_string(),
@@ -4153,6 +4314,7 @@ pub async fn handle_admin_authorize_antigravity(
         let mut gw_cfg = state.config.write();
         let entry = gw_cfg.providers.entry(target_provider.clone()).or_insert_with(|| {
             ProviderConfig {
+    rate_limits: None,
                 base_url: p_sec.base_url.clone(),
                 default_model: p_sec.default_model.clone(),
                 strategy: p_sec.strategy.clone(),
@@ -4581,6 +4743,7 @@ pub async fn handle_admin_provider_upstream_models(
         ModelView,
         CreateModelPayload,
         UpdateModelPayload,
+        AdminRateLimits,
         UpstreamModelItem,
         UpstreamModelsView,
         KeyView,

@@ -228,6 +228,7 @@ pub async fn handle_key_auth_agy(
     let provider_base_url = {
         let p_sec = cfg.providers.entry(target_provider.clone()).or_insert_with(|| {
             ProviderSection {
+    rate_limits: None,
                 base_url: DEFAULT_ANTIGRAVITY_ENDPOINT.to_string(),
                 default_model: "claude-sonnet-4-6".to_string(),
                 strategy: "priority".to_string(),

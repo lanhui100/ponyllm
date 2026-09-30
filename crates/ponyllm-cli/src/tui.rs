@@ -1134,6 +1134,7 @@ fn handle_modal_key(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                         let proto_val = idx_to_protocol(*protocol_idx);
 
                         let cfg = ModelConfig {
+    rate_limits: None,
                             priority: None,
                             name: m_name.clone(),
                             tier: tier_val,
@@ -1329,6 +1330,7 @@ fn handle_modal_key(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                     let proto_val = idx_to_protocol(*protocol_idx);
 
                     let cfg = ModelConfig {
+    rate_limits: None,
                         priority: None,
                         name: model_name.clone(),
                         tier: tier_val,

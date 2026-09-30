@@ -16,7 +16,8 @@ fn make_multimodal_provider(
     input_types: Vec<String>,
     tier: ModelTier,
 ) -> ProviderConfig {
-    ProviderConfig {
+        ProviderConfig {
+    rate_limits: None,
         base_url,
         default_model: model.to_string(),
         strategy: "round_robin".to_string(),
@@ -26,6 +27,7 @@ fn make_multimodal_provider(
         output_price: 0.2,
         models: vec![model.to_string()],
         model_specs: vec![ModelSpec {
+    rate_limits: None,
             priority: None,
             name: model.to_string(),
             tier,

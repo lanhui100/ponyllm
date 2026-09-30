@@ -872,6 +872,55 @@
           }
         }
       },
+      "AdminRateLimits": {
+        "type": "object",
+        "description": "Admin wire form of the short-window account rate limits (ADR\n`2026-09-30-unified-quota-metering-governance-kernel`).\n\nEvery field is optional. On a model, an absent field inherits the provider\ndefault; on a provider, an absent field means \"no limit\" for that axis.\n`rpm`/`tpm`/`concurrency` treat `0` identically to `None` (unlimited).",
+        "properties": {
+          "concurrency": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Max in-flight concurrent requests (`None`/`0` = unlimited).",
+            "minimum": 0
+          },
+          "count_cached": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether cache-hit tokens count toward the TPM budget\n(`None` = `true`)."
+          },
+          "rpm": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Max requests admitted per sliding window (`None`/`0` = unlimited).",
+            "minimum": 0
+          },
+          "tpm": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Max tokens admitted per sliding window (`None`/`0` = unlimited).",
+            "minimum": 0
+          },
+          "window_secs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Sliding window size in seconds (`None` = 60).",
+            "minimum": 0
+          }
+        }
+      },
       "AntigravityAuthUrlView": {
         "type": "object",
         "required": [
@@ -1320,6 +1369,17 @@
               "null"
             ]
           },
+          "rate_limits": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/AdminRateLimits",
+                "description": "Short-window rate limits for this model (RPM/TPM budget + concurrency\ncap), overriding the provider default field-by-field. `None` = inherit\nprovider default (or unlimited)."
+              }
+            ]
+          },
           "temperature": {
             "type": [
               "number",
@@ -1416,6 +1476,17 @@
             "type": [
               "string",
               "null"
+            ]
+          },
+          "rate_limits": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/AdminRateLimits",
+                "description": "Provider-level default short-window rate limits inherited by models\nwithout their own override. `None` = no provider-level limit."
+              }
             ]
           },
           "responses_url": {
@@ -1883,6 +1954,17 @@
           "provider": {
             "type": "string"
           },
+          "rate_limits": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/AdminRateLimits",
+                "description": "Short-window account rate limits for this model (RPM/TPM sliding-window\nbudget + concurrency cap). `None` = no model override; the model\ninherits the provider-level default. See [`AdminRateLimits`]."
+              }
+            ]
+          },
           "temperature": {
             "type": [
               "number",
@@ -2027,6 +2109,17 @@
           "output_price": {
             "type": "number",
             "format": "double"
+          },
+          "rate_limits": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/AdminRateLimits",
+                "description": "Provider-level default short-window rate limits, inherited by every\nmodel without its own override. `None` = no limit at provider level."
+              }
+            ]
           },
           "responses_url": {
             "type": [
@@ -2384,6 +2477,17 @@
               "null"
             ]
           },
+          "rate_limits": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/AdminRateLimits",
+                "description": "Short-window rate limits for this model (`Some(Some(..))` replaces the\nwhole object; explicit `null` (`Some(None)`) clears the model override\nback to \"inherit provider default\"; absent (`None`) leaves it\nuntouched. All-`None` fields = unlimited for those axes, overriding any\nprovider default)."
+              }
+            ]
+          },
           "temperature": {
             "type": [
               "number",
@@ -2464,6 +2568,17 @@
             "type": [
               "string",
               "null"
+            ]
+          },
+          "rate_limits": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/AdminRateLimits",
+                "description": "Provider-level default short-window rate limits. `Some(Some(..))`\nreplaces the whole object; explicit `null` (`Some(None)`) clears the\nprovider-level default back to unlimited; absent (`None`) leaves it\nuntouched. All-`None` fields = unlimited for those axes."
+              }
             ]
           },
           "responses_url": {

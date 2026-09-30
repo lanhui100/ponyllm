@@ -57,6 +57,7 @@ async fn test_thinking_output_safeguard_chat_flooring() {
     config.providers.insert(
         "deepseek".to_string(),
         ProviderConfig {
+    rate_limits: None,
             base_url: format!("http://{}", upstream_addr),
             default_model: "deepseek-reasoner".to_string(),
             strategy: "round_robin".to_string(),
@@ -67,6 +68,7 @@ async fn test_thinking_output_safeguard_chat_flooring() {
             models: vec!["deepseek-reasoner".to_string(), "deepseek-chat".to_string()],
             model_specs: vec![
                 ModelSpec {
+    rate_limits: None,
                     priority: None,
                     name: "deepseek-reasoner".to_string(),
                     tier: ModelTier::Flagship,
@@ -76,6 +78,7 @@ async fn test_thinking_output_safeguard_chat_flooring() {
                     ..Default::default()
                 },
                 ModelSpec {
+    rate_limits: None,
                     priority: None,
                     name: "deepseek-chat".to_string(),
                     tier: ModelTier::Standard,
@@ -191,6 +194,7 @@ async fn test_thinking_output_safeguard_messages_flooring() {
     config.providers.insert(
         "anthropic".to_string(),
         ProviderConfig {
+    rate_limits: None,
             base_url: format!("http://{}", upstream_addr),
             default_model: "claude-3-7-sonnet".to_string(),
             strategy: "round_robin".to_string(),
@@ -201,6 +205,7 @@ async fn test_thinking_output_safeguard_messages_flooring() {
             models: vec!["claude-3-7-sonnet".to_string()],
             model_specs: vec![
                 ModelSpec {
+    rate_limits: None,
                     priority: None,
                     name: "claude-3-7-sonnet".to_string(),
                     tier: ModelTier::Flagship,

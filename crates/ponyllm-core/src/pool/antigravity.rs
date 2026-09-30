@@ -1,3 +1,14 @@
+//! Antigravity（Google CloudCode 云控）账号：OAuth 令牌生命周期、账号额度
+//! 查询与冷却语义。
+//!
+//! 短窗计量口径（统一额度内核 ADR `2026-09-30-...`）：antigravity key 的上游
+//! 尝试**只计量、不强制预算**——executor 对所有 key 统一经
+//! `ApiKeyEntry::meter()` 记账（`in_flight_inc/dec` + `record_attempt`，本账号
+//! 数据仅作信息/观测用）。antigravity 的真实限额仍是 5h/周 桶 + 冷却语义
+//! （见 [`QuotaSummaryBucket`] / [`AntigravityTokenManager`] 冷却），短窗
+//! `RateLimits` 不约束它（antigravity provider 无 rate_limits 配置 → 无限额）。
+//! 本模块不改结构：令牌刷新/冷却等认证流程保持不动。
+
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;

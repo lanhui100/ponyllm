@@ -43,6 +43,7 @@ impl QuotaHarness {
         ];
 
         let provider_sec = ProviderSection {
+    rate_limits: None,
             base_url: "https://api.example.com/v1".to_string(),
             default_model: "probe-model".to_string(),
             strategy: "round_robin".to_string(),
@@ -52,6 +53,7 @@ impl QuotaHarness {
             output_price: 2.0,
             models: vec!["probe-model".to_string()],
             model_configs: vec![ModelConfig {
+    rate_limits: None,
                 priority: None,
                 name: "probe-model".to_string(),
                 tier: ModelTier::Standard,
@@ -106,6 +108,7 @@ impl QuotaHarness {
         gw_config.providers.insert(
             "prober".to_string(),
             ProviderConfig {
+    rate_limits: None,
                 base_url: "https://api.example.com/v1".to_string(),
                 default_model: "probe-model".to_string(),
                 strategy: "round_robin".to_string(),
@@ -115,6 +118,7 @@ impl QuotaHarness {
                 output_price: 2.0,
                 models: vec!["probe-model".to_string()],
                 model_specs: vec![ModelSpec {
+    rate_limits: None,
                     priority: None,
                     name: "probe-model".to_string(),
                     tier: ModelTier::Standard,

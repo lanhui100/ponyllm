@@ -2,9 +2,116 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use parking_lot::RwLock;
+use serde::{Deserialize, Serialize};
 use crate::error::{CoreError, Result};
 use super::entry::{ApiKeyEntry, KeyState, PoolErrorType};
 use super::strategy::RoutingStrategy;
+
+/// Short-window account rate limits (config-driven budget, ADR
+/// `2026-09-30-unified-quota-metering-governance-kernel`).
+///
+/// Every field is optional so legacy configs without the section stay
+/// unlimited. Numeric budgets (`rpm`/`tpm`/`concurrency`) treat `None` and
+/// `0` identically: no limit. The resolved sliding-window budget is applied
+/// per key through the key's [`ShortWindowMeter`](super::meter::ShortWindowMeter)
+/// at selection time — a key whose short-window usage is at its limit is
+/// treated exactly like a cooling key (skipped, and surfaced through
+/// [`KeyPool::exhausted_by_window`] / [`KeyPool::window_refill_in`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct RateLimits {
+    /// Max requests admitted per sliding window (`None`/`0` = unlimited).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rpm: Option<u32>,
+    /// Max tokens admitted per sliding window (`None`/`0` = unlimited).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tpm: Option<u64>,
+    /// Sliding window size in seconds (`None` = [`RateLimits::DEFAULT_WINDOW_SECS`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_secs: Option<u64>,
+    /// Max in-flight concurrent requests (`None`/`0` = unlimited).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub concurrency: Option<u32>,
+    /// Whether cache-hit tokens count toward the TPM budget
+    /// (`None` = `true`, per upstream accounting).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub count_cached: Option<bool>,
+}
+
+impl RateLimits {
+    /// Sliding window used when `window_secs` is unset: 60s.
+    pub const DEFAULT_WINDOW_SECS: u64 = 60;
+
+    /// Effective sliding window size.
+    pub fn window_secs_effective(&self) -> u64 {
+        self.window_secs.unwrap_or(Self::DEFAULT_WINDOW_SECS)
+    }
+
+    /// Effective cached-token accounting (default: cached tokens count).
+    pub fn count_cached_effective(&self) -> bool {
+        self.count_cached.unwrap_or(true)
+    }
+
+    /// `None`/`0` both mean unlimited, folded to `None` here.
+    pub fn rpm_effective(&self) -> Option<u32> {
+        self.rpm.filter(|v| *v > 0)
+    }
+
+    /// `None`/`0` both mean unlimited, folded to `None` here.
+    pub fn tpm_effective(&self) -> Option<u64> {
+        self.tpm.filter(|v| *v > 0)
+    }
+
+    /// `None`/`0` both mean unlimited, folded to `None` here.
+    pub fn concurrency_effective(&self) -> Option<u32> {
+        self.concurrency.filter(|v| *v > 0)
+    }
+
+    /// True when no budget dimension constrains scheduling.
+    pub fn is_unlimited(&self) -> bool {
+        self.rpm_effective().is_none()
+            && self.tpm_effective().is_none()
+            && self.concurrency_effective().is_none()
+    }
+
+    /// Resolve effective limits: the model-level override wins field by field
+    /// over the provider-level default; both `None` resolve to `None`
+    /// (unlimited). Window/cached accounting defaults are applied later by
+    /// [`RateLimits::window_secs_effective`] / [`RateLimits::count_cached_effective`].
+    pub fn resolve(provider_default: Option<&RateLimits>, model_override: Option<&RateLimits>) -> Option<RateLimits> {
+        match (provider_default, model_override) {
+            (None, None) => None,
+            (Some(p), None) => Some(*p),
+            (None, Some(m)) => Some(*m),
+            (Some(p), Some(m)) => Some(RateLimits {
+                rpm: m.rpm.or(p.rpm),
+                tpm: m.tpm.or(p.tpm),
+                window_secs: m.window_secs.or(p.window_secs),
+                concurrency: m.concurrency.or(p.concurrency),
+                count_cached: m.count_cached.or(p.count_cached),
+            }),
+        }
+    }
+
+    /// Fail-fast validation for config-edited limits.
+    ///
+    /// The short-window meter ring is 12 × 5s = 60s, so `window_secs` must
+    /// live in `1..=60`: `0` degenerates the sliding window (every attempt
+    /// instantly out of window), and `> 60` would silently run as 60s,
+    /// loosening the budget by roughly a factor of `window_secs/60`. Longer
+    /// horizons belong to the `CycleStats` periodic buckets, not this meter.
+    /// The numeric budgets accept `0` as "unlimited" by contract.
+    pub fn validate(&self) -> std::result::Result<(), String> {
+        if let Some(w) = self.window_secs {
+            if w == 0 || w > 60 {
+                return Err(format!(
+                    "rate_limits.window_secs 必须在 1..=60（收到 {}），长窗限额请走 CycleStats 周期桶",
+                    w
+                ));
+            }
+        }
+        Ok(())
+    }
+}
 
 #[derive(Debug)]
 pub struct KeyPool {
@@ -61,10 +168,31 @@ impl KeyPool {
 
     /// Select the next active, healthy key excluding already attempted keys in current request
     pub fn select_key_excluding(&self, excluded_key_ids: &[String]) -> Result<Arc<ApiKeyEntry>> {
+        self.select_key_excluding_with_limits(excluded_key_ids, None)
+    }
+
+    /// Select the next active, healthy, budget-available key.
+    ///
+    /// Same semantics as [`KeyPool::select_key_excluding`], plus the
+    /// short-window budget filter: a key whose meter is at its RPM/TPM limit
+    /// (or at its concurrency cap) is treated exactly like a cooling key —
+    /// skipped and surfaced through [`KeyPool::exhausted_by_window_with_limits`]
+    /// / [`KeyPool::window_refill_in_with_limits`]. `limits = None` disables
+    /// the budget dimension (legacy behavior). `rpm`/`tpm`/`concurrency` of
+    /// `None` or `0` mean "no limit" on that axis (see [`RateLimits`]).
+    pub fn select_key_excluding_with_limits(
+        &self,
+        excluded_key_ids: &[String],
+        limits: Option<&RateLimits>,
+    ) -> Result<Arc<ApiKeyEntry>> {
         let keys = self.keys.read();
         let active_keys: Vec<Arc<ApiKeyEntry>> = keys
             .iter()
-            .filter(|k| k.current_state() == KeyState::Active && !excluded_key_ids.iter().any(|ex| ex == &k.id))
+            .filter(|k| {
+                k.current_state() == KeyState::Active
+                    && !excluded_key_ids.iter().any(|ex| ex == &k.id)
+                    && Self::budget_ok(k, limits)
+            })
             .cloned()
             .collect();
 
@@ -72,34 +200,188 @@ impl KeyPool {
             return Err(CoreError::NoAvailableKey(self.provider.clone()));
         }
 
-        match self.strategy {
+        Ok(Self::select_from_active(active_keys, &self.strategy, &self.rr_counter))
+    }
+
+    /// True when the key may receive a request right now under the given
+    /// budget: concurrency cap not reached and both the request and token
+    /// windows still have >= 1 unit of headroom.
+    fn budget_ok(entry: &ApiKeyEntry, limits: Option<&RateLimits>) -> bool {
+        let Some(limits) = limits else {
+            return true;
+        };
+        if let Some(cap) = limits.concurrency_effective() {
+            if entry.meter().in_flight() >= cap {
+                return false;
+            }
+        }
+        let (requests_left, tokens_left) = entry.meter().remaining(
+            limits.rpm_effective(),
+            limits.tpm_effective(),
+            limits.window_secs_effective(),
+            limits.count_cached_effective(),
+        );
+        if requests_left.is_some_and(|r| r < 1) {
+            return false;
+        }
+        if tokens_left.is_some_and(|t| t < 1) {
+            return false;
+        }
+        true
+    }
+
+    /// Strategy pick from an already-filtered, non-empty candidate list.
+    fn select_from_active(
+        active_keys: Vec<Arc<ApiKeyEntry>>,
+        strategy: &RoutingStrategy,
+        rr_counter: &AtomicUsize,
+    ) -> Arc<ApiKeyEntry> {
+        match strategy {
             RoutingStrategy::Priority => {
                 // Return the lowest priority number (highest priority) available
                 let mut sorted = active_keys;
                 sorted.sort_by_key(|k| k.priority);
-                Ok(sorted[0].clone())
+                sorted[0].clone()
             }
             RoutingStrategy::RoundRobin => {
-                let idx = self.rr_counter.fetch_add(1, Ordering::Relaxed) % active_keys.len();
-                Ok(active_keys[idx].clone())
+                let idx = rr_counter.fetch_add(1, Ordering::Relaxed) % active_keys.len();
+                active_keys[idx].clone()
             }
             RoutingStrategy::WeightedRoundRobin => {
                 // Weighted selection based on weight field
                 let total_weight: u32 = active_keys.iter().map(|k| k.weight.max(1)).sum();
                 if total_weight == 0 {
-                    let idx = self.rr_counter.fetch_add(1, Ordering::Relaxed) % active_keys.len();
-                    return Ok(active_keys[idx].clone());
+                    let idx = rr_counter.fetch_add(1, Ordering::Relaxed) % active_keys.len();
+                    return active_keys[idx].clone();
                 }
-                let count = self.rr_counter.fetch_add(1, Ordering::Relaxed) as u32 % total_weight;
+                let count = rr_counter.fetch_add(1, Ordering::Relaxed) as u32 % total_weight;
                 let mut acc = 0;
                 for k in &active_keys {
                     acc += k.weight.max(1);
                     if count < acc {
-                        return Ok(k.clone());
+                        return k.clone();
                     }
                 }
-                Ok(active_keys[0].clone())
+                active_keys[0].clone()
             }
+        }
+    }
+
+    /// True when no key is schedulable and every non-disabled key is blocked
+    /// by budget exhaustion or cooldown — the `exhausted-by-window` state
+    /// (distinct from a permanent auth/disabled pool, which never refills).
+    ///
+    /// Budget dimension disabled (equivalent to cooldown-only) without limits.
+    pub fn exhausted_by_window(&self) -> bool {
+        self.exhausted_by_window_with_limits(None)
+    }
+
+    /// [`KeyPool::exhausted_by_window`] with an explicit budget.
+    pub fn exhausted_by_window_with_limits(&self, limits: Option<&RateLimits>) -> bool {
+        let keys = self.keys.read();
+        let mut any_window_blocked = false;
+        for k in keys.iter() {
+            match k.current_state() {
+                // Permanent states never refill via a window: they neither
+                // count as blocked-by-window nor as schedulable.
+                KeyState::Disabled => continue,
+                KeyState::CoolingDown => any_window_blocked = true,
+                KeyState::Active => {
+                    if Self::budget_ok(k, limits) {
+                        // A schedulable key exists → not exhausted by window.
+                        return false;
+                    }
+                    any_window_blocked = true;
+                }
+            }
+        }
+        any_window_blocked
+    }
+
+    /// Shortest wait until at least one key of the pool is schedulable again
+    /// (min across keys of cooldown end / budget refill; `0` = a key is
+    /// available right now). `None` when no key can ever refill (all disabled)
+    /// or the pool is empty.
+    pub fn window_refill_in(&self) -> Option<Duration> {
+        self.window_refill_in_with_limits(None)
+    }
+
+    /// [`KeyPool::window_refill_in`] with an explicit budget.
+    pub fn window_refill_in_with_limits(&self, limits: Option<&RateLimits>) -> Option<Duration> {
+        let keys = self.keys.read();
+        let mut min: Option<Duration> = None;
+        for k in keys.iter() {
+            if k.current_state() == KeyState::Disabled {
+                continue;
+            }
+            let wait = Self::time_until_schedulable(k, limits);
+            if let Some(w) = wait {
+                min = Some(min.map_or(w, |m: Duration| m.min(w)));
+            }
+        }
+        min
+    }
+
+    /// Longest wait until the WHOLE pool is schedulable again (max across
+    /// keys; `0` = fully available now). `None` when no key can ever refill
+    /// (all disabled) or the pool is empty. Feeds an honest `Retry-After`.
+    pub fn longest_window_refill_in(&self) -> Option<Duration> {
+        self.longest_window_refill_in_with_limits(None)
+    }
+
+    /// [`KeyPool::longest_window_refill_in`] with an explicit budget.
+    pub fn longest_window_refill_in_with_limits(&self, limits: Option<&RateLimits>) -> Option<Duration> {
+        let keys = self.keys.read();
+        let mut max: Option<Duration> = None;
+        for k in keys.iter() {
+            if k.current_state() == KeyState::Disabled {
+                continue;
+            }
+            let wait = Self::time_until_schedulable(k, limits);
+            if let Some(w) = wait {
+                max = Some(max.map_or(w, |m: Duration| m.max(w)));
+            }
+        }
+        max
+    }
+
+    /// Wall-clock milliseconds since the UNIX epoch — the same clock source
+    /// the per-key [`ShortWindowMeter`](super::meter::ShortWindowMeter) uses,
+    /// so expiry timestamps from [`earliest_expiry`](super::meter::ShortWindowMeter::earliest_expiry)
+    /// convert to wait durations consistently.
+    fn wall_now_ms() -> u64 {
+        SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0)
+    }
+
+    /// Per-key wait until schedulable: cooldown end and budget refill must
+    /// BOTH have passed (max of the two); a key already schedulable waits `0`.
+    ///
+    /// The budget refill term is precise, not a full-window upper bound: the
+    /// blocking usage ages out of the meter's 60s ring when its earliest
+    /// (oldest) in-window slot expires, so the wait is
+    /// `min(earliest_expiry - now, window_secs)` — clamped to the configured
+    /// window so it never exceeds what the window can guarantee (M3 caps the
+    /// hold at `pool_wait_max` anyway).
+    fn time_until_schedulable(entry: &ApiKeyEntry, limits: Option<&RateLimits>) -> Option<Duration> {
+        let cooldown = entry.cooldown_remaining();
+        let budget = match limits {
+            Some(l) if !Self::budget_ok(entry, Some(l)) => {
+                let window = Duration::from_secs(l.window_secs_effective());
+                entry
+                    .meter()
+                    .earliest_expiry()
+                    .map(|expiry| Duration::from_millis(expiry.saturating_sub(Self::wall_now_ms())).min(window))
+            }
+            _ => None,
+        };
+        match (cooldown, budget) {
+            (None, None) => Some(Duration::ZERO),
+            (Some(c), None) => Some(c),
+            (None, Some(b)) => Some(b),
+            (Some(c), Some(b)) => Some(c.max(b)),
         }
     }
 
@@ -261,6 +543,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_rate_limits_validate_rejects_zero_and_over_60_window() {
+        // Bounds: 1..=60 are accepted (None defaults to 60s).
+        assert!(RateLimits::default().validate().is_ok());
+        assert!((RateLimits { window_secs: Some(1), ..Default::default() }).validate().is_ok());
+        assert!((RateLimits { window_secs: Some(60), ..Default::default() }).validate().is_ok());
+
+        // 0 degenerates the sliding window; > 60 would silently run as 60s
+        // (meter ring is 12 × 5s) and loosen the budget ~window_secs/60×.
+        let err0 = (RateLimits { window_secs: Some(0), ..Default::default() })
+            .validate()
+            .unwrap_err();
+        assert!(err0.contains("1..=60"), "got: {err0}");
+        let err61 = (RateLimits { window_secs: Some(61), ..Default::default() })
+            .validate()
+            .unwrap_err();
+        assert!(err61.contains("1..=60"), "got: {err61}");
+        assert!(err61.contains("CycleStats"), "long-window must point to CycleStats: {err61}");
+    }
+
+    #[test]
     fn test_add_key_deduplication_upsert() {
         let pool = KeyPool::new("test-provider", RoutingStrategy::RoundRobin);
         pool.add_key(ApiKeyEntry::new("k1", "token-v1", 1, 10));
@@ -275,5 +577,145 @@ mod tests {
         assert_eq!(keys[0].api_key, "token-v2");
         assert_eq!(keys[0].priority, 2);
         assert_eq!(keys[0].weight, 20);
+    }
+
+    #[test]
+    fn test_select_budget_rpm_blocks_exhausted_key() {
+        let pool = KeyPool::new("p", RoutingStrategy::Priority);
+        pool.add_key(ApiKeyEntry::new("k1", "t", 1, 10));
+        let limits = RateLimits {
+            rpm: Some(1),
+            ..Default::default()
+        };
+
+        // Fresh key: the single rpm=1 budget slot is available.
+        let k = pool.select_key_excluding_with_limits(&[], Some(&limits)).unwrap();
+        assert_eq!(k.id, "k1");
+
+        // One attempt recorded (conservative accounting): the budget slot is
+        // spent, so the same key is no longer schedulable under limits.
+        pool.snapshot_keys()[0].meter().record_attempt(0);
+        let err = pool
+            .select_key_excluding_with_limits(&[], Some(&limits))
+            .unwrap_err();
+        assert!(matches!(err, CoreError::NoAvailableKey(_)));
+
+        // Legacy path without limits still selects the key (budget disabled).
+        let k = pool.select_key_excluding(&[]).unwrap();
+        assert_eq!(k.id, "k1");
+    }
+
+    #[test]
+    fn test_select_budget_prefers_key_with_headroom() {
+        let pool = KeyPool::new("p", RoutingStrategy::Priority);
+        pool.add_key(ApiKeyEntry::new("spent", "t1", 1, 10));
+        pool.add_key(ApiKeyEntry::new("fresh", "t2", 2, 10));
+        let limits = RateLimits {
+            rpm: Some(1),
+            ..Default::default()
+        };
+
+        // Spend the only slot of the priority key.
+        pool.snapshot_keys()
+            .iter()
+            .find(|k| k.id == "spent")
+            .unwrap()
+            .meter()
+            .record_attempt(0);
+
+        // The spent high-priority key is skipped; the fresh fallback wins.
+        let k = pool.select_key_excluding_with_limits(&[], Some(&limits)).unwrap();
+        assert_eq!(k.id, "fresh");
+        assert!(!pool.exhausted_by_window_with_limits(Some(&limits)));
+    }
+
+    #[test]
+    fn test_select_budget_concurrency_cap() {
+        let pool = KeyPool::new("p", RoutingStrategy::Priority);
+        pool.add_key(ApiKeyEntry::new("k1", "t", 1, 10));
+        let limits = RateLimits {
+            concurrency: Some(2),
+            ..Default::default()
+        };
+        assert!(pool.select_key_excluding_with_limits(&[], Some(&limits)).is_ok());
+        pool.snapshot_keys()[0].meter().in_flight_inc();
+        pool.snapshot_keys()[0].meter().in_flight_inc();
+        // At the cap: no schedulable key.
+        assert!(pool
+            .select_key_excluding_with_limits(&[], Some(&limits))
+            .is_err());
+        assert!(pool.exhausted_by_window_with_limits(Some(&limits)));
+        pool.snapshot_keys()[0].meter().in_flight_dec();
+        assert!(pool.select_key_excluding_with_limits(&[], Some(&limits)).is_ok());
+    }
+
+    #[test]
+    fn test_exhausted_by_window_and_refill() {
+        let pool = KeyPool::new("p", RoutingStrategy::Priority);
+        pool.add_key(ApiKeyEntry::new("k1", "t", 1, 10));
+        let limits = RateLimits {
+            rpm: Some(1),
+            ..Default::default()
+        };
+
+        // Fresh: schedulable now.
+        assert!(!pool.exhausted_by_window_with_limits(Some(&limits)));
+        assert_eq!(pool.window_refill_in_with_limits(Some(&limits)), Some(Duration::ZERO));
+        assert_eq!(
+            pool.longest_window_refill_in_with_limits(Some(&limits)),
+            Some(Duration::ZERO)
+        );
+
+        // Budget spent: exhausted by window. The refill is the meter's
+        // earliest in-window slot expiry minus now — within one 5s slot
+        // granularity of the full window (precise, not a full-window bound).
+        pool.snapshot_keys()[0].meter().record_attempt(10);
+        assert!(pool.exhausted_by_window_with_limits(Some(&limits)));
+        let refill = pool.window_refill_in_with_limits(Some(&limits)).unwrap();
+        assert!(
+            refill > Duration::from_secs(55) && refill <= Duration::from_secs(RateLimits::DEFAULT_WINDOW_SECS),
+            "precise refill must sit within the 5s slot granularity of the 60s window, got {refill:?}"
+        );
+        let longest = pool.longest_window_refill_in_with_limits(Some(&limits)).unwrap();
+        assert_eq!(longest, refill, "single-key pool: min and max refill coincide");
+
+        // No-arg variants ignore the budget dimension (cooldown-only): the
+        // active key stays schedulable, so the pool is not window-exhausted.
+        assert!(!pool.exhausted_by_window());
+        assert_eq!(pool.window_refill_in(), Some(Duration::ZERO));
+    }
+
+    #[test]
+    fn test_exhausted_by_window_distinguishes_disabled_pool() {
+        let pool = KeyPool::new("p", RoutingStrategy::Priority);
+        pool.add_key(ApiKeyEntry::new("k1", "t", 1, 10));
+        pool.record_error("k1", PoolErrorType::AuthInvalid { reason: None });
+        // A permanently disabled pool is NOT window-exhausted: it never
+        // refills, so M3 must not hold-and-wait on it.
+        assert!(!pool.exhausted_by_window());
+        assert_eq!(pool.window_refill_in(), None);
+        assert_eq!(pool.longest_window_refill_in(), None);
+    }
+
+    #[test]
+    fn test_refill_min_includes_cooldown_dimension() {
+        let pool = KeyPool::new("p", RoutingStrategy::Priority);
+        pool.add_key(ApiKeyEntry::new("cool1", "t1", 1, 10));
+        pool.add_key(ApiKeyEntry::new("cool2", "t2", 2, 10));
+        let limits = RateLimits {
+            rpm: Some(1),
+            window_secs: Some(30),
+            ..Default::default()
+        };
+        // Both keys cooling: earliest unlock is the min cooldown (10s here).
+        pool.set_key_cooldown("cool1", Duration::from_secs(10));
+        pool.set_key_cooldown("cool2", Duration::from_secs(60));
+        assert!(pool.exhausted_by_window_with_limits(Some(&limits)));
+        let min = pool.window_refill_in_with_limits(Some(&limits)).unwrap();
+        assert!(min <= Duration::from_secs(10), "min must be <= 10s, got {min:?}");
+        assert!(min > Duration::ZERO);
+        let max = pool.longest_window_refill_in_with_limits(Some(&limits)).unwrap();
+        // Monotonic-clock drift shaves microseconds off `set_cooldown`'s 60s.
+        assert!(max >= Duration::from_secs(59), "max must be ~60s, got {max:?}");
     }
 }

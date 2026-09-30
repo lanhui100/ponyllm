@@ -74,6 +74,26 @@ interface EditablePricingPeriod {
   include_weekends: boolean;
 }
 
+/** 短窗频率限额编辑态：数值字段以字符串承载，空串 = 未配置。 */
+interface EditableRateLimits {
+  rpm: string;
+  tpm: string;
+  window_secs: string;
+  concurrency: string;
+  count_cached: boolean;
+}
+
+function emptyRateLimits(): EditableRateLimits {
+  // count_cached 默认 true，与后端 RateLimits 默认口径一致（后端 None 视为按上游全计）。
+  return { rpm: '', tpm: '', window_secs: '', concurrency: '', count_cached: true };
+}
+
+/** 清除已配置的短窗限额（提交 rate_limits=null）。 */
+function clearRateLimits() {
+  form.value.rate_limits = emptyRateLimits();
+  rateLimitsCleared.value = true;
+}
+
 const form = ref({
   name: '',
   display_name: '',
@@ -92,7 +112,11 @@ const form = ref({
   cached_price: '',
   output_price: '',
   pricing_periods: [] as EditablePricingPeriod[],
+  rate_limits: emptyRateLimits(),
 });
+
+/** 用户显式清除短窗限额（提交 rate_limits=null）；false=未清除（缺省不改动既有值）。 */
+const rateLimitsCleared = ref(false);
 
 function addPricingPeriod() {
   form.value.pricing_periods.push({
@@ -121,6 +145,44 @@ function parseOptionalNumber(raw: string): number | undefined {
   if (!t) return undefined;
   const v = Number(t);
   return Number.isFinite(v) ? v : NaN;
+}
+
+/** 频率限额数值字段：非空时必须是 >= 1 的整数，返回 undefined 表示未配置。 */
+function parsePositiveInt(raw: string): number | undefined {
+  const t = raw.trim();
+  if (!t) return undefined;
+  const v = Number(t);
+  if (!Number.isInteger(v) || v < 1) return NaN;
+  return v;
+}
+
+/** 将编辑态频率限额收敛为提交 payload：空数值字段全部剔除；
+    全部未配置时返回 undefined（不覆盖 provider 级默认/既有值）。 */
+function buildRateLimitsPayload(): { rpm?: number; tpm?: number; window_secs?: number; concurrency?: number; count_cached?: boolean } | undefined {
+  const rpm = parsePositiveInt(form.value.rate_limits.rpm);
+  const tpm = parsePositiveInt(form.value.rate_limits.tpm);
+  const windowSecs = parsePositiveInt(form.value.rate_limits.window_secs);
+  const concurrency = parsePositiveInt(form.value.rate_limits.concurrency);
+  if (
+    (rpm !== undefined && !Number.isFinite(rpm)) ||
+    (tpm !== undefined && !Number.isFinite(tpm)) ||
+    (windowSecs !== undefined && !Number.isFinite(windowSecs)) ||
+    (concurrency !== undefined && !Number.isFinite(concurrency))
+  ) {
+    return undefined; // 标记非法，由调用方报错
+  }
+  const limits: { rpm?: number; tpm?: number; window_secs?: number; concurrency?: number; count_cached?: boolean } = {};
+  if (rpm !== undefined) limits.rpm = rpm;
+  if (tpm !== undefined) limits.tpm = tpm;
+  if (windowSecs !== undefined) limits.window_secs = windowSecs;
+  if (concurrency !== undefined) limits.concurrency = concurrency;
+  // count_cached 显式下发（true/false 均可表达），与后端默认 true 对齐；
+  // 仅当没有任何数值字段时视为未配置（undefined → 缺省不改动）。
+  if (Object.keys(limits).length > 0 || form.value.rate_limits.count_cached !== true) {
+    limits.count_cached = form.value.rate_limits.count_cached;
+  }
+  if (Object.keys(limits).length === 0) return undefined;
+  return limits;
 }
 
 function normalizeProtocol(proto?: string | null): string {
@@ -180,12 +242,14 @@ function openAddInline() {
     cached_price: '',
     output_price: '',
     pricing_periods: [],
+    rate_limits: emptyRateLimits(),
   };
   isCustomContext.value = false;
   formError.value = null;
   showAdvanced.value = false;
   isExpanded.value = true;
   isAdding.value = true;
+  rateLimitsCleared.value = false;
 }
 
 function openEditInline(model: ModelView) {
@@ -206,6 +270,17 @@ function openEditInline(model: ModelView) {
     include_weekends: Boolean(p.include_weekends),
   }));
 
+  const rl = model.rate_limits;
+  const rateLimits: EditableRateLimits = {
+    rpm: rl && rl.rpm != null ? String(rl.rpm) : '',
+    tpm: rl && rl.tpm != null ? String(rl.tpm) : '',
+    window_secs: rl && rl.window_secs != null ? String(rl.window_secs) : '',
+    concurrency: rl && rl.concurrency != null ? String(rl.concurrency) : '',
+    // 未显式配置时按后端默认 true 回显。
+    count_cached: rl && rl.count_cached != null ? Boolean(rl.count_cached) : true,
+  };
+  rateLimitsCleared.value = false;
+
   form.value = {
     name: model.name,
     display_name: model.display_name || '',
@@ -224,6 +299,7 @@ function openEditInline(model: ModelView) {
     cached_price: model.cached_price != null ? String(model.cached_price) : '',
     output_price: model.output_price != null ? String(model.output_price) : '',
     pricing_periods: periods,
+    rate_limits: rateLimits,
   };
   formError.value = null;
   showAdvanced.value = Boolean(
@@ -236,7 +312,8 @@ function openEditInline(model: ModelView) {
       model.pricing_mode === 'peak_valley' ||
       model.input_price != null ||
       model.cached_price != null ||
-      model.output_price != null,
+      model.output_price != null ||
+      (rl && (rl.rpm != null || rl.tpm != null || rl.window_secs != null || rl.concurrency != null || rl.count_cached != null)),
   );
 }
 
@@ -288,6 +365,7 @@ function cancelForm() {
   isAdding.value = false;
   editingModelName.value = null;
   formError.value = null;
+  rateLimitsCleared.value = false;
 }
 
 function setContextPreset(preset: string) {
@@ -354,6 +432,17 @@ async function handleSubmit() {
       submitting.value = false;
       return;
     }
+    const rateLimits = buildRateLimitsPayload();
+    if (rateLimits === undefined && (
+      form.value.rate_limits.rpm.trim() ||
+      form.value.rate_limits.tpm.trim() ||
+      form.value.rate_limits.window_secs.trim() ||
+      form.value.rate_limits.concurrency.trim()
+    )) {
+      formError.value = '频率限额中的数值必须为 >= 1 的整数（RPM/TPM/窗口秒数/并发），或留空表示未配置';
+      submitting.value = false;
+      return;
+    }
     let validPeriods: PricingPeriod[] = [];
     for (const p of form.value.pricing_periods) {
       const inP = parseOptionalNumber(p.input_price) ?? 0;
@@ -394,6 +483,8 @@ async function handleSubmit() {
       ...(cachedPrice !== undefined ? { cached_price: cachedPrice } : {}),
       ...(outputPrice !== undefined ? { output_price: outputPrice } : {}),
       ...(priority !== undefined ? { priority } : {}),
+      // 显式清除 → rate_limits=null（后端置回 None）；未配置 → 缺省不改动既有值。
+      ...(rateLimitsCleared.value ? { rate_limits: null } : rateLimits !== undefined ? { rate_limits: rateLimits } : {}),
     };
 
     if (editingModelName.value) {
@@ -790,6 +881,84 @@ function getTierBadgeVariant(tier?: string) {
                       </div>
                     </div>
 
+                    <!-- 频率限额 (RPM/TPM/窗口秒数/并发，同一行2列) -->
+                    <div class="grid grid-cols-1 sm:grid-cols-12 gap-2 sm:gap-4 items-start pt-1">
+                      <div class="sm:col-span-3 text-slate-600 font-medium text-xs pt-1.5">
+                        <span class="flex items-center gap-1">
+                          <span>频率限额</span>
+                          <UiTooltip content="每 key 短窗限额（RPM/TPM/窗口秒数/并发）。留空 = 未配置（继承服务商默认）。cached token 是否计入 TPM 可按上游口径勾选。">
+                            <Icons name="info" size="12" class="text-slate-400 cursor-pointer" />
+                          </UiTooltip>
+                        </span>
+                        <p class="text-3xs text-slate-400 font-normal mt-0.5">RPM/TPM/窗口/并发</p>
+                      </div>
+                      <div class="sm:col-span-9 grid grid-cols-2 gap-2.5" data-testid="model-rate-limits">
+                        <div>
+                          <label class="block text-slate-500 mb-0.5 text-3xs">RPM（每分钟请求数）</label>
+                          <input
+                            v-model="form.rate_limits.rpm"
+                            type="text"
+                            inputmode="numeric"
+                            placeholder="如 10"
+                            class="w-full bg-white border border-slate-200/80 rounded px-2.5 py-1 text-xs text-slate-800 font-mono focus:outline-none focus:ring-2 focus:ring-slate-400/20 focus:border-slate-500"
+                            data-testid="model-rpm-input"
+                          />
+                        </div>
+                        <div>
+                          <label class="block text-slate-500 mb-0.5 text-3xs">TPM（每分钟 token 数）</label>
+                          <input
+                            v-model="form.rate_limits.tpm"
+                            type="text"
+                            inputmode="numeric"
+                            placeholder="如 100000"
+                            class="w-full bg-white border border-slate-200/80 rounded px-2.5 py-1 text-xs text-slate-800 font-mono focus:outline-none focus:ring-2 focus:ring-slate-400/20 focus:border-slate-500"
+                            data-testid="model-tpm-input"
+                          />
+                        </div>
+                        <div>
+                          <label class="block text-slate-500 mb-0.5 text-3xs">窗口秒数</label>
+                          <input
+                            v-model="form.rate_limits.window_secs"
+                            type="text"
+                            inputmode="numeric"
+                            placeholder="默认 60"
+                            class="w-full bg-white border border-slate-200/80 rounded px-2.5 py-1 text-xs text-slate-800 font-mono focus:outline-none focus:ring-2 focus:ring-slate-400/20 focus:border-slate-500"
+                            data-testid="model-window-secs-input"
+                          />
+                        </div>
+                        <div>
+                          <label class="block text-slate-500 mb-0.5 text-3xs">并发上限</label>
+                          <input
+                            v-model="form.rate_limits.concurrency"
+                            type="text"
+                            inputmode="numeric"
+                            placeholder="如 4"
+                            class="w-full bg-white border border-slate-200/80 rounded px-2.5 py-1 text-xs text-slate-800 font-mono focus:outline-none focus:ring-2 focus:ring-slate-400/20 focus:border-slate-500"
+                            data-testid="model-concurrency-input"
+                          />
+                        </div>
+                        <label class="col-span-2 inline-flex items-center gap-1.5 text-xs text-slate-600 select-none cursor-pointer pt-0.5">
+                          <input
+                            v-model="form.rate_limits.count_cached"
+                            type="checkbox"
+                            class="rounded border-slate-300 text-slate-900 focus:ring-0 cursor-pointer"
+                            data-testid="model-count-cached-input"
+                          />
+                          <span>缓存 token 计入 TPM</span>
+                        </label>
+                        <div class="col-span-2 flex items-center gap-2 pt-0.5">
+                          <button
+                            type="button"
+                            class="text-3xs text-slate-400 hover:text-red-600 underline underline-offset-2 cursor-pointer transition-colors"
+                            data-testid="model-rate-limits-clear"
+                            @click.prevent="clearRateLimits()"
+                          >
+                            清除限额（置回未配置）
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+
                     <!-- 价格与峰谷模式 (同一行2列：默认价格为谷价，可添加峰价时段) -->
                     <div class="grid grid-cols-1 sm:grid-cols-12 gap-2 sm:gap-4 items-start pt-1">
                       <div class="sm:col-span-3 text-slate-600 font-medium text-xs pt-1.5">
@@ -1049,6 +1218,16 @@ function getTierBadgeVariant(tier?: string) {
             >
               <UiBadge variant="secondary" class="hidden md:inline-flex items-center text-3xs font-mono font-normal cursor-help">
                 {{ m.pricing_mode === 'peak_valley' ? '峰谷定价' : '￥定制' }}
+              </UiBadge>
+            </UiTooltip>
+
+            <!-- 频率限额标记 (短窗 RPM/TPM/窗口/并发 回显) -->
+            <UiTooltip
+              v-if="m.rate_limits && (m.rate_limits.rpm != null || m.rate_limits.tpm != null || m.rate_limits.concurrency != null || m.rate_limits.window_secs != null || m.rate_limits.count_cached)"
+              :content="`频率限额: ${m.rate_limits.rpm != null ? `RPM=${m.rate_limits.rpm}` : ''}${m.rate_limits.rpm != null && m.rate_limits.tpm != null ? ' · ' : ''}${m.rate_limits.tpm != null ? `TPM=${m.rate_limits.tpm}` : ''}${(m.rate_limits.rpm != null || m.rate_limits.tpm != null) && m.rate_limits.window_secs != null ? ' · ' : ''}${m.rate_limits.window_secs != null ? `窗口=${m.rate_limits.window_secs}s` : ''}${((m.rate_limits.rpm != null || m.rate_limits.tpm != null || m.rate_limits.window_secs != null) && m.rate_limits.concurrency != null) ? ' · ' : ''}${m.rate_limits.concurrency != null ? `并发=${m.rate_limits.concurrency}` : ''}${m.rate_limits.count_cached ? ' · 缓存计TPM' : ''}`"
+            >
+              <UiBadge variant="success" class="hidden md:inline-flex items-center text-3xs font-mono font-normal cursor-help" data-testid="model-row-rate-limits">
+                {{ m.rate_limits.rpm != null ? `R${m.rate_limits.rpm}` : '' }}{{ m.rate_limits.rpm != null && m.rate_limits.tpm != null ? '/' : '' }}{{ m.rate_limits.tpm != null ? `T${m.rate_limits.tpm}` : '' }}{{ m.rate_limits.concurrency != null ? ` C${m.rate_limits.concurrency}` : '' }}
               </UiBadge>
             </UiTooltip>
           </div>
@@ -1391,6 +1570,84 @@ function getTierBadgeVariant(tier?: string) {
                           class="w-full bg-white border border-slate-200/80 rounded-lg px-2.5 py-1.5 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-slate-400/20 focus:border-slate-500"
                           data-testid="model-priority-input"
                         />
+                      </div>
+                    </div>
+
+                    <!-- 频率限额 (RPM/TPM/窗口秒数/并发，同一行2列) -->
+                    <div class="grid grid-cols-1 sm:grid-cols-12 gap-2 sm:gap-4 items-start pt-1">
+                      <div class="sm:col-span-3 text-slate-600 font-medium text-xs pt-1.5">
+                        <span class="flex items-center gap-1">
+                          <span>频率限额</span>
+                          <UiTooltip content="每 key 短窗限额（RPM/TPM/窗口秒数/并发）。留空 = 未配置（继承服务商默认）。cached token 是否计入 TPM 可按上游口径勾选。">
+                            <Icons name="info" size="12" class="text-slate-400 cursor-pointer" />
+                          </UiTooltip>
+                        </span>
+                        <p class="text-3xs text-slate-400 font-normal mt-0.5">RPM/TPM/窗口/并发</p>
+                      </div>
+                      <div class="sm:col-span-9 grid grid-cols-2 gap-2.5" data-testid="model-rate-limits">
+                        <div>
+                          <label class="block text-slate-500 mb-0.5 text-3xs">RPM（每分钟请求数）</label>
+                          <input
+                            v-model="form.rate_limits.rpm"
+                            type="text"
+                            inputmode="numeric"
+                            placeholder="如 10"
+                            class="w-full bg-white border border-slate-200/80 rounded px-2.5 py-1 text-xs text-slate-800 font-mono focus:outline-none focus:ring-2 focus:ring-slate-400/20 focus:border-slate-500"
+                            data-testid="model-rpm-input"
+                          />
+                        </div>
+                        <div>
+                          <label class="block text-slate-500 mb-0.5 text-3xs">TPM（每分钟 token 数）</label>
+                          <input
+                            v-model="form.rate_limits.tpm"
+                            type="text"
+                            inputmode="numeric"
+                            placeholder="如 100000"
+                            class="w-full bg-white border border-slate-200/80 rounded px-2.5 py-1 text-xs text-slate-800 font-mono focus:outline-none focus:ring-2 focus:ring-slate-400/20 focus:border-slate-500"
+                            data-testid="model-tpm-input"
+                          />
+                        </div>
+                        <div>
+                          <label class="block text-slate-500 mb-0.5 text-3xs">窗口秒数</label>
+                          <input
+                            v-model="form.rate_limits.window_secs"
+                            type="text"
+                            inputmode="numeric"
+                            placeholder="默认 60"
+                            class="w-full bg-white border border-slate-200/80 rounded px-2.5 py-1 text-xs text-slate-800 font-mono focus:outline-none focus:ring-2 focus:ring-slate-400/20 focus:border-slate-500"
+                            data-testid="model-window-secs-input"
+                          />
+                        </div>
+                        <div>
+                          <label class="block text-slate-500 mb-0.5 text-3xs">并发上限</label>
+                          <input
+                            v-model="form.rate_limits.concurrency"
+                            type="text"
+                            inputmode="numeric"
+                            placeholder="如 4"
+                            class="w-full bg-white border border-slate-200/80 rounded px-2.5 py-1 text-xs text-slate-800 font-mono focus:outline-none focus:ring-2 focus:ring-slate-400/20 focus:border-slate-500"
+                            data-testid="model-concurrency-input"
+                          />
+                        </div>
+                        <label class="col-span-2 inline-flex items-center gap-1.5 text-xs text-slate-600 select-none cursor-pointer pt-0.5">
+                          <input
+                            v-model="form.rate_limits.count_cached"
+                            type="checkbox"
+                            class="rounded border-slate-300 text-slate-900 focus:ring-0 cursor-pointer"
+                            data-testid="model-count-cached-input"
+                          />
+                          <span>缓存 token 计入 TPM</span>
+                        </label>
+                        <div class="col-span-2 flex items-center gap-2 pt-0.5">
+                          <button
+                            type="button"
+                            class="text-3xs text-slate-400 hover:text-red-600 underline underline-offset-2 cursor-pointer transition-colors"
+                            data-testid="model-rate-limits-clear"
+                            @click.prevent="clearRateLimits()"
+                          >
+                            清除限额（置回未配置）
+                          </button>
+                        </div>
                       </div>
                     </div>
 

@@ -8,6 +8,7 @@ fn test_node_latency_metrics_dynamic_update_and_speed_scoring() {
     let mut providers = HashMap::new();
 
     let p_fast = ProviderConfig {
+    rate_limits: None,
         base_url: "https://fast.example.com".to_string(),
         default_model: "test-model".to_string(),
         strategy: "round_robin".to_string(),
@@ -17,6 +18,7 @@ fn test_node_latency_metrics_dynamic_update_and_speed_scoring() {
         output_price: 2.0,
         models: vec!["test-model".to_string()],
         model_specs: vec![ModelSpec {
+    rate_limits: None,
             priority: None,
             name: "test-model".to_string(),
             tier: ModelTier::Standard,
@@ -35,6 +37,7 @@ fn test_node_latency_metrics_dynamic_update_and_speed_scoring() {
     };
 
     let p_slow = ProviderConfig {
+    rate_limits: None,
         base_url: "https://slow.example.com".to_string(),
         default_model: "test-model".to_string(),
         strategy: "round_robin".to_string(),
@@ -44,6 +47,7 @@ fn test_node_latency_metrics_dynamic_update_and_speed_scoring() {
         output_price: 2.0,
         models: vec!["test-model".to_string()],
         model_specs: vec![ModelSpec {
+    rate_limits: None,
             priority: None,
             name: "test-model".to_string(),
             tier: ModelTier::Standard,

@@ -108,6 +108,7 @@ async fn test_model_echo_policy_and_auto_routing() {
     config.providers.insert(
         "deepseek".to_string(),
         ProviderConfig {
+    rate_limits: None,
             base_url: format!("http://{}", upstream_addr),
             default_model: "deepseek-v4-flash".to_string(),
             strategy: "priority".to_string(),
@@ -117,6 +118,7 @@ async fn test_model_echo_policy_and_auto_routing() {
             output_price: 0.28,
             models: vec!["deepseek-v4-flash".to_string()],
             model_specs: vec![ModelSpec {
+    rate_limits: None,
                 priority: None,
                 name: "deepseek-v4-flash".to_string(),
                 tier: ModelTier::Flagship,
@@ -138,6 +140,7 @@ async fn test_model_echo_policy_and_auto_routing() {
     config.providers.insert(
         "openai".to_string(),
         ProviderConfig {
+    rate_limits: None,
             base_url: format!("http://{}", upstream_addr),
             default_model: "gpt-4o-mini".to_string(),
             strategy: "round_robin".to_string(),
@@ -147,6 +150,7 @@ async fn test_model_echo_policy_and_auto_routing() {
             output_price: 0.60,
             models: vec!["gpt-4o-mini".to_string()],
             model_specs: vec![ModelSpec {
+    rate_limits: None,
                 priority: None,
                 name: "gpt-4o-mini".to_string(),
                 tier: ModelTier::Standard,
@@ -277,6 +281,7 @@ fn test_is_anthropic_upstream_heuristic_lock() {
     config.providers.insert(
         "ant-p".to_string(),
         ProviderConfig {
+    rate_limits: None,
             base_url: "https://api.deepseek.com/anthropic".to_string(),
             default_model: "m-ant".to_string(),
             strategy: "round_robin".to_string(),
@@ -297,6 +302,7 @@ fn test_is_anthropic_upstream_heuristic_lock() {
     config.providers.insert(
         "chat-p".to_string(),
         ProviderConfig {
+    rate_limits: None,
             base_url: "https://api.deepseek.com".to_string(),
             default_model: "m-chat".to_string(),
             strategy: "round_robin".to_string(),
@@ -342,6 +348,7 @@ fn test_protocol_resolution_priority_and_overrides() {
             _ => (None, None, None),
         };
         ProviderConfig {
+    rate_limits: None,
             base_url: base.to_string(),
             default_model: model.to_string(),
             strategy: "round_robin".to_string(),
@@ -352,6 +359,7 @@ fn test_protocol_resolution_priority_and_overrides() {
             models: vec![],
             model_specs: if let Some(sp) = spec_proto {
                 vec![ModelSpec {
+    rate_limits: None,
                     priority: None,
                     name: model.to_string(),
                     tier: ModelTier::Standard,
@@ -426,6 +434,7 @@ fn test_models_listing_exposes_native_protocol() {
     config.providers.insert(
         "op".to_string(),
         ProviderConfig {
+    rate_limits: None,
             base_url: "https://op.example.com".to_string(),
             default_model: "muse-spark".to_string(),
             strategy: "round_robin".to_string(),
@@ -466,6 +475,7 @@ fn test_native_protocol_wins_ties_for_passthrough_first() {
         config.providers.insert(
             name.to_string(),
             ProviderConfig {
+    rate_limits: None,
                 base_url: format!("https://{}.example.com", name),
                 default_model: "duo".to_string(),
                 strategy: "round_robin".to_string(),
@@ -512,6 +522,7 @@ fn test_inbound_native_endpoint_wins_over_provider_default() {
     config.providers.insert(
         "deepseek".to_string(),
         ProviderConfig {
+    rate_limits: None,
             base_url: "https://api.deepseek.com".to_string(),
             default_model: "deepseek-chat".to_string(),
             strategy: "round_robin".to_string(),
@@ -614,6 +625,7 @@ async fn test_cross_provider_transparent_failover() {
     config.providers.insert(
         "broken_provider".to_string(),
         ProviderConfig {
+    rate_limits: None,
             base_url: "http://127.0.0.1:1".to_string(), // Dead port
             default_model: "deepseek-v4-flash".to_string(),
             strategy: "priority".to_string(),
@@ -623,6 +635,7 @@ async fn test_cross_provider_transparent_failover() {
             output_price: 0.20,
             models: vec!["deepseek-v4-flash".to_string()],
             model_specs: vec![ModelSpec {
+    rate_limits: None,
                 priority: None,
                 name: "deepseek-v4-flash".to_string(),
                 tier: ModelTier::Flagship,
@@ -644,6 +657,7 @@ async fn test_cross_provider_transparent_failover() {
     config.providers.insert(
         "backup_provider".to_string(),
         ProviderConfig {
+    rate_limits: None,
             base_url: format!("http://{}", healthy_addr),
             default_model: "deepseek-v4-flash".to_string(),
             strategy: "priority".to_string(),
@@ -653,6 +667,7 @@ async fn test_cross_provider_transparent_failover() {
             output_price: 0.40,
             models: vec!["deepseek-v4-flash".to_string()],
             model_specs: vec![ModelSpec {
+    rate_limits: None,
                 priority: None,
                 name: "deepseek-v4-flash".to_string(),
                 tier: ModelTier::Flagship,
@@ -740,6 +755,7 @@ async fn test_anthropic_messages_routing_and_model_echo() {
     config.providers.insert(
         "anthropic".to_string(),
         ProviderConfig {
+    rate_limits: None,
             base_url: format!("http://{}/v1/messages", upstream_addr),
             default_model: "claude-3-7-sonnet".to_string(),
             strategy: "priority".to_string(),
@@ -749,6 +765,7 @@ async fn test_anthropic_messages_routing_and_model_echo() {
             output_price: 15.0,
             models: vec!["claude-3-7-sonnet".to_string()],
             model_specs: vec![ModelSpec {
+    rate_limits: None,
                 priority: None,
                 name: "claude-3-7-sonnet".to_string(),
                 tier: ModelTier::Flagship,
@@ -851,6 +868,7 @@ async fn test_gateway_configuration_hot_reload() {
     gw_config.providers.insert(
         "prov_a".to_string(),
         ProviderConfig {
+    rate_limits: None,
             base_url: "http://127.0.0.1:12345/v1".to_string(),
             default_model: "model-a".to_string(),
             strategy: "round_robin".to_string(),
@@ -907,6 +925,7 @@ async fn test_gateway_configuration_hot_reload() {
     new_config.providers.insert(
         "prov_b".to_string(),
         ProviderConfig {
+    rate_limits: None,
             base_url: format!("http://{}/v1", mock_b_addr),
             default_model: "model-b".to_string(),
             strategy: "round_robin".to_string(),
@@ -1016,6 +1035,7 @@ async fn test_large_payload_handling_with_1m_context_support() {
     config.providers.insert(
         "deepseek".to_string(),
         ProviderConfig {
+    rate_limits: None,
             base_url: format!("http://{}", upstream_addr),
             default_model: "deepseek-v4-flash".to_string(),
             strategy: "priority".to_string(),
@@ -1025,6 +1045,7 @@ async fn test_large_payload_handling_with_1m_context_support() {
             output_price: 0.28,
             models: vec!["deepseek-v4-flash".to_string()],
             model_specs: vec![ModelSpec {
+    rate_limits: None,
                 priority: None,
                 name: "deepseek-v4-flash".to_string(),
                 tier: ModelTier::Flagship,
@@ -1081,6 +1102,7 @@ async fn test_custom_request_body_limit_rejection_with_helpful_error() {
     config.providers.insert(
         "test-p".to_string(),
         ProviderConfig {
+    rate_limits: None,
             base_url: "http://127.0.0.1:9".to_string(),
             default_model: "test-model".to_string(),
             strategy: "priority".to_string(),
@@ -1170,6 +1192,7 @@ async fn test_responses_cross_provider_failover() {
         config.providers.insert(
             name.to_string(),
             ProviderConfig {
+    rate_limits: None,
                 base_url: url,
                 default_model: "muse-spark-test".to_string(),
                 strategy: "priority".to_string(),
@@ -1216,7 +1239,8 @@ async fn test_responses_cross_provider_failover() {
 }
 
 fn cross_protocol_provider(base_url: String, model: &str, proto: UpstreamProtocol) -> ProviderConfig {
-    ProviderConfig {
+        ProviderConfig {
+    rate_limits: None,
         base_url,
         default_model: model.to_string(),
         strategy: "round_robin".to_string(),
@@ -1623,6 +1647,7 @@ async fn test_provider_proxy_routing_and_isolation() {
     config.providers.insert(
         "proxied_prov".to_string(),
         ProviderConfig {
+    rate_limits: None,
             base_url: "https://example.com".to_string(),
             default_model: "mock".to_string(),
             proxy: Some("http://127.0.0.1:8899".to_string()),
@@ -1632,6 +1657,7 @@ async fn test_provider_proxy_routing_and_isolation() {
     config.providers.insert(
         "direct_prov".to_string(),
         ProviderConfig {
+    rate_limits: None,
             base_url: "https://example.com".to_string(),
             default_model: "mock".to_string(),
             proxy: None,
@@ -1649,12 +1675,14 @@ async fn test_provider_proxy_routing_and_isolation() {
 async fn test_model_specific_base_url_routing() {
     let mut config = GatewayConfig::default();
     let mut prov = ProviderConfig {
+    rate_limits: None,
         base_url: "https://provider.example.com/v1".to_string(),
         default_model: "default-model".to_string(),
         models: vec!["default-model".to_string(), "custom-node".to_string()],
         ..Default::default()
     };
     prov.model_specs.push(ModelSpec {
+    rate_limits: None,
         priority: None,
         name: "custom-node".to_string(),
         base_url: Some("https://model-node.example.com/v1".to_string()),
@@ -1691,10 +1719,12 @@ fn test_deepseek_v41_flash_alias_routes_to_live_upstream_name() {
     config.providers.insert(
         "deepseek".to_string(),
         ProviderConfig {
+    rate_limits: None,
             base_url: "https://api.deepseek.com".to_string(),
             default_model: "deepseek-flash".to_string(),
             models: vec!["deepseek-flash".to_string()],
             model_specs: vec![ModelSpec {
+    rate_limits: None,
                 priority: None,
                 name: "deepseek-flash".to_string(),
                 context_window: "1M".to_string(),
@@ -1717,6 +1747,7 @@ fn test_deepseek_v41_flash_alias_routes_to_live_upstream_name() {
     config2.providers.insert(
         "deepseek".to_string(),
         ProviderConfig {
+    rate_limits: None,
             base_url: "https://api.deepseek.com".to_string(),
             default_model: "deepseek-flash".to_string(),
             models: vec!["deepseek-flash".to_string(), "deepseek-v4.1-flash".to_string()],
@@ -1769,6 +1800,7 @@ async fn test_deepseek_v41_flash_alias_echo_and_wire_model() {
     config.providers.insert(
         "deepseek".to_string(),
         ProviderConfig {
+    rate_limits: None,
             base_url: format!("http://{}", upstream_addr),
             default_model: "deepseek-flash".to_string(),
             models: vec!["deepseek-flash".to_string()],
@@ -1815,6 +1847,7 @@ fn priority_provider(name: &str, priority: Option<u32>, input_price: f64) -> (St
     (
         name.to_string(),
         ProviderConfig {
+    rate_limits: None,
             base_url: format!("https://{}.example.com", name),
             default_model: "duo".to_string(),
             strategy: "round_robin".to_string(),
@@ -1824,6 +1857,7 @@ fn priority_provider(name: &str, priority: Option<u32>, input_price: f64) -> (St
             output_price: 2.0,
             models: vec!["duo".to_string()],
             model_specs: vec![ModelSpec {
+    rate_limits: None,
                 name: "duo".to_string(),
                 tier: ModelTier::Standard,
                 priority,

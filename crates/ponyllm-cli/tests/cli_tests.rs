@@ -290,6 +290,7 @@ fn test_model_config_crud_and_params() {
 
     // 2. Add custom model with multimodal parameters
     let custom_model = ModelConfig {
+    rate_limits: None,
         priority: None,
         name: "omni-v1".to_string(),
         tier: ponyllm_core::pool::ModelTier::Flagship,
