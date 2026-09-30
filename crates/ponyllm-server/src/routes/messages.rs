@@ -420,6 +420,7 @@ pub async fn handle_messages(
             .max(pool.total_key_count())
             .max(MIN_EMPTY_STOP_ATTEMPTS);
 
+        let mut collect_tried_keys: Vec<String> = Vec::new();
         if is_streaming {
             let current_executor = executor;
             let mut stream_attempt = 0;
@@ -532,7 +533,7 @@ pub async fn handle_messages(
                                 );
                                 last_kind = ponyllm_core::error::GatewayErrorKind::UpstreamUnavailable;
                                 last_error = format!(
-                                    "Antigravity deterministic empty STOP for model '{}' ({} consecutive first-frame zero-content STOPs across distinct keys; try a different model or prompt)",
+                                    "Antigravity deterministic empty STOP for model '{}' ({} consecutive first-frame zero-content STOPs across distinct keys; gateway converged early, try a different model or prompt)",
                                     target.physical_model, consecutive_first_frame_stops
                                 );
                                 break;
@@ -665,7 +666,6 @@ pub async fn handle_messages(
                 // R2/R3: same policy as chat.rs (fresh key + fresh requestId,
                 // deterministic early convergence).
                 let mut collect_attempt = 0usize;
-                let mut collect_tried_keys: Vec<String> = Vec::new();
                 let mut collect_req_val = req_val.clone();
                 let mut collect_consecutive_first_frame: usize = 0;
                 loop {
@@ -907,7 +907,7 @@ pub async fn handle_messages(
                 (Err(err), _) => {
                     tracing::warn!("Provider '{}' json request failed ({}). Attempting fallback...", target.provider_name, err);
                     last_kind = err.kind();
-                    last_pool_exhausted = matches!(err, CoreError::NoAvailableKey(_));
+                    last_pool_exhausted = matches!(err, CoreError::NoAvailableKey(_)) && collect_tried_keys.is_empty();
                     last_retry_after = crate::extractors::retry_after_secs(&last_kind, retry_unlock_hint(&last_kind, &pool, rate_limits.as_ref()));
                     last_error = err.to_string();
                     continue;

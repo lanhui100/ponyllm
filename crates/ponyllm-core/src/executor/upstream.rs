@@ -83,6 +83,10 @@ pub struct UpstreamExecutor {
     /// `Some(duration)` enforces response headers arrive within `duration`.
     /// `None` disables TTFB guard (call bounded only by total timeout).
     ttfb_timeout: Option<Duration>,
+    /// Cross-call key exclusion (R2): key ids the outer empty-STOP retry loop
+    /// already tried. Pre-seeds `attempted_keys` in the stream executors so a
+    /// Priority pool cannot re-select the same key across retries.
+    excluded_keys: Vec<String>,
 }
 
 impl std::fmt::Debug for UpstreamExecutor {
@@ -960,7 +964,16 @@ impl UpstreamExecutor {
             systemone: false,
             rate_limits: None,
             ttfb_timeout: Some(DEFAULT_UPSTREAM_TTFB_TIMEOUT),
+            excluded_keys: Vec::new(),
         }
+    }
+
+    /// Pre-exclude key ids from selection (R2): the outer Antigravity
+    /// empty-STOP retry loop passes keys it already tried so this executor's
+    /// stream calls fail over to fresh keys instead of re-selecting them.
+    pub fn with_excluded_keys(mut self, excluded: &[String]) -> Self {
+        self.excluded_keys = excluded.to_vec();
+        self
     }
 
     /// Adopt the resolved short-window budget (provider + model `rate_limits`)
@@ -1094,6 +1107,7 @@ impl UpstreamExecutor {
         tokio::time::sleep(hold).await;
         *pool_wait_done = true;
         attempted_keys.clear();
+        attempted_keys.extend(self.excluded_keys.clone());
         true
     }
 
@@ -1677,7 +1691,9 @@ impl UpstreamExecutor {
     pub async fn execute_stream_request_with_timing_and_key(&self, url: &str, body: &Value) -> Result<(reqwest::Response, Instant, String)> {
         let mut last_error = String::new();
         let mut last_kind = GatewayErrorKind::Internal;
-        let mut attempted_keys = Vec::new();
+        // R2: pre-seed with the outer retry loop's already-tried keys so a
+        // Priority pool cannot re-select the same key across retries.
+        let mut attempted_keys = self.excluded_keys.clone();
         let mut attempt_kinds = Vec::new();
         // Antigravity keys already force-refreshed once this request (P0-3
         // stale-token recovery): a second 401 on the same key is genuine.
@@ -2737,6 +2753,66 @@ mod zen_tools_tests {
         let free = json!({"model": "mimo-v2.5-free", "messages": []});
         let out = plain.inject_zen_free_tier_tools(CHAT_URL, std::borrow::Cow::Borrowed(&free));
         assert!(out.get("tools").is_none());
+    }
+
+    #[tokio::test]
+    async fn test_excluded_keys_force_fresh_key_selection() {
+        // R2: the outer empty-STOP loop passes already-tried keys; the next
+        // executor call must not re-select them. Priority pool would
+        // otherwise pin the same key forever.
+        use axum::response::IntoResponse;
+        use std::sync::Arc;
+        let seen_auth = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let seen = seen_auth.clone();
+        let app = axum::Router::new().route(
+            "/v1/chat/completions",
+            axum::routing::post(move |headers: axum::http::HeaderMap, _body: String| {
+                let seen = seen.clone();
+                async move {
+                    let auth = headers
+                        .get("authorization")
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or_default()
+                        .to_string();
+                    seen.lock().unwrap().push(auth);
+                    (
+                        axum::http::StatusCode::OK,
+                        axum::Json(serde_json::json!({"ok": true})),
+                    )
+                        .into_response()
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let endpoint = format!("http://{}/v1/chat/completions", addr);
+
+        let pool = Arc::new(KeyPool::new("p", RoutingStrategy::Priority));
+        pool.add_key(ApiKeyEntry::new("k1", "sk-k1", 1, 10));
+        pool.add_key(ApiKeyEntry::new("k2", "sk-k2", 2, 10));
+        let body = serde_json::json!({"model": "m", "messages": []});
+
+        // Baseline: Priority always picks k1.
+        let base = UpstreamExecutor::new(pool.clone(), 1);
+        let (_, _, kid) = base
+            .execute_stream_request_with_timing_and_key(&endpoint, &body)
+            .await
+            .unwrap();
+        assert_eq!(kid, "k1");
+
+        // With k1 excluded, the same Priority pool must yield k2.
+        let excl = UpstreamExecutor::new(pool.clone(), 1)
+            .with_excluded_keys(&["k1".to_string()]);
+        let (_, _, kid2) = excl
+            .execute_stream_request_with_timing_and_key(&endpoint, &body)
+            .await
+            .unwrap();
+        assert_eq!(kid2, "k2");
+        let auths = seen_auth.lock().unwrap();
+        assert!(auths.iter().any(|a| a.contains("sk-k2")), "upstream must see k2: {auths:?}");
     }
 
     #[test]

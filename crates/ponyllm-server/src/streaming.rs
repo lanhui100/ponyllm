@@ -792,6 +792,87 @@ pub fn has_antigravity_content(val: &serde_json::Value) -> bool {
     false
 }
 
+/// Frame-shape attribution for an Antigravity empty STOP (R1).
+///
+/// Lets one log line answer: was the terminal frame a bare thought-signature
+/// trailer (`signature_only`), did upstream attach token accounting
+/// (`had_usage`), and how many warm-up frames (keepalives / role-only /
+/// usage-only) preceded it (`skipped_frames` — a large count with zero
+/// content means a long thinking warm-up that produced nothing).
+/// `finish_reason` is the terminal frame's `finishReason`
+/// (`None` for EOF/`[DONE]` termination).
+///
+/// NOTE: non-empty thought *text* can never appear here: any frame carrying
+/// it returns `Ready` via `has_antigravity_content` before the empty-STOP
+/// check runs. Thought visibility at the terminal point is therefore only
+/// the opaque `thoughtSignature` trailer (`signature_only`), never text.
+#[derive(Debug, Clone, Default)]
+pub struct EmptyStopShape {
+    pub finish_reason: Option<String>,
+    pub signature_only: bool,
+    pub had_usage: bool,
+    pub skipped_frames: usize,
+}
+
+/// Describe one parsed Antigravity SSE frame for empty-STOP attribution.
+fn describe_antigravity_frame(val: &serde_json::Value) -> EmptyStopShape {
+    let target = val.get("response").unwrap_or(val);
+    let finish_reason = target
+        .get("candidates")
+        .and_then(|v| v.as_array())
+        .and_then(|c| c.first())
+        .and_then(|f| f.get("finishReason"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let mut shape = EmptyStopShape {
+        finish_reason,
+        ..Default::default()
+    };
+    if target.get("usageMetadata").is_some() {
+        shape.had_usage = true;
+    }
+    let parts = target
+        .get("candidates")
+        .and_then(|v| v.as_array())
+        .and_then(|c| c.first())
+        .and_then(|f| f.get("content"))
+        .and_then(|c| c.get("parts"))
+        .and_then(|p| p.as_array());
+    let Some(parts) = parts else {
+        return shape;
+    };
+    if parts.is_empty() {
+        return shape;
+    }
+    let mut all_signature_only = true;
+    for p in parts {
+        // A "signature-only" part carries a thoughtSignature but no visible
+        // payload: empty/missing text and no functionCall. Any non-empty text
+        // (thought or visible) or functionCall disqualifies signature-only.
+        let text_empty = p.get("text").and_then(|v| v.as_str()).map(|t| t.is_empty()).unwrap_or(true);
+        let has_sig = p.get("thoughtSignature").and_then(|v| v.as_str()).is_some();
+        let has_call = p.get("functionCall").is_some();
+        let has_text = p.get("text").and_then(|v| v.as_str()).map(|t| !t.is_empty()).unwrap_or(false);
+        if !(has_sig && text_empty && !has_call) || has_text {
+            all_signature_only = false;
+        }
+    }
+    shape.signature_only = all_signature_only;
+    shape
+}
+
+/// Redact a candidate part for logging: `thoughtSignature` is a ~2KB opaque
+/// blob; keep a 16-char prefix so logs stay attributable without the IO cost.
+pub fn redact_part_for_log(part: &serde_json::Value) -> serde_json::Value {
+    let mut redacted = part.clone();
+    if let Some(sig) = redacted.get("thoughtSignature").and_then(|v| v.as_str()) {
+        let prefix: String = sig.chars().take(16).collect();
+        redacted["thoughtSignature"] =
+            serde_json::Value::String(format!("{}…({} chars)", prefix, sig.len()));
+    }
+    redacted
+}
+
 /// Result of inspecting the initial preamble of an upstream Antigravity SSE stream.
 pub enum AntigravityPreambleResult<S> {
     /// Preamble contains valid content or sufficient frames; ready to stream downstream.
@@ -804,6 +885,9 @@ pub enum AntigravityPreambleResult<S> {
     /// Upstream completed with finishReason: "STOP" and 0 content bytes across preamble frames.
     TransientEmptyStop {
         frames: usize,
+        /// Frame-shape attribution (R1): signature-only trailer flag, usage
+        /// attached flag, warm-up skip count, terminal finishReason.
+        shape: EmptyStopShape,
     },
     /// Upstream safety block or deterministic error frame.
     DeterministicBlock {
@@ -824,6 +908,13 @@ pub const DEFAULT_PREAMBLE_DEADLINE: std::time::Duration = std::time::Duration::
 /// (no downstream bytes committed, no key fault), so a dedicated budget larger
 /// than the generic `max_retries` is cheap and credential-independent.
 pub const MIN_EMPTY_STOP_ATTEMPTS: usize = 12;
+
+/// Consecutive first-frame (`frames == 0`) empty STOPs that flip the verdict
+/// from "transient blip, keep retrying" to "deterministic prompt×model zero
+/// content, converge early" (R3). Each counted attempt already ran on a fresh
+/// key with a fresh upstream requestId (R2), so repetition is evidence, not
+/// coincidence.
+pub const DETERMINISTIC_EMPTY_STOP_THRESHOLD: usize = 3;
 
 /// Jittered exponential backoff before a transparent empty-STOP retry.
 ///
@@ -851,6 +942,17 @@ pub fn empty_stop_retry_delay(attempt: usize) -> std::time::Duration {
 /// (transient empty STOP)`), so routes can retry it transparently.
 pub fn is_transient_empty_stop_error(msg: &str) -> bool {
     msg.contains("transient empty STOP")
+}
+
+/// Extract the `frames=N` trailer from a transient empty-STOP collector error
+/// (R3). `None` when the marker is absent (legacy strings without the trailer
+/// are treated as non-first-frame so the deterministic fast path never fires
+/// on unparseable input).
+pub fn empty_stop_frame_count(msg: &str) -> Option<u32> {
+    let start = msg.find("[frames=")? + "[frames=".len();
+    let rest = &msg[start..];
+    let end = rest.find(']')?;
+    rest[..end].parse::<u32>().ok()
 }
 
 /// Whether an upstream frame is "significant" for preamble frame accounting:
@@ -889,11 +991,12 @@ fn antigravity_frame_is_significant(val: &serde_json::Value) -> bool {
 
 /// Bounded preamble verification for an Antigravity byte stream.
 ///
-/// Inspects frames from the raw byte stream up to `max_frames` (default 8,
-/// significant frames only) or until valid content (`text`, `thought`, or
-/// `functionCall`) is confirmed. If an empty candidate with `finishReason == "STOP"`
-/// is encountered before any content has been emitted, returns `TransientEmptyStop`
-/// to allow transparent gateway-side retry.
+/// Inspects frames from the raw byte stream up to `max_frames` (16,
+/// significant frames only) or until valid content (non-empty `text`,
+/// including `thought` text, or `functionCall`) is confirmed. If an empty
+/// candidate with `finishReason == "STOP"` is encountered before any content
+/// has been emitted, returns `TransientEmptyStop` to allow transparent
+/// gateway-side retry.
 pub async fn verify_antigravity_stream_preamble<S, E>(
     stream: S,
     chunk_timeout: std::time::Duration,
@@ -927,6 +1030,14 @@ where
     let mut buffered_bytes: Vec<Bytes> = Vec::new();
     let mut frame_buf = BytesMut::new();
     let mut frames_inspected = 0;
+    // R1 attribution accumulators: warm-up signals seen in inspected
+    // non-terminal frames before the terminal empty STOP arrived. Note:
+    // non-empty thought *text* can never accumulate here — any frame carrying
+    // it returns `Ready` via `has_antigravity_content` first. What CAN precede
+    // the terminal STOP is signature-only trailers and usage-metadata frames.
+    let mut skipped_warmup_frames: usize = 0;
+    let mut saw_signature_before = false;
+    let mut had_usage_before = false;
     let max_frames = 16;
     let max_buffered_bytes = 64 * 1024;
     let deadline = tokio::time::Instant::now() + overall_deadline;
@@ -957,19 +1068,45 @@ where
                     }
 
                     if is_antigravity_empty_stop_frame(&val) {
+                        // Attribute the terminal frame shape; `skipped_frames`
+                        // counts warm-up frames seen before it (keepalives are
+                        // not JSON and never reach this path, so this is the
+                        // role-only / usage-only / signature-only count).
+                        let mut shape = describe_antigravity_frame(&val);
+                        shape.skipped_frames = skipped_warmup_frames;
+                        shape.had_usage = shape.had_usage || had_usage_before;
+                        shape.signature_only = shape.signature_only || saw_signature_before;
                         return Ok(AntigravityPreambleResult::TransientEmptyStop {
                             frames: frames_inspected,
+                            shape,
                         });
                     }
 
                     // Only significant frames consume the frame budget.
                     if antigravity_frame_is_significant(&val) {
                         frames_inspected += 1;
+                    } else {
+                        // Non-significant but parsed JSON: warm-up
+                        // (role-only / usage-only / signature-only trailer).
+                        skipped_warmup_frames += 1;
+                        let warm = describe_antigravity_frame(&val);
+                        if warm.signature_only {
+                            saw_signature_before = true;
+                        }
+                        if warm.had_usage {
+                            had_usage_before = true;
+                        }
                     }
                 }
             } else if data == "[DONE]" {
                 return Ok(AntigravityPreambleResult::TransientEmptyStop {
                     frames: frames_inspected,
+                    shape: EmptyStopShape {
+                        signature_only: saw_signature_before,
+                        had_usage: had_usage_before,
+                        skipped_frames: skipped_warmup_frames,
+                        ..Default::default()
+                    },
                 });
             }
 
@@ -1010,6 +1147,12 @@ where
                 // Stream ended at EOF before seeing any content
                 return Ok(AntigravityPreambleResult::TransientEmptyStop {
                     frames: frames_inspected,
+                    shape: EmptyStopShape {
+                        signature_only: saw_signature_before,
+                        had_usage: had_usage_before,
+                        skipped_frames: skipped_warmup_frames,
+                        ..Default::default()
+                    },
                 });
             }
             Err(_) => {
@@ -1220,17 +1363,31 @@ where
             let tool_calls = total_tool_calls.load(std::sync::atomic::Ordering::Relaxed);
             let finish_reason = latest_finish_reason.read().unwrap().clone();
 
+            // R4: thoughts-only (thought_bytes > 0, no visible text/tools) is a
+            // successful reasoning-only completion, not an error — still 200.
+            // Only the true zero (no text, no thought, no tools) warns.
             if text_bytes == 0 && tool_calls == 0 && !transport_errored.load(std::sync::atomic::Ordering::SeqCst) {
-                tracing::warn!(
-                    model = %model,
-                    response_id = %response_id,
-                    total_frames = frames,
-                    thought_bytes = thought_bytes,
-                    text_bytes = 0,
-                    tool_calls = 0,
-                    finish_reason = ?finish_reason,
-                    "Antigravity SSE to OpenAI stream finalized with ZERO content bytes"
-                );
+                if thought_bytes > 0 {
+                    tracing::debug!(
+                        model = %model,
+                        response_id = %response_id,
+                        total_frames = frames,
+                        thought_bytes = thought_bytes,
+                        finish_reason = ?finish_reason,
+                        "Antigravity SSE to OpenAI stream finalized with reasoning-only content (no visible text)"
+                    );
+                } else {
+                    tracing::warn!(
+                        model = %model,
+                        response_id = %response_id,
+                        total_frames = frames,
+                        thought_bytes = 0,
+                        text_bytes = 0,
+                        tool_calls = 0,
+                        finish_reason = ?finish_reason,
+                        "Antigravity SSE to OpenAI stream finalized with ZERO content bytes"
+                    );
+                }
             } else {
                 tracing::debug!(
                     response_id = %response_id,
@@ -1730,7 +1887,10 @@ where
                             }
                             if let Some(parts) = cand.get("content").and_then(|c| c.get("parts")).and_then(|p| p.as_array()) {
                                 for part in parts {
-                                    tracing::info!("Antigravity candidate part: {:?}", part);
+                                    // R1: candidate parts are per-frame noise
+                                    // (a bare thoughtSignature trailer is ~2KB);
+                                    // log at debug with the signature redacted.
+                                    tracing::debug!("Antigravity candidate part: {:?}", redact_part_for_log(part));
                                     let is_thought = part.get("thought").and_then(|t| t.as_bool()).unwrap_or(false);
                                     if let Some(txt) = part.get("text").and_then(|t| t.as_str()) {
                                         if is_thought {
@@ -1781,22 +1941,28 @@ where
 
     let final_finish_reason = finish_reason.unwrap_or_else(|| "STOP".to_string());
 
-    if total_text_bytes == 0 && function_call_count == 0 {
+    // R4: thoughts-only is a SUCCESS carrying reasoning (unified with the
+    // stream preamble, which treats non-empty thought text as content).
+    // Only a zero-text AND zero-thought STOP is an empty completion.
+    // The terminal error string carries `frames=N` so the route-level R3
+    // detector can tell first-frame determinism from a late empty STOP
+    // without re-parsing the stream.
+    if total_text_bytes == 0 && function_call_count == 0 && total_thought_bytes == 0 {
         tracing::warn!(
             total_frames = frame_count,
-            total_thought_bytes,
+            total_thought_bytes = 0,
             total_text_bytes = 0,
             function_call_count,
             finish_reason = %final_finish_reason,
             usage = ?usage_metadata,
-            "Antigravity SSE stream completed with ZERO content bytes! (Model produced only thoughts or hit max_tokens/safety stop)"
+            "Antigravity SSE stream completed with ZERO content bytes! (Model produced no text, no thoughts, hit max_tokens/safety stop)"
         );
         // Transparent Gateway Retry: If upstream terminated with STOP but produced zero
         // text and zero tool calls, this is a transient upstream anomaly (empty completion).
         // Returning an error here triggers the gateway's automatic failover/retry loop,
         // preventing downstream clients (Claude Code, Codex, pi-ai) from receiving an empty completion.
         if final_finish_reason == "STOP" {
-            return Err("Antigravity stream completed with zero text and zero tool calls (transient empty STOP)".to_string());
+            return Err(format!("Antigravity stream completed with zero text and zero tool calls (transient empty STOP) [frames={}]", frame_count));
         }
     } else {
         tracing::debug!(
@@ -3049,6 +3215,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_collect_thoughts_only_stop_succeeds_r4() {
+        // R4: thoughts-only + STOP is a SUCCESS carrying reasoning (unified
+        // with the preamble). Only zero-text AND zero-thought STOP retries.
+        let chunk1 = format!(
+            "data: {}\n\n",
+            serde_json::json!({
+                "response": {
+                    "candidates": [{
+                        "content": {
+                            "role": "model",
+                            "parts": [{"thought": true, "text": "Thinking process only..."}]
+                        },
+                        "finishReason": "STOP"
+                    }]
+                }
+            })
+        );
+        let s = bytes_stream(vec![
+            Bytes::from(chunk1),
+            Bytes::from_static(b"data: [DONE]\n\n"),
+        ]);
+        let json_val = collect_antigravity_sse_to_json(s).await.expect("thoughts-only STOP must succeed (R4)");
+        assert_eq!(json_val["candidates"][0]["finishReason"], "STOP");
+        assert_eq!(
+            json_val["candidates"][0]["content"]["parts"][0]["text"],
+            "Thinking process only..."
+        );
+
+        // Lock translator contract: thoughts-only must yield content: "" and reasoning_content: "Thinking process only..."
+        let chat_resp = ponyllm_protocol::translator::antigravity_to_chat_response(&json_val, "gemini-3.8-flash-high");
+        assert_eq!(chat_resp["choices"][0]["message"]["content"], "");
+        assert_eq!(chat_resp["choices"][0]["message"]["reasoning_content"], "Thinking process only...");
+        assert_eq!(chat_resp["choices"][0]["finish_reason"], "stop");
+    }
+
+    #[test]
+    fn test_empty_stop_frame_count_parses_trailer() {
+        // R3: the [frames=N] trailer drives the deterministic detector.
+        assert_eq!(
+            empty_stop_frame_count("Antigravity stream completed with zero text and zero tool calls (transient empty STOP) [frames=0]"),
+            Some(0)
+        );
+        assert_eq!(
+            empty_stop_frame_count("Antigravity stream completed with zero text and zero tool calls (transient empty STOP) [frames=12]"),
+            Some(12)
+        );
+        // Legacy strings without the trailer: None => purely transient.
+        assert_eq!(
+            empty_stop_frame_count("Antigravity stream completed with zero text and zero tool calls (transient empty STOP)"),
+            None
+        );
+        assert_eq!(empty_stop_frame_count("some other error"), None);
+    }
+
+    #[tokio::test]
     async fn test_collect_antigravity_sse_zero_content_stop_returns_err() {
         // When upstream sends a STOP finishReason with zero text and zero tool calls,
         // collect_antigravity_sse_to_json returns an Err to trigger transparent gateway-side retry.
@@ -3549,6 +3770,103 @@ mod tests {
                 d
             );
         }
+    }
+
+    #[tokio::test]
+    async fn test_empty_stop_shape_signature_only_trailer() {
+        // R1: the 9-27 signature+empty-text trailer frame must attribute as
+        // signature_only with STOP finish reason.
+        let sig = "EuEPCt4PAWkUfRMe4SUd9Ovje+TUqfLoMnsCrqfB9pRCtFqiiDYogBZeYoFeqmEKDiq";
+        let trailer = Bytes::from(format!(
+            "data: {}\n\n",
+            serde_json::json!({
+                "response": {
+                    "candidates": [{
+                        "content": {
+                            "role": "model",
+                            "parts": [{"thoughtSignature": sig, "text": ""}]
+                        },
+                        "finishReason": "STOP"
+                    }]
+                }
+            })
+        ));
+        let s = bytes_stream(vec![trailer]);
+        let res = verify_antigravity_stream_preamble(s, std::time::Duration::from_secs(1))
+            .await
+            .expect("verification should succeed");
+        match res {
+            AntigravityPreambleResult::TransientEmptyStop { shape, .. } => {
+                assert_eq!(shape.finish_reason.as_deref(), Some("STOP"));
+                assert!(shape.signature_only, "bare signature trailer must flag signature_only");
+                assert_eq!(shape.skipped_frames, 0);
+            }
+            _ => panic!("Expected TransientEmptyStop"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_empty_stop_shape_warmup_frames_accumulation() {
+        // Multi-frame warmup: 1 role-only + 1 usage-only followed by signature trailer + STOP
+        let role_only = Bytes::from(format!(
+            "data: {}\n\n",
+            serde_json::json!({
+                "response": {
+                    "candidates": [{
+                        "content": { "role": "model", "parts": [] }
+                    }]
+                }
+            })
+        ));
+        let usage_only = Bytes::from(format!(
+            "data: {}\n\n",
+            serde_json::json!({
+                "response": {
+                    "usageMetadata": { "promptTokenCount": 10 }
+                }
+            })
+        ));
+        let sig_stop = Bytes::from(format!(
+            "data: {}\n\n",
+            serde_json::json!({
+                "response": {
+                    "candidates": [{
+                        "content": {
+                            "role": "model",
+                            "parts": [{"thoughtSignature": "xyz123", "text": ""}]
+                        },
+                        "finishReason": "STOP"
+                    }]
+                }
+            })
+        ));
+        let s = bytes_stream(vec![role_only, usage_only, sig_stop]);
+        let res = verify_antigravity_stream_preamble(s, std::time::Duration::from_secs(1))
+            .await
+            .expect("verification should succeed");
+        match res {
+            AntigravityPreambleResult::TransientEmptyStop { shape, .. } => {
+                assert_eq!(shape.finish_reason.as_deref(), Some("STOP"));
+                assert!(shape.signature_only);
+                assert!(shape.had_usage, "must record usage seen during warmup");
+                assert_eq!(shape.skipped_frames, 2, "must accumulate 2 warmup frames");
+            }
+            _ => panic!("Expected TransientEmptyStop"),
+        }
+    }
+
+    #[test]
+    fn test_redact_part_for_log_truncates_signature() {
+        // R1: ~2KB thoughtSignature must not reach logs verbatim.
+        let long_sig = "x".repeat(2048);
+        let part = serde_json::json!({"thoughtSignature": long_sig, "text": ""});
+        let redacted = redact_part_for_log(&part);
+        let sig = redacted.get("thoughtSignature").and_then(|v| v.as_str()).unwrap();
+        assert!(sig.len() < 64, "signature must be truncated, got {} chars", sig.len());
+        assert!(sig.contains("2048"), "truncated form must keep original length, got {sig}");
+        // Parts without a signature pass through untouched.
+        let plain = serde_json::json!({"text": "hello"});
+        assert_eq!(redact_part_for_log(&plain), plain);
     }
 
     #[test]

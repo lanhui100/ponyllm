@@ -17,7 +17,7 @@ use crate::routes::models::ParsedRequestModel;
 use crate::state::AppState;
 use crate::streaming::{
     anthropic_sse_to_responses_stream, antigravity_sse_to_openai_stream,
-    chat_sse_to_responses_stream, collect_antigravity_sse_to_json, empty_stop_retry_delay,
+    chat_sse_to_responses_stream, collect_antigravity_sse_to_json,
     extract_usage_tokens, is_transient_empty_stop_error, passthrough_sse, stall_guard,
     wrap_telemetry_stream, StreamFailureContext, DEFAULT_TAIL_STALL_IDLE, MIN_EMPTY_STOP_ATTEMPTS,
 };
@@ -345,8 +345,9 @@ pub async fn handle_responses(
             .with_opencode_zen(is_opencode_zen_target(&provider_name, &target_url))
             .with_rate_limits(rate_limits)
             .with_ttfb_timeout(ttfb_timeout)
-            .with_event_sink(sink_ctx.clone(), state.event_sink(sink_ctx));
+            .with_event_sink(sink_ctx.clone(), state.event_sink(sink_ctx.clone()));
 
+        let empty_stop_tried_keys: Vec<String> = Vec::new();
         // Handle streaming request: pass through upstream SSE unchanged
         if is_streaming {
             match executor.execute_stream_request_with_timing_and_key(&target_url, &req_val).await {
@@ -431,7 +432,7 @@ pub async fn handle_responses(
                 Err(err) => {
                     tracing::warn!("Provider '{}' responses stream failed ({}). Attempting fallback...", provider_name, err);
                     last_kind = err.kind();
-                    last_pool_exhausted = matches!(err, CoreError::NoAvailableKey(_));
+                    last_pool_exhausted = matches!(err, CoreError::NoAvailableKey(_)) && empty_stop_tried_keys.is_empty();
                     last_retry_after = crate::extractors::retry_after_secs(&last_kind, retry_unlock_hint(&last_kind, &pool, rate_limits.as_ref()));
                     last_error = err.to_string();
                     continue;
@@ -439,30 +440,73 @@ pub async fn handle_responses(
             }
         }
 
+        let mut collect_tried_keys: Vec<String> = Vec::new();
         let (upstream_result, winning_key_id) = if target.upstream_protocol == ponyllm_core::pool::UpstreamProtocol::Antigravity {
             let max_empty_stop_attempts = executor
                 .max_retries
                 .max(pool.total_key_count())
                 .max(MIN_EMPTY_STOP_ATTEMPTS);
+            // R2/R3: same policy as chat.rs (fresh key + fresh requestId,
+            // deterministic early convergence).
             let mut collect_attempt = 0usize;
+            let mut collect_req_val = req_val.clone();
+            let mut collect_consecutive_first_frame: usize = 0;
             loop {
                 collect_attempt += 1;
-                match executor.execute_stream_request_with_timing_and_key(&target_url, &req_val).await {
+                let collect_executor = UpstreamExecutor::with_client(
+                    pool.clone(),
+                    executor.client.clone(),
+                    executor.max_retries,
+                )
+                .with_downstream_headers(&headers)
+                .with_opencode_zen(is_opencode_zen_target(&provider_name, &target_url))
+                .with_rate_limits(rate_limits)
+                .with_ttfb_timeout(ttfb_timeout)
+                .with_excluded_keys(&collect_tried_keys)
+                .with_event_sink(sink_ctx.clone(), state.event_sink(sink_ctx.clone()));
+                match collect_executor.execute_stream_request_with_timing_and_key(&target_url, &collect_req_val).await {
                     Ok((resp, _instant, kid)) => {
+                        if !collect_tried_keys.iter().any(|k| k == &kid) {
+                            collect_tried_keys.push(kid.clone());
+                        }
                         let raw_stream = resp.bytes_stream();
                         match collect_antigravity_sse_to_json(raw_stream).await {
                             Ok(v) => break (Ok(v), Some(kid)),
-                            Err(e) if is_transient_empty_stop_error(&e) && collect_attempt < max_empty_stop_attempts => {
-                                let delay = empty_stop_retry_delay(collect_attempt);
-                                tracing::warn!(
-                                    provider = %provider_name,
-                                    error = %e,
-                                    collect_attempt,
-                                    max_empty_stop_attempts,
-                                    backoff_ms = delay.as_millis() as u64,
-                                    "Non-stream Antigravity collect hit transient empty STOP in Responses route; backing off and retrying"
-                                );
-                                tokio::time::sleep(delay).await;
+                            Err(e) if is_transient_empty_stop_error(&e) => {
+                                match crate::routes::chat::collect_empty_stop_policy(&e, collect_attempt, max_empty_stop_attempts, &mut collect_consecutive_first_frame, &target.physical_model) {
+                                    Some(crate::routes::chat::CollectRetryAction::Retry { delay }) => {
+                                        tracing::warn!(
+                                            provider = %provider_name,
+                                            key_id = %kid,
+                                            error = %e,
+                                            collect_attempt,
+                                            max_empty_stop_attempts,
+                                            backoff_ms = delay.as_millis() as u64,
+                                            "Non-stream Antigravity collect hit transient empty STOP in Responses route; backing off and retrying"
+                                        );
+                                        tokio::time::sleep(delay).await;
+                                        ponyllm_protocol::translator::refresh_antigravity_request_ids(&mut collect_req_val);
+                                    }
+                                    Some(crate::routes::chat::CollectRetryAction::Deterministic { message }) => {
+                                        tracing::warn!(
+                                            provider = %provider_name,
+                                            collect_attempt,
+                                            collect_consecutive_first_frame,
+                                            "Non-stream Antigravity collect hit deterministic empty STOP in Responses route; converging early to trigger failover"
+                                        );
+                                        last_kind = ponyllm_core::error::GatewayErrorKind::UpstreamUnavailable;
+                                        last_error = message;
+                                        break (Err(CoreError::Internal(last_error.clone())), Some(kid));
+                                    }
+                                    None => {
+                                        tracing::warn!(
+                                            provider = %provider_name,
+                                            error = %e,
+                                            "Antigravity stream collection failed in Responses route"
+                                        );
+                                        break (Err(CoreError::Internal(format!("Antigravity stream collect failed: {}", e))), Some(kid));
+                                    }
+                                }
                             }
                             Err(e) => {
                                 tracing::warn!(
@@ -527,8 +571,8 @@ pub async fn handle_responses(
             }
         };
 
-        match (upstream_result, winning_key_id) {
-            (Ok(resp_val), winning_key_id) => {
+            match (upstream_result, winning_key_id) {
+                (Ok(resp_val), winning_key_id) => {
                 let mut resp_val = match target.upstream_protocol {
                     ponyllm_core::pool::UpstreamProtocol::Chat => {
                         let chat_resp: ponyllm_protocol::openai::chat::ChatCompletionResponse =
@@ -651,7 +695,7 @@ pub async fn handle_responses(
             (Err(err), _) => {
                 tracing::warn!("Provider '{}' responses request failed ({}). Attempting fallback...", provider_name, err);
                 last_kind = err.kind();
-                last_pool_exhausted = matches!(err, CoreError::NoAvailableKey(_));
+                last_pool_exhausted = matches!(err, CoreError::NoAvailableKey(_)) && collect_tried_keys.is_empty();
                 last_retry_after = crate::extractors::retry_after_secs(&last_kind, retry_unlock_hint(&last_kind, &pool, rate_limits.as_ref()));
                 last_error = err.to_string();
                 continue;

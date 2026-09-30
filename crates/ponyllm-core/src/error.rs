@@ -137,7 +137,8 @@ impl CoreError {
             // Mid-stream SSE collect failure after headers succeeded: the
             // request reached the upstream, so this is a transport/server
             // fault (failover-eligible), not an internal bug (B4).
-            CoreError::Internal(msg) if msg.starts_with("Antigravity stream collect failed") => {
+            CoreError::Internal(msg) if msg.starts_with("Antigravity stream collect failed")
+                || msg.starts_with("Antigravity deterministic empty STOP") => {
                 GatewayErrorKind::UpstreamUnavailable
             }
             _ => GatewayErrorKind::Internal,
