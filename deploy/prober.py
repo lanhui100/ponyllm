@@ -13,6 +13,9 @@ API_KEY = os.environ.get("PROBE_API_KEY", "")
 MGMT_TOKEN = os.environ.get("PROBE_MGMT_TOKEN", "")
 MODEL = os.environ.get("PROBE_MODEL", "deepseek-flash")
 PROBE_INTERVAL = int(os.environ.get("PROBE_INTERVAL_SECONDS", "30"))
+# 上游首 token 可达 10~40s（opencode-zen/pproxy 路径实测），10s 硬超时必误报；
+# 默认对齐网关 90s TTFB 预算，可用 PROBE_TIMEOUT 覆盖。
+PROBE_TIMEOUT = float(os.environ.get("PROBE_TIMEOUT", "90"))
 
 state = {
     "probe_success": 1,
@@ -61,7 +64,7 @@ def run_probe():
     dur = 0.0
     
     try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        with urllib.request.urlopen(req, timeout=PROBE_TIMEOUT) as resp:
             dur = time.time() - start
             body = resp.read().decode("utf-8")
             data = json.loads(body)

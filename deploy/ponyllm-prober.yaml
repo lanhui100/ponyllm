@@ -45,6 +45,14 @@ spec:
                   name: ponyllm-probe-credentials
                   key: mgmt-token
                   optional: true
+            # 2026-09-30：探针目标从 deepseek-flash（直连）改为 mimo-v2.5-free
+            # （opencode-zen / pproxy 出海链路），覆盖此前 muse/gemini 那类路径。
+            # PROBE_TIMEOUT=90 对齐网关 90s TTFB 预算（opencode-zen 首 token
+            # 实测 10~40s，10s 默认会误报）。
+            - name: PROBE_MODEL
+              value: mimo-v2.5-free
+            - name: PROBE_TIMEOUT
+              value: "90"
           command: ["python3", "/opt/prober/prober.py"]
           ports:
             - containerPort: 9115
