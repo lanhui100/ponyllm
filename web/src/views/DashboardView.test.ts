@@ -4,6 +4,7 @@ import { createApp, nextTick } from 'vue';
 import { createPinia, setActivePinia } from 'pinia';
 import { createRouter, createMemoryHistory } from 'vue-router';
 import DashboardView from './DashboardView.vue';
+import { formatChartTimestamp } from '../utils/format';
 
 describe('DashboardView Full Feature Integration', () => {
   let container: HTMLDivElement;
@@ -171,19 +172,10 @@ describe('DashboardView Full Feature Integration', () => {
     const monthDay = `${(d.getMonth() + 1).toString().padStart(2, '0')}/${d.getDate().toString().padStart(2, '0')}`;
     const hoursMinutes = `${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}`;
 
-    // Verify 7d only outputs MM/DD without time
-    function formatTimestamp(ts: number, range: string): string {
-      const d = new Date(ts);
-      if (range === '30d' || range === '7d') {
-        return `${(d.getMonth() + 1).toString().padStart(2, '0')}/${d.getDate().toString().padStart(2, '0')}`;
-      }
-      return `${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}`;
-    }
-
-    expect(formatTimestamp(ts, '7d')).toBe(monthDay);
-    expect(formatTimestamp(ts, '7d')).not.toContain(':');
-    expect(formatTimestamp(ts, '30d')).toBe(monthDay);
-    expect(formatTimestamp(ts, '24h')).toBe(hoursMinutes);
+    expect(formatChartTimestamp(ts, '7d')).toBe(monthDay);
+    expect(formatChartTimestamp(ts, '7d')).not.toContain(':');
+    expect(formatChartTimestamp(ts, '30d')).toBe(monthDay);
+    expect(formatChartTimestamp(ts, '24h')).toBe(hoursMinutes);
   });
 
   it('renders AntigravityPoolCard when antigravity keys exist', async () => {
@@ -237,12 +229,75 @@ describe('DashboardView Full Feature Integration', () => {
     expect(container.textContent).toContain('Antigravity 算力池');
     expect(container.textContent).toContain('1/1 账号就绪');
 
-    // Verify that key test was triggered on mounted initialization
+    // 初始化仅对"无新鲜缓存" key 补测一次（防风控），而非全量并发探测
     const testKeyCalls = (globalThis.fetch as any).mock.calls.filter((c: any[]) =>
       c[0].includes('/api/admin/keys/anti-key-1/test')
     );
-    expect(testKeyCalls.length).toBeGreaterThanOrEqual(1);
+    expect(testKeyCalls.length).toBe(1);
 
     app.unmount();
+  });
+
+  it('serializes missing quota probes with 800ms intervals when multiple keys lack fresh cache', async () => {
+    vi.useFakeTimers();
+    const mockOverview = {
+      version: '0.2.30',
+      config_version: 1,
+      admin_write_enabled: true,
+      auth_enabled: false,
+    };
+    const mockProviders = [{ name: 'antigravity', default_protocol: 'antigravity', base_url: 'http://localhost' }];
+    const mockKeys = [
+      { id: 'anti-key-seq-1', provider: 'antigravity', state: 'active', priority: 1, weight: 10 },
+      { id: 'anti-key-seq-2', provider: 'antigravity', state: 'active', priority: 2, weight: 10 },
+    ];
+
+    const probeOrder: string[] = [];
+    globalThis.fetch = vi.fn().mockImplementation((url: string) => {
+      if (url.includes('/api/admin/overview')) {
+        return Promise.resolve(new Response(JSON.stringify(mockOverview), { status: 200 }));
+      }
+      if (url.includes('/api/admin/providers')) {
+        return Promise.resolve(new Response(JSON.stringify(mockProviders), { status: 200 }));
+      }
+      if (url.includes('/api/admin/models')) {
+        return Promise.resolve(new Response(JSON.stringify([]), { status: 200 }));
+      }
+      if (url.includes('/api/admin/keys/anti-key-seq-1/test')) {
+        probeOrder.push('anti-key-seq-1');
+        return Promise.resolve(new Response(JSON.stringify({ success: true, latency_ms: 10, message: 'ok' }), { status: 200 }));
+      }
+      if (url.includes('/api/admin/keys/anti-key-seq-2/test')) {
+        probeOrder.push('anti-key-seq-2');
+        return Promise.resolve(new Response(JSON.stringify({ success: true, latency_ms: 10, message: 'ok' }), { status: 200 }));
+      }
+      if (url.includes('/api/admin/keys')) {
+        return Promise.resolve(new Response(JSON.stringify(mockKeys), { status: 200 }));
+      }
+      if (url.includes('/api/admin/strategy')) {
+        return Promise.resolve(new Response(JSON.stringify({ strategy: 'economy', config_version: 1 }), { status: 200 }));
+      }
+      if (url.includes('/health')) {
+        return Promise.resolve(new Response(JSON.stringify({ status: 'ok' }), { status: 200 }));
+      }
+      return Promise.resolve(new Response(JSON.stringify({}), { status: 200 }));
+    });
+
+    await router.push('/dashboard');
+    const app = createApp(DashboardView);
+    app.use(router);
+    app.mount(container);
+
+    // Initial mount ticks
+    await vi.advanceTimersByTimeAsync(50);
+    // Key 1 should be probed first
+    expect(probeOrder).toEqual(['anti-key-seq-1']);
+
+    // Advance 800ms: Key 2 is probed serially
+    await vi.advanceTimersByTimeAsync(850);
+    expect(probeOrder).toEqual(['anti-key-seq-1', 'anti-key-seq-2']);
+
+    app.unmount();
+    vi.useRealTimers();
   });
 });

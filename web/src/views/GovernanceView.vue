@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { useAdminConfig } from '../composables/useAdminConfig';
-import { onStopPolling } from '../router';
 import NavBar from '../components/NavBar.vue';
 import ProviderCard from '../components/governance/ProviderCard.vue';
 import StrategySection from '../components/governance/StrategySection.vue';
@@ -496,15 +495,15 @@ async function handleRefresh() {
   await fetchAll().catch(() => {});
 }
 
-// 自动周期轻量轮询 (5s)，在页面可见且无表单输入/弹窗占用时静默同步后端连接池
-let syncTimer: ReturnType<typeof setInterval> | null = null;
-let unregisterStopPolling: (() => void) | null = null;
+// 冷却到期刷新：无自动轮询，仅在本地倒计时归零时单次对齐后端（30s 防抖，
+// 避免多 provider 计时器惊群；页面静置不产生任何请求，降低上游风控面）。
+let lastCooldownSyncAt = 0;
 
-function canAutoSync(): boolean {
+function canManualSync(): boolean {
   if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
     return false;
   }
-  // 如果用户正在新建服务商或执行批量拨测，暂缓静默同步
+  // 用户正在新建服务商或执行批量拨测时，暂缓冷却对齐，避免打断表单/探测
   if (isAddingProvider.value || batchTesting.value.running) {
     return false;
   }
@@ -512,33 +511,19 @@ function canAutoSync(): boolean {
 }
 
 function handleCooldownExpired() {
-  if (canAutoSync()) {
-    void refreshSilent();
-  }
+  if (!canManualSync()) return;
+  const now = Date.now();
+  if (now - lastCooldownSyncAt < 30000) return;
+  lastCooldownSyncAt = now;
+  void refreshSilent();
 }
 
 onMounted(() => {
-  syncTimer = setInterval(() => {
-    if (canAutoSync()) {
-      void refreshSilent();
-    }
-  }, 5000);
-
-  unregisterStopPolling = onStopPolling(() => {
-    if (syncTimer) {
-      clearInterval(syncTimer);
-      syncTimer = null;
-    }
-  });
+  // 无周期轮询：状态同步仅由用户手动刷新、写操作后 fetchAll、冷却到期单次对齐触发。
 });
 
 onUnmounted(() => {
   cleanupOAuthSession();
-  if (syncTimer) {
-    clearInterval(syncTimer);
-    syncTimer = null;
-  }
-  unregisterStopPolling?.();
 });
 </script>
 

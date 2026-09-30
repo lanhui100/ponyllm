@@ -20,6 +20,7 @@ import KeySubSection from './KeySubSection.vue';
 import ModelSubSection from './ModelSubSection.vue';
 import { formatStrategyLabel } from '../../utils/format';
 import { toast } from '../../composables/useToast';
+import { isAntigravityScope } from '../../utils/antigravityQuota';
 
 const props = defineProps<{
   provider: ProviderView;
@@ -56,10 +57,7 @@ const emit = defineEmits<{
 const expanded = ref(props.defaultExpanded ?? true);
 
 const isAntigravity = computed(() => {
-  return (
-    props.provider.default_protocol === 'antigravity' ||
-    props.provider.name.toLowerCase().includes('antigravity')
-  );
+  return isAntigravityScope(props.provider.name, props.provider.default_protocol);
 });
 
 const ANTIGRAVITY_PROTOCOL_OPTIONS = [
@@ -434,6 +432,7 @@ async function handleDeleteProvider() {
         <div class="pt-1">
           <KeySubSection
             :provider-name="provider.name"
+            :provider-default-protocol="provider.default_protocol"
             :keys="keys"
             :admin-write-enabled="adminWriteEnabled"
             :key-test-results="keyTestResults"

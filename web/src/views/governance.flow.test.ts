@@ -694,7 +694,7 @@ describe('GovernanceView End-to-End User Flow (WEB-04)', () => {
     container.remove();
   });
 
-  it('Flow 7: Background auto-sync periodically invokes refreshSilent without disturbing UI', async () => {
+  it('Flow 7: No background auto-sync polling (风控：页面静置不产生请求)', async () => {
     vi.useFakeTimers();
     const container = document.createElement('div');
     document.body.appendChild(container);
@@ -723,10 +723,60 @@ describe('GovernanceView End-to-End User Flow (WEB-04)', () => {
     await nextTick();
     expect(overviewSpy).toHaveBeenCalledTimes(1);
 
-    // Advance by 5s: triggers auto-sync
-    vi.advanceTimersByTime(5000);
+    // 前进 60s：无任何自动轮询，overview 不再被调用（冷却到期走本地倒计时+30s防抖单次对齐）
+    vi.advanceTimersByTime(60000);
     await nextTick();
 
+    expect(overviewSpy).toHaveBeenCalledTimes(1);
+
+    app.unmount();
+    container.remove();
+    vi.useRealTimers();
+  });
+
+  it('Flow 8: Cooldown-expired event triggers refreshSilent with 30s debouncing guard', async () => {
+    vi.useFakeTimers();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+
+    const coolingKey: KeyView = {
+      id: 'ag-cool-1',
+      provider: 'antigravity',
+      masked_key: 'ya29.***',
+      state: 'cooling_down',
+      priority: 1,
+      weight: 10,
+      cooldown_remaining_secs: 1,
+      cooldown_reset_at: new Date(Date.now() + 1000).toISOString(),
+    };
+
+    const overviewSpy = vi.spyOn(adminApi, 'getOverview').mockReturnValue({
+      send: () => Promise.resolve(mockOverviewWritable),
+    } as any);
+    vi.spyOn(adminApi, 'getProviders').mockReturnValue({
+      send: () => Promise.resolve([{ name: 'antigravity', default_protocol: 'antigravity' } as any]),
+    } as any);
+    vi.spyOn(adminApi, 'getModels').mockReturnValue({ send: () => Promise.resolve([]) } as any);
+    vi.spyOn(adminApi, 'getKeys').mockReturnValue({ send: () => Promise.resolve([coolingKey]) } as any);
+    vi.spyOn(adminApi, 'getStrategy').mockReturnValue({ send: () => Promise.resolve(mockStrategy) } as any);
+
+    const app = createApp(GovernanceView);
+    app.use(router);
+    app.use(pinia);
+    app.mount(container);
+    await vi.advanceTimersByTimeAsync(50);
+    await nextTick();
+
+    expect(overviewSpy).toHaveBeenCalledTimes(1);
+
+    // 1s reaches 0: triggers cooldown-expired -> refreshSilent (calls overview 2nd time)
+    await vi.advanceTimersByTimeAsync(1050);
+    await nextTick();
+    expect(overviewSpy).toHaveBeenCalledTimes(2);
+
+    // Another event within 30s window (e.g. at 5s) must be throttled by 30s guard
+    await vi.advanceTimersByTimeAsync(5000);
+    await nextTick();
     expect(overviewSpy).toHaveBeenCalledTimes(2);
 
     app.unmount();

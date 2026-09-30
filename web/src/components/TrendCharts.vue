@@ -8,6 +8,7 @@ import Icons from './ui/Icons.vue';
 import UiTooltip from './ui/UiTooltip.vue';
 import type { TelemetryPoint } from '../composables/useTelemetry';
 import type { TimeseriesHistoryResponse } from '../types/telemetry';
+import { formatChartTimestamp } from '../utils/format';
 
 echarts.use([LineChart, BarChart, GridComponent, TooltipComponent, LegendComponent, CanvasRenderer]);
 
@@ -56,13 +57,7 @@ let tokenChart: echarts.ECharts | null = null;
 let latencyChart: echarts.ECharts | null = null;
 let errorChart: echarts.ECharts | null = null;
 
-function formatTimestamp(ts: number, range: string): string {
-  const d = new Date(ts);
-  if (range === '30d' || range === '7d') {
-    return `${(d.getMonth() + 1).toString().padStart(2, '0')}/${d.getDate().toString().padStart(2, '0')}`;
-  }
-  return `${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}`;
-}
+const formatTimestamp = formatChartTimestamp;
 
 function getXAxisLabelConfig() {
   const r = props.range;

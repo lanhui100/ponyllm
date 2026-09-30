@@ -1,10 +1,14 @@
 // @vitest-environment happy-dom
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { createApp, nextTick } from 'vue';
 import ProviderCard from './ProviderCard.vue';
+import { markQuotaProbed, clearQuotaProbedAt } from '../../composables/useAdminConfig';
 import type { ProviderView, ModelView, KeyView } from '../../types/admin';
 
 describe('ProviderCard UI and Phase 2 Requirements', () => {
+  beforeEach(() => {
+    clearQuotaProbedAt();
+  });
   const mockProvider: ProviderView = {
     name: 'test-provider',
     base_url: 'https://sensitive-tokens-url.ponyjob.top/v1?token=secret123',
@@ -129,8 +133,7 @@ describe('ProviderCard UI and Phase 2 Requirements', () => {
       'ag-key-1': {
         success: true,
         latency_ms: 120,
-        message: 'probe ok',
-        quota_groups: [
+        message: 'probe ok',        quota_groups: [
           {
             display_name: 'Gemini Models',
             description: 'Gemini 2.5 & 3 series',
@@ -171,6 +174,7 @@ describe('ProviderCard UI and Phase 2 Requirements', () => {
         testedKeyId = id;
       },
     });
+    markQuotaProbed('ag-key-1');
     app.mount(container);
     await nextTick();
 
@@ -276,6 +280,7 @@ describe('ProviderCard UI and Phase 2 Requirements', () => {
       testingKeyIds: new Set<string>(),
       defaultExpanded: true,
     });
+    markQuotaProbed('ag-key-zero');
     app.mount(container);
     await nextTick();
 
@@ -289,6 +294,8 @@ describe('ProviderCard UI and Phase 2 Requirements', () => {
     expect(geminiCapsule).not.toBeNull();
     expect(geminiCapsule?.textContent).toContain('Gemini');
     expect(geminiCapsule?.textContent).toContain('0%');
+    // 周缺席不再伪装 100%：0% 出现一次（仅 5h），周显示"--"
+    expect(geminiCapsule?.textContent).toContain('--');
 
     // Claude 胶囊已移除：仅展示 Gemini
     expect(container.querySelector('[data-testid="quota-capsule-claude"]')).toBeNull();

@@ -1,7 +1,14 @@
 // @vitest-environment happy-dom
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { createPinia, setActivePinia } from 'pinia';
-import { useAdminConfig } from './useAdminConfig';
+import {
+  useAdminConfig,
+  isQuotaResultFresh,
+  markQuotaProbed,
+  clearQuotaProbedAt,
+  ANTIGRAVITY_QUOTA_CACHE_TTL_MS,
+  getPersistedQuotaConfigVersion,
+} from './useAdminConfig';
 import { adminApi } from '../lib/adminApi';
 import { PreconditionFailedError } from '../lib/alova';
 import type {
@@ -292,11 +299,13 @@ describe('useAdminConfig composable (WEB-04 Governance & Admin CUD)', () => {
     expect(config.keyTestResults.value['k1'].success).toBe(true);
     expect(config.keyTestResults.value['k2'].success).toBe(false);
 
-    // Verify localStorage persistence
+    // Verify localStorage persistence (envelope: { version, results, probedAt, savedAt })
     const persistedRaw = window.localStorage.getItem('ponyllm_antigravity_quota_results_v1');
     expect(persistedRaw).not.toBeNull();
     const persisted = JSON.parse(persistedRaw!);
-    expect(persisted['k1']).toEqual(mockKey1Result);
+    expect(persisted.results['k1']).toEqual(mockKey1Result);
+    expect(persisted.probedAt['k1']).toBeGreaterThan(0);
+    expect(getPersistedQuotaConfigVersion()).toBeNull();
 
     // New composable instance should restore from localStorage
     const newConfig = useAdminConfig({ autoFetch: false });
@@ -364,5 +373,20 @@ describe('useAdminConfig composable (WEB-04 Governance & Admin CUD)', () => {
     expect(config.configVersion.value).toBe(2);
     expect(config.providers.value).toHaveLength(1);
     expect(config.providers.value[0].name).toBe('antigravity');
+  });
+
+  it('enforces 6-hour TTL expiration for cached quota results', () => {
+    clearQuotaProbedAt();
+    const keyId = 'ag-ttl-test-key';
+    expect(isQuotaResultFresh(keyId)).toBe(false);
+
+    const baseNow = 1000000;
+    markQuotaProbed(keyId, baseNow);
+    // Within TTL (e.g. 1 hour later)
+    expect(isQuotaResultFresh(keyId, baseNow + 3600 * 1000)).toBe(true);
+    // Right at threshold
+    expect(isQuotaResultFresh(keyId, baseNow + ANTIGRAVITY_QUOTA_CACHE_TTL_MS - 1)).toBe(true);
+    // Expired (TTL + 1ms)
+    expect(isQuotaResultFresh(keyId, baseNow + ANTIGRAVITY_QUOTA_CACHE_TTL_MS + 1)).toBe(false);
   });
 });

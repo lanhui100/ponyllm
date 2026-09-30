@@ -27,6 +27,29 @@ export interface UseAdminConfigOptions {
 }
 
 export const ANTIGRAVITY_QUOTA_STORAGE_KEY = 'ponyllm_antigravity_quota_results_v1';
+/** 配额探测缓存 TTL：6h。超时缓存不再用于渲染水位，只保留“曾探测过”的时间戳语义。 */
+export const ANTIGRAVITY_QUOTA_CACHE_TTL_MS = 6 * 3600 * 1000;
+
+interface PersistedQuotaEnvelope {
+  version: number;
+  configVersion?: number;
+  results: Record<string, KeyTestView>;
+  probedAt: Record<string, number>;
+  savedAt: number;
+}
+
+let persistedConfigVersion: number | null = null;
+
+export function getPersistedQuotaConfigVersion(): number | null {
+  return persistedConfigVersion;
+}
+
+/** 每个 key 最近一次成功/失败探测的时间戳（内存态，不持久化也可工作）。 */
+const quotaProbedAt = new Map<string, number>();
+
+export function getQuotaProbedAt(id: string): number | null {
+  return quotaProbedAt.get(id) ?? null;
+}
 
 function loadPersistedQuotaResults(): Record<string, KeyTestView> {
   if (typeof window === 'undefined' || !window.localStorage) {
@@ -36,9 +59,24 @@ function loadPersistedQuotaResults(): Record<string, KeyTestView> {
     const raw = window.localStorage.getItem(ANTIGRAVITY_QUOTA_STORAGE_KEY);
     if (!raw) return {};
     const data = JSON.parse(raw);
-    if (data && typeof data === 'object' && !Array.isArray(data)) {
+    // 兼容旧格式（裸 map）：视为已过期，仅保留结构，渲染层按 TTL 判为未知。
+    if (data && typeof data === 'object' && !Array.isArray(data) && !('results' in data)) {
       const valid: Record<string, KeyTestView> = {};
       for (const [k, v] of Object.entries(data)) {
+        if (v && typeof v === 'object' && ('quota' in v || 'quota_groups' in v || 'success' in v)) {
+          valid[k] = v as KeyTestView;
+        }
+      }
+      return valid;
+    }
+    if (data && typeof data === 'object' && !Array.isArray(data) && (data as PersistedQuotaEnvelope).results) {
+      const env = data as PersistedQuotaEnvelope;
+      persistedConfigVersion = env.configVersion ?? null;
+      for (const [k, ts] of Object.entries(env.probedAt || {})) {
+        quotaProbedAt.set(k, ts);
+      }
+      const valid: Record<string, KeyTestView> = {};
+      for (const [k, v] of Object.entries(env.results)) {
         if (v && typeof v === 'object' && ('quota' in v || 'quota_groups' in v || 'success' in v)) {
           valid[k] = v as KeyTestView;
         }
@@ -51,15 +89,46 @@ function loadPersistedQuotaResults(): Record<string, KeyTestView> {
   return {};
 }
 
-function savePersistedQuotaResults(results: Record<string, KeyTestView>) {
+function savePersistedQuotaResults(results: Record<string, KeyTestView>, currentConfigVersion?: number) {
   if (typeof window === 'undefined' || !window.localStorage) {
     return;
   }
   try {
-    window.localStorage.setItem(ANTIGRAVITY_QUOTA_STORAGE_KEY, JSON.stringify(results));
+    const probedAt: Record<string, number> = {};
+    for (const [k, ts] of quotaProbedAt.entries()) {
+      probedAt[k] = ts;
+    }
+    const env: PersistedQuotaEnvelope = {
+      version: 1,
+      configVersion: currentConfigVersion ?? persistedConfigVersion ?? undefined,
+      results,
+      probedAt,
+      savedAt: Date.now(),
+    };
+    if (env.configVersion != null) {
+      persistedConfigVersion = env.configVersion;
+    }
+    window.localStorage.setItem(ANTIGRAVITY_QUOTA_STORAGE_KEY, JSON.stringify(env));
   } catch (e) {
     console.warn('[PonyLLM] failed to save persisted quota results:', e);
   }
+}
+
+/** 探测结果是否新鲜（TTL 内）。过期结果不得用于水位渲染，只能显示占位。 */
+export function isQuotaResultFresh(id: string, now: number = Date.now()): boolean {
+  const ts = quotaProbedAt.get(id);
+  if (ts == null) return false;
+  return now - ts < ANTIGRAVITY_QUOTA_CACHE_TTL_MS;
+}
+
+/** 测试/外部调用者可手动标记某 key 的探测时间（单测 seeding 用）。 */
+export function markQuotaProbed(id: string, now: number = Date.now()) {
+  quotaProbedAt.set(id, now);
+}
+
+/** 单测隔离：清空内存探测时间戳（localStorage 由各测试自行清理）。 */
+export function clearQuotaProbedAt() {
+  quotaProbedAt.clear();
 }
 
 export function useAdminConfig(options: UseAdminConfigOptions = {}) {
@@ -125,6 +194,20 @@ export function useAdminConfig(options: UseAdminConfigOptions = {}) {
       strategy.value = st.strategy;
       configVersion.value = ov.config_version;
 
+      // 增量清理已在后端移除的 key 探测缓存，避免残留数据影响视图
+      const validKeyIds = new Set(kv.map((k) => k.id));
+      let changed = false;
+      for (const id of Object.keys(keyTestResults.value)) {
+        if (!validKeyIds.has(id)) {
+          delete keyTestResults.value[id];
+          quotaProbedAt.delete(id);
+          changed = true;
+        }
+      }
+      if (changed) {
+        savePersistedQuotaResults(keyTestResults.value, ov.config_version);
+      }
+
       void fetchProxyStatus().catch(() => {});
     } catch (err: unknown) {
       error.value = err instanceof Error ? err.message : String(err);
@@ -135,7 +218,8 @@ export function useAdminConfig(options: UseAdminConfigOptions = {}) {
   }
 
   /**
-   * 静默刷新配置与资源列表：不在界面触发全局 loading 遮罩，适用于后台周期轮询与倒计时归零对齐
+   * 静默刷新配置与资源列表：不在界面触发全局 loading 遮罩，仅用于用户手动刷新、
+   * 写操作后对齐与冷却到期单次对齐（无自动轮询，见 GovernanceView）。
    */
   async function refreshSilent(): Promise<void> {
     try {
@@ -252,6 +336,7 @@ export function useAdminConfig(options: UseAdminConfigOptions = {}) {
       await adminApi.deleteKey(id, configVersion.value).send();
       if (id in keyTestResults.value) {
         delete keyTestResults.value[id];
+        quotaProbedAt.delete(id);
         savePersistedQuotaResults(keyTestResults.value);
       }
       await fetchAll();
@@ -263,6 +348,7 @@ export function useAdminConfig(options: UseAdminConfigOptions = {}) {
     try {
       const res = await adminApi.testKey(id).send();
       keyTestResults.value[id] = res;
+      markQuotaProbed(id);
       savePersistedQuotaResults(keyTestResults.value);
       return res;
     } finally {
@@ -281,8 +367,11 @@ export function useAdminConfig(options: UseAdminConfigOptions = {}) {
     };
 
     try {
-      for (const k of list) {
-        await testSingleKey(k.id);
+      for (let i = 0; i < list.length; i++) {
+        if (i > 0) {
+          await new Promise((resolve) => setTimeout(resolve, 800));
+        }
+        await testSingleKey(list[i].id);
         batchTesting.value.current += 1;
       }
     } finally {
@@ -324,6 +413,7 @@ export function useAdminConfig(options: UseAdminConfigOptions = {}) {
         quota: res.quota,
         quota_groups: res.quota_groups,
       };
+      markQuotaProbed(res.id);
       savePersistedQuotaResults(keyTestResults.value);
     }
     await fetchAll();

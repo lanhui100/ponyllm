@@ -5,6 +5,17 @@ import Icons from './ui/Icons.vue';
 import UiTooltip from './ui/UiTooltip.vue';
 import UiButton from './ui/UiButton.vue';
 import { formatTokenHuman } from '../utils/format';
+import {
+  extractUnifiedGeminiQuota,
+  judgeKeyAvailability,
+  recordCooldownSnapshots,
+  cooldownRemainingSecsFrom,
+  formatCooldownDuration,
+  isLockBusyResult,
+  isProbeHardFailure,
+  type CooldownSnapshot,
+} from '../utils/antigravityQuota';
+import { isQuotaResultFresh } from '../composables/useAdminConfig';
 
 const props = withDefaults(
   defineProps<{
@@ -40,22 +51,12 @@ onUnmounted(() => {
 // 客户端动态秒级时钟信号，驱动倒计时平滑递减
 const nowMs = ref(Date.now());
 let timer: ReturnType<typeof setInterval> | null = null;
-const recordedSnapshots = new Map<string, { remaining: number; fetchedAt: number }>();
+const recordedSnapshots = new Map<string, CooldownSnapshot>();
 
 watch(
   () => props.keys,
   (newKeys) => {
-    const now = Date.now();
-    for (const k of newKeys) {
-      if (k.state === 'cooling_down' && k.cooldown_remaining_secs != null) {
-        recordedSnapshots.set(k.id, {
-          remaining: k.cooldown_remaining_secs,
-          fetchedAt: now,
-        });
-      } else {
-        recordedSnapshots.delete(k.id);
-      }
-    }
+    recordCooldownSnapshots(recordedSnapshots, newKeys);
   },
   { immediate: true, deep: true }
 );
@@ -88,63 +89,20 @@ onUnmounted(() => {
 });
 
 function cooldownRemainingSecs(k: KeyView): number | null {
-  const currentNow = nowMs.value;
-  const snapshot = recordedSnapshots.get(k.id);
-  if (snapshot) {
-    const elapsedSecs = Math.floor((currentNow - snapshot.fetchedAt) / 1000);
-    return Math.max(0, snapshot.remaining - elapsedSecs);
-  }
-  if (k.cooldown_remaining_secs != null) {
-    return Math.max(0, k.cooldown_remaining_secs);
-  }
-  if (k.cooldown_reset_at) {
-    const resetMs = new Date(k.cooldown_reset_at).getTime();
-    if (!Number.isNaN(resetMs)) {
-      return Math.max(0, Math.floor((resetMs - currentNow) / 1000));
-    }
-  }
-  return null;
-}
-
-function formatCooldownDuration(secs: number | null): string {
-  if (secs == null || secs <= 0) return '';
-  const days = Math.floor(secs / 86400);
-  const hours = Math.floor((secs % 86400) / 3600);
-  const minutes = Math.floor((secs % 3600) / 60);
-  if (days > 0) return `${days}天${hours}小时`;
-  if (hours > 0) return `${hours}小时${minutes}分`;
-  if (minutes > 0) return `${minutes}分`;
-  return `${secs}秒`;
+  return cooldownRemainingSecsFrom(recordedSnapshots, k, nowMs.value);
 }
 
 // 统计信息
 const totalAccounts = computed(() => props.keys.length);
 
 function isKeyUnavailable(k: KeyView): boolean {
-  if (k.state === 'disabled') return true;
-  const testResult = props.keyTestResults[k.id];
-  if (testResult && testResult.success === false) {
-    // 跨副本锁冲突（lock_busy）属于瞬时状态同步中，不计为账号不可用/禁用，避免就绪徽章抖动
-    const errCode = (testResult.error_code || '').toLowerCase();
-    const errMsg = (testResult.message || '').toLowerCase();
-    if (errCode.includes('lock_busy') || errMsg.includes('serialization lock') || errMsg.includes('held by another replica')) {
-      return false;
-    }
-    return true;
-  }
-  return false;
+  return judgeKeyAvailability(k.state, props.keyTestResults[k.id]) === 'unavailable';
 }
 
 function isKeyCoolingDown(k: KeyView): boolean {
-  if (isKeyUnavailable(k)) return false;
-  if (k.state === 'cooling_down') return true;
-  const testResult = props.keyTestResults[k.id];
-  if (!testResult) return false;
-  // 必须具有真实 quota_groups 或 quota 配额探测数据，才参与根据周限流判定冷却
-  if (!testResult.quota_groups && !testResult.quota) return false;
-  // 仅 Gemini 系列参与冷却判定：上游已不再下发 Claude 额度
-  const q = extractKeyQuota(k, testResult);
-  return q.gemini.weeklyFraction <= 0;
+  // 唯一真源：后端 state。本地周水位不再参与冷却判定（交还后端探测回调），
+  // 避免与模型管理页口径打架、无探测结果时误判冷却。
+  return judgeKeyAvailability(k.state, props.keyTestResults[k.id]) === 'cooling';
 }
 
 const disabledKeys = computed(() => {
@@ -200,9 +158,9 @@ const nextRecovery = computed(() => {
     }
     if (!fallbackHint) {
       const testResult = props.keyTestResults[k.id];
-      if (testResult) {
+      if (testResult && isQuotaResultFresh(k.id)) {
         const q = extractKeyQuota(k, testResult);
-        if (q.gemini.weeklyFraction <= 0 && q.gemini.weeklyResetHint && q.gemini.weeklyResetHint !== '已就绪' && q.gemini.weeklyResetHint !== '冷却保护中') {
+        if (q.gemini.weeklyFraction != null && q.gemini.weeklyFraction <= 0 && q.gemini.weeklyResetHint && q.gemini.weeklyResetHint !== '已就绪' && q.gemini.weeklyResetHint !== '冷却保护中' && q.gemini.weeklyResetHint !== '未下发') {
           fallbackHint = q.gemini.weeklyResetHint;
           targetKey = k;
         }
@@ -234,149 +192,81 @@ const nextRecovery = computed(() => {
 });
 
 interface ExtractedQuota {
-  h5Fraction: number;
+  h5Fraction: number | null;
   h5ResetHint: string;
-  weeklyFraction: number;
+  /** null = 上游未下发（未知），渲染"未下发"占位，不参与聚合。 */
+  weeklyFraction: number | null;
   weeklyResetHint: string;
 }
 
-// 仅查询显示 Gemini 系列额度：上游已不再下发 Claude 额度，Claude/GPT/3P
-// 分组与 claude/gpt/sonnet/opus 模型直接跳过（不归入 Gemini，防止残留污染水位）。
+// 额度解析走共享真源 extractUnifiedGeminiQuota；未知（null）调用方渲染占位。
 function extractKeyQuota(k: KeyView, testResult?: KeyTestView): { gemini: ExtractedQuota } {
   const isCooling = k.state === 'cooling_down';
-  const defaultCooling: ExtractedQuota = {
-    h5Fraction: 0,
-    h5ResetHint: '冷却保护中',
-    weeklyFraction: 0,
-    weeklyResetHint: '冷却保护中',
-  };
-  const defaultPending: ExtractedQuota = {
-    h5Fraction: 0,
-    h5ResetHint: '等待刷新',
-    weeklyFraction: 0,
-    weeklyResetHint: '等待刷新',
-  };
 
-  if (!testResult) {
-    if (isCooling) {
-      return { gemini: { ...defaultCooling } };
-    }
-    return { gemini: { ...defaultPending } };
+  // 无探测结果 / 过期缓存 / 失败且无数据：视为未知，渲染占位（不再伪装健康/耗尽）。
+  if (!testResult || !isQuotaResultFresh(k.id)) {
+    return {
+      gemini: isCooling
+        ? { h5Fraction: 0, h5ResetHint: '冷却保护中', weeklyFraction: 0, weeklyResetHint: '冷却保护中' }
+        : { h5Fraction: null, h5ResetHint: '等待刷新', weeklyFraction: null, weeklyResetHint: '等待刷新' },
+    };
   }
-
-  const res = {
-    gemini: { h5Fraction: 0, h5ResetHint: '已就绪', weeklyFraction: 0, weeklyResetHint: '已就绪' },
-  };
-
-  // 1. Quota groups
-  if (testResult.quota_groups && testResult.quota_groups.length > 0) {
-    // 记录 Gemini 是否真实出现周窗口：摘要缺失 ≠ 耗尽（retrieveUserQuotaSummary
-    // 只有 4s 超时，冷建连下整组缺席时不做有罪推定；未知周默认健康，与模型管理页 ?? 1.0 对齐）
-    let geminiWeeklySeen = false;
-    for (const group of testResult.quota_groups) {
-      const name = (group.display_name || '').toLowerCase();
-      const isClaudeGroup = name.includes('claude') || name.includes('gpt') || name.includes('3p');
-      if (isClaudeGroup) continue;
-      const target = res.gemini;
-
-      for (const b of group.buckets || []) {
-        const win = (b.window || '').toLowerCase();
-        const bId = (b.bucket_id || '').toLowerCase();
-        // 周识别与模型管理页 extractCompactQuotas 同口径（含 description/display_name 的
-        // week/周/7d 变体），避免 fail-open 后把“仅在描述中标注的周桶”误写入 5h 并漏报冷却
-        const bDesc = (b.description || '').toLowerCase();
-        const bDisp = (b.display_name || '').toLowerCase();
-        const isWeekly = win === 'weekly' || bId.includes('week') || bDesc.includes('week') || bDisp.includes('周') || bId.includes('7d');
-        const fraction = b.remaining_fraction ?? 0;
-        const resetHint = b.time_until_reset || b.reset_time_beijing || '已就绪';
-
-        if (isWeekly) {
-          target.weeklyFraction = fraction;
-          target.weeklyResetHint = resetHint;
-          geminiWeeklySeen = true;
-        } else {
-          target.h5Fraction = fraction;
-          target.h5ResetHint = resetHint;
-        }
-      }
-    }
-    if (!geminiWeeklySeen) {
-      res.gemini.weeklyFraction = 1.0;
-      res.gemini.weeklyResetHint = '已就绪';
-    }
-  } else if (testResult.quota && testResult.quota.length > 0) {
-    // 平铺 fetchAvailableModels 只表达 5h 滚动余量（33 个模型均无周窗口标识）：
-    // 按同系列最小值聚合为 5h 水位（与模型管理页 extractCompactQuotas 取最小值一致，
-    // 替代此前的遍历覆盖/末值胜出）；周水位无信号时记健康，冷却判定交还后端 state。
-    let geminiH5: { fraction: number; hint: string } | null = null;
-    let geminiWeeklySeen = false;
-    for (const q of testResult.quota) {
-      const mId = q.model_id.toLowerCase();
-      const isClaude = mId.includes('claude') || mId.includes('gpt') || mId.includes('sonnet') || mId.includes('opus');
-      if (isClaude) continue;
-      const fraction = q.remaining_fraction ?? 0;
-      const resetHint = q.time_until_reset || q.reset_time_beijing || '已就绪';
-      const isWeekly = mId.includes('week') || mId.includes('7d') || (q.time_until_reset && (q.time_until_reset.includes('天') || q.time_until_reset.includes('d')));
-
-      if (isWeekly) {
-        geminiWeeklySeen = true;
-        res.gemini.weeklyFraction = fraction;
-        res.gemini.weeklyResetHint = resetHint;
-      } else {
-        if (geminiH5 === null || fraction < geminiH5.fraction) {
-          geminiH5 = { fraction, hint: resetHint };
-        }
-      }
-    }
-    if (geminiH5 !== null) {
-      res.gemini.h5Fraction = geminiH5.fraction;
-      res.gemini.h5ResetHint = geminiH5.hint;
-    }
-    if (!geminiWeeklySeen) {
-      res.gemini.weeklyFraction = 1.0;
-      res.gemini.weeklyResetHint = '已就绪';
-    }
-  } else {
-    // 探测结果不存在 quota / quota_groups 时（如测试失败或无配额信息）
-    res.gemini.h5Fraction = 0;
-    res.gemini.weeklyFraction = 0;
-    res.gemini.h5ResetHint = isCooling ? '冷却保护中' : '等待刷新';
-    res.gemini.weeklyResetHint = isCooling ? '冷却保护中' : '等待刷新';
+  const u = extractUnifiedGeminiQuota(testResult);
+  if (!u.h5 && !u.weekly) {
+    return {
+      gemini: isCooling
+        ? { h5Fraction: 0, h5ResetHint: '冷却保护中', weeklyFraction: 0, weeklyResetHint: '冷却保护中' }
+        : { h5Fraction: null, h5ResetHint: '等待刷新', weeklyFraction: null, weeklyResetHint: '等待刷新' },
+    };
   }
-
-  return res;
+  return {
+    gemini: {
+      // 冷却态未知 h5 按 0 渲染（后端已判冷）；非冷却未知 h5 保持 null 显示"等待刷新"。
+      h5Fraction: u.h5?.fraction ?? (isCooling ? 0 : null),
+      h5ResetHint: u.h5?.timeUntilReset ?? (isCooling ? '冷却保护中' : '等待刷新'),
+      weeklyFraction: u.weekly?.fraction ?? (isCooling ? 0 : null),
+      weeklyResetHint: u.weekly?.timeUntilReset ?? (isCooling ? '冷却保护中' : '未下发'),
+    },
+  };
 }
 
-// 聚合有效可用账户在 5h 和周度窗口的水位百分比
+// 聚合有效可用账户在 5h 和周度窗口的水位百分比（未知水位不参与平均，避免把未知洗成 0%/100%）
 const aggregatedQuotas = computed(() => {
   const active = activeKeys.value;
   if (active.length === 0) {
     return {
-      gemini: { h5Percent: 0, h5Hint: '所有账号冷却中', weeklyPercent: 0, weeklyHint: '所有账号冷却中' },
+      gemini: { h5Percent: null as number | null, h5Hint: '所有账号冷却中', weeklyPercent: null as number | null, weeklyHint: '所有账号冷却中' },
     };
   }
 
   let geminiH5Sum = 0;
+  let geminiH5Count = 0;
   let geminiWeeklySum = 0;
+  let geminiWeeklyCount = 0;
   let geminiH5Hint = '';
   let geminiWeeklyHint = '';
 
   for (const k of active) {
     const q = extractKeyQuota(k, props.keyTestResults[k.id]);
-    geminiH5Sum += q.gemini.h5Fraction;
-    geminiWeeklySum += q.gemini.weeklyFraction;
+    if (q.gemini.h5Fraction != null) {
+      geminiH5Sum += q.gemini.h5Fraction;
+      geminiH5Count += 1;
+    }
+    if (q.gemini.weeklyFraction != null) {
+      geminiWeeklySum += q.gemini.weeklyFraction;
+      geminiWeeklyCount += 1;
+    }
 
     if (!geminiH5Hint && q.gemini.h5ResetHint !== '已就绪') geminiH5Hint = q.gemini.h5ResetHint;
-    if (!geminiWeeklyHint && q.gemini.weeklyResetHint !== '已就绪') geminiWeeklyHint = q.gemini.weeklyResetHint;
+    if (!geminiWeeklyHint && q.gemini.weeklyResetHint !== '已就绪' && q.gemini.weeklyResetHint !== '未下发') geminiWeeklyHint = q.gemini.weeklyResetHint;
   }
 
-  const count = active.length;
   return {
     gemini: {
-      h5Percent: Math.round((geminiH5Sum / count) * 100),
-      h5Hint: geminiH5Hint || '配额充足',
-      weeklyPercent: Math.round((geminiWeeklySum / count) * 100),
-      weeklyHint: geminiWeeklyHint || '配额充足',
+      h5Percent: geminiH5Count > 0 ? Math.round((geminiH5Sum / geminiH5Count) * 100) : null,
+      h5Hint: geminiH5Hint || (geminiH5Count > 0 ? '配额充足' : '等待刷新'),
+      weeklyPercent: geminiWeeklyCount > 0 ? Math.round((geminiWeeklySum / geminiWeeklyCount) * 100) : null,
+      weeklyHint: geminiWeeklyHint || (geminiWeeklyCount > 0 ? '配额充足' : '上游未下发周配额'),
     },
   };
 });
@@ -386,7 +276,17 @@ const aggregatedQuotas = computed(() => {
 // 绝无杂色（无红、无黄、无额外背景底板）。
 // 从完全未激活的沉静冷浅灰 (#ebedf0)，到冷却状态的极淡微绿，
 // 再随可用额度由浅入深逐阶跃迁至充沛深翠绿 (#9be9a8 -> #40c463 -> #30a14e -> #216e39)
-export type SlotHeatLevel = 'cooling' | 'low' | 'medium' | 'high' | 'full';
+export type SlotHeatLevel =
+  | 'cooling'
+  | 'low'
+  | 'medium'
+  | 'high'
+  | 'full'
+  | 'validation_required'
+  | 'auth_invalid'
+  | 'policy_violation'
+  | 'disabled'
+  | 'probe_failed';
 
 export interface HeatSlotItem {
   key: KeyView;
@@ -400,9 +300,9 @@ const slotMatrix = computed<HeatSlotItem[]>(() => {
   return props.keys.map((k) => {
     const testResult = props.keyTestResults[k.id];
     const quota = extractKeyQuota(k, testResult);
-    // 若后端标记为冷却，或当前探测结果中 Gemini 周限流已耗尽归零，均视为冷却保护中
-    const isWeeklyZero = quota.gemini.weeklyFraction <= 0;
-    const isCooling = k.state === 'cooling_down' || isWeeklyZero;
+    // 冷却唯一真源：后端 state（与 activeKeys/模型管理页同表达式）。
+    // 本地周水位不再参与判定；无探测/过期未知渲染"等待刷新"，不判冷。
+    const isCooling = k.state === 'cooling_down';
 
     let email = k.id;
     if (email.startsWith('ag-')) {
@@ -430,7 +330,7 @@ const slotMatrix = computed<HeatSlotItem[]>(() => {
       if (reason.includes('validation_required') || reason.includes('verify your account')) {
         return {
           key: k,
-          level: 'validation_required' as any,
+          level: 'validation_required',
           heatClass: 'bg-amber-500 hover:bg-amber-400 ring-1 ring-amber-400/60',
           tooltipText: `账号: ${email}${tierBadge}\n状态: 需安全验证 (Google安全拦截)${reasonHint}${usageSummary}`,
           isCooling: false,
@@ -439,7 +339,7 @@ const slotMatrix = computed<HeatSlotItem[]>(() => {
       if (reason.includes('invalid_grant') || reason.includes('token has been expired') || reason.includes('revoked')) {
         return {
           key: k,
-          level: 'auth_invalid' as any,
+          level: 'auth_invalid',
           heatClass: 'bg-rose-500 hover:bg-rose-400',
           tooltipText: `账号: ${email}${tierBadge}\n状态: 授权凭据失效 (invalid_grant)${reasonHint}${usageSummary}`,
           isCooling: false,
@@ -448,7 +348,7 @@ const slotMatrix = computed<HeatSlotItem[]>(() => {
       if (reason.includes('policy') || reason.includes('terms of service') || reason.includes('suspended')) {
         return {
           key: k,
-          level: 'policy_violation' as any,
+          level: 'policy_violation',
           heatClass: 'bg-rose-800 hover:bg-rose-700',
           tooltipText: `账号: ${email}${tierBadge}\n状态: 违规停用 (PolicyViolation)${reasonHint}${usageSummary}`,
           isCooling: false,
@@ -456,58 +356,53 @@ const slotMatrix = computed<HeatSlotItem[]>(() => {
       }
       return {
         key: k,
-        level: 'disabled' as any,
+        level: 'disabled',
         heatClass: 'bg-rose-600/90 hover:bg-rose-500',
         tooltipText: `账号: ${email}${tierBadge}\n状态: 已禁用 (不分配流量)${reasonHint}${usageSummary}`,
         isCooling: false,
       };
     }
 
+    // 探测硬失败（凭据失效/需验证）：优先展现严重状态
     if (testResult && testResult.success === false) {
       const errMsg = (testResult.message || '').toLowerCase();
       const errCode = (testResult.error_code || '').toLowerCase();
       if (errCode.includes('validation') || errMsg.includes('validation_required') || errMsg.includes('verify your account')) {
         return {
           key: k,
-          level: 'validation_required' as any,
+          level: 'validation_required',
           heatClass: 'bg-amber-500 hover:bg-amber-400 ring-1 ring-amber-400/60',
           tooltipText: `账号: ${email}${tierBadge}\n状态: 需安全验证 (Google安全拦截)\n提示: ${testResult.message}${usageSummary}`,
-          isCooling: false,
-        };
-      }
-      if (errCode.includes('lock_busy') || errMsg.includes('serialization lock') || errMsg.includes('held by another replica')) {
-        return {
-          key: k,
-          level: 'low',
-          heatClass: 'bg-sky-400/80 hover:bg-sky-300 ring-1 ring-sky-400/50',
-          tooltipText: `账号: ${email}${tierBadge}\n状态: 跨节点锁同步中 (等待另一副本刷新)\n提示: ${testResult.message}${usageSummary}`,
           isCooling: false,
         };
       }
       if (errCode === 'invalid_grant' || errMsg.includes('invalid_grant') || errMsg.includes('token has been expired') || errMsg.includes('revoked')) {
         return {
           key: k,
-          level: 'auth_invalid' as any,
+          level: 'auth_invalid',
           heatClass: 'bg-rose-500 hover:bg-rose-400',
           tooltipText: `账号: ${email}${tierBadge}\n状态: 授权凭据失效 (invalid_grant)\n提示: ${testResult.message}${usageSummary}`,
           isCooling: false,
         };
       }
-      return {
-        key: k,
-        level: 'probe_failed' as any,
-        heatClass: 'bg-rose-400/80 hover:bg-rose-300',
-        tooltipText: `账号: ${email}${tierBadge}\n状态: 探测异常\n提示: ${testResult.message}${usageSummary}`,
-        isCooling: false,
-      };
+      if (errCode.includes('policy') || errMsg.includes('terms of service') || errMsg.includes('suspended')) {
+        return {
+          key: k,
+          level: 'policy_violation',
+          heatClass: 'bg-rose-800 hover:bg-rose-700',
+          tooltipText: `账号: ${email}${tierBadge}\n状态: 违规停用 (PolicyViolation)\n提示: ${testResult.message}${usageSummary}`,
+          isCooling: false,
+        };
+      }
     }
 
+    // 冷却状态优先于瞬态网络/探测失败：保持薄荷绿冷却保护
     if (isCooling) {
       const remaining = cooldownRemainingSecs(k);
       const label = formatCooldownDuration(remaining);
       const hint = label
         ? `预计 ${label} 后解冻`
-        : (quota.gemini.weeklyResetHint !== '冷却保护中' && quota.gemini.weeklyResetHint !== '已就绪'
+        : (quota.gemini.weeklyResetHint !== '冷却保护中' && quota.gemini.weeklyResetHint !== '已就绪' && quota.gemini.weeklyResetHint !== '未下发' && quota.gemini.weeklyResetHint !== '等待刷新'
           ? `预计 ${quota.gemini.weeklyResetHint} 解冻`
           : '等待解冻');
       return {
@@ -520,23 +415,54 @@ const slotMatrix = computed<HeatSlotItem[]>(() => {
       };
     }
 
-    if (!testResult) {
+    if (testResult && testResult.success === false) {
+      const errMsg = (testResult.message || '').toLowerCase();
+      const errCode = (testResult.error_code || '').toLowerCase();
+      if (errCode.includes('lock_busy') || errMsg.includes('serialization lock') || errMsg.includes('held by another replica')) {
+        return {
+          key: k,
+          level: 'low',
+          heatClass: 'bg-sky-400/80 hover:bg-sky-300 ring-1 ring-sky-400/50',
+          tooltipText: `账号: ${email}${tierBadge}\n状态: 跨节点锁同步中 (等待另一副本刷新)\n提示: ${testResult.message}${usageSummary}`,
+          isCooling: false,
+        };
+      }
+      return {
+        key: k,
+        level: 'probe_failed',
+        heatClass: 'bg-rose-400/80 hover:bg-rose-300',
+        tooltipText: `账号: ${email}${tierBadge}\n状态: 探测异常\n提示: ${testResult.message}${usageSummary}`,
+        isCooling: false,
+      };
+    }
+
+    if (!testResult || !isQuotaResultFresh(k.id)) {
+      const staleNote = usageSummary ? '\n(历史快照)' : '';
       return {
         key: k,
         level: 'low',
-        // 尚未探测或未持久化状态：采用低饱和沉静浅灰绿，提示等待刷新
+        // 尚未探测 / 缓存过期 / 未持久化：沉静浅灰绿，提示等待刷新（未知不判冷）
+        heatClass: 'bg-[#d0d7de]',
+        tooltipText: `账号: ${email}${tierBadge}\n状态: 等待刷新配额${staleNote}${usageSummary}`,
+        isCooling: false,
+      };
+    }
+
+    // 以 Gemini 配额为核心判断等级（兼顾 5h 即时爆发余量与周度余量）；未知按"等待刷新"灰块
+    const g5hFraction = quota.gemini.h5Fraction;
+    if (g5hFraction == null) {
+      return {
+        key: k,
+        level: 'low',
         heatClass: 'bg-[#d0d7de]',
         tooltipText: `账号: ${email}${tierBadge}\n状态: 等待刷新配额${usageSummary}`,
         isCooling: false,
       };
     }
-
-    // 以 Gemini 配额为核心判断等级（兼顾 5h 即时爆发余量与周度余量）
-    const g5hFraction = quota.gemini.h5Fraction;
     const g5h = Math.round(g5hFraction * 100);
-    const gWeekly = Math.round(quota.gemini.weeklyFraction * 100);
+    const gWeekly = quota.gemini.weeklyFraction == null ? '--' : `${Math.round(quota.gemini.weeklyFraction * 100)}%`;
 
-    const baseTooltip = `账号: ${email}${tierBadge}\nGemini: 5h余量 ${g5h}% · 周余量 ${gWeekly}%${usageSummary}`;
+    const baseTooltip = `账号: ${email}${tierBadge}\nGemini: 5h余量 ${g5h}% · 周余量 ${gWeekly}${usageSummary}`;
 
     if (g5hFraction >= 0.75) {
       return {
@@ -812,7 +738,10 @@ const factualCycleSummary = computed(() => {
   };
 });
 
-function getProgressColor(percent: number): { bar: string; text: string; bg: string } {
+function getProgressColor(percent: number | null): { bar: string; text: string; bg: string } {
+  if (percent == null) {
+    return { bar: 'bg-slate-300', text: 'text-slate-400', bg: 'bg-slate-50' };
+  }
   if (percent > 30) {
     return { bar: 'bg-emerald-500', text: 'text-emerald-700', bg: 'bg-emerald-50' };
   } else if (percent > 10) {
@@ -820,6 +749,14 @@ function getProgressColor(percent: number): { bar: string; text: string; bg: str
   } else {
     return { bar: 'bg-rose-500', text: 'text-rose-700', bg: 'bg-rose-50' };
   }
+}
+
+function formatWaterPercent(percent: number | null): string {
+  return percent == null ? '--' : `${percent}%`;
+}
+
+function waterBarWidth(percent: number | null): string {
+  return percent == null ? '0%' : `${percent}%`;
 }
 </script>
 
@@ -988,14 +925,14 @@ function getProgressColor(percent: number): { bar: string; text: string; bg: str
             <div class="flex items-center justify-between text-xs">
               <span class="font-medium text-slate-700">5小时窗口</span>
               <span class="font-mono font-semibold tabular-nums w-[3rem] text-right shrink-0" data-testid="gemini-h5-percent" :class="getProgressColor(aggregatedQuotas.gemini.h5Percent).text">
-                {{ aggregatedQuotas.gemini.h5Percent }}%
+                {{ formatWaterPercent(aggregatedQuotas.gemini.h5Percent) }}
               </span>
             </div>
             <div class="w-full bg-slate-200/80 rounded-full h-1.5 overflow-hidden">
               <div
                 class="h-full rounded-full transition-all duration-300"
                 :class="getProgressColor(aggregatedQuotas.gemini.h5Percent).bar"
-                :style="{ width: `${aggregatedQuotas.gemini.h5Percent}%` }"
+                :style="{ width: waterBarWidth(aggregatedQuotas.gemini.h5Percent) }"
               />
             </div>
             <div class="text-[11px] text-slate-400 text-right truncate">
@@ -1008,14 +945,14 @@ function getProgressColor(percent: number): { bar: string; text: string; bg: str
             <div class="flex items-center justify-between text-xs">
               <span class="font-medium text-slate-700">周度窗口</span>
               <span class="font-mono font-semibold tabular-nums w-[3rem] text-right shrink-0" data-testid="gemini-weekly-percent" :class="getProgressColor(aggregatedQuotas.gemini.weeklyPercent).text">
-                {{ aggregatedQuotas.gemini.weeklyPercent }}%
+                {{ formatWaterPercent(aggregatedQuotas.gemini.weeklyPercent) }}
               </span>
             </div>
             <div class="w-full bg-slate-200/80 rounded-full h-1.5 overflow-hidden">
               <div
                 class="h-full rounded-full transition-all duration-300"
                 :class="getProgressColor(aggregatedQuotas.gemini.weeklyPercent).bar"
-                :style="{ width: `${aggregatedQuotas.gemini.weeklyPercent}%` }"
+                :style="{ width: waterBarWidth(aggregatedQuotas.gemini.weeklyPercent) }"
               />
             </div>
             <div class="text-[11px] text-slate-400 text-right truncate">
@@ -1207,6 +1144,20 @@ function getProgressColor(percent: number): { bar: string; text: string; bg: str
         </button>
       </div>
 
+      <!-- 最近一次探测异常提示 -->
+      <div
+        v-if="selectedKeyData.testRes && selectedKeyData.testRes.success === false"
+        class="mb-3 px-3 py-2 rounded-lg bg-rose-50 border border-rose-200 text-xs text-rose-700 flex items-center justify-between"
+      >
+        <span>
+          <strong>探测异常：</strong>
+          {{ selectedKeyData.testRes.message || '上游连接或配额读取失败' }}
+        </span>
+        <span class="font-mono text-[11px] text-rose-500">
+          {{ selectedKeyData.testRes.error_code || 'PROBE_FAILED' }}
+        </span>
+      </div>
+
       <!-- 四要素结构指标：Prompt / Completion / Cached / Requests -->
       <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-3">
         <!-- 输入 Tokens -->
@@ -1263,7 +1214,7 @@ function getProgressColor(percent: number): { bar: string; text: string; bg: str
           </span>
           <span class="text-[10px] text-slate-400 block mt-0.5">
             剩余: {{ selectedKeyData.usage?.estimated_tokens_remaining_5h ? formatTokenHuman(selectedKeyData.usage.estimated_tokens_remaining_5h) : '--' }}
-            ({{ Math.round(selectedKeyData.quota.gemini.h5Fraction * 100) }}%)
+            ({{ selectedKeyData.quota.gemini.h5Fraction == null ? '--' : `${Math.round(selectedKeyData.quota.gemini.h5Fraction * 100)}%` }})
           </span>
         </div>
         <div>
@@ -1272,7 +1223,7 @@ function getProgressColor(percent: number): { bar: string; text: string; bg: str
             {{ selectedKeyData.usage?.estimated_capacity_weekly ? formatTokenHuman(selectedKeyData.usage.estimated_capacity_weekly) : '--' }}
           </span>
           <span class="text-[10px] text-slate-400 block mt-0.5">
-            周度余量水位: {{ Math.round(selectedKeyData.quota.gemini.weeklyFraction * 100) }}%
+            周度余量水位: {{ selectedKeyData.quota.gemini.weeklyFraction == null ? '--' : `${Math.round(selectedKeyData.quota.gemini.weeklyFraction * 100)}%` }}
           </span>
         </div>
         <div>

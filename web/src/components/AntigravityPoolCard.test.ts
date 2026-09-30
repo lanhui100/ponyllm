@@ -1,10 +1,14 @@
 // @vitest-environment happy-dom
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { createApp, nextTick } from 'vue';
 import AntigravityPoolCard from './AntigravityPoolCard.vue';
+import { markQuotaProbed, clearQuotaProbedAt } from '../composables/useAdminConfig';
 import type { KeyView, KeyTestView } from '../types/admin';
 
 describe('AntigravityPoolCard Component', () => {
+  beforeEach(() => {
+    clearQuotaProbedAt();
+  });
   it('renders correctly with mixed active and cooling keys', async () => {
     const container = document.createElement('div');
     document.body.appendChild(container);
@@ -76,6 +80,7 @@ describe('AntigravityPoolCard Component', () => {
     const refreshSpy = vi.fn();
     const navigateSpy = vi.fn();
 
+    markQuotaProbed('acc-1');
     const app = createApp(AntigravityPoolCard, {
       keys,
       keyTestResults,
@@ -207,6 +212,7 @@ describe('AntigravityPoolCard Component', () => {
       keyTestResults,
       adminWriteEnabled: true,
     });
+    markQuotaProbed('ag-active-flat@gmail.com');
 
     app.mount(container);
     await nextTick();
@@ -215,9 +221,9 @@ describe('AntigravityPoolCard Component', () => {
     expect(container.textContent).toContain('1/1 账号就绪');
     expect(container.textContent).not.toContain('所有账号冷却中');
     // 5h 取同系列最小值（与模型管理页取最小值语义一致）：0.0068*100=0.68→1%
-    // 精确断言 testid，避免与可用率/周水位的 '100%' 混淆
+    // 精确断言 testid，避免与可用率/周水位的混淆；周缺席显示"--"（未知不再伪装 100%）
     expect(container.querySelector('[data-testid="gemini-h5-percent"]')?.textContent).toContain('1%');
-    expect(container.querySelector('[data-testid="gemini-weekly-percent"]')?.textContent).toContain('100%');
+    expect(container.querySelector('[data-testid="gemini-weekly-percent"]')?.textContent).toContain('--');
     // Claude 系列不再展示：claude 模型 id 被跳过，claude testid 已移除
     expect(container.querySelector('[data-testid="claude-h5-percent"]')).toBeNull();
     expect(container.querySelector('[data-testid="claude-weekly-percent"]')).toBeNull();
@@ -391,6 +397,7 @@ describe('AntigravityPoolCard Component', () => {
       },
     };
 
+    markQuotaProbed('ag-probe-val@gmail.com');
     const app = createApp(AntigravityPoolCard, {
       keys,
       keyTestResults,
@@ -414,6 +421,97 @@ describe('AntigravityPoolCard Component', () => {
 
     // Ready accounts must be 0/3, none should be counted as ready
     expect(container.textContent).toContain('0/3 账号就绪');
+
+    app.unmount();
+    document.body.removeChild(container);
+  });
+
+  it('renders expired cached quota results as neutral waiting-for-refresh placeholder', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+
+    const keys: KeyView[] = [
+      {
+        id: 'ag-stale-key@gmail.com',
+        provider: 'antigravity',
+        state: 'active',
+        priority: 1,
+        weight: 10,
+        masked_key: 'ya29.***',
+      },
+    ];
+
+    const keyTestResults: Record<string, KeyTestView> = {
+      'ag-stale-key@gmail.com': {
+        success: true,
+        latency_ms: 100,
+        message: 'old probe result',
+        quota_groups: [
+          {
+            display_name: 'Gemini',
+            buckets: [{ bucket_id: 'b1', window: '5h', remaining_fraction: 0.95 }],
+          },
+        ],
+      },
+    };
+
+    // Deliberately do NOT call markQuotaProbed -> cache is treated as stale/unprobed
+    const app = createApp(AntigravityPoolCard, {
+      keys,
+      keyTestResults,
+      adminWriteEnabled: true,
+    });
+    app.mount(container);
+    await nextTick();
+
+    const cell = container.querySelector('[data-testid="slot-heatmap-cell"]');
+    expect(cell?.className).toContain('bg-[#d0d7de]');
+
+    // Water level shows waiting placeholder "--" instead of stale 95%
+    expect(container.querySelector('[data-testid="gemini-h5-percent"]')?.textContent).toContain('--');
+
+    app.unmount();
+    document.body.removeChild(container);
+  });
+
+  it('renders sky-blue heat class for lock_busy replica sync without counting as failed/cooling', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+
+    const keys: KeyView[] = [
+      {
+        id: 'ag-lock-busy@gmail.com',
+        provider: 'antigravity',
+        state: 'active',
+        priority: 1,
+        weight: 10,
+        masked_key: 'ya29.***',
+      },
+    ];
+
+    const keyTestResults: Record<string, KeyTestView> = {
+      'ag-lock-busy@gmail.com': {
+        success: false,
+        latency_ms: 50,
+        message: 'serialization lock held by another replica',
+        error_code: 'lock_busy',
+      },
+    };
+
+    markQuotaProbed('ag-lock-busy@gmail.com');
+    const app = createApp(AntigravityPoolCard, {
+      keys,
+      keyTestResults,
+      adminWriteEnabled: true,
+    });
+    app.mount(container);
+    await nextTick();
+
+    const cell = container.querySelector('[data-testid="slot-heatmap-cell"]');
+    expect(cell?.className).toContain('bg-sky-400');
+
+    // Tolerated as active (not disabled/cooling)
+    expect(container.textContent).toContain('1/1 账号就绪');
 
     app.unmount();
     document.body.removeChild(container);

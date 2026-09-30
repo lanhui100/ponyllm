@@ -108,4 +108,13 @@ export function formatTokenHuman(num?: number | null): string {
   return `${m >= 100 ? Math.round(m) : m.toFixed(2).replace(/\.?0+$/, '')}M`;
 }
 
+/** 遥测趋势图表横轴时间戳格式化 */
+export function formatChartTimestamp(ts: number, range: string): string {
+  const d = new Date(ts);
+  if (range === '30d' || range === '7d') {
+    return `${(d.getMonth() + 1).toString().padStart(2, '0')}/${d.getDate().toString().padStart(2, '0')}`;
+  }
+  return `${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}`;
+}
+
 

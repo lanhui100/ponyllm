@@ -2,7 +2,8 @@
 import { computed, ref, onMounted } from 'vue';
 import { useRouter } from 'vue-router';
 import { useTelemetry } from '../composables/useTelemetry';
-import { useAdminConfig } from '../composables/useAdminConfig';
+import { useAdminConfig, isQuotaResultFresh } from '../composables/useAdminConfig';
+import { isAntigravityScope } from '../utils/antigravityQuota';
 import NavBar from '../components/NavBar.vue';
 import StatusBanner from '../components/StatusBanner.vue';
 import MetricCards from '../components/MetricCards.vue';
@@ -15,6 +16,7 @@ const router = useRouter();
 
 const {
   keys,
+  providers,
   keyTestResults,
   adminWriteEnabled,
   fetchAll: fetchAdminConfig,
@@ -24,7 +26,13 @@ const {
 const isRefreshingAntigravity = ref(false);
 
 const antigravityKeys = computed(() => {
-  return keys.value.filter((k) => k.provider.toLowerCase().includes('antigravity'));
+  const providerMap = new Map<string, string | null>();
+  for (const p of providers.value) {
+    providerMap.set(p.name, p.default_protocol ?? null);
+  }
+  return keys.value.filter((k) =>
+    isAntigravityScope(k.provider, providerMap.get(k.provider))
+  );
 });
 
 async function handleRefreshAntigravityQuotas() {
@@ -70,22 +78,51 @@ async function handleRefreshAntigravityQuotas() {
   }
 }
 
-// 页面初始化时刷新获取 Antigravity 最新配额
+// 页面初始化：仅对"无新鲜缓存"的 key 补测，已有新鲜缓存不再自动打上游（防风控）。
+// 全量刷新只走用户手动"刷新配额"按钮。
 onMounted(async () => {
   // 若首次 fetch 尚未完成或已有 keys，等待配置就绪后触发配额刷新
   if (antigravityKeys.value.length > 0) {
-    void handleRefreshAntigravityQuotas();
+    void handleRefreshMissingQuotas();
   } else {
     try {
       await fetchAdminConfig();
       if (antigravityKeys.value.length > 0) {
-        void handleRefreshAntigravityQuotas();
+        void handleRefreshMissingQuotas();
       }
     } catch {
       // 忽略初始化波动
     }
   }
 });
+
+// 冷却到期刷新：带 30s 防抖 + 可见性守卫，避免多个 key 到期造成高频重复拉取
+let lastCooldownSyncAt = 0;
+function handleCooldownExpired() {
+  if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+  const now = Date.now();
+  if (now - lastCooldownSyncAt < 30000) return;
+  lastCooldownSyncAt = now;
+  void fetchAdminConfig();
+}
+
+async function handleRefreshMissingQuotas() {
+  if (!adminWriteEnabled.value) return;
+  if (antigravityKeys.value.length === 0 || isRefreshingAntigravity.value) return;
+  const missing = antigravityKeys.value.filter((k) => !isQuotaResultFresh(k.id));
+  if (missing.length === 0) return;
+  isRefreshingAntigravity.value = true;
+  try {
+    // 串行补测 + 800ms 间隔，避免并发打 Google 上游配额接口
+    for (const k of missing) {
+      await testSingleKey(k.id);
+      await new Promise((resolve) => setTimeout(resolve, 800));
+    }
+    await fetchAdminConfig();
+  } finally {
+    isRefreshingAntigravity.value = false;
+  }
+}
 
 function handleNavigateGovernance() {
   router.push('/governance');
@@ -168,7 +205,7 @@ const speed24h = computed<number | undefined>(() => {
         :is-refreshing="isRefreshingAntigravity"
         :admin-write-enabled="adminWriteEnabled"
         @refresh-quotas="handleRefreshAntigravityQuotas"
-        @cooldown-expired="fetchAdminConfig"
+        @cooldown-expired="handleCooldownExpired"
         @navigate-governance="handleNavigateGovernance"
       />
 
