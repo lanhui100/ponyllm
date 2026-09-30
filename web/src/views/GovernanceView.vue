@@ -802,9 +802,7 @@ onUnmounted(() => {
                     :class="proxyStatus?.available ? 'bg-emerald-500' : 'bg-amber-500'"
                   ></span>
                 </span>
-                <span class="font-medium text-slate-700">
-                  {{ proxyStatus?.description || '本地代理状态探测中...' }}
-                </span>
+                <span class="font-medium text-slate-700">代理状态</span>
                 <span v-if="proxyStatus?.latency_ms" class="text-xs px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-700 font-mono">
                   {{ proxyStatus.latency_ms }}ms
                 </span>
