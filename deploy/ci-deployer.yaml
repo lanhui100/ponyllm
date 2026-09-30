@@ -24,6 +24,14 @@ rules:
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["get", "list", "watch"]
+  # 2026-09-30 加权部署后 apply 需同时下发 IngressRoute/TLSOption/Middleware
+  # 与 Certificate（见 deploy/ponyllm-ingress-routes.yaml）
+  - apiGroups: ["traefik.io"]
+    resources: ["ingressroutes", "tlsoptions", "middlewares"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: ["cert-manager.io"]
+    resources: ["certificates"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
