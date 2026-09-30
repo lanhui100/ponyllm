@@ -228,6 +228,98 @@ fn redact_internal_identifiers(raw: &str) -> String {
     result
 }
 
+/// Quota/balance wording that client-side quota heuristics (e.g. DSH's
+/// `isQuotaExceededError`) key on anywhere in the failure message, mapped to
+/// a neutral "rate limit" surrogate. Applies ONLY to messages whose gateway
+/// classification is NOT `QuotaExhausted`, so genuine quota failures keep
+/// their honest wording; when the classification is a transient rate limit /
+/// transport fault, this wording can only originate from the raw upstream
+/// error body (Sense/商汤 mislabels RPM/TPM limits with
+/// `code: "insufficient_quota"` / `type: "quota_exceeded_error"`), and
+/// leaking it would make the client render a false "额度已用尽".
+///
+/// Order matters: more specific shapes (e.g. `quota_exceeded_error`) must be
+/// listed before the tokens they contain (`quota_exceeded`). The leftmost
+/// occurrence wins, then scanning resumes after it.
+const CLIENT_QUOTA_WORDING_NEUTRALIZATIONS: &[(&str, &str)] = &[
+    ("insufficient_quota", "rate_limit"),
+    ("insufficient_balance", "rate_limit"),
+    ("insufficient_credit", "rate_limit"),
+    ("insufficient quota", "rate limit"),
+    ("insufficient balance", "rate limit"),
+    ("insufficient credit", "rate limit"),
+    ("quota_exceeded_error", "rate_limit_error"),
+    ("quota_exceeded", "rate_limit"),
+    ("quota exceeded", "rate limit"),
+    ("quota_exhausted", "rate_limit_exhausted"),
+    ("quota exhausted", "rate limited"),
+    ("quota_reached", "rate_limit_reached"),
+    ("quota reached", "rate limit reached"),
+    ("usage_limit_exceeded", "rate_limit_exceeded"),
+    ("usage_limit_reached", "rate_limit_reached"),
+    ("usage_limit_exhausted", "rate_limit_exhausted"),
+    ("usage-limit-exceeded", "rate-limit-exceeded"),
+    ("usage-limit-reached", "rate-limit-reached"),
+    ("usage-limit-exhausted", "rate-limit-exhausted"),
+    ("usage limit exceeded", "rate limit exceeded"),
+    ("usage limit reached", "rate limit reached"),
+    ("usage limit exhausted", "rate limit exhausted"),
+    ("balance_exhausted", "rate_limited"),
+    ("balance exhausted", "rate limited"),
+    ("balance_depleted", "rate_limited"),
+    ("balance depleted", "rate limited"),
+    ("credits_exhausted", "rate_limited"),
+    ("credits exhausted", "rate limited"),
+    ("credits_depleted", "rate_limited"),
+    ("credits depleted", "rate limited"),
+    ("out_of_credits", "rate_limited"),
+    ("out of credits", "rate limited"),
+    ("out_of_budget", "rate_limited"),
+    ("out of budget", "rate limited"),
+    ("exceeded your current quota", "exceeded the current rate limit"),
+    ("exceeded your quota", "exceeded the rate limit"),
+    ("exceeded current quota", "exceeded current rate limit"),
+    ("exceeded the current quota", "exceeded the current rate limit"),
+    ("exceeds your current quota", "exceeds the current rate limit"),
+    ("exceeds your quota", "exceeds the rate limit"),
+];
+
+/// Neutralize client-quota-heuristic wording in a client-visible failure
+/// message (see [`CLIENT_QUOTA_WORDING_NEUTRALIZATIONS`]). Runs on the
+/// diagnostic copy only; server-side logs and flight-recorder frames keep the
+/// raw upstream body.
+fn scrub_upstream_quota_wording(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut rest = raw;
+    'scan: while !rest.is_empty() {
+        let lower = rest.to_ascii_lowercase();
+        // Leftmost occurrence wins across ALL patterns (not the first table
+        // entry that happens to match anywhere): an earlier `quota exhausted`
+        // must be neutralized before a later `quota_exceeded_error`. Ties are
+        // broken by table order, which lists longer shapes first.
+        let mut best_pos = usize::MAX;
+        let mut best_idx = None;
+        for (i, (from, _)) in CLIENT_QUOTA_WORDING_NEUTRALIZATIONS.iter().enumerate() {
+            if let Some(pos) = lower.find(from) {
+                if pos < best_pos {
+                    best_pos = pos;
+                    best_idx = Some(i);
+                }
+            }
+        }
+        if let Some(idx) = best_idx {
+            let (from, to) = CLIENT_QUOTA_WORDING_NEUTRALIZATIONS[idx];
+            out.push_str(&rest[..best_pos]);
+            out.push_str(to);
+            rest = &rest[best_pos + from.len()..];
+            continue 'scan;
+        }
+        out.push_str(rest);
+        break;
+    }
+    out
+}
+
 /// Build the client-visible exhaustion message, distinguishing local pool
 /// exhaustion (no Active keys, check cooling/disabled via `ponyllm status`)
 /// from genuine upstream failures across all candidates.
@@ -243,6 +335,20 @@ pub fn format_exhausted_message(
     request_id: &str,
 ) -> String {
     let safe_error = redact_internal_identifiers(last_error);
+    // Client-side quota heuristics (DSH `isQuotaExceededError`) classify a
+    // failure as account-quota exhaustion from wording such as
+    // `insufficient_quota` / `quota_exhausted` ANYWHERE in the message. When
+    // the gateway classified the failure as a transient rate limit (the
+    // Sense/商汤 RPM/TPM case, which upstream labels
+    // `code: "insufficient_quota"` / `type: "quota_exceeded_error"`), that
+    // wording only originates from the raw upstream body embedded in
+    // `last_error` — scrub it so the client cannot mislabel the failure.
+    // Genuine quota failures (kind == QuotaExhausted) keep their honest text.
+    let safe_error = if matches!(kind, ponyllm_core::error::GatewayErrorKind::QuotaExhausted) {
+        safe_error
+    } else {
+        scrub_upstream_quota_wording(&safe_error)
+    };
     if pool_exhausted {
         format!(
             "Local key pool exhausted for model '{}' (gateway-side cooling, no upstream attempt in this request; no Active keys, check `ponyllm status`). Last error: {} (request_id: {})",
@@ -495,6 +601,74 @@ mod tests {
         let bytes_anth = to_bytes(resp_anth.into_body(), usize::MAX).await.unwrap();
         let body_anth: serde_json::Value = serde_json::from_slice(&bytes_anth).unwrap();
         assert_eq!(body_anth["error"]["type"], "overloaded_error");
+    }
+
+    #[test]
+    fn scrub_neutralizes_upstream_quota_wording_in_rate_limit_failures() {
+        // Exact gateway message for a Sense request that exhausted every key:
+        // the raw upstream body carries `code: "insufficient_quota"` /
+        // `type: "quota_exceeded_error"`, which DSH's `isQuotaExceededError`
+        // regex would otherwise promote to QUOTA ("当前请求的额度已用尽").
+        let raw = "All candidate upstream providers exhausted for model 'deepseek-v4-flash' (upstream-side failure, gateway did attempt upstream). Last error: 6 rate limited: HTTP 429 from key-9478: {\"error\":{\"message\":\"inference exceeds tpm/rpm limit\",\"type\":\"rate_limit_error\",\"code\":\"insufficient_quota\"}} (request_id: req_18d5a6c626cca017)";
+        let scrubbed = super::scrub_upstream_quota_wording(raw);
+        // The client-heuristic triggers are gone…
+        assert!(!scrubbed.to_ascii_lowercase().contains("insufficient_quota"));
+        assert!(!scrubbed.to_ascii_lowercase().contains("quota_exceeded_error"));
+        // …and the message stays readable with the failure class intact.
+        assert!(scrubbed.contains("6 rate limited"));
+        assert!(scrubbed.contains("HTTP 429 from key-9478"));
+        assert!(scrubbed.contains("inference exceeds tpm/rpm limit"));
+        assert!(scrubbed.contains("rate_limit_error"));
+        assert!(scrubbed.contains("req_18d5a6c626cca017"));
+    }
+
+    #[test]
+    fn scrub_neutralizes_quota_exhausted_summary_and_sense_mislabels() {
+        let raw = "2 rate limited, 1 quota exhausted: HTTP 403 from key-1005: {\"error\":{\"message\":\"rpm exhausted\",\"type\":\"quota_exceeded_error\",\"code\":\"8\"}}";
+        let scrubbed = super::scrub_upstream_quota_wording(raw);
+        assert!(!scrubbed.to_ascii_lowercase().contains("quota exhausted"));
+        assert!(!scrubbed.to_ascii_lowercase().contains("quota_exceeded_error"));
+        assert!(scrubbed.contains("rpm exhausted"));
+    }
+
+    #[test]
+    fn scrub_keeps_non_quota_text_intact() {
+        assert_eq!(
+            super::scrub_upstream_quota_wording("upstream transport timeout after 90s"),
+            "upstream transport timeout after 90s"
+        );
+        assert_eq!(
+            super::scrub_upstream_quota_wording("context window overflow: input too long"),
+            "context window overflow: input too long"
+        );
+    }
+
+    #[test]
+    fn format_exhausted_message_scrubs_only_non_quota_kinds() {
+        use ponyllm_core::error::GatewayErrorKind;
+
+        let raw_err = "Request failed after 6 attempts across keys [\"key-1005\"]: 6 rate limited: HTTP 429 from key-1005: {\"error\":{\"message\":\"inference exceeds tpm/rpm limit\",\"type\":\"rate_limit_error\",\"code\":\"insufficient_quota\"}}";
+
+        // RateLimitExceeded: quota wording scrubbed from the client copy.
+        let rate_limited = super::format_exhausted_message(
+            "deepseek-v4-flash",
+            &GatewayErrorKind::RateLimitExceeded { retry_after: None },
+            raw_err,
+            false,
+            "req-scrub-1",
+        );
+        assert!(!rate_limited.to_ascii_lowercase().contains("insufficient_quota"), "msg: {rate_limited}");
+        assert!(rate_limited.contains("6 rate limited"));
+
+        // QuotaExhausted: honest message preserved — the client SHOULD see quota wording.
+        let quota = super::format_exhausted_message(
+            "deepseek-v4-flash",
+            &GatewayErrorKind::QuotaExhausted,
+            raw_err,
+            false,
+            "req-scrub-2",
+        );
+        assert!(quota.to_ascii_lowercase().contains("insufficient_quota"), "msg: {quota}");
     }
 }
 

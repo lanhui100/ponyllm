@@ -390,6 +390,25 @@ fn classify_forbidden(
             GatewayErrorKind::AuthInvalid,
             PoolErrorType::AccountValidationRequired,
         )
+    } else if body_has_rate_limit_signal(err_body) {
+        // Transient rate-limit signal wins over quota wording, mirroring the
+        // 429 path: Sense/商汤 mislabels RPM/TPM rejections as
+        // `type: "quota_exceeded_error"` even on 403, and treating those as
+        // account quota exhaustion would cool the key for ~15 minutes and
+        // shut down pool failover for a window that recovers on its own.
+        (
+            GatewayErrorKind::RateLimitExceeded { retry_after },
+            PoolErrorType::RateLimit { retry_after },
+        )
+    } else if is_balance_exhausted_body(err_body) {
+        // Billing terminal (balance/credit/budget wording) is quota-shaped:
+        // it never recovers by waiting for a sliding window.
+        (
+            GatewayErrorKind::QuotaExhausted,
+            PoolErrorType::QuotaExhausted {
+                retry_after: retry_after.or(Some(Duration::from_secs(900))),
+            },
+        )
     } else if lower.contains("quota")
         || lower.contains("#3501")
         || lower.contains("resource_exhausted")
@@ -472,6 +491,28 @@ pub fn parse_reset_duration(body: &str) -> Option<Duration> {
     }
 }
 
+/// Whether a failure body carries a transient per-minute rate-limit signal:
+/// `rate_limit` / `rate limit`, the `rpm`/`tpm`/`qps` tokens, per-minute or
+/// per-second phrasing, or concurrency limits.
+///
+/// Shared by the 429 and 403 classifiers: these signals must never be read as
+/// account quota exhaustion, even when the upstream provider errantly labels
+/// the rejection `type: "quota_exceeded_error"` (observed on Sense/商汤 RPM
+/// limits). `_` is kept inside a token so `rpm_user`/`corp_tpm` identifiers
+/// stay intact, while `/` splits `tpm/rpm` into two rate-limit words.
+pub fn body_has_rate_limit_signal(body: &str) -> bool {
+    let lower = body.to_ascii_lowercase();
+    lower.contains("rate_limit")
+        || lower.contains("rate limit")
+        || lower.contains("requests per minute")
+        || lower.contains("tokens per minute")
+        || lower.contains("queries per second")
+        || lower.contains("concurrency")
+        || lower
+            .split(|c: char| !c.is_alphanumeric() && c != '_')
+            .any(|word| matches!(word, "rpm" | "tpm" | "qps"))
+}
+
 /// Whether a 429 body is account/model quota exhaustion rather than a
 /// transient rate limit. Google's cloudcode-pa returns
 /// `"status": "RESOURCE_EXHAUSTED"` / `reason: "QUOTA_EXHAUSTED"` with
@@ -483,29 +524,13 @@ pub fn parse_reset_duration(body: &str) -> Option<Duration> {
 /// rate-limit path. Only a quota body with an advertised reset of 5+ minutes
 /// is treated as a windowed quota even without the explicit reason code.
 ///
-/// Transient rate-limit signals are detected FIRST (word-boundary tokenized,
-/// with `_` kept inside tokens so identifiers like `user_rpm` in a genuine
-/// account message cannot be misread), because upstreams such as Sense/商汤
+/// Transient rate-limit signals are detected FIRST via
+/// [`body_has_rate_limit_signal`], because upstreams such as Sense/商汤
 /// mislabel an RPM rejection as `type: "quota_exceeded_error"` while the
 /// `message` only says `"rpm exhausted"`.
 pub fn is_quota_exhausted_body(body: &str) -> bool {
     let lower = body.to_ascii_lowercase();
-
-    // Per-minute / per-second / concurrency rate limits must never be
-    // misclassified as account quota exhaustion, even if the upstream
-    // provider errantly uses `type: "quota_exceeded_error"`.
-    // `_` is kept inside a token so `rpm_user`/`corp_tpm` identifiers stay
-    // intact, while `/` splits `tpm/rpm` into two rate-limit words.
-    let is_rate_limit_signal = lower.contains("rate_limit")
-        || lower.contains("rate limit")
-        || lower.contains("requests per minute")
-        || lower.contains("tokens per minute")
-        || lower.contains("queries per second")
-        || lower.contains("concurrency")
-        || lower
-            .split(|c: char| !c.is_alphanumeric() && c != '_')
-            .any(|word| matches!(word, "rpm" | "tpm" | "qps"));
-    if is_rate_limit_signal {
+    if body_has_rate_limit_signal(body) {
         return false;
     }
 
@@ -2045,6 +2070,50 @@ mod session_header_tests {
                 assert_eq!(retry_after, Some(Duration::from_secs(60)));
             }
             other => panic!("expected 60s cooling, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn forbidden_sense_rate_limit_signal_beats_quota_wording() {
+        // Sense/商汤 labels RPM rejections `type: "quota_exceeded_error"` even
+        // on 403 (same mislabel as the 429 path): the rate-limit signal must
+        // win, otherwise the key is cooled for ~15 minutes and failover is
+        // shut down for a self-recovering window.
+        for body in [
+            r#"{"error":{"message":"rpm exhausted","type":"quota_exceeded_error","code":"8"}}"#,
+            r#"{"error":{"message":"inference exceeds tpm/rpm limit","type":"quota_exceeded_error","code":"8"}}"#,
+            r#"{"error":{"message":"requests per minute exceeded","type":"quota_exceeded_error"}}"#,
+        ] {
+            let (kind, pool_err) = classify_forbidden(body, None);
+            assert!(
+                matches!(kind, GatewayErrorKind::RateLimitExceeded { .. }),
+                "403 Sense rate-limit body must stay RateLimitExceeded, got {:?} (body: {body})",
+                kind
+            );
+            assert!(
+                matches!(pool_err, PoolErrorType::RateLimit { .. }),
+                "got {:?} (body: {body})",
+                pool_err
+            );
+        }
+    }
+
+    #[test]
+    fn forbidden_balance_wording_is_terminal_quota() {
+        // Billing wording on a 403 is account-balance exhaustion, not a
+        // transient window: classify as quota (never a 60s rate-limit blip).
+        for body in [
+            r#"{"error":{"message":"insufficient balance","type":"insufficient_balance"}}"#,
+            "your account balance is exhausted",
+            r#"{"error":{"message":"out of credits","type":"billing_error"}}"#,
+        ] {
+            let (kind, pool_err) = classify_forbidden(body, None);
+            assert_eq!(kind, GatewayErrorKind::QuotaExhausted, "body: {body}");
+            assert!(
+                matches!(pool_err, PoolErrorType::QuotaExhausted { .. }),
+                "got {:?} (body: {body})",
+                pool_err
+            );
         }
     }
 
