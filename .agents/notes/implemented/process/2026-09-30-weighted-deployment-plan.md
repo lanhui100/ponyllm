@@ -18,6 +18,9 @@ gateway 拆为 4 个节点绑定 Deployment（各 1 replica，nodeSelector + `po
 4. 验证全过：4 Pod 各在指定节点 restarts=0；聚合 Service 4 endpoints、加权 Service 各 1 endpoint；/health 200；分布趋势 GET 44:34:7:7 ≈ 5:4:0.8:0.8、POST 21:17:3:5（新后端 0×503；此前 1 次 503 系 EdgeOne 边缘瞬断，未计入 Traefik）；`scripts/post-deploy-smoke.sh` PASS（deepseek-v4-flash finish=stop）。
 5. 提交 5b8b9c7（fix(ci): ci-deployer RBAC 补 CRD）→ apply 生效（as ci-deployer 全 `yes`、dry-run 无 Forbidden）→ push 触发 CI 重跑。
 6. CI 重跑绿灯（幂等 apply + 4 Deployment rollout + 冒烟），部署闭环。
+7. CI 稳定化（部署过程中的两次修复）：
+   - **push 竞态**：docs 的 skip-CI 推送与 deploy job 的 digest 钉回并发 → `git push` 非快进拒绝（fetch first）。修复：commit-back 步骤 commit 后 fetch+rebase origin/main 再 push（457553d）。
+   - **macOS 计时抖动**：`pool_wait_tests` 两个测试（亚秒冷却 250/300/600ms）在重载 macOS arm64 runner 上"设冷却→断言调用"间隙吃光冷却窗口、键提前回填 → `maybe_window_wait` 返回 false。修复：冷却时长提升至秒级（3s/6s、2500ms），语义不变、消除负载敏感（5 轮本地复跑稳定）。
 
 ## Alternatives considered
 
