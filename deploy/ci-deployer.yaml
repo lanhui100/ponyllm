@@ -32,6 +32,10 @@ rules:
   - apiGroups: ["cert-manager.io"]
     resources: ["certificates"]
     verbs: ["get", "list", "watch", "create", "update", "patch"]
+  # 2026-10-01 单写者 PVC 持久化（deploy/ponyllm-deployment.yaml 含 PVC 对象）
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
