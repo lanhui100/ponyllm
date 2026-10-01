@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use ponyllm_server::admin_store::{
-    ConfigStore, ConfigStoreError, ConfigVersion, KubernetesConfigStore, KubeSecretApi,
+    ConfigStore, ConfigStoreError, KubernetesConfigStore, KubeSecretApi,
     SecretApi,
 };
 
@@ -120,7 +120,6 @@ async fn real_apiserver_rotated_at_clock_and_cas() {
     assert_eq!(store.load_rotated_at().await.expect("read marker"), Some(epoch));
     // A stale-rv marker write must be rejected by the apiserver (CAS).
     let snap = {
-        use ponyllm_server::admin_store::SecretApi;
         // Reuse the internal api to read the CURRENT resourceVersion...
     };
     let _ = snap;

@@ -42,13 +42,20 @@ for o in others:
     ok(not any("persistentVolumeClaim" in x for x in v),
        f"{o['metadata']['name']} stays PVC-free (stateless)")
 
-# 4. /api/admin 路由仅 1 个 service（dev）
+# 4. /api/admin 与 telemetry 路由仅 1 个 service（dev）
 route = next(r for r in d2 if r.get("kind") == "IngressRoute" and any(
     "api/admin" in (m.get("match") or "") for m in r["spec"].get("routes", [])))
 admin = next(r for r in route["spec"]["routes"] if "api/admin" in r["match"])
 svcs = admin["services"]
 ok(len(svcs) == 1 and svcs[0]["name"] == "ponyllm-svc-dev",
    "/api/admin route pinned to single service 'ponyllm-svc-dev'")
+
+telemetry = next(r for r in route["spec"]["routes"] if "telemetry" in r["match"])
+tele_svcs = telemetry["services"]
+ok(len(tele_svcs) == 1 and tele_svcs[0]["name"] == "ponyllm-svc-dev",
+   "telemetry route pinned to single service 'ponyllm-svc-dev'")
+ok(telemetry.get("priority") == 100,
+   "telemetry route has priority: 100 to override generic v1 prefix")
 
 sys.exit(1 if _fail else 0)
 EOF

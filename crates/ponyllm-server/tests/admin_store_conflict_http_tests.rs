@@ -25,6 +25,8 @@ struct FakeSecretApi {
     force_conflict: std::sync::atomic::AtomicBool,
     /// When true, GET answers NotFound (config truth source deleted).
     not_found: std::sync::atomic::AtomicBool,
+    /// When true, GET answers Timeout (API server hung).
+    force_timeout: std::sync::atomic::AtomicBool,
     rv: std::sync::atomic::AtomicU64,
     toml: std::sync::Mutex<String>,
 }
@@ -34,6 +36,7 @@ impl FakeSecretApi {
         Arc::new(Self {
             force_conflict: std::sync::atomic::AtomicBool::new(false),
             not_found: std::sync::atomic::AtomicBool::new(false),
+            force_timeout: std::sync::atomic::AtomicBool::new(false),
             rv: std::sync::atomic::AtomicU64::new(100),
             toml: std::sync::Mutex::new(toml),
         })
@@ -43,6 +46,12 @@ impl FakeSecretApi {
 #[async_trait]
 impl SecretApi for FakeSecretApi {
     async fn get(&self, _name: &str) -> Result<SecretSnapshot, ConfigStoreError> {
+        if self.force_timeout.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(ConfigStoreError::Timeout {
+                operation: "get",
+                duration: std::time::Duration::from_millis(1500),
+            });
+        }
         if self.not_found.load(std::sync::atomic::Ordering::SeqCst) {
             return Err(ConfigStoreError::NotFound(
                 "secrets \"ponyllm-live-config\" not found".to_string(),
@@ -110,11 +119,103 @@ async fn spawn_gateway_with_poll(fake: Arc<FakeSecretApi>, config_poll_ms: u64) 
     (format!("http://{}", addr), state)
 }
 
+/// FakeSecretApi that answers GET with a fixed delay (simulating a hung /
+/// black-holed control plane that never settles within the admin
+/// fast-degradation budget of 1s).
+#[derive(Default)]
+struct SlowSecretApi {
+    delay: std::time::Duration,
+}
+
+#[async_trait]
+impl SecretApi for SlowSecretApi {
+    async fn get(&self, _name: &str) -> Result<SecretSnapshot, ConfigStoreError> {
+        tokio::time::sleep(self.delay).await;
+        let mut data = BTreeMap::new();
+        data.insert(
+            "ponyllm.toml".to_string(),
+            ponyllm_config::generate_sample_config().as_bytes().to_vec(),
+        );
+        Ok(SecretSnapshot {
+            resource_version: Some("100".to_string()),
+            data,
+        })
+    }
+
+    async fn patch_data(
+        &self,
+        _name: &str,
+        _resource_version: &str,
+        _data: &BTreeMap<String, Vec<u8>>,
+    ) -> Result<(), ConfigStoreError> {
+        tokio::time::sleep(self.delay).await;
+        Ok(())
+    }
+
+    fn namespace(&self) -> &str {
+        "ponyllm"
+    }
+}
+
+/// Phase 3 fast-degradation contract: when the K8s control plane hangs (the
+/// store never settles), the admin interface must answer 503 `admin_store_degraded`
+/// within ~1 second instead of hanging the caller up to the store's own timeout.
+#[tokio::test]
+async fn admin_store_hang_degrades_to_http_503_within_one_second() {
+    // The store would only respond after 5s — far beyond the 1s admin budget.
+    let fake = Arc::new(SlowSecretApi {
+        delay: std::time::Duration::from_secs(5),
+    });
+    let store = Arc::new(KubernetesConfigStore::with_api(
+        fake,
+        "ponyllm-live-config",
+        "ponyllm.toml",
+    ));
+    let state = Arc::new(
+        AppState::new(gateway_config())
+            .with_config_store(store)
+            .with_config_poll_ms(500),
+    );
+    let app = create_app(state.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let base = format!("http://{}", addr);
+    let client = reqwest::Client::new();
+
+    let start = std::time::Instant::now();
+    let resp = client
+        .get(format!("{}/api/admin/overview", base))
+        .header("Authorization", "Bearer test-token")
+        .send()
+        .await
+        .unwrap();
+    let elapsed = start.elapsed();
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::SERVICE_UNAVAILABLE,
+        "hanging store must degrade to 503, got {}",
+        resp.status()
+    );
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(
+        body["error"]["code"], "admin_store_degraded",
+        "error code must be admin_store_degraded: {body}"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_millis(2000),
+        "degraded response must arrive well within 1s budget, took {:?}",
+        elapsed
+    );
+}
+
 /// A valid `If-Match` write that then hits a STORE conflict must answer 412
 /// with `precondition_failed` and count `admin_save_conflicts_total`.
 #[tokio::test]
-async fn store_conflict_maps_to_http_412_and_counts_metric() {
-    let fake = FakeSecretApi::seed(ponyllm_config::generate_sample_config().to_string());
+async fn store_conflict_maps_to_http_412_and_counts_metric() {    let fake = FakeSecretApi::seed(ponyllm_config::generate_sample_config().to_string());
     fake.force_conflict
         .store(true, std::sync::atomic::Ordering::SeqCst);
     let (base, state) = spawn_gateway_with_poll(fake, 500).await;
@@ -250,5 +351,34 @@ async fn store_not_found_maps_to_http_503_config_store_unavailable() {
     assert!(
         !message.contains("ponyllm-live-config") && !message.contains("not found"),
         "503 body must not leak the Secret name: {body}"
+    );
+}
+
+/// Timeout seam: when API server hangs and KubeSecretApi times out,
+/// the admin endpoint must map [`ConfigStoreError::Timeout`] to HTTP 504
+/// `config_store_timeout` fast without hanging the caller.
+#[tokio::test]
+async fn store_timeout_maps_to_http_504_config_store_timeout() {
+    let fake = FakeSecretApi::seed(ponyllm_config::generate_sample_config().to_string());
+    fake.force_timeout
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let (base, _state) = spawn_gateway_with_poll(fake, 500).await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .get(format!("{}/api/admin/overview", base))
+        .header("Authorization", "Bearer test-token")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::GATEWAY_TIMEOUT,
+        "store timeout must map to HTTP 504"
+    );
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(
+        body["error"]["code"], "config_store_timeout",
+        "error code must be config_store_timeout: {body}"
     );
 }

@@ -12,10 +12,70 @@ use std::time::Duration;
 use async_trait::async_trait;
 use ponyllm_config::ConfigFile;
 
-/// Config backend polling interval (milliseconds), surfaced as the overview
+/// Config backend base polling interval (milliseconds), surfaced as the overview
 /// `hot_reload_ms` contract: file backend 500ms (legacy mtime watcher),
 /// kubernetes backend 2s (Secret content-hash poll).
 pub const KUBERNETES_POLL_INTERVAL_MS: u64 = 2000;
+
+/// Default exponential backoff steps (in milliseconds) when the config source
+/// fails (e.g. Kubernetes API server offline / partitioned / timing out).
+/// 2s -> 4s -> 8s -> 16s -> 30s cap.
+pub const DEFAULT_BACKOFF_STEPS_MS: &[u64] = &[2000, 4000, 8000, 16000, 30000];
+
+/// Tracks consecutive failure counts and calculates the backoff duration.
+#[derive(Debug, Clone)]
+pub struct BackoffPolicy {
+    steps: Vec<Duration>,
+    consecutive_failures: usize,
+}
+
+impl Default for BackoffPolicy {
+    fn default() -> Self {
+        Self::new(
+            DEFAULT_BACKOFF_STEPS_MS
+                .iter()
+                .map(|&ms| Duration::from_millis(ms))
+                .collect(),
+        )
+    }
+}
+
+impl BackoffPolicy {
+    pub fn new(steps: Vec<Duration>) -> Self {
+        assert!(!steps.is_empty(), "backoff steps must not be empty");
+        Self {
+            steps,
+            consecutive_failures: 0,
+        }
+    }
+
+    /// Reset consecutive failures on success.
+    pub fn on_success(&mut self) {
+        if self.consecutive_failures > 0 {
+            tracing::info!(
+                recovered_after_failures = self.consecutive_failures,
+                "config source recovered; resetting backoff interval to base"
+            );
+            self.consecutive_failures = 0;
+        }
+    }
+
+    /// Record a failure and return the sleep duration to wait before the next attempt.
+    pub fn on_failure(&mut self) -> Duration {
+        let idx = self.consecutive_failures.min(self.steps.len() - 1);
+        let duration = self.steps[idx];
+        self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+        duration
+    }
+
+    pub fn consecutive_failures(&self) -> usize {
+        self.consecutive_failures
+    }
+
+    pub fn base_interval(&self) -> Duration {
+        self.steps[0]
+    }
+}
 
 /// A config truth source the poller can snapshot. For the Kubernetes backend
 /// this is a thin wrapper over [`crate::admin_store::ConfigStore`].
@@ -34,9 +94,33 @@ pub trait ConfigSource: Send + Sync {
 /// `initial_identity` seeds the change-detection baseline: pass the identity
 /// of the config the process loaded at startup so a Secret change that lands
 /// between startup and the first poll is still detected (P1-arch S3-1).
+///
+/// On snapshot failure (e.g. apiserver unreachable or timed out), the poller
+/// silently falls back to the in-memory last known good configuration without
+/// interrupting data plane forwarding, and backs off according to `interval`
+/// or exponential backoff steps (2s -> 4s -> 8s -> 16s -> 30s) to prevent
+/// apiserver storming.
 pub async fn run_config_poller(
     source: &dyn ConfigSource,
     interval: Duration,
+    initial_identity: Option<String>,
+    on_change: impl FnMut(ConfigFile),
+    shutdown: impl Fn() -> bool,
+) {
+    let policy = BackoffPolicy::new(vec![
+        interval,
+        interval.saturating_mul(2),
+        interval.saturating_mul(4),
+        interval.saturating_mul(8),
+        Duration::from_millis(30000).max(interval.saturating_mul(15)),
+    ]);
+    run_config_poller_with_backoff(source, policy, initial_identity, on_change, shutdown).await
+}
+
+/// Run the poll loop with an explicit [`BackoffPolicy`].
+pub async fn run_config_poller_with_backoff(
+    source: &dyn ConfigSource,
+    mut backoff: BackoffPolicy,
     initial_identity: Option<String>,
     mut on_change: impl FnMut(ConfigFile),
     shutdown: impl Fn() -> bool,
@@ -47,8 +131,9 @@ pub async fn run_config_poller(
             tracing::info!("config poller stopped (draining)");
             return;
         }
-        match source.snapshot().await {
+        let next_sleep = match source.snapshot().await {
             Ok((identity, config)) => {
+                backoff.on_success();
                 if last_identity.as_deref() != Some(identity.as_str()) {
                     if last_identity.is_some() {
                         tracing::info!(
@@ -60,15 +145,23 @@ pub async fn run_config_poller(
                     // First snapshot establishes the baseline without a reload.
                     last_identity = Some(identity);
                 }
+                backoff.base_interval()
             }
             Err(e) => {
-                // Read failure must never disturb live traffic: log and keep
-                // polling. A missing truth source (NotFound) surfaces as a
-                // distinct message so ops see "Secret deleted" continuously.
-                tracing::warn!("config poll failed (ignored): {}", e);
+                let failures = backoff.consecutive_failures() + 1;
+                let sleep_dur = backoff.on_failure();
+                // Read failure must never disturb live traffic: fallback to last
+                // known good in-memory config, log and backoff.
+                tracing::warn!(
+                    consecutive_failures = failures,
+                    backoff_delay_ms = sleep_dur.as_millis() as u64,
+                    "config poll failed (fallback to last known good in-memory config): {}",
+                    e
+                );
+                sleep_dur
             }
-        }
-        tokio::time::sleep(interval).await;
+        };
+        tokio::time::sleep(next_sleep).await;
     }
 }
 
@@ -277,5 +370,114 @@ mod tests {
         handle.abort();
         let _ = handle.await;
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn backoff_policy_steps_and_reset() {
+        let mut policy = BackoffPolicy::new(vec![
+            Duration::from_millis(2000),
+            Duration::from_millis(4000),
+            Duration::from_millis(8000),
+            Duration::from_millis(16000),
+            Duration::from_millis(30000),
+        ]);
+
+        assert_eq!(policy.consecutive_failures(), 0);
+        assert_eq!(policy.base_interval(), Duration::from_millis(2000));
+
+        assert_eq!(policy.on_failure(), Duration::from_millis(2000));
+        assert_eq!(policy.consecutive_failures(), 1);
+
+        assert_eq!(policy.on_failure(), Duration::from_millis(4000));
+        assert_eq!(policy.consecutive_failures(), 2);
+
+        assert_eq!(policy.on_failure(), Duration::from_millis(8000));
+        assert_eq!(policy.consecutive_failures(), 3);
+
+        assert_eq!(policy.on_failure(), Duration::from_millis(16000));
+        assert_eq!(policy.consecutive_failures(), 4);
+
+        assert_eq!(policy.on_failure(), Duration::from_millis(30000));
+        assert_eq!(policy.consecutive_failures(), 5);
+
+        // Clamped at 30s
+        assert_eq!(policy.on_failure(), Duration::from_millis(30000));
+        assert_eq!(policy.consecutive_failures(), 6);
+
+        // Reset on success
+        policy.on_success();
+        assert_eq!(policy.consecutive_failures(), 0);
+        assert_eq!(policy.on_failure(), Duration::from_millis(2000));
+    }
+
+    #[tokio::test]
+    async fn poller_backoff_timing_and_fallback_to_last_known_good() {
+        // Mock source: returns Initial, then fails 3 times, then recovers with New
+        struct StepSource {
+            step: Arc<AtomicUsize>,
+            timestamps: Arc<tokio::sync::Mutex<Vec<std::time::Instant>>>,
+        }
+
+        #[async_trait]
+        impl ConfigSource for StepSource {
+            async fn snapshot(&self) -> Result<(String, ConfigFile), String> {
+                self.timestamps.lock().await.push(std::time::Instant::now());
+                let cur = self.step.fetch_add(1, Ordering::SeqCst);
+                match cur {
+                    0 => Ok(("v1".to_string(), cfg_with_strategy(true))),
+                    1 | 2 | 3 => Err("control plane offline (simulated 504)".to_string()),
+                    _ => Ok(("v2".to_string(), cfg_with_strategy(false))),
+                }
+            }
+        }
+
+        let step = Arc::new(AtomicUsize::new(0));
+        let timestamps = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let src = StepSource {
+            step: step.clone(),
+            timestamps: timestamps.clone(),
+        };
+
+        let policy = BackoffPolicy::new(vec![
+            Duration::from_millis(20),
+            Duration::from_millis(40),
+            Duration::from_millis(80),
+        ]);
+
+        let changes = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let ch = changes.clone();
+        let handle = tokio::spawn(async move {
+            run_config_poller_with_backoff(
+                &src,
+                policy,
+                None,
+                move |cfg| {
+                    ch.lock().unwrap().push(cfg);
+                },
+                || false,
+            )
+            .await;
+        });
+
+        // Wait long enough for step 0 (v1), 1 (err -> sleep 20), 2 (err -> sleep 40), 3 (err -> sleep 80), 4 (v2)
+        // Total expected sleep: 20 + 20 + 40 + 80 ≈ 160ms
+        tokio::time::sleep(Duration::from_millis(350)).await;
+        handle.abort();
+        let _ = handle.await;
+
+        let applied = changes.lock().unwrap();
+        // v1 establishes baseline (0), then 3 failures fall back quietly, then v2 triggers exactly 1 change
+        assert_eq!(applied.len(), 1, "only genuine change should fire callback");
+        assert_eq!(
+            applied[0].gateway.default_strategy,
+            ponyllm_core::pool::GatewayRoutingStrategy::Speed
+        );
+
+        let ts = timestamps.lock().await;
+        assert!(ts.len() >= 5, "must have at least 5 poll attempts, got {}", ts.len());
+        // Verify that consecutive intervals expanded
+        let diff1 = ts[2].duration_since(ts[1]); // after failure 1 (step 1)
+        let diff2 = ts[3].duration_since(ts[2]); // after failure 2 (step 2)
+        assert!(diff2 >= diff1, "backoff delay must increase: diff1={:?}, diff2={:?}", diff1, diff2);
     }
 }

@@ -53,6 +53,10 @@ pub enum ConfigStoreError {
         expected: Option<ConfigVersion>,
         current: Option<ConfigVersion>,
     },
+    Timeout {
+        operation: &'static str,
+        duration: std::time::Duration,
+    },
 }
 
 impl std::fmt::Display for ConfigStoreError {
@@ -66,6 +70,11 @@ impl std::fmt::Display for ConfigStoreError {
                 "config store version conflict (expected {:?}, current {:?})",
                 expected.as_ref().map(|v| v.as_string()),
                 current.as_ref().map(|v| v.as_string()),
+            ),
+            ConfigStoreError::Timeout { operation, duration } => write!(
+                f,
+                "config store operation '{}' timed out after {:?}",
+                operation, duration
             ),
         }
     }
@@ -199,23 +208,75 @@ fn base64_decode(encoded: &str) -> StoreResult<Vec<u8>> {
         .map_err(|e| ConfigStoreError::InvalidData(format!("invalid base64 in Secret data: {}", e)))
 }
 
+/// Default timeout for Kubernetes API server read requests (1500ms).
+/// Prevents the data gateway from hanging when the K8s control plane is partitioned or offline.
+pub const DEFAULT_KUBE_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1500);
+
+/// Default timeout for Kubernetes API server write requests (5000ms).
+/// Avoids false-negative split-brain writes during slow etcd fsync while still providing a hard timeout barrier.
+pub const DEFAULT_KUBE_WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(5000);
+
+pub const MIN_KUBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(100);
+pub const MAX_KUBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(30_000);
+
 /// Production [`SecretApi`] backed by kube-rs against the real API server.
 #[derive(Clone)]
 pub struct KubeSecretApi {
-    client: kube::Client,
     namespace: String,
+    api: kube::Api<k8s_openapi::api::core::v1::Secret>,
+    read_timeout: std::time::Duration,
+    write_timeout: std::time::Duration,
 }
 
 impl KubeSecretApi {
     pub fn new(client: kube::Client, namespace: impl Into<String>) -> Self {
-        Self {
+        Self::with_timeouts(
             client,
-            namespace: namespace.into(),
+            namespace,
+            DEFAULT_KUBE_READ_TIMEOUT,
+            DEFAULT_KUBE_WRITE_TIMEOUT,
+        )
+    }
+
+    pub fn with_timeout(
+        client: kube::Client,
+        namespace: impl Into<String>,
+        timeout: std::time::Duration,
+    ) -> Self {
+        Self::with_timeouts(client, namespace, timeout, timeout)
+    }
+
+    pub fn with_timeouts(
+        client: kube::Client,
+        namespace: impl Into<String>,
+        read_timeout: std::time::Duration,
+        write_timeout: std::time::Duration,
+    ) -> Self {
+        let ns = namespace.into();
+        let api = kube::Api::namespaced(client, ns.as_str());
+        Self {
+            namespace: ns,
+            api,
+            read_timeout,
+            write_timeout,
         }
     }
 
-    fn api(&self) -> kube::Api<k8s_openapi::api::core::v1::Secret> {
-        kube::Api::namespaced(self.client.clone(), self.namespace.as_str())
+    /// The read timeout (GET requests). Kept as [`timeout`] for backward compatibility.
+    pub fn timeout(&self) -> std::time::Duration {
+        self.read_timeout
+    }
+
+    pub fn read_timeout(&self) -> std::time::Duration {
+        self.read_timeout
+    }
+
+    pub fn write_timeout(&self) -> std::time::Duration {
+        self.write_timeout
+    }
+
+    fn api(&self) -> &kube::Api<k8s_openapi::api::core::v1::Secret> {
+        &self.api
     }
 }
 
@@ -235,10 +296,14 @@ fn map_kube_err(e: kube::Error, expected_rv: Option<&str>) -> ConfigStoreError {
 #[async_trait]
 impl SecretApi for KubeSecretApi {
     async fn get(&self, name: &str) -> StoreResult<SecretSnapshot> {
-        let secret = self
-            .api()
-            .get(name)
+        let api = self.api();
+        let fut = api.get(name);
+        let secret = tokio::time::timeout(self.read_timeout, fut)
             .await
+            .map_err(|_| ConfigStoreError::Timeout {
+                operation: "get",
+                duration: self.read_timeout,
+            })?
             .map_err(|e| map_kube_err(e, None))?;
         let mut data = BTreeMap::new();
         if let Some(map) = secret.data {
@@ -276,9 +341,14 @@ impl SecretApi for KubeSecretApi {
         };
         let pp = kube::api::PatchParams::default();
         let merge = kube::api::Patch::Merge(&patch);
-        self.api()
-            .patch(name, &pp, &merge)
+        let api = self.api();
+        let fut = api.patch(name, &pp, &merge);
+        tokio::time::timeout(self.write_timeout, fut)
             .await
+            .map_err(|_| ConfigStoreError::Timeout {
+                operation: "patch",
+                duration: self.write_timeout,
+            })?
             .map(|_| ())
             .map_err(|e| map_kube_err(e, Some(resource_version)))
     }
@@ -362,8 +432,76 @@ impl KubernetesConfigStore {
                 // In-cluster default; harmless when running with a local kubeconfig.
                 "ponyllm".to_string()
             });
+        let parse_timeout_var = |var_name: &str, default: std::time::Duration| -> std::time::Duration {
+            match std::env::var(var_name) {
+                Ok(raw) => {
+                    let trimmed = raw.trim();
+                    match trimmed.parse::<u64>() {
+                        Ok(ms) => {
+                            let dur = std::time::Duration::from_millis(ms);
+                            if dur < MIN_KUBE_TIMEOUT {
+                                tracing::warn!(
+                                    env_var = var_name,
+                                    given_ms = ms,
+                                    clamped_ms = MIN_KUBE_TIMEOUT.as_millis() as u64,
+                                    "timeout below minimum allowed, clamping"
+                                );
+                                MIN_KUBE_TIMEOUT
+                            } else if dur > MAX_KUBE_TIMEOUT {
+                                tracing::warn!(
+                                    env_var = var_name,
+                                    given_ms = ms,
+                                    clamped_ms = MAX_KUBE_TIMEOUT.as_millis() as u64,
+                                    "timeout above maximum allowed, clamping"
+                                );
+                                MAX_KUBE_TIMEOUT
+                            } else {
+                                dur
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                env_var = var_name,
+                                val = trimmed,
+                                error = %e,
+                                default_ms = default.as_millis() as u64,
+                                "failed to parse timeout env var, falling back to default"
+                            );
+                            default
+                        }
+                    }
+                }
+                Err(_) => default,
+            }
+        };
+
+        // Legacy/fallback general timeout env var
+        let base_timeout = parse_timeout_var("PONYLLM_KUBE_TIMEOUT_MS", DEFAULT_KUBE_READ_TIMEOUT);
+        let read_timeout = parse_timeout_var("PONYLLM_KUBE_READ_TIMEOUT_MS", base_timeout);
+        let write_timeout = parse_timeout_var(
+            "PONYLLM_KUBE_WRITE_TIMEOUT_MS",
+            if std::env::var("PONYLLM_KUBE_TIMEOUT_MS").is_ok() {
+                base_timeout
+            } else {
+                DEFAULT_KUBE_WRITE_TIMEOUT
+            },
+        );
+
+        tracing::info!(
+            read_timeout_ms = read_timeout.as_millis() as u64,
+            write_timeout_ms = write_timeout.as_millis() as u64,
+            namespace = %namespace,
+            secret_name = %secret_name,
+            "initialized kubernetes config store with timeouts"
+        );
+
         Ok(Self::with_api(
-            std::sync::Arc::new(KubeSecretApi::new(client, namespace)),
+            std::sync::Arc::new(KubeSecretApi::with_timeouts(
+                client,
+                namespace,
+                read_timeout,
+                write_timeout,
+            )),
             secret_name,
             "ponyllm.toml",
         ))

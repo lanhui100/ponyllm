@@ -307,3 +307,209 @@ async fn k8s_server_error_is_io_not_conflict() {
         err
     );
 }
+
+/// When the Kubernetes API server hangs (delays response beyond timeout),
+/// `load()` must fail fast with [`ConfigStoreError::Timeout`] rather than
+/// blocking indefinitely.
+#[tokio::test]
+async fn k8s_store_load_times_out_when_apiserver_hangs() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path(SECRET_PATH))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(std::time::Duration::from_secs(5))
+                .set_body_json(secret_json(sample_toml(), "100")),
+        )
+        .mount(&server)
+        .await;
+
+    let client = client_for(&server.uri()).await;
+    let api: Arc<dyn SecretApi> = Arc::new(KubeSecretApi::with_timeout(
+        client,
+        "ponyllm",
+        std::time::Duration::from_millis(100),
+    ));
+    let store = KubernetesConfigStore::with_api(api, "ponyllm-live-config", "ponyllm.toml");
+
+    let start = std::time::Instant::now();
+    let err = store.load().await.expect_err("load must time out");
+    let elapsed = start.elapsed();
+
+    assert!(
+        matches!(err, ConfigStoreError::Timeout { operation: "get", .. }),
+        "expected Timeout error, got {:?}",
+        err
+    );
+    assert!(
+        elapsed < std::time::Duration::from_millis(1500),
+        "must fail fast, took {:?}",
+        elapsed
+    );
+}
+
+/// When the Kubernetes API server hangs on raw hash retrieval,
+/// `load_raw_hash()` must also fail fast with [`ConfigStoreError::Timeout`].
+#[tokio::test]
+async fn k8s_store_raw_hash_times_out_when_apiserver_hangs() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path(SECRET_PATH))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(std::time::Duration::from_secs(5))
+                .set_body_json(secret_json(sample_toml(), "100")),
+        )
+        .mount(&server)
+        .await;
+
+    let client = client_for(&server.uri()).await;
+    let api: Arc<dyn SecretApi> = Arc::new(KubeSecretApi::with_timeout(
+        client,
+        "ponyllm",
+        std::time::Duration::from_millis(100),
+    ));
+    let store = KubernetesConfigStore::with_api(api, "ponyllm-live-config", "ponyllm.toml");
+
+    let start = std::time::Instant::now();
+    let err = store.load_raw_hash().await.expect_err("load_raw_hash must time out");
+    let elapsed = start.elapsed();
+
+    assert!(
+        matches!(err, ConfigStoreError::Timeout { operation: "get", .. }),
+        "expected Timeout error, got {:?}",
+        err
+    );
+    assert!(
+        elapsed < std::time::Duration::from_millis(1500),
+        "must fail fast, took {:?}",
+        elapsed
+    );
+}
+
+/// When the Kubernetes API server hangs on PATCH,
+/// `save()` must fail fast with [`ConfigStoreError::Timeout`].
+#[tokio::test]
+async fn k8s_store_patch_times_out_when_apiserver_hangs() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("PATCH"))
+        .and(path(SECRET_PATH))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(std::time::Duration::from_secs(5))
+                .set_body_json(secret_json(sample_toml(), "101")),
+        )
+        .mount(&server)
+        .await;
+
+    let client = client_for(&server.uri()).await;
+    let api: Arc<dyn SecretApi> = Arc::new(KubeSecretApi::with_timeout(
+        client,
+        "ponyllm",
+        std::time::Duration::from_millis(100),
+    ));
+    let store = KubernetesConfigStore::with_api(api, "ponyllm-live-config", "ponyllm.toml");
+
+    let mut cfg = ponyllm_config::ConfigFile::load_or_default(None).expect("default config");
+    let version = ConfigVersion::Kubernetes("100".to_string());
+
+    let start = std::time::Instant::now();
+    let err = store.save(&mut cfg, &version).await.expect_err("save must time out");
+    let elapsed = start.elapsed();
+
+    assert!(
+        matches!(err, ConfigStoreError::Timeout { operation: "patch", .. }),
+        "expected Timeout error, got {:?}",
+        err
+    );
+    assert!(
+        elapsed < std::time::Duration::from_millis(1500),
+        "must fail fast, took {:?}",
+        elapsed
+    );
+}
+
+/// Assert that read_timeout and write_timeout are cleanly separated:
+/// a fast read succeeds under read_timeout, while write uses its separate longer timeout.
+#[tokio::test]
+async fn k8s_store_read_and_write_timeouts_are_independent() {
+    let server = MockServer::start().await;
+
+    // GET responds after 50ms (fast)
+    Mock::given(method("GET"))
+        .and(path(SECRET_PATH))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(std::time::Duration::from_millis(50))
+                .set_body_json(secret_json(sample_toml(), "100")),
+        )
+        .mount(&server)
+        .await;
+
+    // PATCH hangs for 300ms
+    Mock::given(method("PATCH"))
+        .and(path(SECRET_PATH))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(std::time::Duration::from_millis(300))
+                .set_body_json(secret_json(sample_toml(), "101")),
+        )
+        .mount(&server)
+        .await;
+
+    let client = client_for(&server.uri()).await;
+    // read_timeout: 150ms, write_timeout: 100ms
+    let api: Arc<dyn SecretApi> = Arc::new(KubeSecretApi::with_timeouts(
+        client,
+        "ponyllm",
+        std::time::Duration::from_millis(150),
+        std::time::Duration::from_millis(100),
+    ));
+    assert_eq!(api.namespace(), "ponyllm");
+    let store = KubernetesConfigStore::with_api(api, "ponyllm-live-config", "ponyllm.toml");
+
+    // Read succeeds within 150ms
+    let (_cfg, version) = store.load().await.expect("load should succeed within read_timeout");
+    assert_eq!(version, ConfigVersion::Kubernetes("100".to_string()));
+
+    // Write times out at 100ms because PATCH delayed 300ms
+    let mut cfg = ponyllm_config::ConfigFile::load_or_default(None).expect("default config");
+    let err = store.save(&mut cfg, &version).await.expect_err("save should time out at write_timeout");
+    assert!(
+        matches!(err, ConfigStoreError::Timeout { operation: "patch", duration } if duration == std::time::Duration::from_millis(100)),
+        "expected Timeout(patch, 100ms), got {:?}",
+        err
+    );
+}
+
+/// When connecting to an unreachable / non-routable IP (simulating TCP SYN black hole drop),
+/// KubeSecretApi must fail fast within timeout and not hang on OS SYN retries.
+#[tokio::test]
+async fn k8s_store_timeout_on_tcp_blackhole() {
+    // 10.255.255.1:81 is a private IP that discards SYN packets (black hole)
+    let client = client_for("http://10.255.255.1:81").await;
+    let api: Arc<dyn SecretApi> = Arc::new(KubeSecretApi::with_timeout(
+        client,
+        "ponyllm",
+        std::time::Duration::from_millis(200),
+    ));
+    let store = KubernetesConfigStore::with_api(api, "ponyllm-live-config", "ponyllm.toml");
+
+    let start = std::time::Instant::now();
+    let err = store.load().await.expect_err("load must time out or fail on black hole");
+    let elapsed = start.elapsed();
+
+    assert!(
+        elapsed < std::time::Duration::from_millis(1500),
+        "must fail fast under TCP black hole, took {:?}",
+        elapsed
+    );
+    assert!(
+        matches!(err, ConfigStoreError::Timeout { operation: "get", .. } | ConfigStoreError::Io(_)),
+        "expected Timeout or immediate network Io error, got {:?}",
+        err
+    );
+}

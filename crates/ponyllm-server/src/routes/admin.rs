@@ -965,6 +965,77 @@ fn auth_mode(state: &AppState) -> &'static str {
     }
 }
 
+/// Admin-layer fast-degradation budget (Phase 3): regardless of the store's
+/// own read/write timeouts, an admin request must degrade to 503 within this
+/// budget so the web console never hangs while the K8s control plane is down.
+const ADMIN_STORE_DEGRADE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Outcome of the admin fast-degradation guard: the store call either settled
+/// (possibly with a backend error the caller maps) or was cut short by the
+/// degradation budget (control plane unresponsive).
+enum AdminStoreGuard<T> {
+    /// The store future settled; `Err` holds the store-level error.
+    Settled(T),
+    /// The degradation budget elapsed first — the control plane is
+    /// effectively offline; answer 503 without waiting longer.
+    Degraded,
+}
+
+/// Wrap a config-store future with the admin fast-degradation guard. When the
+/// underlying store call does not settle within
+/// [`ADMIN_STORE_DEGRADE_TIMEOUT`], the admin layer is told to answer HTTP 503
+/// `admin_store_degraded` immediately instead of waiting for the store's own
+/// (longer) timeout — the "1 秒内快速返回 503 降级响应" contract.
+async fn admin_store_guarded<T, F>(fut: F) -> AdminStoreGuard<Result<T, crate::admin_store::ConfigStoreError>>
+where
+    F: std::future::Future<Output = Result<T, crate::admin_store::ConfigStoreError>>,
+{
+    match tokio::time::timeout(ADMIN_STORE_DEGRADE_TIMEOUT, fut).await {
+        Err(_elapsed) => {
+            tracing::warn!(
+                budget_ms = ADMIN_STORE_DEGRADE_TIMEOUT.as_millis() as u64,
+                "admin config store operation exceeded fast-degradation budget; answering 503 (control plane offline?)"
+            );
+            AdminStoreGuard::Degraded
+        }
+        Ok(inner) => AdminStoreGuard::Settled(inner),
+    }
+}
+
+/// Shared mapping of store-level errors to degraded HTTP responses (load path).
+fn store_error_to_response(e: crate::admin_store::ConfigStoreError) -> axum::response::Response {
+    tracing::error!(%e, "config store load failed");
+    match e {
+        crate::admin_store::ConfigStoreError::NotFound(_) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": {"message": "config truth source missing (Secret deleted?)", "code": "config_store_unavailable"}})),
+        )
+            .into_response(),
+        crate::admin_store::ConfigStoreError::Timeout { operation, duration } => {
+            tracing::warn!(%operation, ?duration, "admin config store load timed out");
+            (
+                StatusCode::GATEWAY_TIMEOUT,
+                Json(json!({"error": {"message": "config store operation timed out (control plane offline)", "code": "config_store_timeout"}})),
+            )
+                .into_response()
+        }
+        _ => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": {"message": "config store load failed", "code": "admin_store_load_failed"}})),
+        )
+            .into_response(),
+    }
+}
+
+/// 503 degradation response when the admin fast-degradation budget elapses.
+fn store_degraded_response() -> axum::response::Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({"error": {"message": "config store degraded: control plane unresponsive", "code": "admin_store_degraded"}})),
+    )
+        .into_response()
+}
+
 async fn load_store_config(
     state: &AppState,
 ) -> Result<(ConfigFile, crate::admin_store::ConfigVersion), axum::response::Response> {
@@ -975,21 +1046,11 @@ async fn load_store_config(
         )
             .into_response()
     })?;
-    store.load().await.map_err(|e| {
-        tracing::error!(%e, "config store load failed");
-        match e {
-            crate::admin_store::ConfigStoreError::NotFound(_) => (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({"error": {"message": "config truth source missing (Secret deleted?)", "code": "config_store_unavailable"}})),
-            )
-                .into_response(),
-            _ => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": {"message": "config store load failed", "code": "admin_store_load_failed"}})),
-            )
-                .into_response(),
-        }
-    })
+    match admin_store_guarded(store.load()).await {
+        AdminStoreGuard::Degraded => Err(store_degraded_response()),
+        AdminStoreGuard::Settled(Ok(result)) => Ok(result),
+        AdminStoreGuard::Settled(Err(e)) => Err(store_error_to_response(e)),
+    }
 }
 
 async fn save_store_config(
@@ -1005,40 +1066,51 @@ async fn save_store_config(
             .into_response()
     })?;
     cfg.config_version += 1;
-    store.save(cfg, store_version).await.map_err(|e| {
-        tracing::error!(%e, "config store save failed");
-        match e {
-            crate::admin_store::ConfigStoreError::Conflict { .. } => {
-                // Optimistic-concurrency race against another writer (second
-                // replica, refresh write-back, or an external Secret patch):
-                // surface the existing If-Match 412 precondition_failed
-                // contract so web clients retry with the fresh version.
-                state.metrics.record_admin_save_conflict();
-                tracing::warn!("config store version conflict mapped to 412");
-                (
-                    StatusCode::PRECONDITION_FAILED,
-                    Json(json!({
-                        "error": {
-                            "message": "config store version conflict: concurrent writer updated the configuration; reload and retry",
-                            "code": "precondition_failed"
-                        }
-                    })),
+    match admin_store_guarded(store.save(cfg, store_version)).await {
+        AdminStoreGuard::Degraded => Err(store_degraded_response()),
+        AdminStoreGuard::Settled(Err(e)) => {
+            tracing::error!(%e, "config store save failed");
+            Err(match e {
+                crate::admin_store::ConfigStoreError::Conflict { .. } => {
+                    // Optimistic-concurrency race against another writer (second
+                    // replica, refresh write-back, or an external Secret patch):
+                    // surface the existing If-Match 412 precondition_failed
+                    // contract so web clients retry with the fresh version.
+                    state.metrics.record_admin_save_conflict();
+                    tracing::warn!("config store version conflict mapped to 412");
+                    (
+                        StatusCode::PRECONDITION_FAILED,
+                        Json(json!({
+                            "error": {
+                                "message": "config store version conflict: concurrent writer updated the configuration; reload and retry",
+                                "code": "precondition_failed"
+                            }
+                        })),
+                    )
+                        .into_response()
+                }
+                crate::admin_store::ConfigStoreError::NotFound(_) => (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(json!({"error": {"message": "config truth source missing (Secret deleted?)", "code": "config_store_unavailable"}})),
                 )
-                    .into_response()
-            }
-            crate::admin_store::ConfigStoreError::NotFound(_) => (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({"error": {"message": "config truth source missing (Secret deleted?)", "code": "config_store_unavailable"}})),
-            )
-                .into_response(),
-            _ => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": {"message": "config store save failed", "code": "admin_store_save_failed"}})),
-            )
-                .into_response(),
+                    .into_response(),
+                crate::admin_store::ConfigStoreError::Timeout { operation, duration } => {
+                    tracing::warn!(%operation, ?duration, "admin config store save timed out");
+                    (
+                        StatusCode::GATEWAY_TIMEOUT,
+                        Json(json!({"error": {"message": "config store operation timed out (control plane offline)", "code": "config_store_timeout"}})),
+                    )
+                        .into_response()
+                }
+                _ => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": {"message": "config store save failed", "code": "admin_store_save_failed"}})),
+                )
+                    .into_response(),
+            })
         }
-    })?;
-    Ok(cfg.config_version)
+        AdminStoreGuard::Settled(Ok(())) => Ok(cfg.config_version),
+    }
 }
 
 fn check_admin_write_enabled(state: &AppState) -> Result<(), axum::response::Response> {

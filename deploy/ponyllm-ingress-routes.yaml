@@ -81,6 +81,13 @@ spec:
       services:
         - name: ponyllm-pod-service
           port: 8080
+          # 主动探活（阶段3）：Traefik 原生 L7 探针直连 Pod /health，与 kubelet
+          # 就绪探针解耦 —— 控制面宕机时 kubelet 无法更新 endpoints，边缘仍可
+          # 在 interval+timeout(≈3s) 内自发切除失效端点，前端不卡死。
+          healthCheck:
+            path: /health
+            intervalSeconds: 2
+            timeoutSeconds: 1
     # 2. 其他全部 HTTP 流量强制 301/308 跳转 HTTPS
     - match: Host(`tokens.ponyjob.top`)
       kind: Rule
@@ -89,6 +96,10 @@ spec:
       services:
         - name: ponyllm-pod-service
           port: 8080
+          healthCheck:
+            path: /health
+            intervalSeconds: 2
+            timeoutSeconds: 1
 ---
 apiVersion: traefik.io/v1alpha1
 kind: IngressRoute
@@ -115,6 +126,10 @@ spec:
       services:
         - name: ponyllm-pod-service
           port: 8080
+          healthCheck:
+            path: /health
+            intervalSeconds: 2
+            timeoutSeconds: 1
     # 2. Web 控制台静态页面（挂载安全响应头，防点击劫持与 MIME 嗅探）
     #    精确匹配收敛：Path(`/x`)+PathPrefix(`/x/`) 组合，杜绝 PathPrefix(`/app`) 对
     #    /app-evil、/assets-evil 类路径的过匹配。
@@ -126,27 +141,43 @@ spec:
         - name: ponyllm-svc-dev
           port: 8080
           weight: 5
+          healthCheck:
+            path: /health
+            intervalSeconds: 2
+            timeoutSeconds: 1
           responseForwarding:
             flushInterval: "100ms"
         - name: ponyllm-svc-preprod
           port: 8080
           weight: 4
+          healthCheck:
+            path: /health
+            intervalSeconds: 2
+            timeoutSeconds: 1
           responseForwarding:
             flushInterval: "100ms"
         - name: ponyllm-svc-proserver
           port: 8080
           weight: 1
+          healthCheck:
+            path: /health
+            intervalSeconds: 2
+            timeoutSeconds: 1
           responseForwarding:
             flushInterval: "100ms"
         - name: ponyllm-svc-tencent
           port: 8080
           weight: 1
+          healthCheck:
+            path: /health
+            intervalSeconds: 2
+            timeoutSeconds: 1
           responseForwarding:
             flushInterval: "100ms"
-    # 3. 核心白名单：业务数据面、探活、遥测流（全部由后端 auth_middleware 鉴权）
+    # 3. 核心白名单：业务数据面、探活（全部由后端 auth_middleware 鉴权）
     #    精确匹配收敛：Path(`/x`)+PathPrefix(`/x/`) 组合，杜绝 PathPrefix(`/models`)
     #    对 /models-evil、/messages-evil、/responses-evil 类路径的过匹配。
-    #    /api/admin/ 已拆至独立路由 #4，不在此放行。
+    #    /api/admin/ 与 /v1/telemetry/ 已拆至独立单写者路由，不在此加权分发。
     - match: Host(`tokens.ponyjob.top`) && (PathPrefix(`/v1/`) || Path(`/health`) || Path(`/models`) || PathPrefix(`/models/`) || Path(`/messages`) || PathPrefix(`/messages/`) || Path(`/responses`) || PathPrefix(`/responses/`))
       kind: Rule
       middlewares:
@@ -157,24 +188,59 @@ spec:
         - name: ponyllm-svc-dev
           port: 8080
           weight: 5
+          healthCheck:
+            path: /health
+            intervalSeconds: 2
+            timeoutSeconds: 1
           responseForwarding:
             flushInterval: "100ms"
         - name: ponyllm-svc-preprod
           port: 8080
           weight: 4
+          healthCheck:
+            path: /health
+            intervalSeconds: 2
+            timeoutSeconds: 1
           responseForwarding:
             flushInterval: "100ms"
         - name: ponyllm-svc-proserver
           port: 8080
           weight: 1
+          healthCheck:
+            path: /health
+            intervalSeconds: 2
+            timeoutSeconds: 1
           responseForwarding:
             flushInterval: "100ms"
         - name: ponyllm-svc-tencent
           port: 8080
           weight: 1
+          healthCheck:
+            path: /health
+            intervalSeconds: 2
+            timeoutSeconds: 1
           responseForwarding:
             flushInterval: "100ms"
-    # 4. 受权管理接口独立路由：边缘只做 IPAllowList 粗筛，身份鉴权仍由后端 auth_middleware 负责。
+    # 4. 遥测观测独立路由（2026-10-01 ADR）：钉死 dev 副本，根治多副本遥测漂移导致的仪表盘跳变。
+    #    Traefik IngressRoute 按照最长/具体规则优先或前置规则匹配，独立路由确保精确捕获 telemetry 请求。
+    - match: Host(`tokens.ponyjob.top`) && (Path(`/v1/telemetry`) || PathPrefix(`/v1/telemetry/`) || Path(`/telemetry`) || PathPrefix(`/telemetry/`))
+      kind: Rule
+      priority: 100
+      middlewares:
+        - name: ponyllm-security-headers
+        - name: ponyllm-ratelimit
+        - name: ponyllm-inflightreq
+      services:
+        - name: ponyllm-svc-dev
+          port: 8080
+          weight: 5
+          healthCheck:
+            path: /health
+            intervalSeconds: 2
+            timeoutSeconds: 1
+          responseForwarding:
+            flushInterval: "100ms"
+    # 5. 受权管理接口独立路由：边缘只做 IPAllowList 粗筛，身份鉴权仍由后端 auth_middleware 负责。
     #    sourceRange 为占位，需运维填入真实运维出口 IP/CIDR 后再生效。
     - match: Host(`tokens.ponyjob.top`) && (Path(`/api/admin`) || PathPrefix(`/api/admin/`))
       kind: Rule
@@ -190,11 +256,16 @@ spec:
         - name: ponyllm-svc-dev
           port: 8080
           weight: 5
+          # 管理面同样主动探活：Pod 失效时边缘在 ~3s 内隔离，dashboard 不卡死。
+          healthCheck:
+            path: /health
+            intervalSeconds: 2
+            timeoutSeconds: 1
           responseForwarding:
             flushInterval: "100ms"
     # 注意（边缘行为如实声明，修正旧注释的失实表述）：
     # - 未命中上述路由的其他路径由 Traefik 默认返回 404，不透传后端。
-    # - 但 /v1/telemetry/*（命中 PathPrefix(`/v1/`)）与 /api/admin/*（命中独立路由 #4）
+    # - 但 /v1/telemetry/*（命中独立路由 #4）与 /api/admin/*（命中独立路由 #5）
     #   是显式放行的，鉴权完全依赖后端 auth_middleware，边缘只做路由+限流/IPAllowList，
     #   不做身份校验，更不对这两类路径做 404。
     # - 文档漂移点同步声明：旧注释曾写“/api/admin/*、/v1/telemetry/* 及未授权目录默认 404”，
