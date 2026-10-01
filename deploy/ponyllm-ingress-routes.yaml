@@ -178,6 +178,9 @@ spec:
     #    sourceRange 为占位，需运维填入真实运维出口 IP/CIDR 后再生效。
     - match: Host(`tokens.ponyjob.top`) && (Path(`/api/admin`) || PathPrefix(`/api/admin/`))
       kind: Rule
+      # dashboard telemetry 单写者（2026-10-01 ADR）：admin 面钉死 dev 副本，
+      # 其 /var/lib/ponyllm 挂既有 PVC ponyllm-data，dashboard 读写同副本、
+      # 跨发版持久。数据面 /v1/* 路由仍 5:4:1:1 加权，不受影响。
       middlewares:
         - name: ponyllm-security-headers
         - name: ponyllm-admin-allowlist
@@ -187,21 +190,6 @@ spec:
         - name: ponyllm-svc-dev
           port: 8080
           weight: 5
-          responseForwarding:
-            flushInterval: "100ms"
-        - name: ponyllm-svc-preprod
-          port: 8080
-          weight: 4
-          responseForwarding:
-            flushInterval: "100ms"
-        - name: ponyllm-svc-proserver
-          port: 8080
-          weight: 1
-          responseForwarding:
-            flushInterval: "100ms"
-        - name: ponyllm-svc-tencent
-          port: 8080
-          weight: 1
           responseForwarding:
             flushInterval: "100ms"
     # 注意（边缘行为如实声明，修正旧注释的失实表述）：

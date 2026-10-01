@@ -10,6 +10,11 @@
 #      Service weight 归零，剩余 Service 按比例重分配（非显式 failover）。
 #   3. ponyllm-pod-service 保留为聚合 Service（覆盖全部 4 个 Pod，供
 #      admin/内部流量等非加权场景）。
+#   4. dashboard telemetry 单写者持久化（2026-10-01 ADR）：
+#      /api/admin/* 路由钉死 dev（见 ponyllm-ingress-routes.yaml），仅 dev
+#      副本挂既有 PVC ponyllm-data（local-path/RWO/1Gi，Phase 2 遗留仍 Bound）
+#      承载 /var/lib/ponyllm 快照，跨发版不归零；其余副本无状态，数据面
+#      /v1/* 维持 5:4:1:1 加权不受影响。
 # 部署机制：CI deploy job 直接驱动 —— 镜像推送后 sed 把 registry digest 钉入
 #   本清单（4 个 image 行，[skip ci] commit-back，清单即真相）并 kubectl apply。
 # 回滚：恢复 1 Deployment 4 replicas + 原 IngressRoute 后 kubectl apply；
@@ -253,8 +258,9 @@ spec:
               readOnly: true
             - name: runtime-data
               mountPath: /tmp
-            # telemetry-snapshot 落盘为每副本 emptyDir（无共享可写状态；重启即失）。
-            - name: ponyllm-state
+            # dashboard telemetry 持久化：仅 dev 副本挂既有 PVC ponyllm-data
+            # （local-path/RWO/1Gi，Phase 2 遗留仍 Bound），快照跨发版恢复。
+            - name: ponyllm-data
               mountPath: /var/lib/ponyllm
             - name: favicon
               mountPath: /opt/ponyllm/web/dist/favicon.svg
@@ -276,9 +282,11 @@ spec:
         - name: runtime-data
           emptyDir:
             sizeLimit: 256Mi
-        - name: ponyllm-state
-          emptyDir:
-            sizeLimit: 64Mi
+        # dashboard telemetry 快照卷：复用 Phase 2 遗留 PVC ponyllm-data
+        # （bound 态 local-path PV 其上可能仍存 Phase 2 末期快照）。
+        - name: ponyllm-data
+          persistentVolumeClaim:
+            claimName: ponyllm-data
         - name: favicon
           configMap:
             # 清单见 deploy/ponyllm-favicon.yaml（生成于 scripts/gen-favicon.sh）。
@@ -720,3 +728,19 @@ spec:
           configMap:
             name: ponyllm-favicon
             defaultMode: 292
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ponyllm-data
+  namespace: ponyllm
+  labels:
+    app.kubernetes.io/name: ponyllm
+    app.kubernetes.io/component: gateway
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 1Gi
