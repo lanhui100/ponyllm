@@ -186,7 +186,7 @@ where
 /// otherwise the handshake fails closed against the PG server cert — the
 /// correct posture for a lock DB (P11-sec S2-1: `require` is verify-full
 /// semantics, NOT libpq's encrypt-only).
-fn load_lock_roots() -> rustls::RootCertStore {
+pub fn load_lock_roots() -> rustls::RootCertStore {
     let mut store = rustls::RootCertStore::empty();
     if let Some(ca_path) = std::env::var("PONYLLM_LOCK_CA_FILE")
         .ok()

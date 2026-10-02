@@ -8,6 +8,7 @@
 ## 索引
 - 文档标准 → docs/AGENTS.md
 - 决策记录 → .agents/notes/
+- 集群基础设施（K3s/节点/集群 Addons/监控/Runbook）→ 外部平台仓 `cluster-infra`（`/home/dm/cluster-infra`，权责边界见 `docs/architecture/ARCHITECTURE_BOUNDARIES.md`；本仓库只索引、不复述）
 
 ## 停止线
 槽位未填时本文件为模板态：sync 投影的是**引导内容（bootstrap）**而非命约——指引 AI agent 完成填槽与首篇决策；槽位填妥重跑 sync 后引导自动被命约替换。成熟度目标（meta.yaml level）是硬上限，达到前不抢跑下一档。

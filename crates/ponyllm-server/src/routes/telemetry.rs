@@ -72,8 +72,21 @@ pub async fn handle_get_recorder_frame(
 }
 
 pub async fn handle_get_metrics(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    if let Some(ref store) = state.cluster_telemetry_store {
+        // 先确保本地增量已刷盘，以便获取最新视图
+        let buckets = state.timeseries_proj.snapshot_buckets();
+        state.cluster_telemetry_tracker.record_local_snapshot(&buckets);
+        let deltas = state.cluster_telemetry_tracker.drain_deltas();
+        if !deltas.is_empty() {
+            let _ = store.flush_deltas(deltas).await;
+        }
+
+        if let Ok(cluster_summary) = store.query_cluster_metrics().await {
+            return Json(cluster_summary).into_response();
+        }
+    }
     let summary = state.metrics.get_summary();
-    Json(summary)
+    Json(summary).into_response()
 }
 
 pub async fn handle_get_prometheus_metrics(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -298,6 +311,21 @@ pub async fn handle_get_history(
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
+
+    if let Some(ref store) = state.cluster_telemetry_store {
+        // 先确保本地增量已刷盘，以便获取最新视图
+        let buckets = state.timeseries_proj.snapshot_buckets();
+        state.cluster_telemetry_tracker.record_local_snapshot(&buckets);
+        let deltas = state.cluster_telemetry_tracker.drain_deltas();
+        if !deltas.is_empty() {
+            let _ = store.flush_deltas(deltas).await;
+        }
+
+        if let Ok(cluster_history) = store.query_history(range, now_ms).await {
+            return Json(cluster_history).into_response();
+        }
+    }
+
     let resp: TimeseriesHistoryResponse = state.timeseries_proj.query_history(range, now_ms);
     Json(resp).into_response()
 }

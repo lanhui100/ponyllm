@@ -4,6 +4,10 @@
 > `.agents/reviews/multinode-ha/P2-observation.md`（计数器为进程内 AtomicU64，
 > **随 Pod 重建归零**；基线在每次 rollout / 演练后用下方命令重新记录并标注起算
 > 时间；任何 Pod 重建事件必须记录并重新起算受影响计数器）。判定项对齐 ADR A7/A10。
+>
+> **仓库边界（2026-10-01）**：本文件只覆盖 ponyllm 工作负载的多节点观察。
+> 集群级健康巡检（节点/etcd/监控）由外部平台仓 `cluster-infra` 的
+> `scripts/check-cluster-health.sh` 与 `docs/runbooks/` 承担，本仓库不复述。
 
 ## 判定项与采集命令（每条非零退出）
 

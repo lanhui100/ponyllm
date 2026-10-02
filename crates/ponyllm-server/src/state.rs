@@ -314,6 +314,9 @@ pub struct AppState {
     pub config_store: Option<std::sync::Arc<dyn crate::admin_store::ConfigStore>>,
     /// Process start instant for admin service/status uptime (WEB-03).
     pub started_at: std::time::Instant,
+    /// 全集群遥测持久化与聚合引擎
+    pub cluster_telemetry_store: Option<Arc<crate::cluster_telemetry::ClusterTelemetryStore>>,
+    pub cluster_telemetry_tracker: Arc<crate::cluster_telemetry::ClusterTelemetryTracker>,
     /// Write queue lock serializing admin config mutations (WEB-06).
     pub admin_write_lock: Arc<tokio::sync::Mutex<()>>,
     /// Dashboard telemetry snapshot path (`None` disables persistence).
@@ -438,6 +441,29 @@ impl AppState {
             }
         }
         let pending_restored_usages = Arc::new(RwLock::new(restored_usages));
+        let cluster_telemetry_store = crate::cluster_telemetry::ClusterTelemetryStore::from_env().map(Arc::new);
+        let cluster_telemetry_tracker = Arc::new(crate::cluster_telemetry::ClusterTelemetryTracker::new());
+
+        if let Some(ref store) = cluster_telemetry_store {
+            let store_clone = store.clone();
+            let tracker_clone = cluster_telemetry_tracker.clone();
+            let timeseries_clone = timeseries_proj.clone();
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(15));
+                loop {
+                    interval.tick().await;
+                    let buckets = timeseries_clone.snapshot_buckets();
+                    tracker_clone.record_local_snapshot(&buckets);
+                    let deltas = tracker_clone.drain_deltas();
+                    if !deltas.is_empty() {
+                        if let Err(e) = store_clone.flush_deltas(deltas).await {
+                            tracing::warn!("failed to flush cluster telemetry deltas to PG: {}", e);
+                        }
+                    }
+                }
+            });
+        }
+
         if let Some(ref path) = telemetry_snapshot_path {
             spawn_snapshot_saver(
                 path.clone(),
@@ -465,6 +491,8 @@ impl AppState {
             pending_antigravity_oauth: RwLock::new(HashMap::new()),
             config_store: None,
             started_at: std::time::Instant::now(),
+            cluster_telemetry_store,
+            cluster_telemetry_tracker,
             admin_write_lock: Arc::new(tokio::sync::Mutex::new(())),
             telemetry_snapshot_path,
             pending_restored_usages,

@@ -338,6 +338,13 @@ PostgreSQL RLS 强制隔离与追加写不变式、失败即关的门禁脚本�
 - **`pre-push`（10秒级）**：29 项全量单元/集成测试 + 治理级自洽判定；
 - **`CI/Release`（分钟级）**：Linux / macOS / Windows 跨平台矩阵测试与 GitHub Release 自动化资产构建。
 
+**集群基础设施归属**：K3s 集群生命周期、节点维保、集群级公共 Addons（Traefik /
+CoreDNS / Keel / Cert-Manager）、监控平台与集群运维 Runbook 由独立的 **`cluster-infra`**
+平台仓（[lanhui100/cluster-infra](https://github.com/lanhui100/cluster-infra)）统一治理，
+本仓库只负责 `ponyllm` 自身交付物（网关内核、`ponyllm` 命名空间下的
+Deployment/Service/IngressRoute、镜像构建与发版）。权责边界见
+cluster-infra `docs/architecture/ARCHITECTURE_BOUNDARIES.md`；本仓库 docs 只索引、不复述。
+
 ---
 
 ## 📄 开源许可证

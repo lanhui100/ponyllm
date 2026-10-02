@@ -221,11 +221,13 @@ spec:
             timeoutSeconds: 1
           responseForwarding:
             flushInterval: "100ms"
-    # 4. 遥测观测独立路由（2026-10-01 ADR）：钉死 dev 副本，根治多副本遥测漂移导致的仪表盘跳变。
-    #    Traefik IngressRoute 按照最长/具体规则优先或前置规则匹配，独立路由确保精确捕获 telemetry 请求。
+    # 4. 遥测观测独立路由（2026-10-02 全集群聚合）：
+    #    Traefik IngressRoute 优先级设为 500（确保绝对高于通用 PathPrefix(/v1/) 的默认长度匹配 214），
+    #    精确捕获所有 telemetry 遥测请求并进行 5:4:1:1 加权分发。
+    #    后端所有 Pod 均通过 PostgreSQL 聚合底座返回完全一致的全集群历史与总览数据。
     - match: Host(`tokens.ponyjob.top`) && (Path(`/v1/telemetry`) || PathPrefix(`/v1/telemetry/`) || Path(`/telemetry`) || PathPrefix(`/telemetry/`))
       kind: Rule
-      priority: 100
+      priority: 500
       middlewares:
         - name: ponyllm-security-headers
         - name: ponyllm-ratelimit
@@ -234,6 +236,33 @@ spec:
         - name: ponyllm-svc-dev
           port: 8080
           weight: 5
+          healthCheck:
+            path: /health
+            intervalSeconds: 2
+            timeoutSeconds: 1
+          responseForwarding:
+            flushInterval: "100ms"
+        - name: ponyllm-svc-preprod
+          port: 8080
+          weight: 4
+          healthCheck:
+            path: /health
+            intervalSeconds: 2
+            timeoutSeconds: 1
+          responseForwarding:
+            flushInterval: "100ms"
+        - name: ponyllm-svc-proserver
+          port: 8080
+          weight: 1
+          healthCheck:
+            path: /health
+            intervalSeconds: 2
+            timeoutSeconds: 1
+          responseForwarding:
+            flushInterval: "100ms"
+        - name: ponyllm-svc-tencent
+          port: 8080
+          weight: 1
           healthCheck:
             path: /health
             intervalSeconds: 2

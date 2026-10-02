@@ -15,6 +15,7 @@ pub mod refresh_lock;
 pub mod serve;
 pub mod telemetry_snapshot;
 pub mod egress;
+pub mod cluster_telemetry;
 
 pub use config::{EffectiveProxy, GatewayConfig, ModelSpec, ProviderConfig};
 pub use state::AppState;
