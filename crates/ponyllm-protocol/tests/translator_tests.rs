@@ -144,6 +144,7 @@ fn test_anthropic_to_chat_request() {
         tools: None,
         tool_choice: None,
         thinking: None,
+        output_config: None,
         reasoning_effort: None,
         extra: Default::default(),
     };
@@ -733,6 +734,7 @@ fn test_anthropic_to_responses_request_roundtrip() {
         tools: None,
         tool_choice: None,
         thinking: None,
+        output_config: None,
         reasoning_effort: None,
         extra: Default::default(),
     };
@@ -1142,6 +1144,7 @@ fn test_anthropic_to_responses_request_preserves_thinking_text_tool_order() {
         tools: None,
         tool_choice: None,
         thinking: None,
+        output_config: None,
         reasoning_effort: None,
         extra: Default::default(),
     };
@@ -1662,6 +1665,70 @@ fn test_anthropic_to_chat_reasoning_effort_translation() {
     };
     let chat_req_budget = anthropic_to_chat_request(&ant_req_budget).unwrap();
     assert_eq!(chat_req_budget.reasoning_effort, Some(ReasoningEffort::High));
+
+    // 3. Anthropic request with adaptive thinking & output_config
+    let ant_req_adaptive = MessageRequest {
+        model: "claude-opus-5-5".to_string(),
+        messages: vec![AnthropicMessage {
+            role: AnthropicRole::User,
+            content: "Deep philosophy problem".into(),
+        }],
+        max_tokens: 4096,
+        thinking: Some(ThinkingConfig {
+            r#type: "adaptive".to_string(),
+            budget_tokens: None,
+            effort: None,
+        }),
+        output_config: Some(ponyllm_protocol::anthropic::messages::AnthropicOutputConfig {
+            effort: Some(ReasoningEffort::High),
+        }),
+        ..Default::default()
+    };
+    let chat_req_adaptive = anthropic_to_chat_request(&ant_req_adaptive).unwrap();
+    assert_eq!(chat_req_adaptive.reasoning_effort, Some(ReasoningEffort::High));
+}
+
+#[test]
+fn test_claude_opus_5_5_adaptive_thinking_translation() {
+    use ponyllm_protocol::common::ReasoningEffort;
+
+    // Chat -> Anthropic with claude-opus-5-5
+    let chat_req = ChatCompletionRequest {
+        model: "claude-opus-5-5".to_string(),
+        messages: vec![ChatMessage::User(UserMessage {
+            content: "Hello".into(),
+            name: None,
+        })],
+        reasoning_effort: Some(ReasoningEffort::High),
+        ..Default::default()
+    };
+    let ant_req = chat_to_anthropic_request(&chat_req).unwrap();
+    assert_eq!(ant_req.thinking.as_ref().unwrap().r#type, "adaptive");
+    assert!(ant_req.thinking.as_ref().unwrap().effort.is_none());
+    assert_eq!(ant_req.output_config.as_ref().unwrap().effort, Some(ReasoningEffort::High));
+
+    let json_val = serde_json::to_value(&ant_req).unwrap();
+    assert_eq!(json_val["thinking"]["type"], "adaptive");
+    assert!(json_val["thinking"].get("effort").is_none());
+    assert_eq!(json_val["output_config"]["effort"], "high");
+
+    // Chat -> Anthropic with claude-opus-5-5 (ReasoningEffort::Off)
+    let chat_req_off = ChatCompletionRequest {
+        model: "claude-opus-5-5".to_string(),
+        messages: vec![ChatMessage::User(UserMessage {
+            content: "Hello".into(),
+            name: None,
+        })],
+        reasoning_effort: Some(ReasoningEffort::Off),
+        ..Default::default()
+    };
+    let ant_req_off = chat_to_anthropic_request(&chat_req_off).unwrap();
+    assert!(ant_req_off.thinking.is_none());
+    assert!(ant_req_off.output_config.is_none());
+
+    let json_val_off = serde_json::to_value(&ant_req_off).unwrap();
+    assert!(json_val_off.get("thinking").is_none());
+    assert!(json_val_off.get("output_config").is_none());
 }
 
 #[test]

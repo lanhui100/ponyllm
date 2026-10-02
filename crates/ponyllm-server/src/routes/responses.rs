@@ -245,17 +245,32 @@ pub async fn handle_responses(
                         continue;
                     }
                 };
+                let is_adaptive = ponyllm_protocol::anthropic::messages::ThinkingConfig::is_adaptive_model(&target.physical_model);
                 if effective_thinking.is_active() {
                     ant_req.reasoning_effort = Some(effective_thinking);
-                    ant_req.thinking = Some(ponyllm_protocol::anthropic::messages::ThinkingConfig {
-                        r#type: "enabled".to_string(),
-                        budget_tokens: None,
-                        effort: Some(effective_thinking),
-                    });
+                    if is_adaptive {
+                        ant_req.thinking = Some(ponyllm_protocol::anthropic::messages::ThinkingConfig {
+                            r#type: "adaptive".to_string(),
+                            budget_tokens: None,
+                            effort: None,
+                        });
+                        ant_req.output_config = Some(ponyllm_protocol::anthropic::messages::AnthropicOutputConfig {
+                            effort: Some(effective_thinking),
+                        });
+                    } else {
+                        ant_req.thinking = Some(ponyllm_protocol::anthropic::messages::ThinkingConfig {
+                            r#type: "enabled".to_string(),
+                            budget_tokens: None,
+                            effort: Some(effective_thinking),
+                        });
+                        ant_req.output_config = None;
+                    }
                 } else {
                     ant_req.reasoning_effort = None;
                     ant_req.thinking = None;
+                    ant_req.output_config = None;
                     ant_req.extra.remove("thinking");
+                    ant_req.extra.remove("output_config");
                     ant_req.extra.remove("reasoning_effort");
                 }
                 let val = match serde_json::to_value(&ant_req) {

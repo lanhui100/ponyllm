@@ -216,17 +216,32 @@ pub async fn handle_messages(
             effective_thinking,
         ).unwrap_or(target_req.max_tokens);
 
+        let is_adaptive = ponyllm_protocol::anthropic::messages::ThinkingConfig::is_adaptive_model(&target.physical_model);
         if effective_thinking.is_active() {
             target_req.reasoning_effort = Some(effective_thinking);
-            target_req.thinking = Some(ponyllm_protocol::anthropic::messages::ThinkingConfig {
-                r#type: "enabled".to_string(),
-                budget_tokens: None,
-                effort: Some(effective_thinking),
-            });
+            if is_adaptive {
+                target_req.thinking = Some(ponyllm_protocol::anthropic::messages::ThinkingConfig {
+                    r#type: "adaptive".to_string(),
+                    budget_tokens: None,
+                    effort: None,
+                });
+                target_req.output_config = Some(ponyllm_protocol::anthropic::messages::AnthropicOutputConfig {
+                    effort: Some(effective_thinking),
+                });
+            } else {
+                target_req.thinking = Some(ponyllm_protocol::anthropic::messages::ThinkingConfig {
+                    r#type: "enabled".to_string(),
+                    budget_tokens: None,
+                    effort: Some(effective_thinking),
+                });
+                target_req.output_config = None;
+            }
         } else {
             target_req.reasoning_effort = None;
             target_req.thinking = None;
+            target_req.output_config = None;
             target_req.extra.remove("thinking");
+            target_req.extra.remove("output_config");
             target_req.extra.remove("reasoning_effort");
         }
 

@@ -399,6 +399,134 @@ async fn test_cross_protocol_thinking_translation() {
 }
 
 #[tokio::test]
+async fn test_claude_opus_5_5_adaptive_thinking_gateway() {
+    let captured_requests = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
+    let captured_clone = captured_requests.clone();
+
+    // Mock Anthropic upstream server for claude-opus-5-5
+    let mock_anthropic = Router::new().route(
+        "/v1/messages",
+        post(move |Json(req): Json<serde_json::Value>| {
+            let cap = captured_clone.clone();
+            async move {
+                cap.lock().push(req.clone());
+                axum::Json(json!({
+                    "id": "msg-mock-5-5",
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{
+                        "type": "text",
+                        "text": "Hello Adaptive Opus 5.5"
+                    }],
+                    "model": "claude-opus-5-5",
+                    "stop_reason": "end_turn",
+                    "usage": {
+                        "input_tokens": 10,
+                        "output_tokens": 10
+                    }
+                }))
+            }
+        }),
+    );
+
+    let upstream_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_addr = upstream_listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(upstream_listener, mock_anthropic).await.unwrap();
+    });
+
+    let pool = Arc::new(KeyPool::new("anthropic-adaptive", RoutingStrategy::RoundRobin));
+    pool.add_key(ApiKeyEntry::new("k1", "sk-ant-mock", 1, 10));
+
+    let mut config = GatewayConfig::default();
+    config.providers.insert(
+        "anthropic-adaptive".to_string(),
+        ProviderConfig {
+            rate_limits: None,
+            base_url: format!("http://{}", upstream_addr),
+            default_model: "claude-opus-5-5".to_string(),
+            strategy: "round_robin".to_string(),
+            billing_mode: BillingMode::Metered,
+            input_price: 15.0,
+            cached_price: 1.5,
+            output_price: 75.0,
+            models: vec!["claude-opus-5-5".to_string()],
+            model_specs: vec![ModelSpec {
+                rate_limits: None,
+                priority: None,
+                name: "claude-opus-5-5".to_string(),
+                tier: ModelTier::Flagship,
+                thinking_default: Some(ReasoningEffort::High),
+                thinking_max: Some(ReasoningEffort::High),
+                ..Default::default()
+            }],
+            default_protocol: Some(UpstreamProtocol::Anthropic),
+            chat_url: None,
+            responses_url: None,
+            messages_url: None,
+            proxy: None,
+            timeout_secs: None,
+            ttfb_timeout_secs: None,
+        },
+    );
+
+    let state = Arc::new(AppState::new(config));
+    state.register_pool("anthropic-adaptive", pool);
+
+    let gateway_app = create_app(state);
+    let gateway_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let gateway_addr = gateway_listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(gateway_listener, gateway_app).await.unwrap();
+    });
+
+    let client = reqwest::Client::new();
+
+    // 1. Call /v1/chat/completions with claude-opus-5-5
+    let resp1 = client
+        .post(format!("http://{}/v1/chat/completions", gateway_addr))
+        .json(&json!({
+            "model": "claude-opus-5-5",
+            "messages": [{"role": "user", "content": "Explain adaptive reasoning"}],
+            "reasoning_effort": "high"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp1.status(), 200);
+
+    // 2. Call /v1/messages with claude-opus-5-5
+    let resp2 = client
+        .post(format!("http://{}/v1/messages", gateway_addr))
+        .json(&json!({
+            "model": "claude-opus-5-5",
+            "max_tokens": 1024,
+            "messages": [{"role": "user", "content": "Messages API adaptive"}],
+            "thinking": {
+                "type": "enabled",
+                "budget_tokens": 4096
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp2.status(), 200);
+
+    let reqs = captured_requests.lock().clone();
+    assert_eq!(reqs.len(), 2);
+
+    // Verify reqs[0] (from Chat Completions)
+    assert_eq!(reqs[0]["thinking"]["type"], "adaptive");
+    assert!(reqs[0]["thinking"].get("effort").is_none());
+    assert_eq!(reqs[0]["output_config"]["effort"], "high");
+
+    // Verify reqs[1] (from Messages API, where client requested enabled/budget_tokens: 4096 -> mapped to ReasoningEffort::Medium -> adaptive output_config.effort = medium)
+    assert_eq!(reqs[1]["thinking"]["type"], "adaptive");
+    assert!(reqs[1]["thinking"].get("effort").is_none());
+    assert_eq!(reqs[1]["output_config"]["effort"], "medium");
+}
+
+#[tokio::test]
 async fn test_thinking_precedence_header_wins() {
     let captured_requests = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
     let captured_clone = captured_requests.clone();

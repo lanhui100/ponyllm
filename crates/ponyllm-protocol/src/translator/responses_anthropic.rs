@@ -295,24 +295,49 @@ pub fn responses_to_anthropic_request(req: &CreateResponseRequest) -> Result<Mes
             .collect()
     });
 
-    let (thinking, reasoning_effort) = match req.get_reasoning_effort() {
-        Some(ReasoningEffort::Off) => (
-            Some(ThinkingConfig {
-                r#type: "disabled".to_string(),
-                budget_tokens: None,
-                effort: Some(ReasoningEffort::Off),
-            }),
-            Some(ReasoningEffort::Off),
-        ),
-        Some(effort) => (
-            Some(ThinkingConfig {
-                r#type: "enabled".to_string(),
-                budget_tokens: None,
-                effort: Some(effort),
-            }),
-            Some(effort),
-        ),
-        None => (None, None),
+    let is_adaptive = ThinkingConfig::is_adaptive_model(&req.model);
+    let (thinking, output_config, reasoning_effort) = match req.get_reasoning_effort() {
+        Some(ReasoningEffort::Off) => {
+            if is_adaptive {
+                (None, None, Some(ReasoningEffort::Off))
+            } else {
+                (
+                    Some(ThinkingConfig {
+                        r#type: "disabled".to_string(),
+                        budget_tokens: None,
+                        effort: Some(ReasoningEffort::Off),
+                    }),
+                    None,
+                    Some(ReasoningEffort::Off),
+                )
+            }
+        }
+        Some(effort) => {
+            if is_adaptive {
+                (
+                    Some(ThinkingConfig {
+                        r#type: "adaptive".to_string(),
+                        budget_tokens: None,
+                        effort: None,
+                    }),
+                    Some(crate::anthropic::messages::AnthropicOutputConfig {
+                        effort: Some(effort),
+                    }),
+                    Some(effort),
+                )
+            } else {
+                (
+                    Some(ThinkingConfig {
+                        r#type: "enabled".to_string(),
+                        budget_tokens: None,
+                        effort: Some(effort),
+                    }),
+                    None,
+                    Some(effort),
+                )
+            }
+        }
+        None => (None, None, None),
     };
 
     Ok(MessageRequest {
@@ -329,6 +354,7 @@ pub fn responses_to_anthropic_request(req: &CreateResponseRequest) -> Result<Mes
         tools,
         tool_choice: None,
         thinking,
+        output_config,
         reasoning_effort,
         extra: req.extra.clone(),
     })

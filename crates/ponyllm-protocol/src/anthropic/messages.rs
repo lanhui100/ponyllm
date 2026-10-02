@@ -29,15 +29,28 @@ pub struct MessageRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thinking: Option<ThinkingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_config: Option<AnthropicOutputConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<ReasoningEffort>,
     #[serde(flatten)]
     pub extra: HashMap<String, serde_json::Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AnthropicOutputConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<ReasoningEffort>,
 }
 
 impl MessageRequest {
     pub fn get_reasoning_effort(&self) -> Option<ReasoningEffort> {
         if let Some(re) = self.reasoning_effort {
             return Some(re);
+        }
+        if let Some(ref out_cfg) = self.output_config {
+            if let Some(eff) = out_cfg.effort {
+                return Some(eff);
+            }
         }
         if let Some(ref t) = self.thinking {
             if let Some(eff) = t.effort {
@@ -295,6 +308,13 @@ pub struct ThinkingConfig {
     pub budget_tokens: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<ReasoningEffort>,
+}
+
+impl ThinkingConfig {
+    pub fn is_adaptive_model(model: &str) -> bool {
+        let lower = model.to_ascii_lowercase();
+        lower == "claude-opus-5-5" || lower.starts_with("claude-opus-5-5:")
+    }
 }
 
 

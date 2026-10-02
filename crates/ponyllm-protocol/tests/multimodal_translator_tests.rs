@@ -281,6 +281,7 @@ fn test_chat_and_messages_to_antigravity_multimodal() {
         tools: None,
         tool_choice: None,
         thinking: None,
+        output_config: None,
         reasoning_effort: None,
         extra: Default::default(),
     };
