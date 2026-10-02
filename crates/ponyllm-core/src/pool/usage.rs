@@ -14,6 +14,20 @@ pub const MAX_USAGE_SLICES: usize = 8640; // 30 days * 24 * 12 slices
 pub const MIN_REASONABLE_CAPACITY: u64 = 20_000;
 pub const MAX_REASONABLE_CAPACITY: u64 = 5_000_000;
 
+/// Completed-cycle kind: the upstream quota window that reset.
+pub const CYCLE_KIND_5H: &str = "5h";
+pub const CYCLE_KIND_WEEKLY: &str = "weekly";
+pub const CYCLE_KIND_MONTHLY: &str = "monthly";
+/// Per-kind aligned wall-clock period lengths (used by the persisted pool
+/// benchmark archive to aggregate closed periods from usage slices).
+pub fn cycle_kind_period_ms(kind: &str) -> u64 {
+    match kind {
+        CYCLE_KIND_WEEKLY => SEVEN_DAYS_MS,
+        CYCLE_KIND_MONTHLY => THIRTY_DAYS_MS,
+        _ => FIVE_HOURS_MS,
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct UsageSlice {
     pub timestamp_ms: u64,
@@ -59,6 +73,9 @@ pub struct KeyCapacityEstimate {
     /// Completed 5h cycle weighted average stats (objective factual historical cycles)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub completed_5h_stats: Option<CycleStats>,
+    /// Completed weekly cycle weighted average stats (objective factual historical cycles)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completed_weekly_stats: Option<CycleStats>,
     /// Inferred 5-hour total capacity in tokens, if fitted
     #[serde(skip_serializing_if = "Option::is_none")]
     pub estimated_capacity_5h: Option<u64>,
@@ -84,11 +101,236 @@ fn default_calibration_status() -> String {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CompletedCycleRecord {
     pub cycle_end_ms: u64,
+    /// Window kind: [`CYCLE_KIND_5H`] (default, legacy) or [`CYCLE_KIND_WEEKLY`].
+    #[serde(default = "default_cycle_kind")]
+    pub kind: String,
+    /// Monotonic per-tracker sequence for idempotent pool-archive merging:
+    /// a record with `seq <= last archived seq` is never merged twice even
+    /// across restarts / re-saves.
+    #[serde(default)]
+    pub seq: u64,
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
     pub cached_tokens: u64,
     pub total_tokens: u64,
     pub requests: u64,
+}
+
+fn default_cycle_kind() -> String {
+    CYCLE_KIND_5H.to_string()
+}
+
+/// One (account × closed aligned period) consumption observation, derived
+/// from usage slices by [`aligned_period_observations`]. Feeds the persisted
+/// pool benchmark archive (跨账号跨周期累计平均的数据单元).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PeriodObservation {
+    /// Aligned period end (exclusive) in wall-clock ms; only closed periods
+    /// (`<= now_ms`) are produced, so a partial current window is never
+    /// mistaken for a full period.
+    pub period_end_ms: u64,
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub cached_tokens: u64,
+    pub total_tokens: u64,
+    pub requests: u64,
+}
+
+/// Aggregates usage slices into closed, aligned wall-clock periods of
+/// `period_ms`. A period is closed when its end is `<= now_ms`; slices inside
+/// the partial current period are ignored. Empty periods are skipped. Output
+/// is sorted ascending by `period_end_ms`.
+pub fn aligned_period_observations(
+    slices: &[UsageSlice],
+    period_ms: u64,
+    now_ms: u64,
+) -> Vec<PeriodObservation> {
+    let mut map: BTreeMap<u64, PeriodObservation> = BTreeMap::new();
+    for s in slices {
+        // Align the slice's start to its containing period; the period is
+        // closed once its end boundary has passed.
+        let period_start = (s.timestamp_ms / period_ms) * period_ms;
+        let period_end = period_start.saturating_add(period_ms);
+        if period_end > now_ms {
+            continue; // partial/current period — not a full observation yet
+        }
+        let entry = map.entry(period_end).or_default();
+        entry.period_end_ms = period_end;
+        entry.prompt_tokens = entry.prompt_tokens.saturating_add(s.prompt_tokens);
+        entry.completion_tokens = entry.completion_tokens.saturating_add(s.completion_tokens);
+        entry.cached_tokens = entry.cached_tokens.saturating_add(s.cached_tokens);
+        entry.total_tokens = entry
+            .total_tokens
+            .saturating_add(s.prompt_tokens)
+            .saturating_add(s.completion_tokens);
+        entry.requests = entry.requests.saturating_add(s.requests);
+    }
+    map.into_values()
+        .filter(|o| o.total_tokens > 0)
+        .collect()
+}
+
+/// Cumulative totals for one window kind across ALL tracked accounts and ALL
+/// closed periods / completed cycles. This is the persisted "多账号多周期累计
+/// 不断求平均" benchmark backing the dashboard headline numbers.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CycleBenchmarkTotals {
+    /// Number of (account × closed period) observations merged.
+    pub observations: u64,
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub cached_tokens: u64,
+    pub total_tokens: u64,
+    pub requests: u64,
+    /// Completed (hard reset) cycles observed via upstream fraction jumps.
+    pub completed_cycles: u64,
+    pub completed_prompt_tokens: u64,
+    pub completed_completion_tokens: u64,
+    pub completed_cached_tokens: u64,
+    pub completed_total_tokens: u64,
+    pub completed_requests: u64,
+    pub first_observation_ms: u64,
+    pub last_observation_ms: u64,
+}
+
+impl CycleBenchmarkTotals {
+    /// Average tokens per (account × period) observation; 0 when no observations.
+    pub fn avg_tokens(&self) -> u64 {
+        if self.observations > 0 {
+            self.total_tokens / self.observations
+        } else {
+            0
+        }
+    }
+
+    /// Average tokens per completed (hard reset) cycle; 0 when none.
+    pub fn avg_completed_tokens(&self) -> u64 {
+        if self.completed_cycles > 0 {
+            self.completed_total_tokens / self.completed_cycles
+        } else {
+            0
+        }
+    }
+
+    fn absorb(&mut self, o: &PeriodObservation) {
+        self.observations = self.observations.saturating_add(1);
+        self.prompt_tokens = self.prompt_tokens.saturating_add(o.prompt_tokens);
+        self.completion_tokens = self.completion_tokens.saturating_add(o.completion_tokens);
+        self.cached_tokens = self.cached_tokens.saturating_add(o.cached_tokens);
+        self.total_tokens = self.total_tokens.saturating_add(o.total_tokens);
+        self.requests = self.requests.saturating_add(o.requests);
+        if self.first_observation_ms == 0 || o.period_end_ms < self.first_observation_ms {
+            self.first_observation_ms = o.period_end_ms;
+        }
+        if o.period_end_ms > self.last_observation_ms {
+            self.last_observation_ms = o.period_end_ms;
+        }
+    }
+
+    fn absorb_completed(&mut self, r: &CompletedCycleRecord) {
+        self.completed_cycles = self.completed_cycles.saturating_add(1);
+        self.completed_prompt_tokens = self.completed_prompt_tokens.saturating_add(r.prompt_tokens);
+        self.completed_completion_tokens =
+            self.completed_completion_tokens.saturating_add(r.completion_tokens);
+        self.completed_cached_tokens = self.completed_cached_tokens.saturating_add(r.cached_tokens);
+        self.completed_total_tokens = self.completed_total_tokens.saturating_add(r.total_tokens);
+        self.completed_requests = self.completed_requests.saturating_add(r.requests);
+    }
+}
+
+/// Pool-wide persisted cycle benchmark archive with per-(kind, key) watermark
+/// dedup so re-saves / restarts never double-count observations or cycles.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PoolCycleBenchmark {
+    pub kind_5h: CycleBenchmarkTotals,
+    pub kind_weekly: CycleBenchmarkTotals,
+    pub kind_monthly: CycleBenchmarkTotals,
+    /// Watermarks: kind -> key_id -> highest merged closed `period_end_ms`.
+    #[serde(default)]
+    pub last_merged_period_end: BTreeMap<String, BTreeMap<String, u64>>,
+    /// Watermarks: kind -> key_id -> highest archived completed-cycle `seq`.
+    #[serde(default)]
+    pub last_archived_seq: BTreeMap<String, BTreeMap<String, u64>>,
+}
+
+impl PoolCycleBenchmark {
+    /// Idempotently merge per-key usage state into the archive.
+    ///
+    /// - Closed aligned periods (`aligned_period_observations`) are merged when
+    ///   `period_end_ms` is newer than the key's watermark for that kind.
+    /// - Completed cycles (5h/weekly) are merged when `seq` is newer than the
+    ///   key's archived seq for that kind.
+    ///
+    /// Both watermarks persist with the archive, so calling this on the same
+    /// data twice (crash-replay, restart re-import, repeated saves) never
+    /// changes the totals.
+    pub fn merge_usages(
+        &mut self,
+        usages: &BTreeMap<String, KeyUsageStateSnapshot>,
+        now_ms: u64,
+    ) {
+        for (key_id, snap) in usages {
+            for kind in [CYCLE_KIND_5H, CYCLE_KIND_WEEKLY, CYCLE_KIND_MONTHLY] {
+                let totals = match kind {
+                    CYCLE_KIND_WEEKLY => &mut self.kind_weekly,
+                    CYCLE_KIND_MONTHLY => &mut self.kind_monthly,
+                    _ => &mut self.kind_5h,
+                };
+                let period_ms = cycle_kind_period_ms(kind);
+                let wm = self
+                    .last_merged_period_end
+                    .entry(kind.to_string())
+                    .or_default()
+                    .entry(key_id.clone())
+                    .or_insert(0);
+                let mut wm_value = *wm;
+                for obs in aligned_period_observations(&snap.slices, period_ms, now_ms) {
+                    if obs.period_end_ms > wm_value {
+                        totals.absorb(&obs);
+                        wm_value = obs.period_end_ms;
+                    }
+                }
+                *wm = wm_value;
+            }
+            // Completed cycles (both tracked kinds) deduped by seq.
+            for rec in snap
+                .completed_5h_records
+                .iter()
+                .chain(snap.completed_weekly_records.iter())
+            {
+                if rec.total_tokens == 0 {
+                    continue;
+                }
+                let kind = if rec.kind == CYCLE_KIND_WEEKLY {
+                    CYCLE_KIND_WEEKLY
+                } else {
+                    CYCLE_KIND_5H
+                };
+                let totals = match kind {
+                    CYCLE_KIND_WEEKLY => &mut self.kind_weekly,
+                    _ => &mut self.kind_5h,
+                };
+                let seq_wm = self
+                    .last_archived_seq
+                    .entry(kind.to_string())
+                    .or_default()
+                    .entry(key_id.clone())
+                    .or_insert(0);
+                if rec.seq > *seq_wm {
+                    totals.absorb_completed(rec);
+                    *seq_wm = rec.seq;
+                }
+            }
+        }
+    }
+
+    /// Total merged observations across all kinds (for display labels).
+    pub fn total_observations(&self) -> u64 {
+        self.kind_5h
+            .observations
+            .saturating_add(self.kind_weekly.observations)
+            .saturating_add(self.kind_monthly.observations)
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -98,6 +340,11 @@ pub struct KeyUsageStateSnapshot {
     pub last_probe: Option<(u64, f64, u64)>, // (timestamp_ms, fraction, lifetime_tokens)
     #[serde(default)]
     pub completed_5h_records: Vec<CompletedCycleRecord>,
+    #[serde(default)]
+    pub completed_weekly_records: Vec<CompletedCycleRecord>,
+    /// Next monotonic completed-cycle sequence id (idempotent archiving).
+    #[serde(default)]
+    pub next_cycle_seq: u64,
     #[serde(default)]
     pub completed_5h: Vec<(u64, u64, u64)>,
     #[serde(default)]
@@ -119,10 +366,14 @@ pub struct KeyUsageTracker {
     lifetime_requests: AtomicU64,
     /// Completed 5h cycles history with full 4-factor breakdown
     completed_5h_cycles: RwLock<Vec<CompletedCycleRecord>>,
-    /// Completed weekly cycles history: (cycle_end_ms, tokens, requests)
-    completed_weekly_cycles: RwLock<Vec<(u64, u64, u64)>>,
+    /// Completed weekly cycles history (full 4-factor breakdown)
+    completed_weekly_cycles: RwLock<Vec<CompletedCycleRecord>>,
+    /// Monotonic sequence counter for completed cycles (idempotent archiving).
+    cycle_seq: AtomicU64,
     /// Last observed remaining fraction from quota refresh: (timestamp_ms, remaining_fraction, lifetime_tokens_at_probe, prompt, comp, cached, reqs)
     last_probe_snapshot: RwLock<Option<(u64, f64, u64, u64, u64, u64, u64)>>,
+    /// Weekly-bucket probe baseline, same shape as `last_probe_snapshot`.
+    last_probe_weekly: RwLock<Option<(u64, f64, u64, u64, u64, u64, u64)>>,
     cached_capacity: RwLock<Option<u64>>,
 }
 
@@ -217,6 +468,30 @@ impl KeyUsageTracker {
 
     /// Observe upstream probe fraction with reset detection, monotonic token deltas, and sanity bounds
     pub fn observe_upstream_probe(&self, now_ms: u64, remaining_fraction: f64) {
+        self.observe_upstream_probe_dual(now_ms, Some(remaining_fraction), None);
+    }
+
+    /// Dual-track probe observation: 5h bucket + weekly bucket reset detection.
+    ///
+    /// - A 5h fraction jump (>5%) archives a completed 5h cycle (existing
+    ///   capacity inference is unchanged).
+    /// - A weekly fraction jump (>5%) archives a completed weekly cycle, so
+    ///   long-term measurement covers more than the single 5h window.
+    pub fn observe_upstream_probe_dual(
+        &self,
+        now_ms: u64,
+        h5_fraction: Option<f64>,
+        weekly_fraction: Option<f64>,
+    ) {
+        if let Some(frac) = h5_fraction {
+            self.observe_h5_probe(now_ms, frac);
+        }
+        if let Some(frac) = weekly_fraction {
+            self.observe_weekly_probe(now_ms, frac);
+        }
+    }
+
+    fn observe_h5_probe(&self, now_ms: u64, remaining_fraction: f64) {
         let current_lifetime = self.lifetime_tokens.load(Ordering::Relaxed);
         let current_prompt = self.lifetime_prompt.load(Ordering::Relaxed);
         let current_comp = self.lifetime_completion.load(Ordering::Relaxed);
@@ -231,26 +506,7 @@ impl KeyUsageTracker {
                 // An actual completed cycle occurred before this reset!
                 // Guard: only record cycle if previous baseline was initialized (prev_lifetime > 0)
                 if prev_lifetime > 0 {
-                    let cycle_tokens = current_lifetime.saturating_sub(prev_lifetime);
-                    let cycle_prompt = current_prompt.saturating_sub(prev_prompt);
-                    let cycle_comp = current_comp.saturating_sub(prev_comp);
-                    let cycle_cached = current_cached.saturating_sub(prev_cached);
-                    let cycle_reqs = current_reqs.saturating_sub(prev_reqs);
-
-                    if cycle_tokens > 0 {
-                        let mut completed_5h = self.completed_5h_cycles.write();
-                        completed_5h.push(CompletedCycleRecord {
-                            cycle_end_ms: now_ms,
-                            prompt_tokens: cycle_prompt,
-                            completion_tokens: cycle_comp,
-                            cached_tokens: cycle_cached,
-                            total_tokens: cycle_tokens,
-                            requests: cycle_reqs.max(1),
-                        });
-                        if completed_5h.len() > 100 {
-                            completed_5h.remove(0);
-                        }
-                    }
+                    self.record_completed_cycle(CYCLE_KIND_5H, now_ms, current_lifetime, current_prompt, current_comp, current_cached, current_reqs, prev_lifetime, prev_prompt, prev_comp, prev_cached, prev_reqs);
                 }
 
                 // Upstream window reset occurred: reset baseline without fitting
@@ -296,6 +552,74 @@ impl KeyUsageTracker {
         }
 
         *probe = Some((now_ms, remaining_fraction, current_lifetime, current_prompt, current_comp, current_cached, current_reqs));
+    }
+
+    fn observe_weekly_probe(&self, now_ms: u64, weekly_fraction: f64) {
+        let current_lifetime = self.lifetime_tokens.load(Ordering::Relaxed);
+        let current_prompt = self.lifetime_prompt.load(Ordering::Relaxed);
+        let current_comp = self.lifetime_completion.load(Ordering::Relaxed);
+        let current_cached = self.lifetime_cached.load(Ordering::Relaxed);
+        let current_reqs = self.lifetime_requests.load(Ordering::Relaxed);
+
+        let mut probe = self.last_probe_weekly.write();
+        if let Some((_prev_time, prev_frac, prev_lifetime, prev_prompt, prev_comp, prev_cached, prev_reqs)) = *probe {
+            // Weekly quota bucket reset: fraction jumped upwards by > 5%.
+            if weekly_fraction > prev_frac + 0.05 {
+                if prev_lifetime > 0 {
+                    self.record_completed_cycle(CYCLE_KIND_WEEKLY, now_ms, current_lifetime, current_prompt, current_comp, current_cached, current_reqs, prev_lifetime, prev_prompt, prev_comp, prev_cached, prev_reqs);
+                }
+                *probe = Some((now_ms, weekly_fraction, current_lifetime, current_prompt, current_comp, current_cached, current_reqs));
+                return;
+            }
+        }
+        *probe = Some((now_ms, weekly_fraction, current_lifetime, current_prompt, current_comp, current_cached, current_reqs));
+    }
+
+    /// Archive one completed cycle with a monotonic sequence id (idempotent
+    /// pool-archive merging); keeps a bounded per-key history (100 records).
+    fn record_completed_cycle(
+        &self,
+        kind: &str,
+        now_ms: u64,
+        current_lifetime: u64,
+        current_prompt: u64,
+        current_comp: u64,
+        current_cached: u64,
+        current_reqs: u64,
+        prev_lifetime: u64,
+        prev_prompt: u64,
+        prev_comp: u64,
+        prev_cached: u64,
+        prev_reqs: u64,
+    ) {
+        let cycle_tokens = current_lifetime.saturating_sub(prev_lifetime);
+        if cycle_tokens == 0 {
+            return;
+        }
+        let seq = self.cycle_seq.fetch_add(1, Ordering::Relaxed).saturating_add(1);
+        let record = CompletedCycleRecord {
+            cycle_end_ms: now_ms,
+            kind: kind.to_string(),
+            seq,
+            prompt_tokens: current_prompt.saturating_sub(prev_prompt),
+            completion_tokens: current_comp.saturating_sub(prev_comp),
+            cached_tokens: current_cached.saturating_sub(prev_cached),
+            total_tokens: cycle_tokens,
+            requests: current_reqs.saturating_sub(prev_reqs).max(1),
+        };
+        if kind == CYCLE_KIND_WEEKLY {
+            let mut weekly = self.completed_weekly_cycles.write();
+            weekly.push(record);
+            if weekly.len() > 100 {
+                weekly.remove(0);
+            }
+        } else {
+            let mut cycles = self.completed_5h_cycles.write();
+            cycles.push(record);
+            if cycles.len() > 100 {
+                cycles.remove(0);
+            }
+        }
     }
 
     /// Compute full estimate snapshot with optional weekly fraction for dual-track estimation
@@ -369,31 +693,18 @@ impl KeyUsageTracker {
             }
         });
 
-        let completed_5h_stats = if !completed_cycles.is_empty() {
-            let count = completed_cycles.len() as u64;
-            let prompt_tokens: u64 = completed_cycles.iter().map(|c| c.prompt_tokens).sum();
-            let completion_tokens: u64 = completed_cycles.iter().map(|c| c.completion_tokens).sum();
-            let cached_tokens: u64 = completed_cycles.iter().map(|c| c.cached_tokens).sum();
-            let total_tokens: u64 = completed_cycles.iter().map(|c| c.total_tokens).sum();
-            let requests: u64 = completed_cycles.iter().map(|c| c.requests).sum();
-            Some(CycleStats {
-                count,
-                prompt_tokens,
-                completion_tokens,
-                cached_tokens,
-                total_tokens,
-                requests,
-                avg_tokens: total_tokens / count,
-            })
-        } else {
-            None
-        };
+        let completed_5h_stats = cycle_stats_from_records(&completed_cycles);
+
+        let weekly_cycles = self.completed_weekly_cycles.read();
+        let completed_weekly_stats = cycle_stats_from_records(&weekly_cycles);
+        drop(weekly_cycles);
 
         KeyCapacityEstimate {
             window_5h,
             window_weekly,
             window_monthly,
             completed_5h_stats,
+            completed_weekly_stats,
             estimated_capacity_5h: cap_5h,
             estimated_tokens_remaining_5h,
             estimated_capacity_weekly,
@@ -410,8 +721,10 @@ impl KeyUsageTracker {
             cached_capacity: *self.cached_capacity.read(),
             last_probe,
             completed_5h_records: self.completed_5h_cycles.read().clone(),
+            completed_weekly_records: self.completed_weekly_cycles.read().clone(),
+            next_cycle_seq: self.cycle_seq.load(Ordering::Relaxed),
             completed_5h: self.completed_5h_cycles.read().iter().map(|r| (r.cycle_end_ms, r.total_tokens, r.requests)).collect(),
-            completed_weekly: self.completed_weekly_cycles.read().clone(),
+            completed_weekly: self.completed_weekly_cycles.read().iter().map(|r| (r.cycle_end_ms, r.total_tokens, r.requests)).collect(),
         }
     }
 
@@ -423,8 +736,12 @@ impl KeyUsageTracker {
             *self.last_probe_snapshot.write() = Some((t, f, lt, 0, 0, 0, 0));
             self.lifetime_tokens.store(lt, Ordering::Relaxed);
         }
+        // 5h records: prefer the structured archive, fall back to the legacy
+        // (end, tokens, requests) list. Assign monotonic seq ids so legacy
+        // records still archive exactly once in the pool benchmark.
+        let mut seq_start = snap.next_cycle_seq;
         if !snap.completed_5h_records.is_empty() {
-            let mut records = snap.completed_5h_records;
+            let mut records = prepare_imported_records(snap.completed_5h_records, CYCLE_KIND_5H, &mut seq_start);
             if records.len() > 100 {
                 records = records.split_off(records.len() - 100);
             }
@@ -436,6 +753,8 @@ impl KeyUsageTracker {
             }
             *self.completed_5h_cycles.write() = legacy.into_iter().map(|(end, tot, req)| CompletedCycleRecord {
                 cycle_end_ms: end,
+                kind: CYCLE_KIND_5H.to_string(),
+                seq: next_seq(&mut seq_start),
                 prompt_tokens: 0,
                 completion_tokens: 0,
                 cached_tokens: 0,
@@ -443,7 +762,32 @@ impl KeyUsageTracker {
                 requests: req,
             }).collect();
         }
-        *self.completed_weekly_cycles.write() = snap.completed_weekly;
+        // Weekly records (structured + legacy tuple list).
+        if !snap.completed_weekly_records.is_empty() {
+            let mut records = prepare_imported_records(snap.completed_weekly_records, CYCLE_KIND_WEEKLY, &mut seq_start);
+            if records.len() > 100 {
+                records = records.split_off(records.len() - 100);
+            }
+            *self.completed_weekly_cycles.write() = records;
+        } else if !snap.completed_weekly.is_empty() {
+            let mut legacy = snap.completed_weekly;
+            if legacy.len() > 100 {
+                legacy = legacy.split_off(legacy.len() - 100);
+            }
+            *self.completed_weekly_cycles.write() = legacy.into_iter().map(|(end, tot, req)| CompletedCycleRecord {
+                cycle_end_ms: end,
+                kind: CYCLE_KIND_WEEKLY.to_string(),
+                seq: next_seq(&mut seq_start),
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                cached_tokens: 0,
+                total_tokens: tot,
+                requests: req,
+            }).collect();
+        }
+        if seq_start > 0 {
+            self.cycle_seq.store(seq_start, Ordering::Relaxed);
+        }
         let mut slices = self.slices.write();
         for item in snap.slices {
             slices.insert(item.timestamp_ms, item);
@@ -467,4 +811,51 @@ impl KeyUsageTracker {
             slices.insert(item.timestamp_ms, item);
         }
     }
+}
+
+/// Condense completed-cycle records into a [`CycleStats`] (weighted average
+/// across all archived cycles); `None` when there are no records.
+fn cycle_stats_from_records(records: &[CompletedCycleRecord]) -> Option<CycleStats> {
+    if records.is_empty() {
+        return None;
+    }
+    let count = records.len() as u64;
+    let prompt_tokens: u64 = records.iter().map(|c| c.prompt_tokens).sum();
+    let completion_tokens: u64 = records.iter().map(|c| c.completion_tokens).sum();
+    let cached_tokens: u64 = records.iter().map(|c| c.cached_tokens).sum();
+    let total_tokens: u64 = records.iter().map(|c| c.total_tokens).sum();
+    let requests: u64 = records.iter().map(|c| c.requests).sum();
+    Some(CycleStats {
+        count,
+        prompt_tokens,
+        completion_tokens,
+        cached_tokens,
+        total_tokens,
+        requests,
+        avg_tokens: total_tokens / count,
+    })
+}
+
+/// Assign monotonic sequence ids to imported records, keeping `seq_start`
+/// (the persisted per-key counter) ahead of every archived record so the pool
+/// benchmark archive merges each legacy/structured record exactly once.
+fn prepare_imported_records(
+    mut records: Vec<CompletedCycleRecord>,
+    kind: &str,
+    seq_start: &mut u64,
+) -> Vec<CompletedCycleRecord> {
+    for r in records.iter_mut() {
+        if r.kind.is_empty() {
+            r.kind = kind.to_string();
+        }
+        if r.seq == 0 {
+            r.seq = next_seq(seq_start);
+        }
+    }
+    records
+}
+
+fn next_seq(seq_start: &mut u64) -> u64 {
+    *seq_start = seq_start.saturating_add(1);
+    *seq_start
 }

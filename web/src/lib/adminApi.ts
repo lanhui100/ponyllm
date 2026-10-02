@@ -24,6 +24,7 @@ import type {
   GatewayKeyView,
   IssueGatewayKeyPayload,
   IssueGatewayKeyResponse,
+  QuotaCycleBenchmarkView,
 } from '../types/admin';
 
 export function ifMatchHeaders(version?: number | string): Record<string, string> {
@@ -67,6 +68,11 @@ export const adminApi = {
 
   getStrategy() {
     return alova.Get<StrategyView>('/api/admin/strategy');
+  },
+
+  /** 池级跨账号跨周期持久化累计基准（只读，直接读快照归档）。 */
+  getQuotaBenchmark() {
+    return alova.Get<QuotaCycleBenchmarkView>('/api/admin/quota/benchmark');
   },
 
   /** Scoped gateway credentials (task-28). AdminRead: inference callers get 403. */

@@ -158,12 +158,45 @@ export interface KeyCapacityEstimate {
   window_weekly: WindowUsage;
   window_monthly?: WindowUsage | null;
   completed_5h_stats?: CycleStats | null;
+  completed_weekly_stats?: CycleStats | null;
   estimated_capacity_5h?: number | null;
   estimated_tokens_remaining_5h?: number | null;
   estimated_capacity_weekly?: number | null;
   account_tier: 'pro' | 'standard' | 'free' | 'calibrating' | 'unknown' | string;
   confidence: number;
   calibration_status?: 'benchmarked' | 'estimated' | 'calibrating' | string;
+}
+
+/** 池级跨账号跨周期持久化累计基准（一个窗口档位）。 */
+export interface QuotaBenchmarkKindView {
+  /** 已累计的 (账号 × 已闭合对齐周期) 观测数。 */
+  observations: number;
+  /** 每观测平均 token（= 累计总量 / 观测数）。 */
+  avg_tokens: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  cached_tokens: number;
+  total_tokens: number;
+  requests: number;
+  /** 已累计的打满（完整周期）实测轮数。 */
+  completed_cycles: number;
+  /** 每轮打满实测平均 token。 */
+  avg_completed_tokens: number;
+  completed_prompt_tokens: number;
+  completed_completion_tokens: number;
+  completed_cached_tokens: number;
+  completed_total_tokens: number;
+  completed_requests: number;
+  first_observation_ms: number;
+  last_observation_ms: number;
+}
+
+/** `GET /api/admin/quota/benchmark` —— 持久化累计基准（跨发布/账号增删不归零）。 */
+export interface QuotaCycleBenchmarkView {
+  persisted_at_ms: number;
+  kind_5h: QuotaBenchmarkKindView;
+  kind_weekly: QuotaBenchmarkKindView;
+  kind_monthly: QuotaBenchmarkKindView;
 }
 
 export interface KeyTestView {

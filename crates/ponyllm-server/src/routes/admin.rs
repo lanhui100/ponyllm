@@ -790,7 +790,9 @@ async fn handle_admin_quota_inner(q: QuotaQuery, state: Arc<AppState>) -> Vec<Qu
 
             if let Some(entry) = pool.snapshot_keys().into_iter().find(|k| k.id == id) {
                 if let Some(frac) = current_fraction {
-                    entry.usage_tracker.observe_upstream_probe(now_ms, frac);
+                    entry
+                        .usage_tracker
+                        .observe_upstream_probe_dual(now_ms, Some(frac), weekly_fraction);
                 }
                 view.usage = Some(entry.usage_tracker.estimate_capacity_dual(now_ms, current_fraction, weekly_fraction));
             }
@@ -799,6 +801,107 @@ async fn handle_admin_quota_inner(q: QuotaQuery, state: Arc<AppState>) -> Vec<Qu
     }
     views.sort_by(|a, b| a.provider.cmp(&b.provider).then(a.key_id.cmp(&b.key_id)));
     views
+}
+
+/// One window kind of the persisted pool-level cycle benchmark (跨账号跨周期
+/// 持久化累计平均：每个观测 = 一个账号在一个已闭合对齐周期内的真实消耗)。
+#[derive(Debug, Clone, Default, Serialize, ToSchema)]
+pub struct QuotaBenchmarkKindView {
+    /// Number of (account × closed period) observations merged so far.
+    pub observations: u64,
+    /// Average tokens per observation (= cumulative total / observations).
+    pub avg_tokens: u64,
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub cached_tokens: u64,
+    pub total_tokens: u64,
+    pub requests: u64,
+    /// Completed (hard reset, fraction-jump detected) cycles merged so far.
+    pub completed_cycles: u64,
+    /// Average full-cycle tokens (= completed total / completed cycles).
+    pub avg_completed_tokens: u64,
+    pub completed_prompt_tokens: u64,
+    pub completed_completion_tokens: u64,
+    pub completed_cached_tokens: u64,
+    pub completed_total_tokens: u64,
+    pub completed_requests: u64,
+    pub first_observation_ms: u64,
+    pub last_observation_ms: u64,
+}
+
+impl From<&ponyllm_core::pool::usage::CycleBenchmarkTotals> for QuotaBenchmarkKindView {
+    fn from(t: &ponyllm_core::pool::usage::CycleBenchmarkTotals) -> Self {
+        Self {
+            observations: t.observations,
+            avg_tokens: t.avg_tokens(),
+            prompt_tokens: t.prompt_tokens,
+            completion_tokens: t.completion_tokens,
+            cached_tokens: t.cached_tokens,
+            total_tokens: t.total_tokens,
+            requests: t.requests,
+            completed_cycles: t.completed_cycles,
+            avg_completed_tokens: t.avg_completed_tokens(),
+            completed_prompt_tokens: t.completed_prompt_tokens,
+            completed_completion_tokens: t.completed_completion_tokens,
+            completed_cached_tokens: t.completed_cached_tokens,
+            completed_total_tokens: t.completed_total_tokens,
+            completed_requests: t.completed_requests,
+            first_observation_ms: t.first_observation_ms,
+            last_observation_ms: t.last_observation_ms,
+        }
+    }
+}
+
+/// Persisted pool-level cycle benchmark (`GET /api/admin/quota/benchmark`).
+///
+/// Read directly from the telemetry snapshot file (the single writer), so it
+/// survives process restarts and account/config churn — the authoritative
+/// "长期累计单账号官方用量" estimate backing the dashboard headline numbers.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct QuotaCycleBenchmarkView {
+    /// Epoch ms of the last snapshot save that merged this archive.
+    pub persisted_at_ms: u64,
+    pub kind_5h: QuotaBenchmarkKindView,
+    pub kind_weekly: QuotaBenchmarkKindView,
+    pub kind_monthly: QuotaBenchmarkKindView,
+}
+
+/// Read-only pool-level cycle benchmark (`GET /api/admin/quota/benchmark`).
+#[utoipa::path(get, path = "/api/admin/quota/benchmark", responses((status = 200, body = QuotaCycleBenchmarkView)))]
+pub async fn handle_admin_quota_benchmark(
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let path = match &state.telemetry_snapshot_path {
+        Some(p) => p.clone(),
+        None => {
+            return Json(QuotaCycleBenchmarkView {
+                persisted_at_ms: 0,
+                kind_5h: Default::default(),
+                kind_weekly: Default::default(),
+                kind_monthly: Default::default(),
+            })
+            .into_response();
+        }
+    };
+    let file = crate::telemetry_snapshot::load_snapshot_file(&path);
+    let view = match file {
+        Some(f) => {
+            let b = &f.snapshot.pool_cycle_benchmark;
+            QuotaCycleBenchmarkView {
+                persisted_at_ms: f.snapshot.saved_at_ms,
+                kind_5h: QuotaBenchmarkKindView::from(&b.kind_5h),
+                kind_weekly: QuotaBenchmarkKindView::from(&b.kind_weekly),
+                kind_monthly: QuotaBenchmarkKindView::from(&b.kind_monthly),
+            }
+        }
+        None => QuotaCycleBenchmarkView {
+            persisted_at_ms: 0,
+            kind_5h: Default::default(),
+            kind_weekly: Default::default(),
+            kind_monthly: Default::default(),
+        },
+    };
+    Json(view).into_response()
 }
 
 /// Best-effort Antigravity quota snapshot for one key (read-only).
@@ -3347,7 +3450,9 @@ pub async fn handle_admin_test_key(
     if let Some(pool) = state.pools.read().get(&p_name) {
         if let Some(entry) = pool.snapshot_keys().into_iter().find(|k| k.id == id) {
             if let Some(frac) = current_fraction {
-                entry.usage_tracker.observe_upstream_probe(now_ms, frac);
+                entry
+                    .usage_tracker
+                    .observe_upstream_probe_dual(now_ms, Some(frac), weekly_fraction);
             }
             test_view.usage = Some(entry.usage_tracker.estimate_capacity_dual(now_ms, current_fraction, weekly_fraction));
         }
@@ -4821,6 +4926,7 @@ pub async fn handle_admin_provider_upstream_models(
         handle_admin_delete_key,
         handle_admin_test_key,
         handle_admin_quota,
+        handle_admin_quota_benchmark,
         handle_gateway_keys_list,
         handle_gateway_keys_issue,
         handle_gateway_keys_revoke,
@@ -4850,6 +4956,8 @@ pub async fn handle_admin_provider_upstream_models(
         CreateKeyResponse,
         KeyTestView,
         QuotaKeyView,
+        QuotaCycleBenchmarkView,
+        QuotaBenchmarkKindView,
         GatewayKeyView,
         IssueGatewayKeyPayload,
         IssueGatewayKeyResponse,
@@ -4936,6 +5044,10 @@ pub fn admin_routes() -> axum::Router<Arc<AppState>> {
             post(handle_admin_test_key),
         )
         .route("/api/admin/quota", get(handle_admin_quota))
+        .route(
+            "/api/admin/quota/benchmark",
+            get(handle_admin_quota_benchmark),
+        )
         .route(
             "/api/admin/strategy",
             get(handle_admin_get_strategy).put(handle_admin_put_strategy),

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use parking_lot::RwLock;
 use ponyllm_core::error::{CoreError, Result};
@@ -114,6 +114,7 @@ fn spawn_snapshot_saver(
                 connectivity: connectivity.snapshot_state(),
                 streams: streams.snapshot_nodes(),
                 key_usages,
+                pool_cycle_benchmark: Default::default(),
             };
             if let Err(e) = crate::telemetry_snapshot::save_snapshot_with_live_cycles(&path, &snap, live_cycles) {
                 tracing::warn!("telemetry snapshot save failed: {}", e);
@@ -532,6 +533,7 @@ impl AppState {
                 }
                 usages
             },
+            pool_cycle_benchmark: Default::default(),
         };
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -712,8 +714,51 @@ impl AppState {
         new_config: GatewayConfig,
         new_pools: HashMap<String, Arc<KeyPool>>,
     ) {
+        // Hot-reload survival: capture the current per-key usage trackers so a
+        // fresh pool rebuilt from config keeps its measurement history (slices,
+        // completed cycles, capacity EWMA) by key id — accounts/config churn
+        // must never zero the cycle history. Keys missing here fall back to the
+        // persisted snapshot file below.
+        let mut donor_pools: HashMap<String, Arc<KeyPool>> = {
+            let pools_guard = self.pools.read();
+            pools_guard.clone()
+        };
+
         let mut config_guard = self.config.write();
         let mut pools_guard = self.pools.write();
+
+        // Track which key ids got a live donor so the file fallback below
+        // never overwrites a fresher in-memory tracker with disk state.
+        let mut transplanted_ids: HashSet<String> = HashSet::new();
+
+        for (name, pool) in &new_pools {
+            // Donors are scoped per provider: only reuse measurement state from
+            // the OLD pool with the same provider name (key ids may repeat
+            // across providers).
+            let donors: HashMap<String, Arc<ponyllm_core::pool::ApiKeyEntry>> = donor_pools
+                .get(name)
+                .map(|old_pool| {
+                    old_pool
+                        .snapshot_keys()
+                        .into_iter()
+                        .filter(|k| pool.snapshot_keys().iter().any(|n| n.id == k.id))
+                        .map(|k| (k.id.clone(), k))
+                        .collect()
+                })
+                .unwrap_or_default();
+            for id in pool.snapshot_keys().iter().map(|k| k.id.clone()) {
+                if donors.contains_key(&id) {
+                    transplanted_ids.insert(id);
+                }
+            }
+            let matched = pool.import_matched_usage_trackers(&donors);
+            tracing::debug!(
+                provider = %name,
+                donated = matched,
+                "hot reload: reused usage trackers by key id"
+            );
+        }
+        donor_pools.clear();
 
         for (name, pool) in new_pools {
             pools_guard.insert(name, pool);
@@ -769,7 +814,45 @@ impl AppState {
         drop(config_guard);
         drop(pools_guard);
 
+        // File fallback: keys that survived config changes in the persisted
+        // snapshot (e.g. temporarily removed then re-added) still restore
+        // their history, without clobbering just-transplanted trackers.
+        // Runs after the pools write-lock is released (it re-reads pools).
+        self.restore_pool_usages_from_snapshot(&transplanted_ids);
+
         self.attach_antigravity_rotation_hooks_all();
+    }
+
+    /// Restore per-key usage history from the persisted telemetry snapshot for
+    /// keys that did NOT receive a live in-memory donor during a hot reload.
+    /// Combined with the read-modify-write `key_usages` merging in
+    /// `save_snapshot_with_live_cycles`, an account removed and later re-added
+    /// with the same id keeps its slices, completed cycles and capacity.
+    fn restore_pool_usages_from_snapshot(&self, transplanted_ids: &HashSet<String>) {
+        let path = match &self.telemetry_snapshot_path {
+            Some(p) => p.clone(),
+            None => return,
+        };
+        let saved = match crate::telemetry_snapshot::load_snapshot_file(&path) {
+            Some(f) => f.snapshot.key_usages,
+            None => return,
+        };
+        let pools = self.pools.read();
+        for pool in pools.values() {
+            for key in pool.snapshot_keys() {
+                if transplanted_ids.contains(&key.id) {
+                    continue;
+                }
+                if let Some(s) = saved.get(&key.id) {
+                    key.usage_tracker.import_snapshot(s.clone());
+                    tracing::info!(
+                        provider = %pool.provider,
+                        key_id = %key.id,
+                        "hot reload: restored usage history from persisted snapshot"
+                    );
+                }
+            }
+        }
     }
 
     /// Rebuild-time freshness guard (HA review S1-3): before the config
@@ -1256,10 +1339,27 @@ async fn advance_rotated_at(
                         snapshot.models.values().next().map(|m| m.remaining_fraction)
                     });
 
+                    let weekly_fraction = snapshot.quota_groups.as_ref().and_then(|groups| {
+                        for g in groups {
+                            for b in &g.buckets {
+                                let win = b.window.to_lowercase();
+                                let b_id = b.bucket_id.to_lowercase();
+                                let b_desc = b.description.as_deref().unwrap_or("").to_lowercase();
+                                let b_disp = b.display_name.as_deref().unwrap_or("").to_lowercase();
+                                if win == "weekly" || b_id.contains("week") || b_desc.contains("week") || b_disp.contains("周") || b_id.contains("7d") {
+                                    return Some(b.remaining_fraction);
+                                }
+                            }
+                        }
+                        None
+                    });
+
                     if let Some(frac) = current_fraction {
                         if let Some(pool) = self.pools.read().get(&provider) {
                             if let Some(entry) = pool.snapshot_keys().into_iter().find(|k| k.id == key_id) {
-                                entry.usage_tracker.observe_upstream_probe(now_ms, frac);
+                                entry
+                                    .usage_tracker
+                                    .observe_upstream_probe_dual(now_ms, Some(frac), weekly_fraction);
                             }
                         }
                     }

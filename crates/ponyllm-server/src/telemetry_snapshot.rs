@@ -4,14 +4,15 @@
 //! 流节点EWMA、per-key 用量与周期用量归档。JSON单文件，原子写（tmp+rename），
 //! 读失败返回 None 仅告警。
 //!
-//! 磁盘格式（schema v2，`unified-quota-metering-governance-kernel` M1 持久化部分）：
-//! - 根对象即既有 [`TelemetrySnapshot`] 的全部字段（`version`/`saved_at_ms`/`timeseries`/…，
-//!   旧代码可降级读取，未知键被忽略）；
-//! - 额外注入 `schema_version`（磁盘格式版本；旧格式缺失 → 按 1 处理）与
-//!   `key_usage_cycles`（每 key 周期用量归档：5h/周/月 四要素
-//!   prompt/completion/cached/total/requests，数据源为既有 `CycleStats`）。
-//! - 加载旧格式时**幂等迁移**：缺省字段补默认、历史数据全量保留，
-//!   迁移前将原文件备份为 `<file>.bak-<ts>`，再落盘新格式。
+//! 磁盘格式（schema v3，`unified-quota-metering-governance-kernel` M1 持久化部分 +
+//! 跨账号跨周期持久化累计基准）：根对象即既有 [`TelemetrySnapshot`] 的全部字段
+//! （`version`/`saved_at_ms`/`timeseries`/…，旧代码可降级读取，未知键被忽略）；
+//! 额外注入 `schema_version`（磁盘格式版本；旧格式缺失 → 按 1 处理）与
+//! `key_usage_cycles`（每 key 周期用量归档：5h/周/月 四要素）+ `pool_cycle_benchmark`
+//! （池级跨账号跨周期累计基准，见 `ponyllm_core::pool::usage::PoolCycleBenchmark`）。
+//! - v2 → v3：`pool_cycle_benchmark` 缺省为空，历史数据全量保留。
+//! - 加载旧格式时**幂等迁移**：缺省字段补默认、历史数据全量保留，迁移前将原文件
+//!   备份为 `<file>.bak-<ts>`，再落盘新格式。
 //!
 //! 不使用 `#[serde(flatten)]`：serde flatten 与 `BTreeMap<u64, _>`（timeseries
 //! 数值键）冲突（"invalid type: string, expected u64"），故以 `serde_json::Value`
@@ -20,7 +21,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
-use ponyllm_core::pool::usage::CycleStats;
+use ponyllm_core::pool::usage::{CycleStats, KeyUsageStateSnapshot, PoolCycleBenchmark};
 use ponyllm_core::pool::NodeLatencySnapshot;
 use ponyllm_core::telemetry::{
     HourlyBucket, MetricsCounterSnapshot, ProviderConnectivitySnapshot,
@@ -30,8 +31,9 @@ use serde::de::Error as _;
 
 /// 兼容旧版写入器/读取器使用的 `version` 字段值（保持不变）。
 pub const SNAPSHOT_VERSION: u32 = 1;
-/// 当前磁盘格式 schema 版本：2 = 引入 `schema_version` 与 per-key 周期用量归档。
-pub const SCHEMA_VERSION: u32 = 2;
+/// 当前磁盘格式 schema 版本：2 = 引入 `schema_version` 与 per-key 周期用量归档；
+/// 3 = 引入池级跨账号跨周期持久化累计基准 `pool_cycle_benchmark`。
+pub const SCHEMA_VERSION: u32 = 3;
 /// 旧格式（无 `schema_version` 字段）的隐式 schema 版本。
 pub const LEGACY_SCHEMA_VERSION: u32 = 1;
 
@@ -50,7 +52,10 @@ pub struct TelemetrySnapshot {
     #[serde(default)]
     pub streams: HashMap<String, NodeLatencySnapshot>,
     #[serde(default)]
-    pub key_usages: HashMap<String, ponyllm_core::pool::usage::KeyUsageStateSnapshot>,
+    pub key_usages: HashMap<String, KeyUsageStateSnapshot>,
+    /// 池级跨账号跨周期持久化累计基准（v3；旧格式缺省为空，随周期保存单调累计）。
+    #[serde(default)]
+    pub pool_cycle_benchmark: PoolCycleBenchmark,
 }
 
 fn default_version() -> u32 {
@@ -67,6 +72,7 @@ impl Default for TelemetrySnapshot {
             connectivity: HashMap::new(),
             streams: HashMap::new(),
             key_usages: HashMap::new(),
+            pool_cycle_benchmark: PoolCycleBenchmark::default(),
         }
     }
 }
@@ -289,9 +295,12 @@ pub fn load_snapshot(path: &Path) -> Option<TelemetrySnapshot> {
     Some(file.snapshot)
 }
 
-/// 周期保存：保留磁盘上已有的周期用量归档（读-改-写），并合并本次
-/// live per-key CycleStats（5h/周/月，见 [`window_usage_to_cycle_stats`]）。
-/// `live_cycles` 按 key id 覆盖归档；旧归档中本次未出现的 key 原样保留。
+/// 周期保存：保留磁盘上已有的周期用量归档与 per-key 用量历史（读-改-写），并合并本次
+/// live per-key CycleStats（5h/周/月，见 [`window_usage_to_cycle_stats`]），再在**合并后
+/// 的全量 key_usages** 上执行池级累计基准合并（幂等，见 `PoolCycleBenchmark::merge_usages`）。
+/// - `live_cycles` 按 key id 覆盖归档；旧归档中本次未出现的 key 原样保留。
+/// - `snap.key_usages` 中的 key 覆盖快照里同名 key；不在本次 live 集合的 key 原样保留
+///   （账号被临时移除/换名时其切片与完整周期历史不丢失）。
 pub fn save_snapshot_with_live_cycles(
     path: &Path,
     snap: &TelemetrySnapshot,
@@ -312,7 +321,24 @@ pub fn save_snapshot_with_live_cycles(
         key_usage_cycles: cycles,
         snapshot: owned,
     };
-    write_snapshot_file(path, &file)
+    // 读-改-写合并 per-key 用量：保留磁盘上历史 key（账号增删/热重载不归零）。
+    let mut merged = file.clone();
+    let existing = load_snapshot_file(path)
+        .map(|f| f.snapshot.key_usages)
+        .unwrap_or_default();
+    for (key_id, usage) in existing {
+        merged.snapshot.key_usages.entry(key_id).or_insert(usage);
+    }
+    // 池级跨账号跨周期累计基准：基于合并后的全量 key_usages 幂等合并。
+    let mut usages: BTreeMap<String, KeyUsageStateSnapshot> = BTreeMap::new();
+    for (k, v) in &merged.snapshot.key_usages {
+        usages.insert(k.clone(), v.clone());
+    }
+    merged
+        .snapshot
+        .pool_cycle_benchmark
+        .merge_usages(&usages, merged.snapshot.saved_at_ms);
+    write_snapshot_file(path, &merged)
 }
 
 pub fn save_snapshot(path: &Path, snap: &TelemetrySnapshot) -> std::io::Result<()> {
@@ -473,6 +499,176 @@ mod tests {
         assert_eq!(kept.window_5h.cached_tokens, 20);
         assert_eq!(kept.window_5h.requests, 1);
         assert_eq!(reloaded.snapshot.metrics.total_requests, 1);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 账号增删/热重载不归零：周期保存只覆盖同名 live key，磁盘上历史 key 的
+    /// 切片与完整周期记录原样保留。
+    #[test]
+    fn test_save_preserves_key_usages_of_absent_keys() {
+        let dir = std::env::temp_dir().join(format!("ponyllm-snap-keep-key-{}", now_ms()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("telemetry-snapshot.json");
+
+        let mut snap = TelemetrySnapshot::default();
+        snap.key_usages.insert(
+            "acc-1".to_string(),
+            KeyUsageStateSnapshot {
+                slices: vec![ponyllm_core::pool::usage::UsageSlice {
+                    timestamp_ms: 1_700_000_000_000,
+                    prompt_tokens: 1_000,
+                    completion_tokens: 500,
+                    ..Default::default()
+                }],
+                next_cycle_seq: 3,
+                ..Default::default()
+            },
+        );
+        save_snapshot_with_live_cycles(&path, &snap, HashMap::new()).unwrap();
+
+        // 下一次保存仅含 acc-2（模拟账号被移除/热重载后池内只剩新账号）。
+        let mut snap2 = TelemetrySnapshot::default();
+        snap2.key_usages.insert(
+            "acc-2".to_string(),
+            KeyUsageStateSnapshot::default(),
+        );
+        save_snapshot_with_live_cycles(&path, &snap2, HashMap::new()).unwrap();
+
+        let reloaded = load_snapshot_file(&path).unwrap();
+        assert!(
+            reloaded.snapshot.key_usages.contains_key("acc-1"),
+            "absent key history must survive periodic saves"
+        );
+        assert!(
+            reloaded.snapshot.key_usages.contains_key("acc-2"),
+            "live key present"
+        );
+        assert_eq!(
+            reloaded.snapshot.key_usages["acc-1"].slices.len(),
+            1,
+            "acc-1 slices preserved"
+        );
+        assert_eq!(
+            reloaded.snapshot.key_usages["acc-1"].next_cycle_seq, 3,
+            "acc-1 seq counter preserved"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 池级跨账号跨周期累计基准：随周期保存幂等累计，重复保存/重启回放不重复计数。
+    #[test]
+    fn test_pool_benchmark_persists_and_merges_idempotently() {
+        use ponyllm_core::pool::usage::UsageSlice;
+
+        let dir = std::env::temp_dir().join(format!("ponyllm-snap-bench-{}", now_ms()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("telemetry-snapshot.json");
+
+        let period = ponyllm_core::pool::usage::FIVE_HOURS_MS;
+        let aligned_now = (1_700_000_000_000u64 / period) * period + period;
+        let slice = UsageSlice {
+            timestamp_ms: aligned_now - period + 1_000,
+            prompt_tokens: 8_000,
+            completion_tokens: 2_000,
+            cached_tokens: 500,
+            requests: 4,
+            ..Default::default()
+        };
+
+        let mut snap = TelemetrySnapshot::default();
+        snap.key_usages.insert(
+            "acc-1".to_string(),
+            KeyUsageStateSnapshot {
+                slices: vec![slice.clone()],
+                ..Default::default()
+            },
+        );
+        save_snapshot_with_live_cycles(&path, &snap, HashMap::new()).unwrap();
+
+        let first = load_snapshot_file(&path).unwrap();
+        assert_eq!(first.snapshot.pool_cycle_benchmark.kind_5h.observations, 1);
+        assert_eq!(first.snapshot.pool_cycle_benchmark.kind_5h.total_tokens, 10_000);
+        assert_eq!(
+            first.snapshot.pool_cycle_benchmark.kind_5h.avg_tokens(),
+            10_000
+        );
+
+        // 相同数据再次保存（10s 周期保存 / 崩溃重放 / 重启后恢复再存）→ 不重复累计。
+        save_snapshot_with_live_cycles(&path, &snap, HashMap::new()).unwrap();
+        let again = load_snapshot_file(&path).unwrap();
+        assert_eq!(again.snapshot.pool_cycle_benchmark.kind_5h.observations, 1);
+        assert_eq!(again.snapshot.pool_cycle_benchmark.kind_5h.total_tokens, 10_000);
+
+        // 新的闭合周期 → 恰好 +1 观测。
+        let mut snap3 = TelemetrySnapshot::default();
+        snap3.key_usages.insert(
+            "acc-1".to_string(),
+            KeyUsageStateSnapshot {
+                slices: vec![
+                    slice.clone(),
+                    UsageSlice {
+                        timestamp_ms: aligned_now + 1_000,
+                        prompt_tokens: 3_000,
+                        completion_tokens: 1_000,
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            },
+        );
+        save_snapshot_with_live_cycles(&path, &snap3, HashMap::new()).unwrap();
+        let merged = load_snapshot_file(&path).unwrap();
+        assert_eq!(merged.snapshot.pool_cycle_benchmark.kind_5h.observations, 2);
+        assert_eq!(
+            merged.snapshot.pool_cycle_benchmark.kind_5h.total_tokens,
+            14_000
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// schema v2 → v3 迁移：旧归档保留、pool_cycle_benchmark 缺省为空、版本标记升级。
+    #[test]
+    fn test_v2_file_migrates_to_v3_preserving_data() {
+        let dir = std::env::temp_dir().join(format!("ponyllm-snap-v2v3-{}", now_ms()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("telemetry-snapshot.json");
+
+        // 构造 v2 格式（schema_version=2，无 pool_cycle_benchmark）。
+        let v2 = serde_json::json!({
+            "version": 1,
+            "saved_at_ms": 1_700_000_000_123u64,
+            "schema_version": 2,
+            "key_usage_cycles": {
+                "key-1": {
+                    "window_5h": { "count": 1, "prompt_tokens": 100, "completion_tokens": 50, "cached_tokens": 0, "total_tokens": 150, "requests": 1, "avg_tokens": 150 },
+                    "weekly": { "count": 0, "total_tokens": 0, "avg_tokens": 0 },
+                    "monthly": { "count": 0, "total_tokens": 0, "avg_tokens": 0 }
+                }
+            },
+            "timeseries": {},
+            "metrics": { "total_requests": 42 },
+            "connectivity": {},
+            "streams": {},
+            "key_usages": {
+                "key-1": { "slices": [], "cached_capacity": null, "last_probe": null }
+            }
+        });
+        std::fs::write(&path, v2.to_string()).unwrap();
+
+        let loaded = load_snapshot(&path).expect("v2 file must load");
+        assert_eq!(loaded.metrics.total_requests, 42);
+        assert!(loaded.pool_cycle_benchmark.kind_5h.observations == 0);
+
+        let migrated = load_snapshot_file(&path).unwrap();
+        assert_eq!(migrated.schema_version, SCHEMA_VERSION);
+        let kept = migrated
+            .key_usage_cycles
+            .get("key-1")
+            .expect("v2 cycle archive preserved");
+        assert_eq!(kept.window_5h.total_tokens, 150);
 
         std::fs::remove_dir_all(&dir).ok();
     }

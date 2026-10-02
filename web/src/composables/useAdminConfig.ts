@@ -20,6 +20,7 @@ import type {
   AuthorizeAntigravityPayload,
   AuthorizeAntigravityResponse,
   ProxyStatusView,
+  QuotaCycleBenchmarkView,
 } from '../types/admin';
 
 export interface UseAdminConfigOptions {
@@ -147,6 +148,8 @@ export function useAdminConfig(options: UseAdminConfigOptions = {}) {
   const conflictDetected = ref<boolean>(false);
   const createdKeyResult = ref<CreateKeyResponse | null>(null);
   const keyTestResults = ref<Record<string, KeyTestView>>(loadPersistedQuotaResults());
+  /** 池级跨账号跨周期持久化累计基准（由后端快照归档提供，跨发布不归零）。 */
+  const cycleBenchmark = ref<QuotaCycleBenchmarkView | null>(null);
   const testingKeyIds = ref<Set<string>>(new Set());
   const proxyStatus = ref<ProxyStatusView | null>(null);
   const batchTesting = ref<{ running: boolean; current: number; total: number }>({
@@ -194,6 +197,13 @@ export function useAdminConfig(options: UseAdminConfigOptions = {}) {
       strategy.value = st.strategy;
       configVersion.value = ov.config_version;
 
+      // 池级持久化累计基准：独立只读端点，失败不阻塞主流程（降级为 null）。
+      void adminApi.getQuotaBenchmark().send().then((b) => {
+        cycleBenchmark.value = b;
+      }).catch(() => {
+        cycleBenchmark.value = null;
+      });
+
       // 增量清理已在后端移除的 key 探测缓存，避免残留数据影响视图
       const validKeyIds = new Set(kv.map((k) => k.id));
       let changed = false;
@@ -237,6 +247,11 @@ export function useAdminConfig(options: UseAdminConfigOptions = {}) {
       keys.value = kv;
       strategy.value = st.strategy;
       configVersion.value = ov.config_version;
+      void adminApi.getQuotaBenchmark().send().then((b) => {
+        cycleBenchmark.value = b;
+      }).catch(() => {
+        cycleBenchmark.value = null;
+      });
     } catch {
       // 静默轮询忽略瞬态网络波动
     }
@@ -440,6 +455,7 @@ export function useAdminConfig(options: UseAdminConfigOptions = {}) {
     conflictDetected,
     createdKeyResult,
     keyTestResults,
+    cycleBenchmark,
     testingKeyIds,
     proxyStatus,
     batchTesting,

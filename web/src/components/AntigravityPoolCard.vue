@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
-import type { KeyView, KeyTestView } from '../types/admin';
+import type { KeyView, KeyTestView, QuotaCycleBenchmarkView } from '../types/admin';
 import Icons from './ui/Icons.vue';
 import UiTooltip from './ui/UiTooltip.vue';
 import UiButton from './ui/UiButton.vue';
@@ -21,11 +21,14 @@ const props = withDefaults(
   defineProps<{
     keys: KeyView[];
     keyTestResults?: Record<string, KeyTestView>;
+    /** 池级跨账号跨周期持久化累计基准（后端快照归档，跨发布/账号增删不归零）。 */
+    benchmark?: QuotaCycleBenchmarkView | null;
     isRefreshing?: boolean;
     adminWriteEnabled?: boolean;
   }>(),
   {
     keyTestResults: () => ({}),
+    benchmark: null,
     isRefreshing: false,
     adminWriteEnabled: true,
   }
@@ -693,27 +696,114 @@ const factualCycleSummary = computed(() => {
     }
   }
 
-  const avg5h = count5h > 0 ? Math.round(totalTokens5h / count5h) : 0;
+  const liveAvg5h = count5h > 0 ? Math.round(totalTokens5h / count5h) : 0;
   const proAvg5h = proCount5h > 0 ? Math.round(proTokens5h / proCount5h) : 0;
   const standardAvg5h = standardCount5h > 0 ? Math.round(standardTokens5h / standardCount5h) : 0;
-  const avgPrompt5h = count5h > 0 ? Math.round(totalPrompt5h / count5h) : 0;
-  const avgComp5h = count5h > 0 ? Math.round(totalComp5h / count5h) : 0;
-  const avgCached5h = count5h > 0 ? Math.round(totalCached5h / count5h) : 0;
-  const avgRequests5h = count5h > 0 ? Math.round(totalRequests5h / count5h) : 0;
+  const liveAvgPrompt5h = count5h > 0 ? Math.round(totalPrompt5h / count5h) : 0;
+  const liveAvgComp5h = count5h > 0 ? Math.round(totalComp5h / count5h) : 0;
+  const liveAvgCached5h = count5h > 0 ? Math.round(totalCached5h / count5h) : 0;
+  const liveAvgRequests5h = count5h > 0 ? Math.round(totalRequests5h / count5h) : 0;
 
-  const avgWeekly = weeklyAccounts > 0
+  const liveAvgWeekly = weeklyAccounts > 0
     ? Math.round((totalWeeklyCapacityEstimated > 0 ? totalWeeklyCapacityEstimated : totalTokensWeekly) / weeklyAccounts)
     : 0;
-  const avgPromptWeekly = weeklyAccounts > 0 ? Math.round(totalPromptWeekly / weeklyAccounts) : 0;
-  const avgCompWeekly = weeklyAccounts > 0 ? Math.round(totalCompWeekly / weeklyAccounts) : 0;
-  const avgCachedWeekly = weeklyAccounts > 0 ? Math.round(totalCachedWeekly / weeklyAccounts) : 0;
-  const avgRequestsWeekly = weeklyAccounts > 0 ? Math.round(totalRequestsWeekly / weeklyAccounts) : 0;
+  const liveAvgPromptWeekly = weeklyAccounts > 0 ? Math.round(totalPromptWeekly / weeklyAccounts) : 0;
+  const liveAvgCompWeekly = weeklyAccounts > 0 ? Math.round(totalCompWeekly / weeklyAccounts) : 0;
+  const liveAvgCachedWeekly = weeklyAccounts > 0 ? Math.round(totalCachedWeekly / weeklyAccounts) : 0;
+  const liveAvgRequestsWeekly = weeklyAccounts > 0 ? Math.round(totalRequestsWeekly / weeklyAccounts) : 0;
 
-  const avgMonthly = avgWeekly > 0 ? Math.round(avgWeekly * 4.33) : (monthlyAccounts > 0 ? Math.round(totalTokensMonthly / monthlyAccounts) : 0);
-  const avgPromptMonthly = monthlyAccounts > 0 ? Math.round(totalPromptMonthly / monthlyAccounts) : (avgPromptWeekly > 0 ? Math.round(avgPromptWeekly * 4.33) : 0);
-  const avgCompMonthly = monthlyAccounts > 0 ? Math.round(totalCompMonthly / monthlyAccounts) : (avgCompWeekly > 0 ? Math.round(avgCompWeekly * 4.33) : 0);
-  const avgCachedMonthly = monthlyAccounts > 0 ? Math.round(totalCachedMonthly / monthlyAccounts) : (avgCachedWeekly > 0 ? Math.round(avgCachedWeekly * 4.33) : 0);
-  const avgRequestsMonthly = monthlyAccounts > 0 ? Math.round(totalRequestsMonthly / monthlyAccounts) : (avgRequestsWeekly > 0 ? Math.round(avgRequestsWeekly * 4.33) : 0);
+  const liveAvgMonthly = liveAvgWeekly > 0 ? Math.round(liveAvgWeekly * 4.33) : (monthlyAccounts > 0 ? Math.round(totalTokensMonthly / monthlyAccounts) : 0);
+  const liveAvgPromptMonthly = monthlyAccounts > 0 ? Math.round(totalPromptMonthly / monthlyAccounts) : (liveAvgPromptWeekly > 0 ? Math.round(liveAvgPromptWeekly * 4.33) : 0);
+  const liveAvgCompMonthly = monthlyAccounts > 0 ? Math.round(totalCompMonthly / monthlyAccounts) : (liveAvgCompWeekly > 0 ? Math.round(liveAvgCompWeekly * 4.33) : 0);
+  const liveAvgCachedMonthly = monthlyAccounts > 0 ? Math.round(totalCachedMonthly / monthlyAccounts) : (liveAvgCachedWeekly > 0 ? Math.round(liveAvgCachedWeekly * 4.33) : 0);
+  const liveAvgRequestsMonthly = monthlyAccounts > 0 ? Math.round(totalRequestsMonthly / monthlyAccounts) : (liveAvgRequestsWeekly > 0 ? Math.round(liveAvgRequestsWeekly * 4.33) : 0);
+
+  // ---- 池级跨账号跨周期持久化累计基准（后端快照归档，跨发布/账号增删不归零）----
+  // 只要有持久化观测（含打满周期），即优先生效；否则回退到上面实时在册账号计算。
+  // `kind_*` 可缺省（旧后端/降级响应），全程 null 安全。
+  const b = props.benchmark;
+  const persisted5h =
+    !!b &&
+    ((b.kind_5h?.observations ?? 0) > 0 || (b.kind_5h?.completed_cycles ?? 0) > 0)
+      ? b.kind_5h
+      : null;
+  const persistedWeekly =
+    !!b &&
+    ((b.kind_weekly?.observations ?? 0) > 0 || (b.kind_weekly?.completed_cycles ?? 0) > 0)
+      ? b.kind_weekly
+      : null;
+  const persistedMonthly =
+    !!b &&
+    ((b.kind_monthly?.observations ?? 0) > 0 || (b.kind_monthly?.completed_cycles ?? 0) > 0)
+      ? b.kind_monthly
+      : null;
+  const persistedAtMs = b?.persisted_at_ms ?? 0;
+  const usePersisted = !!(persisted5h || persistedWeekly || persistedMonthly);
+
+  const avg5h =
+    persisted5h && persisted5h.observations > 0
+      ? persisted5h.avg_tokens
+      : persisted5h && persisted5h.completed_cycles > 0
+        ? persisted5h.avg_completed_tokens
+        : liveAvg5h;
+  const completedCyclesCount = persisted5h
+    ? persisted5h.completed_cycles + (persistedWeekly?.completed_cycles ?? 0)
+    : count5h;
+  const avgPrompt5h = persisted5h && persisted5h.observations > 0
+    ? Math.round(persisted5h.prompt_tokens / persisted5h.observations)
+    : liveAvgPrompt5h;
+  const avgComp5h = persisted5h && persisted5h.observations > 0
+    ? Math.round(persisted5h.completion_tokens / persisted5h.observations)
+    : liveAvgComp5h;
+  const avgCached5h = persisted5h && persisted5h.observations > 0
+    ? Math.round(persisted5h.cached_tokens / persisted5h.observations)
+    : liveAvgCached5h;
+  const avgRequests5h = persisted5h && persisted5h.observations > 0
+    ? Math.round(persisted5h.requests / persisted5h.observations)
+    : liveAvgRequests5h;
+
+  const avgWeekly =
+    persistedWeekly && persistedWeekly.observations > 0
+      ? persistedWeekly.avg_tokens
+      : persistedWeekly && persistedWeekly.completed_cycles > 0
+        ? persistedWeekly.avg_completed_tokens
+        : liveAvgWeekly;
+  const avgPromptWeekly = persistedWeekly && persistedWeekly.observations > 0
+    ? Math.round(persistedWeekly.prompt_tokens / persistedWeekly.observations)
+    : liveAvgPromptWeekly;
+  const avgCompWeekly = persistedWeekly && persistedWeekly.observations > 0
+    ? Math.round(persistedWeekly.completion_tokens / persistedWeekly.observations)
+    : liveAvgCompWeekly;
+  const avgCachedWeekly = persistedWeekly && persistedWeekly.observations > 0
+    ? Math.round(persistedWeekly.cached_tokens / persistedWeekly.observations)
+    : liveAvgCachedWeekly;
+  const avgRequestsWeekly = persistedWeekly && persistedWeekly.observations > 0
+    ? Math.round(persistedWeekly.requests / persistedWeekly.observations)
+    : liveAvgRequestsWeekly;
+
+  const avgMonthly =
+    persistedMonthly && persistedMonthly.observations > 0
+      ? persistedMonthly.avg_tokens
+      : persistedMonthly && persistedMonthly.completed_cycles > 0
+        ? persistedMonthly.avg_completed_tokens
+        : liveAvgMonthly;
+  const avgPromptMonthly = persistedMonthly && persistedMonthly.observations > 0
+    ? Math.round(persistedMonthly.prompt_tokens / persistedMonthly.observations)
+    : liveAvgPromptMonthly;
+  const avgCompMonthly = persistedMonthly && persistedMonthly.observations > 0
+    ? Math.round(persistedMonthly.completion_tokens / persistedMonthly.observations)
+    : liveAvgCompMonthly;
+  const avgCachedMonthly = persistedMonthly && persistedMonthly.observations > 0
+    ? Math.round(persistedMonthly.cached_tokens / persistedMonthly.observations)
+    : liveAvgCachedMonthly;
+  const avgRequestsMonthly = persistedMonthly && persistedMonthly.observations > 0
+    ? Math.round(persistedMonthly.requests / persistedMonthly.observations)
+    : liveAvgRequestsMonthly;
+
+  const persistedObservations =
+    (persisted5h?.observations ?? 0) +
+    (persistedWeekly?.observations ?? 0) +
+    (persistedMonthly?.observations ?? 0);
 
   return {
     avg5h,
@@ -733,8 +823,13 @@ const factualCycleSummary = computed(() => {
     avgCompMonthly,
     avgCachedMonthly,
     avgRequestsMonthly,
-    completedCyclesCount: count5h,
+    completedCyclesCount,
     isEstimatedWeekly: totalWeeklyCapacityEstimated > 0,
+    // 持久化累计基准信息（用于标注，非数值来源时回退实时计算）。
+    usePersisted,
+    persistedObservations,
+    persistedCompletedCycles: completedCyclesCount,
+    persistedAtMs,
   };
 });
 
@@ -974,7 +1069,12 @@ function waterBarWidth(percent: number | null): string {
               <Icons name="activity" size="14" class="text-slate-700" />
               账号周期额度测定
             </span>
-            <span class="text-[11px] text-slate-400">完整周期加权</span>
+            <span
+              class="text-[11px]"
+              :class="factualCycleSummary.usePersisted ? 'text-amber-700 font-medium' : 'text-slate-400'"
+            >
+              {{ factualCycleSummary.usePersisted ? '跨账号累计 · 持久化' : '实时加权' }}
+            </span>
           </div>
 
           <!-- 3 个块：5h / 周 / 月 (纯客观实测、无假定推测、无硬编码) -->
@@ -983,7 +1083,10 @@ function waterBarWidth(percent: number | null): string {
             <div class="p-2.5 rounded-lg bg-white/70">
               <div class="flex items-center justify-between text-[11px] text-slate-400 mb-0.5">
                 <span>5小时周期实测基准</span>
-                <span v-if="factualCycleSummary.completedCyclesCount > 0" class="text-emerald-700 font-medium font-mono">
+                <span v-if="factualCycleSummary.usePersisted && factualCycleSummary.persistedObservations > 0" class="text-emerald-700 font-medium font-mono">
+                  已累计 {{ factualCycleSummary.persistedObservations }} 观测 · 打满 {{ factualCycleSummary.persistedCompletedCycles }} 轮
+                </span>
+                <span v-else-if="factualCycleSummary.completedCyclesCount > 0" class="text-emerald-700 font-medium font-mono">
                   已结算 {{ factualCycleSummary.completedCyclesCount }} 轮
                 </span>
                 <span v-else class="text-slate-400">统计累积中</span>
@@ -993,7 +1096,10 @@ function waterBarWidth(percent: number | null): string {
                   {{ factualCycleSummary.avg5h > 0 ? formatTokenHuman(factualCycleSummary.avg5h) : '--' }}
                 </span>
                 <span class="text-[11px] text-slate-400 font-mono">
-                  <template v-if="factualCycleSummary.proAvg5h > 0">
+                  <template v-if="factualCycleSummary.usePersisted">
+                    {{ factualCycleSummary.persistedCompletedCycles > 0 ? '跨账号×周期持久化均值' : '等待完整周期' }}
+                  </template>
+                  <template v-else-if="factualCycleSummary.proAvg5h > 0">
                     Pro: {{ formatTokenHuman(factualCycleSummary.proAvg5h) }}
                   </template>
                   <template v-else-if="factualCycleSummary.standardAvg5h > 0">
@@ -1030,7 +1136,7 @@ function waterBarWidth(percent: number | null): string {
               <div class="flex items-center justify-between text-[11px] text-slate-400 mb-0.5">
                 <span>自然周测定基准</span>
                 <span v-if="factualCycleSummary.avgWeekly > 0" class="text-sky-700 font-medium font-mono">
-                  {{ factualCycleSummary.isEstimatedWeekly ? '余量反推容量' : '活跃账号实测' }}
+                  {{ factualCycleSummary.usePersisted ? '持久化累计均值' : (factualCycleSummary.isEstimatedWeekly ? '余量反推容量' : '活跃账号实测') }}
                 </span>
                 <span v-else class="text-slate-400">周一重置</span>
               </div>
@@ -1039,7 +1145,7 @@ function waterBarWidth(percent: number | null): string {
                   {{ factualCycleSummary.avgWeekly > 0 ? formatTokenHuman(factualCycleSummary.avgWeekly) : '--' }}
                 </span>
                 <span class="text-[11px] text-slate-400 font-mono">
-                  {{ factualCycleSummary.avgWeekly > 0 ? (factualCycleSummary.isEstimatedWeekly ? '单账号理论周配额' : '单账号实际周消耗') : '等待周结算' }}
+                  {{ factualCycleSummary.avgWeekly > 0 ? (factualCycleSummary.usePersisted ? '单账号周度实测累计平均' : (factualCycleSummary.isEstimatedWeekly ? '单账号理论周配额' : '单账号实际周消耗')) : '等待周结算' }}
                 </span>
               </div>
               <!-- 周度四要素结构直接呈现 -->
@@ -1067,7 +1173,7 @@ function waterBarWidth(percent: number | null): string {
             <div class="p-2.5 rounded-lg bg-white/70">
               <div class="flex items-center justify-between text-[11px] text-slate-400 mb-0.5">
                 <span>30天自然月推算基准</span>
-                <span class="text-slate-400 font-mono">周配额累加</span>
+                <span class="text-slate-400 font-mono">{{ factualCycleSummary.usePersisted ? '持久化累计' : '周配额累加' }}</span>
               </div>
               <div class="flex items-baseline justify-between">
                 <span class="text-lg font-bold text-slate-800 font-mono">
@@ -1101,7 +1207,10 @@ function waterBarWidth(percent: number | null): string {
         </div>
 
         <div class="mt-3 pt-2.5 border-t border-slate-200/50 text-[11px] text-slate-400 flex items-center justify-between">
-          <span>基于账号打满重置与余量反推双轨测定</span>
+          <span v-if="factualCycleSummary.usePersisted">
+            持久化累计 {{ factualCycleSummary.persistedObservations }} 轮观测 · 打满 {{ factualCycleSummary.persistedCompletedCycles }} 轮 · 跨发布/账号增删不归零
+          </span>
+          <span v-else>基于账号打满重置与余量反推双轨测定</span>
           <span class="text-amber-600 font-medium cursor-pointer hover:underline" v-if="selectedKeyData" @click="selectedKeyId = null">
             收起单账号画像
           </span>
@@ -1203,6 +1312,22 @@ function waterBarWidth(percent: number | null): string {
             均次消耗: {{ selectedKeyData.usage?.window_5h?.requests ? Math.round((selectedKeyData.usage.window_5h.total_tokens || 0) / selectedKeyData.usage.window_5h.requests).toLocaleString() : '--' }} tk/req
           </div>
         </div>
+      </div>
+
+      <!-- 周度打满周期累计（持久化完整周期实测） -->
+      <div
+        v-if="selectedKeyData.usage?.completed_weekly_stats && selectedKeyData.usage.completed_weekly_stats.count > 0"
+        class="mb-3 px-3 py-2 rounded-lg bg-sky-50 border border-sky-200 text-xs text-sky-800 flex flex-wrap items-center justify-between gap-2"
+        data-testid="weekly-cycle-summary"
+      >
+        <span class="font-medium">自然周打满周期实测（持久化）</span>
+        <span class="font-mono">
+          已结算 {{ selectedKeyData.usage.completed_weekly_stats.count }} 轮 · 平均
+          <strong>{{ formatTokenHuman(selectedKeyData.usage.completed_weekly_stats.avg_tokens) }}</strong>
+          <span class="text-[10px] text-sky-500 ml-1">
+            总量 {{ formatTokenHuman(selectedKeyData.usage.completed_weekly_stats.total_tokens) }}
+          </span>
+        </span>
       </div>
 
       <!-- 额度容量双轨测定结论 -->

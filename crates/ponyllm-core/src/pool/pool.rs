@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -140,6 +141,33 @@ impl KeyPool {
         }
         // Sort keys primarily by priority (ascending: 1, 2, 3...)
         keys.sort_by_key(|k| k.priority);
+    }
+
+    /// Hot-reload survival: transplant the usage-tracker (measurement state:
+    /// slices, completed cycles, capacity EWMA) of the donor entry with the
+    /// same key id into this pool's fresh entries. Keeps per-key cycle history
+    /// across config rebuilds — data must not reset on account/config churn.
+    pub fn import_matched_usage_trackers(&self, donors: &HashMap<String, Arc<ApiKeyEntry>>) -> usize {
+        let mut keys = self.keys.write();
+        let mut transplanted = 0usize;
+        for entry in keys.iter_mut() {
+            let Some(donor) = donors.get(&entry.id) else {
+                continue;
+            };
+            let tracker = donor.usage_tracker.clone();
+            let mut replaced = ApiKeyEntry::new(
+                entry.id.clone(),
+                entry.api_key.clone(),
+                entry.priority,
+                entry.weight,
+            );
+            replaced.account_id = entry.account_id.clone();
+            replaced.auth = entry.auth.clone();
+            replaced.usage_tracker = tracker;
+            *entry = Arc::new(replaced);
+            transplanted += 1;
+        }
+        transplanted
     }
 
     pub fn get_key_status(&self, key_id: &str) -> Option<KeyState> {

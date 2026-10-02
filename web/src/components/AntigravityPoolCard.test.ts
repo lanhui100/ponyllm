@@ -516,4 +516,101 @@ describe('AntigravityPoolCard Component', () => {
     app.unmount();
     document.body.removeChild(container);
   });
+
+  it('renders persisted cross-account multi-cycle benchmark as the headline when provided', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+
+    const keys: KeyView[] = [
+      {
+        id: 'acc-1',
+        provider: 'antigravity',
+        masked_key: 'ya29.***',
+        state: 'active',
+        priority: 1,
+        weight: 10,
+      },
+    ];
+
+    // 无实时完成周期、无容量推断：仅靠持久化基准支撑第三栏主数字。
+    const keyTestResults: Record<string, KeyTestView> = {};
+
+    const app = createApp(AntigravityPoolCard, {
+      keys,
+      keyTestResults,
+      adminWriteEnabled: true,
+      benchmark: {
+        persisted_at_ms: 1_700_000_000_000,
+        kind_5h: {
+          observations: 12,
+          avg_tokens: 1_250_000,
+          prompt_tokens: 9_000_000,
+          completion_tokens: 6_000_000,
+          cached_tokens: 0,
+          total_tokens: 15_000_000,
+          requests: 48,
+          completed_cycles: 3,
+          avg_completed_tokens: 1_400_000,
+          completed_prompt_tokens: 3_600_000,
+          completed_completion_tokens: 600_000,
+          completed_cached_tokens: 0,
+          completed_total_tokens: 4_200_000,
+          completed_requests: 9,
+          first_observation_ms: 1_600_000_000_000,
+          last_observation_ms: 1_700_000_000_000,
+        },
+        kind_weekly: {
+          observations: 2,
+          avg_tokens: 7_000_000,
+          prompt_tokens: 10_000_000,
+          completion_tokens: 4_000_000,
+          cached_tokens: 0,
+          total_tokens: 14_000_000,
+          requests: 20,
+          completed_cycles: 0,
+          avg_completed_tokens: 0,
+          completed_prompt_tokens: 0,
+          completed_completion_tokens: 0,
+          completed_cached_tokens: 0,
+          completed_total_tokens: 0,
+          completed_requests: 0,
+          first_observation_ms: 1_600_000_000_000,
+          last_observation_ms: 1_700_000_000_000,
+        },
+        kind_monthly: {
+          observations: 0,
+          avg_tokens: 0,
+          prompt_tokens: 0,
+          completion_tokens: 0,
+          cached_tokens: 0,
+          total_tokens: 0,
+          requests: 0,
+          completed_cycles: 0,
+          avg_completed_tokens: 0,
+          completed_prompt_tokens: 0,
+          completed_completion_tokens: 0,
+          completed_cached_tokens: 0,
+          completed_total_tokens: 0,
+          completed_requests: 0,
+          first_observation_ms: 0,
+          last_observation_ms: 0,
+        },
+      },
+    });
+    app.mount(container);
+    await nextTick();
+
+    // 持久化标注
+    expect(container.textContent).toContain('跨账号累计 · 持久化');
+    expect(container.textContent).toContain('已累计 14 观测 · 打满 3 轮');
+    expect(container.textContent).toContain('持久化累计 14 轮观测 · 打满 3 轮 · 跨发布/账号增删不归零');
+
+    // 主数字取持久化 5h 均值 1.25M
+    expect(container.textContent).toContain('1.25M');
+    // 周度持久化均值 7M
+    expect(container.textContent).toContain('7M');
+
+    app.unmount();
+    document.body.removeChild(container);
+  });
 });

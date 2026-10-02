@@ -18,6 +18,7 @@ const {
   keys,
   providers,
   keyTestResults,
+  cycleBenchmark,
   adminWriteEnabled,
   fetchAll: fetchAdminConfig,
   testSingleKey,
@@ -202,6 +203,7 @@ const speed24h = computed<number | undefined>(() => {
         v-if="antigravityKeys.length > 0"
         :keys="antigravityKeys"
         :key-test-results="keyTestResults"
+        :benchmark="cycleBenchmark"
         :is-refreshing="isRefreshingAntigravity"
         :admin-write-enabled="adminWriteEnabled"
         @refresh-quotas="handleRefreshAntigravityQuotas"
