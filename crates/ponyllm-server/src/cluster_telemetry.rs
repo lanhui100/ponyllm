@@ -506,17 +506,17 @@ impl ClusterTelemetryStore {
         let client = self.connect().await?;
         let query_sql = "
             SELECT
-                COALESCE(SUM(total_requests), 0),
-                COALESCE(SUM(failed_requests), 0),
-                COALESCE(SUM(prompt_tokens), 0),
-                COALESCE(SUM(completion_tokens), 0),
-                COALESCE(SUM(cached_tokens), 0),
-                COALESCE(SUM(latency_sum_ms), 0),
-                COALESCE(SUM(latency_count), 0),
-                COALESCE(SUM(ttft_sum_ms), 0),
-                COALESCE(SUM(ttft_count), 0),
-                COALESCE(SUM(tps_sum_milli), 0),
-                COALESCE(SUM(tps_count), 0)
+                COALESCE(SUM(total_requests), 0)::BIGINT,
+                COALESCE(SUM(failed_requests), 0)::BIGINT,
+                COALESCE(SUM(prompt_tokens), 0)::BIGINT,
+                COALESCE(SUM(completion_tokens), 0)::BIGINT,
+                COALESCE(SUM(cached_tokens), 0)::BIGINT,
+                COALESCE(SUM(latency_sum_ms), 0)::DOUBLE PRECISION,
+                COALESCE(SUM(latency_count), 0)::BIGINT,
+                COALESCE(SUM(ttft_sum_ms), 0)::DOUBLE PRECISION,
+                COALESCE(SUM(ttft_count), 0)::BIGINT,
+                COALESCE(SUM(tps_sum_milli), 0)::BIGINT,
+                COALESCE(SUM(tps_count), 0)::BIGINT
             FROM telemetry_hourly_cluster;
         ";
 
