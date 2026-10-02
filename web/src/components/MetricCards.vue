@@ -174,24 +174,30 @@ const errorRate = computed(() => {
         </div>
       </div>
 
-      <!-- 2. Token量 (主数字输出总计，下方输入/输出/缓存三维度) -->
+      <!-- 2. Token量 (主数字为输入 Tokens，下方为输出与缓存命中) -->
       <div class="swiss-card p-5 bg-white/45 backdrop-blur-xs transition-all duration-200 border border-white/40">
         <div class="flex items-center justify-between text-[13px] text-slate-500 mb-1.5">
           <span class="font-semibold text-slate-700 inline-flex items-center gap-1.5">
             <Icons name="sparkles" size="16" class="text-slate-700" />
-            Token量
+            Token输入量
           </span>
         </div>
-        <!-- 主数字：输出总计 -->
+        <!-- 主数字：输入量 -->
         <div class="text-3xl font-bold tracking-tight text-slate-900 mb-1.5 flex items-baseline gap-1.5 font-mono tabular-nums">
-          {{ completionTokens.toLocaleString() }}
+          {{ promptTokens.toLocaleString() }}
           <span class="text-sm font-normal text-slate-500 font-sans">tok</span>
         </div>
-        <!-- 下方：输入、输出、缓存三个维度，以语义图标承载标签 -->
-        <div class="text-[12px] text-slate-600 font-medium flex items-center gap-3" :title="`输入: ${promptTokens.toLocaleString()} · 输出: ${completionTokens.toLocaleString()} · 缓存: ${cachedTokens.toLocaleString()} (${cacheHitRate})`">
-          <span class="inline-flex items-center gap-1 font-mono text-slate-700" :aria-label="`输入 ${promptTokens.toLocaleString()}`"><Icons name="arrow-down-left" size="12" class="text-emerald-600" /><span>{{ formatTokensInt(promptTokens) }}</span></span>
-          <span class="inline-flex items-center gap-1 font-mono text-slate-700" :aria-label="`输出 ${completionTokens.toLocaleString()}`"><Icons name="arrow-up-right" size="12" class="text-amber-600" /><span>{{ formatTokensInt(completionTokens) }}</span></span>
-          <span class="inline-flex items-center gap-1 font-mono text-slate-700" :aria-label="`缓存 ${cachedTokens.toLocaleString()}，命中率 ${cacheHitRate}`"><Icons name="database" size="12" class="text-sky-600" /><span>{{ formatTokensInt(cachedTokens) }}</span> <span class="text-[10px]">({{ cacheHitRate }})</span></span>
+        <!-- 下方：输出、缓存命中两个维度 -->
+        <div class="text-[12px] text-slate-600 font-medium flex items-center gap-3" :title="`输出: ${completionTokens.toLocaleString()} · 缓存: ${cachedTokens.toLocaleString()} (${cacheHitRate})`">
+          <span class="inline-flex items-center gap-1 font-mono text-slate-700" :aria-label="`输出 ${completionTokens.toLocaleString()}`">
+            <Icons name="arrow-up-right" size="12" class="text-amber-600" />
+            <span>输出: {{ formatTokensInt(completionTokens) }}</span>
+          </span>
+          <span class="inline-flex items-center gap-1 font-mono text-slate-700" :aria-label="`缓存 ${cachedTokens.toLocaleString()}，命中率 ${cacheHitRate}`">
+            <Icons name="database" size="12" class="text-sky-600" />
+            <span>缓存: {{ formatTokensInt(cachedTokens) }}</span>
+            <span class="text-[10px] text-slate-500">({{ cacheHitRate }})</span>
+          </span>
         </div>
       </div>
 

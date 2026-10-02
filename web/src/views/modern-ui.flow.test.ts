@@ -350,9 +350,8 @@ describe('Modern Minimalist UI/UX System-Wide E2E Verification Suite (WEB-07)', 
 
     expect(container.textContent).toContain('系统仪表盘');
     expect(container.textContent).toContain('网关状态');
-    expect(container.textContent).toContain('5,000 tok'); // output tokens
-    expect(container.textContent).toContain('20K');
-    expect(container.textContent).toContain('5K');
+    expect(container.textContent).toContain('20,000 tok'); // prompt tokens as primary
+    expect(container.textContent).toContain('5K'); // completion output in sub-row
     expect(container.textContent).toContain('115 ms'); // ttft rounded
     expect(container.textContent).toContain('68 t/s'); // tps rounded
 
