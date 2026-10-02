@@ -1136,6 +1136,128 @@ async fn test_singleflight_post_gate_recheck_notifies_followers() {
     assert_eq!(key_entry.stats.consecutive_failures.load(std::sync::atomic::Ordering::Relaxed), 0);
 }
 
+#[tokio::test]
+async fn test_antigravity_invalid_grant_fails_over_to_healthy_key() {
+    let auth_server = axum::Router::new().route(
+        "/oauth2/token",
+        axum::routing::post(|| async move {
+            (
+                axum::http::StatusCode::BAD_REQUEST,
+                [("content-type", "application/json")],
+                json!({
+                    "error": "invalid_grant",
+                    "error_description": "Token has been expired or revoked."
+                })
+                .to_string(),
+            )
+        }),
+    );
+    let auth_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let auth_addr = auth_listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(auth_listener, auth_server).await.unwrap();
+    });
+    std::env::set_var("ANTIGRAVITY_OAUTH_TOKEN_URL_OVERRIDE", format!("http://{}/oauth2/token", auth_addr));
+
+    let app = axum::Router::new().route(
+        "/v1/chat/completions",
+        axum::routing::post(|headers: axum::http::HeaderMap| async move {
+            let auth = headers
+                .get("authorization")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default();
+            if auth.contains("healthy-bearer-token") {
+                axum::response::Response::builder()
+                    .status(200)
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        json!({
+                            "id": "chatcmpl-123",
+                            "choices": [{"message": {"role": "assistant", "content": "pong"}}]
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap()
+            } else {
+                axum::response::Response::builder()
+                    .status(401)
+                    .body(axum::body::Body::from("Unauthorized"))
+                    .unwrap()
+            }
+        }),
+    );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let endpoint = format!("http://{}/v1/chat/completions", addr);
+
+    // Key 1: dead credential (forces invalid_grant via mock manager or failing refresh)
+    let dead_cred = AntigravityCredential {
+        access_token: None,
+        refresh_token: "dead-token".to_string(),
+        client_id: "client-id".to_string(),
+        client_secret: "client-secret".to_string(),
+        project_id: "proj-1".to_string(),
+        expiry: None,
+    };
+    let fast_client = reqwest::Client::builder()
+        .timeout(Duration::from_millis(50))
+        .build()
+        .unwrap();
+    let dead_mgr = Arc::new(AntigravityTokenManager::new(
+        "ag-dead-key",
+        dead_cred,
+        fast_client,
+    ));
+
+    // Key 2: healthy credential with pre-set valid token
+    let healthy_cred = AntigravityCredential {
+        access_token: Some("healthy-bearer-token".to_string()),
+        refresh_token: "healthy-refresh-token".to_string(),
+        client_id: "client-id".to_string(),
+        client_secret: "client-secret".to_string(),
+        project_id: "proj-1".to_string(),
+        expiry: Some(chrono::Utc::now() + chrono::Duration::hours(1)),
+    };
+    let healthy_mgr = Arc::new(AntigravityTokenManager::new(
+        "ag-healthy-key",
+        healthy_cred,
+        reqwest::Client::new(),
+    ));
+
+    let pool = Arc::new(KeyPool::new("antigravity", RoutingStrategy::RoundRobin));
+    pool.add_key(ApiKeyEntry::new_antigravity("ag-dead-key", dead_mgr, 1, 10));
+    pool.add_key(ApiKeyEntry::new_antigravity("ag-healthy-key", healthy_mgr, 2, 10));
+
+    let exec = UpstreamExecutor::new(pool.clone(), 2);
+    let payload = json!({"messages": [{"role": "user", "content": "ping"}]});
+
+    // Even if ag-dead-key fails token resolution or refresh, executor must fail over to ag-healthy-key!
+    let (resp_val, winning_key) = exec
+        .execute_json_request_with_key(&endpoint, &payload)
+        .await
+        .expect("should failover to healthy key");
+
+    assert_eq!(winning_key, "ag-healthy-key");
+    assert_eq!(
+        resp_val["choices"][0]["message"]["content"],
+        "pong"
+    );
+
+    // Streaming failover verification:
+    let (stream_resp, _instant, stream_winning_key) = exec
+        .execute_stream_request_with_timing_and_key(&endpoint, &payload)
+        .await
+        .expect("stream should failover to healthy key");
+
+    assert_eq!(stream_winning_key, "ag-healthy-key");
+    assert_eq!(stream_resp.status(), 200);
+}
+
+
 
 
 
