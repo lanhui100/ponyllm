@@ -187,16 +187,16 @@ const errorRate = computed(() => {
           {{ formatTokensInt(promptTokens) }}
           <span class="text-sm font-normal text-slate-500 font-sans">tok</span>
         </div>
-        <!-- 下方：输出、缓存命中两个维度 -->
-        <div class="text-[12px] text-slate-600 font-medium flex items-center gap-3" :title="`输出: ${completionTokens.toLocaleString()} · 缓存: ${cachedTokens.toLocaleString()} (${cacheHitRate})`">
-          <span class="inline-flex items-center gap-1 font-mono text-slate-700" :aria-label="`输出 ${completionTokens.toLocaleString()}`">
-            <Icons name="arrow-up-right" size="12" class="text-amber-600" />
-            <span>输出: {{ formatTokensInt(completionTokens) }}</span>
+        <!-- 下方：输出、缓存命中两个维度 (保持 whitespace-nowrap inline 不换行) -->
+        <div class="text-[12px] text-slate-600 font-medium flex items-center gap-2.5 flex-nowrap whitespace-nowrap overflow-hidden text-ellipsis" :title="`输出: ${completionTokens.toLocaleString()} · 缓存: ${cachedTokens.toLocaleString()} (${cacheHitRate})`">
+          <span class="inline-flex items-center gap-1 font-mono text-slate-700 whitespace-nowrap shrink-0" :aria-label="`输出 ${completionTokens.toLocaleString()}`">
+            <Icons name="arrow-up-right" size="12" class="text-amber-600 shrink-0" />
+            <span class="whitespace-nowrap">输出 {{ formatTokensInt(completionTokens) }}</span>
           </span>
-          <span class="inline-flex items-center gap-1 font-mono text-slate-700" :aria-label="`缓存 ${cachedTokens.toLocaleString()}，命中率 ${cacheHitRate}`">
-            <Icons name="database" size="12" class="text-sky-600" />
-            <span>缓存: {{ formatTokensInt(cachedTokens) }}</span>
-            <span class="text-[10px] text-slate-500">({{ cacheHitRate }})</span>
+          <span class="inline-flex items-center gap-1 font-mono text-slate-700 whitespace-nowrap shrink-0" :aria-label="`缓存 ${cachedTokens.toLocaleString()}，命中率 ${cacheHitRate}`">
+            <Icons name="database" size="12" class="text-sky-600 shrink-0" />
+            <span class="whitespace-nowrap">缓存 {{ formatTokensInt(cachedTokens) }}</span>
+            <span class="text-[10px] text-slate-500 whitespace-nowrap">({{ cacheHitRate }})</span>
           </span>
         </div>
       </div>
