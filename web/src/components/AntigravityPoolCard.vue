@@ -1218,35 +1218,35 @@ function waterBarWidth(percent: number | null): string {
       </div>
     </div>
 
-    <!-- 单账号专属四要素精确画像抽屉/展开区 (Swiss Minimalist Card) -->
+    <!-- 单账号专属四要素精确画像抽屉/展开区 (Swiss Minimalist Refined) -->
     <div
       v-if="selectedKeyData"
       data-testid="single-account-detail-card"
-      class="mt-4 p-4 rounded-xl bg-slate-50/90 text-slate-800 shadow-xs border border-slate-200/80 transition-all duration-300 animate-in fade-in"
+      class="mt-4 p-4 rounded-xl bg-white/45 backdrop-blur-xs text-slate-800 shadow-xs border border-white/50 transition-all duration-300 animate-in fade-in"
     >
-      <div class="flex flex-wrap items-center justify-between gap-3 pb-3 mb-3 border-b border-slate-200/70">
-        <div class="flex items-center gap-2">
-          <span class="w-2.5 h-2.5 rounded-full bg-amber-500 animate-pulse" />
-          <h3 class="text-sm font-semibold tracking-tight font-mono text-slate-900">
-            单账号周期额度画像 · {{ selectedKeyData.key.id }}
+      <div class="flex flex-wrap items-center justify-between gap-3 pb-3 mb-3 border-b border-slate-200/50">
+        <div class="flex flex-wrap items-center gap-2">
+          <span class="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
+          <h3 class="text-sm font-semibold tracking-tight text-slate-900">
+            单账号周期额度画像 · <span class="font-mono text-slate-700">{{ selectedKeyData.key.id }}</span>
           </h3>
           <span
-            class="px-2 py-0.5 text-[10px] font-mono rounded-full uppercase"
+            class="px-2 py-0.5 text-[10px] font-medium rounded-full uppercase"
             :class="{
-              'bg-emerald-100 text-emerald-800 border border-emerald-300': selectedKeyData.usage?.calibration_status === 'benchmarked',
-              'bg-sky-100 text-sky-800 border border-sky-300': selectedKeyData.usage?.calibration_status === 'estimated',
-              'bg-slate-200/70 text-slate-600 border border-slate-300': !selectedKeyData.usage?.calibration_status || selectedKeyData.usage?.calibration_status === 'calibrating',
+              'bg-emerald-50 text-emerald-700 border border-emerald-200/60': selectedKeyData.usage?.calibration_status === 'benchmarked',
+              'bg-sky-50 text-sky-700 border border-sky-200/60': selectedKeyData.usage?.calibration_status === 'estimated',
+              'bg-slate-100/80 text-slate-600 border border-slate-200/60': !selectedKeyData.usage?.calibration_status || selectedKeyData.usage?.calibration_status === 'calibrating',
             }"
           >
             {{ selectedKeyData.usage?.calibration_status === 'benchmarked' ? '已实测验证 (BENCHMARKED)' : (selectedKeyData.usage?.calibration_status === 'estimated' ? '斜率推算 (ESTIMATED)' : '动态校准中 (CALIBRATING)') }}
           </span>
-          <span class="text-xs text-slate-500 font-mono">
-            等级: <strong class="text-amber-700 uppercase">{{ selectedKeyData.usage?.account_tier || 'UNKNOWN' }}</strong>
-            (置信度 {{ Math.round((selectedKeyData.usage?.confidence || 0) * 100) }}%)
+          <span class="text-xs text-slate-500">
+            等级: <strong class="text-slate-700 uppercase font-mono">{{ selectedKeyData.usage?.account_tier || 'UNKNOWN' }}</strong>
+            <span class="text-slate-400 font-mono ml-1">(置信度 {{ Math.round((selectedKeyData.usage?.confidence || 0) * 100) }}%)</span>
           </span>
         </div>
         <button
-          class="text-xs text-slate-500 hover:text-slate-800 px-2 py-1 rounded bg-white border border-slate-200 shadow-2xs hover:bg-slate-50 transition-colors"
+          class="text-xs text-slate-500 hover:text-slate-800 px-2.5 py-1 rounded-md bg-white/70 border border-white/60 shadow-2xs hover:bg-white transition-colors cursor-pointer"
           @click="selectedKeyId = null"
         >
           关闭画像 ✕
@@ -1256,7 +1256,7 @@ function waterBarWidth(percent: number | null): string {
       <!-- 最近一次探测异常提示 -->
       <div
         v-if="selectedKeyData.testRes && selectedKeyData.testRes.success === false"
-        class="mb-3 px-3 py-2 rounded-lg bg-rose-50 border border-rose-200 text-xs text-rose-700 flex items-center justify-between"
+        class="mb-3 px-3 py-2 rounded-lg bg-rose-50/80 border border-rose-200/70 text-xs text-rose-700 flex items-center justify-between"
       >
         <span>
           <strong>探测异常：</strong>
@@ -1270,31 +1270,40 @@ function waterBarWidth(percent: number | null): string {
       <!-- 四要素结构指标：Prompt / Completion / Cached / Requests -->
       <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-3">
         <!-- 输入 Tokens -->
-        <div class="p-2.5 rounded-lg bg-white border border-slate-200/70 shadow-2xs">
-          <div class="text-[11px] text-slate-500 mb-0.5">输入 (Prompt)</div>
-          <div class="text-base font-bold font-mono text-emerald-700">
+        <div class="p-3 rounded-lg bg-white/70 shadow-2xs">
+          <div class="text-[11px] text-slate-500 mb-0.5 inline-flex items-center gap-1">
+            <Icons name="arrow-down-left" size="12" class="text-slate-400" />
+            输入 (Prompt)
+          </div>
+          <div class="text-lg font-bold font-mono tracking-tight text-slate-800 tabular-nums">
             {{ formatTokenHuman(selectedKeyData.usage?.completed_5h_stats?.prompt_tokens ?? selectedKeyData.usage?.window_5h?.prompt_tokens ?? 0) }}
           </div>
-          <div class="text-[10px] text-slate-400 mt-0.5 font-mono">
+          <div class="text-[10px] text-slate-400 mt-0.5 font-mono tabular-nums">
             5h 累计: {{ (selectedKeyData.usage?.window_5h?.prompt_tokens ?? 0).toLocaleString() }}
           </div>
         </div>
 
         <!-- 输出 Tokens -->
-        <div class="p-2.5 rounded-lg bg-white border border-slate-200/70 shadow-2xs">
-          <div class="text-[11px] text-slate-500 mb-0.5">输出 (Completion)</div>
-          <div class="text-base font-bold font-mono text-amber-700">
+        <div class="p-3 rounded-lg bg-white/70 shadow-2xs">
+          <div class="text-[11px] text-slate-500 mb-0.5 inline-flex items-center gap-1">
+            <Icons name="arrow-up-right" size="12" class="text-slate-400" />
+            输出 (Completion)
+          </div>
+          <div class="text-lg font-bold font-mono tracking-tight text-slate-800 tabular-nums">
             {{ formatTokenHuman(selectedKeyData.usage?.completed_5h_stats?.completion_tokens ?? selectedKeyData.usage?.window_5h?.completion_tokens ?? 0) }}
           </div>
-          <div class="text-[10px] text-slate-400 mt-0.5 font-mono">
+          <div class="text-[10px] text-slate-400 mt-0.5 font-mono tabular-nums">
             权重 3x: {{ ((selectedKeyData.usage?.window_5h?.completion_tokens ?? 0) * 3).toLocaleString() }} eq
           </div>
         </div>
 
         <!-- 缓存命中 Tokens -->
-        <div class="p-2.5 rounded-lg bg-white border border-slate-200/70 shadow-2xs">
-          <div class="text-[11px] text-slate-500 mb-0.5">缓存命中 (Cached)</div>
-          <div class="text-base font-bold font-mono text-sky-700">
+        <div class="p-3 rounded-lg bg-white/70 shadow-2xs">
+          <div class="text-[11px] text-slate-500 mb-0.5 inline-flex items-center gap-1">
+            <Icons name="database" size="12" class="text-slate-400" />
+            缓存命中 (Cached)
+          </div>
+          <div class="text-lg font-bold font-mono tracking-tight text-slate-800 tabular-nums">
             {{ formatTokenHuman(selectedKeyData.usage?.completed_5h_stats?.cached_tokens ?? selectedKeyData.usage?.window_5h?.cached_tokens ?? 0) }}
           </div>
           <div class="text-[10px] text-slate-400 mt-0.5">
@@ -1303,12 +1312,15 @@ function waterBarWidth(percent: number | null): string {
         </div>
 
         <!-- 调用次数 (Requests) -->
-        <div class="p-2.5 rounded-lg bg-white border border-slate-200/70 shadow-2xs">
-          <div class="text-[11px] text-slate-500 mb-0.5">累计调用次数 (Requests)</div>
-          <div class="text-base font-bold font-mono text-purple-700">
-            {{ (selectedKeyData.usage?.completed_5h_stats?.requests ?? selectedKeyData.usage?.window_5h?.requests ?? 0) }} 次
+        <div class="p-3 rounded-lg bg-white/70 shadow-2xs">
+          <div class="text-[11px] text-slate-500 mb-0.5 inline-flex items-center gap-1">
+            <Icons name="repeat" size="12" class="text-slate-400" />
+            累计调用次数 (Requests)
           </div>
-          <div class="text-[10px] text-slate-400 mt-0.5 font-mono">
+          <div class="text-lg font-bold font-mono tracking-tight text-slate-800 tabular-nums">
+            {{ (selectedKeyData.usage?.completed_5h_stats?.requests ?? selectedKeyData.usage?.window_5h?.requests ?? 0) }} <span class="text-xs font-normal text-slate-500 font-sans">次</span>
+          </div>
+          <div class="text-[10px] text-slate-400 mt-0.5 font-mono tabular-nums">
             均次消耗: {{ selectedKeyData.usage?.window_5h?.requests ? Math.round((selectedKeyData.usage.window_5h.total_tokens || 0) / selectedKeyData.usage.window_5h.requests).toLocaleString() : '--' }} tk/req
           </div>
         </div>
@@ -1317,46 +1329,46 @@ function waterBarWidth(percent: number | null): string {
       <!-- 周度打满周期累计（持久化完整周期实测） -->
       <div
         v-if="selectedKeyData.usage?.completed_weekly_stats && selectedKeyData.usage.completed_weekly_stats.count > 0"
-        class="mb-3 px-3 py-2 rounded-lg bg-sky-50 border border-sky-200 text-xs text-sky-800 flex flex-wrap items-center justify-between gap-2"
+        class="mb-3 px-3 py-2 rounded-lg bg-white/60 border border-slate-100 text-xs text-slate-700 flex flex-wrap items-center justify-between gap-2"
         data-testid="weekly-cycle-summary"
       >
-        <span class="font-medium">自然周打满周期实测（持久化）</span>
-        <span class="font-mono">
-          已结算 {{ selectedKeyData.usage.completed_weekly_stats.count }} 轮 · 平均
-          <strong>{{ formatTokenHuman(selectedKeyData.usage.completed_weekly_stats.avg_tokens) }}</strong>
-          <span class="text-[10px] text-sky-500 ml-1">
+        <span class="font-medium text-slate-800">自然周打满周期实测（持久化）</span>
+        <span>
+          已结算 <strong class="font-mono text-slate-900">{{ selectedKeyData.usage.completed_weekly_stats.count }}</strong> 轮 · 平均
+          <strong class="font-mono text-slate-900">{{ formatTokenHuman(selectedKeyData.usage.completed_weekly_stats.avg_tokens) }}</strong>
+          <span class="text-[10px] text-slate-400 ml-1 font-mono">
             总量 {{ formatTokenHuman(selectedKeyData.usage.completed_weekly_stats.total_tokens) }}
           </span>
         </span>
       </div>
 
       <!-- 额度容量双轨测定结论 -->
-      <div class="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs bg-white p-3 rounded-lg border border-slate-200/80 font-mono shadow-2xs">
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs bg-white/70 p-3 rounded-lg shadow-2xs">
         <div>
           <span class="text-slate-500">5h 周期测定容量:</span>
-          <span class="text-slate-900 font-bold ml-1.5">
+          <span class="text-slate-900 font-bold font-mono tabular-nums ml-1.5">
             {{ selectedKeyData.usage?.estimated_capacity_5h ? formatTokenHuman(selectedKeyData.usage.estimated_capacity_5h) : '--' }}
           </span>
-          <span class="text-[10px] text-slate-400 block mt-0.5">
+          <span class="text-[10px] text-slate-400 font-mono block mt-0.5">
             剩余: {{ selectedKeyData.usage?.estimated_tokens_remaining_5h ? formatTokenHuman(selectedKeyData.usage.estimated_tokens_remaining_5h) : '--' }}
             ({{ selectedKeyData.quota.gemini.h5Fraction == null ? '--' : `${Math.round(selectedKeyData.quota.gemini.h5Fraction * 100)}%` }})
           </span>
         </div>
         <div>
           <span class="text-slate-500">自然周理论容量:</span>
-          <span class="text-sky-700 font-bold ml-1.5">
+          <span class="text-slate-900 font-bold font-mono tabular-nums ml-1.5">
             {{ selectedKeyData.usage?.estimated_capacity_weekly ? formatTokenHuman(selectedKeyData.usage.estimated_capacity_weekly) : '--' }}
           </span>
-          <span class="text-[10px] text-slate-400 block mt-0.5">
+          <span class="text-[10px] text-slate-400 font-mono block mt-0.5">
             周度余量水位: {{ selectedKeyData.quota.gemini.weeklyFraction == null ? '--' : `${Math.round(selectedKeyData.quota.gemini.weeklyFraction * 100)}%` }}
           </span>
         </div>
         <div>
           <span class="text-slate-500">月度等效承载量:</span>
-          <span class="text-emerald-700 font-bold ml-1.5">
+          <span class="text-slate-900 font-bold font-mono tabular-nums ml-1.5">
             {{ selectedKeyData.usage?.estimated_capacity_weekly ? formatTokenHuman(Math.round(selectedKeyData.usage.estimated_capacity_weekly * 4.33)) : '--' }}
           </span>
-          <span class="text-[10px] text-slate-400 block mt-0.5">
+          <span class="text-[10px] text-slate-400 font-mono block mt-0.5">
             近30天实跑: {{ formatTokenHuman(selectedKeyData.usage?.window_monthly?.total_tokens ?? 0) }}
           </span>
         </div>
