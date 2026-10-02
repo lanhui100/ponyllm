@@ -182,9 +182,9 @@ const errorRate = computed(() => {
             Token输入量
           </span>
         </div>
-        <!-- 主数字：输入量 -->
-        <div class="text-3xl font-bold tracking-tight text-slate-900 mb-1.5 flex items-baseline gap-1.5 font-mono tabular-nums">
-          {{ promptTokens.toLocaleString() }}
+        <!-- 主数字：输入量 (K/M格式，保持单位一致性) -->
+        <div class="text-3xl font-bold tracking-tight text-slate-900 mb-1.5 flex items-baseline gap-1.5 font-mono tabular-nums" :title="`${promptTokens.toLocaleString()} tok`">
+          {{ formatTokensInt(promptTokens) }}
           <span class="text-sm font-normal text-slate-500 font-sans">tok</span>
         </div>
         <!-- 下方：输出、缓存命中两个维度 -->
