@@ -66,12 +66,43 @@ impl ClusterTelemetryTracker {
             let d_tps_sum = curr.tps_sum_milli.saturating_sub(prev.map(|p| p.tps_sum_milli).unwrap_or(0));
             let d_tps_count = curr.tps_count.saturating_sub(prev.map(|p| p.tps_count).unwrap_or(0));
 
+            // 按 provider 提取增量细分
+            let mut provider_keys = std::collections::HashSet::new();
+            if let Some(prev) = prev {
+                provider_keys.extend(prev.tokens_by_provider.keys().cloned());
+            }
+            provider_keys.extend(curr.tokens_by_provider.keys().cloned());
+
+            let mut provider_deltas_sum = 0u64;
+            for p in provider_keys {
+                let prev_prompt = prev.and_then(|pr| pr.prompt_tokens_by_provider.get(&p)).copied().unwrap_or(0);
+                let curr_prompt = curr.prompt_tokens_by_provider.get(&p).copied().unwrap_or(0);
+                let p_prompt = curr_prompt.saturating_sub(prev_prompt);
+
+                let prev_comp = prev.and_then(|pr| pr.completion_tokens_by_provider.get(&p)).copied().unwrap_or(0);
+                let curr_comp = curr.completion_tokens_by_provider.get(&p).copied().unwrap_or(0);
+                let p_comp = curr_comp.saturating_sub(prev_comp);
+
+                let prev_cached = prev.and_then(|pr| pr.cached_tokens_by_provider.get(&p)).copied().unwrap_or(0);
+                let curr_cached = curr.cached_tokens_by_provider.get(&p).copied().unwrap_or(0);
+                let p_cached = curr_cached.saturating_sub(prev_cached);
+
+                if p_prompt > 0 || p_comp > 0 || p_cached > 0 {
+                    let entry = deltas_guard.entry((hour_ms, p.clone(), String::new())).or_default();
+                    entry.prompt_tokens += p_prompt;
+                    entry.completion_tokens += p_comp;
+                    entry.cached_tokens += p_cached;
+                    provider_deltas_sum = provider_deltas_sum.saturating_add(p_prompt + p_comp);
+                }
+            }
+
             if d_reqs > 0 || d_fails > 0 || d_prompt > 0 || d_comp > 0 || d_cached > 0 {
-                // 如果没有 provider/model 细分，存为 ("", "")
+                // 如果未细分或有总体指标，存入 ("", "")
                 let entry = deltas_guard.entry((hour_ms, String::new(), String::new())).or_default();
                 entry.total_requests += d_reqs;
                 entry.failed_requests += d_fails;
-                entry.prompt_tokens += d_prompt;
+                let residual_prompt = d_prompt.saturating_sub(provider_deltas_sum);
+                entry.prompt_tokens += residual_prompt;
                 entry.completion_tokens += d_comp;
                 entry.cached_tokens += d_cached;
                 entry.latency_sum_ms += d_lat_sum;

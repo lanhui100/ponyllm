@@ -221,10 +221,27 @@ spec:
             timeoutSeconds: 1
           responseForwarding:
             flushInterval: "100ms"
-    # 4. 遥测观测独立路由（2026-10-02 全集群聚合）：
-    #    Traefik IngressRoute 优先级设为 500（确保绝对高于通用 PathPrefix(/v1/) 的默认长度匹配 214），
-    #    精确捕获所有 telemetry 遥测请求并进行 5:4:1:1 加权分发。
-    #    后端所有 Pod 均通过 PostgreSQL 聚合底座返回完全一致的全集群历史与总览数据。
+    # 4. 遥测观测独立路由（2026-10-02 全集群观测）：
+    #    - 全集群指标汇总接口 (/v1/telemetry/metrics, /v1/telemetry/history) 依赖 PostgreSQL 全局聚合底座，支持多副本加权分发；
+    #    - 实时流/提供商状态接口 (/v1/telemetry/stream) 包含 Pod 内存本地的连通性微柱 (ConnectivityBars) 与实时流状态，
+    #      收敛至单写者 dev 副本响应，从边缘彻底消除微柱与提供商状态频闪跳变。
+    - match: Host(`tokens.ponyjob.top`) && (Path(`/v1/telemetry/stream`) || Path(`/telemetry/stream`))
+      kind: Rule
+      priority: 600
+      middlewares:
+        - name: ponyllm-security-headers
+        - name: ponyllm-ratelimit
+        - name: ponyllm-inflightreq
+      services:
+        - name: ponyllm-svc-dev
+          port: 8080
+          weight: 5
+          healthCheck:
+            path: /health
+            intervalSeconds: 2
+            timeoutSeconds: 1
+          responseForwarding:
+            flushInterval: "100ms"
     - match: Host(`tokens.ponyjob.top`) && (Path(`/v1/telemetry`) || PathPrefix(`/v1/telemetry/`) || Path(`/telemetry`) || PathPrefix(`/telemetry/`))
       kind: Rule
       priority: 500

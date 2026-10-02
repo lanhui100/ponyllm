@@ -50,7 +50,14 @@ svcs = admin["services"]
 ok(len(svcs) == 1 and svcs[0]["name"] == "ponyllm-svc-dev",
    "/api/admin route pinned to single service 'ponyllm-svc-dev'")
 
-telemetry = next(r for r in route["spec"]["routes"] if "telemetry" in r["match"])
+stream_route = next(r for r in route["spec"]["routes"] if "stream" in (r.get("match") or ""))
+stream_svcs = stream_route["services"]
+ok(len(stream_svcs) == 1 and stream_svcs[0]["name"] == "ponyllm-svc-dev",
+   "stream route pinned to single service 'ponyllm-svc-dev' for stable connectivity bars")
+ok(stream_route.get("priority") == 600,
+   "stream route has priority: 600")
+
+telemetry = next(r for r in route["spec"]["routes"] if "telemetry" in r["match"] and "stream" not in r["match"])
 tele_svcs = telemetry["services"]
 ok(len(tele_svcs) >= 1,
    "telemetry route present and configured")
