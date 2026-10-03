@@ -170,6 +170,10 @@ spec:
       # 单副本节点绑定：按 handover 5:4:1:1 加权，各节点 1 个 gateway。
       nodeSelector:
         kubernetes.io/hostname: devserver
+      dnsConfig:
+        options:
+          - name: ndots
+            value: "2"
       # 180s 优雅停机窗口：保护 LLM 长文本 / 慢思考（Reasoning）流式连接自然吐完，避免硬杀导致用户端连接被掐断
       terminationGracePeriodSeconds: 180
       serviceAccountName: ponyllm-gateway-sa
@@ -332,6 +336,10 @@ spec:
     spec:
       nodeSelector:
         kubernetes.io/hostname: jobcopilot-preprod
+      dnsConfig:
+        options:
+          - name: ndots
+            value: "2"
       terminationGracePeriodSeconds: 180
       serviceAccountName: ponyllm-gateway-sa
       automountServiceAccountToken: true
@@ -475,6 +483,10 @@ spec:
     spec:
       nodeSelector:
         kubernetes.io/hostname: proserver
+      dnsConfig:
+        options:
+          - name: ndots
+            value: "2"
       terminationGracePeriodSeconds: 180
       serviceAccountName: ponyllm-gateway-sa
       automountServiceAccountToken: true
@@ -619,6 +631,10 @@ spec:
     spec:
       nodeSelector:
         kubernetes.io/hostname: tencent
+      dnsConfig:
+        options:
+          - name: ndots
+            value: "2"
       terminationGracePeriodSeconds: 180
       serviceAccountName: ponyllm-gateway-sa
       automountServiceAccountToken: true
