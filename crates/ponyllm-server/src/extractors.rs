@@ -373,6 +373,13 @@ pub fn format_exhausted_message(
 /// as a quota boundary so the routing guard stops before the next provider,
 /// instead of draining the second provider's quota on every retry inside the
 /// cooldown window.
+///
+/// The quota-reason umbrella covers the OpenCode zen free tier too
+/// (2026-10-03): `FreeUsageLimitError` 429s and `FreeTierError` 403s classify
+/// as `PoolErrorType::QuotaExhausted` (see `is_zen_free_usage_limit_body` /
+/// `is_zen_free_tier_gate_body`), so a fully-cooled zen pool reads as
+/// `quota_exhausted` — clients get an honest "free usage window closed"
+/// signal instead of a misleading gateway-side `rate_limit_exceeded`.
 pub fn pool_quota_exhausted(
     err: &ponyllm_core::error::CoreError,
     pool: &ponyllm_core::pool::KeyPool,

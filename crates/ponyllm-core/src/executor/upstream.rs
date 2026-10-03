@@ -390,6 +390,17 @@ fn classify_forbidden(
             GatewayErrorKind::AuthInvalid,
             PoolErrorType::AccountValidationRequired,
         )
+    } else if is_zen_free_tier_gate_body(err_body) {
+        // OpenCode zen free-tier gate (`FreeTierError`): only the official
+        // client may use `*-free` models, so a proxy replay that trips this
+        // gate is not a transient blip — cool as quota (honest
+        // `quota_exhausted` signal, boundary guard stops failover).
+        (
+            GatewayErrorKind::QuotaExhausted,
+            PoolErrorType::QuotaExhausted {
+                retry_after: retry_after.or(Some(Duration::from_secs(900))),
+            },
+        )
     } else if body_has_rate_limit_signal(err_body) {
         // Transient rate-limit signal wins over quota wording, mirroring the
         // 429 path: Sense/商汤 mislabels RPM/TPM rejections as
@@ -542,8 +553,35 @@ pub fn is_quota_exhausted_body(body: &str) -> bool {
                 .unwrap_or(false))
 }
 
+/// OpenCode zen free-tier *usage-limit* body (`FreeUsageLimitError`, 429 from
+/// the Console/proxy). Despite the `"Rate limit exceeded"` message, this is a
+/// windowed *usage quota* (recovers at the Console window reset), not a
+/// transient per-request rate limit. Classifying it as `RateLimit` was what
+/// escalated every zen key into 5m→2h cooldowns and surfaced a misleading
+/// gateway-side `rate_limit_exceeded` to clients while the upstream had only
+/// closed its free window. Matched by the upstream's own type name so generic
+/// `"rate limit"` wording on other upstreams is untouched.
+pub fn is_zen_free_usage_limit_body(body: &str) -> bool {
+    let lower = body.to_ascii_lowercase();
+    lower.contains("freeusagelimiterror") || lower.contains("free usage limit")
+}
+
+/// OpenCode zen free-tier *gate* rejection (`FreeTierError`, 403): the Console
+/// only serves `*-free` models to requests that look like the official
+/// OpenCode client. A proxied replay that trips this gate does not recover by
+/// waiting for a window — cool it as quota so the pool surfaces an honest
+/// `quota_exhausted` signal (and the quota boundary guard stops cross-provider
+/// failover) instead of cycling generic unknown-403 60s rate-limit cooldowns.
+pub fn is_zen_free_tier_gate_body(body: &str) -> bool {
+    let lower = body.to_ascii_lowercase();
+    lower.contains("freetiererror") || lower.contains("free tier can only be used")
+}
+
 /// Classify a 429 into (gateway kind, pool action).
 ///
+/// - OpenCode zen free usage-limit (`FreeUsageLimitError`) → `QuotaExhausted`
+///   even though the message says "Rate limit exceeded": the free window is
+///   closed, and the quota boundary guard must stop cross-provider failover.
 /// - Quota wording → `QuotaExhausted` cooling for the advertised reset (body
 ///   `Resets in ...` first, then the `Retry-After` header, then the pool's
 ///   conservative default). No same-key transient retry: the window is closed.
@@ -553,6 +591,12 @@ fn classify_too_many_requests(
     err_body: &str,
     retry_after: Option<Duration>,
 ) -> (GatewayErrorKind, PoolErrorType) {
+    if is_zen_free_usage_limit_body(err_body) {
+        return (
+            GatewayErrorKind::QuotaExhausted,
+            PoolErrorType::QuotaExhausted { retry_after },
+        );
+    }
     let body_reset = parse_reset_duration(err_body);
     if is_quota_exhausted_body(err_body) {
         (
@@ -2099,6 +2143,76 @@ mod session_header_tests {
             }
             other => panic!("expected 60s cooling, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn zen_free_tier_gate_403_is_quota_not_unknown_403() {
+        // OpenCode zen `FreeTierError` (403): only the official client may use
+        // `*-free` models. A proxied replay tripping this gate must cool as
+        // quota (honest `quota_exhausted` + boundary guard) instead of cycling
+        // the generic unknown-403 60s rate-limit cooldown forever.
+        for body in [
+            r#"{"type":"error","error":{"type":"FreeTierError","message":"OpenCode's free tier can only be used from within OpenCode"}}"#,
+            r#"{"type":"error","error":{"type":"FreeTierError","message":"Error from provider (Console): OpenCode's free tier can only be used from within OpenCode"}}"#,
+        ] {
+            assert!(is_zen_free_tier_gate_body(body), "body must be detected: {body}");
+            let (kind, pool_err) = classify_forbidden(body, None);
+            assert_eq!(kind, GatewayErrorKind::QuotaExhausted, "body: {body}");
+            match pool_err {
+                PoolErrorType::QuotaExhausted { retry_after } => {
+                    assert_eq!(retry_after, Some(Duration::from_secs(900)));
+                }
+                other => panic!("expected quota cooldown, got {:?} (body: {body})", other),
+            }
+        }
+        // Pool-level effect: cooling with Quota reason, never disabled.
+        let entry = ApiKeyEntry::new("k1", "sk-1", 1, 10);
+        let (_, pool_err) = classify_forbidden(
+            r#"{"type":"error","error":{"type":"FreeTierError","message":"OpenCode's free tier can only be used from within OpenCode"}}"#,
+            None,
+        );
+        entry.record_failure(pool_err);
+        assert_eq!(entry.current_state(), KeyState::CoolingDown);
+        assert_eq!(
+            entry.cooldown_reason(),
+            Some(crate::pool::entry::CooldownReason::Quota)
+        );
+    }
+
+    #[test]
+    fn zen_free_usage_limit_429_is_quota_not_rate_limit() {
+        // Observed 2026-10-03 from the opencode zen proxy: the Console free
+        // window closed and every zen key returned this body. The message says
+        // "Rate limit exceeded", but the type `FreeUsageLimitError` means a
+        // windowed usage quota — it must classify as QuotaExhausted so
+        // `pool_quota_exhausted` reclassifies a fully-cooled pool to
+        // `quota_exhausted` (clients see an honest quota signal instead of a
+        // misleading gateway-side `rate_limit_exceeded`).
+        for body in [
+            r#"{"type":"error","error":{"type":"FreeUsageLimitError","message":"Rate limit exceeded. Please try again later."},"metadata":{}}"#,
+            r#"{"type":"error","error":{"type":"FreeUsageLimitError","message":"Error from provider (Console): Rate limit exceeded. Please try again later."}}"#,
+        ] {
+            assert!(is_zen_free_usage_limit_body(body), "body must be detected: {body}");
+            let (kind, pool_err) = classify_too_many_requests(body, None);
+            assert_eq!(kind, GatewayErrorKind::QuotaExhausted, "body: {body}");
+            assert!(
+                matches!(pool_err, PoolErrorType::QuotaExhausted { .. }),
+                "got {:?} (body: {body})",
+                pool_err
+            );
+        }
+        // Pool-level effect: Quota cooldown reason (feeds `any_key_quota_cooldown`).
+        let entry = ApiKeyEntry::new("k1", "sk-1", 1, 10);
+        let (_, pool_err) = classify_too_many_requests(
+            r#"{"type":"error","error":{"type":"FreeUsageLimitError","message":"Rate limit exceeded. Please try again later."},"metadata":{}}"#,
+            None,
+        );
+        entry.record_failure(pool_err);
+        assert_eq!(entry.current_state(), KeyState::CoolingDown);
+        assert_eq!(
+            entry.cooldown_reason(),
+            Some(crate::pool::entry::CooldownReason::Quota)
+        );
     }
 
     #[test]

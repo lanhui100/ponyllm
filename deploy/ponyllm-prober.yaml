@@ -53,6 +53,15 @@ spec:
               value: mimo-v2.5-free
             - name: PROBE_TIMEOUT
               value: "90"
+            # 2026-10-03：免费额度探针降频 30s -> 600s。事故复盘（req_18daf7d30e…）：
+            # 探针每 30s 打一次 opencode-zen 免费额度模型，叠加真实流量把 Console
+            # 免费窗口打爆（FreeUsageLimitError 429），网关把三把 zen key 全部冷却
+            # （5m→2h 指数升级），全池无可用 key -> 生产请求本地 429。免费额度是
+            # 共享滑动窗口，30s 主动探测等于持续消耗额度；降频至 10min 保留链路
+            # 存活探测又不挖洞（一次失败冷却在下次探测前已过期）。脚本默认仍为 30s，
+            # 由本 Deployment 显式覆盖。
+            - name: PROBE_INTERVAL_SECONDS
+              value: "600"
           command: ["python3", "/opt/prober/prober.py"]
           ports:
             - containerPort: 9115
