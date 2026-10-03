@@ -367,6 +367,21 @@ pub fn format_exhausted_message(
     }
 }
 
+/// H1 reclassification (bugfix 2026-10-02): when a pool has no schedulable
+/// key left and at least one cooling key is cooling due to quota exhaustion, a
+/// `NoAvailableKey` failure means this provider's quota is gone — surface it
+/// as a quota boundary so the routing guard stops before the next provider,
+/// instead of draining the second provider's quota on every retry inside the
+/// cooldown window.
+pub fn pool_quota_exhausted(
+    err: &ponyllm_core::error::CoreError,
+    pool: &ponyllm_core::pool::KeyPool,
+) -> bool {
+    matches!(err, ponyllm_core::error::CoreError::NoAvailableKey(_))
+        && pool.no_schedulable_keys()
+        && pool.any_key_quota_cooldown()
+}
+
 /// Prefer upstream Retry-After, else earliest pool unlock ceiled to seconds.
 pub fn retry_after_secs(
     kind: &ponyllm_core::error::GatewayErrorKind,

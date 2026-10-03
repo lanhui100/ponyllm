@@ -1597,10 +1597,24 @@ impl UpstreamExecutor {
                     if status_code == 429 {
                         // Balance-wording 429 (billing, not window): sets the
                         // fail-fast flag; the classification below is kept.
-                        if is_balance_exhausted_body(&err_body) {
+                        let balance_wording = is_balance_exhausted_body(&err_body);
+                        if balance_wording {
                             balance_exhausted = true;
                         }
                         let (kind, pool_err) = classify_too_many_requests(&err_body, retry_after);
+                        // Balance-wording 429 means the account balance is
+                        // gone, not a sliding window closing: classify as
+                        // quota so the boundary guard stops cross-provider
+                        // failover instead of draining a second provider
+                        // (bugfix 2026-10-02; mirrors the 403 balance path).
+                        let (kind, pool_err) = if balance_wording {
+                            (
+                                GatewayErrorKind::QuotaExhausted,
+                                PoolErrorType::QuotaExhausted { retry_after },
+                            )
+                        } else {
+                            (kind, pool_err)
+                        };
                         last_kind = kind;
                         attempt_kinds.push(last_kind.clone());
                         let transient_retry_after = match &pool_err {
@@ -1854,10 +1868,24 @@ impl UpstreamExecutor {
                     if status_code == 429 {
                         // Balance-wording 429 (billing, not window): sets the
                         // fail-fast flag; the classification below is kept.
-                        if is_balance_exhausted_body(&err_body) {
+                        let balance_wording = is_balance_exhausted_body(&err_body);
+                        if balance_wording {
                             balance_exhausted = true;
                         }
                         let (kind, pool_err) = classify_too_many_requests(&err_body, retry_after);
+                        // Balance-wording 429 means the account balance is
+                        // gone, not a sliding window closing: classify as
+                        // quota so the boundary guard stops cross-provider
+                        // failover instead of draining a second provider
+                        // (bugfix 2026-10-02; mirrors the 403 balance path).
+                        let (kind, pool_err) = if balance_wording {
+                            (
+                                GatewayErrorKind::QuotaExhausted,
+                                PoolErrorType::QuotaExhausted { retry_after },
+                            )
+                        } else {
+                            (kind, pool_err)
+                        };
                         last_kind = kind;
                         attempt_kinds.push(last_kind.clone());
                         let transient_retry_after = match &pool_err {

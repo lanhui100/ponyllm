@@ -273,6 +273,7 @@ pub fn run_interactive_init(output_path: &str) -> Result<(), Box<dyn std::error:
             gateway_keys: Vec::new(),
             antigravity_auto_refresh: true,
             antigravity_refresh_interval_secs: 86400,
+            cross_provider_quota_failover: false,
         },
         providers,
         commercial: Default::default(),

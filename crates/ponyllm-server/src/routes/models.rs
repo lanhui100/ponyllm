@@ -174,8 +174,24 @@ pub async fn handle_get_model(
     State(state): State<Arc<AppState>>,
     Path(model_id): Path<String>,
 ) -> impl IntoResponse {
+    get_model_by_id(state, &model_id).await
+}
+
+/// Handler for `GET /v1/models/:provider/:model` and `GET /models/:provider/:model`
+/// — the `provider/model` pin syntax. A single-segment `{model_id}` route
+/// cannot match a path containing `/`, so `provider/model` aliases (and any
+/// literal model name whose first segment happens to be a provider) need this
+/// two-segment route to resolve without URL-encoding the slash.
+pub async fn handle_get_model_provider_model(
+    State(state): State<Arc<AppState>>,
+    Path((provider, model)): Path<(String, String)>,
+) -> impl IntoResponse {
+    get_model_by_id(state, &format!("{}/{}", provider, model)).await
+}
+
+async fn get_model_by_id(state: Arc<AppState>, model_id: &str) -> impl IntoResponse {
     let models = state.list_all_models();
-    if let Some((m_id, provider_name, display_name, protocol)) = models.into_iter().find(|(m, _, _, _)| m == &model_id) {
+    if let Some((m_id, provider_name, display_name, protocol)) = models.into_iter().find(|(m, _, _, _)| m == model_id) {
         (
             StatusCode::OK,
             Json(format_model_json(&m_id, &provider_name, display_name.as_deref(), &protocol)),

@@ -51,6 +51,21 @@ pub enum PoolErrorType {
     NetworkError,
 }
 
+/// Why a key is cooling down. The quota boundary guard (bugfix 2026-10-02)
+/// needs this to distinguish "account quota exhausted" (must not cross to a
+/// second provider carrying the same model) from transient rate-limit or
+/// server faults (may cross) when a pool has no schedulable key left.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CooldownReason {
+    /// Account/model quota or balance exhausted (402 / balance-wording 429 /
+    /// balance-wording 403 / antigravity quota frames).
+    Quota,
+    /// Sliding-window rate limit (RPM/TPM/concurrency 429).
+    RateLimit,
+    /// Server/network fault or an operator-administered cooldown.
+    Server,
+}
+
 #[derive(Debug)]
 pub struct KeyStats {
     pub total_requests: AtomicU64,
@@ -63,6 +78,11 @@ pub struct KeyStats {
     /// (admin API / Web badge) can render the advertised reset time without
     /// reverse-engineering a monotonic clock.
     pub cooldown_reset_at: RwLock<Option<SystemTime>>,
+    /// Why this key is cooling down, when it is. The quota boundary guard
+    /// (bugfix 2026-10-02) uses this to tell "account quota exhausted" apart
+    /// from transient rate-limit / server faults when a pool has no
+    /// schedulable key left.
+    pub cooldown_reason: RwLock<Option<CooldownReason>>,
     pub disabled_reason: RwLock<Option<String>>,
 }
 
@@ -76,6 +96,7 @@ impl Default for KeyStats {
             policy_violations: AtomicUsize::new(0),
             cooldown_until: RwLock::new(None),
             cooldown_reset_at: RwLock::new(None),
+            cooldown_reason: RwLock::new(None),
             disabled_reason: RwLock::new(None),
         }
     }
@@ -227,6 +248,7 @@ impl ApiKeyEntry {
             if Instant::now() >= until {
                 *cd_write = None;
                 *self.stats.cooldown_reset_at.write() = None;
+                *self.stats.cooldown_reason.write() = None;
                 self.stats.consecutive_failures.store(0, Ordering::SeqCst);
                 KeyState::Active
             } else {
@@ -254,6 +276,7 @@ impl ApiKeyEntry {
         let mut cd = self.stats.cooldown_until.write();
         *cd = None;
         *self.stats.cooldown_reset_at.write() = None;
+        *self.stats.cooldown_reason.write() = None;
         self.stats.consecutive_failures.store(0, Ordering::SeqCst);
     }
 
@@ -283,6 +306,15 @@ impl ApiKeyEntry {
             return None;
         }
         *self.stats.cooldown_reset_at.read()
+    }
+
+    /// Why this key is currently cooling down, when known.
+    pub fn cooldown_reason(&self) -> Option<CooldownReason> {
+        let until = (*self.stats.cooldown_until.read())?;
+        if Instant::now() >= until {
+            return None;
+        }
+        *self.stats.cooldown_reason.read()
     }
 
     /// Concrete reason why the key is disabled, if permanently isolated.
@@ -355,6 +387,7 @@ impl ApiKeyEntry {
                     }
                 };
                 self.set_cooldown(duration);
+                *self.stats.cooldown_reason.write() = Some(CooldownReason::RateLimit);
             }
             PoolErrorType::QuotaExhausted { retry_after } => {
                 // Quota exhaustion is transient by nature (real quota
@@ -364,6 +397,7 @@ impl ApiKeyEntry {
                 // available; the 15m default is a conservative fallback.
                 let duration = retry_after.unwrap_or(Duration::from_secs(15 * 60));
                 self.set_cooldown(duration);
+                *self.stats.cooldown_reason.write() = Some(CooldownReason::Quota);
             }
             PoolErrorType::AuthInvalid { reason } => {
                 let msg = reason.unwrap_or_else(|| "Authentication failed (invalid key)".to_string());
@@ -380,6 +414,7 @@ impl ApiKeyEntry {
                     let exp = (consecutive as u32).saturating_sub(3);
                     let secs = (1u64.saturating_mul(2u64.saturating_pow(exp))).min(30);
                     self.set_cooldown(Duration::from_secs(secs));
+                    *self.stats.cooldown_reason.write() = Some(CooldownReason::Server);
                 }
             }
         }

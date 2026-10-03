@@ -105,6 +105,16 @@ impl GatewayErrorKind {
     pub fn triggers_failover(&self) -> bool {
         !matches!(self, GatewayErrorKind::ClientBadRequest)
     }
+
+    /// True when this failure means the account/model *quota* is exhausted
+    /// (402 / balance-wording 429 / balance-wording 403 / antigravity quota
+    /// frames), as opposed to a transient rate-limit window. The quota
+    /// boundary guard in the chat/messages/responses routing loops keys off
+    /// this predicate: quota exhaustion must not silently drain a second
+    /// provider carrying the same model.
+    pub fn is_quota_exhausted(&self) -> bool {
+        matches!(self, GatewayErrorKind::QuotaExhausted)
+    }
 }
 
 impl CoreError {
@@ -136,9 +146,20 @@ impl CoreError {
             }
             // Mid-stream SSE collect failure after headers succeeded: the
             // request reached the upstream, so this is a transport/server
-            // fault (failover-eligible), not an internal bug (B4).
-            CoreError::Internal(msg) if msg.starts_with("Antigravity stream collect failed")
-                || msg.starts_with("Antigravity deterministic empty STOP") => {
+            // fault (failover-eligible), not an internal bug (B4). An
+            // upstream error frame that says the account/model quota is gone
+            // must classify as QuotaExhausted so the quota boundary guard
+            // stops cross-provider failover instead of draining a second
+            // provider's quota (and double-billing when the first provider
+            // already accepted the request).
+            CoreError::Internal(msg) if msg.starts_with("Antigravity stream collect failed") => {
+                if antigravity_collect_error_is_quota(msg) {
+                    GatewayErrorKind::QuotaExhausted
+                } else {
+                    GatewayErrorKind::UpstreamUnavailable
+                }
+            }
+            CoreError::Internal(msg) if msg.starts_with("Antigravity deterministic empty STOP") => {
                 GatewayErrorKind::UpstreamUnavailable
             }
             _ => GatewayErrorKind::Internal,
@@ -147,6 +168,24 @@ impl CoreError {
 }
 
 pub type Result<T> = std::result::Result<T, CoreError>;
+
+/// Whether an Antigravity collect-failure message means the account/model
+/// *quota* is gone (as opposed to a transient server fault or a sliding-window
+/// rate limit). Broader than the executor's 429/403 body classifiers because a
+/// mid-stream error frame carries no reset duration: any "quota" / balance
+/// wording qualifies as long as a rate-limit signal (rpm/tpm/qps/concurrency)
+/// is absent — upstreams mislabeling RPM rejections as quota stay excluded.
+fn antigravity_collect_error_is_quota(msg: &str) -> bool {
+    use crate::executor::upstream::{
+        body_has_rate_limit_signal, is_balance_exhausted_body, is_quota_exhausted_body,
+    };
+    let lower = msg.to_ascii_lowercase();
+    !body_has_rate_limit_signal(msg)
+        && (is_balance_exhausted_body(msg)
+            || is_quota_exhausted_body(msg)
+            || lower.contains("quota")
+            || lower.contains("resource has been exhausted"))
+}
 
 #[cfg(test)]
 mod tests {
@@ -160,6 +199,38 @@ mod tests {
         assert_eq!(err.kind(), GatewayErrorKind::LockContention);
         assert_eq!(err.kind().kind_name(), "lock_contention");
         assert!(err.kind().triggers_failover());
+    }
+
+    #[test]
+    fn test_antigravity_collect_quota_frame_classifies_quota_exhausted() {
+        // H2 (bugfix 2026-10-02): a mid-stream quota error frame must read as
+        // a quota boundary so the routing guard stops cross-provider failover.
+        let quota = CoreError::Internal(
+            "Antigravity stream collect failed: upstream error frame: Resource has been exhausted (e.g. check quota)"
+                .to_string(),
+        );
+        assert_eq!(quota.kind(), GatewayErrorKind::QuotaExhausted);
+        assert!(quota.kind().is_quota_exhausted());
+
+        let balance = CoreError::Internal(
+            "Antigravity stream collect failed: upstream error frame: your account balance is exhausted"
+                .to_string(),
+        );
+        assert_eq!(balance.kind(), GatewayErrorKind::QuotaExhausted);
+
+        // Transient faults keep the failover-eligible classification.
+        let transient = CoreError::Internal(
+            "Antigravity stream collect failed: upstream connection reset".to_string(),
+        );
+        assert_eq!(transient.kind(), GatewayErrorKind::UpstreamUnavailable);
+
+        // Rate-limit wording stays transient even when the upstream errantly
+        // labels it "quota" (Sense/商汤 RPM pattern).
+        let rate = CoreError::Internal(
+            "Antigravity stream collect failed: upstream error frame: rpm quota exceeded for account rpm_user"
+                .to_string(),
+        );
+        assert_eq!(rate.kind(), GatewayErrorKind::UpstreamUnavailable);
     }
 }
 

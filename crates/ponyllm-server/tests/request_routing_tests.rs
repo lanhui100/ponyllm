@@ -1,6 +1,8 @@
 #![allow(clippy::field_reassign_with_default)]
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use axum::response::IntoResponse;
 use axum::routing::post;
 use axum::{Json, Router};
 use serde_json::json;
@@ -734,6 +736,484 @@ async fn test_cross_provider_transparent_failover() {
     assert_eq!(body["choices"][0]["message"]["content"], "Hello from healthy backup provider!");
 }
 
+/// Same-model multi-provider quota semantics (bugfix 2026-10-02).
+///
+/// The same model configured on two providers appears ONCE in `/v1/models`
+/// (dedup by bare name), but at request time a quota exhaustion on the first
+/// provider used to transparently fail over to the second provider and
+/// silently consume the second provider's quota. Default behavior now stops at
+/// the quota boundary (`quota_exhausted`, 429) unless
+/// `cross_provider_quota_failover = true` opts back in.
+
+#[derive(Clone, Copy)]
+enum QuotaFailMode {
+    /// 402 Payment Required — unambiguous quota exhaustion.
+    PaymentRequired,
+    /// 429 with balance-wording body — classified QuotaExhausted.
+    Balance429,
+    /// 429 with rate-limit-wording body — transient, may fail over.
+    Rate429,
+}
+
+fn quota_fail_response(mode: QuotaFailMode) -> (axum::http::StatusCode, serde_json::Value) {
+    match mode {
+        QuotaFailMode::PaymentRequired => (
+            axum::http::StatusCode::PAYMENT_REQUIRED,
+            json!({"error": {"message": "insufficient account balance", "type": "insufficient_quota", "code": "402"}}),
+        ),
+        QuotaFailMode::Balance429 => (
+            axum::http::StatusCode::TOO_MANY_REQUESTS,
+            json!({"error": {"message": "your account balance is exhausted", "type": "insufficient_quota", "code": "429"}}),
+        ),
+        QuotaFailMode::Rate429 => (
+            axum::http::StatusCode::TOO_MANY_REQUESTS,
+            json!({"error": {"message": "rate limit exceeded for account rpm_user", "type": "rate_limit_error", "code": "429"}}),
+        ),
+    }
+}
+
+async fn spawn_quota_failover_gateway(
+    quota_failover: bool,
+    route: &'static str,
+    fail_mode: QuotaFailMode,
+) -> (String, Arc<AtomicUsize>, Arc<AtomicUsize>) {
+    let a_hits = Arc::new(AtomicUsize::new(0));
+    let b_hits = Arc::new(AtomicUsize::new(0));
+
+    // Upstreams always serve the chat URL: with `default_protocol = None` and
+    // an IP base URL every gateway entry resolves upstream protocol Chat, so
+    // all three gateway routes (chat/messages/responses) forward to
+    // `{base}/v1/chat/completions` after normalization.
+    // Provider A: quota-exhausted mock.
+    let a_hits_clone = a_hits.clone();
+    let quota_upstream = Router::new().route(
+        "/v1/chat/completions",
+        post(move |_req: Json<serde_json::Value>| async move {
+            a_hits_clone.fetch_add(1, Ordering::SeqCst);
+            let (status, body) = quota_fail_response(fail_mode);
+            (status, axum::Json(body)).into_response()
+        }),
+    );
+    let quota_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let quota_addr = quota_listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(quota_listener, quota_upstream).await.unwrap();
+    });
+
+    // Provider B: healthy backup, counts every request it serves.
+    let b_hits_clone = b_hits.clone();
+    let healthy_upstream = Router::new().route(
+        "/v1/chat/completions",
+        post(move |_req: Json<serde_json::Value>| async move {
+            b_hits_clone.fetch_add(1, Ordering::SeqCst);
+            axum::Json(json!({
+                "id": "chatcmpl-backup-quota",
+                "object": "chat.completion",
+                "created": 1710000000,
+                "model": "quota-test-model",
+                "choices": [{
+                    "index": 0,
+                    "message": { "role": "assistant", "content": "served by backup" },
+                    "finish_reason": "stop"
+                }],
+                "usage": { "prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15 }
+            }))
+        }),
+    );
+    let healthy_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let healthy_addr = healthy_listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(healthy_listener, healthy_upstream).await.unwrap();
+    });
+
+    let pool_quota = Arc::new(KeyPool::new("quota_provider", RoutingStrategy::RoundRobin));
+    pool_quota.add_key(ApiKeyEntry::new("quota-k1", "sk-quota", 1, 10));
+    let pool_backup = Arc::new(KeyPool::new("backup_provider", RoutingStrategy::RoundRobin));
+    pool_backup.add_key(ApiKeyEntry::new("backup-k1", "sk-backup", 1, 10));
+
+    let mut config = GatewayConfig::default();
+    config.max_retries = 1;
+    config.cross_provider_quota_failover = quota_failover;
+
+    for (p_name, base) in [("quota_provider", quota_addr), ("backup_provider", healthy_addr)] {
+        let cheap = p_name == "quota_provider";
+        config.providers.insert(
+            p_name.to_string(),
+            ProviderConfig {
+                rate_limits: None,
+                base_url: format!("http://{}", base),
+                default_model: "quota-test-model".to_string(),
+                strategy: "priority".to_string(),
+                billing_mode: BillingMode::Metered,
+                input_price: if cheap { 0.10 } else { 0.20 },
+                cached_price: 0.01,
+                output_price: if cheap { 0.20 } else { 0.40 },
+                models: vec!["quota-test-model".to_string()],
+                model_specs: vec![ModelSpec {
+                    rate_limits: None,
+                    priority: None,
+                    name: "quota-test-model".to_string(),
+                    tier: ModelTier::Flagship,
+                    context_window: "1M".to_string(),
+                    max_output: "32K".to_string(),
+                    input_types: vec!["text".to_string()],
+                    output_types: vec!["text".to_string()],
+                    ..Default::default()
+                }],
+                default_protocol: None,
+                chat_url: None,
+                responses_url: None,
+                messages_url: None,
+                proxy: None,
+                timeout_secs: None,
+                ttfb_timeout_secs: None,
+            },
+        );
+    }
+
+    let state = Arc::new(AppState::new(config));
+    state.register_pool("quota_provider", pool_quota);
+    state.register_pool("backup_provider", pool_backup);
+
+    let gateway_app = create_app(state);
+    let gateway_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let gateway_addr = gateway_listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(gateway_listener, gateway_app).await.unwrap();
+    });
+
+    (format!("http://{}", gateway_addr), a_hits, b_hits)
+}
+
+async fn send_quota_request(
+    gateway_addr: &str,
+    route: &str,
+    model: &str,
+    extra: Option<serde_json::Value>,
+) -> reqwest::Response {
+    let mut body = match route {
+        "/v1/messages" => json!({
+            "model": model,
+            "messages": [{"role": "user", "content": "Hello quota failover"}],
+            "max_tokens": 128
+        }),
+        "/v1/responses" => json!({
+            "model": model,
+            "input": "Hello quota failover"
+        }),
+        _ => json!({
+            "model": model,
+            "messages": [{"role": "user", "content": "Hello quota failover"}]
+        }),
+    };
+    if let Some(extra) = extra {
+        if let Some(obj) = body.as_object_mut() {
+            if let Some(extra_obj) = extra.as_object() {
+                for (k, v) in extra_obj {
+                    obj.insert(k.clone(), v.clone());
+                }
+            }
+        }
+    }
+    reqwest::Client::new()
+        .post(format!("{}{}", gateway_addr, route))
+        .json(&body)
+        .send()
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn test_quota_exhaustion_does_not_drain_backup_provider_by_default() {
+    let (gateway_addr, a_hits, b_hits) =
+        spawn_quota_failover_gateway(false, "/v1/chat/completions", QuotaFailMode::PaymentRequired).await;
+    let resp = send_quota_request(&gateway_addr, "/v1/chat/completions", "quota-test-model", None).await;
+
+    assert_eq!(resp.status(), 429);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "quota_exhausted");
+    assert_eq!(a_hits.load(Ordering::SeqCst), 1, "quota provider was attempted once");
+    assert_eq!(
+        b_hits.load(Ordering::SeqCst),
+        0,
+        "backup provider quota must NOT be consumed by default"
+    );
+}
+
+#[tokio::test]
+async fn test_cross_provider_quota_failover_legacy_opt_in() {
+    let (gateway_addr, _a_hits, b_hits) =
+        spawn_quota_failover_gateway(true, "/v1/chat/completions", QuotaFailMode::PaymentRequired).await;
+    let resp = send_quota_request(&gateway_addr, "/v1/chat/completions", "quota-test-model", None).await;
+
+    // Legacy opt-in: `cross_provider_quota_failover = true` restores the old
+    // transparent failover that serves from the backup provider.
+    assert_eq!(resp.status(), 200);
+    assert_eq!(
+        resp.headers().get("x-ponyllm-provider").unwrap().to_str().unwrap(),
+        "backup_provider"
+    );
+    assert_eq!(b_hits.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn test_quota_guard_messages_and_responses_routes() {
+    for route in ["/v1/messages", "/v1/responses"] {
+        let (gateway_addr, _a_hits, b_hits) =
+            spawn_quota_failover_gateway(false, route, QuotaFailMode::PaymentRequired).await;
+        let resp = send_quota_request(&gateway_addr, route, "quota-test-model", None).await;
+
+        // Guard behavior: quota boundary surfaces as 429 and never touches B.
+        // (messages renders an Anthropic error envelope; the exact `code`
+        // field shape is protocol-specific and asserted on the chat route.)
+        assert_eq!(resp.status(), 429, "route {route}");
+        assert_eq!(
+            b_hits.load(Ordering::SeqCst),
+            0,
+            "route {route}: backup must not be consumed"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_quota_guard_streaming_chat() {
+    let (gateway_addr, _a_hits, b_hits) =
+        spawn_quota_failover_gateway(false, "/v1/chat/completions", QuotaFailMode::PaymentRequired).await;
+    let resp = send_quota_request(
+        &gateway_addr,
+        "/v1/chat/completions",
+        "quota-test-model",
+        Some(json!({"stream": true})),
+    )
+    .await;
+
+    assert_eq!(resp.status(), 429);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "quota_exhausted");
+    assert_eq!(
+        b_hits.load(Ordering::SeqCst),
+        0,
+        "streaming must not consume the backup quota"
+    );
+}
+
+#[tokio::test]
+async fn test_quota_guard_provider_pin_routes_to_one_provider() {
+    // Pin to the exhausted provider: quota error, backup untouched.
+    let (gateway_addr, a_hits, b_hits) =
+        spawn_quota_failover_gateway(false, "/v1/chat/completions", QuotaFailMode::PaymentRequired).await;
+    let resp = send_quota_request(&gateway_addr, "/v1/chat/completions", "quota_provider/quota-test-model", None).await;
+    assert_eq!(resp.status(), 429);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "quota_exhausted");
+    assert_eq!(a_hits.load(Ordering::SeqCst), 1);
+    assert_eq!(b_hits.load(Ordering::SeqCst), 0);
+
+    // Pin to the healthy provider: served by backup, exhausted provider untouched.
+    let (gateway_addr, a_hits, b_hits) =
+        spawn_quota_failover_gateway(false, "/v1/chat/completions", QuotaFailMode::PaymentRequired).await;
+    let resp = send_quota_request(&gateway_addr, "/v1/chat/completions", "backup_provider/quota-test-model", None).await;
+    assert_eq!(resp.status(), 200);
+    assert_eq!(
+        resp.headers().get("x-ponyllm-provider").unwrap().to_str().unwrap(),
+        "backup_provider"
+    );
+    assert_eq!(
+        a_hits.load(Ordering::SeqCst),
+        0,
+        "pinned healthy provider must not touch the exhausted provider"
+    );
+    assert_eq!(b_hits.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn test_quota_guard_balance_wording_429_stops_but_rate_limit_429_fails_over() {
+    // Balance-wording 429 -> QuotaExhausted -> boundary stop.
+    let (gateway_addr, _a_hits, b_hits) =
+        spawn_quota_failover_gateway(false, "/v1/chat/completions", QuotaFailMode::Balance429).await;
+    let resp = send_quota_request(&gateway_addr, "/v1/chat/completions", "quota-test-model", None).await;
+    assert_eq!(resp.status(), 429);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "quota_exhausted");
+    assert_eq!(
+        b_hits.load(Ordering::SeqCst),
+        0,
+        "balance-wording 429 must stop at the quota boundary"
+    );
+
+    // Rate-limit-wording 429 -> transient -> legacy cross-provider failover.
+    let (gateway_addr, _a_hits, b_hits) =
+        spawn_quota_failover_gateway(false, "/v1/chat/completions", QuotaFailMode::Rate429).await;
+    let resp = send_quota_request(&gateway_addr, "/v1/chat/completions", "quota-test-model", None).await;
+    assert_eq!(resp.status(), 200);
+    assert_eq!(
+        resp.headers().get("x-ponyllm-provider").unwrap().to_str().unwrap(),
+        "backup_provider"
+    );
+    assert_eq!(b_hits.load(Ordering::SeqCst), 1, "transient rate limit must still fail over");
+}
+
+#[tokio::test]
+async fn test_quota_guard_holds_across_cooldown_window_second_request() {
+    // H1 (bugfix 2026-10-02): the first request cools quota_provider's only
+    // key (quota cooldown); a second request finds NoAvailableKey, which must
+    // reclassify as a quota boundary instead of draining the backup provider.
+    let (gateway_addr, a_hits, b_hits) =
+        spawn_quota_failover_gateway(false, "/v1/chat/completions", QuotaFailMode::PaymentRequired).await;
+
+    let resp1 = send_quota_request(&gateway_addr, "/v1/chat/completions", "quota-test-model", None).await;
+    assert_eq!(resp1.status(), 429);
+
+    let resp2 = send_quota_request(&gateway_addr, "/v1/chat/completions", "quota-test-model", None).await;
+    assert_eq!(resp2.status(), 429);
+    let body: serde_json::Value = resp2.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "quota_exhausted");
+    assert_eq!(
+        a_hits.load(Ordering::SeqCst),
+        1,
+        "quota provider key is cooling: no upstream attempt on the second request"
+    );
+    assert_eq!(
+        b_hits.load(Ordering::SeqCst),
+        0,
+        "cooldown-window retries must NOT burn the backup quota"
+    );
+}
+
+#[test]
+fn test_models_list_exposes_per_provider_aliases() {
+    let mut config = GatewayConfig::default();
+    for (p, extra) in [("alpha", vec!["solo-model"]), ("beta", Vec::new())] {
+        let mut models = vec!["shared-model".to_string()];
+        models.extend(extra.into_iter().map(|m| m.to_string()));
+        config.providers.insert(
+            p.to_string(),
+            ProviderConfig {
+                rate_limits: None,
+                base_url: "https://api.example.com".to_string(),
+                default_model: "shared-model".to_string(),
+                strategy: "priority".to_string(),
+                billing_mode: BillingMode::Metered,
+                input_price: 0.10,
+                cached_price: 0.01,
+                output_price: 0.20,
+                models,
+                model_specs: vec![
+                    ModelSpec {
+                        rate_limits: None,
+                        priority: None,
+                        name: "shared-model".to_string(),
+                        tier: ModelTier::Flagship,
+                        context_window: "1M".to_string(),
+                        max_output: "32K".to_string(),
+                        input_types: vec!["text".to_string()],
+                        output_types: vec!["text".to_string()],
+                        ..Default::default()
+                    },
+                    ModelSpec {
+                        rate_limits: None,
+                        priority: None,
+                        name: "solo-model".to_string(),
+                        tier: ModelTier::Standard,
+                        context_window: "128K".to_string(),
+                        max_output: "32K".to_string(),
+                        input_types: vec!["text".to_string()],
+                        output_types: vec!["text".to_string()],
+                        ..Default::default()
+                    },
+                ],
+                default_protocol: None,
+                chat_url: None,
+                responses_url: None,
+                messages_url: None,
+                proxy: None,
+                timeout_secs: None,
+                ttfb_timeout_secs: None,
+            },
+        );
+    }
+    let state = AppState::new(config);
+
+    let models = state.list_all_models();
+    let ids: Vec<&str> = models.iter().map(|(id, _, _, _)| id.as_str()).collect();
+
+    // The bare name is deduped to ONE entry...
+    assert_eq!(ids.iter().filter(|id| **id == "shared-model").count(), 1);
+    // ...while each provider's instance is exposed as a pindown alias.
+    assert!(ids.contains(&"alpha/shared-model"), "missing alpha alias: {ids:?}");
+    assert!(ids.contains(&"beta/shared-model"), "missing beta alias: {ids:?}");
+    // 1M shared models also get provider-scoped [1m] aliases; the pooled
+    // `shared-model[1m]` variant stays as before.
+    assert!(ids.contains(&"shared-model[1m]"), "missing pooled [1m]: {ids:?}");
+    assert!(ids.contains(&"alpha/shared-model[1m]"), "missing alpha [1m] alias: {ids:?}");
+    assert!(ids.contains(&"beta/shared-model[1m]"), "missing beta [1m] alias: {ids:?}");
+    // Single-provider models get NO alias (the list stays lean).
+    assert!(!ids.contains(&"alpha/solo-model"), "single-provider model must not get an alias: {ids:?}");
+    // Deterministic ordering: provider iteration is name-sorted, so the
+    // alpha alias comes before the beta alias (and the list is stable).
+    let i_alpha = ids.iter().position(|id| *id == "alpha/shared-model").unwrap();
+    let i_beta = ids.iter().position(|id| *id == "beta/shared-model").unwrap();
+    assert!(i_alpha < i_beta, "list must be provider-sorted");
+    let again = state.list_all_models();
+    assert_eq!(
+        models.iter().map(|(id, _, _, _)| id.as_str()).collect::<Vec<_>>(),
+        again.iter().map(|(id, _, _, _)| id.as_str()).collect::<Vec<_>>(),
+        "list must be deterministic across calls"
+    );
+}
+
+#[tokio::test]
+async fn test_get_model_provider_model_two_segment_route() {
+    let (gateway_addr, _a_hits, _b_hits) =
+        spawn_quota_failover_gateway(false, "/v1/chat/completions", QuotaFailMode::PaymentRequired).await;
+    let client = reqwest::Client::new();
+
+    // Two-segment route resolves `provider/model` without URL-encoding the slash.
+    let resp = client
+        .get(format!("{}/v1/models/backup_provider/quota-test-model", gateway_addr))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["id"], "backup_provider/quota-test-model");
+    assert_eq!(body["owned_by"], "backup_provider");
+
+    let resp = client
+        .get(format!("{}/v1/models/quota_provider/quota-test-model", gateway_addr))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["owned_by"], "quota_provider");
+
+    // Unknown provider/model -> 404.
+    let resp = client
+        .get(format!("{}/v1/models/nope/nope-model", gateway_addr))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+
+    // The aliases are also visible in the /v1/models listing over HTTP.
+    let list: serde_json::Value = client
+        .get(format!("{}/v1/models", gateway_addr))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let ids: Vec<&str> = list["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|m| m["id"].as_str())
+        .collect();
+    assert!(ids.contains(&"quota_provider/quota-test-model"));
+    assert!(ids.contains(&"backup_provider/quota-test-model"));
+}
 #[tokio::test]
 async fn test_anthropic_messages_routing_and_model_echo() {
     // Mock Anthropic upstream server

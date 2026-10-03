@@ -107,6 +107,13 @@ pub struct GatewaySection {
     /// Background interval in seconds for Antigravity auto-refresh (default 86400 = 24h).
     #[serde(default = "default_antigravity_refresh_interval_secs")]
     pub antigravity_refresh_interval_secs: u64,
+    /// Whether a quota-exhaustion failure on one provider may transparently fail
+    /// over to another provider carrying the same model (legacy HA behavior).
+    /// Default `false`: quota exhaustion surfaces `insufficient_quota` instead of
+    /// silently consuming a second provider's quota. Transient faults
+    /// (network / 5xx / TTFB / timeout) always keep cross-provider failover.
+    #[serde(default)]
+    pub cross_provider_quota_failover: bool,
 }
 
 /// Scoped gateway credential (P1): one entry per issued key.
@@ -431,6 +438,7 @@ impl Default for GatewaySection {
             gateway_keys: Vec::new(),
             antigravity_auto_refresh: default_antigravity_auto_refresh(),
             antigravity_refresh_interval_secs: default_antigravity_refresh_interval_secs(),
+            cross_provider_quota_failover: false,
         }
     }
 }
@@ -1570,6 +1578,27 @@ ttfb_timeout_secs = 0
             Some(std::time::Duration::from_secs(10))
         );
         assert_eq!(cfg_gw.effective_ttfb_timeout("disabled_prov"), None);
+    }
+
+    #[test]
+    fn test_cross_provider_quota_failover_toml_roundtrip() {
+        // Explicit `true` parses and survives a save/load round-trip.
+        let explicit: ConfigFile = toml::from_str(
+            r#"
+[gateway]
+cross_provider_quota_failover = true
+"#,
+        )
+        .unwrap();
+        assert!(explicit.gateway.cross_provider_quota_failover);
+        // Old configs without the field deserialize to the new default `false`
+        // (zero migration): quota exhaustion stops at the first provider.
+        let legacy: ConfigFile = toml::from_str(r#"
+[gateway]
+bind = "127.0.0.1:8080"
+"#)
+        .unwrap();
+        assert!(!legacy.gateway.cross_provider_quota_failover);
     }
 }
 

@@ -78,6 +78,35 @@ fn build_gateway_config_and_pools(
     gw_config.gateway_keys = config_file.gateway.gateway_keys.clone();
     gw_config.antigravity_auto_refresh = config_file.gateway.antigravity_auto_refresh;
     gw_config.antigravity_refresh_interval_secs = config_file.gateway.antigravity_refresh_interval_secs;
+    gw_config.cross_provider_quota_failover = config_file.gateway.cross_provider_quota_failover;
+
+    // Startup observability for the quota-boundary default (bugfix 2026-10-02):
+    // when cross-provider quota failover is disabled but ≥2 providers share a
+    // model name, make the behavior change explicit so an upgrade is not silent.
+    if !gw_config.cross_provider_quota_failover {
+        let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+        for p in gw_config.providers.values() {
+            for m in p
+                .models
+                .iter()
+                .map(String::as_str)
+                .chain(std::iter::once(p.default_model.as_str()).filter(|d| !d.is_empty()))
+            {
+                *counts.entry(m).or_insert(0) += 1;
+            }
+        }
+        let shared: Vec<&&str> = counts
+            .iter()
+            .filter(|(_, c)| **c >= 2)
+            .map(|(k, _)| k)
+            .collect();
+        if !shared.is_empty() {
+            tracing::info!(
+                models = ?shared,
+                "cross_provider_quota_failover=false: quota exhaustion stops at the first provider for shared models; use `provider/model` (e.g. sense/deepseek-v4-flash) to pin a specific provider"
+            );
+        }
+    }
 
     let mut pools = HashMap::new();
 

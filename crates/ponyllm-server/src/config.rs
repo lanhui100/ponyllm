@@ -474,6 +474,13 @@ pub struct GatewayConfig {
     /// Background interval in seconds for Antigravity auto-refresh (default 86400 = 24h).
     #[serde(default = "default_antigravity_refresh_interval_secs")]
     pub antigravity_refresh_interval_secs: u64,
+    /// Whether a quota-exhaustion failure on one provider may transparently fail
+    /// over to another provider carrying the same model (legacy HA behavior).
+    /// Default `false`: quota exhaustion surfaces `insufficient_quota` instead of
+    /// silently consuming a second provider's quota. Transient faults
+    /// (network / 5xx / TTFB / timeout) always keep cross-provider failover.
+    #[serde(default)]
+    pub cross_provider_quota_failover: bool,
 }
 
 fn default_antigravity_refresh_interval_secs() -> u64 {
@@ -509,6 +516,7 @@ impl Default for GatewayConfig {
             gateway_keys: Vec::new(),
             antigravity_auto_refresh: true,
             antigravity_refresh_interval_secs: default_antigravity_refresh_interval_secs(),
+            cross_provider_quota_failover: false,
         }
     }
 }

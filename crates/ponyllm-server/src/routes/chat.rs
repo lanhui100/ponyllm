@@ -182,7 +182,24 @@ pub async fn handle_chat_completions(
         },
     );
 
+    // Quota boundary (bugfix): a quota-exhaustion failure on one provider must
+    // not silently drain a second provider that carries the same model, unless
+    // the operator explicitly opts back into cross-provider quota failover.
+    let quota_failover_enabled = state.config.read().cross_provider_quota_failover;
+
     for target in targets {
+        // Stop before touching the next provider's quota when the previous
+        // provider exhausted its account quota (402 / balance-wording 429 /
+        // balance-wording 403 / antigravity quota frames / a pool cooled
+        // entirely by quota). Transient faults still fail over normally.
+        if !quota_failover_enabled && last_kind.is_quota_exhausted() {
+            tracing::warn!(
+                provider = %target.provider_name,
+                "quota boundary stop: previous provider exhausted account quota; NOT failing over to '{}' to preserve its quota",
+                target.provider_name
+            );
+            break;
+        }
         let pool = match state.get_pool(&target.provider_name) {
             Some(p) => p,
             None => continue,
@@ -636,6 +653,11 @@ pub async fn handle_chat_completions(
                     Err(err) => {
                         tracing::warn!("Provider '{}' stream failed ({}). Attempting fallback...", target.provider_name, err);
                         last_kind = err.kind();
+                        // H1: pool entirely cooled by quota exhaustion reads
+                        // as a quota boundary, not a transient no-key error.
+                        if !quota_failover_enabled && crate::extractors::pool_quota_exhausted(&err, &pool) {
+                            last_kind = ponyllm_core::error::GatewayErrorKind::QuotaExhausted;
+                        }
                         // R2: an empty-STOP retry loop that consumed every key
                         // surfaces NoAvailableKey from the executor, but pool
                         // keys are NOT cooling — the request simply tried them
@@ -895,6 +917,11 @@ pub async fn handle_chat_completions(
                 (Err(err), _) => {
                     tracing::warn!("Provider '{}' json request failed ({}). Attempting fallback...", target.provider_name, err);
                     last_kind = err.kind();
+                    // H1: pool entirely cooled by quota exhaustion reads as a
+                    // quota boundary, not a transient no-key error.
+                    if !quota_failover_enabled && crate::extractors::pool_quota_exhausted(&err, &pool) {
+                        last_kind = ponyllm_core::error::GatewayErrorKind::QuotaExhausted;
+                    }
                     last_pool_exhausted = matches!(err, CoreError::NoAvailableKey(_)) && collect_tried_keys.is_empty();
                     last_retry_after = crate::extractors::retry_after_secs(&last_kind, retry_unlock_hint(&last_kind, &pool, rate_limits.as_ref()));
                     last_error = err.to_string();

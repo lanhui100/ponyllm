@@ -173,7 +173,12 @@ bind = "127.0.0.1:8080"
 api_key = "sk-pony-<至少32位随机字符>"  # 网关接入凭证（见 §6 auth；禁止弱口令；留空则无鉴权，仅限本地环回开发）
 admin_write_enabled = false             # 默认只读；Web 治理写操作需显式开启
 request_body_limit = 134217728 # 请求体上限字节数，默认 128MB；1M 长上下文/大提示词场景无需再调
+cross_provider_quota_failover = false   # 默认：某 provider 额度耗尽即报 insufficient_quota，不再跨提供商烧别家的额度；置 true 恢复旧"额度也跨提供商透明倒换"行为
 ```
+
+> 同名模型多提供商提示：`/v1/models` 中裸模型名去重为一条（=“池化名”，按策略评分选首候选）。<br>
+> 想精确控制消耗哪家额度，用 `provider/model` 显式 pin（如 `sense/deepseek-v4-flash`），各家实例（含共享 1M 模型的 `provider/model[1m]`）都已出现在列表里，`GET /v1/models/{provider}/{model}` 可直接查询。<br>
+> 注意：`model[1m]` 变体仍按池化名处理；若某提供商配置的字面模型名本身以 `provider/` 开头（如 openrouter 上的 `openai/gpt-4o`），字面名在路由时优先于 pin——无法用 `provider/model` 形式 pin 该场景；`provider/model` 别名仅 REST `/v1/models` 暴露，嵌入式 SDK `list_models` 保持裸名去重。
 
 > **对外服务安全环境变量**（部署注记）：
 >

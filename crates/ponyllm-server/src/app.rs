@@ -138,6 +138,23 @@ async fn auth_middleware(
 
     let headers = req.headers();
 
+    // 提取客户端真实 IP（经反向代理/EdgeOne）及 User-Agent，用于管理审计
+    let client_ip = headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(',').next().map(|s| s.trim()))
+        .or_else(|| {
+            headers
+                .get("x-real-ip")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.trim())
+        })
+        .unwrap_or("unknown");
+    let user_agent = headers
+        .get(axum::http::header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("unknown");
+
     // Extract the presented credential: `Authorization: Bearer <token>`
     // (scheme case-insensitive), bare Authorization value, or `x-api-key`.
     // P0 G3 is preserved as the strict bare-token rule below.
@@ -168,12 +185,31 @@ async fn auth_middleware(
     }
 
     let Some(token) = provided_token.filter(|t| !t.is_empty()) else {
+        if path.starts_with("/api/admin") {
+            tracing::warn!(client_ip, user_agent, %method, %path, reason = "missing_credential", "admin interface access rejected (unauthenticated)");
+        }
         return crate::auth::invalid_api_key();
     };
 
+    let token_prefix = if token.len() > 7 {
+        format!("{}****", &token[..7])
+    } else {
+        "***".to_string()
+    };
+
     match authenticate(token, &entries, &legacy_key, strict) {
-        AuthVerdict::Invalid => crate::auth::invalid_api_key(),
-        AuthVerdict::LegacyDisabled => crate::auth::legacy_disabled(),
+        AuthVerdict::Invalid => {
+            if path.starts_with("/api/admin") {
+                tracing::warn!(client_ip, user_agent, token_prefix, %method, %path, reason = "invalid_credential", "admin interface access rejected (invalid credential)");
+            }
+            crate::auth::invalid_api_key()
+        }
+        AuthVerdict::LegacyDisabled => {
+            if path.starts_with("/api/admin") {
+                tracing::warn!(client_ip, user_agent, token_prefix, %method, %path, reason = "legacy_disabled", "admin interface rejected disabled legacy credential");
+            }
+            crate::auth::legacy_disabled()
+        }
         AuthVerdict::Allowed { scope, .. } => {
             let resource = classify_resource(&method, &path, query.as_deref());
             if matches!(resource, Resource::Exempt) {
@@ -191,6 +227,9 @@ async fn auth_middleware(
                     Resource::Quota => "quota",
                     Resource::Exempt => "exempt",
                 };
+                if path.starts_with("/api/admin") {
+                    tracing::warn!(client_ip, user_agent, token_prefix, %method, %path, scope = scope.as_str(), resource = name, reason = "privilege_boundary_violation", "admin privilege boundary violation rejected (403)");
+                }
                 crate::auth::forbidden(name)
             }
         }
@@ -209,8 +248,10 @@ pub fn create_app(state: Arc<AppState>) -> Router {
         .route("/oauth2callback", get(crate::routes::handle_oauth2_callback))
         .route("/models", get(handle_list_models))
         .route("/models/{model_id}", get(handle_get_model))
+        .route("/models/{provider}/{model}", get(handle_get_model_provider_model))
         .route("/v1/models", get(handle_list_models))
         .route("/v1/models/{model_id}", get(handle_get_model))
+        .route("/v1/models/{provider}/{model}", get(handle_get_model_provider_model))
         .route("/chat/completions", post(handle_chat_completions))
         .route("/v1/chat/completions", post(handle_chat_completions))
         .route("/messages", post(handle_messages))
@@ -276,15 +317,42 @@ pub fn create_app(state: Arc<AppState>) -> Router {
                 ),
             );
         }
+        if !headers.contains_key(axum::http::header::CONTENT_SECURITY_POLICY) {
+            headers.insert(
+                axum::http::header::CONTENT_SECURITY_POLICY,
+                axum::http::HeaderValue::from_static(
+                    "default-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'self'; form-action 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self';",
+                ),
+            );
+        }
+        if !headers.contains_key(axum::http::header::STRICT_TRANSPORT_SECURITY) {
+            headers.insert(
+                axum::http::header::STRICT_TRANSPORT_SECURITY,
+                axum::http::HeaderValue::from_static("max-age=31536000; includeSubDomains; preload"),
+            );
+        }
         res
     });
 
     api.merge(web)
+        .fallback(global_fallback)
         .layer(security_headers)
         .layer(cors)
         .layer(TraceLayer::new_for_http())
         .layer(DefaultBodyLimit::max(body_limit))
         .with_state(state)
+}
+
+async fn global_fallback() -> impl IntoResponse {
+    (
+        StatusCode::NOT_FOUND,
+        Json(json!({
+            "error": {
+                "message": "Not Found",
+                "code": "not_found"
+            }
+        })),
+    )
 }
 
 /// Web console hosting (`/app` prefix): mounted WITHOUT `auth_middleware` so static

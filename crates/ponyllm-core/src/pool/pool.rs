@@ -548,6 +548,25 @@ impl KeyPool {
         keys.iter().filter(|k| k.current_state() == KeyState::Active).count()
     }
 
+    /// True when no key can currently serve (none Active: all cooling down or
+    /// disabled). Feeds the quota boundary guard (bugfix 2026-10-02).
+    pub fn no_schedulable_keys(&self) -> bool {
+        let keys = self.keys.read();
+        keys.iter().all(|k| k.current_state() != KeyState::Active)
+    }
+
+    /// True when at least one cooling key is cooling because its account/model
+    /// quota was exhausted. Combined with [`Self::no_schedulable_keys`] this
+    /// lets the routing layer reclassify a `NoAvailableKey` failure as a quota
+    /// boundary instead of draining a second provider's quota.
+    pub fn any_key_quota_cooldown(&self) -> bool {
+        let keys = self.keys.read();
+        keys.iter().any(|k| {
+            k.current_state() == KeyState::CoolingDown
+                && k.cooldown_reason() == Some(crate::pool::entry::CooldownReason::Quota)
+        })
+    }
+
     /// Earliest unlock across cooling keys, for honest Retry-After.
     pub fn earliest_unlock(&self) -> Option<std::time::Duration> {
         let keys = self.keys.read();
