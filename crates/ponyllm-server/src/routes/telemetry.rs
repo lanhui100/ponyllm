@@ -71,18 +71,25 @@ pub async fn handle_get_recorder_frame(
     }
 }
 
+const CLUSTER_QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(200);
+
 pub async fn handle_get_metrics(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     if let Some(ref store) = state.cluster_telemetry_store {
-        // 先确保本地增量已刷盘，以便获取最新视图
+        // 读写分离 & 防阻塞设计：
+        // 1. 本地增量由后台任务异步定期（15s）刷盘，读请求路径上不再同步执行阻塞的 flush_deltas。
+        //    只在 tracker 中记录本地快照（纯内存操作），确保增量被暂存待后台 flush。
         let buckets = state.timeseries_proj.snapshot_buckets();
         state.cluster_telemetry_tracker.record_local_snapshot(&buckets);
-        let deltas = state.cluster_telemetry_tracker.drain_deltas();
-        if !deltas.is_empty() {
-            let _ = store.flush_deltas(deltas).await;
-        }
 
-        if let Ok(cluster_summary) = store.query_cluster_metrics().await {
-            return Json(cluster_summary).into_response();
+        // 2. 查询 PG 施加短超时快速降级（200ms），一旦遇到 PG 锁争用或连接排队立即降级返回本地内存快照
+        match tokio::time::timeout(CLUSTER_QUERY_TIMEOUT, store.query_cluster_metrics()).await {
+            Ok(Ok(cluster_summary)) => return Json(cluster_summary).into_response(),
+            Ok(Err(e)) => {
+                tracing::warn!("failed to query cluster metrics from PG: {}, falling back to local snapshot", e);
+            }
+            Err(_) => {
+                tracing::warn!("querying cluster metrics from PG timed out ({:?}), falling back to local snapshot", CLUSTER_QUERY_TIMEOUT);
+            }
         }
     }
     let summary = state.metrics.get_summary();
@@ -313,16 +320,21 @@ pub async fn handle_get_history(
         .unwrap_or(0);
 
     if let Some(ref store) = state.cluster_telemetry_store {
-        // 先确保本地增量已刷盘，以便获取最新视图
+        // 读写分离 & 防阻塞设计：
+        // 1. 本地增量由后台任务异步定期（15s）刷盘，读请求路径上不再同步执行阻塞的 flush_deltas。
+        //    只在 tracker 中记录本地快照（纯内存操作），确保增量被暂存待后台 flush。
         let buckets = state.timeseries_proj.snapshot_buckets();
         state.cluster_telemetry_tracker.record_local_snapshot(&buckets);
-        let deltas = state.cluster_telemetry_tracker.drain_deltas();
-        if !deltas.is_empty() {
-            let _ = store.flush_deltas(deltas).await;
-        }
 
-        if let Ok(cluster_history) = store.query_history(range, now_ms).await {
-            return Json(cluster_history).into_response();
+        // 2. 查询 PG 施加短超时快速降级（200ms），一旦遇到 PG 锁争用或连接排队立即降级返回本地内存快照
+        match tokio::time::timeout(CLUSTER_QUERY_TIMEOUT, store.query_history(range, now_ms)).await {
+            Ok(Ok(cluster_history)) => return Json(cluster_history).into_response(),
+            Ok(Err(e)) => {
+                tracing::warn!("failed to query cluster history from PG: {}, falling back to local snapshot", e);
+            }
+            Err(_) => {
+                tracing::warn!("querying cluster history from PG timed out ({:?}), falling back to local snapshot", CLUSTER_QUERY_TIMEOUT);
+            }
         }
     }
 

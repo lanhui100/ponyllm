@@ -223,9 +223,12 @@ export function useTelemetry(options: UseTelemetryOptions = {}) {
 
   async function probeGatewayRtt(): Promise<{ ok: boolean; latencyMs: number }> {
     const t0 = Date.now();
-    const probeUrl = `${PUBLIC_GATEWAY_PROBE_URL}?_t=${t0}`;
     try {
-      const res = await fetch(probeUrl, { method: 'GET', mode: 'cors', cache: 'no-store' });
+      const res = await fetch(PUBLIC_GATEWAY_PROBE_URL, {
+        method: 'GET',
+        mode: 'cors',
+        headers: { 'Cache-Control': 'no-cache' },
+      });
       const elapsed = Math.max(1, Date.now() - t0);
       if (res.ok) {
         return { ok: true, latencyMs: elapsed };
