@@ -555,7 +555,26 @@ pub async fn handle_responses(
                             }
                         }
                     }
-                    Err(e) => break (Err(e), None),
+                    Err(e) => {
+                        if matches!(e, CoreError::NoAvailableKey(_))
+                            && !collect_tried_keys.is_empty()
+                            && collect_attempt < max_empty_stop_attempts
+                        {
+                            let delay = crate::streaming::empty_stop_retry_delay(collect_attempt);
+                            tracing::warn!(
+                                provider = %provider_name,
+                                collect_attempt,
+                                max_empty_stop_attempts,
+                                backoff_ms = delay.as_millis() as u64,
+                                "All eligible keys cycled during non-stream Antigravity empty-STOP retries in Responses route; resetting exclusion list to retry across pool with backoff"
+                            );
+                            collect_tried_keys.clear();
+                            tokio::time::sleep(delay).await;
+                            ponyllm_protocol::translator::refresh_antigravity_request_ids(&mut collect_req_val);
+                            continue;
+                        }
+                        break (Err(e), None);
+                    }
                 }
             }
         } else if ponyllm_core::executor::zen_free_tier_forces_upstream_stream(

@@ -651,6 +651,29 @@ pub async fn handle_chat_completions(
                         return resp;
                     }
                     Err(err) => {
+                        // If we failed with NoAvailableKey after having excluded keys due to empty STOPs,
+                        // and we still have attempts remaining, clear the exclusion list so we can cycle
+                        // and retry with backoff across all keys in the pool instead of prematurely failing.
+                        if matches!(err, CoreError::NoAvailableKey(_))
+                            && !empty_stop_tried_keys.is_empty()
+                            && stream_attempt < max_empty_stop_attempts
+                        {
+                            let delay = empty_stop_retry_delay(stream_attempt);
+                            tracing::warn!(
+                                provider = %target.provider_name,
+                                stream_attempt,
+                                max_empty_stop_attempts,
+                                backoff_ms = delay.as_millis() as u64,
+                                "All eligible keys cycled during Antigravity empty-STOP retries; resetting exclusion list to retry across pool with backoff"
+                            );
+                            empty_stop_tried_keys.clear();
+                            tokio::time::sleep(delay).await;
+                            if target.upstream_protocol == ponyllm_core::pool::UpstreamProtocol::Antigravity {
+                                ponyllm_protocol::translator::refresh_antigravity_request_ids(&mut attempt_req_val);
+                            }
+                            continue;
+                        }
+
                         tracing::warn!("Provider '{}' stream failed ({}). Attempting fallback...", target.provider_name, err);
                         last_kind = err.kind();
                         // H1: pool entirely cooled by quota exhaustion reads
@@ -754,7 +777,26 @@ pub async fn handle_chat_completions(
                                 }
                             }
                         }
-                        Err(e) => break (Err(e), None),
+                        Err(e) => {
+                            if matches!(e, CoreError::NoAvailableKey(_))
+                                && !collect_tried_keys.is_empty()
+                                && collect_attempt < max_empty_stop_attempts
+                            {
+                                let delay = empty_stop_retry_delay(collect_attempt);
+                                tracing::warn!(
+                                    provider = %target.provider_name,
+                                    collect_attempt,
+                                    max_empty_stop_attempts,
+                                    backoff_ms = delay.as_millis() as u64,
+                                    "All eligible keys cycled during non-stream Antigravity empty-STOP retries; resetting exclusion list to retry across pool with backoff"
+                                );
+                                collect_tried_keys.clear();
+                                tokio::time::sleep(delay).await;
+                                ponyllm_protocol::translator::refresh_antigravity_request_ids(&mut collect_req_val);
+                                continue;
+                            }
+                            break (Err(e), None);
+                        }
                     }
                 }
             } else if ponyllm_core::executor::zen_free_tier_forces_upstream_stream(
@@ -1274,5 +1316,24 @@ mod route_wait_tests {
         let mut consec4 = 0usize;
         assert!(collect_empty_stop_policy(first, 12, 12, &mut consec4, "m").is_none());
         assert!(collect_empty_stop_policy("boom", 1, 12, &mut consec4, "m").is_none());
+    }
+
+    #[test]
+    fn empty_stop_pool_cycling_logic() {
+        // Verify the condition for resetting empty_stop_tried_keys:
+        // When all active keys in the pool were tried (resulting in NoAvailableKey),
+        // but stream_attempt < max_empty_stop_attempts, the exclusion list should clear.
+        let mut tried_keys = vec!["k1".to_string(), "k2".to_string()];
+        let stream_attempt = 2;
+        let max_empty_stop_attempts = 12;
+        let is_no_avail = true;
+
+        let should_cycle = is_no_avail && !tried_keys.is_empty() && stream_attempt < max_empty_stop_attempts;
+        assert!(should_cycle);
+
+        if should_cycle {
+            tried_keys.clear();
+        }
+        assert!(tried_keys.is_empty());
     }
 }

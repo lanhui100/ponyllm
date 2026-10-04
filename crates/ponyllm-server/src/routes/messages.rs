@@ -675,6 +675,29 @@ pub async fn handle_messages(
                         return resp;
                     }
                     Err(err) => {
+                        // If we failed with NoAvailableKey after having excluded keys due to empty STOPs,
+                        // and we still have attempts remaining, clear the exclusion list so we can cycle
+                        // and retry with backoff across all keys in the pool instead of prematurely failing.
+                        if matches!(err, CoreError::NoAvailableKey(_))
+                            && !empty_stop_tried_keys.is_empty()
+                            && stream_attempt < max_empty_stop_attempts
+                        {
+                            let delay = crate::streaming::empty_stop_retry_delay(stream_attempt);
+                            tracing::warn!(
+                                provider = %target.provider_name,
+                                stream_attempt,
+                                max_empty_stop_attempts,
+                                backoff_ms = delay.as_millis() as u64,
+                                "All eligible keys cycled during Antigravity empty-STOP retries; resetting exclusion list to retry across pool with backoff"
+                            );
+                            empty_stop_tried_keys.clear();
+                            tokio::time::sleep(delay).await;
+                            if target.upstream_protocol == ponyllm_core::pool::UpstreamProtocol::Antigravity {
+                                ponyllm_protocol::translator::refresh_antigravity_request_ids(&mut attempt_req_val);
+                            }
+                            continue;
+                        }
+
                         tracing::warn!("Provider '{}' stream failed ({}). Attempting fallback...", target.provider_name, err);
                         last_kind = err.kind();
                         // H1: pool entirely cooled by quota exhaustion reads
@@ -772,7 +795,26 @@ pub async fn handle_messages(
                                 }
                             }
                         }
-                        Err(e) => break (Err(e), None),
+                        Err(e) => {
+                            if matches!(e, CoreError::NoAvailableKey(_))
+                                && !collect_tried_keys.is_empty()
+                                && collect_attempt < max_empty_stop_attempts
+                            {
+                                let delay = crate::streaming::empty_stop_retry_delay(collect_attempt);
+                                tracing::warn!(
+                                    provider = %target.provider_name,
+                                    collect_attempt,
+                                    max_empty_stop_attempts,
+                                    backoff_ms = delay.as_millis() as u64,
+                                    "All eligible keys cycled during non-stream Antigravity empty-STOP retries; resetting exclusion list to retry across pool with backoff"
+                                );
+                                collect_tried_keys.clear();
+                                tokio::time::sleep(delay).await;
+                                ponyllm_protocol::translator::refresh_antigravity_request_ids(&mut collect_req_val);
+                                continue;
+                            }
+                            break (Err(e), None);
+                        }
                     }
                 }
             } else if ponyllm_core::executor::zen_free_tier_forces_upstream_stream(
