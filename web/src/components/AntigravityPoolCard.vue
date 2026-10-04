@@ -522,9 +522,9 @@ const totalColumns = computed(() => {
   return Math.max(10, cols);
 });
 
-// 每 5 行为一组，支持垂直排列多组（当前展示 2 组）
+// 每 5 行为一组，支持垂直排列多组（当前展示 3 组）
 const ROWS_PER_GROUP = 5;
-const GROUP_COUNT = 2;
+const GROUP_COUNT = 3;
 const slotsPerGroup = computed(() => totalColumns.value * ROWS_PER_GROUP);
 const totalSlots = computed(() => slotsPerGroup.value * GROUP_COUNT);
 
