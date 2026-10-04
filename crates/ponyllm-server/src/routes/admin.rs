@@ -472,6 +472,8 @@ pub struct CreateModelPayload {
     /// provider default (or unlimited).
     #[serde(default)]
     pub rate_limits: Option<AdminRateLimits>,
+    #[serde(default)]
+    pub fallbacks: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -529,6 +531,8 @@ pub struct UpdateModelPayload {
     /// provider default).
     #[serde(default, deserialize_with = "deserialize_optional_rate_limits")]
     pub rate_limits: Option<Option<AdminRateLimits>>,
+    #[serde(default)]
+    pub fallbacks: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2149,6 +2153,7 @@ pub async fn handle_admin_create_model(
         thinking_max: think_max,
         proxy: payload.proxy.clone(),
         timeout_secs: payload.timeout_secs,
+        fallbacks: payload.fallbacks.clone().unwrap_or_default(),
     };
 
     p_sec.models.push(model_name.clone());
@@ -2188,6 +2193,7 @@ pub async fn handle_admin_create_model(
         thinking_max: think_max,
         proxy: payload.proxy,
         timeout_secs: payload.timeout_secs,
+        fallbacks: payload.fallbacks.clone().unwrap_or_default(),
     };
 
     let spec_obj = m_spec.thinking_spec();
@@ -2353,10 +2359,14 @@ pub async fn handle_admin_update_model(
             thinking_max: None,
             proxy: None,
             timeout_secs: None,
+            fallbacks: Vec::new(),
         });
 
     if let Some(ref t) = payload.tier {
         existing_config.tier = parse_tier(t);
+    }
+    if let Some(ref fbs) = payload.fallbacks {
+        existing_config.fallbacks = fbs.clone();
     }
     if let Some(ref cw) = payload.context_window {
         existing_config.context_window = cw.clone();
@@ -2487,6 +2497,7 @@ pub async fn handle_admin_update_model(
         thinking_max: existing_config.thinking_max,
         proxy: existing_config.proxy.clone(),
         timeout_secs: existing_config.timeout_secs,
+        fallbacks: existing_config.fallbacks.clone(),
     };
 
     let spec_obj = m_spec.thinking_spec();

@@ -68,6 +68,9 @@ pub struct ModelSpec {
     /// resolve effective limits without re-parsing the config file.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rate_limits: Option<RateLimits>,
+    /// Optional ordered model fallbacks when this model fails upstream or exhausts its providers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fallbacks: Vec<String>,
 }
 
 impl ModelSpec {
@@ -115,6 +118,7 @@ impl Default for ModelSpec {
             proxy: None,
             timeout_secs: None,
             rate_limits: None,
+            fallbacks: Vec::new(),
         }
     }
 }
@@ -280,6 +284,7 @@ impl ProviderConfig {
             proxy: None,
             timeout_secs: None,
             rate_limits: None,
+            fallbacks: Vec::new(),
         }
     }
 

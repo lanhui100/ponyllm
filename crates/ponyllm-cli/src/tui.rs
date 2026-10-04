@@ -1157,6 +1157,7 @@ fn handle_modal_key(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                             thinking_max: None,
                             proxy: None,
                             timeout_secs: None,
+                            fallbacks: Vec::new(),
                         };
 
 
@@ -1353,6 +1354,7 @@ fn handle_modal_key(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                     thinking_max: None,
                     proxy: None,
                     timeout_secs: None,
+                    fallbacks: Vec::new(),
                 };
 
 

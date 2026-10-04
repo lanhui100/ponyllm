@@ -510,6 +510,9 @@ pub struct ModelConfig {
     /// `2026-09-30-unified-quota-metering-governance-kernel`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rate_limits: Option<RateLimits>,
+    /// Optional ordered model fallbacks when this model fails upstream or exhausts its providers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fallbacks: Vec<String>,
 }
 
 pub fn default_context_window() -> String {
@@ -548,6 +551,7 @@ impl Default for ModelConfig {
             proxy: None,
             timeout_secs: None,
             rate_limits: None,
+            fallbacks: Vec::new(),
         }
     }
 }
@@ -578,6 +582,7 @@ impl ModelConfig {
             proxy: None,
             timeout_secs: None,
             rate_limits: None,
+            fallbacks: Vec::new(),
         }
     }
 

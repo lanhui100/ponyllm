@@ -139,6 +139,7 @@ fn build_gateway_config_and_pools(
                 proxy: m.proxy,
                 timeout_secs: m.timeout_secs,
                 rate_limits: m.rate_limits,
+                fallbacks: m.fallbacks,
             })
             .collect();
 
@@ -1162,6 +1163,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     proxy: model_proxy.clone(),
                     timeout_secs: None,
                     rate_limits: None,
+                    fallbacks: Vec::new(),
                 };
 
                 cfg.upsert_model_config(&provider, model_cfg)
