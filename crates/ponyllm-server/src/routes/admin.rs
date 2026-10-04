@@ -1381,13 +1381,7 @@ fn parse_tier(s: &str) -> ModelTier {
 }
 
 fn parse_effort_opt(s: &str) -> Option<ponyllm_protocol::common::ReasoningEffort> {
-    match s.trim().to_ascii_lowercase().as_str() {
-        "off" | "none" => Some(ponyllm_protocol::common::ReasoningEffort::Off),
-        "low" => Some(ponyllm_protocol::common::ReasoningEffort::Low),
-        "medium" => Some(ponyllm_protocol::common::ReasoningEffort::Medium),
-        "high" => Some(ponyllm_protocol::common::ReasoningEffort::High),
-        _ => None,
-    }
+    ponyllm_protocol::common::ReasoningEffort::from_str_loose(s)
 }
 
 fn parse_pool_strategy(s: &str) -> ponyllm_core::pool::RoutingStrategy {

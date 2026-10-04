@@ -1081,6 +1081,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 billing_mode,
                 protocol,
                 proxy,
+                thinking_default,
+                thinking_max,
                 config,
             } => {
                 let resolved = resolve_path(config.as_deref());
@@ -1139,6 +1141,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
 
+                let thinking_default_effort = thinking_default.as_deref().map(|s| ponyllm_core::pool::ModelThinkingSpec::match_4tier_effort(Some(s)));
+                let thinking_max_effort = thinking_max.as_deref().map(|s| ponyllm_core::pool::ModelThinkingSpec::match_4tier_effort(Some(s)));
+
                 let model_cfg = ponyllm_cli::config::ModelConfig {
                     name: model.clone(),
                     tier: tier_val,
@@ -1158,8 +1163,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     top_p: None,
                     protocol,
                     base_url: None,
-                    thinking_default: None,
-                    thinking_max: None,
+                    thinking_default: thinking_default_effort,
+                    thinking_max: thinking_max_effort,
                     proxy: model_proxy.clone(),
                     timeout_secs: None,
                     rate_limits: None,

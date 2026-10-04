@@ -148,6 +148,37 @@ fn map_audio_format_to_mime(format: &str) -> &'static str {
     }
 }
 
+/// Resolve the effective Gemini 3 Antigravity model name based on reasoning effort.
+///
+/// Gemini 3 models in Antigravity use route-based thinking depth:
+/// - Low: `-low`
+/// - Medium: `-medium`
+/// - High: `-high`
+/// - Default (None / Off): `-tiered`
+pub fn resolve_antigravity_gemini3_model(model: &str, thinking: Option<ReasoningEffort>) -> String {
+    let lower = model.to_ascii_lowercase();
+    if !lower.contains("gemini-3") {
+        return model.to_string();
+    }
+    // Strip any existing thinking suffix to find the base model name
+    let base = if let Some(stripped) = lower.strip_suffix("-high")
+        .or_else(|| lower.strip_suffix("-medium"))
+        .or_else(|| lower.strip_suffix("-low"))
+        .or_else(|| lower.strip_suffix("-tiered"))
+    {
+        stripped
+    } else {
+        model
+    };
+
+    match thinking {
+        Some(ReasoningEffort::Low) => format!("{}-low", base),
+        Some(ReasoningEffort::Medium) => format!("{}-medium", base),
+        Some(ReasoningEffort::High) => format!("{}-high", base),
+        None | Some(ReasoningEffort::Off) => format!("{}-tiered", base),
+    }
+}
+
 /// Map an explicit ponyllm [`ReasoningEffort`] to an Antigravity
 /// `thinkingConfig` value, mirroring the reference `gcli2api` behavior:
 ///
@@ -708,8 +739,10 @@ pub fn chat_to_antigravity_request(
     if let Some(m) = req.max_tokens.or(req.max_completion_tokens) {
         gen_config["maxOutputTokens"] = json!(m);
     }
-    if let Some(thinking_cfg) = antigravity_thinking_config(model, thinking) {
-        clamp_max_output_for_thinking_budget(&mut gen_config, &thinking_cfg, model, thinking);
+    let effective_model = resolve_antigravity_gemini3_model(model, thinking);
+
+    if let Some(thinking_cfg) = antigravity_thinking_config(&effective_model, thinking) {
+        clamp_max_output_for_thinking_budget(&mut gen_config, &thinking_cfg, &effective_model, thinking);
         if gen_config.as_object().map(|o| !o.is_empty()).unwrap_or(false) {
             inner_request["generationConfig"] = gen_config;
         }
@@ -728,7 +761,7 @@ pub fn chat_to_antigravity_request(
         "project": project_id,
         "requestId": request_id.clone(),
         "request": inner_request,
-        "model": model,
+        "model": effective_model,
         "userAgent": "antigravity",
         "requestType": "agent"
     });
@@ -937,8 +970,10 @@ pub fn messages_to_antigravity_request(
     if let Some(p) = req.top_p {
         gen_config["topP"] = json!(p);
     }
-    if let Some(thinking_cfg) = antigravity_thinking_config(model, thinking) {
-        clamp_max_output_for_thinking_budget(&mut gen_config, &thinking_cfg, model, thinking);
+    let effective_model = resolve_antigravity_gemini3_model(model, thinking);
+
+    if let Some(thinking_cfg) = antigravity_thinking_config(&effective_model, thinking) {
+        clamp_max_output_for_thinking_budget(&mut gen_config, &thinking_cfg, &effective_model, thinking);
         gen_config["thinkingConfig"] = thinking_cfg;
     }
     inner_request["generationConfig"] = gen_config;
@@ -947,7 +982,7 @@ pub fn messages_to_antigravity_request(
         "project": project_id,
         "requestId": request_id.clone(),
         "request": inner_request,
-        "model": model,
+        "model": effective_model,
         "userAgent": "antigravity",
         "requestType": "agent"
     });
@@ -1491,6 +1526,24 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_antigravity_gemini3_model() {
+        assert_eq!(resolve_antigravity_gemini3_model("gemini-3.8-flash", Some(ReasoningEffort::Low)), "gemini-3.8-flash-low");
+        assert_eq!(resolve_antigravity_gemini3_model("gemini-3.8-flash", Some(ReasoningEffort::Medium)), "gemini-3.8-flash-medium");
+        assert_eq!(resolve_antigravity_gemini3_model("gemini-3.8-flash", Some(ReasoningEffort::High)), "gemini-3.8-flash-high");
+        assert_eq!(resolve_antigravity_gemini3_model("gemini-3.8-flash", None), "gemini-3.8-flash-tiered");
+        assert_eq!(resolve_antigravity_gemini3_model("gemini-3.8-flash", Some(ReasoningEffort::Off)), "gemini-3.8-flash-tiered");
+
+        // Existing suffixes should be normalized and re-routed
+        assert_eq!(resolve_antigravity_gemini3_model("gemini-3.8-flash-tiered", Some(ReasoningEffort::High)), "gemini-3.8-flash-high");
+        assert_eq!(resolve_antigravity_gemini3_model("gemini-3.8-flash-low", Some(ReasoningEffort::Medium)), "gemini-3.8-flash-medium");
+        assert_eq!(resolve_antigravity_gemini3_model("gemini-3.8-flash-high", None), "gemini-3.8-flash-tiered");
+
+        // Non gemini-3 models untouched
+        assert_eq!(resolve_antigravity_gemini3_model("gemini-2.5-flash", Some(ReasoningEffort::High)), "gemini-2.5-flash");
+        assert_eq!(resolve_antigravity_gemini3_model("claude-sonnet-4-6", Some(ReasoningEffort::High)), "claude-sonnet-4-6");
+    }
+
+    #[test]
     fn test_chat_to_antigravity_envelope() {
         let mut req = ChatCompletionRequest::default();
         req.model = "gemini-3.8-flash-low".to_string();
@@ -1503,15 +1556,17 @@ mod tests {
             name: None,
         }));
 
-        let env = chat_to_antigravity_request(&req, "gemini-3.8-flash-low", "aicode-consumers", None, "").unwrap();
+        let env = chat_to_antigravity_request(&req, "gemini-3.8-flash-low", "aicode-consumers", Some(ReasoningEffort::Low), "").unwrap();
         assert_eq!(env["project"], "aicode-consumers");
         assert_eq!(env["model"], "gemini-3.8-flash-low");
         assert_eq!(env["userAgent"], "antigravity");
         assert_eq!(env["requestType"], "agent");
         assert!(env["requestId"].as_str().unwrap().starts_with("agent/"));
         assert!(env["request"]["toolConfig"]["functionCallingConfig"]["mode"] == "VALIDATED");
-        // No explicit effort → legacy wire shape, no thinkingConfig injected.
-        assert!(env["request"].get("generationConfig").is_none());
+
+        // When thinking is None, default routes to -tiered
+        let env_default = chat_to_antigravity_request(&req, "gemini-3.8-flash", "aicode-consumers", None, "").unwrap();
+        assert_eq!(env_default["model"], "gemini-3.8-flash-tiered");
     }
 
     #[test]

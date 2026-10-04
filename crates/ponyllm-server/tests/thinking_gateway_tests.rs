@@ -766,3 +766,133 @@ async fn test_responses_upstream_thinking_serialization_omits_top_level_reasonin
         );
     }
 }
+
+#[tokio::test]
+async fn test_antigravity_gemini3_thinking_suffix_routing() {
+    let captured_requests = Arc::new(Mutex::new(Vec::new()));
+    let captured_clone = captured_requests.clone();
+
+    let upstream_app = axum::Router::new().route(
+        "/v1internal:streamGenerateContent",
+        axum::routing::post(move |axum::extract::Json(body): axum::extract::Json<serde_json::Value>| {
+            captured_clone.lock().push(body);
+            async move {
+                let sse_data = "data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"routed response\"}]}}]}}\n\n";
+                (
+                    [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+                    sse_data,
+                )
+            }
+        }),
+    );
+
+    let upstream_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_addr = upstream_listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(upstream_listener, upstream_app).await.unwrap();
+    });
+
+    let pool = KeyPool::new("antigravity", RoutingStrategy::Priority);
+    pool.add_key(ApiKeyEntry::new("ag-key-1", "sk-antigravity", 1, 10));
+
+    let mut config = GatewayConfig::default();
+    config.providers.insert(
+        "antigravity".to_string(),
+        ProviderConfig {
+            base_url: format!("http://{}", upstream_addr),
+            default_model: "gemini-3.8-flash".to_string(),
+            models: vec![
+                "gemini-3.8-flash".to_string(),
+                "gemini-3.8-flash-tiered".to_string(),
+                "gemini-3.8-flash-low".to_string(),
+                "gemini-3.8-flash-medium".to_string(),
+                "gemini-3.8-flash-high".to_string(),
+            ],
+            strategy: "priority".to_string(),
+            billing_mode: BillingMode::Metered,
+            input_price: 0.0,
+            cached_price: 0.0,
+            output_price: 0.0,
+            rate_limits: None,
+            model_specs: vec![],
+            default_protocol: Some(UpstreamProtocol::Antigravity),
+            chat_url: None,
+            responses_url: None,
+            messages_url: None,
+            proxy: None,
+            timeout_secs: None,
+            ttfb_timeout_secs: None,
+        },
+    );
+
+    let state = Arc::new(AppState::new(config));
+    state.register_pool("antigravity", Arc::new(pool));
+
+    let gateway_app = create_app(state);
+    let gateway_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let gateway_addr = gateway_listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(gateway_listener, gateway_app).await.unwrap();
+    });
+
+    let client = reqwest::Client::new();
+
+    // 1. Explicit Low -> routes to -low
+    let resp = client
+        .post(format!("http://{}/v1/chat/completions", gateway_addr))
+        .json(&json!({
+            "model": "gemini-3.8-flash",
+            "messages": [{"role": "user", "content": "hello"}],
+            "reasoning_effort": "low"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // 2. Explicit Medium -> routes to -medium
+    let resp = client
+        .post(format!("http://{}/v1/chat/completions", gateway_addr))
+        .json(&json!({
+            "model": "gemini-3.8-flash",
+            "messages": [{"role": "user", "content": "hello"}],
+            "reasoning_effort": "medium"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // 3. Explicit High -> routes to -high
+    let resp = client
+        .post(format!("http://{}/v1/chat/completions", gateway_addr))
+        .json(&json!({
+            "model": "gemini-3.8-flash",
+            "messages": [{"role": "user", "content": "hello"}],
+            "reasoning_effort": "high"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // 4. No explicit reasoning_effort -> routes to -tiered (or default High if thinking_spec defaulted to High)
+    let resp = client
+        .post(format!("http://{}/v1/chat/completions", gateway_addr))
+        .json(&json!({
+            "model": "gemini-3.8-flash",
+            "messages": [{"role": "user", "content": "hello"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let reqs = captured_requests.lock().clone();
+    assert_eq!(reqs.len(), 4);
+    assert_eq!(reqs[0]["model"], "gemini-3.8-flash-low");
+    assert_eq!(reqs[1]["model"], "gemini-3.8-flash-medium");
+    assert_eq!(reqs[2]["model"], "gemini-3.8-flash-high");
+    // Request 4: when not explicitly requested, defaults to -tiered
+    assert_eq!(reqs[3]["model"], "gemini-3.8-flash-tiered");
+}

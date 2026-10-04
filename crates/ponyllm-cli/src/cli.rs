@@ -568,6 +568,14 @@ pub enum ModelCommands {
         #[arg(long)]
         proxy: Option<String>,
 
+        /// Optional thinking default level (off, low, medium, high - defaults to high)
+        #[arg(long)]
+        thinking_default: Option<String>,
+
+        /// Optional thinking max ceiling (off, low, medium, high - defaults to high)
+        #[arg(long)]
+        thinking_max: Option<String>,
+
         #[arg(short, long)]
         config: Option<String>,
     },

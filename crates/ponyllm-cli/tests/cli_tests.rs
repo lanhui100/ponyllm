@@ -668,11 +668,11 @@ fn test_model_thinking_spec_toml_and_cli() {
     use ponyllm_protocol::common::ReasoningEffort;
 
 
-    // 1. Inferred from model name (o3-mini)
+    // 1. Inferred from model name defaults to High
     let m1 = ModelConfig::new("o3-mini");
     let spec1 = m1.thinking_spec();
-    assert_eq!(spec1.default_effort, ReasoningEffort::Low);
-    assert_eq!(spec1.max_effort, ReasoningEffort::Medium);
+    assert_eq!(spec1.default_effort, ReasoningEffort::High);
+    assert_eq!(spec1.max_effort, ReasoningEffort::High);
 
     // 2. Custom override via config
     let mut m2 = ModelConfig::new("custom-reasoner");
