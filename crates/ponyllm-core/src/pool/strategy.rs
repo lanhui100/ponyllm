@@ -146,6 +146,7 @@ pub fn is_context_capacity_compatible(source_capacity_str: &str, target_capacity
 /// tokens alone (which results in zero text content and client-side errors).
 pub fn min_safe_thinking_output_tokens(effort: ponyllm_protocol::common::ReasoningEffort) -> u32 {
     match effort {
+        ponyllm_protocol::common::ReasoningEffort::Max => 32768,
         ponyllm_protocol::common::ReasoningEffort::High => 16384,
         ponyllm_protocol::common::ReasoningEffort::Medium => 8192,
         ponyllm_protocol::common::ReasoningEffort::Low => 4096,

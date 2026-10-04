@@ -707,11 +707,11 @@ function getTierBadgeVariant(tier?: string) {
                 </div>
               </div>
 
-              <!-- 思考强度 (同一行2列) -->
+              <!-- 思考强度 (支持 Off, Low, Medium, High, Max 映射) -->
               <div class="grid grid-cols-1 sm:grid-cols-12 gap-2 sm:gap-4 items-center">
                 <label class="sm:col-span-3 text-slate-700 font-medium text-xs flex items-center gap-1">
-                  <span>思考强度</span>
-                  <UiTooltip content="设置模型推理思考深度的预设档位，按需开启深度认知">
+                  <span>思考强度映射</span>
+                  <UiTooltip content="设置模型思考强度映射（支持 Off/Low/Medium/High/Max，支持将模型的 xhigh/ultra 映射为 Max/High 级别）">
                     <Icons name="info" size="12" class="text-slate-400 cursor-pointer" />
                   </UiTooltip>
                 </label>
@@ -719,6 +719,9 @@ function getTierBadgeVariant(tier?: string) {
                   <ThinkingEffortSelect
                     v-model:default-effort="form.thinking_default"
                   />
+                  <div class="mt-1 text-[11px] text-slate-400">
+                    提示：未配置时默认映射为 High；超深度模型（如 xhigh/ultra）可映射为 Max/High。
+                  </div>
                 </div>
               </div>
 
@@ -1377,11 +1380,11 @@ function getTierBadgeVariant(tier?: string) {
                 </div>
               </div>
 
-              <!-- 思考强度按钮组 (同一行2列) -->
+              <!-- 思考强度按钮组 (支持 Off, Low, Medium, High, Max 映射) -->
               <div class="grid grid-cols-1 sm:grid-cols-12 gap-2 sm:gap-4 items-center">
                 <label class="sm:col-span-3 text-slate-700 font-medium text-xs flex items-center gap-1">
-                  <span>思考强度</span>
-                  <UiTooltip content="设置模型推理思考深度的预设档位，按需开启深度认知">
+                  <span>思考强度映射</span>
+                  <UiTooltip content="设置模型思考强度映射（支持 Off/Low/Medium/High/Max，支持将模型的 xhigh/ultra 映射为 Max/High 级别）">
                     <Icons name="info" size="12" class="text-slate-400 cursor-pointer" />
                   </UiTooltip>
                 </label>
@@ -1390,6 +1393,9 @@ function getTierBadgeVariant(tier?: string) {
                     v-model:default-effort="form.thinking_default"
                     :disabled="!adminWriteEnabled"
                   />
+                  <div class="mt-1 text-[11px] text-slate-400">
+                    提示：未配置时默认映射为 High；超深度模型（如 xhigh/ultra）可映射为 Max/High。
+                  </div>
                 </div>
               </div>
 

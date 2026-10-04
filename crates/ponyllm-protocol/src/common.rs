@@ -33,7 +33,7 @@ use std::fmt;
 use std::str::FromStr;
 use serde::{Deserializer, Serializer};
 
-/// Unified 4-tier reasoning effort scale.
+/// Unified reasoning effort scale (Off, Low, Medium, High, Max).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Hash)]
 pub enum ReasoningEffort {
     /// Zero reasoning chain / disabled. Lowest latency and token cost.
@@ -43,8 +43,10 @@ pub enum ReasoningEffort {
     /// Standard / balanced reasoning.
     #[default]
     Medium = 2,
-    /// Deep reasoning / maximum cognitive allocation.
+    /// Deep reasoning / high cognitive allocation.
     High = 3,
+    /// Maximum cognitive allocation / xhigh / ultra / max reasoning.
+    Max = 4,
 }
 
 impl ReasoningEffort {
@@ -54,6 +56,7 @@ impl ReasoningEffort {
             Self::Low => "low",
             Self::Medium => "medium",
             Self::High => "high",
+            Self::Max => "max",
         }
     }
 
@@ -68,6 +71,7 @@ impl ReasoningEffort {
             Self::Low => Some("low"),
             Self::Medium => Some("medium"),
             Self::High => Some("high"),
+            Self::Max => Some("high"), // OpenAI standard protocol caps at high, Max maps to high
         }
     }
 
@@ -77,7 +81,8 @@ impl ReasoningEffort {
             "off" | "none" | "0" | "false" | "disabled" | "disable" | "no" => Some(Self::Off),
             "low" | "minimal" | "1" | "fast" | "light" => Some(Self::Low),
             "medium" | "standard" | "default" | "2" | "balanced" | "med" => Some(Self::Medium),
-            "high" | "deep" | "max" | "ultra" | "3" | "true" | "full" => Some(Self::High),
+            "high" | "deep" | "3" | "true" | "full" => Some(Self::High),
+            "max" | "xhigh" | "extra_high" | "extra-high" | "ultra" | "4" | "extreme" => Some(Self::Max),
             _ => None,
         }
     }

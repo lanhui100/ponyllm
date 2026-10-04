@@ -1577,17 +1577,24 @@ fn test_reasoning_effort_parsing_and_serde() {
     assert_eq!(ReasoningEffort::from_str_loose("standard"), Some(ReasoningEffort::Medium));
     assert_eq!(ReasoningEffort::from_str_loose("high"), Some(ReasoningEffort::High));
     assert_eq!(ReasoningEffort::from_str_loose("deep"), Some(ReasoningEffort::High));
-    assert_eq!(ReasoningEffort::from_str_loose("max"), Some(ReasoningEffort::High));
+    assert_eq!(ReasoningEffort::from_str_loose("max"), Some(ReasoningEffort::Max));
+    assert_eq!(ReasoningEffort::from_str_loose("xhigh"), Some(ReasoningEffort::Max));
+    assert_eq!(ReasoningEffort::from_str_loose("ultra"), Some(ReasoningEffort::Max));
 
     // Serde
     let eff: ReasoningEffort = serde_json::from_str("\"high\"").unwrap();
     assert_eq!(eff, ReasoningEffort::High);
     assert_eq!(serde_json::to_string(&eff).unwrap(), "\"high\"");
 
-    // Ordering: Off < Low < Medium < High
+    let eff_max: ReasoningEffort = serde_json::from_str("\"max\"").unwrap();
+    assert_eq!(eff_max, ReasoningEffort::Max);
+    assert_eq!(serde_json::to_string(&eff_max).unwrap(), "\"max\"");
+
+    // Ordering: Off < Low < Medium < High < Max
     assert!(ReasoningEffort::Off < ReasoningEffort::Low);
     assert!(ReasoningEffort::Low < ReasoningEffort::Medium);
     assert!(ReasoningEffort::Medium < ReasoningEffort::High);
+    assert!(ReasoningEffort::High < ReasoningEffort::Max);
 }
 
 #[test]

@@ -24,20 +24,21 @@ const TIERS = [
   { value: 'Low', label: '轻度', sub: 'Low', desc: '轻度推理，适合轻量逻辑和简单步骤校验' },
   { value: 'Medium', label: '平衡', sub: 'Medium', desc: '标准深度思考，兼顾推理质量与响应速度' },
   { value: 'High', label: '深度', sub: 'High', desc: '最大化认知推理预算，适合极高难度复杂任务' },
+  { value: 'Max', label: '极致', sub: 'Max', desc: '极限思考预算（适用于 xhigh/ultra/max 等超深推理模型）' },
 ];
 
 function selectEffort(val: string) {
   if (props.disabled) return;
   emit('update:defaultEffort', val);
-  emit('update:maxEffort', val === 'Off' ? 'Off' : 'High');
+  emit('update:maxEffort', val === 'Off' ? 'Off' : val === 'Max' ? 'Max' : 'High');
 }
 </script>
 
 <template>
   <div class="text-sm">
-    <!-- 纯按钮分段选项器 (无最大上限) -->
+    <!-- 纯按钮分段选项器 (支持 Off, Low, Medium, High, Max 5档映射) -->
     <div
-      class="grid grid-cols-4 gap-1.5 p-1 bg-slate-100/90 rounded-lg border border-slate-200/70 select-none"
+      class="grid grid-cols-5 gap-1.5 p-1 bg-slate-100/90 rounded-lg border border-slate-200/70 select-none"
       data-testid="thinking-effort-segment"
     >
       <UiTooltip

@@ -15,7 +15,7 @@ const emit = defineEmits<{
   (e: 'delete', name: string): Promise<void>;
 }>();
 
-const THINKING_TIERS = ['Off', 'Low', 'Medium', 'High'] as const;
+const THINKING_TIERS = ['Off', 'Low', 'Medium', 'High', 'Max'] as const;
 const MODEL_TIERS = ['Fast', 'Smart', 'Large', 'Fallback'] as const;
 
 const showDrawer = ref(false);

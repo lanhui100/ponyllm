@@ -174,7 +174,7 @@ pub fn resolve_antigravity_gemini3_model(model: &str, thinking: Option<Reasoning
     match thinking {
         Some(ReasoningEffort::Low) => format!("{}-low", base),
         Some(ReasoningEffort::Medium) => format!("{}-medium", base),
-        Some(ReasoningEffort::High) => format!("{}-high", base),
+        Some(ReasoningEffort::High) | Some(ReasoningEffort::Max) => format!("{}-high", base),
         None | Some(ReasoningEffort::Off) => format!("{}-tiered", base),
     }
 }
@@ -205,7 +205,7 @@ pub fn antigravity_thinking_config(model: &str, thinking: Option<ReasoningEffort
         let budget = match effort {
             ReasoningEffort::Low => 1024,
             ReasoningEffort::Medium => 4096,
-            ReasoningEffort::High => 16384,
+            ReasoningEffort::High | ReasoningEffort::Max => 16384,
             ReasoningEffort::Off => unreachable!(),
         };
         cfg["thinkingBudget"] = json!(budget);
@@ -232,7 +232,8 @@ fn clamp_max_output_for_thinking_budget(
     // Ensure gen_config has sufficient headroom for implicit Gemini 3 thinking budgets.
     if min_budget.is_none() && model.to_ascii_lowercase().contains("gemini-3") {
         let is_high = model.to_ascii_lowercase().contains("-high")
-            || thinking == Some(ReasoningEffort::High);
+            || thinking == Some(ReasoningEffort::High)
+            || thinking == Some(ReasoningEffort::Max);
         let is_low = model.to_ascii_lowercase().contains("-low")
             || thinking == Some(ReasoningEffort::Low);
         if is_high {

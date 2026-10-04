@@ -41,16 +41,17 @@ impl ModelThinkingSpec {
         }
     }
 
-    /// Standard 4-tier reasoning effort levels supported by the project.
-    pub const ALL_EFFORT_TIERS: [ReasoningEffort; 4] = [
+    /// Standard reasoning effort levels supported by the project (Off, Low, Medium, High, Max).
+    pub const ALL_EFFORT_TIERS: [ReasoningEffort; 5] = [
         ReasoningEffort::Off,
         ReasoningEffort::Low,
         ReasoningEffort::Medium,
         ReasoningEffort::High,
+        ReasoningEffort::Max,
     ];
 
-    /// Match an arbitrary client string or tier name into the standard 4-tier ReasoningEffort.
-    /// Falls back to default (High) if unrecognized or empty.
+    /// Match an arbitrary client string or tier name (including low, medium, high, max, xhigh, ultra) into ReasoningEffort.
+    /// xhigh / ultra / max map to Max (or High). Falls back to default (High) if unrecognized or empty.
     pub fn match_4tier_effort(val: Option<&str>) -> ReasoningEffort {
         match val {
             Some(s) => ReasoningEffort::from_str_loose(s).unwrap_or(ReasoningEffort::High),
@@ -168,6 +169,9 @@ mod tests {
         assert_eq!(ModelThinkingSpec::match_4tier_effort(Some("low")), ReasoningEffort::Low);
         assert_eq!(ModelThinkingSpec::match_4tier_effort(Some("standard")), ReasoningEffort::Medium);
         assert_eq!(ModelThinkingSpec::match_4tier_effort(Some("deep")), ReasoningEffort::High);
+        assert_eq!(ModelThinkingSpec::match_4tier_effort(Some("xhigh")), ReasoningEffort::Max);
+        assert_eq!(ModelThinkingSpec::match_4tier_effort(Some("ultra")), ReasoningEffort::Max);
+        assert_eq!(ModelThinkingSpec::match_4tier_effort(Some("max")), ReasoningEffort::Max);
         assert_eq!(ModelThinkingSpec::match_4tier_effort(Some("off")), ReasoningEffort::Off);
         assert_eq!(ModelThinkingSpec::match_4tier_effort(None), ReasoningEffort::High);
     }
