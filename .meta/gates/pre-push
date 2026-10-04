@@ -3,6 +3,10 @@
 set -eo pipefail
 
 echo "=== [pre-push 1/3] Full workspace tests execution ==="
+# 校验并自动保障 web/openapi.json 与 OpenAPI 契约及版本号对齐
+if [ -f "crates/ponyllm-server/tests/admin_contract_tests.rs" ]; then
+  cargo test -p ponyllm-server --test admin_contract_tests test_openapi_no_real_secret_and_schema_committed -- --quiet
+fi
 cargo test --workspace
 
 echo "=== [pre-push 2/3] ponygo governance status check ==="
