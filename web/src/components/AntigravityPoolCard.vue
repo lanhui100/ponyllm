@@ -516,16 +516,40 @@ let resizeObserver: ResizeObserver | null = null;
 const totalColumns = computed(() => {
   if (containerWidth.value <= 0) return 16;
   // 每个方块 14px (w-3.5)，间距 3px (gap-[3px])
-  // 列数 = Math.floor((width + 3) / 17)
-  const cols = Math.floor((containerWidth.value + 3) / 17);
+  // 外层增加 p-1 (左右各 4px)，计算可用宽度：width - 8
+  const availableWidth = Math.max(0, containerWidth.value - 8);
+  const cols = Math.floor((availableWidth + 3) / 17);
   return Math.max(10, cols);
 });
 
-const totalSlots = computed(() => totalColumns.value * 5);
+// 每 5 行为一组，支持垂直排列多组（当前展示 2 组）
+const ROWS_PER_GROUP = 5;
+const GROUP_COUNT = 2;
+const slotsPerGroup = computed(() => totalColumns.value * ROWS_PER_GROUP);
+const totalSlots = computed(() => slotsPerGroup.value * GROUP_COUNT);
 
-const emptySlotCount = computed(() => {
-  const current = props.keys.length;
-  return Math.max(0, totalSlots.value - current);
+interface MatrixGroup {
+  items: HeatSlotItem[];
+  emptyCount: number;
+}
+
+const matrixGroups = computed<MatrixGroup[]>(() => {
+  const allSlots = slotMatrix.value;
+  const perGroup = slotsPerGroup.value;
+  const groups: MatrixGroup[] = [];
+
+  for (let g = 0; g < GROUP_COUNT; g++) {
+    const start = g * perGroup;
+    const end = start + perGroup;
+    const groupItems = allSlots.slice(start, Math.min(allSlots.length, end));
+    const emptyCount = Math.max(0, perGroup - groupItems.length);
+    groups.push({
+      items: groupItems,
+      emptyCount,
+    });
+  }
+
+  return groups;
 });
 
 // 选中的账号用于展示单账号详细额度画像
@@ -943,15 +967,17 @@ function waterBarWidth(percent: number | null): string {
             </div>
           </div>
 
-          <!-- 绝对严格等距矩阵：移除 justify-between，横纵均由 gap-[3px] 锁定，自动排列填满整行 -->
-          <div ref="gridContainerRef" class="my-2.5 w-full overflow-hidden">
+          <!-- 绝对严格等距矩阵：每 5 行为一组垂直排列，新增一组，外层留足 p-1 与 overflow-visible 避免边缘放大切割 -->
+          <div ref="gridContainerRef" class="my-2.5 w-full overflow-x-auto overflow-y-visible p-1 space-y-2">
             <div
-              class="grid grid-rows-5 grid-flow-col gap-[3px] w-max"
+              v-for="(group, gIdx) in matrixGroups"
+              :key="`matrix-group-${gIdx}`"
+              class="grid grid-rows-5 grid-flow-col gap-[3px] w-max p-0.5"
               data-testid="slot-heatmap-grid"
             >
               <!-- 已分配账号槽位 (无边框，纯方块) -->
               <UiTooltip
-                v-for="item in slotMatrix"
+                v-for="item in group.items"
                 :key="item.key.id"
                 :content="`${item.tooltipText} · 点击查看单账号测定画像`"
               >
@@ -960,10 +986,10 @@ function waterBarWidth(percent: number | null): string {
                   role="button"
                   tabindex="0"
                   :aria-label="`查看账号 ${item.key.id} 测定画像`"
-                  class="w-3.5 h-3.5 rounded-[2px] transition-transform duration-150 hover:scale-125 cursor-pointer shrink-0 focus:outline-hidden focus:ring-2 focus:ring-amber-500"
+                  class="w-3.5 h-3.5 rounded-[2px] transition-transform duration-150 hover:scale-125 hover:z-20 cursor-pointer shrink-0 focus:outline-hidden focus:ring-2 focus:ring-amber-500"
                   :class="[
                     item.heatClass,
-                    selectedKeyId === item.key.id ? 'ring-2 ring-amber-500 scale-110 z-10' : ''
+                    selectedKeyId === item.key.id ? 'ring-2 ring-amber-500 scale-110 z-30' : ''
                   ]"
                   @click="selectKeyForDetail(item.key.id)"
                   @keydown.enter.prevent="selectKeyForDetail(item.key.id)"
@@ -973,8 +999,8 @@ function waterBarWidth(percent: number | null): string {
 
               <!-- 未占用预留槽位 (严格等距，沉稳灰阶实体方块) -->
               <UiTooltip
-                v-for="i in emptySlotCount"
-                :key="`empty-slot-${i}`"
+                v-for="i in group.emptyCount"
+                :key="`empty-slot-${gIdx}-${i}`"
                 content="未配置槽位 · 接入新账号后将自动点亮"
               >
                 <div

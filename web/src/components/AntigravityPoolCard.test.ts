@@ -105,12 +105,14 @@ describe('AntigravityPoolCard Component', () => {
     // Verify GitHub-style heatmap cells
     const cells = container.querySelectorAll('[data-testid="slot-heatmap-cell"]');
     expect(cells.length).toBe(2);
-    // Verify empty placeholder slots are rendered (80 total - 2 active = 78 empty)
+    // Verify empty placeholder slots are rendered (2 groups of 80 = 160 total - 2 active = 158 empty)
     const emptySlots = container.querySelectorAll('[data-testid="slot-heatmap-empty"]');
-    expect(emptySlots.length).toBe(78);
+    expect(emptySlots.length).toBe(158);
 
-    const grid = container.querySelector('[data-testid="slot-heatmap-grid"]');
-    expect(grid?.className).toContain('grid-rows-5');
+    const grids = container.querySelectorAll('[data-testid="slot-heatmap-grid"]');
+    expect(grids.length).toBe(2);
+    expect(grids[0]?.className).toContain('grid-rows-5');
+    expect(grids[1]?.className).toContain('grid-rows-5');
 
     // 3. Verify Next recovery countdown hint
     expect(container.textContent).toContain('最近解冻');
