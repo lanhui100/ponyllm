@@ -313,6 +313,7 @@ fn test_model_config_crud_and_params() {
         thinking_max: None,
         proxy: None,
         timeout_secs: None,
+        fallbacks: Vec::new(),
     };
 
     cfg.upsert_model_config("ai-hub", custom_model.clone()).unwrap();

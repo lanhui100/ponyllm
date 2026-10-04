@@ -39,6 +39,7 @@ fn test_model_config_tier_and_pricing_serialization() {
         thinking_max: None,
         proxy: None,
         timeout_secs: None,
+        fallbacks: Vec::new(),
     };
 
     let m_inherit = ModelConfig {
@@ -65,6 +66,7 @@ fn test_model_config_tier_and_pricing_serialization() {
         thinking_max: None,
         proxy: None,
         timeout_secs: None,
+        fallbacks: Vec::new(),
     };
 
 
