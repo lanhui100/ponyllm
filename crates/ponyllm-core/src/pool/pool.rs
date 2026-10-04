@@ -206,13 +206,30 @@ impl KeyPool {
         excluded_key_ids: &[String],
         limits: Option<&RateLimits>,
     ) -> Result<Arc<ApiKeyEntry>> {
+        self.select_key_with_affinity_for_family(affinity_seed, excluded_key_ids, limits, None)
+    }
+
+    /// Select key with KV-cache / session affinity, additionally excluding keys
+    /// whose Antigravity quota *group* for the requested model family is
+    /// exhausted (e.g. Gemini weekly = 0 while Claude/GPT weekly still has
+    /// headroom). `family = None` keeps the legacy key-level semantics, so
+    /// non-Antigravity providers and unclassified models never get filtered.
+    pub fn select_key_with_affinity_for_family(
+        &self,
+        affinity_seed: Option<u64>,
+        excluded_key_ids: &[String],
+        limits: Option<&RateLimits>,
+        family: Option<crate::pool::entry::QuotaFamily>,
+    ) -> Result<Arc<ApiKeyEntry>> {
         let keys = self.keys.read();
+        let now = chrono::Utc::now();
         let active_keys: Vec<Arc<ApiKeyEntry>> = keys
             .iter()
             .filter(|k| {
                 k.current_state() == KeyState::Active
                     && !excluded_key_ids.iter().any(|ex| ex == &k.id)
                     && Self::budget_ok(k, limits)
+                    && !k.quota_group_exhausted_for(family, now)
             })
             .cloned()
             .collect();
@@ -567,6 +584,48 @@ impl KeyPool {
         })
     }
 
+    /// True when any *non-disabled* key carries an unexpired quota-group
+    /// exhaustion for some family. Feeds the H1 quota-boundary reclassification
+    /// (extractors::pool_quota_exhausted): after family-aware selection,
+    /// `NoAvailableKey` with family-exhausted keys present is a quota boundary,
+    /// not a transient no-key error — the routing guard must stop before
+    /// draining a second provider (ADR
+    /// `2026-10-04-antigravity-group-quota-aware-scheduling`).
+    pub fn any_key_family_exhausted_any(&self) -> bool {
+        let keys = self.keys.read();
+        let now = chrono::Utc::now();
+        keys.iter().any(|k| {
+            k.current_state() != KeyState::Disabled
+                && k
+                    .quota_group_exhaustions()
+                    .values()
+                    .any(|reset| *reset > now)
+        })
+    }
+
+    /// Earliest unexpired quota-group reset across keys (any family), for an
+    /// honest `Retry-After` when the pool is family-quota-bound.
+    pub fn earliest_family_reset_any(&self) -> Option<std::time::Duration> {
+        let keys = self.keys.read();
+        let now = chrono::Utc::now();
+        let mut min: Option<chrono::DateTime<chrono::Utc>> = None;
+        for k in keys.iter() {
+            for reset in k.quota_group_exhaustions().values() {
+                if *reset <= now {
+                    continue;
+                }
+                min = Some(match min {
+                    Some(cur) => cur.min(*reset),
+                    None => *reset,
+                });
+            }
+        }
+        min.map(|reset| {
+            let secs = (reset - now).num_seconds().max(0) as u64;
+            std::time::Duration::from_secs(secs)
+        })
+    }
+
     /// Copy the runtime state of matching key ids from a donor pool onto this
     /// (freshly rebuilt) pool: permanent `disabled_reason`, the active cooldown
     /// (remaining deadline + wall-clock reset), its `cooldown_reason` and the
@@ -598,6 +657,11 @@ impl KeyPool {
                     *new_entry.stats.error_reason.write() = Some(err_reason);
                 }
             }
+            // Family-scoped quota-group verdicts survive rebuilds too: a hot
+            // reload inside a Gemini weekly exhaustion must not revive the key
+            // for Gemini traffic (ADR
+            // `2026-10-04-antigravity-group-quota-aware-scheduling`).
+            new_entry.restore_quota_group_exhaustions(old_entry.quota_group_exhaustions());
         }
     }
 

@@ -351,7 +351,7 @@ pub fn format_exhausted_message(
     };
     if pool_exhausted {
         format!(
-            "Local key pool exhausted for model '{}' (gateway-side cooling, no upstream attempt in this request; no Active keys, check `ponyllm status`). Last error: {} (request_id: {})",
+            "Local key pool exhausted for model '{}' (gateway-side cooling / window-budget / family-quota exhaustion, no upstream attempt in this request; no schedulable keys, check `ponyllm status`). Last error: {} (request_id: {})",
             model, safe_error, request_id
         )
     } else if matches!(kind, ponyllm_core::error::GatewayErrorKind::LockContention) {
@@ -386,10 +386,16 @@ pub fn pool_quota_exhausted(
 ) -> bool {
     matches!(err, ponyllm_core::error::CoreError::NoAvailableKey(_))
         && pool.no_schedulable_keys()
-        && pool.any_key_quota_cooldown()
+        && (pool.any_key_quota_cooldown() || pool.any_key_family_exhausted_any())
 }
 
 /// Prefer upstream Retry-After, else earliest pool unlock ceiled to seconds.
+///
+/// The 60s cap applies ONLY to the sliding-window `RateLimitExceeded` branch
+/// (short-window refills are bounded by the meter window anyway). A pool-level
+/// unlock hint (quota cooldown / family-quota reset) passes through untruncated:
+/// capping a 3h56m quota reset at 60s made clients spin empty retries for the
+/// whole window (review 2026-10-04, gap #2).
 pub fn retry_after_secs(
     kind: &ponyllm_core::error::GatewayErrorKind,
     pool_unlock: Option<std::time::Duration>,
@@ -399,7 +405,7 @@ pub fn retry_after_secs(
         let s = d.as_secs().max(1).min(60);
         return Some(s);
     }
-    pool_unlock.map(|d| d.as_secs().saturating_add(1).clamp(1, 60))
+    pool_unlock.map(|d| d.as_secs().saturating_add(1).max(1))
 }
 
 /// Project a `GatewayErrorKind` into an OpenAI format HTTP response.

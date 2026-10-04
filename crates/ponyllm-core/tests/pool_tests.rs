@@ -360,3 +360,209 @@ fn test_two_key_pool_tos_second_strike_permanent_isolation() {
     assert_eq!(pool.get_key_status("k1"), Some(KeyState::Disabled));
 }
 
+
+// --- Antigravity quota-group aware scheduling (ADR 2026-10-04) ---
+
+#[test]
+fn test_classify_quota_family() {
+    use ponyllm_core::pool::entry::{classify_quota_family, QuotaFamily};
+    assert_eq!(classify_quota_family("gemini-3.8-flash-high"), Some(QuotaFamily::Gemini));
+    assert_eq!(classify_quota_family("gemini-2.5-pro"), Some(QuotaFamily::Gemini));
+    assert_eq!(classify_quota_family("claude-sonnet-4-6"), Some(QuotaFamily::ThirdParty));
+    assert_eq!(classify_quota_family("gpt-oss-120b-medium"), Some(QuotaFamily::ThirdParty));
+    assert_eq!(classify_quota_family("deepseek-v4-flash"), None);
+    assert_eq!(classify_quota_family(""), None);
+}
+
+fn weekly_bucket(bucket_id: &str, remaining: f64, reset: chrono::DateTime<chrono::Utc>) -> ponyllm_core::pool::antigravity::QuotaSummaryBucket {
+    ponyllm_core::pool::antigravity::QuotaSummaryBucket {
+        bucket_id: bucket_id.to_string(),
+        window: "weekly".to_string(),
+        remaining_fraction: remaining,
+        reset_time: Some(reset),
+        reset_time_raw: None,
+        display_name: Some("Weekly Limit Remaining".to_string()),
+        description: None,
+    }
+}
+
+fn gemini_groups(gemini_weekly: f64, reset: chrono::DateTime<chrono::Utc>) -> Vec<ponyllm_core::pool::antigravity::QuotaSummaryGroup> {
+    vec![
+        ponyllm_core::pool::antigravity::QuotaSummaryGroup {
+            display_name: "Gemini Models".to_string(),
+            description: Some("Gemini Flash, Gemini Pro".to_string()),
+            buckets: vec![
+                weekly_bucket("gemini-weekly", gemini_weekly, reset),
+                ponyllm_core::pool::antigravity::QuotaSummaryBucket {
+                    bucket_id: "gemini-5h".to_string(),
+                    window: "5h".to_string(),
+                    remaining_fraction: 1.0,
+                    reset_time: None,
+                    reset_time_raw: None,
+                    display_name: None,
+                    description: None,
+                },
+            ],
+        },
+        ponyllm_core::pool::antigravity::QuotaSummaryGroup {
+            display_name: "Claude and GPT models".to_string(),
+            description: Some("Claude Opus, Claude Sonnet, GPT-OSS".to_string()),
+            buckets: vec![weekly_bucket("3p-weekly", 1.0, reset)],
+        },
+    ]
+}
+
+#[test]
+fn test_apply_quota_groups_records_family_exhaustion_and_recovers() {
+    let entry = ApiKeyEntry::new("ag-1", "sk-1", 1, 10);
+    let now = chrono::Utc::now();
+    let future = now + chrono::Duration::hours(24);
+
+    // Gemini weekly exhausted -> only Gemini family is blocked.
+    entry.apply_quota_groups(Some(&gemini_groups(0.0, future)), now);
+    assert!(entry.quota_group_exhausted_for(Some(ponyllm_core::pool::entry::QuotaFamily::Gemini), now));
+    assert!(!entry.quota_group_exhausted_for(Some(ponyllm_core::pool::entry::QuotaFamily::ThirdParty), now));
+    assert!(!entry.quota_group_exhausted_for(None, now));
+
+    // Weekly recovered -> both families schedulable again.
+    entry.apply_quota_groups(Some(&gemini_groups(1.0, future)), now);
+    assert!(!entry.quota_group_exhausted_for(Some(ponyllm_core::pool::entry::QuotaFamily::Gemini), now));
+    assert!(!entry.quota_group_exhausted_for(Some(ponyllm_core::pool::entry::QuotaFamily::ThirdParty), now));
+
+    // Reset already passed -> verdict expires on its own.
+    let past = now - chrono::Duration::hours(1);
+    entry.apply_quota_groups(Some(&gemini_groups(0.0, past)), now);
+    assert!(!entry.quota_group_exhausted_for(Some(ponyllm_core::pool::entry::QuotaFamily::Gemini), now));
+
+    // Ledger round-trips through the snapshot/restore pair (hot-reload survival).
+    entry.apply_quota_groups(Some(&gemini_groups(0.0, future)), now);
+    let ledger = entry.quota_group_exhaustions();
+    let revived = ApiKeyEntry::new("ag-1", "sk-1", 1, 10);
+    revived.restore_quota_group_exhaustions(ledger);
+    assert!(revived.quota_group_exhausted_for(Some(ponyllm_core::pool::entry::QuotaFamily::Gemini), now));
+}
+
+#[test]
+fn test_pool_family_selection_skips_group_exhausted_key() {
+    let pool = KeyPool::new("antigravity", RoutingStrategy::Priority);
+    let key1 = ApiKeyEntry::new("ag-gemini-exhausted", "sk-1", 1, 10);
+    let key2 = ApiKeyEntry::new("ag-healthy", "sk-2", 2, 10);
+    let now = chrono::Utc::now();
+    let future = now + chrono::Duration::hours(24);
+    key1.apply_quota_groups(Some(&gemini_groups(0.0, future)), now);
+    pool.add_key(key1);
+    pool.add_key(key2);
+
+    // Gemini request must NOT land on the Gemini-exhausted (higher-priority) key.
+    let gemini_key = pool
+        .select_key_with_affinity_for_family(None, &[], None, Some(ponyllm_core::pool::entry::QuotaFamily::Gemini))
+        .unwrap();
+    assert_eq!(gemini_key.id, "ag-healthy");
+
+    // Third-party request may still use the same account (Claude/GPT weekly is fine).
+    let third_party_key = pool
+        .select_key_with_affinity_for_family(None, &[], None, Some(ponyllm_core::pool::entry::QuotaFamily::ThirdParty))
+        .unwrap();
+    assert_eq!(third_party_key.id, "ag-gemini-exhausted");
+
+    // Legacy family-less selection keeps the old behavior (no filtering).
+    let legacy_key = pool.select_key_with_affinity(None, &[], None).unwrap();
+    assert_eq!(legacy_key.id, "ag-gemini-exhausted");
+}
+
+#[test]
+fn test_apply_quota_groups_tracks_individual_bucket_exhaustion() {
+    use ponyllm_core::pool::entry::QuotaFamily;
+    let entry = ApiKeyEntry::new("ag-1", "sk-1", 1, 10);
+    let now = chrono::Utc::now();
+    let reset = now + chrono::Duration::hours(4);
+
+    // The incident 429 class: "Individual quota reached ... Resets in 3h56m"
+    // maps to the 5h/individual bucket, not weekly. Exhausted individual bucket
+    // must block the family too.
+    let groups = vec![ponyllm_core::pool::antigravity::QuotaSummaryGroup {
+        display_name: "Gemini Models".to_string(),
+        description: None,
+        buckets: vec![
+            weekly_bucket("gemini-weekly", 1.0, reset),
+            ponyllm_core::pool::antigravity::QuotaSummaryBucket {
+                bucket_id: "gemini-individual".to_string(),
+                window: "5h".to_string(),
+                remaining_fraction: 0.0,
+                reset_time: Some(reset),
+                reset_time_raw: None,
+                display_name: None,
+                description: None,
+            },
+        ],
+    }];
+    entry.apply_quota_groups(Some(&groups), now);
+    assert!(entry.quota_group_exhausted_for(Some(QuotaFamily::Gemini), now));
+    // Weekly alone positive does not block.
+    let groups_ok = vec![ponyllm_core::pool::antigravity::QuotaSummaryGroup {
+        display_name: "Gemini Models".to_string(),
+        description: None,
+        buckets: vec![weekly_bucket("gemini-weekly", 1.0, reset)],
+    }];
+    entry.apply_quota_groups(Some(&groups_ok), now);
+    assert!(!entry.quota_group_exhausted_for(Some(QuotaFamily::Gemini), now));
+}
+
+#[test]
+fn test_apply_quota_groups_falls_back_without_reset_time() {
+    use ponyllm_core::pool::entry::QuotaFamily;
+    let entry = ApiKeyEntry::new("ag-1", "sk-1", 1, 10);
+    let now = chrono::Utc::now();
+    // Exhausted weekly bucket with NO reset_time: the fallback horizon must
+    // still record the verdict (previously it was silently dropped and the key
+    // kept getting selected into 429s).
+    let groups = vec![ponyllm_core::pool::antigravity::QuotaSummaryGroup {
+        display_name: "Gemini Models".to_string(),
+        description: None,
+        buckets: vec![ponyllm_core::pool::antigravity::QuotaSummaryBucket {
+            bucket_id: "gemini-weekly".to_string(),
+            window: "weekly".to_string(),
+            remaining_fraction: 0.0,
+            reset_time: None,
+            reset_time_raw: None,
+            display_name: None,
+            description: None,
+        }],
+    }];
+    entry.apply_quota_groups(Some(&groups), now);
+    assert!(entry.quota_group_exhausted_for(Some(QuotaFamily::Gemini), now));
+}
+
+#[test]
+fn test_set_family_quota_exhausted_and_pool_helpers() {
+    use ponyllm_core::pool::entry::QuotaFamily;
+    let pool = KeyPool::new("antigravity", RoutingStrategy::Priority);
+    let key1 = ApiKeyEntry::new("ag-1", "sk-1", 1, 10);
+    let key2 = ApiKeyEntry::new("ag-2", "sk-2", 2, 10);
+    pool.add_key(key1);
+    pool.add_key(key2);
+
+    // Request-path 429 writeback (no group snapshot available).
+    let now = chrono::Utc::now();
+    let reset = now + chrono::Duration::hours(4);
+    pool.snapshot_keys()
+        .into_iter()
+        .find(|k| k.id == "ag-1")
+        .unwrap()
+        .set_family_quota_exhausted(QuotaFamily::Gemini, reset);
+
+    assert!(pool.any_key_family_exhausted_any());
+    let earliest = pool.earliest_family_reset_any().expect("family reset hint present");
+    assert!(earliest > std::time::Duration::from_secs(3 * 3600) && earliest <= std::time::Duration::from_secs(4 * 3600 + 1));
+
+    // A family-exhausted key is still Active (not cooled) — this is exactly
+    // the H1 boundary case the route-level guard must catch via
+    // any_key_family_exhausted_any().
+    assert_eq!(pool.get_key_status("ag-1"), Some(KeyState::Active));
+    assert!(!pool.no_schedulable_keys());
+    // Gemini selection must skip ag-1 and land on ag-2.
+    let picked = pool
+        .select_key_with_affinity_for_family(None, &[], None, Some(QuotaFamily::Gemini))
+        .unwrap();
+    assert_eq!(picked.id, "ag-2");
+}

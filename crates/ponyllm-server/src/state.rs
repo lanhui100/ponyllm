@@ -1373,6 +1373,19 @@ async fn advance_rotated_at(
                             }
                         }
                     }
+
+                    // Family-scoped quota-group verdicts (ADR
+                    // `2026-10-04-antigravity-group-quota-aware-scheduling`):
+                    // a key whose Gemini weekly bucket is exhausted must stop
+                    // being selected for Gemini requests now — not after the
+                    // first upstream 429 burns an attempt. Applied regardless
+                    // of `current_fraction` so a missing 5h bucket cannot
+                    // skip the weekly exhaustion verdict.
+                    if let Some(pool) = self.pools.read().get(&provider) {
+                        if let Some(entry) = pool.snapshot_keys().into_iter().find(|k| k.id == key_id) {
+                            entry.apply_quota_groups(snapshot.quota_groups.as_deref(), chrono::Utc::now());
+                        }
+                    }
                 }
                 Err(e) => {
                     // Probe-facing 403s get the SAME *deterministic hard*

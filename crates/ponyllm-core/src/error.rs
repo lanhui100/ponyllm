@@ -35,7 +35,7 @@ pub enum CoreError {
     #[error("JSON serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
 
-    #[error("No available key for provider '{0}' (all keys cooling down or disabled)")]
+    #[error("No available key for provider '{0}' (all keys cooling down, window-budget exhausted, or family-quota exhausted)")]
     NoAvailableKey(String),
 
     #[error("Request failed after {retries} attempts across keys {attempted_keys:?}: {last_error}")]

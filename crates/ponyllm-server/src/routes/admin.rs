@@ -770,10 +770,18 @@ async fn handle_admin_quota_inner(q: QuotaQuery, state: Arc<AppState>) -> Vec<Qu
             };
             if q.refresh && is_agy {
                 match refresh_agy_quota(&state, &provider, &id).await {
-                    Some((items, groups)) => {
+                    Some((items, groups, snapshot)) => {
                         view.source = "buckets".to_string();
                         view.quota = Some(items);
                         view.quota_groups = Some(groups);
+                        // Family-scoped quota-group verdicts: apply the fresh
+                        // weekly-bucket exhaustion ledger to the live key entry
+                        // (ADR `2026-10-04-antigravity-group-quota-aware-scheduling`),
+                        // so a manual refresh immediately stops scheduling an
+                        // exhausted family instead of waiting for the next 429.
+                        if let Some(entry) = pool.snapshot_keys().into_iter().find(|k| k.id == id) {
+                            entry.apply_quota_groups(snapshot.quota_groups.as_deref(), chrono::Utc::now());
+                        }
                     }
                     None => {
                         view.stale = true;
@@ -938,7 +946,11 @@ async fn refresh_agy_quota(
     state: &Arc<AppState>,
     provider: &str,
     key_id: &str,
-) -> Option<(Vec<AntigravityQuotaItemView>, Vec<AntigravityQuotaGroupView>)> {
+) -> Option<(
+    Vec<AntigravityQuotaItemView>,
+    Vec<AntigravityQuotaGroupView>,
+    ponyllm_core::pool::antigravity::AccountQuotaSnapshot,
+)> {
     let base_url = {
         let cfg = state.config.read();
         cfg.providers.get(provider)?.base_url.clone()
@@ -1026,7 +1038,7 @@ async fn refresh_agy_quota(
             });
         }
     }
-    Some((items, groups))
+    Some((items, groups, snapshot))
 }
 
 #[derive(Debug, Deserialize, utoipa::IntoParams)]
@@ -3259,37 +3271,27 @@ pub async fn handle_admin_test_key(
                                 .collect()
                         });
 
-                        let mut weekly_exhausted_reset: Option<std::time::Duration> = None;
-                        if let Some(ref groups) = snapshot.quota_groups {
-                            for g in groups {
-                                for b in &g.buckets {
-                                    let win = b.window.to_lowercase();
-                                    let b_id = b.bucket_id.to_lowercase();
-                                    let is_weekly = win == "weekly" || b_id.contains("week") || b_id.contains("7d");
-                                    if is_weekly && b.remaining_fraction <= 0.0 {
-                                        if let Some(reset_time) = b.reset_time {
-                                            let now = chrono::Utc::now();
-                                            if reset_time > now {
-                                                if let Ok(dur) = (reset_time - now).to_std() {
-                                                    weekly_exhausted_reset = Some(match weekly_exhausted_reset {
-                                                        Some(cur) => cur.max(dur),
-                                                        None => dur,
-                                                    });
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
                         let has_positive_quota = snapshot.models.values().any(|m| m.remaining_fraction > 0.0);
                         let pools = state.pools.read();
                         if let Some(pool) = pools.get(&p_name) {
-                            if let Some(exhausted_dur) = weekly_exhausted_reset {
-                                // 周配额耗尽，强制将该 Key 设为冷却并记录解冻时间
-                                pool.set_key_cooldown(&key_sec.id, exhausted_dur);
-                            } else if has_positive_quota {
+                            // Family-scoped quota-group verdicts (ADR
+                            // `2026-10-04-antigravity-group-quota-aware-scheduling`):
+                            // a weekly-exhausted group (e.g. Gemini Models)
+                            // blocks only that family's traffic on this key;
+                            // Claude/GPT headroom on the same account stays
+                            // usable. This replaces the previous whole-key
+                            // cooldown that mis-shelved mixed accounts for days.
+                            if let Some(entry) = pool
+                                .snapshot_keys()
+                                .into_iter()
+                                .find(|k| k.id == key_sec.id)
+                            {
+                                entry.apply_quota_groups(
+                                    snapshot.quota_groups.as_deref(),
+                                    chrono::Utc::now(),
+                                );
+                            }
+                            if has_positive_quota {
                                 // 拨测成功只清**瞬态**冷却（quota/rate_limit/
                                 // server）。资格冻结（Eligibility，3 天）只能
                                 // 自然到期或被新上游证据替换——quota 端点查的是

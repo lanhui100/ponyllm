@@ -1586,7 +1586,14 @@ impl UpstreamExecutor {
                 .and_then(|first| first.get("content").and_then(|c| c.as_str()))
                 .and_then(crate::pool::hot_cache::PrefixFingerprint::compute)
                 .map(|fp| fp.as_u64());
-            let key = match self.pool.select_key_with_affinity(affinity_seed, &attempted_keys, self.rate_limits.as_ref()) {
+            // Antigravity quota-group aware selection: the requested model's
+            // family decides which quota group (Gemini vs Claude/GPT) must have
+            // headroom for this key to be schedulable.
+            let quota_family = body
+                .get("model")
+                .and_then(|m| m.as_str())
+                .and_then(crate::pool::entry::classify_quota_family);
+            let key = match self.pool.select_key_with_affinity_for_family(affinity_seed, &attempted_keys, self.rate_limits.as_ref(), quota_family) {
                 Ok(k) => k,
                 Err(e) => {
                     // Full-pool exhaustion: when window-shaped (per-minute/quota,
@@ -1597,6 +1604,21 @@ impl UpstreamExecutor {
                         .await
                     {
                         continue;
+                    }
+                    // Honest failure kind after the rescue wait (review
+                    // 2026-10-04): family/quota boundaries surface as
+                    // QuotaExhausted; short-window budget exhaustion as
+                    // RateLimitExceeded with the real refill hint — never the
+                    // misleading generic Internal that downstream reads as
+                    // "gateway did attempt upstream" (it did not, for these).
+                    if attempt > 0 {
+                        if self.pool.any_key_quota_cooldown() || self.pool.any_key_family_exhausted_any() {
+                            last_kind = GatewayErrorKind::QuotaExhausted;
+                        } else if self.pool.exhausted_by_window_with_limits(self.rate_limits.as_ref()) {
+                            last_kind = GatewayErrorKind::RateLimitExceeded {
+                                retry_after: self.pool.window_refill_in_with_limits(self.rate_limits.as_ref()),
+                            };
+                        }
                     }
                     // First-attempt pool exhaustion surfaces structurally so
                     // callers never string-match on the aggregated message.
@@ -1733,7 +1755,24 @@ impl UpstreamExecutor {
                             _ => None,
                         };
                         let is_quota = matches!(&pool_err, PoolErrorType::QuotaExhausted { .. });
+                        let quota_reset = match &pool_err {
+                            PoolErrorType::QuotaExhausted { retry_after } => *retry_after,
+                            _ => None,
+                        };
                         self.pool.record_error(&key.id, pool_err);
+                        // Family-scoped 429 writeback: an upstream quota reset
+                        // records the family group's exhaustion immediately, so
+                        // the pre-exclusion ledger self-heals between keepalive
+                        // refreshes instead of waiting for the next probe
+                        // (ADR 2026-10-04-antigravity-group-quota-aware-scheduling).
+                        if key.is_antigravity() {
+                            if let (Some(fam), Some(reset)) = (quota_family, quota_reset) {
+                                let reset_at = chrono::Utc::now()
+                                    + chrono::Duration::from_std(reset)
+                                        .unwrap_or(chrono::Duration::hours(6));
+                                key.set_family_quota_exhausted(fam, reset_at);
+                            }
+                        }
                         // Quota exhaustion closes the window: never retry the
                         // same key in-request, let the pool fail over / fail fast.
                         if !is_quota {
@@ -1867,7 +1906,14 @@ impl UpstreamExecutor {
                 .and_then(|first| first.get("content").and_then(|c| c.as_str()))
                 .and_then(crate::pool::hot_cache::PrefixFingerprint::compute)
                 .map(|fp| fp.as_u64());
-            let key = match self.pool.select_key_with_affinity(affinity_seed, &attempted_keys, self.rate_limits.as_ref()) {
+            // Antigravity quota-group aware selection: the requested model's
+            // family decides which quota group (Gemini vs Claude/GPT) must have
+            // headroom for this key to be schedulable.
+            let quota_family = body
+                .get("model")
+                .and_then(|m| m.as_str())
+                .and_then(crate::pool::entry::classify_quota_family);
+            let key = match self.pool.select_key_with_affinity_for_family(affinity_seed, &attempted_keys, self.rate_limits.as_ref(), quota_family) {
                 Ok(k) => k,
                 Err(e) => {
                     // Full-pool exhaustion: when window-shaped (per-minute/quota,
@@ -1878,6 +1924,21 @@ impl UpstreamExecutor {
                         .await
                     {
                         continue;
+                    }
+                    // Honest failure kind after the rescue wait (review
+                    // 2026-10-04): family/quota boundaries surface as
+                    // QuotaExhausted; short-window budget exhaustion as
+                    // RateLimitExceeded with the real refill hint — never the
+                    // misleading generic Internal that downstream reads as
+                    // "gateway did attempt upstream" (it did not, for these).
+                    if attempt > 0 {
+                        if self.pool.any_key_quota_cooldown() || self.pool.any_key_family_exhausted_any() {
+                            last_kind = GatewayErrorKind::QuotaExhausted;
+                        } else if self.pool.exhausted_by_window_with_limits(self.rate_limits.as_ref()) {
+                            last_kind = GatewayErrorKind::RateLimitExceeded {
+                                retry_after: self.pool.window_refill_in_with_limits(self.rate_limits.as_ref()),
+                            };
+                        }
                     }
                     // First-attempt pool exhaustion surfaces structurally so
                     // callers never string-match on the aggregated message.
@@ -2004,7 +2065,24 @@ impl UpstreamExecutor {
                             _ => None,
                         };
                         let is_quota = matches!(&pool_err, PoolErrorType::QuotaExhausted { .. });
+                        let quota_reset = match &pool_err {
+                            PoolErrorType::QuotaExhausted { retry_after } => *retry_after,
+                            _ => None,
+                        };
                         self.pool.record_error(&key.id, pool_err);
+                        // Family-scoped 429 writeback: an upstream quota reset
+                        // records the family group's exhaustion immediately, so
+                        // the pre-exclusion ledger self-heals between keepalive
+                        // refreshes instead of waiting for the next probe
+                        // (ADR 2026-10-04-antigravity-group-quota-aware-scheduling).
+                        if key.is_antigravity() {
+                            if let (Some(fam), Some(reset)) = (quota_family, quota_reset) {
+                                let reset_at = chrono::Utc::now()
+                                    + chrono::Duration::from_std(reset)
+                                        .unwrap_or(chrono::Duration::hours(6));
+                                key.set_family_quota_exhausted(fam, reset_at);
+                            }
+                        }
                         // Quota exhaustion closes the window: never retry the
                         // same key in-request, let the pool fail over / fail fast.
                         if !is_quota {

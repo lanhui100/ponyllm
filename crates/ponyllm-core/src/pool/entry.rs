@@ -1,8 +1,10 @@
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
+use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
-use crate::pool::antigravity::AntigravityTokenManager;
+use crate::pool::antigravity::{AntigravityTokenManager, QuotaSummaryGroup};
 
 /// Process-wide jitter counter: mixed with wall-clock nanos so concurrent
 /// instances and synchronized retries desynchronize (B1). Not cryptographic,
@@ -95,6 +97,56 @@ impl CooldownReason {
     }
 }
 
+/// Model family a request belongs to, for Antigravity quota-group aware
+/// scheduling. Antigravity exposes *group* buckets (e.g. "Gemini Models" vs
+/// "Claude and GPT models"): a key whose Gemini weekly bucket is exhausted can
+/// still serve Claude/GPT traffic, so exhaustion must be judged per family
+/// instead of per key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuotaFamily {
+    Gemini,
+    ThirdParty,
+}
+
+/// Classify a client-requested model into an Antigravity quota family.
+/// `None` = unknown family: the key-selection filter stays permissive (today's
+/// behavior), so non-Antigravity providers and unclassified models are never
+/// accidentally starved.
+pub fn classify_quota_family(model: &str) -> Option<QuotaFamily> {
+    let m = model.to_ascii_lowercase();
+    if m.starts_with("gemini") {
+        Some(QuotaFamily::Gemini)
+    } else if m.starts_with("claude") || m.starts_with("gpt") || m.contains("oss") {
+        Some(QuotaFamily::ThirdParty)
+    } else {
+        None
+    }
+}
+
+/// Conservative reset horizon when an exhausted quota bucket advertises no
+/// `reset_time`: far enough to stop the 429 storm, short enough that a stale
+/// verdict self-expires and never over-blocks past a real recovery.
+const DEFAULT_EXHAUSTED_RESET_FALLBACK_HOURS: i64 = 6;
+
+fn group_matches_family(name: &str, family: QuotaFamily) -> bool {
+    let n = name.to_ascii_lowercase();
+    match family {
+        QuotaFamily::Gemini => n.contains("gemini"),
+        QuotaFamily::ThirdParty => {
+            n.contains("claude") || n.contains("gpt") || n.contains("3p") || n.contains("third")
+        }
+    }
+}
+
+/// Canonical ledger key for a family, used by the request-path 429 writeback
+/// (`set_family_quota_exhausted`) which has no upstream group display_name.
+fn family_group_key(family: QuotaFamily) -> &'static str {
+    match family {
+        QuotaFamily::Gemini => "Gemini Models",
+        QuotaFamily::ThirdParty => "Claude and GPT models",
+    }
+}
+
 #[derive(Debug)]
 pub struct KeyStats {
     pub total_requests: AtomicU64,
@@ -175,6 +227,12 @@ pub struct ApiKeyEntry {
     /// by the executor for attempt/success accounting (M1/M2, ADR
     /// `2026-09-30-unified-quota-metering-governance-kernel`).
     pub short_meter: Arc<crate::pool::meter::ShortWindowMeter>,
+    /// Antigravity quota-group exhaustion ledger: group display_name → wall-clock
+    /// reset of its (exhausted) weekly bucket. Kept separate from the key-level
+    /// cooldown because exhaustion is *family-scoped*: a key with Gemini weekly
+    /// exhausted can still serve Claude/GPT and must stay schedulable for those
+    /// requests (ADR `2026-10-04-antigravity-group-quota-aware-scheduling`).
+    pub quota_group_exhausted: Arc<RwLock<HashMap<String, DateTime<Utc>>>>,
 }
 
 // Manual Debug: `#[derive(Debug)]` would print `api_key` verbatim into
@@ -205,6 +263,7 @@ impl ApiKeyEntry {
             stats: KeyStats::default(),
             usage_tracker: Arc::new(crate::pool::usage::KeyUsageTracker::new()),
             short_meter: Arc::new(crate::pool::meter::ShortWindowMeter::new()),
+            quota_group_exhausted: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -234,6 +293,7 @@ impl ApiKeyEntry {
             stats: KeyStats::default(),
             usage_tracker: Arc::new(crate::pool::usage::KeyUsageTracker::new()),
             short_meter: Arc::new(crate::pool::meter::ShortWindowMeter::new()),
+            quota_group_exhausted: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -295,6 +355,82 @@ impl ApiKeyEntry {
         } else {
             KeyState::Active
         }
+    }
+
+    /// Record Antigravity quota-group bucket exhaustion into the family-scoped
+    /// ledger. A group is exhausted when ANY of its window buckets (weekly or
+    /// 5h/individual — the incident 429 "Individual quota reached ... Resets
+    /// in 3h56m" is exactly the individual class) reads `remaining_fraction
+    /// <= 0.0`; the group stays blocked for that family until the farthest
+    /// reset. A bucket without `reset_time` falls back to a conservative
+    /// horizon so a missing field never re-opens the storm. Everything else is
+    /// cleared so recovered groups become schedulable immediately.
+    pub fn apply_quota_groups(&self, groups: Option<&[QuotaSummaryGroup]>, now: DateTime<Utc>) {
+        let mut ledger = self.quota_group_exhausted.write();
+        // Drop entries whose reset has already passed (stale verdicts).
+        ledger.retain(|_, reset| *reset > now);
+        match groups {
+            None => {}
+            Some(groups) => {
+                for g in groups {
+                    let mut exhausted_reset: Option<DateTime<Utc>> = None;
+                    for b in &g.buckets {
+                        if b.remaining_fraction <= 0.0 {
+                            let reset = b.reset_time.unwrap_or_else(|| {
+                                now + chrono::Duration::hours(DEFAULT_EXHAUSTED_RESET_FALLBACK_HOURS)
+                            });
+                            exhausted_reset = Some(match exhausted_reset {
+                                Some(cur) => cur.max(reset),
+                                None => reset,
+                            });
+                        }
+                    }
+                    if let Some(reset) = exhausted_reset {
+                        if reset > now {
+                            ledger.insert(g.display_name.clone(), reset);
+                            continue;
+                        }
+                    }
+                    ledger.remove(&g.display_name);
+                }
+            }
+        }
+    }
+
+    /// Request-path 429 writeback (ADR
+    /// `2026-10-04-antigravity-group-quota-aware-scheduling`): an upstream
+    /// quota rejection for a known family records the family group's reset
+    /// directly, so the pre-exclusion ledger self-heals between keepalive
+    /// refreshes instead of waiting for the next probe.
+    pub fn set_family_quota_exhausted(&self, family: QuotaFamily, reset_at: DateTime<Utc>) {
+        if reset_at <= Utc::now() {
+            return;
+        }
+        self.quota_group_exhausted
+            .write()
+            .insert(family_group_key(family).to_string(), reset_at);
+    }
+
+    /// Whether this key is currently group-exhausted for the given family:
+    /// true only when a matching group has an unexpired weekly-exhaustion reset.
+    /// `None` (unknown family / non-Antigravity provider) never filters.
+    pub fn quota_group_exhausted_for(&self, family: Option<QuotaFamily>, now: DateTime<Utc>) -> bool {
+        let Some(family) = family else { return false };
+        let ledger = self.quota_group_exhausted.read();
+        ledger
+            .iter()
+            .any(|(name, reset)| *reset > now && group_matches_family(name, family))
+    }
+
+    /// Snapshot of the group-exhaustion ledger for runtime-state inheritance
+    /// across pool rebuilds (keeps the pre-computed verdict on hot reload).
+    pub fn quota_group_exhaustions(&self) -> HashMap<String, DateTime<Utc>> {
+        self.quota_group_exhausted.read().clone()
+    }
+
+    /// Restore a group-exhaustion ledger (from [`Self::quota_group_exhaustions`]).
+    pub fn restore_quota_group_exhaustions(&self, ledger: HashMap<String, DateTime<Utc>>) {
+        *self.quota_group_exhausted.write() = ledger;
     }
 
     /// Record a successful request

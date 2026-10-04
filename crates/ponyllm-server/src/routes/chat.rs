@@ -1203,6 +1203,10 @@ pub(crate) fn retry_unlock_hint(
     match kind {
         GatewayErrorKind::RateLimitExceeded { .. } | GatewayErrorKind::QuotaExhausted => {
             pool_longest_unlock(pool, limits)
+                // Family-quota boundary: keys stay Active (pre-excluded, not
+                // cooled), so cooldown-based unlocks are empty — the honest
+                // hint is the earliest family group reset (review 2026-10-04).
+                .or_else(|| pool.earliest_family_reset_any())
         }
         GatewayErrorKind::LockContention => {
             // Under cross-replica lock contention, the key is healthy (not cooled down),
