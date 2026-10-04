@@ -14,6 +14,14 @@ static JITTER_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// garbled or hostile upstream reset hint.
 const MAX_COOLDOWN: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
+/// Freeze window for upstream account/product-eligibility 403s (e.g. Antigravity
+/// "Your current account is not eligible for Gemini Code Assist for
+/// individuals"): the account cannot use the product until its upstream status
+/// changes. Longer than any quota window so the pool routes around the account
+/// for days instead of hammering it every 60s (the pre-freeze behavior that
+/// exhausted whole pools mid-request and interrupted agent runs).
+const ELIGIBILITY_FREEZE: Duration = Duration::from_secs(3 * 24 * 60 * 60);
+
 fn backoff_jitter_millis(spread: u64) -> u64 {
     let n = JITTER_COUNTER.fetch_add(1, Ordering::Relaxed);
     let nanos = std::time::SystemTime::now()
@@ -47,6 +55,11 @@ pub enum PoolErrorType {
     /// Google 账号需要人工验证（403 VALIDATION_REQUIRED）：永久隔离，
     /// 等人工完成验证/重新授权后恢复；绝不能靠等待额度窗口自动恢复。
     AccountValidationRequired,
+    /// 上游账号/产品资格类 403（如 Antigravity Gemini Code Assist
+    /// "Your current account is not eligible for ..."）：账号当前无该产品资格，
+    /// 既非瞬态也非永久——长冷冻（数日）后由调度自动路由到池内其它账号，
+    /// 请求继续、agent 不中断；账号不摘除、不永久禁用。
+    AccountEligibility { reason: Option<String> },
     ServerError,
     NetworkError,
 }
@@ -64,6 +77,22 @@ pub enum CooldownReason {
     RateLimit,
     /// Server/network fault or an operator-administered cooldown.
     Server,
+    /// Upstream account/product-eligibility rejection (403 "not eligible for").
+    /// The account is frozen for days; only an upstream status change revives it.
+    Eligibility,
+}
+
+impl CooldownReason {
+    /// Stable wire name for admin/observability surfaces. The web pool matrix
+    /// keys off `"eligibility"` to render a long-frozen account in red.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            CooldownReason::Quota => "quota",
+            CooldownReason::RateLimit => "rate_limit",
+            CooldownReason::Server => "server",
+            CooldownReason::Eligibility => "eligibility",
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -84,6 +113,13 @@ pub struct KeyStats {
     /// schedulable key left.
     pub cooldown_reason: RwLock<Option<CooldownReason>>,
     pub disabled_reason: RwLock<Option<String>>,
+    /// Human-readable reason for a *hard cooldown* that is not a permanent
+    /// disable — currently the upstream account/product-eligibility message.
+    /// Kept separate from `disabled_reason` because `current_state()` treats
+    /// a non-None `disabled_reason` as permanently Disabled, while an
+    /// eligibility freeze must stay `CoolingDown` and auto-recover when the
+    /// cooldown expires.
+    pub error_reason: RwLock<Option<String>>,
 }
 
 impl Default for KeyStats {
@@ -98,6 +134,7 @@ impl Default for KeyStats {
             cooldown_reset_at: RwLock::new(None),
             cooldown_reason: RwLock::new(None),
             disabled_reason: RwLock::new(None),
+            error_reason: RwLock::new(None),
         }
     }
 }
@@ -249,6 +286,7 @@ impl ApiKeyEntry {
                 *cd_write = None;
                 *self.stats.cooldown_reset_at.write() = None;
                 *self.stats.cooldown_reason.write() = None;
+                *self.stats.error_reason.write() = None;
                 self.stats.consecutive_failures.store(0, Ordering::SeqCst);
                 KeyState::Active
             } else {
@@ -277,6 +315,7 @@ impl ApiKeyEntry {
         *cd = None;
         *self.stats.cooldown_reset_at.write() = None;
         *self.stats.cooldown_reason.write() = None;
+        *self.stats.error_reason.write() = None;
         self.stats.consecutive_failures.store(0, Ordering::SeqCst);
     }
 
@@ -320,6 +359,29 @@ impl ApiKeyEntry {
     /// Concrete reason why the key is disabled, if permanently isolated.
     pub fn disabled_reason(&self) -> Option<String> {
         self.stats.disabled_reason.read().clone()
+    }
+
+    /// Raw stored hard-error message (`error_reason`), regardless of current
+    /// state gating. Used by pool-level state inheritance on config rebuilds.
+    pub fn raw_error_reason(&self) -> Option<String> {
+        self.stats.error_reason.read().clone()
+    }
+
+    /// Human-readable reason for a *hard* non-active state: an upstream
+    /// eligibility freeze (cooldown reason `Eligibility`) or a permanent
+    /// disable. `None` for soft cooldowns (quota / rate-limit / server).
+    pub fn error_reason(&self) -> Option<String> {
+        let hard = self.current_state() == KeyState::Disabled
+            || matches!(self.cooldown_reason(), Some(CooldownReason::Eligibility));
+        if hard {
+            if matches!(self.cooldown_reason(), Some(CooldownReason::Eligibility)) {
+                self.stats.error_reason.read().clone()
+            } else {
+                self.disabled_reason()
+            }
+        } else {
+            None
+        }
     }
 
     /// Apply a cooldown, keeping the monotonic deadline and its wall-clock
@@ -368,6 +430,17 @@ impl ApiKeyEntry {
         self.stats.failed_requests.fetch_add(1, Ordering::Relaxed);
         let consecutive = self.stats.consecutive_failures.fetch_add(1, Ordering::SeqCst) + 1;
 
+        // A key already in a 3-day eligibility freeze stays frozen with its
+        // calling reason: only an `AccountEligibility` (re-)proof may refresh
+        // the message. Any other error type (a stray quota/rate-limit/server
+        // hit racing an in-flight request or a probe) must not downgrade the
+        // freeze's `cooldown_reason`/`error_reason` — otherwise the web red
+        // badge loses the reason and the operator cannot tell eligibility
+        // apart from a soft cooldown. The pending cooldown deadline is still
+        // extended (set_cooldown keeps the max), never shortened.
+        let frozen_eligibility =
+            matches!(self.cooldown_reason(), Some(CooldownReason::Eligibility));
+
         match err_type {
             PoolErrorType::RateLimit { retry_after } => {
                 let duration = match retry_after {
@@ -387,7 +460,9 @@ impl ApiKeyEntry {
                     }
                 };
                 self.set_cooldown(duration);
-                *self.stats.cooldown_reason.write() = Some(CooldownReason::RateLimit);
+                if !frozen_eligibility {
+                    *self.stats.cooldown_reason.write() = Some(CooldownReason::RateLimit);
+                }
             }
             PoolErrorType::QuotaExhausted { retry_after } => {
                 // Quota exhaustion is transient by nature (real quota
@@ -397,11 +472,33 @@ impl ApiKeyEntry {
                 // available; the 15m default is a conservative fallback.
                 let duration = retry_after.unwrap_or(Duration::from_secs(15 * 60));
                 self.set_cooldown(duration);
-                *self.stats.cooldown_reason.write() = Some(CooldownReason::Quota);
+                if !frozen_eligibility {
+                    *self.stats.cooldown_reason.write() = Some(CooldownReason::Quota);
+                }
             }
             PoolErrorType::AuthInvalid { reason } => {
                 let msg = reason.unwrap_or_else(|| "Authentication failed (invalid key)".to_string());
-                *self.stats.disabled_reason.write() = Some(msg);
+                if !frozen_eligibility {
+                    *self.stats.disabled_reason.write() = Some(msg);
+                }
+            }
+            PoolErrorType::AccountEligibility { reason } => {
+                // Account/product-eligibility rejection: not a 60s blip and not
+                // a permanent isolate. Freeze for days so scheduling routes
+                // around the account; the upstream status change is the only
+                // thing that revives it. The (bounded) upstream message is
+                // stored in `error_reason` (NOT `disabled_reason`, which would
+                // flip the state to permanent Disabled) so admin/observability
+                // can render the exact reason in red.
+                let msg = reason.unwrap_or_else(|| {
+                    "Account not eligible for the requested product (upstream 403)".to_string()
+                });
+                // Bound the stored reason: upstream bodies can be huge / hostile
+                // (mirrors the request-path MAX_UPSTREAM_ERROR_BYTES backstop).
+                let bounded = truncate_reason(&msg);
+                self.set_cooldown(ELIGIBILITY_FREEZE);
+                *self.stats.cooldown_reason.write() = Some(CooldownReason::Eligibility);
+                *self.stats.error_reason.write() = Some(bounded);
             }
             PoolErrorType::PolicyViolation => {
                 *self.stats.disabled_reason.write() = Some("Account policy violation / Terms of Service suspension (permanent isolate)".to_string());
@@ -414,9 +511,23 @@ impl ApiKeyEntry {
                     let exp = (consecutive as u32).saturating_sub(3);
                     let secs = (1u64.saturating_mul(2u64.saturating_pow(exp))).min(30);
                     self.set_cooldown(Duration::from_secs(secs));
-                    *self.stats.cooldown_reason.write() = Some(CooldownReason::Server);
+                    if !frozen_eligibility {
+                        *self.stats.cooldown_reason.write() = Some(CooldownReason::Server);
+                    }
                 }
             }
         }
     }
+}
+
+/// Bound a stored upstream reason (eligibility message) to a sane size for
+/// memory / admin payload safety. Mirrors the request-path backstop
+/// (`MAX_UPSTREAM_ERROR_BYTES`) and the web-side display truncation.
+fn truncate_reason(msg: &str) -> String {
+    const MAX_REASON_CHARS: usize = 2048;
+    if msg.chars().count() <= MAX_REASON_CHARS {
+        return msg.to_string();
+    }
+    let trimmed: String = msg.chars().take(MAX_REASON_CHARS).collect();
+    format!("{}…(truncated)", trimmed)
 }

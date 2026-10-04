@@ -148,6 +148,10 @@ export function isProbeHardFailure(r?: KeyTestView | null): boolean {
     combined.includes('unauthorized') ||
     combined.includes('invalid key') ||
     combined.includes('invalid_api_key') ||
+    // 上游资格受限（RESTRICTED_AGE / "not eligible for"）：硬信号，
+    // 冻结数日、需上游状态变化才恢复——与 quota/rate-limit 软冷却区分。
+    combined.includes('eligibility') ||
+    combined.includes('not eligible') ||
     /\b401\b/.test(combined)
   );
 }

@@ -192,6 +192,15 @@ function cooldownResetHint(k: KeyView): string {
 }
 
 function cooldownResetTooltip(k: KeyView): string {
+  if (k.cooldown_reason === 'eligibility') {
+    const label = formatCooldownDuration(cooldownRemainingSecs(k));
+    const abs = k.cooldown_reset_at ? new Date(k.cooldown_reset_at).toLocaleString() : '';
+    const why = (k.error_message || '上游判定账号无该产品资格（not eligible）').slice(0, 300);
+    const when = label
+      ? `约 ${label} 后自动解冻`
+      : abs ? `预计 ${abs} 自动解冻` : '冻结数日后到期，等待上游状态变化';
+    return `上游资格受限（not eligible），账号被冻结跳过，请求自动路由到其它账号。${when}。\n原因: ${why}`;
+  }
   const label = formatCooldownDuration(cooldownRemainingSecs(k));
   const abs = k.cooldown_reset_at ? new Date(k.cooldown_reset_at).toLocaleString() : '';
   if (label && abs) {
@@ -670,10 +679,10 @@ async function handleRefreshAllQuotas() {
 
                 <UiBadge
                   v-else-if="k.state === 'cooling_down'"
-                  variant="warning"
+                  :variant="k.cooldown_reason === 'eligibility' ? 'destructive' : 'warning'"
                   :data-testid="`key-state-badge-${k.id}`"
                 >
-                  {{ formatKeyState(k.state) }}
+                  {{ k.cooldown_reason === 'eligibility' ? '资格受限' : formatKeyState(k.state) }}
                 </UiBadge>
                 <!-- 冷冻徽标后直出上游告知的重置/解冻时间：冷冻期内不再向该密钥发请求 -->
                 <UiTooltip
@@ -681,7 +690,8 @@ async function handleRefreshAllQuotas() {
                   :content="cooldownResetTooltip(k)"
                 >
                   <span
-                    class="text-[11px] font-medium text-amber-700/90 whitespace-nowrap select-none"
+                    class="text-[11px] font-medium whitespace-nowrap select-none"
+                    :class="k.cooldown_reason === 'eligibility' ? 'text-rose-700/90' : 'text-amber-700/90'"
                     data-testid="key-cooldown-reset"
                   >
                     {{ cooldownResetHint(k) }}

@@ -366,10 +366,38 @@ pub fn is_account_validation_required(err_body: &str) -> bool {
         .any(|sig| lower.contains(sig))
 }
 
+/// Google 账号/产品资格阻塞签名（403 "not eligible for"，reason=RESTRICTED_AGE）：
+/// 账号当前被上游判定无某产品资格（观测例：Gemini Code Assist "must be 18 years
+/// old or older"）。刻意收窄到**账号级实体锚点**——只有"your (current) account is
+/// not eligible"或上游自己的 `restricted_age` 状态码才算数；模型/项目级或
+/// prompt 级 "not eligible" 措辞（无账号实体）若误判会把整个账号冻 3 天，
+/// 让其它可服务模型停摆。与 VALIDATION_REQUIRED（需人工验证）不同：资格问题
+/// 没有"完成验证"动作，只能等上游状态变化，故走长冷冻而非永久隔离。
+const ACCOUNT_ELIGIBILITY_SIGNATURES: &[&str] = &[
+    "your current account is not eligible for",
+    "your account is not eligible for",
+    "your current account is not eligible",
+    "restricted_age",
+];
+
+pub fn is_account_eligibility_revoked(err_body: &str) -> bool {
+    let lower = err_body.to_lowercase();
+    ACCOUNT_ELIGIBILITY_SIGNATURES
+        .iter()
+        .any(|sig| lower.contains(sig))
+}
+
 /// Classify a 403 body into (gateway kind, pool action).
 ///
 /// - Exact ToS death signature → permanent `PolicyViolation` isolate
 ///   (still guarded by the pool mass-disable breaker).
+/// - Account/product-eligibility signature (`"not eligible for"` /
+///   `RESTRICTED_AGE`, account-anchored) → long `AccountEligibility` freeze:
+///   the account is frozen for days and the pool routes around it (see
+///   2026-10-04 upstream-eligibility-403-freeze ADR). Checked BEFORE the
+///   validation branch: Antigravity sometimes returns the same "not eligible"
+///   condition with `"status":"VALIDATION_REQUIRED"` (observed externally),
+///   and freezing is self-healing while permanent isolation is not.
 /// - Account-validation signature (`VALIDATION_REQUIRED`) → permanent
 ///   `AccountValidationRequired` isolate: needs human verification, never
 ///   auto-recovers by waiting for a quota window.
@@ -378,13 +406,26 @@ pub fn is_account_validation_required(err_body: &str) -> bool {
 ///   and throttling clears on its own (P0-2).
 /// - Unknown 403 → 60s cooling + warning. A new Google wording, locale
 ///   variant, or WAF flap must never burn a credential on first sight.
-fn classify_forbidden(
+pub fn classify_forbidden(
     err_body: &str,
     retry_after: Option<Duration>,
 ) -> (GatewayErrorKind, PoolErrorType) {
     let lower = err_body.to_lowercase();
     if is_tos_account_death(&lower) {
         (GatewayErrorKind::AuthInvalid, PoolErrorType::PolicyViolation)
+    } else if is_account_eligibility_revoked(err_body) {
+        // Account/product-eligibility 403 (observed: Gemini Code Assist
+        // "Your current account is not eligible for ..." on Antigravity,
+        // reason=RESTRICTED_AGE). Not a 60s blip (that hammered the account
+        // every minute and exhausted whole pools mid-request) and not a
+        // permanent isolate: freeze the account for days so scheduling routes
+        // around it and the agent run keeps going on the next available key.
+        (
+            GatewayErrorKind::AuthInvalid,
+            PoolErrorType::AccountEligibility {
+                reason: Some(err_body.to_string()),
+            },
+        )
     } else if is_account_validation_required(err_body) {
         (
             GatewayErrorKind::AuthInvalid,
@@ -451,6 +492,32 @@ fn classify_forbidden(
                 retry_after: Some(Duration::from_secs(60)),
             },
         )
+    }
+}
+
+/// Classify a probe-obtained upstream failure into the SAME pool action the
+/// request path would apply for *authoritative account signals*, so backend
+/// probes (keepalive quota refresh, admin refresh/dial-test) freeze an
+/// eligibility-rejected account just like a live request would.
+///
+/// Deliberately narrower than the request path:
+/// - Only **deterministic hard signals** are acted on: `AccountEligibility`
+///   (long freeze), `AccountValidationRequired` / `PolicyViolation` (isolate).
+/// - Soft signals (quota/rate-limit cooldowns) and the unknown-403 60s
+///   fallback return `None`: a probe targeting `fetchAvailableModels` must
+///   never cool a healthy key over a WAF/HTML/scope 403 or a quota-shaped
+///   blip — probes are observability, not the traffic path (the observed
+///   2026-10-04 `quota_probe_failed` was exactly such a transport misread).
+pub fn classify_probe_failure(status: u16, body: &str) -> Option<PoolErrorType> {
+    if status != 403 {
+        return None;
+    }
+    let (_, pool_err) = classify_forbidden(body, None);
+    match &pool_err {
+        PoolErrorType::AccountEligibility { .. }
+        | PoolErrorType::AccountValidationRequired
+        | PoolErrorType::PolicyViolation => Some(pool_err),
+        _ => None,
     }
 }
 
@@ -2117,6 +2184,132 @@ mod session_header_tests {
                 .contains("VALIDATION_REQUIRED"),
             "disabled reason must name the verification gate"
         );
+    }
+
+    #[test]
+    fn forbidden_eligibility_freezes_for_days_and_keeps_pool_alive() {
+        // Observed 2026-10-04 on Antigravity: chat completions for
+        // gemini-3.8-flash-high returned this 403 body. It must freeze the
+        // account for days (not a 60s blip that hammered the account every
+        // minute) while leaving the rest of the pool schedulable.
+        let body = r#"{
+            "error": {
+              "code": 403,
+              "message": "Your current account is not eligible for Gemini Code Assist for individuals. To use Gemini Code Assist for individuals you must be 18 years old or older. If you think you are receiving this message in error, please ensure you have verified your age and try to log in again.",
+              "status": "PERMISSION_DENIED"
+            }
+        }"#;
+        assert!(is_account_eligibility_revoked(body), "body must be detected: {body}");
+        let (kind, pool_err) = classify_forbidden(body, None);
+        assert_eq!(kind, GatewayErrorKind::AuthInvalid, "body: {body}");
+        match &pool_err {
+            PoolErrorType::AccountEligibility { reason } => {
+                let reason = reason.as_deref().unwrap_or_default();
+                assert!(
+                    reason.contains("not eligible"),
+                    "reason must carry the upstream message, got: {reason}"
+                );
+            }
+            other => panic!("expected AccountEligibility freeze, got {other:?}"),
+        }
+        // Pool-level effect: days-long cooling (not disabled, not 60s), with
+        // the eligibility reason exposed for the admin/web red badge.
+        let entry = ApiKeyEntry::new("k1", "sk-1", 1, 10);
+        entry.record_failure(pool_err);
+        assert_eq!(entry.current_state(), KeyState::CoolingDown);
+        assert_eq!(
+            entry.cooldown_reason(),
+            Some(crate::pool::entry::CooldownReason::Eligibility)
+        );
+        let remaining = entry.cooldown_remaining().expect("must still be cooling");
+        assert!(
+            remaining >= Duration::from_secs(3 * 24 * 60 * 60) - Duration::from_secs(60),
+            "freeze must be ~3 days, got {remaining:?}"
+        );
+        assert!(
+            entry
+                .error_reason()
+                .unwrap_or_default()
+                .contains("not eligible"),
+            "error_reason must expose the upstream message"
+        );
+    }
+
+    #[test]
+    fn probe_failure_classifies_403_eligibility_but_ignores_transport_blips() {
+        // 探针路径与请求路径共用"确定性硬信号"分类：资格 403 → 给出长冷冻
+        // 动作，由调用方 pool.record_error 落地（keepalive / 管理面刷新 / 拨测）。
+        assert!(matches!(
+            classify_probe_failure(
+                403,
+                "Your current account is not eligible for Gemini Code Assist for individuals."
+            ),
+            Some(PoolErrorType::AccountEligibility { .. })
+        ));
+        // 网络超时（status=0 / 5xx / 429）→ None：探针不得把瞬时抽风
+        // 冻成账号问题（2026-10-04 的 quota_probe_failed 正是网络超时误伤）。
+        assert!(classify_probe_failure(0, "").is_none());
+        assert!(classify_probe_failure(503, "upstream oops").is_none());
+        assert!(classify_probe_failure(429, "rate limit").is_none());
+        // 软信号（quota 措辞）与 unknown-403 兜底 → None：探针只认确定性
+        // 硬信号，绝不因 WAF/HTML/scope 类 403 给健康 key 套冷却。
+        assert!(classify_probe_failure(403, "RESOURCE_EXHAUSTED #3501 quota exceeded").is_none());
+        assert!(classify_probe_failure(403, "<html>Forbidden</html>").is_none());
+        // 其它权威 403 签名同样被探针路径采纳，与请求路径一致。
+        assert!(matches!(
+            classify_probe_failure(403, "Verify your account to continue."),
+            Some(PoolErrorType::AccountValidationRequired)
+        ));
+        assert!(matches!(
+            classify_probe_failure(403, "ACCOUNT_SUSPENDED terms of service violation"),
+            Some(PoolErrorType::PolicyViolation)
+        ));
+    }
+
+    #[test]
+    fn eligibility_403_with_validation_reason_still_freezes_not_isolates() {
+        // Antigravity 同一"not eligible"条件有两种 body 形态（观测：
+        // PERMISSION_DENIED；外部证据：VALIDATION_REQUIRED）。资格语义必须
+        // 优先——冷冻 3 天可自愈，永久隔离不可逆（ADR 决策）。
+        for body in [
+            r#"{"error":{"code":403,"message":"Your current account is not eligible for Gemini Code Assist for individuals.","status":"VALIDATION_REQUIRED"}}"#,
+            r#"{"error":{"code":403,"message":"Your current account is not eligible for Gemini Code Assist for individuals.","status":"PERMISSION_DENIED","reason":"RESTRICTED_AGE"}}"#,
+        ] {
+            let (kind, pool_err) = classify_forbidden(body, None);
+            assert_eq!(kind, GatewayErrorKind::AuthInvalid, "body: {body}");
+            assert!(
+                matches!(pool_err, PoolErrorType::AccountEligibility { .. }),
+                "eligibility must win over validation wording, got {pool_err:?} (body: {body})"
+            );
+            let entry = ApiKeyEntry::new("k1", "sk-1", 1, 10);
+            entry.record_failure(pool_err);
+            assert_eq!(
+                entry.current_state(),
+                KeyState::CoolingDown,
+                "eligibility freeze must NOT permanently isolate (body: {body})"
+            );
+        }
+    }
+
+    #[test]
+    fn model_level_not_eligible_wording_must_not_freeze_whole_account() {
+        // 无账号实体锚点的 "not eligible"（模型/项目级措辞）不得冻结整个
+        // 账号 3 天——Antigravity 池按账号共享凭证，误冻会停摆其它可服务模型。
+        for body in [
+            "Your project is not eligible for gemini-2.5-pro",
+            "Model gemini-2.5-pro is not eligible for this request",
+            "not eligible for gemini code assist",
+        ] {
+            assert!(
+                !is_account_eligibility_revoked(body),
+                "model-level wording must NOT match account eligibility: {body}"
+            );
+            let (_, pool_err) = classify_forbidden(body, None);
+            assert!(
+                !matches!(pool_err, PoolErrorType::AccountEligibility { .. }),
+                "must not freeze the account, got {pool_err:?} (body: {body})"
+            );
+        }
     }
 
     #[test]

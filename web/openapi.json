@@ -1848,6 +1848,13 @@
           "state"
         ],
         "properties": {
+          "cooldown_reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the key is cooling down, while it is: `rate_limit | quota | server\n| eligibility`. The web pool matrix keys off `eligibility` to render a\nlong-frozen account in red instead of the soft mint-green cooling."
+          },
           "cooldown_remaining_secs": {
             "type": [
               "integer",
@@ -1870,6 +1877,13 @@
               "null"
             ],
             "description": "Reason why the key was permanently disabled, if state is `disabled`."
+          },
+          "error_message": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Human-readable reason for a hard non-active state (upstream\neligibility freeze / permanent disable), while applicable."
           },
           "id": {
             "type": "string"
@@ -2381,6 +2395,13 @@
           "source"
         ],
         "properties": {
+          "cooldown_reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the key is cooling down, while it is: `rate_limit | quota | server\n| eligibility` (values come from `CooldownReason::as_str`)."
+          },
           "cooldown_remaining_secs": {
             "type": [
               "integer",
@@ -2403,6 +2424,13 @@
               "null"
             ],
             "description": "Reason why the key was permanently disabled, if state is `disabled`."
+          },
+          "error_message": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Human-readable reason for a hard non-active state (upstream\neligibility freeze / permanent disable), while applicable."
           },
           "key_id": {
             "type": "string"

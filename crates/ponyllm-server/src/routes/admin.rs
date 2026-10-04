@@ -254,6 +254,15 @@ pub struct KeyView {
     /// the Web badge show the upstream-advertised quota reset verbatim.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cooldown_reset_at: Option<String>,
+    /// Why the key is cooling down, while it is: `rate_limit | quota | server
+    /// | eligibility`. The web pool matrix keys off `eligibility` to render a
+    /// long-frozen account in red instead of the soft mint-green cooling.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cooldown_reason: Option<String>,
+    /// Human-readable reason for a hard non-active state (upstream
+    /// eligibility freeze / permanent disable), while applicable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<String>,
     /// Reason why the key was permanently disabled, if state is `disabled`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub disabled_reason: Option<String>,
@@ -631,6 +640,14 @@ pub struct QuotaKeyView {
     /// Wall-clock instant the key is expected to recover, RFC 3339 UTC.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cooldown_reset_at: Option<String>,
+    /// Why the key is cooling down, while it is: `rate_limit | quota | server
+    /// | eligibility` (values come from `CooldownReason::as_str`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cooldown_reason: Option<String>,
+    /// Human-readable reason for a hard non-active state (upstream
+    /// eligibility freeze / permanent disable), while applicable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<String>,
     /// Reason why the key was permanently disabled, if state is `disabled`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub disabled_reason: Option<String>,
@@ -730,6 +747,10 @@ async fn handle_admin_quota_inner(q: QuotaQuery, state: Arc<AppState>) -> Vec<Qu
             } else {
                 None
             };
+            let cooldown_reason = pool
+                .key_cooldown_reason(&id)
+                .map(|r| r.as_str().to_string());
+            let error_message = pool.key_error_reason(&id);
             let mut view = QuotaKeyView {
                 provider: provider.clone(),
                 key_id: id.clone(),
@@ -737,6 +758,8 @@ async fn handle_admin_quota_inner(q: QuotaQuery, state: Arc<AppState>) -> Vec<Qu
                 cooldown_remaining_secs: cooldown_remaining.map(|d| d.as_secs()),
                 cooldown_reset_at: cooldown_reset_at
                     .map(|t| chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339()),
+                cooldown_reason,
+                error_message,
                 disabled_reason,
                 source: "probe_only".to_string(),
                 schedulable,
@@ -933,11 +956,35 @@ async fn refresh_agy_quota(
         })
     }?;
     let probe_client = state.probe_http_client_for_provider(provider);
-    let snapshot = mgr
+    let snapshot = match mgr
         .with_client(&probe_client)
         .fetch_quota(Some(&base_url))
         .await
-        .ok()?;
+    {
+        Ok(s) => s,
+        Err(ponyllm_core::error::CoreError::UpstreamStatusError { status, body }) => {
+            // 探针撞到上游 403 时与请求路径同处理（资格类 → 长冷冻等）：
+            // 不能让探针把"账号资格受限"当瞬时网络故障忽略掉。
+            if let Some(pool_err) =
+                ponyllm_core::executor::classify_probe_failure(status.as_u16(), &body)
+            {
+                if let Some(pool) = state.pools.read().get(provider) {
+                    let preview: String =
+                        format!("{pool_err:?}").chars().take(300).collect();
+                    tracing::warn!(
+                        provider = %provider,
+                        key_id = %key_id,
+                        status = %status,
+                        error = %preview,
+                        "admin quota refresh probe hit upstream 403; applying the same pool action as the request path"
+                    );
+                    pool.record_error(key_id, pool_err);
+                }
+            }
+            return None;
+        }
+        Err(_) => return None,
+    };
     let mut items: Vec<AntigravityQuotaItemView> = Vec::new();
     let mut models: Vec<_> = snapshot.models.values().collect();
     models.sort_by_key(|m| &m.model_id);
@@ -1825,6 +1872,11 @@ pub async fn handle_admin_update_provider(
         for k in &updated_p.keys {
             new_pool.add_key(build_pool_entry(&state, &name, &updated_p, k));
         }
+        // Provider 编辑触发的整池重建同样必须继承运行时状态（进行中的资格
+        // 冻结/冷却及其原因），否则编辑一次 provider 即复活被冻结账号。
+        if let Some(old_pool) = state.pools.read().get(&name) {
+            new_pool.inherit_runtime_state(old_pool);
+        }
         state.pools.write().insert(name.clone(), new_pool);
     }
 
@@ -2665,6 +2717,10 @@ pub async fn handle_admin_keys(State(state): State<Arc<AppState>>) -> impl IntoR
             } else {
                 None
             };
+            let cooldown_reason = pool
+                .key_cooldown_reason(&id)
+                .map(|r| r.as_str().to_string());
+            let error_message = pool.key_error_reason(&id);
             views.push(KeyView {
                 provider: provider.clone(),
                 id,
@@ -2675,6 +2731,8 @@ pub async fn handle_admin_keys(State(state): State<Arc<AppState>>) -> impl IntoR
                 cooldown_remaining_secs: cooldown_remaining.map(|d| d.as_secs()),
                 cooldown_reset_at: cooldown_reset_at
                     .map(|t| chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339()),
+                cooldown_reason,
+                error_message,
                 disabled_reason,
                 usage,
             });
@@ -2873,17 +2931,10 @@ pub async fn handle_admin_update_key(
     }
 
     if let Some(old_pool) = old_pool_opt {
-        for old_entry in old_pool.snapshot_keys() {
-            if let Some(new_entry) = new_pool.snapshot_keys().into_iter().find(|k| k.id == old_entry.id) {
-                if let Some(reason) = old_entry.disabled_reason() {
-                    *new_entry.stats.disabled_reason.write() = Some(reason);
-                }
-                if let (Some(remaining), Some(reset_at)) = (old_entry.cooldown_remaining(), old_entry.cooldown_reset_at()) {
-                    new_entry.set_cooldown(remaining);
-                    *new_entry.stats.cooldown_reset_at.write() = Some(reset_at);
-                }
-            }
-        }
+        // Hot-rebuild runtime-state inheritance (cooldown + reason +
+        // disabled_reason + error_reason): a key edit inside a 3-day
+        // eligibility freeze must not revive the account mid-freeze.
+        new_pool.inherit_runtime_state(&old_pool);
     }
 
     state
@@ -2901,6 +2952,10 @@ pub async fn handle_admin_update_key(
     } else {
         None
     };
+    let cooldown_reason = new_pool
+        .key_cooldown_reason(&id)
+        .map(|r| r.as_str().to_string());
+    let error_message = new_pool.key_error_reason(&id);
 
     let view = KeyView {
         id: updated_key_sec.id,
@@ -2916,6 +2971,8 @@ pub async fn handle_admin_update_key(
         cooldown_remaining_secs: cooldown_remaining.map(|d| d.as_secs()),
         cooldown_reset_at: cooldown_reset_at
             .map(|t| chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339()),
+        cooldown_reason,
+        error_message,
         disabled_reason,
         usage: None,
     };
@@ -2986,7 +3043,10 @@ pub async fn handle_admin_delete_key(
     };
 
     // Hot-rebuild KeyPool with remaining keys (P0-4: same Antigravity
-    // branching as create-key, never a bare static entry).
+    // branching as create-key, never a bare static entry). Runtime state of
+    // the surviving keys (cooldown/reason/disabled/error_reason) is inherited
+    // too — deleting one key must not revive another account mid-freeze.
+    let old_pool_opt = state.pools.read().get(&target_provider_name).cloned();
     let new_pool = Arc::new(KeyPool::new(&target_provider_name, strat));
     if let Some(p_sec) = file.providers.get(&target_provider_name) {
         for k in &remaining_keys {
@@ -2996,6 +3056,9 @@ pub async fn handle_admin_delete_key(
         for k in &remaining_keys {
             new_pool.add_key(ApiKeyEntry::new(&k.id, &k.api_key, k.priority, k.weight));
         }
+    }
+    if let Some(old_pool) = old_pool_opt {
+        new_pool.inherit_runtime_state(&old_pool);
     }
     state
         .pools
@@ -3127,7 +3190,7 @@ pub async fn handle_admin_test_key(
                     .with_client(&probe_client)
                     .fetch_quota(Some(&base_url))
                     .await;
-                let (quota_view, quota_groups_view, quota_msg) = match quota_res {
+                let (quota_view, quota_groups_view, quota_msg, probe_error_code) = match quota_res {
                     Ok(snapshot) => {
                         let mut list = Vec::new();
                         let mut models: Vec<_> = snapshot.models.values().collect();
@@ -3227,9 +3290,19 @@ pub async fn handle_admin_test_key(
                                 // 周配额耗尽，强制将该 Key 设为冷却并记录解冻时间
                                 pool.set_key_cooldown(&key_sec.id, exhausted_dur);
                             } else if has_positive_quota {
-                                pool.clear_key_cooldown(&key_sec.id);
+                                // 拨测成功只清**瞬态**冷却（quota/rate_limit/
+                                // server）。资格冻结（Eligibility，3 天）只能
+                                // 自然到期或被新上游证据替换——quota 端点查的是
+                                // 用量快照，无法证明模型服务端点的资格状态；一次
+                                // "全部拨测"若把冻结账号集体复活，下一请求整池
+                                // 再次撞 403，重演 10-04 打空池事故。
+                                let frozen = pool.key_cooldown_reason(&key_sec.id)
+                                    == Some(ponyllm_core::pool::entry::CooldownReason::Eligibility);
+                                if !frozen {
+                                    pool.clear_key_cooldown(&key_sec.id);
+                                }
                                 let cleared = pool.clear_key_disabled(&key_sec.id);
-                                if cleared {
+                                if cleared && !frozen {
                                     tracing::info!(provider = %p_name, key_id = %key_sec.id, "Antigravity probe succeeded with quota; key restored to active");
                                 }
                             }
@@ -3239,9 +3312,51 @@ pub async fn handle_admin_test_key(
                             Some(list),
                             groups_view,
                             format!("probe ok (quota fetched for {} models)", snapshot.models.len()),
+                            None,
                         )
                     }
-                    Err(e) => (None, None, format!("quota fetch error: {}", e)),
+                                        Err(e) => {
+                        // 探针撞到上游 403 时与请求路径同处理（资格类 → 长冷冻
+                        // 等）：记录池动作 + 前端用 error_code 区分
+                        // `eligibility_frozen`，而不是笼统报 quota_probe_failed。
+                        let mut probe_error_code: Option<String> = None;
+                        if let ponyllm_core::error::CoreError::UpstreamStatusError { status, body } = &e {
+                            if let Some(pool_err) =
+                                ponyllm_core::executor::classify_probe_failure(status.as_u16(), body)
+                            {
+                                // 把确定性 403 类别映射为稳定 error_code，
+                                // 而非只特判 eligibility——policy/validation
+                                // 同样不能被笼统报成 quota_probe_failed。
+                                probe_error_code = Some(match &pool_err {
+                                    ponyllm_core::pool::PoolErrorType::AccountEligibility { .. } => {
+                                        "eligibility_frozen".to_string()
+                                    }
+                                    ponyllm_core::pool::PoolErrorType::AccountValidationRequired => {
+                                        "account_validation_required".to_string()
+                                    }
+                                    ponyllm_core::pool::PoolErrorType::PolicyViolation => {
+                                        "policy_violation".to_string()
+                                    }
+                                    _ => "quota_probe_failed".to_string(),
+                                });
+                                if let Some(pool) = state.pools.read().get(&p_name) {
+                                    let preview: String = format!("{pool_err:?}")
+                                        .chars()
+                                        .take(300)
+                                        .collect();
+                                    tracing::warn!(
+                                        provider = %p_name,
+                                        key_id = %key_sec.id,
+                                        status = %status,
+                                        error = %preview,
+                                        "dial-test probe hit upstream 403; applying the same pool action as the request path"
+                                    );
+                                    pool.record_error(&key_sec.id, pool_err);
+                                }
+                            }
+                        }
+                        (None, None, format!("quota fetch error: {}", e), probe_error_code)
+                    }
                 };
 
                 // quota 探测失败不能再包装成成功：否则前端会继续沿用
@@ -3252,7 +3367,9 @@ pub async fn handle_admin_test_key(
                     success: !quota_failed,
                     latency_ms,
                     http_status: if quota_failed { None } else { Some(200) },
-                    error_code: if is_validation {
+                    error_code: if let Some(c) = probe_error_code {
+                        Some(c)
+                    } else if is_validation {
                         Some("account_validation_required".to_string())
                     } else if quota_failed {
                         Some("quota_probe_failed".to_string())

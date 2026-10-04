@@ -9,6 +9,142 @@ describe('AntigravityPoolCard Component', () => {
   beforeEach(() => {
     clearQuotaProbedAt();
   });
+
+  it('renders upstream eligibility freeze as a red error cell, not mint-green cooling', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+
+    const keys: KeyView[] = [
+      {
+        id: 'ag-noteligible@gmail.com',
+        provider: 'antigravity',
+        masked_key: 'ya29.***',
+        state: 'cooling_down',
+        priority: 1,
+        weight: 10,
+        cooldown_remaining_secs: 3 * 24 * 3600, // ~3 days
+        cooldown_reason: 'eligibility',
+        error_message: 'Your current account is not eligible for Gemini Code Assist for individuals.',
+      },
+      {
+        id: 'ag-good@gmail.com',
+        provider: 'antigravity',
+        masked_key: 'ya29.***',
+        state: 'cooling_down',
+        priority: 2,
+        weight: 10,
+        cooldown_remaining_secs: 60,
+        // No cooldown_reason: soft quota/rate-limit cooling stays mint-green.
+      },
+    ];
+
+    const app = createApp(AntigravityPoolCard, {
+      keys,
+      keyTestResults: {},
+      adminWriteEnabled: true,
+    });
+    app.mount(container);
+    await nextTick();
+
+    const cells = container.querySelectorAll('[data-testid="slot-heatmap-cell"]');
+    expect(cells.length).toBe(2);
+
+    // Eligibility-frozen account: red error block.
+    expect(cells[0].className).toContain('bg-rose-600');
+
+    // Soft cooling account: mint-green cooling block (unchanged).
+    expect(cells[1].className).toContain('bg-[#a3e4a8]');
+
+    // Hover the eligibility cell: tooltip names the freeze and the upstream reason.
+    cells[0].dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 220));
+    await nextTick();
+    const tooltip = document.body.querySelector('[data-testid="ui-tooltip"]');
+    expect(tooltip).not.toBeNull();
+    const tooltipText = tooltip?.textContent ?? '';
+    expect(tooltipText).toContain('资格受限');
+    expect(tooltipText).toContain('not eligible');
+    expect(tooltipText).toContain('后解冻');
+
+    app.unmount();
+    document.body.removeChild(container);
+  });
+
+  it('keeps the full freeze tooltip for a dial-tested frozen account, and never shows stale red on an active key', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+
+    const keys: KeyView[] = [
+      {
+        id: 'ag-dial-tested@gmail.com',
+        provider: 'antigravity',
+        masked_key: 'ya29.***',
+        state: 'cooling_down',
+        priority: 1,
+        weight: 10,
+        cooldown_remaining_secs: 3 * 24 * 3600,
+        cooldown_reason: 'eligibility',
+        error_message: 'Your current account is not eligible for Gemini Code Assist for individuals.',
+      },
+      {
+        id: 'ag-stale-probe@gmail.com',
+        provider: 'antigravity',
+        masked_key: 'ya29.***',
+        state: 'active',
+        priority: 2,
+        weight: 10,
+      },
+    ];
+
+    const keyTestResults: Record<string, KeyTestView> = {
+      // 后端拨测已冻结并在 keyTestResults 持久化资格失败；state 也已是
+      // 冷却+资格 → 必须走"完整冻结文案"（含解冻倒计时），不是探测分支
+      // 的无倒计时短文案（review P1 回归）。
+      'ag-dial-tested@gmail.com': {
+        success: false,
+        latency_ms: 200,
+        message: 'quota fetch error: 403 Your current account is not eligible...',
+        error_code: 'eligibility_frozen',
+      },
+      // 仅陈旧探针证据而 state 已回 active：不得硬判红（冻结可能已解除）。
+      'ag-stale-probe@gmail.com': {
+        success: false,
+        latency_ms: 200,
+        message: 'quota fetch error: 403 not eligible for Gemini Code Assist',
+        error_code: 'eligibility_frozen',
+      },
+    };
+
+    const app = createApp(AntigravityPoolCard, {
+      keys,
+      keyTestResults,
+      adminWriteEnabled: true,
+    });
+    app.mount(container);
+    await nextTick();
+
+    const cells = container.querySelectorAll('[data-testid="slot-heatmap-cell"]');
+    expect(cells.length).toBe(2);
+
+    // Dial-tested frozen account: red + aria/文案含"已冻结跳过"与倒计时。
+    expect(cells[0].className).toContain('bg-rose-600');
+    expect(cells[0].getAttribute('aria-label')).toContain('资格受限');
+    cells[0].dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 220));
+    await nextTick();
+    const tooltip = document.body.querySelector('[data-testid="ui-tooltip"]');
+    const tooltipText = tooltip?.textContent ?? '';
+    expect(tooltipText).toContain('已冻结跳过');
+    expect(tooltipText).toContain('后解冻');
+
+    // Stale active key with a persisted eligibility probe failure: NOT red.
+    // The backend says this key is active again, so the 6h-old probe result
+    // must not paint a red "拒绝服务" block over a schedulable account.
+    expect(cells[1].className).not.toContain('bg-rose-600');
+
+    app.unmount();
+    document.body.removeChild(container);
+  });
   it('renders correctly with mixed active and cooling keys', async () => {
     const container = document.createElement('div');
     document.body.appendChild(container);

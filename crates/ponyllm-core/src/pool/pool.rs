@@ -567,6 +567,40 @@ impl KeyPool {
         })
     }
 
+    /// Copy the runtime state of matching key ids from a donor pool onto this
+    /// (freshly rebuilt) pool: permanent `disabled_reason`, the active cooldown
+    /// (remaining deadline + wall-clock reset), its `cooldown_reason` and the
+    /// hard-error message. Every config reload / admin rebuild path must call
+    /// this, otherwise a hot reload inside a 3-day eligibility freeze revives
+    /// the account and re-triggers the hammering the freeze exists to stop.
+    pub fn inherit_runtime_state(&self, donor: &KeyPool) {
+        let donors: HashMap<String, Arc<ApiKeyEntry>> = donor
+            .snapshot_keys()
+            .into_iter()
+            .map(|k| (k.id.clone(), k))
+            .collect();
+        for new_entry in self.snapshot_keys() {
+            let Some(old_entry) = donors.get(&new_entry.id) else {
+                continue;
+            };
+            if let Some(reason) = old_entry.disabled_reason() {
+                *new_entry.stats.disabled_reason.write() = Some(reason);
+            }
+            if let (Some(remaining), Some(reset_at)) =
+                (old_entry.cooldown_remaining(), old_entry.cooldown_reset_at())
+            {
+                new_entry.set_cooldown(remaining);
+                *new_entry.stats.cooldown_reset_at.write() = Some(reset_at);
+                if let Some(cd_reason) = old_entry.cooldown_reason() {
+                    *new_entry.stats.cooldown_reason.write() = Some(cd_reason);
+                }
+                if let Some(err_reason) = old_entry.raw_error_reason() {
+                    *new_entry.stats.error_reason.write() = Some(err_reason);
+                }
+            }
+        }
+    }
+
     /// Earliest unlock across cooling keys, for honest Retry-After.
     pub fn earliest_unlock(&self) -> Option<std::time::Duration> {
         let keys = self.keys.read();
@@ -588,6 +622,23 @@ impl KeyPool {
     pub fn key_disabled_reason(&self, key_id: &str) -> Option<String> {
         let keys = self.keys.read();
         keys.iter().find(|k| k.id == key_id).and_then(|k| k.disabled_reason())
+    }
+
+    /// Why a key is currently cooling down, when known (admin surface).
+    pub fn key_cooldown_reason(
+        &self,
+        key_id: &str,
+    ) -> Option<crate::pool::entry::CooldownReason> {
+        let keys = self.keys.read();
+        keys.iter().find(|k| k.id == key_id).and_then(|k| k.cooldown_reason())
+    }
+
+    /// Human-readable reason for a hard non-active state (eligibility freeze /
+    /// permanent disable), surfaced so the web pool matrix can render the
+    /// exact upstream message in red.
+    pub fn key_error_reason(&self, key_id: &str) -> Option<String> {
+        let keys = self.keys.read();
+        keys.iter().find(|k| k.id == key_id).and_then(|k| k.error_reason())
     }
 
     /// Total keys in pool
@@ -786,6 +837,85 @@ mod tests {
         assert!(!pool.exhausted_by_window());
         assert_eq!(pool.window_refill_in(), None);
         assert_eq!(pool.longest_window_refill_in(), None);
+    }
+
+    #[test]
+    fn test_eligibility_freeze_skips_key_and_keeps_pool_alive() {
+        // 上游资格类 403：坏账号长冷冻（数日），同请求 failover 与后续请求
+        // 都必须路由到池内其它 Active key，agent 运行不中断。
+        let pool = KeyPool::new("antigravity", RoutingStrategy::Priority);
+        pool.add_key(ApiKeyEntry::new("bad", "t1", 1, 10));
+        pool.add_key(ApiKeyEntry::new("good", "t2", 2, 10));
+        pool.record_error(
+            "bad",
+            PoolErrorType::AccountEligibility {
+                reason: Some("Your current account is not eligible for Gemini Code Assist".to_string()),
+            },
+        );
+        // 坏账号：长冷冻 + 原因可查（管理面红显的输入）。
+        let remaining = pool.key_cooldown("bad").0.expect("bad key must be cooling");
+        assert!(
+            remaining >= Duration::from_secs(3 * 24 * 60 * 60) - Duration::from_secs(60),
+            "freeze must be ~3 days, got {remaining:?}"
+        );
+        assert_eq!(
+            pool.key_cooldown_reason("bad"),
+            Some(crate::pool::entry::CooldownReason::Eligibility)
+        );
+        assert!(
+            pool.key_error_reason("bad")
+                .unwrap_or_default()
+                .contains("not eligible"),
+            "error_reason must carry the upstream message"
+        );
+        // 计划行为：调度跳过冷冻账号，next 请求落到合格账号。
+        let picked = pool.select_key().expect("pool must still have a schedulable key");
+        assert_eq!(picked.id, "good", "routing must skip the frozen account");
+    }
+
+    #[test]
+    fn test_inherit_runtime_state_preserves_eligibility_freeze_across_rebuild() {
+        // 热重建继承：config 重载 / PUT key / PUT provider / DELETE key 四条
+        // 重建路径都会重建 KeyPool，必须把进行中的资格冻结及其原因原样搬给
+        // 新池，否则冻结窗口内的任意管理操作都会复活账号、重演整池锤打
+        // （2026-10-04 事故路径；对抗审核 P1-3）。
+        let donor = KeyPool::new("antigravity", RoutingStrategy::Priority);
+        donor.add_key(ApiKeyEntry::new("ag1", "t1", 1, 10));
+        donor.record_error(
+            "ag1",
+            PoolErrorType::AccountEligibility {
+                reason: Some("Your current account is not eligible for Gemini Code Assist".to_string()),
+            },
+        );
+        donor.add_key(ApiKeyEntry::new("ag2", "t2", 2, 10));
+        donor.set_key_cooldown("ag2", Duration::from_secs(120));
+
+        let rebuilt = KeyPool::new("antigravity", RoutingStrategy::Priority);
+        rebuilt.add_key(ApiKeyEntry::new("ag1", "t1", 1, 10));
+        rebuilt.add_key(ApiKeyEntry::new("ag2", "t2", 2, 10));
+        rebuilt.add_key(ApiKeyEntry::new("ag3", "t3", 3, 10));
+        rebuilt.inherit_runtime_state(&donor);
+
+        // 资格冻结及其原因保留；软冷却保留。
+        assert_eq!(
+            rebuilt.key_cooldown_reason("ag1"),
+            Some(crate::pool::entry::CooldownReason::Eligibility)
+        );
+        assert!(
+            rebuilt
+                .key_error_reason("ag1")
+                .unwrap_or_default()
+                .contains("not eligible"),
+            "rebuild must not lose the eligibility reason"
+        );
+        let ag2 = rebuilt.key_cooldown("ag2").0.expect("ag2 cooldown must survive");
+        assert!(
+            ag2 >= Duration::from_secs(119),
+            "soft cooldown must survive rebuild, got {ag2:?}"
+        );
+        // 冻结仍然生效：ag1/ag2 都被冻结/冷却，调度只落到重建期间新加入的 ag3。
+        let picked = rebuilt.select_key().expect("ag3 must be schedulable");
+        assert_eq!(picked.id, "ag3", "rebuild must not revive the frozen account");
     }
 
     #[test]

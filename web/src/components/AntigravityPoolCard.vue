@@ -274,11 +274,14 @@ const aggregatedQuotas = computed(() => {
   };
 });
 
-// 针对各账号提取健康评分与热力方块状态
-// 纯粹绿色单色系色阶（GitHub Pure Green Monochrome Scale）：
-// 绝无杂色（无红、无黄、无额外背景底板）。
-// 从完全未激活的沉静冷浅灰 (#ebedf0)，到冷却状态的极淡微绿，
-// 再随可用额度由浅入深逐阶跃迁至充沛深翠绿 (#9be9a8 -> #40c463 -> #30a14e -> #216e39)
+// 针对各账号提取健康评分与热力方块状态。
+// 色系：绿色单色阶表达可用额度（GitHub Pure Green Monochrome Scale）：
+// 从完全未激活的沉静冷浅灰 (#ebedf0)，到冷却状态的柔青薄荷绿，
+// 再随可用额度由浅入深逐阶跃迁至充沛深翠绿 (#9be9a8 -> #40c463 -> #30a14e -> #216e39)。
+// 语义色仅用于硬/异常状态，与绿色阶严格分开：琥珀 = 需安全验证；
+// 玫红/深红 = 硬错误（凭据失效 / 资格受限冻结 / 违规停用 / 已禁用 / 探测异常）；
+// 天蓝 = 跨副本锁同步；灰色 = 未知（等待刷新）。eligibility_frozen 专属玫红，
+// 表示"上游资格受限、冻结数日、已跳过"，区别于软冷却的薄荷绿。
 export type SlotHeatLevel =
   | 'cooling'
   | 'low'
@@ -288,6 +291,7 @@ export type SlotHeatLevel =
   | 'validation_required'
   | 'auth_invalid'
   | 'policy_violation'
+  | 'eligibility_frozen'
   | 'disabled'
   | 'probe_failed';
 
@@ -297,6 +301,67 @@ export interface HeatSlotItem {
   heatClass: string;
   tooltipText: string;
   isCooling: boolean;
+}
+
+/** 展示侧截断上游原文（后端已截 2048 字符，UI 再收窄到 300 保护布局）。 */
+function truncateErr(msg: string | null | undefined, max = 300): string {
+  if (!msg) return '';
+  return msg.length > max ? `${msg.slice(0, max)}…` : msg;
+}
+
+/** 色块状态的可读名称（读屏/aria 非颜色通道表达，插件色盲可区分）。 */
+function levelAriaLabel(level: SlotHeatLevel): string {
+  switch (level) {
+    case 'eligibility_frozen':
+      return '上游资格受限已冻结';
+    case 'validation_required':
+      return '需安全验证';
+    case 'auth_invalid':
+      return '凭据失效';
+    case 'policy_violation':
+      return '违规停用';
+    case 'disabled':
+      return '已禁用';
+    case 'cooling':
+      return '冷却中';
+    case 'low':
+    case 'medium':
+    case 'high':
+    case 'full':
+      return '可用';
+    case 'probe_failed':
+      return '探测异常';
+    default:
+      return '未知';
+  }
+}
+
+/**
+ * 资格受限冻结格的单一渲染源（冷却分支与拨测分支共用）：
+ * 红色错误块 + 解冻倒计时 + 上游原因 + "已冻结跳过"。同一账号两条路径
+ * 文案一致，避免拨测后走探测分支丢失倒计时（review P1）。
+ */
+function frozenEligibilitySlot(
+  k: KeyView,
+  email: string,
+  tierBadge: string,
+  usageSummary: string,
+): HeatSlotItem {
+  const remaining = cooldownRemainingSecs(k);
+  const label = formatCooldownDuration(remaining);
+  const when = label
+    ? `约 ${label} 后解冻`
+    // 后端冻结时长是常量多日；避免把具体天数写死（后续若改配置即失配），
+    // 且倒计时归零但后端尚未翻态时不得谎报"3 天后"。
+    : '冻结数日后到期，等待上游状态变化';
+  const errHint = k.error_message ? `\n原因: ${truncateErr(k.error_message)}` : '';
+  return {
+    key: k,
+    level: 'eligibility_frozen',
+    heatClass: 'bg-rose-600 hover:bg-rose-500',
+    tooltipText: `账号: ${email}${tierBadge}\n状态: 上游资格受限（拒绝服务，已冻结跳过）\n冻结: ${when}${errHint}${usageSummary}`,
+    isCooling: k.state === 'cooling_down',
+  };
 }
 
 const slotMatrix = computed<HeatSlotItem[]>(() => {
@@ -397,10 +462,36 @@ const slotMatrix = computed<HeatSlotItem[]>(() => {
           isCooling: false,
         };
       }
+      if (errCode.includes('eligibility') || errMsg.includes('not eligible for')) {
+        // 拨测命中资格 403（后端已同请求内冻结该账号）。
+        // - 后端 state 已确认冷却+资格 → 完整文案（含解冻倒计时，与冷却分支
+        //   同一渲染源），避免探测分支丢失"已冻结跳过/倒计时"（review P1）。
+        // - 仅探针证据而 state 仍是 active → 陈旧/矛盾数据：可能是冻结已
+        //   过期但 localStorage 结果未失效（TTL 6h），不硬判红（review P2）。
+        // - 其余（如后端仍未来得及刷新 state）→ 红色无倒计时，附探针证据。
+        if (k.state === 'cooling_down' && k.cooldown_reason === 'eligibility') {
+          return frozenEligibilitySlot(k, email, tierBadge, usageSummary);
+        }
+        if (k.state !== 'active') {
+          return {
+            key: k,
+            level: 'eligibility_frozen',
+            heatClass: 'bg-rose-600 hover:bg-rose-500',
+            tooltipText: `账号: ${email}${tierBadge}\n状态: 上游资格受限（拒绝服务）\n提示: ${truncateErr(testResult.message)}${usageSummary}`,
+            isCooling: false,
+          };
+        }
+      }
     }
 
-    // 冷却状态优先于瞬态网络/探测失败：保持薄荷绿冷却保护
+    // 冷却状态优先于瞬态网络/探测失败：长冻结的资格类账号显示红色错误，
+    // 其余保持薄荷绿冷却保护。
     if (isCooling) {
+      if (k.cooldown_reason === 'eligibility') {
+        // 上游资格类 403（如 Gemini Code Assist "not eligible"）：账号被冻结数日。
+        // 红色错误块 + 原因 + 解冻时间，与软冷却（薄荷绿）区分开。
+        return frozenEligibilitySlot(k, email, tierBadge, usageSummary);
+      }
       const remaining = cooldownRemainingSecs(k);
       const label = formatCooldownDuration(remaining);
       const hint = label
@@ -985,7 +1076,7 @@ function waterBarWidth(percent: number | null): string {
                   data-testid="slot-heatmap-cell"
                   role="button"
                   tabindex="0"
-                  :aria-label="`查看账号 ${item.key.id} 测定画像`"
+                  :aria-label="`查看账号 ${item.key.id}（${levelAriaLabel(item.level)}）测定画像`"
                   class="w-3.5 h-3.5 rounded-[2px] transition-transform duration-150 hover:scale-125 hover:z-20 cursor-pointer shrink-0 focus:outline-hidden focus:ring-2 focus:ring-amber-500"
                   :class="[
                     item.heatClass,

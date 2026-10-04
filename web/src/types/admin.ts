@@ -105,6 +105,10 @@ export interface KeyView {
   cooldown_remaining_secs?: number | null;
   /** RFC 3339 UTC instant the key is expected to recover after a cooldown. */
   cooldown_reset_at?: string | null;
+  /** Why the key is cooling down, while it is: `rate_limit | quota | server | eligibility`. */
+  cooldown_reason?: string | null;
+  /** Human-readable reason for a hard non-active state (eligibility freeze / permanent disable). */
+  error_message?: string | null;
   /** Reason why the key was permanently disabled, if state is `disabled`. */
   disabled_reason?: string | null;
   usage?: KeyCapacityEstimate | null;

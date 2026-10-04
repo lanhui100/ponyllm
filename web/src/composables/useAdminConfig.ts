@@ -365,6 +365,15 @@ export function useAdminConfig(options: UseAdminConfigOptions = {}) {
       keyTestResults.value[id] = res;
       markQuotaProbed(id);
       savePersistedQuotaResults(keyTestResults.value);
+      // 拨测会由网关侧落地池动作（资格 403 → 3 天冻结等）：拨测后静默刷新 keys，
+      // 让 state 与拨测结果同帧收敛，避免"红方块 + 全部就绪"自相矛盾。
+      // 用 `refreshSilent`（无 loading 覆盖）而非 `fetchAll`——批量拨测 N 键
+      // 不会触发 N 次全屏 loading（review 收尾建议）。
+      try {
+        await refreshSilent();
+      } catch {
+        // 刷新失败不吞拨测结果本身（网络瞬断时保留本地结果）。
+      }
       return res;
     } finally {
       testingKeyIds.value.delete(id);

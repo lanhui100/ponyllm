@@ -756,6 +756,12 @@ impl AppState {
                 }
             }
             let matched = pool.import_matched_usage_trackers(&donors);
+            // 热重载还必须继承运行时状态（禁用原因 / 进行中的冷冻及其原因与
+            // 硬错误消息）：否则一次配置重载就会把 3 天资格冻结清掉，账号被
+            // 复活后下一请求再次撞 403，重演整池锤打（2026-10-04 事故路径）。
+            if let Some(old_pool) = donor_pools.get(name) {
+                pool.inherit_runtime_state(old_pool);
+            }
             tracing::debug!(
                 provider = %name,
                 donated = matched,
@@ -1369,6 +1375,32 @@ async fn advance_rotated_at(
                     }
                 }
                 Err(e) => {
+                    // Probe-facing 403s get the SAME *deterministic hard*
+                    // pool action as the request path: `AccountEligibility`
+                    // (long freeze for "not eligible"), `AccountValidationRequired`
+                    // / `PolicyViolation` (isolate) — see `classify_probe_failure`.
+                    // Soft signals (quota wording / unknown-403 / 429 / 5xx /
+                    // network timeout) deliberately return None and stay
+                    // fail-soft: a keepalive probe must never cool a healthy
+                    // key over a WAF/HTML/scope 403 or transport jitter
+                    // (the observed 2026-10-04 `quota_probe_failed` was
+                    // exactly such a misread).
+                    if let ponyllm_core::error::CoreError::UpstreamStatusError { status, body } = &e {
+                        if let Some(pool_err) = ponyllm_core::executor::classify_probe_failure(status.as_u16(), body) {
+                            if let Some(pool) = self.pools.read().get(&provider) {
+                                let preview: String =
+                                    format!("{pool_err:?}").chars().take(300).collect();
+                                tracing::warn!(
+                                    provider = %provider,
+                                    key_id = %key_id,
+                                    status = %status,
+                                    error = %preview,
+                                    "keepalive quota probe hit an upstream 403; applying the same pool action as the request path"
+                                );
+                                pool.record_error(&key_id, pool_err);
+                            }
+                        }
+                    }
                     tracing::debug!(
                         provider = %provider,
                         key_id = %key_id,
