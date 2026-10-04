@@ -96,7 +96,8 @@ metadata:
     app.kubernetes.io/name: ponyllm
 spec:
   inFlightReq:
-    amount: 30
+    # 对抗审核裁决：从 30 适度收敛提升至 60（规避 EdgeOne 少数回源节点聚合打满，同时防止单 Pod OOM 击穿）
+    amount: 60
     sourceCriterion:
       ipStrategy:
         # 同上：EdgeOne 双层代理下需 Traefik 静态 trustedIPs + depth:2；
