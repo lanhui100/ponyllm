@@ -151,6 +151,10 @@ pub struct RoutedTarget {
     pub top_p: Option<f32>,
     pub input_types: Vec<String>,
     pub max_output: String,
+    /// Declared output modalities for this model (e.g. `["text"]` or
+    /// `["image"]`). The Images API endpoints require `image` here; chat
+    /// translation ignores it (text models always emit text).
+    pub output_types: Vec<String>,
 }
 
 impl RoutedTarget {
@@ -1663,6 +1667,7 @@ async fn advance_rotated_at(
                     top_p: spec.top_p,
                     input_types: spec.input_types,
                     max_output: spec.max_output,
+                    output_types: spec.output_types.clone(),
                 });
             }
         }
@@ -1695,6 +1700,7 @@ async fn advance_rotated_at(
                         top_p: spec.top_p,
                         input_types: spec.input_types,
                         max_output: spec.max_output,
+                        output_types: spec.output_types.clone(),
                     });
                 }
             }
@@ -1729,6 +1735,7 @@ async fn advance_rotated_at(
                         top_p: spec.top_p,
                         input_types: spec.input_types,
                         max_output: spec.max_output,
+                        output_types: spec.output_types.clone(),
                     });
                 }
             }
@@ -1766,6 +1773,7 @@ async fn advance_rotated_at(
                         top_p: spec.top_p,
                         input_types: spec.input_types,
                         max_output: spec.max_output,
+                        output_types: spec.output_types.clone(),
                     });
                 }
             }
@@ -1831,6 +1839,7 @@ async fn advance_rotated_at(
                     top_p: default_spec.top_p,
                     input_types: default_spec.input_types,
                     max_output: default_spec.max_output,
+                    output_types: default_spec.output_types.clone(),
                 });
             }
             for m in &p_cfg.models {
@@ -1859,6 +1868,7 @@ async fn advance_rotated_at(
                             top_p: spec.top_p,
                             input_types: spec.input_types,
                             max_output: spec.max_output,
+                            output_types: spec.output_types.clone(),
                         });
                     }
                 }

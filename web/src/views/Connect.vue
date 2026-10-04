@@ -104,7 +104,7 @@ import { ref, onMounted } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { useSessionStore } from '../stores/session';
 import { bearerValue } from '../lib/alova';
-import { PROBE_PATH, probeOpenMode } from '../router';
+import { PROBE_PATH, probeOpenMode, consumeTransferToken } from '../router';
 import UiCard from '../components/ui/UiCard.vue';
 import UiButton from '../components/ui/UiButton.vue';
 import Icons from '../components/ui/Icons.vue';
@@ -132,6 +132,12 @@ onMounted(async () => {
     }
   } catch {
     // 网关不可达时不强制 logout，探针/表单提交会给出 DOWN/不可达态。
+  }
+  const transferred = consumeTransferToken();
+  if (transferred) {
+    input.value = transferred;
+    prefilledNotice.value = true;
+    return;
   }
   const qToken = (route.query.token || route.query.key) as string | undefined;
   if (qToken && typeof qToken === 'string' && qToken.trim() !== '') {

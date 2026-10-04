@@ -1342,6 +1342,115 @@ pub fn antigravity_chunk_to_chat_chunk(
     })
 }
 
+// ---------------------------------------------------------------------------
+// OpenAI Images API <-> Antigravity generateContent translators
+// ---------------------------------------------------------------------------
+
+/// OpenAI image request → Antigravity `generateContent` envelope.
+///
+/// `image_part` carries `(mime, base64)` for the edit variant (image + prompt
+/// parts). `aspect_ratio` maps to `generationConfig.imageConfig.aspectRatio`
+/// (`"1:1"` / `"16:9"` / `"9:16"`). The upstream does not support
+/// `candidateCount` for this model (probe-verified), so `n` is validated by
+/// the route handler, not here. OpenAI's `mask` has no Antigravity equivalent
+/// and is intentionally not forwarded.
+pub fn images_to_antigravity_request(
+    model: &str,
+    project_id: &str,
+    prompt: &str,
+    image_part: Option<(&str, &str)>, // (mime, base64)
+    aspect_ratio: Option<&str>,
+    salt: &str,
+) -> Value {
+    let mut parts = Vec::new();
+    if let Some((mime, b64)) = image_part {
+        parts.push(json!({ "inlineData": { "mimeType": mime, "data": b64 } }));
+    }
+    parts.push(json!({ "text": prompt }));
+
+    let session_id = extract_or_generate_session_id(Some(prompt), salt);
+    let request_id = generate_antigravity_request_id(&session_id, 1);
+
+    let mut inner_request = json!({
+        "contents": [{
+            "role": "user",
+            "parts": parts
+        }],
+        "sessionId": session_id,
+        "labels": { "model_enum": model }
+    });
+
+    if let Some(ar) = aspect_ratio {
+        inner_request["generationConfig"] = json!({
+            "imageConfig": { "aspectRatio": ar }
+        });
+    }
+
+    json!({
+        "project": project_id,
+        "requestId": request_id,
+        "request": inner_request,
+        "model": model,
+        "userAgent": "antigravity",
+        "requestType": "agent"
+    })
+}
+
+/// OpenAI `size` (`"1024x1024"`) → Gemini `imageConfig.aspectRatio`.
+/// Returns `None` for absent or unparseable sizes (upstream default applies).
+pub fn openai_size_to_antigravity_aspect_ratio(size: Option<&str>) -> Option<String> {
+    let s = size?.trim();
+    let (w, h) = s.split_once('x')?;
+    let w = w.trim().parse::<u64>().ok()?;
+    let h = h.trim().parse::<u64>().ok()?;
+    if w == 0 || h == 0 {
+        return None;
+    }
+    Some(match w.cmp(&h) {
+        std::cmp::Ordering::Equal => "1:1".to_string(),
+        std::cmp::Ordering::Greater => "16:9".to_string(),
+        std::cmp::Ordering::Less => "9:16".to_string(),
+    })
+}
+
+/// Antigravity `generateContent` response → OpenAI Images API response.
+///
+/// Accepts both the collected shape (`candidates` at top) and the raw upstream
+/// envelope (`response.candidates`). Returns `None` when no `inlineData`
+/// image part is present in the first candidate (caller decides the error).
+pub fn antigravity_to_images_response(resp: &Value, model: &str) -> Option<Value> {
+    let now_ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let target = resp.get("response").unwrap_or(resp);
+    let candidates = target.get("candidates").and_then(|v| v.as_array())?;
+    let first = candidates.first()?;
+    let parts = first
+        .get("content")
+        .and_then(|c| c.get("parts"))
+        .and_then(|p| p.as_array())?;
+
+    let mut images = Vec::new();
+    for p in parts {
+        if let Some(inline) = p.get("inlineData") {
+            if let Some(data) = inline.get("data").and_then(|d| d.as_str()) {
+                images.push(json!({ "b64_json": data }));
+            }
+        }
+    }
+    if images.is_empty() {
+        return None;
+    }
+
+    Some(json!({
+        "created": now_ts,
+        "data": images,
+        "model": model
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1662,5 +1771,102 @@ mod tests {
         let mut plain = json!({"model": "x"});
         assert!(!refresh_antigravity_request_ids(&mut plain));
         assert_eq!(plain, json!({"model": "x"}));
+    }
+
+    #[test]
+    fn test_images_generation_to_antigravity_request() {
+        let env = images_to_antigravity_request(
+            "gemini-3.1-flash-image",
+            "proj-1",
+            "a cute neon pony",
+            None,
+            Some("1:1"),
+            "salt-1",
+        );
+        assert_eq!(env["model"], "gemini-3.1-flash-image");
+        assert_eq!(env["project"], "proj-1");
+        assert_eq!(env["requestType"], "agent");
+        assert_eq!(env["request"]["contents"][0]["parts"][0]["text"], "a cute neon pony");
+        assert_eq!(
+            env["request"]["generationConfig"]["imageConfig"]["aspectRatio"],
+            "1:1"
+        );
+        assert!(env["requestId"].as_str().unwrap().starts_with("agent/"));
+        // No inlineData in a pure generation.
+        assert!(env["request"]["contents"][0]["parts"][0].get("inlineData").is_none());
+    }
+
+    #[test]
+    fn test_images_edit_to_antigravity_request() {
+        let env = images_to_antigravity_request(
+            "gemini-3.1-flash-image",
+            "proj-1",
+            "make it purple",
+            Some(("image/png", "AAAA")),
+            Some("9:16"),
+            "salt-1",
+        );
+        let parts = &env["request"]["contents"][0]["parts"];
+        assert_eq!(parts[0]["inlineData"]["mimeType"], "image/png");
+        assert_eq!(parts[0]["inlineData"]["data"], "AAAA");
+        assert_eq!(parts[1]["text"], "make it purple");
+        assert_eq!(
+            env["request"]["generationConfig"]["imageConfig"]["aspectRatio"],
+            "9:16"
+        );
+    }
+
+    #[test]
+    fn test_openai_size_to_aspect_ratio() {
+        assert_eq!(openai_size_to_antigravity_aspect_ratio(Some("1024x1024")).as_deref(), Some("1:1"));
+        assert_eq!(openai_size_to_antigravity_aspect_ratio(Some("1792x1024")).as_deref(), Some("16:9"));
+        assert_eq!(openai_size_to_antigravity_aspect_ratio(Some("1024x1792")).as_deref(), Some("9:16"));
+        assert_eq!(openai_size_to_antigravity_aspect_ratio(Some(" 512 x 512 ")).as_deref(), Some("1:1"));
+        assert_eq!(openai_size_to_antigravity_aspect_ratio(None), None);
+        assert_eq!(openai_size_to_antigravity_aspect_ratio(Some("garbage")), None);
+        assert_eq!(openai_size_to_antigravity_aspect_ratio(Some("0x1024")), None);
+    }
+
+    #[test]
+    fn test_antigravity_to_images_response() {
+        // Raw upstream envelope shape.
+        let resp = json!({
+            "response": {
+                "candidates": [{
+                    "content": {
+                        "role": "model",
+                        "parts": [
+                            {"thoughtSignature": "abc"},
+                            {"inlineData": {"mimeType": "image/jpeg", "data": "QUFB"}},
+                            {"inlineData": {"mimeType": "image/jpeg", "data": "QkJC"}}
+                        ]
+                    },
+                    "finishReason": "STOP"
+                }],
+                "usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 6, "totalTokenCount": 16}
+            }
+        });
+        let out = antigravity_to_images_response(&resp, "gemini-3.1-flash-image").unwrap();
+        assert_eq!(out["model"], "gemini-3.1-flash-image");
+        assert_eq!(out["data"].as_array().unwrap().len(), 2);
+        assert_eq!(out["data"][0]["b64_json"], "QUFB");
+        assert_eq!(out["data"][1]["b64_json"], "QkJC");
+        assert!(out["created"].as_u64().is_some());
+    }
+
+    #[test]
+    fn test_antigravity_to_images_response_no_image() {
+        // Collected shape (candidates at top) with text-only parts → None.
+        let resp = json!({
+            "candidates": [{
+                "content": {"parts": [{"text": "no image here"}], "role": "model"},
+                "finishReason": "STOP"
+            }]
+        });
+        assert!(antigravity_to_images_response(&resp, "m").is_none());
+
+        // Empty candidates → None.
+        let empty = json!({"response": {"candidates": []}});
+        assert!(antigravity_to_images_response(&empty, "m").is_none());
     }
 }

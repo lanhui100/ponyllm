@@ -47,3 +47,13 @@ default_protocol = "systemone"
 # antigravity 走 CONNECT 代理模式，proxy= 凭据形态为占位（真 token 只进 live secret）
 # [providers.antigravity]
 # proxy = "http://user:<PPROXY_CLIENT_TOKEN>@pproxy-host.ponyllm.svc:8899"
+# default_protocol = "antigravity"
+# models = ["claude-sonnet-4-6", "gemini-3.1-flash-image"]
+# 图像模型（OpenAI Images API 专用，/v1/images/generations 与 /v1/images/edits）：
+# [[providers.antigravity.model_configs]]
+# name = "gemini-3.1-flash-image"
+# tier = "S"
+# context_window = "1m"
+# max_output = "32K"
+# input_types = ["text", "image"]
+# output_types = ["image"]

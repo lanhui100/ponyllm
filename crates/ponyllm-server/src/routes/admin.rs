@@ -4207,7 +4207,10 @@ async fn measure_proxy_latency(proxy_url: &str) -> Option<u64> {
 /// 2026-09-13, "redirect_uri 白名单").
 pub(crate) fn validate_antigravity_redirect_uri(uri: &str) -> Result<(), String> {
     let parsed = reqwest::Url::parse(uri)
-        .map_err(|_| format!("redirect_uri 不是合法 URL: {uri}"))?;
+        .map_err(|_| {
+            let sanitized: String = uri.chars().take(64).filter(|c| !c.is_control()).collect();
+            format!("redirect_uri 不是合法 URL: {sanitized}")
+        })?;
     let scheme_ok = matches!(parsed.scheme(), "http" | "https");
     let host_ok = matches!(parsed.host_str(), Some("localhost" | "127.0.0.1"));
     let path_ok = parsed.path() == "/oauth2callback";
@@ -5135,6 +5138,21 @@ mod antigravity_redirect_uri_tests {
         assert!(validate_antigravity_redirect_uri("http://localhost:0/oauth2callback").is_err());
         assert!(validate_antigravity_redirect_uri("http://LOCALHOST:51121/oauth2callback").is_err());
         assert!(validate_antigravity_redirect_uri("ftp://localhost:51121/oauth2callback").is_err());
+        assert!(validate_antigravity_redirect_uri("javascript:alert(1)").is_err());
+        assert!(validate_antigravity_redirect_uri("data:text/html,evil").is_err());
+        assert!(validate_antigravity_redirect_uri("http://localhost.evil.com/oauth2callback").is_err());
+        assert!(validate_antigravity_redirect_uri("http://attacker.com#localhost/oauth2callback").is_err());
+        assert!(validate_antigravity_redirect_uri("http://127.0.0.2:51121/oauth2callback").is_err());
+        assert!(validate_antigravity_redirect_uri("http://[::1]:51121/oauth2callback").is_err());
+        assert!(validate_antigravity_redirect_uri("http://localhost:65536/oauth2callback").is_err());
+        // Hexadecimal / Octal IP representations and special symbol obfuscation
+        assert!(validate_antigravity_redirect_uri("http://0x7f.0.0.1:51121/oauth2callback").is_err());
+        assert!(validate_antigravity_redirect_uri("http://0177.0.0.1:51121/oauth2callback").is_err());
+        assert!(validate_antigravity_redirect_uri("http://2130706433:51121/oauth2callback").is_err());
+        assert!(validate_antigravity_redirect_uri("http://0x7f000001:51121/oauth2callback").is_err());
+        assert!(validate_antigravity_redirect_uri("http://localhost%00:51121/oauth2callback").is_err());
+        assert!(validate_antigravity_redirect_uri("http://localhost%20:51121/oauth2callback").is_err());
+        assert!(validate_antigravity_redirect_uri("http://127.0.0.1%2f@evil.com/oauth2callback").is_err());
     }
 
     #[test]

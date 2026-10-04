@@ -47,7 +47,9 @@ pub fn classify_resource(method: &str, path: &str, query: Option<&str>) -> Resou
     if method.eq_ignore_ascii_case("POST") {
         match path {
             "/chat/completions" | "/v1/chat/completions" | "/messages" | "/v1/messages"
-            | "/responses" | "/v1/responses" | "/systemone" | "/v1/systemone" => return Resource::Inference,
+            | "/responses" | "/v1/responses" | "/systemone" | "/v1/systemone"
+            | "/images/generations" | "/v1/images/generations"
+            | "/images/edits" | "/v1/images/edits" => return Resource::Inference,
             _ => {}
         }
     }

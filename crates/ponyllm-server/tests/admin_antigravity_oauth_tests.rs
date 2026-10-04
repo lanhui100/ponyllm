@@ -156,6 +156,40 @@ async fn test_antigravity_authorize_rejects_public_redirect_uri() {
 }
 
 #[tokio::test]
+async fn test_antigravity_auth_url_rejects_open_redirect_subdomain_and_schemes() {
+    let harness = OAuthHarness::new(true).await;
+    let client = reqwest::Client::new();
+
+    let malicious_uris = [
+        "http://localhost.evil.com/oauth2callback",
+        "javascript:alert(1)",
+        "data:text/html,evil",
+        "http://attacker.com#localhost/oauth2callback",
+        "http://0x7f000001:51121/oauth2callback",
+        "http://0177.0.0.1:51121/oauth2callback",
+        "http://2130706433:51121/oauth2callback",
+        "http://127.0.0.1%2f@evil.com/oauth2callback",
+    ];
+
+    for bad_uri in malicious_uris {
+        let resp = client
+            .get(format!(
+                "http://{}/api/admin/oauth/antigravity/auth-url",
+                harness.addr
+            ))
+            .query(&[("redirect_uri", bad_uri)])
+            .header("Authorization", format!("Bearer {}", harness.api_key))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let err: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(err["error"]["code"], "invalid_redirect_uri");
+    }
+}
+
+#[tokio::test]
 async fn test_antigravity_authorize_invalid_input() {
     let harness = OAuthHarness::new(true).await;
     let client = reqwest::Client::new();

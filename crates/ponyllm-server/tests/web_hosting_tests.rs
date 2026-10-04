@@ -197,6 +197,32 @@ async fn web_hosting_missing_dist_is_deterministic_503() {
 }
 
 #[tokio::test]
+async fn test_404_fallback_carries_complete_security_headers() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_fake_dist(tmp.path());
+    let addr = spawn_gateway(test_config_with_web(true, tmp.path().to_str().unwrap())).await;
+    let client = reqwest::Client::new();
+
+    for path in ["/robots.txt", "/random-404-path", "/nonexistent.php", "/api/nonexistent"] {
+        let resp = client.get(format!("http://{addr}{path}")).send().await.unwrap();
+        assert_eq!(resp.status(), 404, "path: {path} should 404");
+
+        let headers = resp.headers();
+        assert_eq!(headers.get("x-frame-options").unwrap(), "SAMEORIGIN");
+        assert_eq!(headers.get("x-content-type-options").unwrap(), "nosniff");
+        assert_eq!(headers.get("referrer-policy").unwrap(), "no-referrer");
+        assert!(headers.contains_key("permissions-policy"));
+        assert!(headers.contains_key("content-security-policy"));
+        assert!(headers.contains_key("strict-transport-security"));
+
+        let csp = headers.get("content-security-policy").unwrap().to_str().unwrap();
+        assert!(!csp.contains("script-src 'unsafe-inline'"));
+        assert!(csp.contains("default-src 'self'"));
+        assert!(csp.contains("form-action 'self'"));
+    }
+}
+
+#[tokio::test]
 async fn web_hosting_no_web_flag_disables_mount() {
     let addr = spawn_gateway(test_config_with_web(false, "web/dist")).await;
     let client = reqwest::Client::new();

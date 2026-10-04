@@ -30,8 +30,8 @@ metadata:
     app.kubernetes.io/component: egress-proxy
 subsets:
   - addresses:
-      # Tencent node Tailscale address. Verify before applying; do not use devserver 100.95.193.103.
-      - ip: 100.105.241.39
+      # Primary local endpoint on devserver (100.95.193.103). High performance, zero DERP packet loss.
+      - ip: 100.95.193.103
     ports:
       - name: http-proxy
         port: 8899

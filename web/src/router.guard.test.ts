@@ -178,6 +178,34 @@ describe('URL token direct authorization', () => {
     expect(router.currentRoute.value.query.key).toBeUndefined();
   });
 
+  it('P1: URL fragment #token= is extracted, cleared from hash, and transferred to connect', async () => {
+    const session = useSessionStore();
+    expect(session.token).toBe('');
+    await router.push('/dashboard#token=frag-secret-token');
+    expect(session.token).toBe('');
+    expect(router.currentRoute.value.path).toBe('/connect');
+    expect(router.currentRoute.value.hash).toBe('');
+    expect(router.currentRoute.value.query.redirect).toBe('/dashboard');
+  });
+
+  it('P1: URL fragment #key= preserves non-secret query params in redirect target', async () => {
+    const session = useSessionStore();
+    await router.push('/dashboard?tab=models&view=tree#key=frag-key-secret');
+    expect(session.token).toBe('');
+    expect(router.currentRoute.value.path).toBe('/connect');
+    expect(router.currentRoute.value.hash).toBe('');
+    expect(router.currentRoute.value.query.redirect).toBe('/dashboard?tab=models&view=tree');
+  });
+
+  it('P1: ?token= query strips token but preserves business query params in redirect', async () => {
+    const session = useSessionStore();
+    await router.push('/dashboard?tab=logs&token=leak-secret&limit=50');
+    expect(session.token).toBe('');
+    expect(router.currentRoute.value.path).toBe('/connect');
+    expect(router.currentRoute.value.query.token).toBeUndefined();
+    expect(router.currentRoute.value.query.redirect).toBe('/dashboard?tab=logs&limit=50');
+  });
+
   it('P2: logoutIfGatewayUpgraded wipes session only on version change', () => {
     const session = useSessionStore();
     session.login('sk-pony-admin-aaa');

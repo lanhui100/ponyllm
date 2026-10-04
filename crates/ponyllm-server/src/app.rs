@@ -258,6 +258,16 @@ pub fn create_app(state: Arc<AppState>) -> Router {
         .route("/v1/messages", post(handle_messages))
         .route("/responses", post(handle_responses))
         .route("/v1/responses", post(handle_responses))
+        .route("/images/generations", post(handle_image_generations))
+        .route("/v1/images/generations", post(handle_image_generations))
+        .route(
+            "/images/edits",
+            post(handle_image_edits).layer(DefaultBodyLimit::max(body_limit)),
+        )
+        .route(
+            "/v1/images/edits",
+            post(handle_image_edits).layer(DefaultBodyLimit::max(body_limit)),
+        )
         .route(
             "/systemone",
             post(handle_systemone).layer(DefaultBodyLimit::max(crate::routes::systemone::SYSTEMONE_MAX_JSON_BYTES)),

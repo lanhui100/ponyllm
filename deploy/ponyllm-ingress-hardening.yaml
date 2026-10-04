@@ -9,18 +9,15 @@ spec:
   headers:
     customResponseHeaders:
       Strict-Transport-Security: max-age=31536000; includeSubDomains; preload
-      # CSP 现状说明：当前为全站统一的宽松基线（connect-src 允许 https:/wss:，
-      # script/style 保留 'unsafe-inline' 以兼容现有控制台内联代码）。
-      # 未来收紧方向：API 数据面（/v1/*、/models*、/messages*、/responses*、
-      # /api/admin/*）应收敛为 default-src 'none' + 仅 JSON 响应头（靠后端
-      # Content-Type: application/json），移除 unsafe-inline 与 https:/wss: 通配；
-      # 静态控制台（/、/app/*、/assets/* 及 /connect 等页面）再单独挂一条更严但
-      # 仍允许自有静态资源的 CSP。本文件暂保留现状避免误伤业务，仅作方向声明。
+      # CSP 加固：移除 script-src 'unsafe-inline'，严禁内联脚本执行；
+      # 允许 style-src 'self' 'unsafe-inline' 仅供 Tailwind/Vue scoped 动态样式插入；
+      # img-src 收窄为 'self' data: 杜绝图片加载外带凭据；
+      # connect-src 收敛为 'self' 同源；补充 form-action 'self' 防表单劫持。
       Content-Security-Policy: >-
-        default-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'self';
-        script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline';
-        img-src 'self' data: https:; font-src 'self' data:;
-        connect-src 'self' https: wss:;
+        default-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'self'; form-action 'self';
+        script-src 'self'; style-src 'self' 'unsafe-inline';
+        img-src 'self' data:; font-src 'self' data:;
+        connect-src 'self';
       Permissions-Policy: geolocation=(), microphone=(), camera=()
       Referrer-Policy: no-referrer
       X-Content-Type-Options: nosniff
@@ -70,6 +67,24 @@ spec:
         # 正确做法是在 Traefik 静态配置补 trustedIPs（EdgeOne 回源段）+ depth:2，
         # 取 X-Forwarded-For 倒数第 2 跳的真实客户端 IP。本文件为 Middleware CRD，
         # 配不了静态 trustedIPs，故此处保持 depth:1 不动，由运维在 Traefik 层补齐。
+        depth: 1
+---
+# 针对敏感管理路径与未认证探测的收紧限流（防暴力破解与高频扫描）
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: ponyllm-admin-ratelimit
+  namespace: ponyllm
+  labels:
+    app.kubernetes.io/name: ponyllm
+spec:
+  rateLimit:
+    average: 20
+    burst: 10
+    sourceCriterion:
+      ipStrategy:
+        # 与全局限流一致：接入 CDN（如 EdgeOne）后，运维应在 Traefik 静态配置配置
+        # trustedIPs（回源 IP 段）并将 depth 设为 2，以准确提取客户端真实 IP 限流。
         depth: 1
 ---
 apiVersion: traefik.io/v1alpha1

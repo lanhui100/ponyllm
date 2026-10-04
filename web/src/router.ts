@@ -77,25 +77,84 @@ export async function probeOpenMode(): Promise<boolean> {
   }
 }
 
+export function extractFragmentToken(hash: string): string | null {
+  if (!hash || !hash.startsWith('#')) return null;
+  const raw = hash.slice(1);
+  const params = new URLSearchParams(raw);
+  const token = params.get('token') || params.get('key');
+  if (token && token.trim() !== '') {
+    return token.trim();
+  }
+  return null;
+}
+
+// In-memory transfer for fragment token so it never persists in URL / history
+let memoryTransferToken: string | null = null;
+
+export function consumeTransferToken(): string | null {
+  const t = memoryTransferToken;
+  memoryTransferToken = null;
+  return t;
+}
+
+export function setTransferToken(token: string | null): void {
+  memoryTransferToken = token;
+}
+
+export function sanitizeRedirectUrl(fullPath: string): string {
+  if (!fullPath) return '/dashboard';
+  try {
+    const noHash = fullPath.split('#')[0];
+    const [pathPart, queryPart] = noHash.split('?');
+    const cleanPath = pathPart || '/dashboard';
+    if (!queryPart) return cleanPath;
+    const params = new URLSearchParams(queryPart);
+    params.delete('token');
+    params.delete('key');
+    const qs = params.toString();
+    return qs ? `${cleanPath}?${qs}` : cleanPath;
+  } catch {
+    return '/dashboard';
+  }
+}
+
 router.beforeEach(async (to) => {
   const session = useSessionStore();
 
-  // P2 (?token= 收敛): URL token 不再静默登录——服务端早已不认 query 凭证
-  // (app.rs 只读 Authorization/x-api-key 头)，且 query 会进历史/书签/代理日志。
-  // 此处只做 query 清洗并放行到 Connect，由 Connect 预填表单 + 用户显式点
-  // "连接"完成鉴权探针；strict/dual 语义由服务端探针 verdict 统一裁决。
-  // NOTE: token 明文值只在内存中转一次，禁止 console.* / 日志落值。
+  // 1. Support URL fragment/hash (#token= / #key=) to pass tokens securely:
+  // Browser fragment is never sent to the server (not in access logs, referrer, or CDN cache).
+  // Clean hash via Vue Router native replace to preserve router internal history.state and scroll.
+  const hashToken = to.hash ? extractFragmentToken(to.hash) : null;
+  if (hashToken) {
+    setTransferToken(hashToken);
+    const sanitizedRedirect = sanitizeRedirectUrl(to.fullPath);
+    if (to.path === '/connect') {
+      return { path: '/connect', query: to.query, hash: '', replace: true };
+    }
+    return {
+      path: '/connect',
+      query: { ...to.query, redirect: sanitizedRedirect },
+      hash: '',
+      replace: true,
+    };
+  }
+
+  // 2. Deprecate and clean legacy query ?token= / ?key=:
+  // Remove immediately from URL and redirect to /connect without exposing in logs.
+  // Preserve any other legitimate business query parameters in the redirect target.
   const rawToken = (to.query.token || to.query.key) as string | undefined;
   if (rawToken && typeof rawToken === 'string' && rawToken.trim() !== '') {
+    setTransferToken(rawToken.trim());
     const nextQuery = { ...to.query };
     delete nextQuery.token;
     delete nextQuery.key;
+    const sanitizedRedirect = sanitizeRedirectUrl(to.fullPath);
     if (to.path === '/connect') {
       return { path: '/connect', query: nextQuery, replace: true };
     }
     return {
       path: '/connect',
-      query: { ...nextQuery, redirect: to.fullPath.split('?')[0] },
+      query: { ...nextQuery, redirect: sanitizedRedirect },
       replace: true,
     };
   }

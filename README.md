@@ -203,6 +203,8 @@ cross_provider_quota_failover = false   # 默认：某 provider 额度耗尽即�
 | `/v1/chat/completions` | `POST` | **OpenAI Chat Completions** | 绝大多数 AI 插件与客户端的通用对话流 |
 | `/v1/messages` | `POST` | **Anthropic Messages API** | Claude Dev、Cline、Roo Code 等专用协议 |
 | `/v1/responses` | `POST` | **OpenAI Responses API** | 新一代结构化响应协议 |
+| `/v1/images/generations` | `POST` | **OpenAI Images 生成** | 文生图（如 antigravity `gemini-3.1-flash-image`），恒回 `b64_json` |
+| `/v1/images/edits` | `POST` | **OpenAI Images 编辑** | 图+文改图（JSON base64/data-URI 或 multipart/form-data） |
 | `/v1/telemetry/recorder` | `GET` | **黑匣子录波快照** | 取证分析最近 200 次请求与 429/5xx 现场 |
 | `/v1/telemetry/metrics` | `GET` | **实时吞吐指标** | 查看实时 QPS、Token 数与各 Key 倒换计数 |
 
@@ -248,7 +250,30 @@ curl http://127.0.0.1:8080/v1/messages \
     "max_tokens": 1024,
     "messages": [{"role": "user", "content": "请用一句话证明你是 ponyllm 后端"}]
   }'
+
+# 4. 文生图 (OpenAI Images 协议，antigravity gemini-3.1-flash-image)
+curl http://127.0.0.1:8080/v1/images/generations \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer any-key" \
+  -d '{
+    "model": "gemini-3.1-flash-image",
+    "prompt": "a cute neon cyber pony",
+    "size": "1024x1024",
+    "response_format": "b64_json"
+  }'
+
+# 5. 图编辑 (JSON：image 为 base64 或 data URI；也支持 multipart/form-data)
+curl http://127.0.0.1:8080/v1/images/edits \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer any-key" \
+  -d '{
+    "model": "gemini-3.1-flash-image",
+    "prompt": "make the mane purple",
+    "image": "data:image/jpeg;base64,<b64>"
+  }'
 ```
+
+> 注：Images 端点恒回 `b64_json`（网关无 URL 托管）；`n > 1` 暂不支持（上游该模型未启用多候选）。
 
 ---
 

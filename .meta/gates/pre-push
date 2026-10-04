@@ -7,7 +7,7 @@ echo "=== [pre-push 1/3] Full workspace tests execution ==="
 if [ -f "crates/ponyllm-server/tests/admin_contract_tests.rs" ]; then
   cargo test -p ponyllm-server --test admin_contract_tests test_openapi_no_real_secret_and_schema_committed -- --quiet
 fi
-cargo test --workspace
+cargo test --workspace -- --test-threads=4
 
 echo "=== [pre-push 2/3] ponygo governance status check ==="
 if command -v ponygo >/dev/null 2>&1; then
