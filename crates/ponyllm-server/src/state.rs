@@ -1788,11 +1788,80 @@ async fn advance_rotated_at(
             )));
         }
 
+        // 4b. Configured Model Fallbacks (Secondary Candidates for DR)
+        // If the primary model defines explicit fallbacks, resolve them in order and
+        // append as secondary candidates so if all primary provider targets fail or converge early
+        // (e.g. deterministic empty STOP), the router can fail over to the fallback model.
+        // We use a visited set and a depth limit of 3 to prevent cyclic/duplicate references.
+        let mut visited_models: std::collections::HashSet<String> = std::collections::HashSet::new();
+        visited_models.insert(clean.clone());
+        visited_models.insert(effective.to_string());
+
+        let mut queue: std::collections::VecDeque<(String, usize)> = std::collections::VecDeque::new();
+        for target in &candidates {
+            if let Some(p_cfg) = config.providers.get(&target.provider_name) {
+                let spec = p_cfg.get_model_spec(&target.physical_model);
+                for fb in &spec.fallbacks {
+                    if visited_models.insert(fb.clone()) {
+                        queue.push_back((fb.clone(), 1));
+                    }
+                }
+            }
+        }
+
+        let mut sorted_primary = self.sort_candidates(candidates, strategy, config, cached_provider, inbound);
+
+        let mut secondary_candidates = Vec::new();
+        while let Some((fb_model, depth)) = queue.pop_front() {
+            for (p_name, p_cfg) in &config.providers {
+                if p_cfg.default_model == fb_model || p_cfg.models.iter().any(|m| m == &fb_model) {
+                    let spec = p_cfg.get_model_spec(&fb_model);
+                    let thinking_spec = spec.thinking_spec();
+                    let pricing = p_cfg.get_model_pricing(&fb_model);
+                    let billing_mode = p_cfg.get_model_billing_mode(&fb_model);
+                    let (protocol, endpoint_base) =
+                        resolve_effective_protocol(p_name, p_cfg, &fb_model, proto_override, inbound);
+                    secondary_candidates.push(RoutedTarget {
+                        provider_name: p_name.clone(),
+                        base_url: spec.base_url.clone().unwrap_or_else(|| p_cfg.base_url.clone()),
+                        physical_model: fb_model.clone(),
+                        tier: spec.tier,
+                        priority: spec.priority,
+                        strategy,
+                        upstream_protocol: protocol,
+                        endpoint_base,
+                        context_window: spec.context_window.clone(),
+                        billing_mode,
+                        pricing,
+                        thinking_spec,
+                        temperature: spec.temperature,
+                        top_p: spec.top_p,
+                        input_types: spec.input_types.clone(),
+                        max_output: spec.max_output.clone(),
+                        output_types: spec.output_types.clone(),
+                    });
+
+                    if depth < 3 {
+                        for next_fb in &spec.fallbacks {
+                            if visited_models.insert(next_fb.clone()) {
+                                queue.push_back((next_fb.clone(), depth + 1));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if !secondary_candidates.is_empty() {
+            let sorted_secondary = self.sort_candidates(secondary_candidates, strategy, config, cached_provider, inbound);
+            sorted_primary.extend(sorted_secondary);
+        }
+
         // 5. Context Capacity Monotonicity check
         if parsed.is_1m_context {
-            let before_len = candidates.len();
-            candidates.retain(|c| is_context_capacity_compatible("1M", &c.context_window));
-            if candidates.is_empty() && before_len > 0 {
+            let before_len = sorted_primary.len();
+            sorted_primary.retain(|c| is_context_capacity_compatible("1M", &c.context_window));
+            if sorted_primary.is_empty() && before_len > 0 {
                 return Err(CoreError::CapacityExhausted {
                     required_context: "1M".to_string(),
                     message: format!(
@@ -1803,7 +1872,7 @@ async fn advance_rotated_at(
             }
         }
 
-        Ok(self.sort_candidates(candidates, strategy, config, cached_provider, inbound))
+        Ok(sorted_primary)
     }
 
     fn collect_tier_candidates(

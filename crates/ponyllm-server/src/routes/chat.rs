@@ -648,6 +648,18 @@ pub async fn handle_chat_completions(
                         );
                         inject_routing_headers(&mut resp, &target);
                         inject_telemetry_headers(&mut resp, &request_id, &stages);
+                        if target.physical_model != parsed.clean_model_name {
+                            resp.headers_mut().insert(
+                                axum::http::header::HeaderName::from_static("x-ponyllm-fallback-triggered"),
+                                HeaderValue::from_static("true"),
+                            );
+                            if let Ok(orig_val) = HeaderValue::from_str(&parsed.clean_model_name) {
+                                resp.headers_mut().insert(
+                                    axum::http::header::HeaderName::from_static("x-ponyllm-original-model"),
+                                    orig_val,
+                                );
+                            }
+                        }
                         return resp;
                     }
                     Err(err) => {
@@ -954,6 +966,18 @@ pub async fn handle_chat_completions(
                     let mut response = (StatusCode::OK, Json(final_val)).into_response();
                     inject_routing_headers(&mut response, &target);
                     inject_telemetry_headers(&mut response, &request_id, &stages);
+                    if target.physical_model != parsed.clean_model_name {
+                        response.headers_mut().insert(
+                            axum::http::header::HeaderName::from_static("x-ponyllm-fallback-triggered"),
+                            axum::http::HeaderValue::from_static("true"),
+                        );
+                        if let Ok(orig_val) = axum::http::HeaderValue::from_str(&parsed.clean_model_name) {
+                            response.headers_mut().insert(
+                                axum::http::header::HeaderName::from_static("x-ponyllm-original-model"),
+                                orig_val,
+                            );
+                        }
+                    }
                     return response;
                 }
                 (Err(err), _) => {

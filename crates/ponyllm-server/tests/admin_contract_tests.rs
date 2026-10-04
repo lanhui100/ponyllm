@@ -107,6 +107,7 @@ impl TestHarness {
                 thinking_max: None,
                 proxy: None,
                 timeout_secs: None,
+                fallbacks: Vec::new(),
             }],
             keys: raw_keys.clone(),
             default_protocol: None,
@@ -169,6 +170,7 @@ impl TestHarness {
             thinking_max: None,
             proxy: None,
             timeout_secs: None,
+            fallbacks: Vec::new(),
         };
 
         gw_config.providers.insert(

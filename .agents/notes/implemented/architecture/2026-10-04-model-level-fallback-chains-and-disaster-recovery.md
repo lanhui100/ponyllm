@@ -1,6 +1,6 @@
 # ADR: Model-Level Fallback Chains & Disaster Recovery (跨模型容灾降级阶梯)
 
-Status: proposed
+Status: implemented
 Date: 2026-10-04
 
 ## Context & Problem Statement
@@ -18,7 +18,7 @@ Date: 2026-10-04
 
 ## Decision
 
-我们采用 **显式配置的同族/模型级降级链（Configured Model Fallback Chain）** + **Preamble 零提交安全转移**：
+我们实施了 **显式配置的同族/模型级降级链（Configured Model Fallback Chain）** + **Preamble 零提交安全转移**：
 
 1. **配置层增强 (`ModelConfig.fallbacks`)**：
    - 在 `ModelConfig` 中支持显式配置可选的备选模型链：`fallbacks: Vec<String>`。

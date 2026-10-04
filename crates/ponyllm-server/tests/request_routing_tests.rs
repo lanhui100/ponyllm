@@ -2385,6 +2385,7 @@ fn priority_provider(name: &str, priority: Option<u32>, input_price: f64) -> (St
                 thinking_max: None,
                 proxy: None,
                 timeout_secs: None,
+                fallbacks: Vec::new(),
             }],
             default_protocol: Some(UpstreamProtocol::Chat),
             chat_url: None,

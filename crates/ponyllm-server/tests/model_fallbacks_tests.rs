@@ -36,8 +36,55 @@ async fn test_model_fallbacks_routing() {
         Some(GatewayRoutingStrategy::Speed),
     ).unwrap();
 
-    // Red-phase expectation: targets should include the primary model and the fallback model
     assert_eq!(targets.len(), 2, "Expected 2 targets (primary + fallback)");
     assert_eq!(targets[0].physical_model, "gemini-3.8-flash-high");
     assert_eq!(targets[1].physical_model, "gemini-3.8-flash-medium");
 }
+
+#[tokio::test]
+async fn test_model_fallbacks_chain_and_cycle_prevention() {
+    let mut config = GatewayConfig::default();
+    let prov = ProviderConfig {
+        base_url: "https://example.com".to_string(),
+        default_model: "model-a".to_string(),
+        strategy: "latency".to_string(),
+        models: vec![
+            "model-a".to_string(),
+            "model-b".to_string(),
+            "model-c".to_string(),
+        ],
+        model_specs: vec![
+            ModelSpec {
+                name: "model-a".to_string(),
+                fallbacks: vec!["model-b".to_string()],
+                ..ModelSpec::default()
+            },
+            ModelSpec {
+                name: "model-b".to_string(),
+                fallbacks: vec!["model-c".to_string(), "model-a".to_string()], // cyclic reference back to model-a
+                ..ModelSpec::default()
+            },
+            ModelSpec {
+                name: "model-c".to_string(),
+                ..ModelSpec::default()
+            },
+        ],
+        ..ProviderConfig::default()
+    };
+
+    config.providers.insert("mock".to_string(), prov);
+    let state = AppState::new(config);
+
+    let parsed = ParsedRequestModel::parse("model-a");
+    let targets = state.resolve_routed_targets(
+        &parsed,
+        Some(GatewayRoutingStrategy::Speed),
+    ).unwrap();
+
+    // Resolves model-a -> model-b -> model-c cleanly without duplicate or infinite loop
+    assert_eq!(targets.len(), 3);
+    assert_eq!(targets[0].physical_model, "model-a");
+    assert_eq!(targets[1].physical_model, "model-b");
+    assert_eq!(targets[2].physical_model, "model-c");
+}
+

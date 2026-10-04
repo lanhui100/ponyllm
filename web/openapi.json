@@ -1304,6 +1304,15 @@
               "null"
             ]
           },
+          "fallbacks": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
           "input_price": {
             "type": [
               "number",
@@ -2575,6 +2584,15 @@
               "string",
               "null"
             ]
+          },
+          "fallbacks": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            }
           },
           "input_price": {
             "type": [
