@@ -973,11 +973,11 @@ function waterBarWidth(percent: number | null): string {
 <template>
   <div
     v-if="totalAccounts > 0"
-    class="swiss-card p-5 bg-white/45 backdrop-blur-xs transition-all duration-200 border border-white/40 shadow-xs mb-6"
+    class="swiss-card p-4 bg-white/45 backdrop-blur-xs transition-all duration-200 border border-white/40 shadow-xs mb-6"
     :class="{ 'border-rose-200/80 bg-rose-50/20': activeKeys.length === 0 }"
   >
     <!-- 卡片头部 -->
-    <div class="flex flex-wrap items-center justify-between gap-3 pb-4 mb-4 border-b border-slate-200/60">
+    <div class="flex flex-wrap items-center justify-between gap-3 pb-3 mb-3 border-b border-slate-200/60">
       <div class="flex items-center gap-2.5">
         <div class="flex items-center justify-center text-slate-800">
           <Icons name="zap" size="16" />
@@ -1022,9 +1022,9 @@ function waterBarWidth(percent: number | null): string {
     </div>
 
     <!-- 指标布局区：左侧账户状态，右侧现代精简指标 -->
-    <div class="grid grid-cols-1 lg:grid-cols-12 gap-5">
+    <div class="grid grid-cols-1 lg:grid-cols-12 gap-4">
       <!-- 账户可用性状态与矩阵槽位 (占 4 列) -->
-      <div class="lg:col-span-4 flex min-h-0 flex-col justify-between p-3.5 rounded-lg bg-slate-50/60 border border-slate-100/80">
+      <div class="lg:col-span-4 flex min-h-0 flex-col justify-between p-3 rounded-lg bg-slate-50/60 border border-slate-100/80">
         <div class="flex shrink-0 self-start w-full items-center justify-between text-xs text-slate-500 mb-2 font-medium">
           <span class="inline-flex items-center gap-1 text-slate-700">
             <Icons name="check" size="14" class="text-slate-700" />
@@ -1118,18 +1118,46 @@ function waterBarWidth(percent: number | null): string {
         </div>
       </div>
 
-      <!-- 右侧现代精简排版：容量水位 + 周期额度测定 + 加权用量统计 (占 8 列) -->
-      <div class="lg:col-span-8 flex flex-col justify-between gap-3">
-        <!-- 顶部：Gemini 容量水位条 (横向双列紧凑展开) -->
-        <div class="p-3.5 rounded-lg bg-slate-50/60 border border-slate-100/80">
-          <div class="flex items-center justify-between text-xs text-slate-500 mb-2 font-medium">
+      <!-- 右侧现代精简排版：加权用量统计 + 容量水位 + 周期额度测定 (占 8 列) -->
+      <div class="lg:col-span-8 flex flex-col gap-2">
+        <!-- 顶部：加权用量统计 (无面板，小文字大数字) -->
+        <div>
+          <div class="flex items-center gap-1 text-xs text-slate-500 font-medium mb-1">
+            <Icons name="activity" size="13" class="text-slate-700" />
+            加权用量统计
+          </div>
+          <div class="grid grid-cols-3 gap-2">
+            <div class="flex flex-col">
+              <span class="text-[10px] text-slate-400">5小时用量</span>
+              <span class="text-4xl sm:text-5xl font-bold font-mono tracking-tight text-slate-900 tabular-nums leading-none">
+                {{ factualCycleSummary.avg5h > 0 ? formatTokenHuman(factualCycleSummary.avg5h) : '--' }}
+              </span>
+            </div>
+            <div class="flex flex-col">
+              <span class="text-[10px] text-slate-400">自然周用量</span>
+              <span class="text-4xl sm:text-5xl font-bold font-mono tracking-tight text-slate-900 tabular-nums leading-none">
+                {{ factualCycleSummary.avgWeekly > 0 ? formatTokenHuman(factualCycleSummary.avgWeekly) : '--' }}
+              </span>
+            </div>
+            <div class="flex flex-col">
+              <span class="text-[10px] text-slate-400">自然月用量</span>
+              <span class="text-4xl sm:text-5xl font-bold font-mono tracking-tight text-slate-900 tabular-nums leading-none">
+                {{ factualCycleSummary.avgMonthly > 0 ? formatTokenHuman(factualCycleSummary.avgMonthly) : '--' }}
+              </span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Gemini 容量水位条 (横向双列紧凑展开) -->
+        <div class="p-3 rounded-lg bg-slate-50/60 border border-slate-100/80">
+          <div class="flex items-center justify-between text-xs text-slate-500 mb-1.5 font-medium">
             <span class="inline-flex items-center gap-1 text-slate-700">
               <Icons name="sparkles" size="14" class="text-slate-700" />
               Gemini 容量水位
             </span>
             <span class="text-[11px] text-slate-400">基于当前 {{ activeKeys.length }} 个就绪账号会话余量加权聚合</span>
           </div>
-          <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <!-- 5 小时窗口水位 -->
             <div class="space-y-1">
               <div class="flex items-center justify-between text-xs">
@@ -1171,11 +1199,11 @@ function waterBarWidth(percent: number | null): string {
           </div>
         </div>
 
-        <!-- 中部：5小时 / 自然周 / 自然月 测定基准 (输入大字体 + 右侧紧凑三要素) -->
-        <div class="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+        <!-- 5小时 / 自然周 / 自然月 测定基准 (输入大字体 + 右侧紧凑三要素) -->
+        <div class="grid grid-cols-1 sm:grid-cols-3 gap-2">
           <!-- 5小时 -->
-          <div class="p-3 rounded-lg bg-slate-50/60 border border-slate-100/80 flex flex-col justify-between">
-            <div class="text-xs font-semibold text-slate-700 mb-2">5小时</div>
+          <div class="p-2.5 rounded-lg bg-slate-50/60 border border-slate-100/80 flex flex-col justify-between">
+            <div class="text-xs font-semibold text-slate-700 mb-1">5小时</div>
             <div class="flex items-center justify-between gap-2">
               <div class="flex flex-col min-w-0">
                 <span class="text-[10px] text-slate-400">输入 Token</span>
@@ -1201,8 +1229,8 @@ function waterBarWidth(percent: number | null): string {
           </div>
 
           <!-- 自然周 -->
-          <div class="p-3 rounded-lg bg-slate-50/60 border border-slate-100/80 flex flex-col justify-between">
-            <div class="text-xs font-semibold text-slate-700 mb-2">自然周</div>
+          <div class="p-2.5 rounded-lg bg-slate-50/60 border border-slate-100/80 flex flex-col justify-between">
+            <div class="text-xs font-semibold text-slate-700 mb-1">自然周</div>
             <div class="flex items-center justify-between gap-2">
               <div class="flex flex-col min-w-0">
                 <span class="text-[10px] text-slate-400">输入 Token</span>
@@ -1228,8 +1256,8 @@ function waterBarWidth(percent: number | null): string {
           </div>
 
           <!-- 自然月 -->
-          <div class="p-3 rounded-lg bg-slate-50/60 border border-slate-100/80 flex flex-col justify-between">
-            <div class="text-xs font-semibold text-slate-700 mb-2">自然月</div>
+          <div class="p-2.5 rounded-lg bg-slate-50/60 border border-slate-100/80 flex flex-col justify-between">
+            <div class="text-xs font-semibold text-slate-700 mb-1">自然月</div>
             <div class="flex items-center justify-between gap-2">
               <div class="flex flex-col min-w-0">
                 <span class="text-[10px] text-slate-400">输入 Token</span>
@@ -1255,36 +1283,6 @@ function waterBarWidth(percent: number | null): string {
           </div>
         </div>
 
-        <!-- 底部：加权用量统计 (持久化，样式小文字大数字) -->
-        <div class="p-3 rounded-lg bg-slate-50/60 border border-slate-100/80">
-          <div class="flex items-center justify-between text-xs text-slate-500 mb-2 font-medium">
-            <span class="inline-flex items-center gap-1 text-slate-700">
-              <Icons name="activity" size="14" class="text-slate-700" />
-              加权用量统计
-            </span>
-            <span class="text-[10px] text-amber-700 bg-amber-50 px-1.5 py-0.5 rounded font-medium">持久化</span>
-          </div>
-          <div class="grid grid-cols-3 gap-2 text-center sm:text-left">
-            <div class="flex flex-col">
-              <span class="text-[10px] text-slate-400">5小时用量</span>
-              <span class="text-xl sm:text-2xl font-bold font-mono tracking-tight text-slate-900 tabular-nums">
-                {{ factualCycleSummary.avg5h > 0 ? formatTokenHuman(factualCycleSummary.avg5h) : '--' }}
-              </span>
-            </div>
-            <div class="flex flex-col">
-              <span class="text-[10px] text-slate-400">自然周用量</span>
-              <span class="text-xl sm:text-2xl font-bold font-mono tracking-tight text-slate-900 tabular-nums">
-                {{ factualCycleSummary.avgWeekly > 0 ? formatTokenHuman(factualCycleSummary.avgWeekly) : '--' }}
-              </span>
-            </div>
-            <div class="flex flex-col">
-              <span class="text-[10px] text-slate-400">自然月用量</span>
-              <span class="text-xl sm:text-2xl font-bold font-mono tracking-tight text-slate-900 tabular-nums">
-                {{ factualCycleSummary.avgMonthly > 0 ? formatTokenHuman(factualCycleSummary.avgMonthly) : '--' }}
-              </span>
-            </div>
-          </div>
-        </div>
       </div>
     </div>
 
