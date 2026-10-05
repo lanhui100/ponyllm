@@ -293,9 +293,12 @@ spec:
       # dashboard telemetry 单写者（2026-10-01 ADR）：admin 面钉死 dev 副本，
       # 其 /var/lib/ponyllm 挂既有 PVC ponyllm-data，dashboard 读写同副本、
       # 跨发版持久。数据面 /v1/* 路由仍 5:4:1:1 加权，不受影响。
+      # 2026-10-06 F16：补挂专用 admin-ratelimit（20/10，比全局 120/60 更严），
+      # 防管理面撞库/扫号；与全局 ratelimit 链式叠加计数。
       middlewares:
         - name: ponyllm-security-headers
         - name: ponyllm-admin-allowlist
+        - name: ponyllm-admin-ratelimit
         - name: ponyllm-ratelimit
         - name: ponyllm-inflightreq
       services:

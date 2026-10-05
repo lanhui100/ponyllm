@@ -52,8 +52,19 @@ jobs:
         run: |
           Compress-Archive -Path target/${{ matrix.target }}/release/ponyllm.exe -DestinationPath ${{ matrix.artifact_name }}
 
+      - name: Compute checksum
+        shell: bash
+        run: |
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum ${{ matrix.artifact_name }} > ${{ matrix.artifact_name }}.sha256
+          else
+            shasum -a 256 ${{ matrix.artifact_name }} > ${{ matrix.artifact_name }}.sha256
+          fi
+
       - name: Upload Release Artifacts
         uses: softprops/action-gh-release@v2
         with:
-          files: ${{ matrix.artifact_name }}
+          files: |
+            ${{ matrix.artifact_name }}
+            ${{ matrix.artifact_name }}.sha256
           generate_release_notes: true

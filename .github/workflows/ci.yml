@@ -81,9 +81,45 @@ jobs:
       - name: Web production build (catches base/asset breakage)
         run: pnpm --dir web build
 
+  audit:
+    name: Dependency audits (cargo + pnpm)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install cargo-audit (prebuilt)
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+
+      - name: Rust dependency audit
+        # 漏洞（含 unmaintained/unsound 之外的安全项）→ 非零退出阻断发布；
+        # unmaintained/unsound 警告不阻断（当前为 fxhash/paste/rustls-pemfile/lru）。
+        run: cargo audit
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      - name: Install web dependencies (frozen)
+        run: pnpm --dir web install --frozen-lockfile
+
+      - name: Web dependency audit
+        # high 及以上漏洞 → 非零退出（brace-expansion 2.1.7 后应为 0）
+        run: pnpm audit --dir web --audit-level high
+
   build-and-push-image:
     name: Build & Push GHCR Image
-    needs: [test, web]
+    needs: [test, web, audit]
     runs-on: ubuntu-latest
     permissions:
       contents: read

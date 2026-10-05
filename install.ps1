@@ -35,6 +35,18 @@ try {
         Invoke-WebRequest -Uri $DownloadUrl -OutFile $TempZip -UseBasicParsing
     }
 
+    Write-Host "--> 正在校验 sha256（供应链防护，防止下载被篡改/替换）..." -ForegroundColor Yellow
+    $ChecksumUrl = "$DownloadUrl.sha256"
+    $ChecksumContent = (Invoke-WebRequest -Uri $ChecksumUrl -UseBasicParsing).Content
+    $ExpectedHash = ($ChecksumContent -split ' ')[0].Trim().ToLowerInvariant()
+    if (-not $ExpectedHash) {
+        throw "无法获取校验和文件 $ChecksumUrl（发布资产缺失），中止安装"
+    }
+    $ActualHash = (Get-FileHash -Path $TempZip -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($ActualHash -ne $ExpectedHash) {
+        throw "sha256 校验不匹配，发布包可能被篡改，已中止安装"
+    }
+
     Write-Host "--> 正在解压发布包..." -ForegroundColor Yellow
     Expand-Archive -Path $TempZip -DestinationPath $TempExtract -Force
 

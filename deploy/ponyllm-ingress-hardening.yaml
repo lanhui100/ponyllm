@@ -12,13 +12,19 @@ spec:
       # CSP 加固：移除 script-src 'unsafe-inline'，严禁内联脚本执行；
       # 允许 style-src 'self' 'unsafe-inline' 仅供 Tailwind/Vue scoped 动态样式插入；
       # img-src 收窄为 'self' data: 杜绝图片加载外带凭据；
-      # connect-src 收敛为 'self' 同源；补充 form-action 'self' 防表单劫持。
+      # connect-src 收敛为 'self' 同源；补充 form-action 'self' 防表单劫持；
+      # upgrade-insecure-requests：全站 HTTPS，杜绝任何降级明文子资源。
       Content-Security-Policy: >-
         default-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'self'; form-action 'self';
-        script-src 'self'; style-src 'self' 'unsafe-inline';
+        script-src 'self'; style-src 'self' 'unsafe-inline'; upgrade-insecure-requests;
         img-src 'self' data:; font-src 'self' data:;
         connect-src 'self';
-      Permissions-Policy: geolocation=(), microphone=(), camera=()
+      # 跨源隔离（VULN-10）：CORP/COOP same-origin 阻断跨源资源嵌入与窗口接管；
+      # 本站 OAuth 弹窗与父页同源，COOP same-origin 不阻断同源窗口通信。
+      Cross-Origin-Resource-Policy: same-origin
+      Cross-Origin-Opener-Policy: same-origin
+      # permissions-policy 与应用层 app.rs 默认值对齐，补 payment=()。
+      Permissions-Policy: geolocation=(), microphone=(), camera=(), payment=()
       Referrer-Policy: no-referrer
       X-Content-Type-Options: nosniff
       X-Frame-Options: SAMEORIGIN

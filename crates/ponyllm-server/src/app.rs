@@ -99,6 +99,7 @@ async fn auth_middleware(
 ) -> Response {
     use crate::auth::{authenticate, classify_resource, scope_allows, AuthVerdict, Resource};
     use ponyllm_config::AuthCompat;
+    use std::net::{IpAddr, SocketAddr};
 
     let path = req.uri().path().to_string();
     // /health, /metrics and /oauth2callback endpoints are exempt from authentication
@@ -106,19 +107,19 @@ async fn auth_middleware(
         return next.run(req).await;
     }
 
-    let (legacy_key, entries, compat) = {
+    let (legacy_key, entries, compat, auth_mode) = {
         let cfg = state.config.read();
         (
             cfg.api_key.trim().to_string(),
             cfg.gateway_keys.clone(),
             cfg.auth_compat,
+            cfg.auth_mode,
         )
     };
-    // Open mode (empty/`none` legacy key AND no scoped keys): unchanged P0
-    // behavior — allow all (non-loopback binds are refused at startup by
-    // `validate_bind_auth_combo`).
-    let open = (legacy_key.is_empty() || legacy_key.eq_ignore_ascii_case("none")) && entries.is_empty();
-    if open {
+    // F1 (VULN-17): open mode is now explicit `auth_mode = "open"` ONLY.
+    // The legacy implicit "empty api_key → open" behavior is removed, so an
+    // accidentally emptied credential source can never open the gateway.
+    if auth_mode == ponyllm_config::AuthMode::Open {
         return next.run(req).await;
     }
 
@@ -138,18 +139,39 @@ async fn auth_middleware(
 
     let headers = req.headers();
 
-    // 提取客户端真实 IP（经反向代理/EdgeOne）及 User-Agent，用于管理审计
-    let client_ip = headers
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.split(',').next().map(|s| s.trim()))
-        .or_else(|| {
-            headers
-                .get("x-real-ip")
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.trim())
-        })
-        .unwrap_or("unknown");
+    // F3 (VULN-12): resolve the client IP ONCE from forwarding headers
+    // (right-to-left, skipping trusted proxy hops). This single value feeds
+    // the audit log, the F2 rate-limit key and the F4 admin fence — one trust
+    // model, no drift. The TCP peer comes from `ConnectInfo` (registered in
+    // `serve_with_shutdown`); test servers without it fall back to the
+    // unspec address, which the fence treats as outside (fail-closed).
+    let remote_peer: IpAddr = req
+        .extensions()
+        .get::<axum::extract::ConnectInfo<SocketAddr>>()
+        .map(|c| c.0.ip())
+        .unwrap_or(IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
+    let trusted = state.trusted_proxies.read().clone();
+    let client_ip = crate::auth::resolve_client_ip(
+        headers
+            .get("x-forwarded-for")
+            .and_then(|v| v.to_str().ok()),
+        headers.get("x-real-ip").and_then(|v| v.to_str().ok()),
+        remote_peer,
+        &trusted,
+    );
+    let client_ip_str = client_ip.to_string();
+
+    // F4 (VULN-02): admin IP fence — a non-empty allowlist is fail-closed:
+    // the resolved client IP must be inside, otherwise 404 (hide existence).
+    if path.starts_with("/api/admin") {
+        let fence = state.admin_ip_allowlist.read();
+        if let Some(ref nets) = *fence {
+            if !nets.is_empty() && !nets.iter().any(|n| n.contains(&client_ip)) {
+                return admin_fence_denied();
+            }
+        }
+    }
+
     let user_agent = headers
         .get(axum::http::header::USER_AGENT)
         .and_then(|v| v.to_str().ok())
@@ -180,14 +202,30 @@ async fn auth_middleware(
     // P0 G3: strict rejects bare tokens even when the value is otherwise
     // correct — clients must send `Authorization: Bearer <token>`.
     // (`x-api-key` carries equal rights in both modes, never tightened.)
-    if strict && is_bare_token {
+    let bare_rejected = strict && is_bare_token;
+
+    // F2 (VULN-01): auth-failure budget check BEFORE `authenticate` so an
+    // attacker cannot burn SHA-256 CPU first. Budget key = (client IP, scope
+    // prefix); successful calls never consume it. On any failure below we
+    // record into the same budget.
+    let prefix = crate::auth::ratelimit_prefix(provided_token);
+    if state.auth_ratelimiter.check(client_ip, prefix).is_err() {
+        return crate::auth::rate_limited();
+    }
+
+    if bare_rejected {
+        if path.starts_with("/api/admin") {
+            tracing::warn!(client_ip = %client_ip_str, user_agent, %method, %path, reason = "bare_token_strict", "admin interface access rejected (bare token in strict mode)");
+        }
+        state.auth_ratelimiter.record_failure(client_ip, prefix);
         return crate::auth::unauthorized("Bare token rejected in strict mode; send `Authorization: Bearer <token>`. Legacy token disabled; re-issue a scoped key.");
     }
 
     let Some(token) = provided_token.filter(|t| !t.is_empty()) else {
         if path.starts_with("/api/admin") {
-            tracing::warn!(client_ip, user_agent, %method, %path, reason = "missing_credential", "admin interface access rejected (unauthenticated)");
+            tracing::warn!(client_ip = %client_ip_str, user_agent, %method, %path, reason = "missing_credential", "admin interface access rejected (unauthenticated)");
         }
+        state.auth_ratelimiter.record_failure(client_ip, prefix);
         return crate::auth::invalid_api_key();
     };
 
@@ -200,14 +238,16 @@ async fn auth_middleware(
     match authenticate(token, &entries, &legacy_key, strict) {
         AuthVerdict::Invalid => {
             if path.starts_with("/api/admin") {
-                tracing::warn!(client_ip, user_agent, token_prefix, %method, %path, reason = "invalid_credential", "admin interface access rejected (invalid credential)");
+                tracing::warn!(client_ip = %client_ip_str, user_agent, token_prefix, %method, %path, reason = "invalid_credential", "admin interface access rejected (invalid credential)");
             }
+            state.auth_ratelimiter.record_failure(client_ip, prefix);
             crate::auth::invalid_api_key()
         }
         AuthVerdict::LegacyDisabled => {
             if path.starts_with("/api/admin") {
-                tracing::warn!(client_ip, user_agent, token_prefix, %method, %path, reason = "legacy_disabled", "admin interface rejected disabled legacy credential");
+                tracing::warn!(client_ip = %client_ip_str, user_agent, token_prefix, %method, %path, reason = "legacy_disabled", "admin interface rejected disabled legacy credential");
             }
+            state.auth_ratelimiter.record_failure(client_ip, prefix);
             crate::auth::legacy_disabled()
         }
         AuthVerdict::Allowed { scope, .. } => {
@@ -228,16 +268,58 @@ async fn auth_middleware(
                     Resource::Exempt => "exempt",
                 };
                 if path.starts_with("/api/admin") {
-                    tracing::warn!(client_ip, user_agent, token_prefix, %method, %path, scope = scope.as_str(), resource = name, reason = "privilege_boundary_violation", "admin privilege boundary violation rejected (403)");
+                    tracing::warn!(client_ip = %client_ip_str, user_agent, token_prefix, %method, %path, scope = scope.as_str(), resource = name, reason = "privilege_boundary_violation", "admin privilege boundary violation rejected (403)");
                 }
+                // 403 is NOT an authentication failure — do not consume the
+                // F2 budget (a valid key hitting a forbidden scope must not
+                // be locked out).
                 crate::auth::forbidden(name)
             }
         }
     }
 }
 
+/// F4 (VULN-02): fence denial envelope — 404, same shape as the global
+/// fallback, so the admin surface is indistinguishable from a missing route.
+fn admin_fence_denied() -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        Json(json!({
+            "error": {
+                "message": "Not Found",
+                "code": "not_found"
+            }
+        })),
+    )
+        .into_response()
+}
+
 pub fn create_app(state: Arc<AppState>) -> Router {
     let cors = build_cors();
+
+    // Phase-2 env overrides (F4/F3), read ONCE at app build time (same pattern
+    // as `PONYLLM_CORS_ALLOWLIST`): ops-level admin fence CIDRs and trusted
+    // proxy IPs win over the config-file values.
+    if let Ok(raw) = std::env::var("PONYLLM_ADMIN_IP_ALLOWLIST") {
+        let list: Vec<String> = raw
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !list.is_empty() {
+            *state.admin_ip_allowlist.write() = crate::state::parse_admin_allowlist(&list);
+        }
+    }
+    if let Ok(raw) = std::env::var("PONYLLM_TRUSTED_PROXIES") {
+        let list: Vec<String> = raw
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !list.is_empty() {
+            *state.trusted_proxies.write() = crate::state::parse_trusted_proxies(&list);
+        }
+    }
 
     let body_limit = state.config.read().request_body_limit;
 
@@ -400,19 +482,61 @@ fn build_web_router(web_enabled: bool, web_dist_dir: &str) -> Router<Arc<AppStat
         .fallback(ServeFile::new(index.clone()));
 
     let assets_dir = dist.join("assets");
-    let router = Router::new()
+    let index_routes = Router::new()
         .route("/", axum::routing::get_service(ServeFile::new(index.clone())))
         .route("/connect", axum::routing::get_service(ServeFile::new(index.clone())))
         .route("/dashboard", axum::routing::get_service(ServeFile::new(index.clone())))
         .route("/recorder", axum::routing::get_service(ServeFile::new(index.clone())))
         .route("/governance", axum::routing::get_service(ServeFile::new(index.clone())))
-        .nest_service("/app", serve);
-    let router = mount_favicon_routes(router, &dist);
+        .layer(axum::middleware::from_fn(html_no_cache));
+    let router = mount_favicon_routes(index_routes.nest_service("/app", serve), &dist);
 
     if assets_dir.is_dir() {
-        return router.nest_service("/assets", ServeDir::new(assets_dir));
+        // Vite 哈希资产：缓存 immutable，浏览器/CDN 无需再启发式协商。
+        let assets_router = Router::new()
+            .fallback_service(ServeDir::new(assets_dir))
+            .layer(axum::middleware::from_fn(assets_cache_headers));
+        return router.nest("/assets", assets_router);
     }
     router
+}
+
+/// Web 静态资源缓存策略（VULN-20/F11）：
+/// - `/assets/*`：Vite 内容哈希产物（文件名含内容 hash），成功响应加
+///   `Cache-Control: public, max-age=31536000, immutable`，杜绝浏览器
+///   启发式缓存歧义；发版后文件名变化即自动取新资源。
+/// - HTML 入口（`/`、`/connect`、`/dashboard`、`/recorder`、`/governance`）：
+///   `no-cache`，保证发版后 index.html 及时引用新哈希资源。
+async fn assets_cache_headers(
+    req: Request,
+    next: Next,
+) -> Response {
+    let mut res = next.run(req).await;
+    if res.status().is_success()
+        && !res.headers().contains_key(axum::http::header::CACHE_CONTROL)
+    {
+        res.headers_mut().insert(
+            axum::http::header::CACHE_CONTROL,
+            HeaderValue::from_static("public, max-age=31536000, immutable"),
+        );
+    }
+    res
+}
+
+async fn html_no_cache(
+    req: Request,
+    next: Next,
+) -> Response {
+    let mut res = next.run(req).await;
+    if res.status().is_success()
+        && !res.headers().contains_key(axum::http::header::CACHE_CONTROL)
+    {
+        res.headers_mut().insert(
+            axum::http::header::CACHE_CONTROL,
+            HeaderValue::from_static("no-cache"),
+        );
+    }
+    res
 }
 
 /// Favicon routes: served straight from dist with an explicit `Cache-Control`

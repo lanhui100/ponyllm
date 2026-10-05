@@ -59,6 +59,25 @@ else
   exit 1
 fi
 
+echo "--> 正在校验 sha256（供应链防护，防止下载被篡改/替换）..."
+if command -v curl >/dev/null 2>&1; then
+  curl -fSL "${DOWNLOAD_URL}.sha256" -o "$TMP_DIR/$ASSET_NAME.sha256"
+elif command -v wget >/dev/null 2>&1; then
+  wget -qO "$TMP_DIR/$ASSET_NAME.sha256" "${DOWNLOAD_URL}.sha256"
+fi
+if [ ! -s "$TMP_DIR/$ASSET_NAME.sha256" ]; then
+  echo "错误: 无法获取校验和文件 ${DOWNLOAD_URL}.sha256（发布资产缺失），中止安装。" >&2
+  exit 1
+fi
+if ! (
+  cd "$TMP_DIR" && sha256sum -c "$ASSET_NAME.sha256" 2>/dev/null
+) && ! (
+  cd "$TMP_DIR" && shasum -a 256 -c "$ASSET_NAME.sha256" 2>/dev/null
+); then
+  echo "错误: sha256 校验不匹配，发布包可能被篡改，已中止安装。" >&2
+  exit 1
+fi
+
 echo "--> 正在解压发布包..."
 if [ "$PLATFORM" = "windows" ]; then
   if command -v unzip >/dev/null 2>&1; then
