@@ -140,14 +140,13 @@ describe('header + storage contract (WEB-01 acceptance 6)', () => {
     expect('X-Api-Key' in headers).toBe(false);
   });
 
-  it('resolveBaseURL normalizes blanks, slashes and non-strings', () => {
+  it('F13: resolveBaseURL ignores runtime __PONY_BASE__ override, build-time VITE_API_BASE only', () => {
     const w = window as unknown as Record<string, unknown>;
-    delete w.__PONY_BASE__;
-    expect(resolveBaseURL()).toBe('');
     w.__PONY_BASE__ = 'http://127.0.0.1:8080///';
-    expect(resolveBaseURL()).toBe('http://127.0.0.1:8080');
+    expect(resolveBaseURL()).toBe('');
+    expect(resolveBaseURL()).not.toContain('127.0.0.1:8080');
     w.__PONY_BASE__ = '  http://x/  ';
-    expect(resolveBaseURL()).toBe('http://x');
+    expect(resolveBaseURL()).toBe('');
     w.__PONY_BASE__ = 42;
     expect(resolveBaseURL()).toBe('');
     delete w.__PONY_BASE__;

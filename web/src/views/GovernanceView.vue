@@ -212,41 +212,7 @@ function cleanupOAuthSession() {
     pollTimer = null;
   }
   if (typeof window !== 'undefined') {
-    window.removeEventListener('message', handleWindowMessage);
     window.removeEventListener('focus', handleWindowFocus);
-  }
-}
-
-function handleWindowMessage(event: MessageEvent) {
-  if (!event.data || event.data.type !== 'antigravity:oauth_callback') {
-    return;
-  }
-  // 安全校验 1: 严格校验消息来源 Origin (允许同源，或服务端返回的回环回调 origin)
-  const expectedOrigin = oauthRedirectUri.value
-    ? new URL(oauthRedirectUri.value).origin
-    : window.location.origin;
-  if (typeof window !== 'undefined' && event.origin !== window.location.origin && event.origin !== expectedOrigin) {
-    console.warn('[PonyLLM OAuth] 拒绝未授信跨源消息:', event.origin);
-    return;
-  }
-  // 安全校验 2: 校验消息发送源 Window 引用 (若有)
-  if (oauthPopupRef.value && event.source && event.source !== oauthPopupRef.value) {
-    console.warn('[PonyLLM OAuth] 拒绝来自未知弹窗窗口的消息');
-    return;
-  }
-  // 安全校验 3: 严格比对 State 防范 CSRF（缺 state 亦拒绝）
-  if (oauthState.value && event.data.state !== oauthState.value) {
-    console.warn('[PonyLLM OAuth] 拒绝 State 缺失或不匹配的 OAuth 回调');
-    return;
-  }
-
-  if (event.data.success && event.data.code) {
-    antigravityForm.value.code_or_url = event.data.code;
-    showToast('已成功接收 Google 授权回调，正在自动保存...');
-    void handleAuthorizeAntigravity();
-  } else if (event.data.error) {
-    providerFormError.value = `Google 授权失败: ${event.data.error}`;
-    cleanupOAuthSession();
   }
 }
 
@@ -284,7 +250,9 @@ async function fetchAndOpenAuthUrl() {
 
     if (typeof window !== 'undefined') {
       oauthWaiting.value = true;
-      window.addEventListener('message', handleWindowMessage);
+      // F14: noopener=yes —— 弹窗不再持有 opener 引用，杜绝 tabnabbing；
+      // 授权结果回传走服务端 pending 轮询（下方 45s）与剪贴板捕获，不再依赖
+      // 跨源 postMessage 通道（已移除）。
       window.addEventListener('focus', handleWindowFocus);
 
       const width = 600;
@@ -294,7 +262,7 @@ async function fetchAndOpenAuthUrl() {
       oauthPopupRef.value = window.open(
         res.auth_url,
         'google_oauth_popup',
-        `width=${width},height=${height},left=${left},top=${top},status=no,toolbar=no,menubar=no,noopener=no`
+        `width=${width},height=${height},left=${left},top=${top},status=no,toolbar=no,menubar=no,noopener=yes`
       );
 
 

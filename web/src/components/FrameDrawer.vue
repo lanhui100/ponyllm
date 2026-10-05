@@ -3,6 +3,7 @@ import { h, ref, computed, watch, onMounted, onUnmounted } from 'vue';
 import type { RecordedFrame } from '../types/telemetry';
 import { scrubSecrets, generateCurlCommand } from '../utils/scrub';
 import { formatDateTime } from '../utils/format';
+import { renderFastMarkdown } from '../utils/markdown';
 import Icons from './ui/Icons.vue';
 import UiTooltip from './ui/UiTooltip.vue';
 
@@ -381,41 +382,8 @@ watch(
   { immediate: true }
 );
 
-// 简易极速轻量 Markdown 渲染器 (支持代码块、行内代码、标题、粗体、列表与换行)
-function renderFastMarkdown(text: string): string {
-  if (!text) return '';
-  // 1. 转义 HTML 实体防止 XSS
-  let escaped = text
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
-
-  // 2. 独立多行代码块 ```lang ... ```
-  escaped = escaped.replace(/```([a-zA-Z0-9_-]*)\n([\s\S]*?)```/g, (_m, lang, code) => {
-    const langBadge = lang ? `<div class="code-badge font-mono text-[10px] text-slate-400 select-none pb-1">${lang}</div>` : '';
-    return `<div class="my-2.5 p-3 rounded-lg bg-slate-900 text-slate-100 font-mono text-xs overflow-x-auto custom-scrollbar">${langBadge}<pre class="leading-relaxed select-all"><code>${code.trim()}</code></pre></div>`;
-  });
-
-  // 3. 行内代码 `code`
-  escaped = escaped.replace(/`([^`\n]+)`/g, '<code class="px-1.5 py-0.5 rounded bg-slate-200/80 font-mono text-xs text-indigo-700 select-all">$1</code>');
-
-  // 4. 标题 # ## ###
-  escaped = escaped.replace(/^### (.*$)/gim, '<h3 class="font-bold text-sm text-slate-900 mt-2 mb-1">$1</h3>');
-  escaped = escaped.replace(/^## (.*$)/gim, '<h2 class="font-bold text-base text-slate-900 mt-3 mb-1.5">$1</h2>');
-  escaped = escaped.replace(/^# (.*$)/gim, '<h1 class="font-bold text-lg text-slate-900 mt-3 mb-2">$1</h1>');
-
-  // 5. 粗体与斜体
-  escaped = escaped.replace(/\*\*([^*]+)\*\*/g, '<strong class="font-semibold text-slate-900">$1</strong>');
-  escaped = escaped.replace(/\*([^*]+)\*/g, '<em class="italic">$1</em>');
-
-  // 6. 列表项 - / *
-  escaped = escaped.replace(/^\s*[-*]\s+(.*$)/gim, '<li class="ml-4 list-disc text-slate-800">$1</li>');
-
-  // 7. 普通换行
-  escaped = escaped.replace(/\n/g, '<br/>');
-
-  return escaped;
-}
+// Markdown 渲染统一由 ../utils/markdown 提供（F12：DOMPurify 消毒 + 补 " ' 转义）。
+// 原组件内私有 renderFastMarkdown 已随 F12 抽离删除。
 
 // 可按层级折叠的递归漂亮 JSON 树状组件 (Collapsible JsonTree)
 const JsonTree = {

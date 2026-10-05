@@ -79,6 +79,14 @@ fn build_gateway_config_and_pools(
     gw_config.antigravity_auto_refresh = config_file.gateway.antigravity_auto_refresh;
     gw_config.antigravity_refresh_interval_secs = config_file.gateway.antigravity_refresh_interval_secs;
     gw_config.cross_provider_quota_failover = config_file.gateway.cross_provider_quota_failover;
+    // Phase-2 auth hardening passthrough (F1/F2/F4/F3): auth mode, failure
+    // budget, admin IP fence and trusted proxies (disk format -> runtime).
+    gw_config.auth_mode = config_file.gateway.auth_mode;
+    gw_config.auth_fail_window_secs = config_file.gateway.auth_fail_window_secs;
+    gw_config.auth_fail_limit = config_file.gateway.auth_fail_limit;
+    gw_config.auth_lockout_secs = config_file.gateway.auth_lockout_secs;
+    gw_config.admin_ip_allowlist = config_file.gateway.admin_ip_allowlist.clone();
+    gw_config.trusted_proxies = config_file.gateway.trusted_proxies.clone();
 
     // Startup observability for the quota-boundary default (bugfix 2026-10-02):
     // when cross-provider quota failover is disabled but ≥2 providers share a
@@ -375,6 +383,23 @@ async fn run_server(opts: ServerOptions) -> Result<(), Box<dyn std::error::Error
         eprintln!("❌ {}", reason);
         return Err(reason.into());
     }
+    // Phase-2 F1: explicit `auth_mode="open"` on a non-loopback bind is
+    // refused too — an open gateway must never face the public network,
+    // even when a (now-ignored) key is present.
+    if config_file.gateway.auth_mode == ponyllm_config::AuthMode::Open {
+        let host = final_bind.split_once(':').map(|(h, _)| h.trim()).unwrap_or(final_bind.trim());
+        let loopback = host.eq_ignore_ascii_case("127.0.0.1")
+            || host.eq_ignore_ascii_case("localhost")
+            || host == "::1"
+            || host == "[::1]";
+        if !loopback {
+            return Err(format!(
+                "拒绝启动：auth_mode='open'（免鉴权）禁止绑定非环回地址 '{}'。请改用 secured 模式并配置网关口令。",
+                final_bind
+            )
+            .into());
+        }
+    }
     if gw_config.telemetry_snapshot_path.is_none() {
         let snap = ponyllm_server::telemetry_snapshot::snapshot_path_for_config(
             None,
@@ -549,13 +574,17 @@ async fn run_server(opts: ServerOptions) -> Result<(), Box<dyn std::error::Error
     let has_token = !gw_config.api_key.is_empty() && !gw_config.api_key.eq_ignore_ascii_case("none");
     let web_base_url = format!("http://{}:{}/", probe_host, p_str);
     let web_direct_url = if has_token {
-        format!("http://{}:{}/?token={}", probe_host, p_str, gw_config.api_key)
+        // F15 (VULN-15): fragment 传递凭据（#token=），避免进入终端/会话日志与 CDN 缓存
+        format!("http://{}:{}/#token={}", probe_host, p_str, gw_config.api_key)
     } else {
         web_base_url.clone()
     };
 
-    let auth_display = if gw_config.api_key.is_empty() || gw_config.api_key.eq_ignore_ascii_case("none") {
-        "免鉴权 (开放模式)".to_string()
+    // Phase-2 F1: emptiness no longer implies open — display the real mode.
+    let auth_display = if gw_config.auth_mode == ponyllm_config::AuthMode::Open {
+        "免鉴权 (显式 auth_mode=open，仅限环回绑定)".to_string()
+    } else if gw_config.api_key.is_empty() || gw_config.api_key.eq_ignore_ascii_case("none") {
+        "未配置凭证 (secured fail-closed：所有 API 需认证)".to_string()
     } else {
         gw_config.api_key.clone()
     };

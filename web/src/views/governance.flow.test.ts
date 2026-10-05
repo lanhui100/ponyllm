@@ -349,7 +349,7 @@ describe('GovernanceView End-to-End User Flow (WEB-04)', () => {
     expect(authorizeSpy.mock.calls[0]?.[0]).not.toHaveProperty('redirect_uri');
   });
 
-  it('Flow 5: Antigravity automated OAuth postMessage callback seamlessly completes authorization', async () => {
+  it('Flow 5: Antigravity automated OAuth pending-polling seamlessly completes authorization (postMessage channel removed)', async () => {
     vi.spyOn(adminApi, 'getOverview').mockReturnValue({
       send: () => Promise.resolve(mockOverviewWritable),
     } as any);
@@ -454,25 +454,23 @@ describe('GovernanceView End-to-End User Flow (WEB-04)', () => {
     await nextTick();
     expect(authorizeSpy).not.toHaveBeenCalled();
 
-    // Simulate legitimate OAuth callback window sending postMessage with matching origin and state
-    window.dispatchEvent(
-      new MessageEvent('message', {
-        origin: window.location.origin,
-        data: {
-          type: 'antigravity:oauth_callback',
-          success: true,
-          code: '4/0A-postmessage-seamless-code',
-          state: 'auto-test-state-999',
-        },
-      })
-    );
+    // F14: postMessage 通道已随 noopener=yes 移除——恶意/CSRF 消息（上方两个
+    // dispatch）在无监听下被忽略，攻击面随通道关闭而消失。合法回调改由服务端
+    // pending 轮询回传（轮询周期 1s，45 次上限）。
+    vi.spyOn(adminApi, 'getAntigravityPending').mockReturnValue({
+      send: () => Promise.resolve({
+        ready: true,
+        code: '4/0A-poll-seamless-code',
+      }),
+    } as any);
 
+    // 等待首轮 pending 探测（1000ms 间隔）触发自动授权
+    await new Promise((r) => setTimeout(r, 1150));
     await nextTick();
-    await new Promise((r) => setTimeout(r, 20));
 
-    // Verify authorizeAntigravity was automatically triggered without manual user input!
+    // Verify authorizeAntigravity was automatically triggered via polling, no manual input!
     expect(authorizeSpy).toHaveBeenCalledWith(expect.objectContaining({
-      code_or_url: '4/0A-postmessage-seamless-code',
+      code_or_url: '4/0A-poll-seamless-code',
       provider: 'antigravity',
       state: 'auto-test-state-999',
     }));

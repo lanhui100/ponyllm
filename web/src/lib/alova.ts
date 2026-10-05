@@ -70,15 +70,14 @@ export function authHeaders(rawToken: string): Record<string, string> {
   return { [AUTH_HEADER]: bearerValue(token) };
 }
 
-// Runtime-configurable base URL (ADR: never baked as VITE_* build-time const).
-// Same-origin relative by default; dev overrides via `window.__PONY_BASE__`.
+// F13 (VULN-16): base URL 由构建期 `VITE_API_BASE` 注入（生产默认同源空串）。
+// runtime `window.__PONY_BASE__` 覆写已剥离——防止任意同源脚本（如既有 XSS）重定向
+// API 基址到恶意服务并连带窃取 Authorization header。dev 跨源调试改经
+// vite.config proxy 或构建期 VITE_API_BASE。
 // Normalized: trimmed, single trailing slash stripped (empty stays empty).
 export function resolveBaseURL(): string {
-  const override = (window as unknown as Record<string, unknown>).__PONY_BASE__;
-  if (typeof override !== 'string') {
-    return '';
-  }
-  return override.trim().replace(/\/+$/, '');
+  const builtin = (import.meta.env.VITE_API_BASE as string | undefined) ?? '';
+  return builtin.trim().replace(/\/+$/, '');
 }
 
 export const alova = createAlova({
