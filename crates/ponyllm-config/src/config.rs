@@ -114,6 +114,32 @@ pub struct GatewaySection {
     /// (network / 5xx / TTFB / timeout) always keep cross-provider failover.
     #[serde(default)]
     pub cross_provider_quota_failover: bool,
+    /// Explicit authentication mode (Phase-2 F1): `secured` (default,
+    /// fail-closed — credentials always required) | `open` (explicit opt-in).
+    /// The legacy implicit open-on-empty-key behavior is removed.
+    #[serde(default = "default_auth_mode")]
+    pub auth_mode: AuthMode,
+    /// F2 (VULN-01): sliding-window length for failed-auth counting (seconds).
+    #[serde(default = "default_auth_fail_window_secs")]
+    pub auth_fail_window_secs: u64,
+    /// F2 (VULN-01): failed-auth budget per (client IP, key prefix) per window;
+    /// exceeding it locks the pair for `auth_lockout_secs` (tiered backoff).
+    #[serde(default = "default_auth_fail_limit")]
+    pub auth_fail_limit: u32,
+    /// F2 (VULN-01): base lockout duration after the budget is exceeded
+    /// (escalates 900s → 3600s → 14400s on repeated lockouts).
+    #[serde(default = "default_auth_lockout_secs")]
+    pub auth_lockout_secs: u64,
+    /// F4 (VULN-02): admin IP fence. CIDR list (e.g. `203.0.113.0/24,10.0.0.0/8`);
+    /// non-empty → `/api/admin/*` requires the resolved client IP inside the
+    /// list, otherwise 404 (fail-closed). `PONYLLM_ADMIN_IP_ALLOWLIST` env
+    /// (comma-separated) overrides at app build time.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub admin_ip_allowlist: Vec<String>,
+    /// F3 (VULN-12): exact proxy IPs trusted to append `X-Forwarded-For`
+    /// (e.g. EdgeOne回源网段). `PONYLLM_TRUSTED_PROXIES` env overrides.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trusted_proxies: Vec<String>,
 }
 
 /// Scoped gateway credential (P1): one entry per issued key.
@@ -197,6 +223,45 @@ impl KeyScope {
 /// Default `last4` for entries issued before the field existed (task-27).
 fn default_gateway_key_last4() -> String {
     "****".to_string()
+}
+
+/// Gateway authentication mode (Phase-2 F1, VULN-17 fail-closed).
+///
+/// `secured` (default): a credential is ALWAYS required. `open` is explicit
+/// opt-in only — the legacy "empty `api_key` implies open" behavior is gone.
+/// A Secured-start gateway also refuses runtime reloads that would flip it
+/// open (empty key + no scoped keys), see the `ponyllm-server` reload guard.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum AuthMode {
+    #[default]
+    Secured,
+    Open,
+}
+
+impl AuthMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Secured => "secured",
+            Self::Open => "open",
+        }
+    }
+}
+
+fn default_auth_mode() -> AuthMode {
+    AuthMode::Secured
+}
+
+fn default_auth_fail_window_secs() -> u64 {
+    60
+}
+
+fn default_auth_fail_limit() -> u32 {
+    30
+}
+
+fn default_auth_lockout_secs() -> u64 {
+    900
 }
 
 /// Compute the stored hash for a scoped gateway key (P1): never store plaintext.
@@ -439,6 +504,12 @@ impl Default for GatewaySection {
             antigravity_auto_refresh: default_antigravity_auto_refresh(),
             antigravity_refresh_interval_secs: default_antigravity_refresh_interval_secs(),
             cross_provider_quota_failover: false,
+            auth_mode: default_auth_mode(),
+            auth_fail_window_secs: default_auth_fail_window_secs(),
+            auth_fail_limit: default_auth_fail_limit(),
+            auth_lockout_secs: default_auth_lockout_secs(),
+            admin_ip_allowlist: Vec::new(),
+            trusted_proxies: Vec::new(),
         }
     }
 }

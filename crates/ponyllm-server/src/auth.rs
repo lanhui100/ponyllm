@@ -270,6 +270,96 @@ pub fn caller_scope(
     }
 }
 
+// ---------------------------------------------------------------------------
+// F3 (VULN-12): client IP resolution from forwarding headers
+// ---------------------------------------------------------------------------
+
+/// Parse one `X-Forwarded-For` / `X-Real-IP` segment into a plain IP.
+///
+/// - Empty / whitespace / non-IP junk → `None` (caller skips the segment).
+/// - Port injection is stripped: `1.2.3.4:6666` and `[2001:db8::1]:443` both
+///   resolve to their bare IP.
+/// - IPv4-mapped IPv6 (`::ffff:10.0.0.1`) is normalized to the embedded v4.
+fn parse_ip_segment(seg: &str) -> Option<std::net::IpAddr> {
+    let s = seg.trim();
+    if s.is_empty() {
+        return None;
+    }
+    // Bracketed v6 with port: `[2001:db8::1]:443` → `2001:db8::1`.
+    if let Some(rest) = s.strip_prefix('[') {
+        let inner = rest.split_once(']').map(|(a, _)| a).unwrap_or(rest);
+        return inner.parse().ok();
+    }
+    if let Ok(ip) = s.parse::<std::net::IpAddr>() {
+        return Some(normalize_ip(ip));
+    }
+    // v4 with port (`1.2.3.4:6666`) or unbracketed v6 with trailing port
+    // (`2001:db8::1:443`): strip the last `:port` and re-parse.
+    if let Some((addr, _port)) = s.rsplit_once(':') {
+        if !addr.is_empty() {
+            if let Ok(ip) = addr.parse::<std::net::IpAddr>() {
+                return Some(normalize_ip(ip));
+            }
+        }
+    }
+    None
+}
+
+fn normalize_ip(ip: std::net::IpAddr) -> std::net::IpAddr {
+    match ip {
+        std::net::IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => std::net::IpAddr::V4(v4),
+            None => std::net::IpAddr::V6(v6),
+        },
+        other => other,
+    }
+}
+
+/// Resolve the effective client IP from forwarding headers (F3, VULN-12).
+///
+/// Contract (frozen in `tests/acceptance_sec_ip_resolve_tests.rs`):
+/// 1. If `xff` is present and non-empty: split on ',', trim, drop empty and
+///    invalid segments; scan **right-to-left**, skipping addresses inside
+///    `trusted`; the first non-trusted segment is the client IP. If every
+///    segment is trusted, fall through to step 2.
+/// 2. Otherwise (no XFF / empty / all-trusted): use `x_real_ip` when it
+///    parses as a plain IP (port stripped), else `remote` (the TCP peer).
+///
+/// This single resolution is shared by the auth rate-limit key (F2), the
+/// admin IP fence (F4) and the admin audit log — one trust model, no drift.
+pub fn resolve_client_ip(
+    xff: Option<&str>,
+    x_real_ip: Option<&str>,
+    remote: std::net::IpAddr,
+    trusted: &[std::net::IpAddr],
+) -> std::net::IpAddr {
+    if let Some(raw) = xff {
+        let raw = raw.trim();
+        if !raw.is_empty() {
+            let mut valid: Vec<std::net::IpAddr> = Vec::new();
+            for seg in raw.split(',') {
+                if let Some(ip) = parse_ip_segment(seg) {
+                    valid.push(ip);
+                }
+            }
+            if !valid.is_empty() {
+                for ip in valid.iter().rev() {
+                    if !trusted.contains(ip) {
+                        return *ip;
+                    }
+                }
+                // Every hop trusted → fall through to x_real_ip / remote.
+            }
+        }
+    }
+    if let Some(rip) = x_real_ip {
+        if let Some(ip) = parse_ip_segment(rip) {
+            return ip;
+        }
+    }
+    remote
+}
+
 /// 401 envelope (contract §3.3): same shape as the legacy response, only the
 /// `message` varies. Never echoes the presented credential.
 pub fn unauthorized(message: &str) -> Response {
@@ -307,6 +397,43 @@ pub fn forbidden(resource: &str) -> Response {
         })),
     )
         .into_response()
+}
+
+/// 429 envelope (F2, VULN-01): auth failure budget exhausted / lockout active.
+/// Same error shape family as 401/403 so clients parse it uniformly.
+pub fn rate_limited() -> Response {
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        Json(json!({
+            "error": {
+                "message": "Too many failed authentication attempts from this client; retry after the lockout window.",
+                "type": "rate_limit_error",
+                "code": "rate_limit_exceeded"
+            }
+        })),
+    )
+        .into_response()
+}
+
+/// Normalize a presented credential into a coarse rate-limit bucket so an
+/// attacker cannot burn budget with a fresh random suffix per attempt
+/// (namespace isolation, second key dimension: `(ip, prefix)`).
+pub fn ratelimit_prefix(token: Option<&str>) -> &'static str {
+    let t = token.unwrap_or("").trim();
+    for (p, name) in [
+        (KeyScope::Admin.prefix(), "admin"),
+        (KeyScope::Inference.prefix(), "infer"),
+        (KeyScope::Readonly.prefix(), "read"),
+    ] {
+        if t.starts_with(p) {
+            return name;
+        }
+    }
+    if t.is_empty() {
+        "none"
+    } else {
+        "legacy"
+    }
 }
 
 #[cfg(test)]

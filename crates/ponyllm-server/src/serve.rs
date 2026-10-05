@@ -43,12 +43,16 @@ pub async fn serve_with_shutdown(
     let shutdown_future = async move {
         wait_shutdown_flag(shutdown_rx).await;
     };
-    // `WithGracefulShutdown` is only `IntoFuture`: materialize a real future
-    // first so it can be pinned, selected on, and re-timed across phases.
+    // `with_connect_info` (Phase-2 F3): registers the TCP peer address in the
+    // request extensions so `auth::resolve_client_ip` can fall back to the
+    // real socket peer when forwarding headers are absent/untrusted.
     let mut serve = Box::pin(
-        axum::serve(listener, router.into_make_service())
-            .with_graceful_shutdown(shutdown_future)
-            .into_future(),
+        axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .with_graceful_shutdown(shutdown_future)
+        .into_future(),
     );
     // Phase 1: normal operation, deliberately NO deadline.
     tokio::select! {

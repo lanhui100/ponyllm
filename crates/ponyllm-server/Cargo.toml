@@ -44,6 +44,9 @@ rustls-pemfile = { workspace = true }
 # Images API: multipart uploads re-encoded into Gemini inlineData data URIs
 # (production path). base64 also stays in dev-dependencies for Secret tests.
 base64 = { workspace = true }
+# F4 (VULN-02): admin IP fence CIDR parsing (2.12.x already in the lock via
+# transitive deps — no version drift).
+ipnet = "2"
 
 [dev-dependencies]
 tempfile = { workspace = true }

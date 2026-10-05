@@ -4135,10 +4135,14 @@ pub async fn handle_oauth2_callback(
         if exists {
             let mut pending_map = state.pending_antigravity_oauth.write();
             if let Some(pending) = pending_map.get_mut(state_key) {
-                if success {
+                // F5 (VULN-08): one-shot capture — never overwrite an
+                // already-received code, never write into a consumed flow.
+                // A second callback with a different code must not replace
+                // the first (authorize consumed/replaced by the attacker).
+                if success && pending.code.is_none() && !pending.consumed {
                     pending.code = code.clone();
                     pending.error = None;
-                } else {
+                } else if !success {
                     pending.code = None;
                     pending.error = error_msg.clone();
                 }
@@ -4197,8 +4201,25 @@ pub async fn handle_oauth2_callback(
 )]
 pub async fn handle_admin_antigravity_pending(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Query(query): Query<AntigravityPendingQuery>,
 ) -> impl IntoResponse {
+    // F5 (VULN-08): the OAuth authorization code is bearer-grade; only
+    // admin-scope callers may read it. Readonly keeps the readiness flags but
+    // never the code (`AntigravityPendingView.code` omits None via serde).
+    let is_admin = {
+        let cfg = state.config.read();
+        let strict = matches!(
+            cfg.auth_compat,
+            ponyllm_config::AuthCompat::Strict
+        );
+        let entries = cfg.gateway_keys.clone();
+        let legacy = cfg.api_key.clone();
+        matches!(
+            crate::auth::caller_scope(&headers, &entries, &legacy, strict),
+            Some(ponyllm_config::KeyScope::Admin)
+        )
+    };
     let pending_map = state.pending_antigravity_oauth.read();
     if let Some(pending) = pending_map.get(&query.state) {
         let ready = pending.code.is_some() || pending.error.is_some();
@@ -4207,7 +4228,7 @@ pub async fn handle_admin_antigravity_pending(
             Json(AntigravityPendingView {
                 state: query.state,
                 ready,
-                code: pending.code.clone(),
+                code: if is_admin { pending.code.clone() } else { None },
                 error: pending.error.clone(),
             }),
         )
@@ -4434,6 +4455,7 @@ pub async fn handle_admin_antigravity_auth_url(
                 code: None,
                 error: None,
                 redirect_uri: Some(redirect_uri.clone()),
+                consumed: false,
             },
         );
     }
@@ -4691,9 +4713,14 @@ pub async fn handle_admin_authorize_antigravity(
     }
 
 
-    // Clean up consumed pending state
+    // Clean up consumed pending state (F5 one-shot: mark consumed, then drop
+    // the entry so no later callback can re-inject into this flow).
     if let Some(ref st) = payload.state {
-        state.pending_antigravity_oauth.write().remove(st);
+        let mut m = state.pending_antigravity_oauth.write();
+        if let Some(p) = m.get_mut(st) {
+            p.consumed = true;
+        }
+        m.remove(st);
     }
 
     // Best-effort quota fetch using the ready token manager.

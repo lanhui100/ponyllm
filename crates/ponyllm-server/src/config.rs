@@ -486,6 +486,41 @@ pub struct GatewayConfig {
     /// (network / 5xx / TTFB / timeout) always keep cross-provider failover.
     #[serde(default)]
     pub cross_provider_quota_failover: bool,
+    /// Explicit authentication mode (Phase-2 F1): `secured` default (fail-closed);
+    /// `open` only via explicit opt-in. Canonical type in `ponyllm-config`.
+    #[serde(default = "default_auth_mode")]
+    pub auth_mode: ponyllm_config::AuthMode,
+    /// F2 (VULN-01): failed-auth sliding window length in seconds.
+    #[serde(default = "default_auth_fail_window_secs")]
+    pub auth_fail_window_secs: u64,
+    /// F2 (VULN-01): failed-auth budget per (client IP, key prefix) per window.
+    #[serde(default = "default_auth_fail_limit")]
+    pub auth_fail_limit: u32,
+    /// F2 (VULN-01): base lockout seconds after the budget is exceeded.
+    #[serde(default = "default_auth_lockout_secs")]
+    pub auth_lockout_secs: u64,
+    /// F4 (VULN-02): admin IP fence CIDRs (empty = fence disabled).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub admin_ip_allowlist: Vec<String>,
+    /// F3 (VULN-12): exact trusted proxy IPs for XFF hop skipping.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trusted_proxies: Vec<String>,
+}
+
+fn default_auth_mode() -> ponyllm_config::AuthMode {
+    ponyllm_config::AuthMode::Secured
+}
+
+fn default_auth_fail_window_secs() -> u64 {
+    60
+}
+
+fn default_auth_fail_limit() -> u32 {
+    30
+}
+
+fn default_auth_lockout_secs() -> u64 {
+    900
 }
 
 fn default_antigravity_refresh_interval_secs() -> u64 {
@@ -528,6 +563,12 @@ impl Default for GatewayConfig {
             antigravity_auto_refresh: true,
             antigravity_refresh_interval_secs: default_antigravity_refresh_interval_secs(),
             cross_provider_quota_failover: false,
+            auth_mode: default_auth_mode(),
+            auth_fail_window_secs: default_auth_fail_window_secs(),
+            auth_fail_limit: default_auth_fail_limit(),
+            auth_lockout_secs: default_auth_lockout_secs(),
+            admin_ip_allowlist: Vec::new(),
+            trusted_proxies: Vec::new(),
         }
     }
 }
