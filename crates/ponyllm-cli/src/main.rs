@@ -574,8 +574,9 @@ async fn run_server(opts: ServerOptions) -> Result<(), Box<dyn std::error::Error
     let has_token = !gw_config.api_key.is_empty() && !gw_config.api_key.eq_ignore_ascii_case("none");
     let web_base_url = format!("http://{}:{}/", probe_host, p_str);
     let web_direct_url = if has_token {
-        // F15 (VULN-15): fragment 传递凭据（#token=），避免进入终端/会话日志与 CDN 缓存
-        format!("http://{}:{}/#token={}", probe_host, p_str, gw_config.api_key)
+        // R9: 复用 format_web_status_url —— encodeURIComponent 等价编码 + fragment
+        // 传递，避免特殊字符截断/误解码（与 cli.rs 同一来源，防漂移）。
+        format_web_status_url(&web_base_url, true, &gw_config.api_key)
     } else {
         web_base_url.clone()
     };

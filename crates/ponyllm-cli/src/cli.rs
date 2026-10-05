@@ -1,4 +1,34 @@
 use clap::{Parser, Subcommand};
+use percent_encoding::{percent_encode, AsciiSet, CONTROLS};
+
+/// JS `encodeURIComponent` 等价编码集：仅编码 ASCII 控制符、空格与
+/// `" # $ % & + , / : ; < = > ? @ [ \ ] ^ ` { | }`，保留字母数字与
+/// `- _ . ! ~ * ' ( )` —— 与浏览器 `URLSearchParams` 解码侧完全互补
+/// （`&`→`%26`、`#`→`%23`、`+`→`%2B`，其余保留原样）。
+const ENCODE_COMPONENT_SET: &AsciiSet = &CONTROLS
+    .add(b'"')
+    .add(b'#')
+    .add(b'$')
+    .add(b'%')
+    .add(b'&')
+    .add(b'+')
+    .add(b',')
+    .add(b'/')
+    .add(b':')
+    .add(b';')
+    .add(b'=')
+    .add(b'?')
+    .add(b'@')
+    .add(b'[')
+    .add(b']')
+    .add(b'^')
+    .add(b'`')
+    .add(b'{')
+    .add(b'|')
+    .add(b'}')
+    .add(b'<')
+    .add(b'>')
+    .add(b'\\');
 
 #[derive(Debug, Parser)]
 #[command(
@@ -606,8 +636,10 @@ pub enum ModelCommands {
 /// Formats the Web Console URL or disabled indicator for status inspection display.
 ///
 /// If `web_enabled` is false, returns a disabled indicator string.
-/// If `api_key` is non-empty and not "none", returns `{base_url}/#token={api_key}`
-/// (F15: URL fragment 永不上送服务器，避免凭据落入访问日志/referrer/CDN 缓存)。
+/// If `api_key` is non-empty and not "none", returns `{base_url}/#token={encoded}`
+/// (F15: URL fragment 永不上送服务器；R9: api_key 经 encodeURIComponent 等价
+/// percent-encode —— `&`/`#` 不截断 fragment、`+` 不被解码为空格；前端
+/// `URLSearchParams` 解码侧自动还原)。
 /// Otherwise returns `{base_url}/`.
 pub fn format_web_status_url(base_url: &str, web_enabled: bool, api_key: &str) -> String {
     if !web_enabled {
@@ -615,7 +647,7 @@ pub fn format_web_status_url(base_url: &str, web_enabled: bool, api_key: &str) -
     }
     let trimmed = base_url.trim_end_matches('/');
     if !api_key.is_empty() && !api_key.eq_ignore_ascii_case("none") {
-        format!("{}/#token={}", trimmed, api_key)
+        format!("{}/#token={}", trimmed, percent_encode(api_key.as_bytes(), ENCODE_COMPONENT_SET))
     } else {
         format!("{}/", trimmed)
     }

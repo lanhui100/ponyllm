@@ -43,3 +43,24 @@ Phase-2 红队审计确认了前端客户端 4 项缺陷（FIX-CONTRACT.md F12-F
 - F14：OAuth 弹窗 tabnabbing 面关闭；授权回传延迟 ≤1s（轮询间隔）。
 - F15：CLI 控制台链接与启动直达链接凭据经 fragment 传递，不再进访问日志/referrer/CDN 缓存；旧 `?token=` 链接前端仍兼容。
 - 验证：`pnpm web test` 152/152 全绿；`pnpm web build` 通过；`cargo build --bin ponyllm` 通过；`cargo test -p ponyllm-cli` 全绿（含 F15 验收 2/2）。
+
+---
+
+## R9（Phase-2b 追加）：fragment token 的 encodeURIComponent 等价编码
+
+### Problem
+`format_web_status_url` 将 `api_key` 原样拼进 `#token={api_key}`（F15 产物）：key 含 `&` 会被前端 `URLSearchParams`（router.ts `extractFragmentToken`）当参数分隔符截断、含 `+` 被 form 解码成空格、含 `#` 截断 fragment——链接与真实 key 不一致导致登录失败（R9 采纳 finding）。
+
+### Decision
+1. `cli.rs` `format_web_status_url`：api_key 经 `percent_encoding::percent_encode` + 自定义 `ENCODE_COMPONENT_SET`（JS `encodeURIComponent` 等价：保留 `A-Za-z0-9-_.~!*'()`，编码其余）后拼接。`&`→`%26`、`#`→`%23`、`+`→`%2B`；`sk-pony-test-123` 等常规 key 输出不变（不破坏 F15 验收断言）。
+2. `main.rs` 启动直达链接 `web_direct_url` 复用 `format_web_status_url`（单一来源，防漂移）。
+3. 依赖：根 `Cargo.toml` workspace.dependencies + `crates/ponyllm-cli/Cargo.toml` 引入 `percent-encoding = "2.3"`（lockfile 已有 2.3.2，零新下载）。
+
+### Alternatives considered
+- *手写 byte 级 percent-encode 函数*：零依赖但语义易漂移（须精确模拟 encodeURIComponent 保留集），重复造轮子——拒绝，用标准 crate。
+- *`NON_ALPHANUMERIC` 全量编码集*：会把 `-` 编码为 `%2D`，破坏既有 F15 验收断言（`sk-pony-test-123` 输出不变）——拒绝，用 encodeURIComponent 等价保留集。
+- *仅修 cli.rs 不动 main.rs*：同根因（URL 输出含裸 key）遗留隐患——拒绝，统一复用函数。
+
+### Consequences
+- 特殊字符 key 的 fragment 链接与真实 key 一致，登录成功；常规 key 输出与 F15 一致。
+- 前端 `URLSearchParams` 自动解码 `%XX`，解码侧无需改动。
