@@ -283,6 +283,10 @@ pub struct PendingAntigravityOAuth {
     pub code: Option<String>,
     pub error: Option<String>,
     pub redirect_uri: Option<String>,
+    /// F5 (VULN-08): one-shot semantics — set once the flow is consumed by
+    /// `authorize` (entry then removed); a second callback must never
+    /// overwrite an already-received code.
+    pub consumed: bool,
 }
 
 /// Cache key for a pooled proxy client: `(proxy_url, total_timeout_secs)`.
@@ -346,6 +350,90 @@ pub struct AppState {
     /// successful refresh. Quarantine only after N consecutive hits (the
     /// propagation-window buffer from the HA review).
     pub antigravity_invalid_grant_count: Arc<tokio::sync::Mutex<HashMap<String, u32>>>,
+    /// Data-plane egress guard verdict cache (VULN-07/F6): host → last
+    /// verdict with expiry. Per-request re-validation of routed upstream URLs
+    /// pays no DNS on the hot path (positive 60s / negative 10s, fail-closed
+    /// on miss). See [`AppState::data_plane_egress_guard`].
+    pub egress_guard_cache: std::sync::Mutex<HashMap<String, EgressGuardVerdict>>,
+    /// F1 (VULN-17): authentication mode latched at startup. A Secured-start
+    /// gateway refuses runtime reloads that would flip it open.
+    pub startup_auth_state: StartupAuthState,
+    /// F4 (VULN-02): parsed admin IP fence CIDRs. `None`/empty = fence off.
+    /// Non-empty → `/api/admin/*` requires the resolved client IP inside.
+    pub admin_ip_allowlist: Arc<parking_lot::RwLock<Option<Vec<ipnet::IpNet>>>>,
+    /// F3 (VULN-12): exact proxy IPs trusted to append `X-Forwarded-For`.
+    pub trusted_proxies: Arc<parking_lot::RwLock<Vec<std::net::IpAddr>>>,
+    /// F2 (VULN-01): auth-failure rate limiter (sliding window per
+    /// (client IP, key prefix), tiered lockout).
+    pub auth_ratelimiter: Arc<crate::auth_ratelimit::AuthRateLimiter>,
+}
+
+/// F1: authentication mode frozen at startup (see `AppState::startup_auth_state`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartupAuthState {
+    /// A credential is required; empty-key runtime reloads are rejected.
+    Secured,
+    /// Explicit `auth_mode=open` at startup; reloads stay open.
+    Open,
+}
+
+/// Parse F4 admin fence CIDR strings; invalid entries are dropped (never a
+/// startup failure — a typo must not brick the gateway, it just narrows the
+/// fence to the valid entries). Returns `None` when the list is empty.
+///
+/// Bare IPs (no mask) are accepted as host nets — `ipnet`'s `FromStr` only
+/// accepts masked forms, so `127.0.0.1` is normalized to `127.0.0.1/32`.
+pub(crate) fn parse_admin_allowlist(raw: &[String]) -> Option<Vec<ipnet::IpNet>> {
+    let mut out = Vec::new();
+    for s in raw {
+        let s = s.trim();
+        if s.is_empty() {
+            continue;
+        }
+        match s.parse::<ipnet::IpNet>() {
+            Ok(net) => out.push(net),
+            Err(_) => match s.parse::<std::net::IpAddr>() {
+                Ok(std::net::IpAddr::V4(v4)) => {
+                    out.push(ipnet::IpNet::V4(ipnet::Ipv4Net::new(v4, 32).expect("v4 /32")));
+                }
+                Ok(std::net::IpAddr::V6(v6)) => {
+                    out.push(ipnet::IpNet::V6(ipnet::Ipv6Net::new(v6, 128).expect("v6 /128")));
+                }
+                Err(_) => {
+                    tracing::warn!(cidr = %s, "admin_ip_allowlist: dropping unparseable entry");
+                }
+            },
+        }
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
+/// Parse F3 trusted proxy IP strings (exact IPs per the F3 contract);
+/// invalid entries are dropped with a warning.
+pub(crate) fn parse_trusted_proxies(raw: &[String]) -> Vec<std::net::IpAddr> {
+    raw.iter()
+        .filter_map(|s| {
+            let s = s.trim();
+            match s.parse::<std::net::IpAddr>() {
+                Ok(ip) => Some(ip),
+                Err(_) => {
+                    tracing::warn!(proxy = %s, "trusted_proxies: dropping unparseable IP");
+                    None
+                }
+            }
+        })
+        .collect()
+}
+
+/// Cached verdict for the data-plane egress guard (VULN-07/F6).
+#[derive(Clone, Copy, Debug)]
+pub struct EgressGuardVerdict {
+    ok: bool,
+    expires_at: std::time::Instant,
 }
 
 impl std::fmt::Debug for dyn crate::admin_store::ConfigStore {
@@ -479,6 +567,20 @@ impl AppState {
                 pools.clone(),
             );
         }
+        // Phase-2 auth hardening (F1/F2/F4/F3): compute before `config` is
+        // moved into the RwLock below.
+        let startup_auth_state = if config.auth_mode == ponyllm_config::AuthMode::Open {
+            StartupAuthState::Open
+        } else {
+            StartupAuthState::Secured
+        };
+        let admin_allowlist = parse_admin_allowlist(&config.admin_ip_allowlist);
+        let trusted = parse_trusted_proxies(&config.trusted_proxies);
+        let ratelimiter = crate::auth_ratelimit::AuthRateLimiter::new(
+            config.auth_fail_window_secs,
+            config.auth_fail_limit,
+            config.auth_lockout_secs,
+        );
         Self {
             config: RwLock::new(config),
             pools,
@@ -506,6 +608,11 @@ impl AppState {
             refresh_gate: Arc::new(RwLock::new(None)),
             last_antigravity_refresh: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             antigravity_invalid_grant_count: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            egress_guard_cache: std::sync::Mutex::new(HashMap::new()),
+            startup_auth_state,
+            admin_ip_allowlist: Arc::new(parking_lot::RwLock::new(admin_allowlist)),
+            trusted_proxies: Arc::new(parking_lot::RwLock::new(trusted)),
+            auth_ratelimiter: Arc::new(ratelimiter),
         }
     }
 
@@ -689,6 +796,51 @@ impl AppState {
         ponyllm_core::executor::create_probe_http_client_with_options(proxy_opt)
     }
 
+    /// Data-plane egress guard (VULN-07/F6): re-validate a routed upstream
+    /// URL immediately before dialing so a provider hostname that rebinds to
+    /// an internal address AFTER the write-time check is refused here,
+    /// fail-closed (no dial on refusal). A short TTL cache keyed by host
+    /// keeps the hot path DNS-free: positive verdicts cached 60s, negative
+    /// 10s; a cache miss re-resolves with the 5s fail-closed bound inside
+    /// `egress::check_data_plane_url`.
+    ///
+    /// Loopback upstreams stay legitimate by design (documented data-plane
+    /// shape — local Ollama); LAN model-server names are lifted via
+    /// `PONYLLM_PROBE_ALLOWLIST` (same operator hatch as admin probes).
+    pub async fn data_plane_egress_guard(&self, url: &str) -> std::result::Result<(), String> {
+        let host = crate::egress::parse_host(url)?.to_ascii_lowercase();
+        {
+            let cache = self.egress_guard_cache.lock().unwrap_or_else(|p| p.into_inner());
+            if let Some(v) = cache.get(&host) {
+                if v.expires_at > std::time::Instant::now() {
+                    if v.ok {
+                        return Ok(());
+                    }
+                    return Err(format!(
+                        "egress guard refused data-plane upstream host '{}' (cached)",
+                        host
+                    ));
+                }
+            }
+        }
+        let verdict = crate::egress::check_data_plane_url(url).await;
+        let (ok, ttl) = match &verdict {
+            Ok(_) => (true, std::time::Duration::from_secs(60)),
+            Err(_) => (false, std::time::Duration::from_secs(10)),
+        };
+        self.egress_guard_cache
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(
+                host,
+                EgressGuardVerdict {
+                    ok,
+                    expires_at: std::time::Instant::now() + ttl,
+                },
+            );
+        verdict
+    }
+
     /// Best-effort Antigravity identity for envelope translation (P0-6, B7):
     /// `(project_id, key_id)` from the provider's pool. Prefers an Active
     /// key's manager so cooling/disabled credentials don't donate a stale
@@ -718,6 +870,25 @@ impl AppState {
         new_config: GatewayConfig,
         new_pools: HashMap<String, Arc<KeyPool>>,
     ) {
+        // F1 (VULN-17): a Secured-start gateway must never flip open at
+        // runtime. `reload_config_with_pools` wholesale-replaces the in-memory
+        // config; an empty/`none` api_key with no scoped keys would otherwise
+        // turn every endpoint unauthenticated the moment the truth source
+        // (k8s Secret) is accidentally emptied. Refuse and keep the previous
+        // secured config; switching to open requires an explicit
+        // `auth_mode="open"` (or a key) AND a restart (startup guard re-checks).
+        let open_shaped = self.startup_auth_state == StartupAuthState::Secured
+            && (new_config.api_key.trim().is_empty()
+                || new_config.api_key.trim().eq_ignore_ascii_case("none"))
+            && new_config.gateway_keys.is_empty();
+        if open_shaped {
+            tracing::error!(
+                "F1 fail-closed: refusing config reload that would open the gateway \
+                 (empty api_key, no scoped keys); keeping previous secured config. \
+                 To run open mode set auth_mode='open' with a real key and restart."
+            );
+            return;
+        }
         // Hot-reload survival: capture the current per-key usage trackers so a
         // fresh pool rebuilt from config keeps its measurement history (slices,
         // completed cycles, capacity EWMA) by key id — accounts/config churn
