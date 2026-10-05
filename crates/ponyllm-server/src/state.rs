@@ -438,11 +438,14 @@ pub(crate) fn parse_trusted_proxies(raw: &[String]) -> Vec<std::net::IpAddr> {
         .collect()
 }
 
-/// Cached verdict for the data-plane egress guard (VULN-07/F6).
+/// Cached verdict for the data-plane egress guard (VULN-07/F6, R3).
+///
+/// Fields are `pub` so acceptance tests can observe the cache TTL (see
+/// `tests/acceptance_sec_egress_cache_tests.rs`).
 #[derive(Clone, Copy, Debug)]
 pub struct EgressGuardVerdict {
-    ok: bool,
-    expires_at: std::time::Instant,
+    pub ok: bool,
+    pub expires_at: std::time::Instant,
 }
 
 impl std::fmt::Debug for dyn crate::admin_store::ConfigStore {
@@ -805,17 +808,26 @@ impl AppState {
         ponyllm_core::executor::create_probe_http_client_with_options(proxy_opt)
     }
 
-    /// Data-plane egress guard (VULN-07/F6): re-validate a routed upstream
-    /// URL immediately before dialing so a provider hostname that rebinds to
-    /// an internal address AFTER the write-time check is refused here,
-    /// fail-closed (no dial on refusal). A short TTL cache keyed by host
-    /// keeps the hot path DNS-free: positive verdicts cached 60s, negative
-    /// 10s; a cache miss re-resolves with the 5s fail-closed bound inside
-    /// `egress::check_data_plane_url`.
+    /// Data-plane egress guard (VULN-07/F6, R3): re-validate a routed
+    /// upstream URL immediately before dialing so a provider hostname that
+    /// rebinds to an internal address AFTER the write-time check is refused
+    /// here, fail-closed (no dial on refusal). A short TTL cache keyed by
+    /// host keeps the hot path DNS-free: positive verdicts cached 5s,
+    /// negative 10s; a cache miss re-resolves with the 5s fail-closed bound
+    /// inside `egress::check_data_plane_url`.
+    ///
+    /// Residual TOCTOU boundary (stated honestly): a hostname that rebinds
+    /// WITHIN the positive-cache window (≤5s) is not re-resolved until the
+    /// window expires; this is bounded to the TTL by design, and mitigated
+    /// further by `redirect(Policy::none)` on the data-plane client (a 3xx
+    /// cannot steer to an internal target after the gate) and by fail-closed
+    /// refusals on every miss. The admin-probe path (`check_probe_url`)
+    /// re-resolves per call with no positive cache.
     ///
     /// Loopback upstreams stay legitimate by design (documented data-plane
-    /// shape — local Ollama); LAN model-server names are lifted via
-    /// `PONYLLM_PROBE_ALLOWLIST` (same operator hatch as admin probes).
+    /// shape — local Ollama); LAN model-server names AND literal IPs are
+    /// lifted via `PONYLLM_PROBE_ALLOWLIST` (same operator hatch as admin
+    /// probes).
     pub async fn data_plane_egress_guard(&self, url: &str) -> std::result::Result<(), String> {
         let host = crate::egress::parse_host(url)?.to_ascii_lowercase();
         {
@@ -834,7 +846,7 @@ impl AppState {
         }
         let verdict = crate::egress::check_data_plane_url(url).await;
         let (ok, ttl) = match &verdict {
-            Ok(_) => (true, std::time::Duration::from_secs(60)),
+            Ok(_) => (true, std::time::Duration::from_secs(5)),
             Err(_) => (false, std::time::Duration::from_secs(10)),
         };
         self.egress_guard_cache

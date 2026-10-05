@@ -21,7 +21,10 @@
 //!   connection still times out fast on the probe path);
 //! - `.svc`, `.svc.cluster.local`, `localhost`, and cloud metadata hosts
 //!   (`169.254.169.254`, `metadata.google.internal`, …) are rejected by
-//!   name as well, so they stay blocked even if DNS is unavailable.
+//!   name as well, so they stay blocked even if DNS is unavailable;
+//! - the operator allowlist (`PONYLLM_PROBE_ALLOWLIST`) exempts exact hosts
+//!   AND literal IPs (LAN model servers / on-prem proxies) BEFORE the
+//!   name/IP policy runs (B7).
 
 use std::net::{IpAddr, ToSocketAddrs};
 
@@ -91,9 +94,11 @@ fn is_blocked_ip(ip: &IpAddr) -> bool {
     is_blocked_ip_with(ip, allow_loopback)
 }
 
-/// Operator-managed allowlist for admin probes (e.g. an on-prem Ollama or
-/// LAN model server): PONYLLM_PROBE_ALLOWLIST="ollama.lan,models.corp".
-/// Entries match the exact host or any subdomain.
+/// Operator-managed allowlist: `PONYLLM_PROBE_ALLOWLIST="ollama.lan,models.corp"`.
+/// Entries match the exact host or any subdomain; literal IPs (e.g.
+/// `10.0.0.5`) also match exactly and are exempted from the name/IP policy
+/// (B7) — the intended escape hatch for LAN model servers / on-prem
+/// proxies.
 fn probe_allowlisted(host: &str) -> bool {
     if let Ok(list) = std::env::var("PONYLLM_PROBE_ALLOWLIST") {
         let lower = host.trim().trim_end_matches('.').to_ascii_lowercase();
@@ -206,6 +211,11 @@ pub fn check_proxy_url_fast(raw: &str) -> Result<(), String> {
     if host.is_empty() {
         return Err(format!("proxy URL '{}' has no host", trimmed));
     }
+    // B7: the operator allowlist exempts exact proxy hosts AND literal IPs
+    // (on-prem/LAN proxy), consistent with the probe path.
+    if probe_allowlisted(host) {
+        return Ok(());
+    }
     if let Some(reason) = is_blocked_name(host) {
         // localhost is allowed for proxies (local dev proxy); the name
         // check would otherwise reject it.
@@ -237,6 +247,12 @@ pub fn check_proxy_url_fast(raw: &str) -> Result<(), String> {
 /// paying a DNS lookup inside the write lock.
 pub fn check_probe_url_fast(raw: &str) -> Result<(), String> {
     let host = parse_host(raw)?;
+    // B7: the operator allowlist exempts the target BEFORE any name/IP
+    // policy — exact hosts AND literal IPs (e.g. a LAN model server at
+    // `10.0.0.5`) are permitted explicitly by the operator.
+    if probe_allowlisted(&host) {
+        return Ok(());
+    }
     if let Some(reason) = is_blocked_name(&host) {
         return Err(reason.to_string());
     }
@@ -277,9 +293,10 @@ pub fn probe_http_client() -> reqwest::Client {
 pub async fn check_probe_url(raw: &str) -> Result<(), String> {
     check_probe_url_fast(raw)?;
     let host = parse_host(raw)?;
-    // Operator allowlist (see is_blocked_name) also skips the IP re-check:
-    // an allowlisted LAN name necessarily resolves to a LAN address.
-    if host.parse::<IpAddr>().is_err() && probe_allowlisted(&host) {
+    // Operator allowlist (see probe_allowlisted) also skips the IP re-check:
+    // an allowlisted LAN name/literal necessarily points at a target the
+    // operator explicitly permitted (B7).
+    if probe_allowlisted(&host) {
         return Ok(());
     }
     // Literal IPs were already decided above.
@@ -361,6 +378,12 @@ pub async fn check_data_plane_url(raw: &str) -> Result<(), String> {
     if let Some(reason) = data_plane_blocked_name(&host) {
         return Err(reason.to_string());
     }
+    // B7: the operator allowlist (LAN model servers — exact host OR literal
+    // IP) skips the name/IP policy and the DNS re-check, mirroring the probe
+    // path.
+    if probe_allowlisted(&host) {
+        return Ok(());
+    }
     if let Ok(ip) = host.parse::<IpAddr>() {
         if is_blocked_ip_with(&ip, true) {
             return Err(format!(
@@ -368,11 +391,6 @@ pub async fn check_data_plane_url(raw: &str) -> Result<(), String> {
                 host, ip
             ));
         }
-        return Ok(());
-    }
-    // Hostnames pass the name checks; the allowlist (LAN model servers)
-    // skips the IP re-check, mirroring the probe path.
-    if probe_allowlisted(&host) {
         return Ok(());
     }
     let host_for_lookup = host.clone();

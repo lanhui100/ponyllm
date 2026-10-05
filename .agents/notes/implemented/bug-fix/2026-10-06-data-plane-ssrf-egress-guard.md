@@ -16,6 +16,13 @@ Status: implemented
    - 在 `routes/{chat,messages,responses,images,systemone}.rs` 的 per-target 拨号点（target_url 构造后、首个 execute 前）插入守卫；拒绝时置 `last_error`/`UpstreamUnavailable` 并 `continue`（不发拨号）。
 4. 只改生产代码；验收测试由 Test Agent 冻结维护，本次未触碰任何测试文件。
 
+## Phase-2b 修订（审查 B3/B6/B7，2026-10-06）
+
+- **B3（正缓存 TTL 收窄）**：`EgressGuardVerdict::{ok, expires_at}` 改为 `pub`（供 `tests/acceptance_sec_egress_cache_tests.rs` 读取）；数据面正缓存 TTL 60s → 5s（DNS rebinding 窗口有界 ≤15s，验收断言 5s 满足），负缓存保持 10s（有界 ≤30s）；方法文档如实标注残余 TOCTOU：缓存窗口内（≤5s）的 rebinding 不被即时复检，由 `redirect(Policy::none)` 与 fail-closed 缓解；admin 探针路径无正缓存、每次调用重新解析。
+- **B6（fallback client 跟随重定向）**：核对确认已在 F6 提交覆盖——`create_upstream_http_client_with_timeout` 的 fallback builder（upstream.rs:973）已带 `redirect(Policy::none)`（review 引用的 :976 为 F6 前代码）；探针 client（:989-1008）同带；无新增代码。
+- **B7（allowlist 豁免字面 IP）**：`probe_allowlisted` 检查提前到各路径的字面 IP/名称策略之前——`check_probe_url_fast`、`check_probe_url`、`check_data_plane_url`、`check_proxy_url_fast` 四处；`PONYLLM_PROBE_ALLOWLIST` 现可豁免精确字面 IP（如 LAN 模型服务器 `10.0.0.5`、on-prem 代理），模块文档与 `probe_allowlisted` 文档同步说明。
+- 验收：`acceptance_sec_ssrf_tests` 4/4、`acceptance_sec_egress_cache_tests` 2/2 全绿；回归见下。
+
 ## Alternatives considered
 
 - **维持现状（仅写入时校验）**：写入后 DNS 重绑定窗口存在于整个上游生命周期，且 302 跟随可绕过校验；否决。
@@ -26,7 +33,7 @@ Status: implemented
 
 ## Consequences
 
-- 行为变化：依赖上游 3xx 跳转的 provider 现在显式报错（不再静默跟随）；升级后 LAN 模型服务器上游需设置 `PONYLLM_PROBE_ALLOWLIST`（本地 Ollama 回环默认不受影响）。
-- 性能：冷缓存首次请求每个新 host 多一次有界 DNS（≤5s、fail-closed），热路径由 60s 正缓存吸收；chat 首包延迟无感知劣化（缓存命中即零 DNS）。
-- 已知测试缺陷（非实现缺陷）：`acceptance_sec_ssrf_tests.rs::f6_egress_boundaries_outside_remain_open` 断言 `100.65.0.1` 放行，而该地址属于 100.64/10 CGNAT 段（100.64.0.0–100.127.255.255），与同文件 `f6_egress_blocks_cgnat_100_64_10` 自相矛盾；按合约实现 /10 后该断言失败，需 Test Agent 将该项改为 `100.128.0.1`（已上报 Lead 协调）。
-- 回归状态：server/core lib 全绿；鉴权通过的数据面测试（gateway_keys_api_tests、auth_compat_tests）全绿；未鉴权 e2e 的 401 失败属 F1（open 模式 fail-closed，auth-lane 在途）与本项无关。
+- 行为变化：依赖上游 3xx 跳转的 provider 现在显式报错（不再静默跟随）；升级后 LAN 模型服务器上游（主机名或字面 IP）需设置 `PONYLLM_PROBE_ALLOWLIST`（本地 Ollama 回环默认不受影响）。
+- 性能：冷缓存首次请求每个新 host 多一次有界 DNS（≤5s、fail-closed）；正缓存 5s/负缓存 10s，热路径绝大多数命中缓存，chat 首包延迟无感知劣化（缓存命中即零 DNS）；高 RPS 部署每 host 每 5s 一次 getaddrinfo（OS 侧有 DNS 缓存，实际开销更低）。
+- 已知测试缺陷（非实现缺陷）：`acceptance_sec_ssrf_tests.rs::f6_egress_boundaries_outside_remain_open` 原断言 `100.65.0.1` 放行，该地址属于 100.64/10 CGNAT 段；Test Agent 已修正为 `100.128.0.1`（上边界外），该断言现通过。
+- 回归状态：server/core lib 全绿；鉴权通过的数据面测试（gateway_keys_api_tests、auth_compat_tests、admin_write_tests）全绿；未鉴权 e2e 的 401 失败属 F1（open 模式 fail-closed，auth-lane 在途）与本项无关。
