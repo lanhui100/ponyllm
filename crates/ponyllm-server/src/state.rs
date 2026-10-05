@@ -1615,7 +1615,7 @@ async fn advance_rotated_at(
                     )));
                 }
             }
-            return Ok(self.sort_candidates(candidates, strategy, config, cached_provider, inbound));
+            return Ok(self.sort_auto_candidates(candidates, strategy, config, cached_provider, inbound));
         }
 
         // Default auto (no explicit tier): Try Standard -> Elevate to Flagship -> Fallback to Light
@@ -1626,7 +1626,7 @@ async fn advance_rotated_at(
             .collect();
 
         if !standard_candidates.is_empty() {
-            return Ok(self.sort_candidates(standard_candidates, strategy, config, cached_provider, inbound));
+            return Ok(self.sort_auto_candidates(standard_candidates, strategy, config, cached_provider, inbound));
         }
 
         // Adaptive Tier Elevation: Elevate to Flagship if Standard has no matching (or 1M or modality) nodes
@@ -1637,7 +1637,7 @@ async fn advance_rotated_at(
             .collect();
 
         if !flagship_candidates.is_empty() {
-            return Ok(self.sort_candidates(flagship_candidates, strategy, config, cached_provider, inbound));
+            return Ok(self.sort_auto_candidates(flagship_candidates, strategy, config, cached_provider, inbound));
         }
 
         // Fallback to Light tier
@@ -1648,7 +1648,7 @@ async fn advance_rotated_at(
             .collect();
 
         if !light_candidates.is_empty() {
-            return Ok(self.sort_candidates(light_candidates, strategy, config, cached_provider, inbound));
+            return Ok(self.sort_auto_candidates(light_candidates, strategy, config, cached_provider, inbound));
         }
 
         if !required_modalities.is_empty() {
@@ -2008,11 +2008,34 @@ async fn advance_rotated_at(
 
     fn sort_candidates(
         &self,
+        candidates: Vec<RoutedTarget>,
+        strategy: GatewayRoutingStrategy,
+        config: &GatewayConfig,
+        cached_provider: Option<&str>,
+        inbound: Option<UpstreamProtocol>,
+    ) -> Vec<RoutedTarget> {
+        self.sort_candidates_internal(candidates, strategy, config, cached_provider, inbound, false)
+    }
+
+    fn sort_auto_candidates(
+        &self,
+        candidates: Vec<RoutedTarget>,
+        strategy: GatewayRoutingStrategy,
+        config: &GatewayConfig,
+        cached_provider: Option<&str>,
+        inbound: Option<UpstreamProtocol>,
+    ) -> Vec<RoutedTarget> {
+        self.sort_candidates_internal(candidates, strategy, config, cached_provider, inbound, true)
+    }
+
+    fn sort_candidates_internal(
+        &self,
         mut candidates: Vec<RoutedTarget>,
         strategy: GatewayRoutingStrategy,
         _config: &GatewayConfig,
         cached_provider: Option<&str>,
         inbound: Option<UpstreamProtocol>,
+        is_auto: bool,
     ) -> Vec<RoutedTarget> {
         // Passthrough-first tiebreak: stable native-first order BEFORE the
         // strategy sort, so strategy stays primary and same-native wins ties.
@@ -2094,7 +2117,22 @@ async fn advance_rotated_at(
         // over hot-cache stickiness and price/latency/reliability scores
         // (documented in the model-priority ADR); `None` = 0 keeps legacy
         // configurations byte-for-byte identical to the pre-priority ordering.
-        sorted.sort_by_key(|c| std::cmp::Reverse(c.priority.unwrap_or(0)));
+        if is_auto {
+            sorted.sort_by_key(|c| {
+                // Live health awareness for auto routing: if all keys of this provider are cooling down or unavailable,
+                // push it down after active healthy providers to guarantee zero downtime.
+                let has_active_keys = self
+                    .get_pool(&c.provider_name)
+                    .map(|p| p.active_key_count() > 0)
+                    .unwrap_or(true);
+                (
+                    !has_active_keys, // false (active) comes before true (cooling/dead)
+                    std::cmp::Reverse(c.priority.unwrap_or(0)),
+                )
+            });
+        } else {
+            sorted.sort_by_key(|c| std::cmp::Reverse(c.priority.unwrap_or(0)));
+        }
         sorted
     }
 

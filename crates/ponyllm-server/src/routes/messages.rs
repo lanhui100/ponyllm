@@ -185,8 +185,10 @@ pub async fn handle_messages(
 
     // Quota boundary (bugfix): a quota-exhaustion failure on one provider must
     // not silently drain a second provider that carries the same model, unless
-    // the operator explicitly opts back into cross-provider quota failover.
-    let quota_failover_enabled = state.config.read().cross_provider_quota_failover;
+    // the operator explicitly opts back into cross-provider quota failover, OR
+    // when the request is an auto-managed virtual model (`auto`) where zero-interruption
+    // failover across providers is the explicit contract requested by downstream agents.
+    let quota_failover_enabled = parsed.is_auto || state.config.read().cross_provider_quota_failover;
 
     for target in targets {
         // Stop before touching the next provider's quota when the previous
