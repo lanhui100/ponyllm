@@ -23,6 +23,10 @@ lcov.info
 __pycache__/
 *.pyc
 
+# Agent team 内部审计产物（findings/报告/复审/红相记录，不入库）：
+.dev-team/
+
+
 # IDE/编辑器目录：
 .idea/
 .vscode/
