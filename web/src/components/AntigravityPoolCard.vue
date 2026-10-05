@@ -1119,28 +1119,28 @@ function waterBarWidth(percent: number | null): string {
       </div>
 
       <!-- 右侧现代精简排版：加权用量统计 + 容量水位 + 周期额度测定 (占 8 列) -->
-      <div class="lg:col-span-8 flex flex-col gap-4">
+      <div class="lg:col-span-8 flex flex-col gap-8">
         <!-- 顶部：加权用量统计 (无面板，小文字大数字) -->
         <div>
-          <div class="flex items-center gap-1 text-xs text-slate-500 font-medium mb-2.5">
+          <div class="flex items-center gap-1 text-xs text-slate-500 font-medium mb-5">
             <Icons name="activity" size="13" class="text-slate-700" />
             加权用量统计
           </div>
           <div class="grid grid-cols-3 gap-3">
             <div class="flex flex-col">
-              <span class="text-[10px] text-slate-400 mb-1">5小时用量</span>
+              <span class="text-[10px] text-slate-400 mb-1.5">5小时用量</span>
               <span class="text-4xl sm:text-5xl font-bold font-mono tracking-tight text-slate-900 tabular-nums leading-none">
                 {{ factualCycleSummary.avg5h > 0 ? formatTokenHuman(factualCycleSummary.avg5h) : '--' }}
               </span>
             </div>
             <div class="flex flex-col">
-              <span class="text-[10px] text-slate-400 mb-1">自然周用量</span>
+              <span class="text-[10px] text-slate-400 mb-1.5">自然周用量</span>
               <span class="text-4xl sm:text-5xl font-bold font-mono tracking-tight text-slate-900 tabular-nums leading-none">
                 {{ factualCycleSummary.avgWeekly > 0 ? formatTokenHuman(factualCycleSummary.avgWeekly) : '--' }}
               </span>
             </div>
             <div class="flex flex-col">
-              <span class="text-[10px] text-slate-400 mb-1">自然月用量</span>
+              <span class="text-[10px] text-slate-400 mb-1.5">自然月用量</span>
               <span class="text-4xl sm:text-5xl font-bold font-mono tracking-tight text-slate-900 tabular-nums leading-none">
                 {{ factualCycleSummary.avgMonthly > 0 ? formatTokenHuman(factualCycleSummary.avgMonthly) : '--' }}
               </span>
