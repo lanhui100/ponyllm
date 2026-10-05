@@ -76,6 +76,52 @@ impl std::error::Error for StallError {}
 /// the whole budget.
 pub const DEFAULT_TAIL_STALL_IDLE: std::time::Duration = std::time::Duration::from_secs(120);
 
+/// Default heartbeat interval for downstream SSE streams: if no chunk is emitted to the downstream
+/// client for this duration (e.g. during deep thinking or upstream model scheduling), an SSE comment
+/// (`: ping\n\n`) is sent to keep the downstream connection alive and reset client-side idle watchdogs.
+pub const DEFAULT_DOWNSTREAM_HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Wrap a downstream byte stream so that if no chunk is emitted for longer than `interval`,
+/// an SSE comment keepalive line (`: ping\n\n`) is yielded to maintain connection activity
+/// without disturbing SSE JSON stream parsers.
+pub fn downstream_heartbeat_guard<S, E>(
+    stream: S,
+    interval: std::time::Duration,
+) -> futures_util::stream::BoxStream<'static, Result<Bytes, E>>
+where
+    S: Stream<Item = Result<Bytes, E>> + Send + Unpin + 'static,
+    E: Send + 'static,
+{
+    futures_util::stream::unfold(
+        (stream, interval, false),
+        |(mut inner, interval, done)| async move {
+            if done {
+                return None;
+            }
+            loop {
+                match tokio::time::timeout(interval, inner.next()).await {
+                    Ok(Some(Ok(bytes))) => {
+                        return Some((Ok(bytes), (inner, interval, false)));
+                    }
+                    Ok(Some(Err(err))) => {
+                        return Some((Err(err), (inner, interval, true)));
+                    }
+                    Ok(None) => {
+                        return None;
+                    }
+                    Err(_elapsed) => {
+                        // Heartbeat deadline elapsed without any chunk from inner stream.
+                        // Yield an SSE comment ping and re-arm the loop with the same inner stream.
+                        let ping = Bytes::from_static(b": ping\n\n");
+                        return Some((Ok(ping), (inner, interval, false)));
+                    }
+                }
+            }
+        },
+    )
+    .boxed()
+}
+
 /// Wrap an upstream byte stream with a tail-stall watchdog and normalize its
 /// error type to [`StallError`]. The watchdog resets its deadline on every
 /// byte, so long thinking phases that keep emitting heartbeats stay alive;
@@ -2393,6 +2439,9 @@ fn estimate_tokens_from_sse_bytes(raw: &[u8]) -> (usize, Option<u64>, Option<u64
     (content_chars, usage_completion, usage_prompt, usage_cached, text_delta)
 }
 
+/// Wrap a downstream byte stream with telemetry and an automatic SSE heartbeat guard
+/// so downstream clients (and intermediate proxies) do not experience idle read timeouts
+/// during long upstream reasoning or scheduling pauses.
 pub fn wrap_telemetry_stream<S, E>(
     stream: S,
     failure_ctx: StreamFailureContext,
@@ -2401,7 +2450,10 @@ where
     S: Stream<Item = Result<Bytes, E>> + Send + Unpin + 'static,
     E: Send + std::fmt::Display + 'static,
 {
-    TelemetryStream::new(stream, failure_ctx)
+    downstream_heartbeat_guard(
+        TelemetryStream::new(stream, failure_ctx),
+        DEFAULT_DOWNSTREAM_HEARTBEAT_INTERVAL,
+    )
 }
 
 fn parse_lenient_u64(v: &serde_json::Value) -> Option<u64> {
@@ -3953,5 +4005,37 @@ mod tests {
         // Plain transport at other latencies stays transport.
         assert_eq!(classify_stream_timeout_tag("upstream transport error: error decoding response body", 5_000), "transport");
         assert_eq!(classify_stream_timeout_tag("connection reset", 120_000), "transport");
+    }
+
+    #[tokio::test]
+    async fn test_downstream_heartbeat_guard_injects_ping_during_silence() {
+        // Stream emits one chunk, then stays silent for 60ms, then emits another chunk.
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(10);
+        let s = tokio_stream::wrappers::ReceiverStream::new(rx);
+
+        tokio::spawn(async move {
+            let _ = tx.send(Ok(Bytes::from_static(b"data: first\n\n"))).await;
+            tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+            let _ = tx.send(Ok(Bytes::from_static(b"data: second\n\n"))).await;
+        });
+
+        // Heartbeat interval 20ms: during the 60ms silence, ~2 pings should be emitted.
+        let guarded = downstream_heartbeat_guard(s, std::time::Duration::from_millis(20));
+        let mut it = std::pin::pin!(guarded);
+
+        let mut collected = Vec::new();
+        while let Ok(Some(item)) = tokio::time::timeout(std::time::Duration::from_millis(150), it.next()).await {
+            let b = item.expect("stream item should be ok");
+            let is_second = b == Bytes::from_static(b"data: second\n\n");
+            collected.push(b);
+            if is_second {
+                break;
+            }
+        }
+
+        assert!(collected.len() >= 3, "expected first chunk, at least one ping, and second chunk; got: {:?}", collected);
+        assert_eq!(collected[0], Bytes::from_static(b"data: first\n\n"));
+        assert!(collected.iter().any(|b| b == &Bytes::from_static(b": ping\n\n")), "must contain SSE comment ping");
+        assert_eq!(*collected.last().unwrap(), Bytes::from_static(b"data: second\n\n"));
     }
 }
