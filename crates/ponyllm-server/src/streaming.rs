@@ -907,9 +907,13 @@ pub const DEFAULT_PREAMBLE_DEADLINE: std::time::Duration = std::time::Duration::
 /// transient empty-STOP completions. Empty STOPs fail fast in the preamble
 /// (no downstream bytes committed, no key fault), so a dedicated budget larger
 /// than the generic `max_retries` is cheap and credential-independent.
-pub const MIN_EMPTY_STOP_ATTEMPTS: usize = 12;
+pub const MIN_EMPTY_STOP_ATTEMPTS: usize = 15;
 
-/// Consecutive first-frame (`frames == 0`) empty STOPs that flip the verdict
+/// Maximum number of consecutive empty-STOP retries on a single account before
+/// failing over to the next candidate key in the pool.
+pub const PER_KEY_EMPTY_STOP_MAX_ATTEMPTS: usize = 5;
+
+/// Consecutive early-frame (`frames <= 1`) empty STOPs across distinct keys that flip the verdict
 /// from "transient blip, keep retrying" to "deterministic prompt×model zero
 /// content, converge early" (R3). Each counted attempt already ran on a fresh
 /// key with a fresh upstream requestId (R2), so repetition is evidence, not

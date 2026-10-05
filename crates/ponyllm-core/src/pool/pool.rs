@@ -290,7 +290,7 @@ impl KeyPool {
     /// True when the key may receive a request right now under the given
     /// budget: concurrency cap not reached and both the request and token
     /// windows still have >= 1 unit of headroom.
-    fn budget_ok(entry: &ApiKeyEntry, limits: Option<&RateLimits>) -> bool {
+    pub fn budget_ok(entry: &ApiKeyEntry, limits: Option<&RateLimits>) -> bool {
         let Some(limits) = limits else {
             return true;
         };

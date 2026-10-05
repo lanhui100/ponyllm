@@ -87,6 +87,9 @@ pub struct UpstreamExecutor {
     /// already tried. Pre-seeds `attempted_keys` in the stream executors so a
     /// Priority pool cannot re-select the same key across retries.
     excluded_keys: Vec<String>,
+    /// Optional preferred/pinned key id: when specified, key selection attempts
+    /// to lock to this specific key (e.g. for per-account in-place retries).
+    pinned_key: Option<String>,
 }
 
 impl std::fmt::Debug for UpstreamExecutor {
@@ -1101,7 +1104,14 @@ impl UpstreamExecutor {
             rate_limits: None,
             ttfb_timeout: Some(DEFAULT_UPSTREAM_TTFB_TIMEOUT),
             excluded_keys: Vec::new(),
+            pinned_key: None,
         }
+    }
+
+    /// Pin key selection to a specific key id (e.g. for single-account in-place retry).
+    pub fn with_pinned_key(mut self, key_id: Option<String>) -> Self {
+        self.pinned_key = key_id;
+        self
     }
 
     /// Pre-exclude key ids from selection (R2): the outer Antigravity
@@ -1913,48 +1923,65 @@ impl UpstreamExecutor {
                 .get("model")
                 .and_then(|m| m.as_str())
                 .and_then(crate::pool::entry::classify_quota_family);
-            let key = match self.pool.select_key_with_affinity_for_family(affinity_seed, &attempted_keys, self.rate_limits.as_ref(), quota_family) {
-                Ok(k) => k,
-                Err(e) => {
-                    // Full-pool exhaustion: when window-shaped (per-minute/quota,
-                    // not balance/auth-disabled), transparently wait up to
-                    // DEFAULT_POOL_WAIT_MAX then retry the pool once.
-                    if self
-                        .maybe_window_wait(&mut pool_wait_done, &mut attempted_keys, balance_exhausted)
-                        .await
-                    {
-                        continue;
-                    }
-                    // Honest failure kind after the rescue wait (review
-                    // 2026-10-04): family/quota boundaries surface as
-                    // QuotaExhausted; short-window budget exhaustion as
-                    // RateLimitExceeded with the real refill hint — never the
-                    // misleading generic Internal that downstream reads as
-                    // "gateway did attempt upstream" (it did not, for these).
-                    if attempt > 0 {
-                        if self.pool.any_key_quota_cooldown() || self.pool.any_key_family_exhausted_any() {
-                            last_kind = GatewayErrorKind::QuotaExhausted;
-                        } else if self.pool.exhausted_by_window_with_limits(self.rate_limits.as_ref()) {
-                            last_kind = GatewayErrorKind::RateLimitExceeded {
-                                retry_after: self.pool.window_refill_in_with_limits(self.rate_limits.as_ref()),
-                            };
-                        }
-                    }
-                    // First-attempt pool exhaustion surfaces structurally so
-                    // callers never string-match on the aggregated message.
-                    if attempt == 0 {
-                        self.emit_both("", attempt_idx, None, e.kind(), e.to_string(), None, attempt_start.elapsed());
-                        return Err(e);
-                    }
-                    self.emit_both("", attempt_idx, None, last_kind.clone(), last_error.clone(), None, attempt_start.elapsed());
-                    let aggregated_error = format!("{}{}", summarize_attempt_failures(&attempt_kinds), if last_error.is_empty() { String::new() } else { format!(": {}", last_error) });
-                    return Err(CoreError::AllRetriesFailed {
-                        retries: attempt,
-                        attempted_keys,
-                        last_error: aggregated_error,
-                        kind: last_kind,
-                    });
+            let pinned_candidate = if let Some(ref pk) = self.pinned_key {
+                if !attempted_keys.iter().any(|ex| ex == pk) {
+                    self.pool.snapshot_keys().into_iter().find(|k| {
+                        k.id == *pk
+                            && k.current_state() == crate::pool::entry::KeyState::Active
+                            && KeyPool::budget_ok(k, self.rate_limits.as_ref())
+                            && !k.quota_group_exhausted_for(quota_family, chrono::Utc::now())
+                    })
+                } else {
+                    None
                 }
+            } else {
+                None
+            };
+            let key = match pinned_candidate {
+                Some(pk) => pk,
+                None => match self.pool.select_key_with_affinity_for_family(affinity_seed, &attempted_keys, self.rate_limits.as_ref(), quota_family) {
+                    Ok(k) => k,
+                    Err(e) => {
+                        // Full-pool exhaustion: when window-shaped (per-minute/quota,
+                        // not balance/auth-disabled), transparently wait up to
+                        // DEFAULT_POOL_WAIT_MAX then retry the pool once.
+                        if self
+                            .maybe_window_wait(&mut pool_wait_done, &mut attempted_keys, balance_exhausted)
+                            .await
+                        {
+                            continue;
+                        }
+                        // Honest failure kind after the rescue wait (review
+                        // 2026-10-04): family/quota boundaries surface as
+                        // QuotaExhausted; short-window budget exhaustion as
+                        // RateLimitExceeded with the real refill hint — never the
+                        // misleading generic Internal that downstream reads as
+                        // "gateway did attempt upstream" (it did not, for these).
+                        if attempt > 0 {
+                            if self.pool.any_key_quota_cooldown() || self.pool.any_key_family_exhausted_any() {
+                                last_kind = GatewayErrorKind::QuotaExhausted;
+                            } else if self.pool.exhausted_by_window_with_limits(self.rate_limits.as_ref()) {
+                                last_kind = GatewayErrorKind::RateLimitExceeded {
+                                    retry_after: self.pool.window_refill_in_with_limits(self.rate_limits.as_ref()),
+                                };
+                            }
+                        }
+                        // First-attempt pool exhaustion surfaces structurally so
+                        // callers never string-match on the aggregated message.
+                        if attempt == 0 {
+                            self.emit_both("", attempt_idx, None, e.kind(), e.to_string(), None, attempt_start.elapsed());
+                            return Err(e);
+                        }
+                        self.emit_both("", attempt_idx, None, last_kind.clone(), last_error.clone(), None, attempt_start.elapsed());
+                        let aggregated_error = format!("{}{}", summarize_attempt_failures(&attempt_kinds), if last_error.is_empty() { String::new() } else { format!(": {}", last_error) });
+                        return Err(CoreError::AllRetriesFailed {
+                            retries: attempt,
+                            attempted_keys,
+                            last_error: aggregated_error,
+                            kind: last_kind,
+                        });
+                    }
+                },
             };
 
             attempted_keys.push(key.id.clone());

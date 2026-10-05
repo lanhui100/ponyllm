@@ -449,7 +449,7 @@ pub async fn handle_messages(
         // multi-second upstream blip cannot exhaust the generic retry budget.
         let max_empty_stop_attempts = executor
             .max_retries
-            .max(pool.total_key_count())
+            .max(pool.total_key_count().saturating_mul(crate::streaming::PER_KEY_EMPTY_STOP_MAX_ATTEMPTS))
             .max(MIN_EMPTY_STOP_ATTEMPTS);
 
         let mut collect_tried_keys: Vec<String> = Vec::new();
@@ -459,9 +459,12 @@ pub async fn handle_messages(
             let max_stream_attempts = current_executor.max_retries.max(pool.total_key_count()).max(1);
             // R2: keys already tried by empty-STOP retries (mirrors chat.rs).
             let mut empty_stop_tried_keys: Vec<String> = Vec::new();
+            // Per-key empty STOP attempt counter to allow in-place exponential backoff retries.
+            let mut active_key_id: Option<String> = None;
+            let mut active_key_empty_stop_count: usize = 0;
             // R2: mutable upstream envelope, refreshed per retry.
             let mut attempt_req_val = req_val.clone();
-            // R3: consecutive first-frame empty STOPs.
+            // R3: consecutive early-frame empty STOPs.
             let mut consecutive_first_frame_stops: usize = 0;
 
             loop {
@@ -477,12 +480,10 @@ pub async fn handle_messages(
                 .with_rate_limits(rate_limits)
                 .with_ttfb_timeout(ttfb_timeout)
                 .with_excluded_keys(&empty_stop_tried_keys)
+                .with_pinned_key(active_key_id.clone())
                 .with_event_sink(sink_ctx.clone(), state.event_sink(sink_ctx.clone()));
                 match attempt_executor.execute_stream_request_with_timing_and_key(&target_url, &attempt_req_val).await {
                     Ok((upstream_resp, attempt_start, winning_key_id)) => {
-                        if !empty_stop_tried_keys.iter().any(|k| k == &winning_key_id) {
-                            empty_stop_tried_keys.push(winning_key_id.clone());
-                        }
                         let raw_stream = stall_guard(upstream_resp.bytes_stream(), DEFAULT_TAIL_STALL_IDLE);
 
                         // For Antigravity upstream, verify preamble before committing downstream headers.
@@ -498,9 +499,9 @@ pub async fn handle_messages(
                                 Ok(AntigravityPreambleResult::TransientEmptyStop { frames, shape }) => {
                                     // R1: one line must answer key / latency /
                                     // frame shape (mirrors chat.rs).
-                                    // R3: `frames == 0` means the terminal STOP
-                                    // was the first significant frame.
-                                    first_frame_stop = frames == 0;
+                                    // R3: `frames <= 1` means the terminal STOP
+                                    // arrived in early warmup/first frame.
+                                    first_frame_stop = frames <= 1;
                                     tracing::warn!(
                                         provider = %target.provider_name,
                                         key_id = %winning_key_id,
@@ -550,10 +551,28 @@ pub async fn handle_messages(
                         };
 
                         if is_empty_stop_retry {
-                            // R3: deterministic early convergence (mirrors chat.rs).
-                            if first_frame_stop {
-                                consecutive_first_frame_stops += 1;
+                            // Update per-key empty-STOP accounting:
+                            // Try in-place on the same key up to PER_KEY_EMPTY_STOP_MAX_ATTEMPTS before rotating.
+                            if active_key_id.as_deref() == Some(&winning_key_id) {
+                                active_key_empty_stop_count += 1;
                             } else {
+                                active_key_id = Some(winning_key_id.clone());
+                                active_key_empty_stop_count = 1;
+                            }
+
+                            let key_exhausted = active_key_empty_stop_count >= crate::streaming::PER_KEY_EMPTY_STOP_MAX_ATTEMPTS;
+                            if key_exhausted {
+                                if !empty_stop_tried_keys.iter().any(|k| k == &winning_key_id) {
+                                    empty_stop_tried_keys.push(winning_key_id.clone());
+                                }
+                                active_key_id = None;
+                                active_key_empty_stop_count = 0;
+                            }
+
+                            // R3: deterministic early convergence (mirrors chat.rs).
+                            if first_frame_stop && key_exhausted {
+                                consecutive_first_frame_stops += 1;
+                            } else if !first_frame_stop {
                                 consecutive_first_frame_stops = 0;
                             }
                             if consecutive_first_frame_stops >= crate::streaming::DETERMINISTIC_EMPTY_STOP_THRESHOLD {
@@ -571,10 +590,12 @@ pub async fn handle_messages(
                                 break;
                             }
                             if stream_attempt < max_empty_stop_attempts {
-                                let delay = empty_stop_retry_delay(stream_attempt);
+                                let delay = empty_stop_retry_delay(active_key_empty_stop_count.max(1));
                                 tracing::warn!(
                                     provider = %target.provider_name,
+                                    key_id = %winning_key_id,
                                     stream_attempt,
+                                    key_empty_stop_attempt = active_key_empty_stop_count,
                                     max_empty_stop_attempts,
                                     backoff_ms = delay.as_millis() as u64,
                                     "Antigravity empty-STOP before commit; backing off and retrying transparently"
