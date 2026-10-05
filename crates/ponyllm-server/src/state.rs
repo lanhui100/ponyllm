@@ -1851,6 +1851,19 @@ async fn advance_rotated_at(
                         queue.push_back((fb.clone(), 1));
                     }
                 }
+                // Automatic intra-family fallback for Gemini 3:
+                // If gemini-3.*-flash-high or gemini-3.*-flash-tiered experiences empty STOP or upstream choke,
+                // automatically fallback to gemini-3.*-flash-medium within the same provider if supported.
+                if target.physical_model.contains("gemini-3") && (target.physical_model.ends_with("-high") || target.physical_model.ends_with("-tiered")) {
+                    let base = target.physical_model
+                        .strip_suffix("-high")
+                        .or_else(|| target.physical_model.strip_suffix("-tiered"))
+                        .unwrap_or(&target.physical_model);
+                    let med_model = format!("{}-medium", base);
+                    if p_cfg.models.iter().any(|m| m == &med_model) && visited_models.insert(med_model.clone()) {
+                        queue.push_back((med_model, 1));
+                    }
+                }
             }
         }
 

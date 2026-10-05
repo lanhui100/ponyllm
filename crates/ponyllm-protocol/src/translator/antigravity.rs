@@ -160,6 +160,20 @@ pub fn resolve_antigravity_gemini3_model(model: &str, thinking: Option<Reasoning
     if !lower.contains("gemini-3") {
         return model.to_string();
     }
+
+    // Check if the input model itself already specifies an explicit suffix
+    let original_suffix = if lower.ends_with("-high") {
+        Some("high")
+    } else if lower.ends_with("-medium") {
+        Some("medium")
+    } else if lower.ends_with("-low") {
+        Some("low")
+    } else if lower.ends_with("-tiered") {
+        Some("tiered")
+    } else {
+        None
+    };
+
     // Strip any existing thinking suffix to find the base model name
     let base = if let Some(stripped) = lower.strip_suffix("-high")
         .or_else(|| lower.strip_suffix("-medium"))
@@ -175,7 +189,17 @@ pub fn resolve_antigravity_gemini3_model(model: &str, thinking: Option<Reasoning
         Some(ReasoningEffort::Low) => format!("{}-low", base),
         Some(ReasoningEffort::Medium) => format!("{}-medium", base),
         Some(ReasoningEffort::High) | Some(ReasoningEffort::Max) => format!("{}-high", base),
-        None | Some(ReasoningEffort::Off) => format!("{}-tiered", base),
+        Some(ReasoningEffort::Off) => format!("{}-tiered", base),
+        None => {
+            // When thinking is None, preserve the model's own explicit suffix if present.
+            // Only default bare models (or explicit -tiered) to `-tiered`.
+            match original_suffix {
+                Some("high") => format!("{}-high", base),
+                Some("medium") => format!("{}-medium", base),
+                Some("low") => format!("{}-low", base),
+                _ => format!("{}-tiered", base),
+            }
+        }
     }
 }
 
@@ -798,6 +822,62 @@ pub fn refresh_antigravity_request_ids(envelope: &mut Value) -> bool {
         labels["trajectory_id"] = Value::String(trajectory_id);
     }
     envelope["requestId"] = Value::String(request_id);
+    true
+}
+
+/// Mutate an Antigravity request envelope upon experiencing empty-STOP completions.
+///
+/// Unlike plain `refresh_antigravity_request_ids`, this function applies progressive
+/// perturbations to break upstream deadlocks:
+/// 1. Regenerates requestId and trajectory_id.
+/// 2. Injects random salt into `sessionId` to cut affinity with corrupted or poisoned upstream KV-caches.
+/// 3. If the model is a `-tiered` Gemini 3 model, escalates it to `-high` on retry to guarantee explicit reasoning depth.
+/// 4. Injects slight temperature perturbation (+0.15) if temperature is zero or unset, breaking greedy-search zero-token halts.
+pub fn mutate_antigravity_request_on_empty_stop(envelope: &mut Value, attempt: usize) -> bool {
+    if !refresh_antigravity_request_ids(envelope) {
+        return false;
+    }
+
+    // 1. If model ends with -tiered, escalate to -high on empty-STOP to ensure reasoning activation
+    let mut high_model_opt = None;
+    if let Some(model_str) = envelope.get("model").and_then(|v| v.as_str()) {
+        if model_str.contains("gemini-3") && model_str.ends_with("-tiered") {
+            let base = model_str.strip_suffix("-tiered").unwrap_or(model_str);
+            high_model_opt = Some(format!("{}-high", base));
+        }
+    }
+    if let Some(ref hm) = high_model_opt {
+        envelope["model"] = Value::String(hm.clone());
+    }
+
+    let Some(request) = envelope.get_mut("request") else {
+        return false;
+    };
+
+    // Update labels if model was escalated
+    if let Some(hm) = high_model_opt {
+        if let Some(labels) = request.get_mut("labels") {
+            labels["model_enum"] = Value::String(hm);
+        }
+    }
+
+    // 2. Cut corrupted upstream KV-cache affinity by randomizing sessionId
+    let random_salt = Uuid::new_v4().simple().to_string();
+    let current_session = request.get("sessionId").and_then(|v| v.as_str()).unwrap_or("");
+    let new_session = format!("sess_{}_{}", &random_salt[..8], current_session);
+    request["sessionId"] = Value::String(new_session);
+
+    // 3. Inject temperature perturbation to break greedy-search zero-token halt
+    if !request.get("generationConfig").is_some_and(|v| v.is_object()) {
+        request["generationConfig"] = json!({});
+    }
+    if let Some(obj) = request.get_mut("generationConfig").and_then(|v| v.as_object_mut()) {
+        let current_t = obj.get("temperature").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        if current_t < 0.05 {
+            obj.insert("temperature".to_string(), json!(0.15 + (attempt as f64 * 0.05).min(0.25)));
+        }
+    }
+
     true
 }
 
@@ -1534,10 +1614,14 @@ mod tests {
         assert_eq!(resolve_antigravity_gemini3_model("gemini-3.8-flash", None), "gemini-3.8-flash-tiered");
         assert_eq!(resolve_antigravity_gemini3_model("gemini-3.8-flash", Some(ReasoningEffort::Off)), "gemini-3.8-flash-tiered");
 
-        // Existing suffixes should be normalized and re-routed
+        // Existing suffixes should be normalized when explicit effort is supplied,
+        // but preserved when thinking is None.
         assert_eq!(resolve_antigravity_gemini3_model("gemini-3.8-flash-tiered", Some(ReasoningEffort::High)), "gemini-3.8-flash-high");
         assert_eq!(resolve_antigravity_gemini3_model("gemini-3.8-flash-low", Some(ReasoningEffort::Medium)), "gemini-3.8-flash-medium");
-        assert_eq!(resolve_antigravity_gemini3_model("gemini-3.8-flash-high", None), "gemini-3.8-flash-tiered");
+        assert_eq!(resolve_antigravity_gemini3_model("gemini-3.8-flash-high", None), "gemini-3.8-flash-high");
+        assert_eq!(resolve_antigravity_gemini3_model("gemini-3.8-flash-medium", None), "gemini-3.8-flash-medium");
+        assert_eq!(resolve_antigravity_gemini3_model("gemini-3.8-flash-low", None), "gemini-3.8-flash-low");
+        assert_eq!(resolve_antigravity_gemini3_model("gemini-3.8-flash-tiered", None), "gemini-3.8-flash-tiered");
 
         // Non gemini-3 models untouched
         assert_eq!(resolve_antigravity_gemini3_model("gemini-2.5-flash", Some(ReasoningEffort::High)), "gemini-2.5-flash");

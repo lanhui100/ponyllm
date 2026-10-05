@@ -574,10 +574,9 @@ pub async fn handle_chat_completions(
                                     "Antigravity empty-STOP before commit; backing off and retrying transparently"
                                 );
                                 tokio::time::sleep(delay).await;
-                                // R2: fresh upstream identity for the next
-                                // attempt (sessionId preserved for KV cache).
+                                // R2: mutate upstream identity, cut toxic KV-cache affinity and escalate reasoning depth
                                 if target.upstream_protocol == ponyllm_core::pool::UpstreamProtocol::Antigravity {
-                                    ponyllm_protocol::translator::refresh_antigravity_request_ids(&mut attempt_req_val);
+                                    ponyllm_protocol::translator::mutate_antigravity_request_on_empty_stop(&mut attempt_req_val, stream_attempt);
                                 }
                                 continue;
                             }
