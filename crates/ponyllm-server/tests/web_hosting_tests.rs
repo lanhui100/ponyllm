@@ -423,3 +423,67 @@ async fn web_hosting_favicon_missing_is_404() {
         assert_eq!(resp.status(), 404, "path: {path}");
     }
 }
+
+// ---------------------------------------------------------------------------
+// R8（Phase-2b）：/app 旧前缀深链必须 no-cache（分布缓存不得滞留旧 index.html）；
+// 哈希资产保持 immutable。
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn r8_app_legacy_routes_no_cache_and_assets_immutable() {
+    let tmp = tempfile::tempdir().unwrap();
+    // 带 assets/ 哈希产物的 dist
+    std::fs::create_dir_all(tmp.path().join("assets")).unwrap();
+    std::fs::write(tmp.path().join("index.html"), "<html>pony console</html>").unwrap();
+    std::fs::write(tmp.path().join("assets/app-abc123.js"), "console.log(1)").unwrap();
+
+    let mut config = test_config_with_web(true, tmp.path().to_str().unwrap());
+    config.auth_mode = ponyllm_config::AuthMode::Open;
+    let addr = spawn_gateway(config).await;
+    let client = reqwest::Client::new();
+
+    let cache_control = |resp: &reqwest::Response| -> String {
+        resp.headers()
+            .get("cache-control")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string()
+    };
+
+    // /app/* 深链（SPA fallback → index.html）必须 no-cache
+    // （HEAD 上 html_no_cache 层不覆盖 nest_service("/app") → 无 Cache-Control，红相成立）
+    for path in ["/app/dashboard", "/app/connect", "/app/governance", "/app/recorder"] {
+        let resp = client
+            .get(format!("http://{}{}", addr, path))
+            .send()
+            .await
+            .unwrap();
+        assert!(resp.status().is_success(), "{path} 应 200");
+        let cc = cache_control(&resp);
+        assert!(
+            cc.contains("no-cache"),
+            "R8: {} 必须 no-cache（旧前缀深链不得被缓存策略滞留），实际 {:?}",
+            path,
+            cc
+        );
+    }
+
+    // 顶层 HTML 入口保持 no-cache
+    let resp = client
+        .get(format!("http://{}/dashboard", addr))
+        .send()
+        .await
+        .unwrap();
+    assert!(cache_control(&resp).contains("no-cache"), "顶层 HTML 入口须 no-cache");
+
+    // 哈希资产保持 immutable（F11 回归）
+    let resp = client
+        .get(format!("http://{}/assets/app-abc123.js", addr))
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        cache_control(&resp).contains("immutable"),
+        "R8: 哈希资产须保持 immutable，实际 {:?}",
+        cache_control(&resp)
+    );
+}

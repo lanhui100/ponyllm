@@ -125,6 +125,17 @@ else
     fail "F9 .github/workflows/release.yml 不存在"
 fi
 
+# --- R7（Phase-2b）：release.yml audit 门禁 -------------------------------------------------
+if [ -f .github/workflows/release.yml ]; then
+    if grep -qE 'cargo audit|pnpm audit' .github/workflows/release.yml; then
+        pass "R7 release.yml 含 audit 门禁（cargo/pnpm audit）"
+    else
+        fail "R7 release.yml 缺少 audit 门禁（cargo/pnpm audit）（红相成立）"
+    fi
+else
+    fail "R7 .github/workflows/release.yml 不存在"
+fi
+
 # --- F10 hardening 头 --------------------------------------------------------------------
 HARDENING=""
 [ -f deploy/hardening.yaml ] && HARDENING="deploy/hardening.yaml"

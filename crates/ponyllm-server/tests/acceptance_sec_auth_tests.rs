@@ -52,7 +52,10 @@ async fn spawn_app(cfg_build: impl FnOnce(&mut GatewayConfig)) -> SocketAddr {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
+        // ConnectInfo 注入真实 TCP peer（127.0.0.1）：R1 peer-校验需要真实对端。
+        axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>())
+            .await
+            .unwrap();
     });
     addr
 }
@@ -228,7 +231,9 @@ async fn f4_admin_fence_404_for_outside_ip() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
+            axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>())
+            .await
+            .unwrap();
         });
         addr
     };
@@ -267,7 +272,9 @@ async fn f4_admin_fence_allows_inside_ip() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
+            axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>())
+            .await
+            .unwrap();
         });
         addr
     };
@@ -384,4 +391,189 @@ async fn f5_admin_scope_sees_code() {
     let resp = authed_get(&addr, "/api/admin/oauth/antigravity/pending?state=st-f5c-1", "test-token").await;
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["code"].as_str(), Some("CODE_ADMIN"));
+}
+
+// ---------------------------------------------------------------------------
+// R1（Phase-2b）集成断言：伪造 XFF 无法绕过 admin 围栏
+// ---------------------------------------------------------------------------
+
+/// 直连 peer（127.0.0.1）不在 trusted_proxies 时，伪造 XFF 必须被忽略：
+/// 围栏按 peer 判定 → 围栏外 → 404。HEAD 上 resolve_client_ip 无 peer 校验 →
+/// 伪造 XFF 命中 allowlist → 200（红相成立）。
+#[tokio::test]
+async fn r1_forged_xff_cannot_bypass_admin_fence() {
+    let addr = {
+        let _guard = env_lock().lock().unwrap();
+        std::env::remove_var("PONYLLM_CORS_ALLOWLIST");
+        std::env::set_var("PONYLLM_ADMIN_IP_ALLOWLIST", "203.0.113.0/24"); // 攻击者伪造的目标段
+        let mut config = GatewayConfig::default();
+        config.api_key = "test-token".to_string();
+        let state = Arc::new(AppState::new(config));
+        let app = create_app(state);
+        std::env::remove_var("PONYLLM_ADMIN_IP_ALLOWLIST");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>())
+                .await
+                .unwrap();
+        });
+        addr
+    };
+    let resp = reqwest::Client::new()
+        .get(format!("http://{}/api/admin/providers", addr))
+        .header("Authorization", "Bearer test-token")
+        .header("X-Forwarded-For", "203.0.113.9") // 伪造：声称来自 allowlist 内
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::NOT_FOUND,
+        "R1: 直连 peer 非 trusted 时伪造 XFF 不得绕过围栏（应 404），实际 {}（HEAD 无 peer 校验 → XFF=203.0.113.9 命中 allowlist → 200，红相成立）",
+        resp.status()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// R4（Phase-2b）：admin allowlist 全解析失败 → fail-closed（非静默关闭）
+// ---------------------------------------------------------------------------
+
+/// `PONYLLM_ADMIN_IP_ALLOWLIST` 非空但全部非法 → 必须 fail-closed（404），
+/// 不得静默退化为无围栏。HEAD 上 parse_admin_allowlist 全非法 → None → 无围栏 → 200
+/// （红相成立）。
+#[tokio::test]
+async fn r4_allowlist_all_invalid_env_fail_closed() {
+    let addr = {
+        let _guard = env_lock().lock().unwrap();
+        std::env::remove_var("PONYLLM_CORS_ALLOWLIST");
+        std::env::set_var("PONYLLM_ADMIN_IP_ALLOWLIST", "not-a-cidr,!!!garbage,999.999.1.1"); // 非空、全非法
+        let mut config = GatewayConfig::default();
+        config.api_key = "test-token".to_string();
+        let state = Arc::new(AppState::new(config));
+        let app = create_app(state);
+        std::env::remove_var("PONYLLM_ADMIN_IP_ALLOWLIST");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>())
+                .await
+                .unwrap();
+        });
+        addr
+    };
+    let resp = authed_get(&addr, "/api/admin/providers", "test-token").await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::NOT_FOUND,
+        "R4: allowlist 非空但全非法必须 fail-closed（404），实际 {}（HEAD 全非法 → None → 无围栏 → 200，红相成立）",
+        resp.status()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// R5（Phase-2b）：reload 守卫扩展 —— auth_mode secured→open 一律拒绝
+// ---------------------------------------------------------------------------
+
+/// Secured 启动的网关，reload 到 auth_mode=open（即便带着 key）必须被拒绝并保持
+/// Secured。HEAD 上 reload 守卫只拦空 key → open reload 被应用（红相成立）。
+#[tokio::test]
+async fn r5_reload_secured_to_open_rejected() {
+    let state = {
+        let mut cfg = GatewayConfig::default(); // auth_mode = Secured（默认）
+        cfg.api_key = "keep-me-123".to_string();
+        Arc::new(AppState::new(cfg))
+    };
+    let flips_open = GatewayConfig {
+        api_key: "keep-me-123".to_string(),
+        auth_mode: ponyllm_config::AuthMode::Open,
+        ..GatewayConfig::default()
+    };
+    state.reload_config_with_pools(flips_open, HashMap::new());
+
+    let after = state.config.read().auth_mode;
+    assert_eq!(
+        after,
+        ponyllm_config::AuthMode::Secured,
+        "R5: secured→open 的 reload 必须被拒绝（配置保持 Secured），实际 {:?}（HEAD 无该守卫 → open 被应用，红相成立）",
+        after
+    );
+}
+
+// ---------------------------------------------------------------------------
+// R6（Phase-2b）：overview auth_mode 回显 config.auth_mode（而非 api_key 推断）
+// ---------------------------------------------------------------------------
+
+/// 带 FileConfigStore 的 overview 测试 app（overview 依赖 config store）。
+async fn spawn_overview_app(
+    cfg_build: impl FnOnce(&mut GatewayConfig),
+) -> (SocketAddr, tempfile::TempDir) {
+    let tmp = tempfile::tempdir().unwrap();
+    let config_path = tmp.path().join("ponyllm.toml");
+    std::fs::write(&config_path, "[gateway]\nbind = \"127.0.0.1:0\"\n").unwrap();
+    let app = {
+        let _guard = env_lock().lock().unwrap();
+        std::env::remove_var("PONYLLM_CORS_ALLOWLIST");
+        std::env::remove_var("PONYLLM_ADMIN_IP_ALLOWLIST");
+        let mut config = GatewayConfig::default();
+        cfg_build(&mut config);
+        let store = Arc::new(ponyllm_server::admin_store::FileConfigStore::new(
+            config_path.to_str().unwrap(),
+        ));
+        let state = Arc::new(AppState::new(config).with_config_store(store));
+        create_app(state)
+    };
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>())
+            .await
+            .unwrap();
+    });
+    (addr, tmp)
+}
+
+async fn overview_auth_mode(addr: &SocketAddr, token: Option<&str>) -> String {
+    let mut req = reqwest::Client::new().get(format!("http://{}/api/admin/overview", addr));
+    if let Some(t) = token {
+        req = req.header("Authorization", format!("Bearer {}", t));
+    }
+    let resp = req.send().await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "overview 应可访问");
+    let body: serde_json::Value = resp.json().await.unwrap();
+    body["auth_mode"].as_str().unwrap_or("").to_string()
+}
+
+/// 显式 open + 有 key → overview 必须回显 "open"。
+/// HEAD 上 auth_mode() 按 api_key 非空推断 "secured"（红相成立）。
+#[tokio::test]
+async fn r6_overview_echoes_open_when_explicit_open_with_key() {
+    let (addr, _tmp) = spawn_overview_app(|cfg| {
+        cfg.auth_mode = ponyllm_config::AuthMode::Open;
+        cfg.api_key = "test-token".to_string(); // 显式 open 且带着 key
+    })
+    .await;
+    assert_eq!(
+        overview_auth_mode(&addr, None).await,
+        "open",
+        "R6: 显式 open+key 时 overview 必须回显 open（HEAD 按 api_key 推断 secured，红相成立）"
+    );
+}
+
+/// secured + 空 api_key（但有 scoped admin key 可鉴权）→ overview 必须回显 "secured"。
+/// HEAD 上 auth_mode() 按 api_key 为空推断 "open"（红相成立）。
+#[tokio::test]
+async fn r6_overview_echoes_secured_when_secured_with_empty_key() {
+    let (admin_plain, admin_entry) = generate_scoped_gateway_key("r6-a1", KeyScope::Admin);
+    let (addr, _tmp) = spawn_overview_app(|cfg| {
+        cfg.auth_mode = ponyllm_config::AuthMode::Secured;
+        cfg.api_key = String::new(); // 空 key
+        cfg.gateway_keys = vec![admin_entry.clone()];
+    })
+    .await;
+    assert_eq!(
+        overview_auth_mode(&addr, Some(&admin_plain)).await,
+        "secured",
+        "R6: secured+空 key 时 overview 必须回显 secured（HEAD 按空 api_key 推断 open，红相成立）"
+    );
 }

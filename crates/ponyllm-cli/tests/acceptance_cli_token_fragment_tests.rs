@@ -28,3 +28,25 @@ fn f15_cli_console_url_trims_trailing_slash_and_no_token() {
     assert_eq!(format_web_status_url("http://127.0.0.1:8080/", true, ""), "http://127.0.0.1:8080/");
     assert_eq!(format_web_status_url("http://127.0.0.1:8080", true, "none"), "http://127.0.0.1:8080/");
 }
+
+// ---------------------------------------------------------------------------
+// R9（Phase-2b）：fragment 内 token 需 percent-encode（encodeURIComponent 等价）
+// ---------------------------------------------------------------------------
+
+/// 含 `&`、`#`、`+` 的 key 必须生成完好链接：`&`/`#` 会截断 fragment 或注入参数，
+/// `+` 会被解析为空格 —— 一律 percent-encode。HEAD 上原样拼接（红相成立）。
+#[test]
+fn r9_cli_console_url_encodes_special_chars_in_fragment_token() {
+    let url = format_web_status_url("http://127.0.0.1:8080", true, "sk+b&c#d");
+    assert_eq!(
+        url,
+        "http://127.0.0.1:8080/#token=sk%2Bb%26c%23d",
+        "R9: 特殊字符必须 percent-encode（&→%26、#→%23、+→%2B），实际 {}",
+        url
+    );
+    assert!(
+        !url.contains("sk+b&c#d"),
+        "R9: 裸特殊字符不得出现在 fragment 中（=&/&# 截断注入），实际 {}",
+        url
+    );
+}
