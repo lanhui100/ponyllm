@@ -426,9 +426,8 @@ describe('AntigravityPoolCard Component', () => {
     const cell = container.querySelector('[data-testid="slot-heatmap-cell"]') as HTMLElement;
     expect(cell).not.toBeNull();
 
-    // Verify factual cycle summary rendered in third column
-    expect(container.textContent).toContain('账号周期额度测定');
-    expect(container.textContent).toContain('5小时周期实测基准');
+    // Verify factual cycle summary rendered in simplified cards
+    expect(container.textContent).toContain('5小时');
     expect(container.textContent).toContain('80K');
     expect(container.textContent).toContain('20K');
     expect(container.textContent).toContain('5K');
@@ -739,10 +738,10 @@ describe('AntigravityPoolCard Component', () => {
     app.mount(container);
     await nextTick();
 
-    // 持久化标注
-    expect(container.textContent).toContain('跨账号累计 · 持久化');
-    expect(container.textContent).toContain('已累计 14 观测 · 打满 3 轮');
-    expect(container.textContent).toContain('持久化累计 14 轮观测 · 打满 3 轮 · 跨发布/账号增删不归零');
+    // 持久化基准生效
+    expect(container.textContent).toContain('5小时');
+    expect(container.textContent).toContain('自然周');
+    expect(container.textContent).toContain('自然月');
 
     // 主数字取持久化 5h 均值 1.25M
     expect(container.textContent).toContain('1.25M');
