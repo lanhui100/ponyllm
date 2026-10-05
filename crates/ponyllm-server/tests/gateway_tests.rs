@@ -70,6 +70,7 @@ async fn test_gateway_chat_and_messages_endpoints() {
     pool.add_key(ApiKeyEntry::new("k1", "sk-mock-key-123456", 1, 10));
 
     let mut config = GatewayConfig::default();
+    config.auth_mode = ponyllm_config::AuthMode::Open; // F1 migration: default is now secured; these behavior tests opt into open mode
     config.providers.insert(
         "openai".to_string(),
         make_mock_provider_config(&format!("http://{}", upstream_addr), "gpt-4o", vec![]),
@@ -166,6 +167,7 @@ async fn test_gateway_chat_and_messages_endpoints() {
 #[tokio::test]
 async fn test_multi_provider_dynamic_model_routing() {
     let mut config = GatewayConfig::default();
+    config.auth_mode = ponyllm_config::AuthMode::Open; // F1 migration: default is now secured; these behavior tests opt into open mode
     config.providers.insert(
         "deepseek".to_string(),
         make_mock_provider_config("https://api.deepseek.com", "deepseek-v4-flash", vec![]),
@@ -244,6 +246,7 @@ async fn test_anthropic_upstream_direct_and_cross_routing() {
     pool.add_key(ApiKeyEntry::new("ds-key-1", "sk-ds-secret-123456", 1, 10));
 
     let mut config = GatewayConfig::default();
+    config.auth_mode = ponyllm_config::AuthMode::Open; // F1 migration: default is now secured; these behavior tests opt into open mode
     config.providers.insert(
         "deepseek-anthropic".to_string(),
         make_mock_provider_config(&format!("http://{}/anthropic", upstream_addr), "deepseek-v4-flash", vec![]),
@@ -295,6 +298,7 @@ async fn test_anthropic_upstream_direct_and_cross_routing() {
 #[tokio::test]
 async fn test_gateway_models_endpoints() {
     let mut config = GatewayConfig::default();
+    config.auth_mode = ponyllm_config::AuthMode::Open; // F1 migration: default is now secured; these behavior tests opt into open mode
     config.providers.insert(
         "deepseek".to_string(),
         make_mock_provider_config("https://api.deepseek.com", "deepseek-v4-flash", vec!["deepseek-chat", "deepseek-reasoner"]),
@@ -484,6 +488,7 @@ async fn test_model_default_sampling_applied() {
     pool.add_key(ApiKeyEntry::new("k1", "sk-mock-key-123456", 1, 10));
 
     let mut config = GatewayConfig::default();
+    config.auth_mode = ponyllm_config::AuthMode::Open; // F1 migration: default is now secured; these behavior tests opt into open mode
     let mut prov = make_mock_provider_config(&format!("http://{}", upstream_addr), "gpt-4o", vec!["gpt-4o"]);
     prov.model_specs.push(ponyllm_server::ModelSpec {
     rate_limits: None,
@@ -565,6 +570,7 @@ async fn test_gateway_ttfb_timeout_returns_503_and_provider_override() {
     });
 
     let mut config = GatewayConfig::default();
+    config.auth_mode = ponyllm_config::AuthMode::Open; // F1 migration: default is now secured; these behavior tests opt into open mode
     config.max_retries = 1;
 
     // Provider 1: tight TTFB timeout of 1 second

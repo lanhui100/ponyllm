@@ -54,6 +54,7 @@ async fn test_thinking_scrubbing_for_non_reasoning_models() {
     pool.add_key(ApiKeyEntry::new("k1", "sk-mock-key-123", 1, 10));
 
     let mut config = GatewayConfig::default();
+    config.auth_mode = ponyllm_config::AuthMode::Open; // F1 migration: default is now secured; these behavior tests opt into open mode
     config.providers.insert(
         "openai".to_string(),
         ProviderConfig {
@@ -203,6 +204,7 @@ async fn test_thinking_forwarding_and_clamping_for_reasoning_models() {
     pool.add_key(ApiKeyEntry::new("k1", "sk-mock-key-123", 1, 10));
 
     let mut config = GatewayConfig::default();
+    config.auth_mode = ponyllm_config::AuthMode::Open; // F1 migration: default is now secured; these behavior tests opt into open mode
     config.providers.insert(
         "openai".to_string(),
         ProviderConfig {
@@ -332,6 +334,7 @@ async fn test_cross_protocol_thinking_translation() {
     pool.add_key(ApiKeyEntry::new("k1", "sk-ant-mock", 1, 10));
 
     let mut config = GatewayConfig::default();
+    config.auth_mode = ponyllm_config::AuthMode::Open; // F1 migration: default is now secured; these behavior tests opt into open mode
     config.providers.insert(
         "anthropic".to_string(),
         ProviderConfig {
@@ -439,6 +442,7 @@ async fn test_claude_opus_5_5_adaptive_thinking_gateway() {
     pool.add_key(ApiKeyEntry::new("k1", "sk-ant-mock", 1, 10));
 
     let mut config = GatewayConfig::default();
+    config.auth_mode = ponyllm_config::AuthMode::Open; // F1 migration: default is now secured; these behavior tests opt into open mode
     config.providers.insert(
         "anthropic-adaptive".to_string(),
         ProviderConfig {
@@ -570,6 +574,7 @@ async fn test_thinking_precedence_header_wins() {
     pool.add_key(ApiKeyEntry::new("k1", "sk-ds-mock", 1, 10));
 
     let mut config = GatewayConfig::default();
+    config.auth_mode = ponyllm_config::AuthMode::Open; // F1 migration: default is now secured; these behavior tests opt into open mode
     config.providers.insert(
         "deepseek".to_string(),
         ProviderConfig {
@@ -680,6 +685,7 @@ async fn test_responses_upstream_thinking_serialization_omits_top_level_reasonin
     pool.add_key(ApiKeyEntry::new("test-key", "sk-test", 1, 10));
 
     let mut config = GatewayConfig::default();
+    config.auth_mode = ponyllm_config::AuthMode::Open; // F1 migration: default is now secured; these behavior tests opt into open mode
     config.api_key = "sk-pony-test".to_string();
     config.providers.insert(
         "zen-provider".to_string(),
@@ -796,6 +802,7 @@ async fn test_antigravity_gemini3_thinking_suffix_routing() {
     pool.add_key(ApiKeyEntry::new("ag-key-1", "sk-antigravity", 1, 10));
 
     let mut config = GatewayConfig::default();
+    config.auth_mode = ponyllm_config::AuthMode::Open; // F1 migration: default is now secured; these behavior tests opt into open mode
     config.providers.insert(
         "antigravity".to_string(),
         ProviderConfig {

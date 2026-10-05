@@ -104,6 +104,7 @@ async fn test_chat_streaming_responses_failed_is_error_not_other() {
     let pool = Arc::new(KeyPool::new("spark_fail", RoutingStrategy::RoundRobin));
     pool.add_key(ApiKeyEntry::new("k1", "sk-test", 1, 10));
     let mut config = GatewayConfig::default();
+    config.auth_mode = ponyllm_config::AuthMode::Open; // F1 migration: default is now secured; these behavior tests opt into open mode
     config.providers.insert(
         "spark_fail".to_string(),
         provider(
@@ -213,6 +214,7 @@ async fn test_chat_non_streaming_responses_failed_fails_over() {
     pool_backup.add_key(ApiKeyEntry::new("fk-k1", "sk-backup", 1, 10));
 
     let mut config = GatewayConfig::default();
+    config.auth_mode = ponyllm_config::AuthMode::Open; // F1 migration: default is now secured; these behavior tests opt into open mode
     config.max_retries = 1;
     config.providers.insert(
         "fail_broken".to_string(),
@@ -281,6 +283,7 @@ async fn test_chat_non_streaming_responses_failed_single_candidate_is_503_with_u
     let pool = Arc::new(KeyPool::new("solo_fail", RoutingStrategy::RoundRobin));
     pool.add_key(ApiKeyEntry::new("k1", "sk-test", 1, 10));
     let mut config = GatewayConfig::default();
+    config.auth_mode = ponyllm_config::AuthMode::Open; // F1 migration: default is now secured; these behavior tests opt into open mode
     config.providers.insert(
         "solo_fail".to_string(),
         provider(
@@ -368,6 +371,7 @@ async fn test_messages_non_streaming_responses_failed_fails_over() {
     pool_backup.add_key(ApiKeyEntry::new("fk-k1", "sk-backup", 1, 10));
 
     let mut config = GatewayConfig::default();
+    config.auth_mode = ponyllm_config::AuthMode::Open; // F1 migration: default is now secured; these behavior tests opt into open mode
     config.max_retries = 1;
     config.providers.insert(
         "msg_fail_broken".to_string(),
@@ -437,6 +441,7 @@ async fn test_messages_non_streaming_responses_failed_single_candidate_is_503() 
     let pool = Arc::new(KeyPool::new("msg_solo_fail", RoutingStrategy::RoundRobin));
     pool.add_key(ApiKeyEntry::new("k1", "sk-test", 1, 10));
     let mut config = GatewayConfig::default();
+    config.auth_mode = ponyllm_config::AuthMode::Open; // F1 migration: default is now secured; these behavior tests opt into open mode
     config.providers.insert(
         "msg_solo_fail".to_string(),
         provider(

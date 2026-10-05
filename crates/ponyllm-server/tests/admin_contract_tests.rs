@@ -139,6 +139,13 @@ impl TestHarness {
         let mut gw_config = GatewayConfig::default();
         gw_config.bind_addr = bind_addr.to_string();
         gw_config.api_key = api_key.to_string();
+        // F1 (VULN-17): empty api_key no longer opens the gateway — the open
+        // matrix harness opts in explicitly; keyed harnesses stay secured.
+        gw_config.auth_mode = if api_key.trim().is_empty() {
+            ponyllm_config::AuthMode::Open
+        } else {
+            ponyllm_config::AuthMode::Secured
+        };
         gw_config.default_strategy = strategy;
         gw_config.web_enabled = true;
         gw_config.web_dist_dir = "web/dist".to_string();

@@ -12,7 +12,9 @@ use ponyllm_server::{create_app, AppState, GatewayConfig};
 
 fn test_config_with_web(web_enabled: bool, web_dist_dir: &str) -> GatewayConfig {
     let mut config = GatewayConfig::default();
-    // Empty api_key => auth_middleware open mode: no token needed for API probes.
+    config.auth_mode = ponyllm_config::AuthMode::Open; // F1 migration: default is now secured; these behavior tests opt into open mode
+    // F1 (VULN-17): open mode is now explicit — empty api_key no longer opens;
+    // these web-hosting behavior tests opt into open mode so API probes need no token.
     config.api_key = String::new();
     config.web_enabled = web_enabled;
     config.web_dist_dir = web_dist_dir.to_string();
@@ -255,6 +257,7 @@ async fn web_hosting_secured_static_bypass_but_api_guarded() {
     write_fake_dist(tmp.path());
     let mut config = test_config_with_web(true, tmp.path().to_str().unwrap());
     config.api_key = "sk-pony-secured-test".to_string();
+    config.auth_mode = ponyllm_config::AuthMode::Secured; // re-assert secured for the 401 contract
     let addr = spawn_gateway(config).await;
     let client = reqwest::Client::new();
 

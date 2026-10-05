@@ -29,6 +29,7 @@ async fn systemone_passthrough_preserves_body_and_records_usage() {
     tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
 
     let mut config = GatewayConfig::default();
+    config.auth_mode = ponyllm_config::AuthMode::Open; // F1 migration: default is now secured; these behavior tests opt into open mode
     config.providers.insert(
         "chat-only".to_string(),
         ProviderConfig {
@@ -136,6 +137,7 @@ async fn spawn_systemone_test_gateway() -> (SocketAddr, Arc<AppState>) {
     let upstream_addr = upstream_listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(upstream_listener, upstream).await.unwrap() });
     let mut config = GatewayConfig::default();
+    config.auth_mode = ponyllm_config::AuthMode::Open; // F1 migration: default is now secured; these behavior tests opt into open mode
     config.api_key = "none".to_string();
     config.providers.insert("zen-jev".to_string(), ProviderConfig {
     rate_limits: None,

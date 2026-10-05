@@ -88,6 +88,7 @@ async fn test_chat_multimodal_to_responses_upstream_preserves_images() {
     let pool = Arc::new(KeyPool::new("spark_p", RoutingStrategy::RoundRobin));
     pool.add_key(ApiKeyEntry::new("k1", "sk-test", 1, 10));
     let mut config = GatewayConfig::default();
+    config.auth_mode = ponyllm_config::AuthMode::Open; // F1 migration: default is now secured; these behavior tests opt into open mode
     config.providers.insert(
         "spark_p".to_string(),
         make_multimodal_provider(
@@ -171,6 +172,7 @@ async fn test_chat_multimodal_to_text_only_model_rejected_with_400() {
     let pool = Arc::new(KeyPool::new("text_pool", RoutingStrategy::RoundRobin));
     pool.add_key(ApiKeyEntry::new("k1", "sk-test", 1, 10));
     let mut config = GatewayConfig::default();
+    config.auth_mode = ponyllm_config::AuthMode::Open; // F1 migration: default is now secured; these behavior tests opt into open mode
     config.providers.insert(
         "text_pool".to_string(),
         make_multimodal_provider(
@@ -223,6 +225,7 @@ async fn test_responses_multimodal_to_text_only_model_rejected_with_400() {
     let pool = Arc::new(KeyPool::new("text_pool2", RoutingStrategy::RoundRobin));
     pool.add_key(ApiKeyEntry::new("k1", "sk-test", 1, 10));
     let mut config = GatewayConfig::default();
+    config.auth_mode = ponyllm_config::AuthMode::Open; // F1 migration: default is now secured; these behavior tests opt into open mode
     config.providers.insert(
         "text_pool2".to_string(),
         make_multimodal_provider(
@@ -292,6 +295,7 @@ async fn test_messages_multimodal_to_responses_upstream_preserves_images() {
     let pool = Arc::new(KeyPool::new("resp_vlm_pool", RoutingStrategy::RoundRobin));
     pool.add_key(ApiKeyEntry::new("k1", "sk-test", 1, 10));
     let mut config = GatewayConfig::default();
+    config.auth_mode = ponyllm_config::AuthMode::Open; // F1 migration: default is now secured; these behavior tests opt into open mode
     config.providers.insert(
         "resp_vlm_pool".to_string(),
         make_multimodal_provider(
@@ -387,6 +391,7 @@ async fn test_auto_routing_modality_awareness_and_tier_elevation() {
     pool_flag.add_key(ApiKeyEntry::new("k2", "sk-test", 1, 10));
 
     let mut config = GatewayConfig::default();
+    config.auth_mode = ponyllm_config::AuthMode::Open; // F1 migration: default is now secured; these behavior tests opt into open mode
     // Standard tier has ONLY text support
     config.providers.insert(
         "prov_std".to_string(),

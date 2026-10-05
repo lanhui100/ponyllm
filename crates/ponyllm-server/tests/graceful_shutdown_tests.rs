@@ -101,6 +101,7 @@ async fn spawn_gateway_with_shutdown(
     pool.add_key(ApiKeyEntry::new("k1", "sk-mock-key-123456", 1, 10));
 
     let mut config = GatewayConfig::default();
+    config.auth_mode = ponyllm_config::AuthMode::Open; // F1 migration: default is now secured; these behavior tests opt into open mode
     config.providers.insert(
         "deepseek".to_string(),
         make_provider(&format!("http://{}", upstream_addr), "deepseek-v4-flash"),

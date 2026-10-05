@@ -95,6 +95,7 @@ impl SecretApi for FakeSecretApi {
 
 fn gateway_config() -> GatewayConfig {
     let mut cfg = GatewayConfig::default();
+    cfg.auth_mode = ponyllm_config::AuthMode::Open; // F1 migration: default is now secured; these behavior tests opt into open mode
     cfg.admin_write_enabled = true;
     cfg
 }

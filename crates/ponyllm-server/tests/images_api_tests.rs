@@ -94,6 +94,7 @@ async fn test_images_generations_openai_protocol() {
     let pool = Arc::new(KeyPool::new("agy", RoutingStrategy::RoundRobin));
     pool.add_key(ApiKeyEntry::new("k1", "sk-test", 1, 10));
     let mut config = GatewayConfig::default();
+    config.auth_mode = ponyllm_config::AuthMode::Open; // F1 migration: default is now secured; these behavior tests opt into open mode
     config.providers.insert(
         "agy".to_string(),
         image_provider(format!("http://{}", addr)),
@@ -148,6 +149,7 @@ async fn test_images_edits_json_wire() {
     let pool = Arc::new(KeyPool::new("agy", RoutingStrategy::RoundRobin));
     pool.add_key(ApiKeyEntry::new("k1", "sk-test", 1, 10));
     let mut config = GatewayConfig::default();
+    config.auth_mode = ponyllm_config::AuthMode::Open; // F1 migration: default is now secured; these behavior tests opt into open mode
     config.providers.insert(
         "agy".to_string(),
         image_provider(format!("http://{}", addr)),
@@ -200,6 +202,7 @@ async fn test_images_edits_multipart_wire() {
     let pool = Arc::new(KeyPool::new("agy", RoutingStrategy::RoundRobin));
     pool.add_key(ApiKeyEntry::new("k1", "sk-test", 1, 10));
     let mut config = GatewayConfig::default();
+    config.auth_mode = ponyllm_config::AuthMode::Open; // F1 migration: default is now secured; these behavior tests opt into open mode
     config.providers.insert(
         "agy".to_string(),
         image_provider(format!("http://{}", addr)),
@@ -241,6 +244,7 @@ async fn test_images_generations_rejects_n_greater_than_one() {
     let pool = Arc::new(KeyPool::new("agy", RoutingStrategy::RoundRobin));
     pool.add_key(ApiKeyEntry::new("k1", "sk-test", 1, 10));
     let mut config = GatewayConfig::default();
+    config.auth_mode = ponyllm_config::AuthMode::Open; // F1 migration: default is now secured; these behavior tests opt into open mode
     config.providers.insert(
         "agy".to_string(),
         image_provider("http://127.0.0.1:9".to_string()), // unreachable; must not be hit
@@ -271,6 +275,7 @@ async fn test_images_generations_rejects_non_image_output_model() {
     let pool = Arc::new(KeyPool::new("agy", RoutingStrategy::RoundRobin));
     pool.add_key(ApiKeyEntry::new("k1", "sk-test", 1, 10));
     let mut config = GatewayConfig::default();
+    config.auth_mode = ponyllm_config::AuthMode::Open; // F1 migration: default is now secured; these behavior tests opt into open mode
     config.providers.insert(
         "agy".to_string(),
         // default ModelSpec output_types = ["text"] — must be rejected
@@ -307,7 +312,9 @@ fn image_provider_with_text_output(base_url: String) -> ProviderConfig {
 
 #[tokio::test]
 async fn test_images_generations_unknown_model_404() {
-    let state = Arc::new(AppState::new(GatewayConfig::default()));
+    let mut config = GatewayConfig::default();
+    config.auth_mode = ponyllm_config::AuthMode::Open; // F1 migration: behavior test opts into open mode
+    let state = Arc::new(AppState::new(config));
     let app = create_app(state);
     let gw = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let gw_addr = gw.local_addr().unwrap();
@@ -342,6 +349,7 @@ async fn test_images_generations_upstream_error_projection() {
     let pool = Arc::new(KeyPool::new("agy", RoutingStrategy::RoundRobin));
     pool.add_key(ApiKeyEntry::new("k1", "sk-test", 1, 10));
     let mut config = GatewayConfig::default();
+    config.auth_mode = ponyllm_config::AuthMode::Open; // F1 migration: default is now secured; these behavior tests opt into open mode
     config.providers.insert(
         "agy".to_string(),
         image_provider(format!("http://{}", addr)),

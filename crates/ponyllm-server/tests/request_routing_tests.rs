@@ -105,6 +105,7 @@ async fn test_model_echo_policy_and_auto_routing() {
     pool_openai.add_key(ApiKeyEntry::new("oa-k1", "sk-oa-key", 1, 10));
 
     let mut config = GatewayConfig::default();
+    config.auth_mode = ponyllm_config::AuthMode::Open; // F1 migration: default is now secured; these behavior tests opt into open mode
     config.default_strategy = GatewayRoutingStrategy::Economy;
 
     config.providers.insert(
@@ -282,6 +283,7 @@ fn test_is_anthropic_upstream_heuristic_lock() {
     use ponyllm_server::routes::models::ParsedRequestModel;
 
     let mut config = GatewayConfig::default();
+    config.auth_mode = ponyllm_config::AuthMode::Open; // F1 migration: default is now secured; these behavior tests opt into open mode
     config.providers.insert(
         "ant-p".to_string(),
         ProviderConfig {
@@ -390,6 +392,7 @@ fn test_protocol_resolution_priority_and_overrides() {
     }
 
     let mut config = GatewayConfig::default();
+    config.auth_mode = ponyllm_config::AuthMode::Open; // F1 migration: default is now secured; these behavior tests opt into open mode
     // Explicit default beats the anthropic-URL heuristic.
     config.providers.insert("p1".to_string(), provider("https://x.example.com/anthropic", "m1", Some(UpstreamProtocol::Chat), None, None));
     // Model override beats provider default.
@@ -438,6 +441,7 @@ fn test_protocol_resolution_priority_and_overrides() {
 fn test_models_listing_exposes_native_protocol() {
     use ponyllm_server::{AppState, GatewayConfig, ProviderConfig};
     let mut config = GatewayConfig::default();
+    config.auth_mode = ponyllm_config::AuthMode::Open; // F1 migration: default is now secured; these behavior tests opt into open mode
     config.providers.insert(
         "op".to_string(),
         ProviderConfig {
@@ -475,6 +479,7 @@ fn test_native_protocol_wins_ties_for_passthrough_first() {
     // Two providers serve the same model at identical prices; only the native
     // protocol differs. Same-native must rank first per inbound entry.
     let mut config = GatewayConfig::default();
+    config.auth_mode = ponyllm_config::AuthMode::Open; // F1 migration: default is now secured; these behavior tests opt into open mode
     config.default_strategy = GatewayRoutingStrategy::Reliable;
     for (name, proto) in [
         ("chat-p", UpstreamProtocol::Chat),
@@ -528,6 +533,7 @@ fn test_inbound_native_endpoint_wins_over_provider_default() {
 
     // Merged single-provider DeepSeek: default chat + messages_url override.
     let mut config = GatewayConfig::default();
+    config.auth_mode = ponyllm_config::AuthMode::Open; // F1 migration: default is now secured; these behavior tests opt into open mode
     config.providers.insert(
         "deepseek".to_string(),
         ProviderConfig {
@@ -637,6 +643,7 @@ async fn test_cross_provider_transparent_failover() {
     pool_backup.add_key(ApiKeyEntry::new("backup-k1", "sk-backup", 1, 10));
 
     let mut config = GatewayConfig::default();
+    config.auth_mode = ponyllm_config::AuthMode::Open; // F1 migration: default is now secured; these behavior tests opt into open mode
     config.max_retries = 1;
 
     // Primary broken provider has slightly lower price to be preferred first
@@ -832,6 +839,7 @@ async fn spawn_quota_failover_gateway(
     pool_backup.add_key(ApiKeyEntry::new("backup-k1", "sk-backup", 1, 10));
 
     let mut config = GatewayConfig::default();
+    config.auth_mode = ponyllm_config::AuthMode::Open; // F1 migration: default is now secured; these behavior tests opt into open mode
     config.max_retries = 1;
     config.cross_provider_quota_failover = quota_failover;
 
@@ -1083,6 +1091,7 @@ async fn test_quota_guard_holds_across_cooldown_window_second_request() {
 #[test]
 fn test_models_list_exposes_per_provider_aliases() {
     let mut config = GatewayConfig::default();
+    config.auth_mode = ponyllm_config::AuthMode::Open; // F1 migration: default is now secured; these behavior tests opt into open mode
     for (p, extra) in [("alpha", vec!["solo-model"]), ("beta", Vec::new())] {
         let mut models = vec!["shared-model".to_string()];
         models.extend(extra.into_iter().map(|m| m.to_string()));
@@ -1250,6 +1259,7 @@ async fn test_anthropic_messages_routing_and_model_echo() {
     pool.add_key(ApiKeyEntry::new("ant-k1", "sk-ant-key", 1, 10));
 
     let mut config = GatewayConfig::default();
+    config.auth_mode = ponyllm_config::AuthMode::Open; // F1 migration: default is now secured; these behavior tests opt into open mode
     config.providers.insert(
         "anthropic".to_string(),
         ProviderConfig {
@@ -1362,6 +1372,7 @@ async fn test_gateway_configuration_hot_reload() {
 
     // 1. Initial configuration: prov_a only
     let mut gw_config = GatewayConfig::default();
+    gw_config.auth_mode = ponyllm_config::AuthMode::Open; // F1 migration: default is now secured; these behavior tests opt into open mode
     gw_config.bind_addr = "127.0.0.1:0".to_string();
     gw_config.api_key = String::new();
     gw_config.providers.insert(
@@ -1421,6 +1432,7 @@ async fn test_gateway_configuration_hot_reload() {
 
     // 3. Perform Hot Reload: remove prov_a, add prov_b
     let mut new_config = GatewayConfig::default();
+    new_config.auth_mode = ponyllm_config::AuthMode::Open; // F1 migration: default is now secured; these behavior tests opt into open mode
     new_config.bind_addr = gw_config.bind_addr.clone();
     new_config.providers.insert(
         "prov_b".to_string(),
@@ -1533,6 +1545,7 @@ async fn test_large_payload_handling_with_1m_context_support() {
     pool.add_key(ApiKeyEntry::new("ds-1", "sk-ds-key", 1, 10));
 
     let mut config = GatewayConfig::default();
+    config.auth_mode = ponyllm_config::AuthMode::Open; // F1 migration: default is now secured; these behavior tests opt into open mode
     config.providers.insert(
         "deepseek".to_string(),
         ProviderConfig {
@@ -1600,6 +1613,7 @@ async fn test_custom_request_body_limit_rejection_with_helpful_error() {
     pool.add_key(ApiKeyEntry::new("k1", "sk-test", 1, 10));
 
     let mut config = GatewayConfig::default();
+    config.auth_mode = ponyllm_config::AuthMode::Open; // F1 migration: default is now secured; these behavior tests opt into open mode
     config.request_body_limit = 16 * 1024; // 16 KB small limit
     config.providers.insert(
         "test-p".to_string(),
@@ -1687,6 +1701,7 @@ async fn test_responses_cross_provider_failover() {
     pool_backup.add_key(ApiKeyEntry::new("rk-k1", "sk-backup", 1, 10));
 
     let mut config = GatewayConfig::default();
+    config.auth_mode = ponyllm_config::AuthMode::Open; // F1 migration: default is now secured; these behavior tests opt into open mode
     config.max_retries = 1;
     for (name, url, price) in [
         ("resp_broken", "http://127.0.0.1:1".to_string(), 0.10),
@@ -1802,6 +1817,7 @@ async fn test_chat_entry_translates_responses_native_upstream() {
     let pool = Arc::new(KeyPool::new("spark", RoutingStrategy::RoundRobin));
     pool.add_key(ApiKeyEntry::new("k1", "sk-test", 1, 10));
     let mut config = GatewayConfig::default();
+    config.auth_mode = ponyllm_config::AuthMode::Open; // F1 migration: default is now secured; these behavior tests opt into open mode
     config.providers.insert(
         "spark".to_string(),
         cross_protocol_provider(format!("http://{}", addr), "muse-spark", UpstreamProtocol::Responses),
@@ -1865,6 +1881,7 @@ async fn test_responses_entry_translates_chat_native_upstream() {
     let pool = Arc::new(KeyPool::new("chatter", RoutingStrategy::RoundRobin));
     pool.add_key(ApiKeyEntry::new("k1", "sk-test", 1, 10));
     let mut config = GatewayConfig::default();
+    config.auth_mode = ponyllm_config::AuthMode::Open; // F1 migration: default is now secured; these behavior tests opt into open mode
     config.providers.insert(
         "chatter".to_string(),
         cross_protocol_provider(format!("http://{}", addr), "chat-model", UpstreamProtocol::Chat),
@@ -1919,6 +1936,7 @@ async fn test_responses_entry_translates_antigravity_upstream() {
     let pool = Arc::new(KeyPool::new("agy_prov", RoutingStrategy::RoundRobin));
     pool.add_key(ApiKeyEntry::new("k1", "sk-test", 1, 10));
     let mut config = GatewayConfig::default();
+    config.auth_mode = ponyllm_config::AuthMode::Open; // F1 migration: default is now secured; these behavior tests opt into open mode
     config.providers.insert(
         "agy_prov".to_string(),
         cross_protocol_provider(format!("http://{}", addr), "gemini-3.8-flash-high", UpstreamProtocol::Antigravity),
@@ -1998,6 +2016,7 @@ async fn test_messages_entry_translates_responses_native_upstream() {
     let pool = Arc::new(KeyPool::new("spark2", RoutingStrategy::RoundRobin));
     pool.add_key(ApiKeyEntry::new("k1", "sk-test", 1, 10));
     let mut config = GatewayConfig::default();
+    config.auth_mode = ponyllm_config::AuthMode::Open; // F1 migration: default is now secured; these behavior tests opt into open mode
     config.providers.insert(
         "spark2".to_string(),
         cross_protocol_provider(format!("http://{}", addr), "spark-msg", UpstreamProtocol::Responses),
@@ -2058,6 +2077,7 @@ async fn test_chat_streaming_translates_responses_native_upstream() {
     let pool = Arc::new(KeyPool::new("spark3", RoutingStrategy::RoundRobin));
     pool.add_key(ApiKeyEntry::new("k1", "sk-test", 1, 10));
     let mut config = GatewayConfig::default();
+    config.auth_mode = ponyllm_config::AuthMode::Open; // F1 migration: default is now secured; these behavior tests opt into open mode
     config.providers.insert(
         "spark3".to_string(),
         cross_protocol_provider(format!("http://{}", addr), "spark-stream", UpstreamProtocol::Responses),
@@ -2093,6 +2113,7 @@ async fn test_messages_image_only_translated_to_responses_rejected_with_anthropi
     let pool = Arc::new(KeyPool::new("spark_img", RoutingStrategy::RoundRobin));
     pool.add_key(ApiKeyEntry::new("k1", "sk-test", 1, 10));
     let mut config = GatewayConfig::default();
+    config.auth_mode = ponyllm_config::AuthMode::Open; // F1 migration: default is now secured; these behavior tests opt into open mode
     config.providers.insert(
         "spark_img".to_string(),
         cross_protocol_provider("http://127.0.0.1:9999".to_string(), "spark-resp", UpstreamProtocol::Responses),
@@ -2149,6 +2170,7 @@ async fn test_provider_proxy_routing_and_isolation() {
     let _ = client_proxy;
 
     let mut config = GatewayConfig::default();
+    config.auth_mode = ponyllm_config::AuthMode::Open; // F1 migration: default is now secured; these behavior tests opt into open mode
     config.providers.insert(
         "proxied_prov".to_string(),
         ProviderConfig {
@@ -2179,6 +2201,7 @@ async fn test_provider_proxy_routing_and_isolation() {
 #[tokio::test]
 async fn test_model_specific_base_url_routing() {
     let mut config = GatewayConfig::default();
+    config.auth_mode = ponyllm_config::AuthMode::Open; // F1 migration: default is now secured; these behavior tests opt into open mode
     let mut prov = ProviderConfig {
     rate_limits: None,
         base_url: "https://provider.example.com/v1".to_string(),
@@ -2221,6 +2244,7 @@ fn test_deepseek_v41_flash_alias_routes_to_live_upstream_name() {
     use ponyllm_server::{AppState, GatewayConfig, ProviderConfig, ModelSpec};
 
     let mut config = GatewayConfig::default();
+    config.auth_mode = ponyllm_config::AuthMode::Open; // F1 migration: default is now secured; these behavior tests opt into open mode
     config.providers.insert(
         "deepseek".to_string(),
         ProviderConfig {
@@ -2249,6 +2273,7 @@ fn test_deepseek_v41_flash_alias_routes_to_live_upstream_name() {
 
     // Explicit config entry still wins over the alias (never shadow config).
     let mut config2 = GatewayConfig::default();
+    config2.auth_mode = ponyllm_config::AuthMode::Open; // F1 migration: default is now secured; these behavior tests opt into open mode
     config2.providers.insert(
         "deepseek".to_string(),
         ProviderConfig {
@@ -2302,6 +2327,7 @@ async fn test_deepseek_v41_flash_alias_echo_and_wire_model() {
     let pool = Arc::new(KeyPool::new("deepseek", RoutingStrategy::RoundRobin));
     pool.add_key(ApiKeyEntry::new("ds-k1", "sk-ds-key", 1, 10));
     let mut config = GatewayConfig::default();
+    config.auth_mode = ponyllm_config::AuthMode::Open; // F1 migration: default is now secured; these behavior tests opt into open mode
     config.providers.insert(
         "deepseek".to_string(),
         ProviderConfig {
@@ -2406,6 +2432,7 @@ fn test_model_priority_dominates_strategy_scoring() {
     // hi-pp is far pricier than lo-pp, so the Economy default would choose
     // lo-pp first; explicit priority must override the price score.
     let mut config = GatewayConfig::default();
+    config.auth_mode = ponyllm_config::AuthMode::Open; // F1 migration: default is now secured; these behavior tests opt into open mode
     config.default_strategy = GatewayRoutingStrategy::Economy;
     let (lo_name, lo_cfg) = priority_provider("lo-pp", Some(1), 0.1);
     config.providers.insert(lo_name, lo_cfg);
@@ -2428,6 +2455,7 @@ fn test_model_priority_tie_keeps_strategy_scoring() {
     // Both providers have no priority: the Economy price score must decide,
     // exactly as before the priority feature existed.
     let mut config = GatewayConfig::default();
+    config.auth_mode = ponyllm_config::AuthMode::Open; // F1 migration: default is now secured; these behavior tests opt into open mode
     config.default_strategy = GatewayRoutingStrategy::Economy;
     let (ex_name, ex_cfg) = priority_provider("expensive", None, 5.0);
     config.providers.insert(ex_name, ex_cfg);
@@ -2449,6 +2477,7 @@ fn test_model_priority_equal_values_fall_back_to_strategy() {
 
     // Equal priorities behave like no priority: price decides.
     let mut config = GatewayConfig::default();
+    config.auth_mode = ponyllm_config::AuthMode::Open; // F1 migration: default is now secured; these behavior tests opt into open mode
     config.default_strategy = GatewayRoutingStrategy::Economy;
     let (ex_name, ex_cfg) = priority_provider("expensive", Some(7), 5.0);
     config.providers.insert(ex_name, ex_cfg);

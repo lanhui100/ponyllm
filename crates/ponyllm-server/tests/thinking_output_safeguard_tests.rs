@@ -54,6 +54,7 @@ async fn test_thinking_output_safeguard_chat_flooring() {
     pool.add_key(ApiKeyEntry::new("k1", "sk-mock-key-123", 1, 10));
 
     let mut config = GatewayConfig::default();
+    config.auth_mode = ponyllm_config::AuthMode::Open; // F1 migration: default is now secured; these behavior tests opt into open mode
     config.providers.insert(
         "deepseek".to_string(),
         ProviderConfig {
@@ -192,6 +193,7 @@ async fn test_thinking_output_safeguard_messages_flooring() {
     pool.add_key(ApiKeyEntry::new("k1", "sk-ant-mock", 1, 10));
 
     let mut config = GatewayConfig::default();
+    config.auth_mode = ponyllm_config::AuthMode::Open; // F1 migration: default is now secured; these behavior tests opt into open mode
     config.providers.insert(
         "anthropic".to_string(),
         ProviderConfig {
