@@ -19,8 +19,10 @@ spec:
         script-src 'self'; style-src 'self' 'unsafe-inline'; upgrade-insecure-requests;
         img-src 'self' data:; font-src 'self' data:;
         connect-src 'self';
-      # 跨源隔离（VULN-10）：CORP/COOP same-origin 阻断跨源资源嵌入与窗口接管；
-      # 本站 OAuth 弹窗与父页同源，COOP same-origin 不阻断同源窗口通信。
+      # 跨源隔离（VULN-10）：CORP/COOP same-origin 阻断跨源资源嵌入与窗口接管。
+      # 注（Phase-2b 修正）：OAuth 弹窗实际跳转 accounts.google.com 等跨源页面，
+      # COOP same-origin 下跨源弹窗的 opener 为 null——与前端 noopener=yes +
+      # 轮询回调（polling）的 OAuth 流程设计一致，本网关不依赖 opener 通道。
       Cross-Origin-Resource-Policy: same-origin
       Cross-Origin-Opener-Policy: same-origin
       # permissions-policy 与应用层 app.rs 默认值对齐，补 payment=()。

@@ -497,7 +497,13 @@ fn build_web_router(web_enabled: bool, web_dist_dir: &str) -> Router<Arc<AppStat
         .route("/recorder", axum::routing::get_service(ServeFile::new(index.clone())))
         .route("/governance", axum::routing::get_service(ServeFile::new(index.clone())))
         .layer(axum::middleware::from_fn(html_no_cache));
-    let router = mount_favicon_routes(index_routes.nest_service("/app", serve), &dist);
+    // R8：/app 前缀服务（ServeDir + SPA fallback）同样需要 no-cache——
+    // index_routes 的 layer 只包裹已注册路由，nest_service 注册的 /app 分支
+    // 不在其内，故单独包一层 Router 并应用同一中间件后 merge。
+    let app_router = Router::new()
+        .nest_service("/app", serve)
+        .layer(axum::middleware::from_fn(html_no_cache));
+    let router = mount_favicon_routes(index_routes.merge(app_router), &dist);
 
     if assets_dir.is_dir() {
         // Vite 哈希资产：缓存 immutable，浏览器/CDN 无需再启发式协商。

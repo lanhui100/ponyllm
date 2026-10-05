@@ -9,8 +9,44 @@ permissions:
   contents: write
 
 jobs:
+  # R7（Phase-2b）：tag 触发发布同样先过依赖审计门禁（与 ci.yml audit job
+  # 相同语义）；审计失败则 build-and-release 不执行，杜绝带漏洞依赖发版。
+  audit:
+    name: Dependency audits (cargo + pnpm)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install cargo-audit (prebuilt)
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+
+      - name: Rust dependency audit
+        run: cargo audit
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      - name: Install web dependencies (frozen)
+        run: pnpm --dir web install --frozen-lockfile
+
+      - name: Web dependency audit
+        run: pnpm audit --dir web --audit-level high
+
   build-and-release:
     name: Build & Release (${{ matrix.target }})
+    needs: [audit]
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
