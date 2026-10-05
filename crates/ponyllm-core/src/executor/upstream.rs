@@ -927,7 +927,12 @@ pub fn try_create_upstream_http_client_with_timeout(
         .tcp_nodelay(true)
         .tcp_keepalive(Duration::from_secs(60))
         .pool_idle_timeout(Duration::from_secs(90))
-        .pool_max_idle_per_host(32);
+        .pool_max_idle_per_host(32)
+        // VULN-07/F6: the data plane must never follow upstream redirects —
+        // an attacker-controllable public base_url that passes the egress
+        // gate could otherwise 302 (or rebind) to a metadata/private target
+        // AFTER the check. Redirects surface as errors, same as probes.
+        .redirect(reqwest::redirect::Policy::none());
 
     if !use_system_proxy {
         builder = builder.no_proxy();
@@ -963,7 +968,12 @@ pub fn create_upstream_http_client_with_timeout(
         Ok(client) => client,
         Err(e) => {
             tracing::warn!(error = %e, "Failed to create configured proxy client, falling back to default");
-            reqwest::Client::builder().build().unwrap_or_default()
+            // VULN-07/F6: the fallback client must carry the same redirect
+            // discipline as the primary builder.
+            reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .unwrap_or_default()
         }
     }
 }

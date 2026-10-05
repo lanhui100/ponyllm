@@ -43,15 +43,16 @@ fn blocked_v4(octets: [u8; 4], allow_loopback: bool) -> bool {
         || (octets[0] == 172 && (16..=31).contains(&octets[1])) // 172.16/12
         || (octets[0] == 192 && octets[1] == 168) // 192.168/16
         || (octets[0] == 169 && octets[1] == 254) // link-local 169.254/16 (metadata)
+        || (octets[0] == 100 && (64..=127).contains(&octets[1])) // 100.64/10 CGNAT (RFC 6598)
+        || (octets[0] == 198 && (18..=19).contains(&octets[1])) // 198.18/15 benchmarking (RFC 2544)
         || octets == [0, 0, 0, 0] // 0.0.0.0
 }
 
-fn is_blocked_ip(ip: &IpAddr) -> bool {
-    // PONYLLM_ALLOW_LOOPBACK_PROBE=1 lifts the *loopback-only* ban for
-    // integration tests and local dev (mock upstreams on 127.0.0.1).
-    // Private/link-local/metadata ranges stay blocked regardless.
-    let allow_loopback =
-        std::env::var("PONYLLM_ALLOW_LOOPBACK_PROBE").as_deref() == Ok("1");
+/// Shared per-IP policy with an explicit loopback flag. Used by
+/// [`is_blocked_ip`] (admin probes, loopback lifted only via
+/// `PONYLLM_ALLOW_LOOPBACK_PROBE`) and by [`check_data_plane_url`] (data
+/// plane, where loopback is a documented legitimate shape — local Ollama).
+fn is_blocked_ip_with(ip: &IpAddr, allow_loopback: bool) -> bool {
     match ip {
         IpAddr::V4(v4) => blocked_v4(v4.octets(), allow_loopback),
         IpAddr::V6(v6) => {
@@ -79,6 +80,15 @@ fn is_blocked_ip(ip: &IpAddr) -> bool {
                 || v6.is_unicast_link_local() // fe80::/10
         }
     }
+}
+
+fn is_blocked_ip(ip: &IpAddr) -> bool {
+    // PONYLLM_ALLOW_LOOPBACK_PROBE=1 lifts the *loopback-only* ban for
+    // integration tests and local dev (mock upstreams on 127.0.0.1).
+    // Private/link-local/metadata ranges stay blocked regardless.
+    let allow_loopback =
+        std::env::var("PONYLLM_ALLOW_LOOPBACK_PROBE").as_deref() == Ok("1");
+    is_blocked_ip_with(ip, allow_loopback)
 }
 
 /// Operator-managed allowlist for admin probes (e.g. an on-prem Ollama or
@@ -136,7 +146,7 @@ fn is_blocked_name(host: &str) -> Option<&'static str> {
 /// `parse::<IpAddr>` below and silently downgrade literal IPs to the
 /// hostname path. We strip exactly one surrounding bracket pair instead of
 /// switching to `Url::host()` so DNS names keep their verbatim form.
-fn parse_host(raw: &str) -> Result<String, String> {
+pub(crate) fn parse_host(raw: &str) -> Result<String, String> {
     let url = reqwest::Url::parse(raw.trim())
         .map_err(|e| format!("invalid probe URL '{}': {}", raw.trim(), e))?;
     if url.scheme() != "http" && url.scheme() != "https" {
@@ -305,6 +315,93 @@ pub async fn check_probe_url(raw: &str) -> Result<(), String> {
         if is_blocked_ip(ip) {
             return Err(format!(
                 "probe target '{}' resolves to a blocked address ({})",
+                host, ip
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Name-based rejections for the data plane (VULN-07/F6): k8s in-cluster
+/// names and cloud-metadata hosts stay blocked by name even if DNS is
+/// unavailable. Loopback hostnames are deliberately ALLOWED here — the
+/// documented data-plane shape includes local model servers (Ollama on
+/// 127.0.0.1); `PONYLLM_PROBE_ALLOWLIST` still lifts LAN model-server names.
+fn data_plane_blocked_name(host: &str) -> Option<&'static str> {
+    let lower = host.trim().trim_end_matches('.').to_ascii_lowercase();
+    if lower == "svc" || lower.ends_with(".svc") || lower.ends_with(".svc.cluster.local") {
+        return Some("kubernetes in-cluster names (*.svc) are not allowed for data-plane upstreams");
+    }
+    if METADATA_HOSTS.iter().any(|m| lower == *m || lower.ends_with(&format!(".{}", m))) {
+        return Some("cloud metadata endpoints are not allowed for data-plane upstreams");
+    }
+    None
+}
+
+/// Data-plane (inference) upstream policy check (VULN-07/F6).
+///
+/// Same policy family as [`check_probe_url`] — http(s) scheme only; literal
+/// IPs judged against the shared block table (private / link-local /
+/// metadata / CGNAT 100.64/10 / benchmarking 198.18/15 / unspecified, plus
+/// IPv4-mapped IPv6 and pure-V6 loopback via `is_blocked_ip_with`); hostnames
+/// are resolved (blocking `getaddrinfo` offloaded via `spawn_blocking`,
+/// bounded 5s fail-closed) and EVERY resolved address must pass — with TWO
+/// deliberate differences from the admin-probe policy:
+///   - loopback literals (`127/8`, `::1`) and the `localhost` name stay
+///     ALLOWED: the documented data-plane shape includes local model servers
+///     (Ollama on 127.0.0.1);
+///   - `PONYLLM_PROBE_ALLOWLIST` lifts LAN model-server names, the same
+///     operator hatch as admin probes.
+/// DNS is re-resolved here at dial time, so a provider hostname rebinding to
+/// an internal address AFTER the write-time check is refused before the
+/// connection is attempted (the write path keeps its own checks — see
+/// `check_probe_url_fast` callers in `routes/admin.rs`).
+pub async fn check_data_plane_url(raw: &str) -> Result<(), String> {
+    let host = parse_host(raw)?;
+    if let Some(reason) = data_plane_blocked_name(&host) {
+        return Err(reason.to_string());
+    }
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        if is_blocked_ip_with(&ip, true) {
+            return Err(format!(
+                "data-plane upstream '{}' resolves to a blocked address ({})",
+                host, ip
+            ));
+        }
+        return Ok(());
+    }
+    // Hostnames pass the name checks; the allowlist (LAN model servers)
+    // skips the IP re-check, mirroring the probe path.
+    if probe_allowlisted(&host) {
+        return Ok(());
+    }
+    let host_for_lookup = host.clone();
+    // Same bounded getaddrinfo discipline as the probe path (fail-closed).
+    let lookup = tokio::task::spawn_blocking(move || {
+        (host_for_lookup.as_str(), 0)
+            .to_socket_addrs()
+            .map(|it| it.map(|s| s.ip()).collect::<Vec<IpAddr>>())
+            .map_err(|e| format!("DNS resolution failed for '{}': {}", host_for_lookup, e))
+    });
+    let addrs: Vec<IpAddr> = match tokio::time::timeout(std::time::Duration::from_secs(5), lookup).await
+    {
+        Ok(Ok(Ok(addrs))) => addrs,
+        Ok(Ok(Err(e))) => return Err(e),
+        Ok(Err(e)) => return Err(format!("DNS lookup task failed: {}", e)),
+        Err(_) => {
+            return Err(format!(
+                "DNS resolution timed out for '{}' (blocked fail-closed)",
+                host
+            ))
+        }
+    };
+    if addrs.is_empty() {
+        return Err(format!("DNS resolution returned no addresses for '{}'", host));
+    }
+    for ip in &addrs {
+        if is_blocked_ip_with(ip, true) {
+            return Err(format!(
+                "data-plane upstream '{}' resolves to a blocked address ({})",
                 host, ip
             ));
         }
