@@ -296,6 +296,7 @@ pub fn responses_to_chat_request(req: &CreateResponseRequest) -> Result<ChatComp
                         messages.push(ChatMessage::Tool(ToolMessage {
                             content: output.as_str().into(),
                             tool_call_id: call_id.clone(),
+                            name: None,
                         }));
                     }
                     ResponseInputItem::Reasoning { content, summary, .. } => {

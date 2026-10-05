@@ -35,6 +35,7 @@ fn test_chat_to_anthropic_request() {
             ChatMessage::Tool(ToolMessage {
                 content: "4".into(),
                 tool_call_id: "call_abc".to_string(),
+                name: None,
             }),
         ],
         temperature: Some(0.5),
@@ -1918,6 +1919,7 @@ fn test_chat_to_responses_tool_message_serializes_as_function_call_output() {
             ChatMessage::Tool(ToolMessage {
                 content: "fn main() {}".into(),
                 tool_call_id: "call_123".to_string(),
+                name: None,
             }),
         ],
         ..Default::default()
@@ -2049,6 +2051,39 @@ fn test_antigravity_chunk_to_chat_chunk_function_call() {
 }
 
 #[test]
+fn test_antigravity_sanitizes_empty_function_response_name() {
+    let mut req = ChatCompletionRequest::default();
+    req.model = "gemini-3.8-flash-high".to_string();
+    req.messages.push(ChatMessage::User(UserMessage {
+        content: "Run bash".into(),
+        name: None,
+    }));
+    // Assistant tool call with empty name or missing resolution
+    req.messages.push(ChatMessage::Tool(ToolMessage {
+        content: "success".into(),
+        tool_call_id: "call_abc123".to_string(),
+        name: None,
+    }));
+    req.messages.push(ChatMessage::Function(FunctionMessage {
+        content: Some("done".into()),
+        name: "".to_string(), // empty name
+    }));
+
+    let envelope = chat_to_antigravity_request(&req, "gemini-3.8-flash-high", "test-project", None, "").unwrap();
+    let contents = envelope["request"]["contents"].as_array().expect("contents array");
+    for turn in contents {
+        if let Some(parts) = turn.get("parts").and_then(|p| p.as_array()) {
+            for part in parts {
+                if let Some(fc_resp) = part.get("functionResponse") {
+                    let name = fc_resp.get("name").and_then(|n| n.as_str()).expect("name must be string");
+                    assert!(!name.trim().is_empty(), "functionResponse.name must not be empty! got: '{}'", name);
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn test_antigravity_to_chat_response_function_call() {
     let resp_val = serde_json::json!({
         "response": {
@@ -2140,6 +2175,7 @@ fn test_chat_to_antigravity_tools_and_multi_turn_history() {
             ChatMessage::Tool(ToolMessage {
                 content: "{\"price\": 180}".into(),
                 tool_call_id: "call_123".to_string(),
+                name: None,
             }),
         ],
         tools: Some(vec![ToolDefinition {

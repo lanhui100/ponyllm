@@ -648,7 +648,20 @@ pub fn chat_to_antigravity_request(
                 push_or_merge_turn(&mut contents, "model", parts);
             }
             ChatMessage::Tool(m) => {
-                let func_name = tool_id_to_name.get(&m.tool_call_id).cloned().unwrap_or_else(|| "tool".to_string());
+                let func_name = m.name.as_deref()
+                    .filter(|n| !n.trim().is_empty())
+                    .map(|n| n.to_string())
+                    .or_else(|| tool_id_to_name.get(&m.tool_call_id).cloned().filter(|n| !n.trim().is_empty()))
+                    .unwrap_or_else(|| {
+                        // Fallback: If name cannot be resolved, use tool_call_id or default string.
+                        // Google Protobuf strictly requires: function_response.name: Name cannot be empty.
+                        let sanitized_id = m.tool_call_id.trim();
+                        if !sanitized_id.is_empty() {
+                            format!("tool_{}", sanitized_id)
+                        } else {
+                            "tool_result".to_string()
+                        }
+                    });
                 let mut extra_inline_parts = Vec::new();
                 let txt = match &m.content {
                     crate::openai::chat::MessageContent::Text(t) => t.clone(),
@@ -703,6 +716,11 @@ pub fn chat_to_antigravity_request(
                 push_or_merge_turn(&mut contents, "user", user_turn_parts);
             }
             ChatMessage::Function(m) => {
+                let func_name = if !m.name.trim().is_empty() {
+                    m.name.clone()
+                } else {
+                    "tool_result".to_string()
+                };
                 let txt = m.content.clone().unwrap_or_default();
                 let response_obj = match serde_json::from_str::<Value>(&txt) {
                     Ok(Value::Object(map)) => Value::Object(map),
@@ -711,7 +729,7 @@ pub fn chat_to_antigravity_request(
                 };
                 push_or_merge_turn(&mut contents, "user", vec![json!({
                     "functionResponse": {
-                        "name": m.name,
+                        "name": func_name,
                         "response": response_obj
                     }
                 })]);
@@ -947,7 +965,16 @@ pub fn messages_to_antigravity_request(
                             }));
                         }
                         crate::anthropic::messages::AnthropicContentBlock::ToolResult { tool_use_id, content, .. } => {
-                            let func_name = tool_id_to_name.get(tool_use_id).cloned().unwrap_or_else(|| "tool".to_string());
+                            let func_name = tool_id_to_name.get(tool_use_id).cloned()
+                                .filter(|n| !n.trim().is_empty())
+                                .unwrap_or_else(|| {
+                                    let sanitized_id = tool_use_id.trim();
+                                    if !sanitized_id.is_empty() {
+                                        format!("tool_{}", sanitized_id)
+                                    } else {
+                                        "tool_result".to_string()
+                                    }
+                                });
                             let mut extra_inline_parts = Vec::new();
                             let txt = match content {
                                 crate::anthropic::messages::ToolResultContent::Text(s) => s.clone(),

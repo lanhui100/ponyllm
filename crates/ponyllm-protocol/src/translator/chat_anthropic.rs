@@ -354,6 +354,7 @@ pub fn anthropic_to_chat_request(req: &MessageRequest) -> Result<ChatCompletionR
                                 messages.push(ChatMessage::Tool(ToolMessage {
                                     content: res_text.into(),
                                     tool_call_id: tool_use_id.clone(),
+                                    name: None,
                                 }));
                             }
                             _ => {}

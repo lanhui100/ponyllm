@@ -138,6 +138,8 @@ pub struct AssistantMessage {
 pub struct ToolMessage {
     pub content: MessageContent,
     pub tool_call_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
