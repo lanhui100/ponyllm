@@ -116,12 +116,6 @@ async fn auth_middleware(
             cfg.auth_mode,
         )
     };
-    // F1 (VULN-17): open mode is now explicit `auth_mode = "open"` ONLY.
-    // The legacy implicit "empty api_key → open" behavior is removed, so an
-    // accidentally emptied credential source can never open the gateway.
-    if auth_mode == ponyllm_config::AuthMode::Open {
-        return next.run(req).await;
-    }
 
     let (method, path, query) = {
         let uri = req.uri();
@@ -163,13 +157,27 @@ async fn auth_middleware(
 
     // F4 (VULN-02): admin IP fence — a non-empty allowlist is fail-closed:
     // the resolved client IP must be inside, otherwise 404 (hide existence).
+    // B4 (Phase-2b): `Some(vec![])` (allowlist configured but every entry
+    // unparseable) DENIES everything — a misconfigured fence fails closed,
+    // never silently opens. `None` (not configured) stays off.
+    // B5 (Phase-2b): the fence runs BEFORE the `auth_mode=open` bypass below,
+    // so an explicitly-open gateway still honors the admin IP fence (the
+    // surface an operator chose to lock stays locked even in open mode).
     if path.starts_with("/api/admin") {
         let fence = state.admin_ip_allowlist.read();
         if let Some(ref nets) = *fence {
-            if !nets.is_empty() && !nets.iter().any(|n| n.contains(&client_ip)) {
+            if !nets.iter().any(|n| n.contains(&client_ip)) {
                 return admin_fence_denied();
             }
         }
+    }
+
+    // F1 (VULN-17): open mode is now explicit `auth_mode = "open"` ONLY.
+    // The legacy implicit "empty api_key → open" behavior is removed, so an
+    // accidentally emptied credential source can never open the gateway.
+    // (Must stay AFTER the F4 fence above.)
+    if auth_mode == ponyllm_config::AuthMode::Open {
+        return next.run(req).await;
     }
 
     let user_agent = headers

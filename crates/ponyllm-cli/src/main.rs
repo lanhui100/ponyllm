@@ -1458,10 +1458,14 @@ fn handle_manage_gateway_auth(
         }
         GatewayAuthAction::Show => {
             // P0: default masked display; `--show` reveals plaintext (contract §4).
-            let open_mode = cfg.gateway.api_key.is_empty()
+            // C2 (Phase-2b): display follows the EXPLICIT `auth_mode`, not key
+            // emptiness — secured+empty-key is NOT open (fail-closed default).
+            let key_empty = cfg.gateway.api_key.is_empty()
                 || cfg.gateway.api_key.eq_ignore_ascii_case("none");
-            let current_key = if open_mode {
-                "免鉴权 (开放模式)".to_string()
+            let current_key = if cfg.gateway.auth_mode == ponyllm_config::AuthMode::Open {
+                "免鉴权 (显式开放模式)".to_string()
+            } else if key_empty {
+                "未配置凭证 (secured：所有 API 需认证)".to_string()
             } else if show_plaintext {
                 cfg.gateway.api_key.clone()
             } else {
@@ -1484,6 +1488,8 @@ fn handle_manage_gateway_auth(
             let anthropic_base = format!("http://{}", host_port);
             let token_val = if current_key.starts_with("免鉴权") {
                 "none"
+            } else if current_key.starts_with("未配置凭证") {
+                "" // secured + 未配置：无凭证可导出
             } else {
                 &current_key
             };
@@ -1595,7 +1601,13 @@ fn handle_gateway_keys_list(config_path: Option<&str>) -> Result<(), Box<dyn std
         );
     }
     if cfg.gateway.gateway_keys.is_empty() && open {
-        println!("(空：开放模式，无凭证)");
+        // C2 (Phase-2b): the "empty" hint follows the explicit auth mode —
+        // secured+empty is fail-closed, NOT an open gateway.
+        if cfg.gateway.auth_mode == ponyllm_config::AuthMode::Open {
+            println!("(空：显式开放模式，无凭证)");
+        } else {
+            println!("(未配置凭证：secured 模式，所有 API 需认证)");
+        }
     }
     Ok(())
 }

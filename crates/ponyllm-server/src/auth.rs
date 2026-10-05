@@ -315,13 +315,19 @@ fn normalize_ip(ip: std::net::IpAddr) -> std::net::IpAddr {
     }
 }
 
-/// Resolve the effective client IP from forwarding headers (F3, VULN-12).
+/// Resolve the effective client IP from forwarding headers (F3+R1, VULN-12).
 ///
 /// Contract (frozen in `tests/acceptance_sec_ip_resolve_tests.rs`):
-/// 1. If `xff` is present and non-empty: split on ',', trim, drop empty and
-///    invalid segments; scan **right-to-left**, skipping addresses inside
-///    `trusted`; the first non-trusted segment is the client IP. If every
-///    segment is trusted, fall through to step 2.
+/// 0. **Peer-trust gate (R1, Phase-2b)**: if the direct TCP peer `remote` is
+///    NOT inside `trusted`, ALL forwarding headers are ignored and `remote`
+///    is returned. XFF/x-real-ip are only meaningful when the peer that
+///    delivered them is a trusted proxy — otherwise an attacker who can reach
+///    us directly forges them to spoof any client (admin-fence bypass,
+///    rate-limit key confusion, audit poisoning).
+/// 1. Otherwise, if `xff` is present and non-empty: split on ',', trim, drop
+///    empty and invalid segments; scan **right-to-left**, skipping addresses
+///    inside `trusted`; the first non-trusted segment is the client IP. If
+///    every segment is trusted, fall through to step 2.
 /// 2. Otherwise (no XFF / empty / all-trusted): use `x_real_ip` when it
 ///    parses as a plain IP (port stripped), else `remote` (the TCP peer).
 ///
@@ -333,6 +339,11 @@ pub fn resolve_client_ip(
     remote: std::net::IpAddr,
     trusted: &[std::net::IpAddr],
 ) -> std::net::IpAddr {
+    // R1: the direct peer must itself be a trusted proxy for any forwarding
+    // header to be honored.
+    if !trusted.contains(&remote) {
+        return remote;
+    }
     if let Some(raw) = xff {
         let raw = raw.trim();
         if !raw.is_empty() {

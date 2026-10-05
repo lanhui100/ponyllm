@@ -1122,13 +1122,11 @@ pub struct AuthorizeAntigravityResponse {
 
 // ---------- helpers ----------
 
+/// C1 (Phase-2b): surface the EXPLICIT `config.auth_mode`, never infer from
+/// `api_key` emptiness — an explicit open+key deployment is `open`, and a
+/// secured deployment with an empty key is `secured` (fail-closed).
 fn auth_mode(state: &AppState) -> &'static str {
-    let key = state.config.read().api_key.clone();
-    if key.trim().is_empty() || key.trim().eq_ignore_ascii_case("none") {
-        "open"
-    } else {
-        "secured"
-    }
+    state.config.read().auth_mode.as_str()
 }
 
 /// Admin-layer fast-degradation budget (Phase 3): regardless of the store's

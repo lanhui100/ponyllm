@@ -379,17 +379,25 @@ pub enum StartupAuthState {
 
 /// Parse F4 admin fence CIDR strings; invalid entries are dropped (never a
 /// startup failure — a typo must not brick the gateway, it just narrows the
-/// fence to the valid entries). Returns `None` when the list is empty.
+/// fence to the valid entries). Bare IPs (no mask) are accepted as host nets —
+/// `ipnet`'s `FromStr` only accepts masked forms, so `127.0.0.1` normalizes
+/// to `127.0.0.1/32`.
 ///
-/// Bare IPs (no mask) are accepted as host nets — `ipnet`'s `FromStr` only
-/// accepts masked forms, so `127.0.0.1` is normalized to `127.0.0.1/32`.
+/// R4 (Phase-2b) fail-closed semantics:
+/// - Empty input list → `None` = fence not configured (off).
+/// - Non-empty input where EVERY entry is unparseable → `Some(vec![])` =
+///   fence ACTIVE matching nothing → every `/api/admin/*` call denied (404).
+///   A misconfigured allowlist must fail closed, never silently disable the
+///   fence (that would reopen the surface the operator meant to lock).
 pub(crate) fn parse_admin_allowlist(raw: &[String]) -> Option<Vec<ipnet::IpNet>> {
     let mut out = Vec::new();
+    let mut saw_any_entry = false;
     for s in raw {
         let s = s.trim();
         if s.is_empty() {
             continue;
         }
+        saw_any_entry = true;
         match s.parse::<ipnet::IpNet>() {
             Ok(net) => out.push(net),
             Err(_) => match s.parse::<std::net::IpAddr>() {
@@ -405,7 +413,8 @@ pub(crate) fn parse_admin_allowlist(raw: &[String]) -> Option<Vec<ipnet::IpNet>>
             },
         }
     }
-    if out.is_empty() {
+    if !saw_any_entry {
+        // Nothing configured → fence off.
         None
     } else {
         Some(out)
@@ -870,22 +879,22 @@ impl AppState {
         new_config: GatewayConfig,
         new_pools: HashMap<String, Arc<KeyPool>>,
     ) {
-        // F1 (VULN-17): a Secured-start gateway must never flip open at
+        // F1+B5 (VULN-17): a Secured-start gateway must never flip open at
         // runtime. `reload_config_with_pools` wholesale-replaces the in-memory
-        // config; an empty/`none` api_key with no scoped keys would otherwise
-        // turn every endpoint unauthenticated the moment the truth source
-        // (k8s Secret) is accidentally emptied. Refuse and keep the previous
-        // secured config; switching to open requires an explicit
-        // `auth_mode="open"` (or a key) AND a restart (startup guard re-checks).
-        let open_shaped = self.startup_auth_state == StartupAuthState::Secured
-            && (new_config.api_key.trim().is_empty()
+        // config; either an explicit `auth_mode="open"` in the new config or
+        // an empty/`none` api_key with no scoped keys would turn every
+        // endpoint unauthenticated the moment the truth source (k8s Secret)
+        // is changed/emptied. Refuse and keep the previous secured config;
+        // entering open mode requires a restart (startup guards re-check).
+        let tries_to_open = new_config.auth_mode == ponyllm_config::AuthMode::Open
+            || ((new_config.api_key.trim().is_empty()
                 || new_config.api_key.trim().eq_ignore_ascii_case("none"))
-            && new_config.gateway_keys.is_empty();
-        if open_shaped {
+                && new_config.gateway_keys.is_empty());
+        if self.startup_auth_state == StartupAuthState::Secured && tries_to_open {
             tracing::error!(
-                "F1 fail-closed: refusing config reload that would open the gateway \
-                 (empty api_key, no scoped keys); keeping previous secured config. \
-                 To run open mode set auth_mode='open' with a real key and restart."
+                "F1/B5 fail-closed: refusing config reload that would open the gateway \
+                 (auth_mode=open or empty credentials); keeping previous secured config. \
+                 To run open mode set auth_mode='open' at startup and restart."
             );
             return;
         }
