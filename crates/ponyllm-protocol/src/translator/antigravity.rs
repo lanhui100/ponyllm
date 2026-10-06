@@ -1506,12 +1506,33 @@ pub fn images_to_antigravity_request(
     salt: &str,
 ) -> Value {
     let mut parts = Vec::new();
+    let effective_prompt;
+    let session_seed;
+
     if let Some((mime, b64)) = image_part {
         parts.push(json!({ "inlineData": { "mimeType": mime, "data": b64 } }));
-    }
-    parts.push(json!({ "text": prompt }));
 
-    let session_id = extract_or_generate_session_id(Some(prompt), salt);
+        let trimmed_lower = prompt.trim().to_lowercase();
+        if trimmed_lower.contains("based on the input image")
+            || trimmed_lower.contains("based on the provided image")
+            || trimmed_lower.contains("edit this image")
+            || trimmed_lower.contains("modify this image")
+        {
+            effective_prompt = prompt.to_string();
+        } else {
+            effective_prompt = format!("Based on the input image, modify it according to: {}", prompt);
+        }
+
+        let img_prefix = if b64.len() > 32 { &b64[..32] } else { b64 };
+        session_seed = format!("{}:{}", prompt, img_prefix);
+    } else {
+        effective_prompt = prompt.to_string();
+        session_seed = prompt.to_string();
+    }
+
+    parts.push(json!({ "text": effective_prompt }));
+
+    let session_id = extract_or_generate_session_id(Some(&session_seed), salt);
     let request_id = generate_antigravity_request_id(&session_id, 1);
 
     let mut inner_request = json!({

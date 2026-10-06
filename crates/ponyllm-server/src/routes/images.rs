@@ -205,6 +205,9 @@ pub async fn handle_image_edits(
     headers: HeaderMap,
     input: ImageEditInput,
 ) -> Response {
+    if input.image.as_deref().unwrap_or("").trim().is_empty() {
+        return bad_request("image is required for image editing", "missing_image");
+    }
     run_images_request(
         state,
         headers,
@@ -312,8 +315,13 @@ async fn run_images_request(
         },
     );
 
-    let aspect_ratio = openai_size_to_antigravity_aspect_ratio(size);
     let image_part = image.and_then(|raw| extract_image_part(raw, "image/png"));
+    // For image editing, do not force an aspect ratio if not explicitly specified, to preserve upstream image ratio
+    let aspect_ratio = if image_part.is_some() && size.is_none() {
+        None
+    } else {
+        openai_size_to_antigravity_aspect_ratio(size)
+    };
 
     let mut last_error = String::new();
     let mut last_pool_exhausted = false;
