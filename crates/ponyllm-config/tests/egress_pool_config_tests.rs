@@ -103,11 +103,11 @@ fn c1_egress_strategy_defaults_to_round_robin() {
 fn c1_egress_pool_serialize_round_trips() {
     let original = parse_provider(POOLED_TOML);
     let serialized = toml::to_string(&original).expect("serialize must not fail");
-    let reparsed: ConfigFile = toml::from_str(&serialized).expect("serialized TOML must reparse");
-    let round = reparsed
-        .providers
-        .get("opencode-zen")
-        .expect("provider must survive the round trip");
+    // Round-trip at provider-section granularity: the bare section serializes
+    // to a top-level TOML table (no `[providers.<name>]` wrapper — that key
+    // is ConfigFile's business), so it must reparse as `ProviderSection`.
+    let round: ProviderSection =
+        toml::from_str(&serialized).expect("serialized TOML must reparse as a provider");
     assert_eq!(
         round.egress_pool, original.egress_pool,
         "round trip must preserve the pool list and order"
@@ -134,13 +134,10 @@ fn c1_empty_pool_keeps_legacy_proxy_semantics() {
         "the single-proxy field must stay untouched when no pool is configured"
     );
 
-    // Round trip keeps the proxy and stays pool-less.
+    // Round trip keeps the proxy and stays pool-less (same section-level
+    // granularity as c1_egress_pool_serialize_round_trips).
     let serialized = toml::to_string(&p).expect("serialize must not fail");
-    let reparsed: ConfigFile = toml::from_str(&serialized).expect("must reparse");
-    let round = reparsed
-        .providers
-        .get("opencode-zen")
-        .expect("provider must survive the round trip");
+    let round: ProviderSection = toml::from_str(&serialized).expect("must reparse as a provider");
     assert!(round.egress_pool.is_empty());
     assert_eq!(round.proxy.as_deref(), Some("http://127.0.0.1:8899"));
 }
