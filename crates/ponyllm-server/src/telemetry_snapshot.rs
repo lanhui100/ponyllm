@@ -321,13 +321,15 @@ pub fn save_snapshot_with_live_cycles(
         key_usage_cycles: cycles,
         snapshot: owned,
     };
-    // 读-改-写合并 per-key 用量：保留磁盘上历史 key（账号增删/热重载不归零）。
+    // 读-改-写合并 per-key 用量与池级基准：保留磁盘上历史 key 与基准。
     let mut merged = file.clone();
-    let existing = load_snapshot_file(path)
-        .map(|f| f.snapshot.key_usages)
-        .unwrap_or_default();
-    for (key_id, usage) in existing {
-        merged.snapshot.key_usages.entry(key_id).or_insert(usage);
+    if let Some(existing_file) = load_snapshot_file(path) {
+        for (key_id, usage) in existing_file.snapshot.key_usages {
+            merged.snapshot.key_usages.entry(key_id).or_insert(usage);
+        }
+        // 保留磁盘上既有的 pool_cycle_benchmark 状态，防止被 live snap 的默认空值抹掉；
+        // 然后在已有基准的基础上 merge 最新的 usages。
+        merged.snapshot.pool_cycle_benchmark = existing_file.snapshot.pool_cycle_benchmark;
     }
     // 池级跨账号跨周期累计基准：基于合并后的全量 key_usages 幂等合并。
     let mut usages: BTreeMap<String, KeyUsageStateSnapshot> = BTreeMap::new();
