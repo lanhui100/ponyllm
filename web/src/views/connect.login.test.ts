@@ -20,7 +20,7 @@ const DASHBOARD = { template: '<div>dashboard</div>' };
 
 let mountedApp: ReturnType<typeof createApp> | null = null;
 
-function mountConnect(calls: { url: string; init?: RequestInit }[]) {
+function mountConnect(_calls: { url: string; init?: RequestInit }[]) {
   const pinia = createPinia();
   setActivePinia(pinia);
   const router = createRouter({

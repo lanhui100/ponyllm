@@ -1022,7 +1022,7 @@ function waterBarWidth(percent: number | null): string {
     </div>
 
     <!-- 指标布局区：左侧账户状态，右侧现代精简指标 -->
-    <div class="grid grid-cols-1 lg:grid-cols-12 gap-4">
+    <div class="grid grid-cols-1 lg:grid-cols-12 gap-4 items-stretch">
       <!-- 账户可用性状态与矩阵槽位 (占 4 列) -->
       <div class="lg:col-span-4 flex min-h-0 flex-col justify-between p-3 rounded-lg bg-slate-50/60 border border-slate-100/80">
         <div class="flex shrink-0 self-start w-full items-center justify-between text-xs text-slate-500 mb-2 font-medium">
@@ -1118,11 +1118,11 @@ function waterBarWidth(percent: number | null): string {
         </div>
       </div>
 
-      <!-- 右侧现代精简排版：加权用量统计 + 容量水位 + 周期额度测定 (占 8 列) -->
-      <div class="lg:col-span-8 flex flex-col gap-8">
-        <!-- 顶部：加权用量统计 (无面板，小文字大数字) -->
-        <div>
-          <div class="flex items-center gap-1 text-xs text-slate-500 font-medium mb-5">
+      <!-- 右侧现代精简排版：上方剩余空间居中放数字，底部对齐周期测定与容量水位 (占 8 列) -->
+      <div class="lg:col-span-8 flex flex-col justify-between">
+        <!-- 上方：加权用量统计在剩余空间中居中显示 -->
+        <div class="flex-1 flex flex-col justify-center py-2">
+          <div class="flex items-center gap-1 text-xs text-slate-500 font-medium mb-3">
             <Icons name="activity" size="13" class="text-slate-700" />
             加权用量统计
           </div>
@@ -1148,59 +1148,61 @@ function waterBarWidth(percent: number | null): string {
           </div>
         </div>
 
-        <!-- Gemini 容量水位条 (横向双列紧凑展开) -->
-        <div class="p-3 rounded-lg bg-slate-50/60 border border-slate-100/80">
-          <div class="flex items-center justify-between text-xs text-slate-500 mb-1.5 font-medium">
-            <span class="inline-flex items-center gap-1 text-slate-700">
-              <Icons name="sparkles" size="14" class="text-slate-700" />
-              Gemini 容量水位
-            </span>
-            <span class="text-[11px] text-slate-400">基于当前 {{ activeKeys.length }} 个就绪账号会话余量加权聚合</span>
-          </div>
-          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <!-- 5 小时窗口水位 -->
-            <div class="space-y-1">
-              <div class="flex items-center justify-between text-xs">
-                <span class="font-medium text-slate-700">5小时窗口</span>
-                <span class="font-mono font-semibold tabular-nums text-right shrink-0" data-testid="gemini-h5-percent" :class="getProgressColor(aggregatedQuotas.gemini.h5Percent).text">
-                  {{ formatWaterPercent(aggregatedQuotas.gemini.h5Percent) }}
-                </span>
+        <!-- 底部区：容量水位 + 周期统计3个小面板紧贴底部 -->
+        <div class="flex flex-col gap-2.5 mt-auto">
+          <!-- Gemini 容量水位条 (横向双列紧凑展开) -->
+          <div class="p-3 rounded-lg bg-slate-50/60 border border-slate-100/80">
+            <div class="flex items-center justify-between text-xs text-slate-500 mb-1.5 font-medium">
+              <span class="inline-flex items-center gap-1 text-slate-700">
+                <Icons name="sparkles" size="14" class="text-slate-700" />
+                Gemini 容量水位
+              </span>
+              <span class="text-[11px] text-slate-400">基于当前 {{ activeKeys.length }} 个就绪账号会话余量加权聚合</span>
+            </div>
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <!-- 5 小时窗口水位 -->
+              <div class="space-y-1">
+                <div class="flex items-center justify-between text-xs">
+                  <span class="font-medium text-slate-700">5小时窗口</span>
+                  <span class="font-mono font-semibold tabular-nums text-right shrink-0" data-testid="gemini-h5-percent" :class="getProgressColor(aggregatedQuotas.gemini.h5Percent).text">
+                    {{ formatWaterPercent(aggregatedQuotas.gemini.h5Percent) }}
+                  </span>
+                </div>
+                <div class="w-full bg-slate-200/80 rounded-full h-1.5 overflow-hidden">
+                  <div
+                    class="h-full rounded-full transition-all duration-300"
+                    :class="getProgressColor(aggregatedQuotas.gemini.h5Percent).bar"
+                    :style="{ width: waterBarWidth(aggregatedQuotas.gemini.h5Percent) }"
+                  />
+                </div>
+                <div class="text-[10px] text-slate-400 text-right truncate">
+                  {{ aggregatedQuotas.gemini.h5Hint }}
+                </div>
               </div>
-              <div class="w-full bg-slate-200/80 rounded-full h-1.5 overflow-hidden">
-                <div
-                  class="h-full rounded-full transition-all duration-300"
-                  :class="getProgressColor(aggregatedQuotas.gemini.h5Percent).bar"
-                  :style="{ width: waterBarWidth(aggregatedQuotas.gemini.h5Percent) }"
-                />
-              </div>
-              <div class="text-[10px] text-slate-400 text-right truncate">
-                {{ aggregatedQuotas.gemini.h5Hint }}
+              <!-- 周度窗口水位 -->
+              <div class="space-y-1">
+                <div class="flex items-center justify-between text-xs">
+                  <span class="font-medium text-slate-700">周度窗口</span>
+                  <span class="font-mono font-semibold tabular-nums text-right shrink-0" data-testid="gemini-weekly-percent" :class="getProgressColor(aggregatedQuotas.gemini.weeklyPercent).text">
+                    {{ formatWaterPercent(aggregatedQuotas.gemini.weeklyPercent) }}
+                  </span>
+                </div>
+                <div class="w-full bg-slate-200/80 rounded-full h-1.5 overflow-hidden">
+                  <div
+                    class="h-full rounded-full transition-all duration-300"
+                    :class="getProgressColor(aggregatedQuotas.gemini.weeklyPercent).bar"
+                    :style="{ width: waterBarWidth(aggregatedQuotas.gemini.weeklyPercent) }"
+                  />
+                </div>
+                <div class="text-[10px] text-slate-400 text-right truncate">
+                  {{ aggregatedQuotas.gemini.weeklyHint }}
+                </div>
               </div>
             </div>
-            <!-- 周度窗口水位 -->
-            <div class="space-y-1">
-              <div class="flex items-center justify-between text-xs">
-                <span class="font-medium text-slate-700">周度窗口</span>
-                <span class="font-mono font-semibold tabular-nums text-right shrink-0" data-testid="gemini-weekly-percent" :class="getProgressColor(aggregatedQuotas.gemini.weeklyPercent).text">
-                  {{ formatWaterPercent(aggregatedQuotas.gemini.weeklyPercent) }}
-                </span>
-              </div>
-              <div class="w-full bg-slate-200/80 rounded-full h-1.5 overflow-hidden">
-                <div
-                  class="h-full rounded-full transition-all duration-300"
-                  :class="getProgressColor(aggregatedQuotas.gemini.weeklyPercent).bar"
-                  :style="{ width: waterBarWidth(aggregatedQuotas.gemini.weeklyPercent) }"
-                />
-              </div>
-              <div class="text-[10px] text-slate-400 text-right truncate">
-                {{ aggregatedQuotas.gemini.weeklyHint }}
-              </div>
-            </div>
           </div>
-        </div>
 
-        <!-- 5小时 / 自然周 / 自然月 测定基准 (输入大字体 + 右侧紧凑三要素) -->
-        <div class="grid grid-cols-1 sm:grid-cols-3 gap-2">
+          <!-- 5小时 / 自然周 / 自然月 测定基准 (输入大字体 + 右侧紧凑三要素，底部对齐) -->
+          <div class="grid grid-cols-1 sm:grid-cols-3 gap-2">
           <!-- 5小时 -->
           <div class="p-2.5 rounded-lg bg-slate-50/60 border border-slate-100/80 flex flex-col justify-between">
             <div class="text-xs font-semibold text-slate-700 mb-1">5小时</div>
@@ -1282,9 +1284,9 @@ function waterBarWidth(percent: number | null): string {
             </div>
           </div>
         </div>
-
       </div>
     </div>
+  </div>
 
     <!-- 单账号专属四要素精确画像抽屉/展开区 (Swiss Minimalist Refined) -->
     <div
