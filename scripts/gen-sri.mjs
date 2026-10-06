@@ -14,7 +14,7 @@
 //   防止无 SRI 的构建产物被发布。
 // ==============================================================================
 import { createHash } from 'node:crypto';
-import { readFile, writeFile, stat } from 'node:fs/promises';
+import { readFile, writeFile, stat, rename, unlink } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
@@ -112,7 +112,21 @@ async function main() {
   for (const [tag, replacement] of patches) {
     html = html.split(tag).join(replacement);
   }
-  await writeFile(INDEX_PATH, html);
+
+  // Phase-3b：原子写——同目录临时文件 + rename（同文件系统 rename 原子），
+  // 进程中断也不会留下半写入的 index.html；失败时清理临时文件。
+  const tmpPath = `${INDEX_PATH}.tmp-${process.pid}`;
+  try {
+    await writeFile(tmpPath, html);
+    await rename(tmpPath, INDEX_PATH);
+  } catch (err) {
+    try {
+      await unlink(tmpPath);
+    } catch {
+      /* 临时文件不存在则忽略 */
+    }
+    throw err;
+  }
   console.log(`gen-sri: OK — ${patches.size} 个本地资产已注入 integrity → ${INDEX_PATH}`);
 }
 

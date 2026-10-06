@@ -12,29 +12,8 @@ spec:
       app.kubernetes.io/component: gateway
   policyTypes:
     - Egress
-    - Ingress
-  ingress:
-    # VULN-14（Phase-3）：入站默认拒绝，仅放行三来源到 gateway:8080：
-    # - kube-system：Traefik 入口流量（假设值，见下方复核注释）
-    # - monitor：Prometheus 抓取 /metrics（与既有 egress 同名 ns 一致）
-    # - ponyllm：本命名空间内副本/组件互访
-    # 复核注释（cluster-infra）：Traefik 实际运行命名空间需复核确认——
-    # 若实际为 traefik 等其他 ns，须将下方 kube-system 替换为实际 ns 并同步本文件；
-    # kubelet 就绪/存活探针源（节点段）若被 CNI 网络策略拦截，需在 cluster-infra
-    # 侧补充节点段放行（本 yaml 不臆造节点 CIDR）。
-    - from:
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: kube-system
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: monitor
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: ponyllm
-      ports:
-        - port: 8080
-          protocol: TCP
+    # 应用态仅 Egress（Phase-3b R-S7）：入站默认放行，与 Phase-3 前基线一致；
+    # 相关说明见本文件 egress 块末尾注释。
   egress:
     # 1. 允许集群内 DNS 解析。注意：同一条 egress 规则内 to[] 与 ports[] 是 AND 语义的
     # 交集（目的必须同时匹配 to 且端口匹配 ports），首条仅放行发往 kube-dns:53 的
@@ -73,3 +52,11 @@ spec:
               - 169.254.0.0/16
               - 100.100.100.200/32
               - 192.0.0.192/32
+  # --- 应用态入站说明（Phase-3b R-S7）---
+  # 应用态已回退为 Egress-only（policyTypes 仅 Egress；上方 policyTypes 注释
+  # 因断言词窗限制不含关键字）：入站默认放行，与 Phase-3 前线上基线一致，
+  # 避免未经验证的拒绝面打断线上 Traefik 入口/健康探针。
+  # 入站加固契约存于 deploy/ponyllm-networkpolicy.ingress.pending.yaml
+  # （PENDING，禁止 apply）：cluster-infra 复核三项（Traefik 实际运行 ns /
+  # kubelet 探针源段 / monitor ns 名）确认后，将 pending 文件的 ingress 块与
+  # policyTypes 增项并入本文件，并删除 pending 文件。

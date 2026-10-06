@@ -1,0 +1,62 @@
+# ==============================================================================
+# deploy/ponyllm-networkpolicy.ingress.pending.yaml — PENDING（禁止 apply）
+#
+# ⚠️ 状态：PENDING — 本文件是 VULN-14 Ingress 加固的"契约待确认稿"，
+#    未经 cluster-infra 确认前【严禁 apply / 严禁并入应用态清单】。
+#
+# 为什么 pending（Phase-3b 撤销地雷）：
+#   应用态 deploy/ponyllm-networkpolicy.yaml 已回退为 Egress-only（入站默认放行，
+#   与 Phase-3 前线上基线一致）。Ingress 默认拒绝规则一旦 apply，未匹配来源全部
+#   被拒；以下三项集群事实未确认前直接上线可能打断线上入口与健康检查：
+#
+#   ① Traefik 实际运行命名空间（假定 kube-system，若实际为 traefik 等其他 ns，
+#     必须把下方 kube-system namespaceSelector 换成实际 ns）
+#   ② kubelet 就绪/存活探针源段（若 CNI 网络策略拦截 kubelet 源自节点 IP 的
+#     探针，需补 ipBlock 放行节点段——见下方 TODO，本文件不臆造 CIDR）
+#   ③ monitor 命名空间名（Prometheus 抓取 /metrics 的 ns 是否确为 monitor）
+#
+# 启用流程（三项确认后）：
+#   1. 在下方 ingress 规则中替换/补齐实际 ns 与探针节点段；
+#   2. 把 spec.policyTypes 增加 "Ingress"、并将下方 `ingress:` 块并入
+#      deploy/ponyllm-networkpolicy.yaml（保留其既有 egress 块）；
+#   3. 删除本 pending 文件；更新 task-8 ADR 状态。
+# ==============================================================================
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ponyllm-egress-lockdown
+  namespace: ponyllm
+  labels:
+    app.kubernetes.io/name: ponyllm
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: ponyllm
+      app.kubernetes.io/component: gateway
+  policyTypes:
+    - Egress
+    - Ingress
+  ingress:
+    # VULN-14：入站默认拒绝，仅放行三来源到 gateway:8080：
+    # - kube-system：Traefik 入口流量（确认项①，假定值）
+    # - monitor：Prometheus 抓取 /metrics（确认项③，与既有 egress 同名 ns 一致）
+    # - ponyllm：本命名空间内副本/组件互访
+    # TODO（确认项②）：kubelet 就绪/存活探针源——若被 CNI 拦截，在此追加
+    #   - ipBlock:
+    #       cidr: <NODE_CIDR>     # 节点段由 cluster-infra 提供
+    # 到 from[] 列表（nodeSelector 在 NetworkPolicy 不可用，需 ipBlock）。
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitor
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ponyllm
+      ports:
+        - port: 8080
+          protocol: TCP
+  # egress：沿用应用态 deploy/ponyllm-networkpolicy.yaml 的既有 egress 块
+  # （并入时保留，勿在本文件重复定义以免漂移）。
