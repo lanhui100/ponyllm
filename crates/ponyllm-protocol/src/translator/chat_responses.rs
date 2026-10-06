@@ -98,7 +98,7 @@ pub fn chat_to_responses_request(req: &ChatCompletionRequest) -> Result<CreateRe
                     for tc in tool_calls {
                         items.push(ResponseInputItem::FunctionCall {
                             call_id: tc.id.clone(),
-                            name: tc.function.name.clone(),
+                            name: crate::common::sanitize_wire_tool_name(&tc.function.name),
                             arguments: tc.function.arguments.clone(),
                         });
                     }
@@ -131,7 +131,7 @@ pub fn chat_to_responses_request(req: &ChatCompletionRequest) -> Result<CreateRe
         t_list
             .iter()
             .map(|t| ResponseToolDefinition::Function {
-                name: t.function.name.clone(),
+                name: crate::common::sanitize_wire_tool_name(&t.function.name),
                 description: t.function.description.clone(),
                 parameters: t.function.parameters.clone(),
                 strict: t.function.strict,

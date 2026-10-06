@@ -123,3 +123,43 @@ impl<'de> Deserialize<'de> for ReasoningEffort {
     }
 }
 
+/// Sanitize a tool or function name for upstream wire compatibility.
+///
+/// Most upstreams (OpenAI, Anthropic, Gemini, OpenCode Zen Responses) require
+/// names matching `^[a-zA-Z0-9_.-]+$` with a length cap (typically 64 chars).
+/// Any invalid character (e.g. `:` from hallucinated `git_diff:bash`, spaces, `/`)
+/// is mapped to `_`. Empty or whitespace names fall back to a safe identifier.
+pub fn sanitize_wire_tool_name(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return "tool_call".to_string();
+    }
+
+    let is_valid_char = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '-';
+    let needs_cleaning = trimmed.chars().any(|c| !is_valid_char(c));
+
+    let sanitized = if needs_cleaning {
+        trimmed
+            .chars()
+            .map(|c| if is_valid_char(c) { c } else { '_' })
+            .collect::<String>()
+    } else {
+        trimmed.to_string()
+    };
+
+    const MAX_TOOL_NAME_LEN: usize = 64;
+    if sanitized.len() > MAX_TOOL_NAME_LEN {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let mut hasher = DefaultHasher::new();
+        raw.hash(&mut hasher);
+        let hash_suffix = format!("_{:08x}", hasher.finish() as u32);
+        let keep_len = MAX_TOOL_NAME_LEN.saturating_sub(hash_suffix.len());
+        format!("{}{}", &sanitized[..keep_len], hash_suffix)
+    } else {
+        sanitized
+    }
+}
+
+

@@ -457,7 +457,7 @@ fn convert_tools_to_gemini(tools: &[crate::openai::chat::ToolDefinition]) -> Opt
     for t in tools {
         if t.r#type == "function" {
             let mut decl = json!({
-                "name": t.function.name,
+                "name": crate::common::sanitize_wire_tool_name(&t.function.name),
             });
             if let Some(ref desc) = t.function.description {
                 decl["description"] = json!(desc);
@@ -541,7 +541,8 @@ pub fn chat_to_antigravity_request(
         if let ChatMessage::Assistant(m) = msg {
             if let Some(ref tcs) = m.tool_calls {
                 for tc in tcs {
-                    tool_id_to_name.insert(tc.id.clone(), tc.function.name.clone());
+                    let sanitized = crate::common::sanitize_wire_tool_name(&tc.function.name);
+                    tool_id_to_name.insert(tc.id.clone(), sanitized);
                 }
             }
         }
@@ -638,7 +639,7 @@ pub fn chat_to_antigravity_request(
                             .unwrap_or_else(|_| json!({}));
                         parts.push(json!({
                             "functionCall": {
-                                "name": tc.function.name,
+                                "name": crate::common::sanitize_wire_tool_name(&tc.function.name),
                                 "args": args_val
                             },
                             "thoughtSignature": "skip_thought_signature_validator"
@@ -1998,7 +1999,7 @@ mod tests {
         let parts = &env["request"]["contents"][0]["parts"];
         assert_eq!(parts[0]["inlineData"]["mimeType"], "image/png");
         assert_eq!(parts[0]["inlineData"]["data"], "AAAA");
-        assert_eq!(parts[1]["text"], "make it purple");
+        assert_eq!(parts[1]["text"], "Based on the input image, modify it according to: make it purple");
         assert_eq!(
             env["request"]["generationConfig"]["imageConfig"]["aspectRatio"],
             "9:16"

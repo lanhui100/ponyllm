@@ -120,7 +120,7 @@ pub fn chat_to_anthropic_request(req: &ChatCompletionRequest) -> Result<MessageR
                             .unwrap_or_else(|_| json!({}));
                         blocks.push(AnthropicContentBlock::ToolUse {
                             id: tc.id.clone(),
-                            name: tc.function.name.clone(),
+                            name: crate::common::sanitize_wire_tool_name(&tc.function.name),
                             input: input_val,
                             cache_control: None,
                         });
@@ -178,7 +178,7 @@ pub fn chat_to_anthropic_request(req: &ChatCompletionRequest) -> Result<MessageR
     let tools = req.tools.as_ref().map(|defs| {
         defs.iter()
             .map(|td| AnthropicTool {
-                name: td.function.name.clone(),
+                name: crate::common::sanitize_wire_tool_name(&td.function.name),
                 description: td.function.description.clone(),
                 input_schema: td.function.parameters.clone().unwrap_or_else(|| json!({"type": "object"})),
                 cache_control: None,

@@ -1,5 +1,5 @@
+use ponyllm_protocol::common::{sanitize_wire_tool_name, ReasoningEffort};
 use ponyllm_protocol::anthropic::messages::*;
-use ponyllm_protocol::common::ReasoningEffort;
 use ponyllm_protocol::openai::chat::*;
 use ponyllm_protocol::openai::responses::*;
 use ponyllm_protocol::translator::*;
@@ -3029,5 +3029,133 @@ fn test_responses_failed_to_anthropic_response_returns_error() {
     let msg = responses_to_anthropic_response(&ok).unwrap();
     assert_eq!(msg.stop_reason, Some(AnthropicStopReason::EndTurn));
 }
+
+#[test]
+fn test_sanitize_wire_tool_name_rules() {
+    // Normal names remain untouched without changes
+    assert_eq!(sanitize_wire_tool_name("bash"), "bash");
+    assert_eq!(sanitize_wire_tool_name("my_tool-1.0"), "my_tool-1.0");
+
+    // Colon in tool name (incident cause: git_diff:bash)
+    assert_eq!(sanitize_wire_tool_name("git_diff:bash"), "git_diff_bash");
+    assert_eq!(sanitize_wire_tool_name("git_log_show:bash"), "git_log_show_bash");
+
+    // Space, slash, and unicode characters
+    assert_eq!(sanitize_wire_tool_name("my tool/action"), "my_tool_action");
+    assert_eq!(sanitize_wire_tool_name("工具_查询"), "_____");
+
+    // Empty or whitespace falls back safely
+    assert_eq!(sanitize_wire_tool_name(""), "tool_call");
+    assert_eq!(sanitize_wire_tool_name("   "), "tool_call");
+
+    // Excessive length capped at 64 with deterministic hash suffix
+    let long_name = "a".repeat(100);
+    let sanitized_long = sanitize_wire_tool_name(&long_name);
+    assert_eq!(sanitized_long.len(), 64);
+    assert!(sanitized_long.starts_with(&"a".repeat(55)));
+}
+
+#[test]
+fn test_chat_to_responses_request_sanitizes_replayed_tool_calls_and_declarations() {
+    let req = ChatCompletionRequest {
+        model: "muse-spark-1.3-contributor-free".to_string(),
+        messages: vec![
+            ChatMessage::User(UserMessage {
+                content: "Run diff".into(),
+                name: None,
+            }),
+            ChatMessage::Assistant(AssistantMessage {
+                content: None,
+                name: None,
+                refusal: None,
+                reasoning_content: None,
+                tool_calls: Some(vec![
+                    ToolCall {
+                        id: "call_1".to_string(),
+                        r#type: "function".to_string(),
+                        function: FunctionCall {
+                            name: "git_diff:bash".to_string(),
+                            arguments: "{}".to_string(),
+                        },
+                    },
+                    ToolCall {
+                        id: "call_2".to_string(),
+                        r#type: "function".to_string(),
+                        function: FunctionCall {
+                            name: "".to_string(),
+                            arguments: "{}".to_string(),
+                        },
+                    },
+                ]),
+            }),
+            ChatMessage::Tool(ToolMessage {
+                content: "unknown tool".into(),
+                tool_call_id: "call_1".to_string(),
+                name: None,
+            }),
+            ChatMessage::User(UserMessage {
+                content: "Retry".into(),
+                name: None,
+            }),
+        ],
+        tools: Some(vec![ToolDefinition {
+            r#type: "function".to_string(),
+            function: FunctionDefinition {
+                name: "declared:action".to_string(),
+                description: None,
+                parameters: None,
+                strict: None,
+            },
+        }]),
+        temperature: None,
+        top_p: None,
+        n: None,
+        stream: Some(false),
+        stream_options: None,
+        stop: None,
+        max_tokens: None,
+        max_completion_tokens: None,
+        presence_penalty: None,
+        frequency_penalty: None,
+        logit_bias: None,
+        user: None,
+        response_format: None,
+        seed: None,
+        tool_choice: None,
+        parallel_tool_calls: None,
+        reasoning_effort: None,
+        extra: Default::default(),
+    };
+
+    let resp_req = chat_to_responses_request(&req).expect("translation succeeds");
+    match resp_req.input {
+        ResponseInput::Items(items) => {
+            let func_calls: Vec<_> = items
+                .iter()
+                .filter_map(|it| match it {
+                    ResponseInputItem::FunctionCall { call_id, name, .. } => {
+                        Some((call_id.as_str(), name.as_str()))
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                func_calls,
+                vec![("call_1", "git_diff_bash"), ("call_2", "tool_call")]
+            );
+        }
+        _ => panic!("expected items input"),
+    }
+
+    let tools = resp_req.tools.expect("tools present");
+    assert_eq!(tools.len(), 1);
+    match &tools[0] {
+        ResponseToolDefinition::Function { name, .. } => {
+            assert_eq!(name, "declared_action");
+        }
+        _ => panic!("expected Function definition"),
+    }
+}
+
 
 

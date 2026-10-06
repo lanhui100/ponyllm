@@ -210,7 +210,7 @@ pub fn responses_to_anthropic_request(req: &CreateResponseRequest) -> Result<Mes
                             serde_json::from_str(arguments).unwrap_or_else(|_| json!({}));
                         pending_use.push(AnthropicContentBlock::ToolUse {
                             id: call_id.clone(),
-                            name: name.clone(),
+                            name: crate::common::sanitize_wire_tool_name(name),
                             input: input_val,
                             cache_control: None,
                         });
@@ -283,7 +283,7 @@ pub fn responses_to_anthropic_request(req: &CreateResponseRequest) -> Result<Mes
                     parameters,
                     ..
                 } => Some(AnthropicTool {
-                    name: name.clone(),
+                    name: crate::common::sanitize_wire_tool_name(name),
                     description: description.clone(),
                     input_schema: parameters
                         .clone()
