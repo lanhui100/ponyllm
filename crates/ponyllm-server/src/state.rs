@@ -366,6 +366,9 @@ pub struct AppState {
     /// F2 (VULN-01): auth-failure rate limiter (sliding window per
     /// (client IP, key prefix), tiered lockout).
     pub auth_ratelimiter: Arc<crate::auth_ratelimit::AuthRateLimiter>,
+    /// Phase-3 (VULN-05): per-pod HttpOnly-cookie admin session store.
+    /// `None` = sessions disabled (routes absent, cookie auth off).
+    pub admin_session_store: Arc<parking_lot::RwLock<Option<Arc<crate::session::SessionStore>>>>,
 }
 
 /// F1: authentication mode frozen at startup (see `AppState::startup_auth_state`).
@@ -593,6 +596,11 @@ impl AppState {
             config.auth_fail_limit,
             config.auth_lockout_secs,
         );
+        let admin_sessions = config.admin_session_enabled.then(|| {
+            Arc::new(crate::session::SessionStore::new(std::time::Duration::from_secs(
+                config.admin_session_ttl_secs,
+            )))
+        });
         Self {
             config: RwLock::new(config),
             pools,
@@ -625,6 +633,7 @@ impl AppState {
             admin_ip_allowlist: Arc::new(parking_lot::RwLock::new(admin_allowlist)),
             trusted_proxies: Arc::new(parking_lot::RwLock::new(trusted)),
             auth_ratelimiter: Arc::new(ratelimiter),
+            admin_session_store: Arc::new(parking_lot::RwLock::new(admin_sessions)),
         }
     }
 

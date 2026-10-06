@@ -87,6 +87,9 @@ fn build_gateway_config_and_pools(
     gw_config.auth_lockout_secs = config_file.gateway.auth_lockout_secs;
     gw_config.admin_ip_allowlist = config_file.gateway.admin_ip_allowlist.clone();
     gw_config.trusted_proxies = config_file.gateway.trusted_proxies.clone();
+    // Phase-3 (VULN-05): HttpOnly cookie admin sessions (disk format -> runtime).
+    gw_config.admin_session_enabled = config_file.gateway.admin_session_enabled;
+    gw_config.admin_session_ttl_secs = config_file.gateway.admin_session_ttl_secs;
 
     // Startup observability for the quota-boundary default (bugfix 2026-10-02):
     // when cross-provider quota failover is disabled but ≥2 providers share a

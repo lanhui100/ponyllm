@@ -7,6 +7,7 @@ pub mod telemetry;
 pub mod models;
 pub mod admin;
 pub mod images;
+pub mod session;
 
 pub use health::*;
 pub use chat::*;

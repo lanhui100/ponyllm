@@ -140,6 +140,15 @@ pub struct GatewaySection {
     /// (e.g. EdgeOne回源网段). `PONYLLM_TRUSTED_PROXIES` env overrides.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub trusted_proxies: Vec<String>,
+    /// Phase-3 (VULN-05): HttpOnly cookie admin sessions (`PONYLLM_ADMIN_SESSION_ENABLED=1`
+    /// env also enables at app build time). Default `false`: session routes
+    /// are absent and cookie auth is off — behavior identical to pre-session.
+    #[serde(default = "default_admin_session_enabled")]
+    pub admin_session_enabled: bool,
+    /// Phase-3: session TTL in seconds (default 28800 = 8h, sliding refresh on
+    /// every validated use). `PONYLLM_ADMIN_SESSION_TTL_SECS` overrides (test hook).
+    #[serde(default = "default_admin_session_ttl_secs")]
+    pub admin_session_ttl_secs: u64,
 }
 
 /// Scoped gateway credential (P1): one entry per issued key.
@@ -262,6 +271,14 @@ fn default_auth_fail_limit() -> u32 {
 
 fn default_auth_lockout_secs() -> u64 {
     900
+}
+
+fn default_admin_session_enabled() -> bool {
+    false
+}
+
+fn default_admin_session_ttl_secs() -> u64 {
+    28800
 }
 
 /// Compute the stored hash for a scoped gateway key (P1): never store plaintext.
@@ -510,6 +527,8 @@ impl Default for GatewaySection {
             auth_lockout_secs: default_auth_lockout_secs(),
             admin_ip_allowlist: Vec::new(),
             trusted_proxies: Vec::new(),
+            admin_session_enabled: default_admin_session_enabled(),
+            admin_session_ttl_secs: default_admin_session_ttl_secs(),
         }
     }
 }

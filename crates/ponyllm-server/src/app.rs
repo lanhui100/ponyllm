@@ -106,6 +106,13 @@ async fn auth_middleware(
     if path == "/health" || path == "/metrics" || path == "/oauth2callback" {
         return next.run(req).await;
     }
+    // Phase-3 (VULN-05): the session API is self-authenticating and mounted
+    // OUTSIDE this middleware (post-layer merge). When sessions are disabled
+    // the routes do not exist, and these paths must fall through to the
+    // global fallback (404 — the regression anchor), never 401 here.
+    if path == "/api/admin/session" || path == "/api/admin/session/revoke" {
+        return next.run(req).await;
+    }
 
     let (legacy_key, entries, compat, auth_mode) = {
         let cfg = state.config.read();
@@ -204,6 +211,59 @@ async fn auth_middleware(
         if let Some(key_val) = headers.get("x-api-key").and_then(|v| v.to_str().ok()) {
             provided_token = Some(key_val.trim());
         }
+    }
+
+    // Phase-3 (VULN-05) session cookie branch: no `Authorization` header +
+    // sessions enabled + a `ponyllm_session` cookie → authenticate with the
+    // scope captured at exchange time. CSRF double-submit: every method
+    // except GET/HEAD must carry `X-Pony-Session` matching the cookie sid
+    // (SameSite=Strict is browser-side defense in depth; this is the
+    // server-enforced check).
+    let session_scope: Option<ponyllm_config::KeyScope> = if headers.get("authorization").is_none()
+    {
+        let store_opt = state.admin_session_store.read().clone();
+        let sid_opt = store_opt
+            .as_ref()
+            .and_then(|store| crate::routes::session::session_cookie_sid(headers).map(|sid| (store.clone(), sid)));
+        match sid_opt {
+            Some((store, sid)) => match store.validate(&sid) {
+                Some(scope) => {
+                    let is_safe = matches!(method.as_str(), "GET" | "HEAD");
+                    if !is_safe {
+                        let csrf_ok = headers
+                            .get("x-pony-session")
+                            .and_then(|v| v.to_str().ok())
+                            .map(|s| s.trim() == sid)
+                            .unwrap_or(false);
+                        if !csrf_ok {
+                            return crate::auth::csrf_forbidden();
+                        }
+                    }
+                    Some(scope)
+                }
+                None => return crate::auth::session_expired(),
+            },
+            None => None,
+        }
+    } else {
+        None
+    };
+    if let Some(scope) = session_scope {
+        let resource = classify_resource(&method, &path, query.as_deref());
+        if scope_allows(scope, resource) {
+            return next.run(req).await;
+        }
+        let name = match resource {
+            Resource::Inference => "inference",
+            Resource::AdminRead => "admin-read",
+            Resource::AdminWrite => "admin-write",
+            Resource::TeleFull => "telemetry-full",
+            Resource::TeleSummary => "telemetry-summary",
+            Resource::Quota => "quota",
+            Resource::Exempt => "exempt",
+        };
+        tracing::warn!(client_ip = %client_ip_str, user_agent, %method, %path, scope = scope.as_str(), resource = name, reason = "privilege_boundary_violation", "admin privilege boundary violation rejected (403, session cookie)");
+        return crate::auth::forbidden(name);
     }
 
     let strict = matches!(compat, AuthCompat::Strict);
@@ -329,10 +389,32 @@ pub fn create_app(state: Arc<AppState>) -> Router {
         }
     }
 
+    // Phase-3 (VULN-05): session enablement env overrides, read ONCE at app
+    // build time (same pattern as the F4 allowlist above). When enabled, the
+    // session routes are mounted (below) and the middleware cookie branch
+    // activates. `PONYLLM_ADMIN_SESSION_TTL_SECS` is a test hook overriding
+    // the default 28800s.
+    {
+        let mut store_guard = state.admin_session_store.write();
+        let enabled = std::env::var("PONYLLM_ADMIN_SESSION_ENABLED")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+            || state.config.read().admin_session_enabled;
+        if enabled && store_guard.is_none() {
+            let ttl = std::env::var("PONYLLM_ADMIN_SESSION_TTL_SECS")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or_else(|| state.config.read().admin_session_ttl_secs);
+            *store_guard = Some(Arc::new(crate::session::SessionStore::new(
+                std::time::Duration::from_secs(ttl),
+            )));
+        }
+    }
+
     let body_limit = state.config.read().request_body_limit;
 
     // API routes: guarded by auth_middleware (Bearer / x-api-key, /health & /metrics exempt).
-    let api = Router::new()
+    let mut api = Router::new()
         .route("/health", get(handle_health))
         .route("/metrics", get(crate::routes::telemetry::handle_get_prometheus_metrics))
         .route("/oauth2callback", get(crate::routes::handle_oauth2_callback))
@@ -378,6 +460,22 @@ pub fn create_app(state: Arc<AppState>) -> Router {
         .route("/v1/telemetry/history", get(handle_get_history))
         .merge(admin_routes())
         .layer(from_fn_with_state(state.clone(), auth_middleware));
+
+    // Phase-3 (VULN-05): session API mounted AFTER the auth layer — the
+    // handlers self-authenticate (Bearer exchange / cookie validation), and
+    // the middleware path-exemption keeps disabled-mode requests on the 404
+    // regression anchor. When disabled the routes simply do not exist.
+    if state.admin_session_store.read().is_some() {
+        use crate::routes::session::{handle_session_create, handle_session_probe, handle_session_revoke};
+        api = api.merge(
+            Router::new()
+                .route(
+                    "/api/admin/session",
+                    get(handle_session_probe).post(handle_session_create),
+                )
+                .route("/api/admin/session/revoke", post(handle_session_revoke)),
+        );
+    }
 
     let (web_enabled, web_dist_dir) = {
         let cfg = state.config.read();

@@ -6,6 +6,7 @@ pub mod routes;
 pub mod app;
 pub mod auth;
 pub mod auth_ratelimit;
+pub mod session;
 pub mod streaming;
 pub mod extractors;
 pub mod frames;

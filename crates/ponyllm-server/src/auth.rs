@@ -410,6 +410,38 @@ pub fn forbidden(resource: &str) -> Response {
         .into_response()
 }
 
+/// 401 envelope (Phase-3 / VULN-05): the presented session cookie is unknown,
+/// expired or revoked — the browser must re-authenticate.
+pub fn session_expired() -> Response {
+    (
+        StatusCode::UNAUTHORIZED,
+        Json(json!({
+            "error": {
+                "message": "Session expired or invalid; re-authenticate to obtain a new session.",
+                "type": "invalid_request_error",
+                "code": "session_expired"
+            }
+        })),
+    )
+        .into_response()
+}
+
+/// 403 envelope (Phase-3 / VULN-05): CSRF double-submit check failed — a
+/// cookie-authenticated write did not carry a matching `X-Pony-Session`.
+pub fn csrf_forbidden() -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        Json(json!({
+            "error": {
+                "message": "CSRF check failed: write request must carry X-Pony-Session matching the session cookie.",
+                "type": "csrf_failed",
+                "code": "csrf_failed"
+            }
+        })),
+    )
+        .into_response()
+}
+
 /// 429 envelope (F2, VULN-01): auth failure budget exhausted / lockout active.
 /// Same error shape family as 401/403 so clients parse it uniformly.
 pub fn rate_limited() -> Response {

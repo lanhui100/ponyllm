@@ -505,6 +505,20 @@ pub struct GatewayConfig {
     /// F3 (VULN-12): exact trusted proxy IPs for XFF hop skipping.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub trusted_proxies: Vec<String>,
+    /// Phase-3 (VULN-05): HttpOnly cookie admin sessions (default false).
+    #[serde(default = "default_admin_session_enabled")]
+    pub admin_session_enabled: bool,
+    /// Phase-3: session TTL seconds (default 28800 = 8h sliding).
+    #[serde(default = "default_admin_session_ttl_secs")]
+    pub admin_session_ttl_secs: u64,
+}
+
+fn default_admin_session_enabled() -> bool {
+    false
+}
+
+fn default_admin_session_ttl_secs() -> u64 {
+    28800
 }
 
 fn default_auth_mode() -> ponyllm_config::AuthMode {
@@ -569,6 +583,8 @@ impl Default for GatewayConfig {
             auth_lockout_secs: default_auth_lockout_secs(),
             admin_ip_allowlist: Vec::new(),
             trusted_proxies: Vec::new(),
+            admin_session_enabled: default_admin_session_enabled(),
+            admin_session_ttl_secs: default_admin_session_ttl_secs(),
         }
     }
 }

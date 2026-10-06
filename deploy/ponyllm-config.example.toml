@@ -57,3 +57,13 @@ default_protocol = "systemone"
 # max_output = "32K"
 # input_types = ["text", "image"]
 # output_types = ["image"]
+
+# ── 安全：Phase-3 HttpOnly Cookie 管理会话（VULN-05，默认关闭）────────────────
+# 开启方式（生产建议启用，配合 Web 控制台后续版本）：
+#   [gateway]
+#   admin_session_enabled = true      # 挂载 /api/admin/session 会话路由并启用 cookie 鉴权
+#   admin_session_ttl_secs = 28800    # 会话 TTL（8h，滑动刷新；默认 28800）
+# 说明：开启后浏览器经 POST /api/admin/session 用 Bearer 换发 HttpOnly;Secure;
+#   SameSite=Strict cookie，管理凭证不再常驻前端 sessionStorage（配合 XSS 加固断链）。
+# 多副本注意：会话表为 per-pod 内存（上限 4096 LRU），replica 间不共享、重启即失效。
+# 也可用环境变量在启动时覆盖：PONYLLM_ADMIN_SESSION_ENABLED=1 / PONYLLM_ADMIN_SESSION_TTL_SECS=<n>。

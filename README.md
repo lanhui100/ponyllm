@@ -155,6 +155,13 @@ ponyllm keys revoke --id agent-ci-1                    # 删除（硬删除：�
 
 dual → strict 发版路径：先在 staging 切 `strict` 观 401 → 回 `dual`（RTO 演练）；正式发版后 Web 按网关 `/health` 版本强制 logout（旧会话不跨版本），`?token=` 书签请改走表单登录一次。401 = 换 key/重领，403 `insufficient_scope` = 提权换 key。
 
+> **HttpOnly Cookie 管理会话（`[gateway] admin_session_enabled`，默认关闭）**：
+> 开启后 Web 控制台可经 `POST /api/admin/session` 用 Bearer 一次性换发
+> `ponyllm_session` cookie（`HttpOnly; Secure; SameSite=Strict; Max-Age=<TTL 默认 28800s 滑动>`），
+> 管理凭证不再常驻前端 sessionStorage（配合 DOM XSS 防护断掉"XSS→窃取 token→全权接管"链）。
+> 会话为 per-pod 内存表（上限 4096 LRU 淘汰，replica 间不共享、重启即失效）；也可用
+> `PONYLLM_ADMIN_SESSION_ENABLED=1` / `PONYLLM_ADMIN_SESSION_TTL_SECS=<n>` 环境变量在启动时覆盖。
+
 ### 7. 配置文件与寻路规则
 
 网关与 CLI 共用一份 `ponyllm.toml`。定位优先级（高→低）：
