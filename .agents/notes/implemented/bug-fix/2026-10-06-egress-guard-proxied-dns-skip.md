@@ -71,6 +71,8 @@ antigravity → `pproxy-host.ponyllm.svc:8899` CONNECT 代理，代理自行解�
     Non-Goal 保守覆盖，命中即 DNS 照跑）。
   - 单飞 owner 以 `InflightEntry` RAII Drop guard 兜底：owner 取消/panic 时移除
     (mode,host) 条目，waiter 有界等待后可接管为新 owner，杜绝 stale-Occupied 永久 hang。
+  - `*.localhost` 子域对齐客户端静态 no_proxy 豁免（终审 PARTIAL 关闭）：此类目标一律
+    完整检查，快路径判定与客户端字节去向严格同源。
 - 一次 DNS 瞬时抖动不再造成 10s 保证 503：瞬时失败 1s 内快速重检，恢复即放行。
 - 验收（implemented 时全绿）：acceptance_egress_proxied_tests（12 用例：代理零 DNS 放行/
   直连瞬时拒绝 TTL≤2s/socks5 与不可解析代理强制全检查/确定性拒绝缓存/mode 隔离/注入
