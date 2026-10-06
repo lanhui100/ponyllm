@@ -350,11 +350,19 @@ pub struct AppState {
     /// successful refresh. Quarantine only after N consecutive hits (the
     /// propagation-window buffer from the HA review).
     pub antigravity_invalid_grant_count: Arc<tokio::sync::Mutex<HashMap<String, u32>>>,
-    /// Data-plane egress guard verdict cache (VULN-07/F6): host → last
-    /// verdict with expiry. Per-request re-validation of routed upstream URLs
-    /// pays no DNS on the hot path (positive 60s / negative 10s, fail-closed
-    /// on miss). See [`AppState::data_plane_egress_guard`].
-    pub egress_guard_cache: std::sync::Mutex<HashMap<String, EgressGuardVerdict>>,
+    /// Data-plane egress guard verdict cache (VULN-07/F6): `(proxied, host)`
+    /// → last verdict with expiry. Per-request re-validation of routed
+    /// upstream URLs pays no DNS on the hot path. Keyed by BOTH the proxied
+    /// mode and the host so a proxied Ok verdict can never satisfy a direct
+    /// dial (mode isolation — a direct dial must always re-resolve, otherwise
+    /// the DNS-rebinding defense is silently disabled). TTLs: positive 5s /
+    /// deterministic refusal 10s / transient DNS failure 1s (fail-closed on
+    /// miss). See [`AppState::data_plane_egress_guard`].
+    pub egress_guard_cache: std::sync::Mutex<HashMap<(bool, String), EgressGuardVerdict>>,
+    /// Per-`(proxied, host)` in-flight resolution dedup (thundering-herd
+    /// guard): concurrent cache misses collapse onto one resolution; waiters
+    /// are woken by the owner and re-read the cache.
+    pub egress_guard_inflight: std::sync::Mutex<HashMap<(bool, String), Arc<tokio::sync::Notify>>>,
     /// F1 (VULN-17): authentication mode latched at startup. A Secured-start
     /// gateway refuses runtime reloads that would flip it open.
     pub startup_auth_state: StartupAuthState,
@@ -443,11 +451,15 @@ pub(crate) fn parse_trusted_proxies(raw: &[String]) -> Vec<std::net::IpAddr> {
 
 /// Cached verdict for the data-plane egress guard (VULN-07/F6, R3).
 ///
-/// Fields are `pub` so acceptance tests can observe the cache TTL (see
-/// `tests/acceptance_sec_egress_cache_tests.rs`).
+/// Fields are `pub` so acceptance tests can observe the verdicts and cache
+/// TTLs (see `tests/acceptance_sec_egress_cache_tests.rs` and
+/// `tests/acceptance_egress_proxied_tests.rs`).
 #[derive(Clone, Copy, Debug)]
 pub struct EgressGuardVerdict {
     pub ok: bool,
+    /// Stability classification: `true` = transient DNS failure (short TTL,
+    /// re-checked almost immediately); `false` = deterministic refusal.
+    pub transient: bool,
     pub expires_at: std::time::Instant,
 }
 
@@ -629,6 +641,7 @@ impl AppState {
             last_antigravity_refresh: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             antigravity_invalid_grant_count: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             egress_guard_cache: std::sync::Mutex::new(HashMap::new()),
+            egress_guard_inflight: std::sync::Mutex::new(HashMap::new()),
             startup_auth_state,
             admin_ip_allowlist: Arc::new(parking_lot::RwLock::new(admin_allowlist)),
             trusted_proxies: Arc::new(parking_lot::RwLock::new(trusted)),
@@ -723,11 +736,6 @@ impl AppState {
     /// Connections are pooled and reused across targets pointing to the same proxy endpoint.
     pub fn http_client_for_target(&self, provider_name: &str, model_name: &str) -> reqwest::Client {
         let cfg = self.config.read();
-        let effective = cfg
-            .providers
-            .get(provider_name)
-            .map(|p| p.effective_proxy_for_model(model_name))
-            .unwrap_or(crate::config::EffectiveProxy::InheritGateway);
         let timeout_secs = cfg
             .providers
             .get(provider_name)
@@ -736,11 +744,11 @@ impl AppState {
         let timeout = std::time::Duration::from_secs(timeout_secs);
         let gw_timeout = std::time::Duration::from_secs(cfg.upstream_timeout_secs);
         let use_sys = cfg.use_system_proxy;
-        let proxy_url: Option<String> = match effective {
-            crate::config::EffectiveProxy::InheritGateway => cfg.proxy.clone(),
-            crate::config::EffectiveProxy::Direct => None,
-            crate::config::EffectiveProxy::Custom(url) => Some(url.to_string()),
-        };
+        // Same-source effective proxy as the data-plane egress guard
+        // (`data_plane_egress_guard_for_target`): a drift here would either
+        // break availability (guard thinks proxied, client dials direct) or
+        // break SSRF guarantees (guard skips DNS for a direct target).
+        let proxy_url: Option<String> = cfg.effective_proxy_url_for(provider_name, model_name);
         drop(cfg);
 
         // Fast paths for the gateway defaults (no per-target override):
@@ -817,12 +825,13 @@ impl AppState {
         ponyllm_core::executor::create_probe_http_client_with_options(proxy_opt)
     }
 
-    /// Data-plane egress guard (VULN-07/F6, R3): re-validate a routed
-    /// upstream URL immediately before dialing so a provider hostname that
-    /// rebinds to an internal address AFTER the write-time check is refused
-    /// here, fail-closed (no dial on refusal). A short TTL cache keyed by
-    /// host keeps the hot path DNS-free: positive verdicts cached 5s,
-    /// negative 10s; a cache miss re-resolves with the 5s fail-closed bound
+    /// Data-plane egress guard for DIRECT dials (VULN-07/F6, R3): re-validate
+    /// a routed upstream URL immediately before dialing so a provider
+    /// hostname that rebinds to an internal address AFTER the write-time
+    /// check is refused here, fail-closed (no dial on refusal). A short TTL
+    /// cache keyed by `(proxied=false, host)` keeps the hot path DNS-free:
+    /// positive verdicts cached 5s, deterministic refusals 10s, transient DNS
+    /// failures 1s; a cache miss re-resolves with the 5s fail-closed bound
     /// inside `egress::check_data_plane_url`.
     ///
     /// Residual TOCTOU boundary (stated honestly): a hostname that rebinds
@@ -838,37 +847,132 @@ impl AppState {
     /// lifted via `PONYLLM_PROBE_ALLOWLIST` (same operator hatch as admin
     /// probes).
     pub async fn data_plane_egress_guard(&self, url: &str) -> std::result::Result<(), String> {
+        self.guard_url(false, url).await
+    }
+
+    /// Data-plane egress guard when the target's effective outbound proxy is
+    /// known (model > provider > gateway, same source as the upstream HTTP
+    /// client via [`GatewayConfig::effective_proxy_url_for`]): if the proxy is
+    /// fast-path eligible (see [`crate::egress::proxy_fast_path_eligible`])
+    /// the guard runs the NO-DNS proxied policy — the trusted proxy owns DNS +
+    /// egress for the target, and the gateway's local resolution is irrelevant
+    /// to where bytes go (it was the source of the observed 5s fail-closed +
+    /// 10s negative-cache 503 storms for GFW-blocked Google domains).
+    /// Otherwise (socks / unparseable proxy / no_proxy-exempt target /
+    /// system-proxy-only) it falls back to the full direct check so the guard
+    /// never skips DNS for a target that is actually dialed directly.
+    pub async fn data_plane_egress_guard_for_target(
+        &self,
+        provider_name: &str,
+        model_name: &str,
+        url: &str,
+    ) -> std::result::Result<(), String> {
+        let proxied = {
+            let cfg = self.config.read();
+            cfg.effective_proxy_url_for(provider_name, model_name)
+                .map(|p| crate::egress::proxy_fast_path_eligible(&p, url))
+                .unwrap_or(false)
+        };
+        if proxied {
+            tracing::trace!(
+                provider = %provider_name,
+                model = %model_name,
+                url = %url,
+                "data-plane egress guard: proxied fast path (no local DNS)"
+            );
+        }
+        self.guard_url(proxied, url).await
+    }
+
+    /// Shared guard core: verdict cache keyed by `(proxied, host)` with
+    /// tri-state TTLs (Ok 5s / deterministic refusal 10s / transient DNS
+    /// failure 1s) and per-key in-flight single-flight dedup so a burst of
+    /// concurrent cache misses collapses onto ONE resolution instead of N
+    /// `spawn_blocking` DNS lookups.
+    async fn guard_url(&self, proxied: bool, url: &str) -> std::result::Result<(), String> {
         let host = crate::egress::parse_host(url)?.to_ascii_lowercase();
-        {
-            let cache = self.egress_guard_cache.lock().unwrap_or_else(|p| p.into_inner());
-            if let Some(v) = cache.get(&host) {
-                if v.expires_at > std::time::Instant::now() {
-                    if v.ok {
-                        return Ok(());
+        let key = (proxied, host.clone());
+        loop {
+            {
+                let cache = self.egress_guard_cache.lock().unwrap_or_else(|p| p.into_inner());
+                if let Some(v) = cache.get(&key) {
+                    if v.expires_at > std::time::Instant::now() {
+                        if v.ok {
+                            return Ok(());
+                        }
+                        return Err(format!(
+                            "egress guard refused data-plane upstream host '{}' (cached)",
+                            host
+                        ));
                     }
-                    return Err(format!(
-                        "egress guard refused data-plane upstream host '{}' (cached)",
-                        host
-                    ));
                 }
             }
-        }
-        let verdict = crate::egress::check_data_plane_url(url).await;
-        let (ok, ttl) = match &verdict {
-            Ok(_) => (true, std::time::Duration::from_secs(5)),
-            Err(_) => (false, std::time::Duration::from_secs(10)),
-        };
-        self.egress_guard_cache
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .insert(
-                host,
-                EgressGuardVerdict {
-                    ok,
-                    expires_at: std::time::Instant::now() + ttl,
+            // Register the in-flight entry; only the owner performs the
+            // resolution, waiters get woken and re-check the cache.
+            let (nf, owner) = {
+                let mut inflight = self
+                    .egress_guard_inflight
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner());
+                match inflight.entry(key.clone()) {
+                    std::collections::hash_map::Entry::Vacant(e) => {
+                        let nf = Arc::new(tokio::sync::Notify::new());
+                        e.insert(nf.clone());
+                        (nf, true)
+                    }
+                    std::collections::hash_map::Entry::Occupied(o) => (o.get().clone(), false),
+                }
+            };
+            if !owner {
+                // Bounded wait (owner may have raced the removal); re-check
+                // the cache on wake — the verdict is inserted before notify.
+                let _ =
+                    tokio::time::timeout(std::time::Duration::from_secs(6), nf.notified()).await;
+                continue;
+            }
+            // Owner: resolve outside any lock.
+            let checked = if proxied {
+                crate::egress::check_data_plane_url_proxied(url).await
+            } else {
+                crate::egress::check_data_plane_url(url).await
+            };
+            let now = std::time::Instant::now();
+            let verdict = match &checked {
+                Ok(()) => EgressGuardVerdict {
+                    ok: true,
+                    transient: false,
+                    expires_at: now + std::time::Duration::from_secs(5),
                 },
-            );
-        verdict
+                Err(r) => EgressGuardVerdict {
+                    ok: false,
+                    transient: r.transient,
+                    expires_at: now
+                        + if r.transient {
+                            std::time::Duration::from_secs(1)
+                        } else {
+                            std::time::Duration::from_secs(10)
+                        },
+                },
+            };
+            {
+                let mut cache = self.egress_guard_cache.lock().unwrap_or_else(|p| p.into_inner());
+                cache.insert(key.clone(), verdict);
+            }
+            // Remove the in-flight entry BEFORE notifying: a waiter that
+            // registers after the removal creates a fresh entry instead of
+            // waiting on a stale notifier forever.
+            let wake = {
+                let mut inflight = self
+                    .egress_guard_inflight
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner());
+                inflight.remove(&key)
+            };
+            if let Some(nf) = wake {
+                nf.notify_waiters();
+            }
+            return checked.map_err(String::from);
+        }
     }
 
     /// Best-effort Antigravity identity for envelope translation (P0-6, B7):

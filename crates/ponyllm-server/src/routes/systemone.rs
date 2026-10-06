@@ -74,7 +74,10 @@ pub async fn handle_systemone(
         // VULN-07/F6: refuse to dial upstream URLs that resolve (or rebind)
         // to metadata/private/CGNAT/benchmark ranges — re-validated here at
         // dial time (cached per host), not only at provider write time.
-        if let Err(reason) = state.data_plane_egress_guard(&target_url).await {
+        if let Err(reason) = state
+            .data_plane_egress_guard_for_target(&provider, &target.physical_model, &target_url)
+            .await
+        {
             last_error = reason;
             last_kind = ponyllm_core::error::GatewayErrorKind::UpstreamUnavailable;
             tracing::warn!(provider = %provider, url = %target_url, "data-plane egress guard refused upstream; skipping target");

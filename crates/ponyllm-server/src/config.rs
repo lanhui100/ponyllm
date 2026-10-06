@@ -615,6 +615,37 @@ impl GatewayConfig {
             Some(ponyllm_core::DEFAULT_UPSTREAM_TTFB_TIMEOUT)
         }
     }
+
+    /// Same-source effective proxy URL used by BOTH the upstream HTTP client
+    /// (`AppState::http_client_for_target`) and the data-plane egress guard
+    /// (`AppState::data_plane_egress_guard_for_target`): model-level proxy >
+    /// provider-level proxy > gateway default (`InheritGateway`).
+    /// `"direct"`/`"none"`/empty resolve to `None` (direct connection).
+    /// Returns the trimmed URL so the two consumers can never drift apart.
+    pub fn effective_proxy_url_for(&self, provider_name: &str, model_name: &str) -> Option<String> {
+        let effective = self
+            .providers
+            .get(provider_name)
+            .map(|p| p.effective_proxy_for_model(model_name))
+            .unwrap_or(EffectiveProxy::InheritGateway);
+        match effective {
+            EffectiveProxy::InheritGateway => self
+                .proxy
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string()),
+            EffectiveProxy::Direct => None,
+            EffectiveProxy::Custom(url) => {
+                let trimmed = url.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]

@@ -355,76 +355,209 @@ fn data_plane_blocked_name(host: &str) -> Option<&'static str> {
     None
 }
 
-/// Data-plane (inference) upstream policy check (VULN-07/F6).
-///
-/// Same policy family as [`check_probe_url`] — http(s) scheme only; literal
-/// IPs judged against the shared block table (private / link-local /
-/// metadata / CGNAT 100.64/10 / benchmarking 198.18/15 / unspecified, plus
-/// IPv4-mapped IPv6 and pure-V6 loopback via `is_blocked_ip_with`); hostnames
-/// are resolved (blocking `getaddrinfo` offloaded via `spawn_blocking`,
-/// bounded 5s fail-closed) and EVERY resolved address must pass — with TWO
-/// deliberate differences from the admin-probe policy:
-///   - loopback literals (`127/8`, `::1`) and the `localhost` name stay
-///     ALLOWED: the documented data-plane shape includes local model servers
-///     (Ollama on 127.0.0.1);
-///   - `PONYLLM_PROBE_ALLOWLIST` lifts LAN model-server names, the same
-///     operator hatch as admin probes.
-/// DNS is re-resolved here at dial time, so a provider hostname rebinding to
-/// an internal address AFTER the write-time check is refused before the
-/// connection is attempted (the write path keeps its own checks — see
-/// `check_probe_url_fast` callers in `routes/admin.rs`).
-pub async fn check_data_plane_url(raw: &str) -> Result<(), String> {
-    let host = parse_host(raw)?;
-    if let Some(reason) = data_plane_blocked_name(&host) {
-        return Err(reason.to_string());
+/// Data-plane upstream refusal with a stability classification so the verdict
+/// cache can treat transient DNS failures differently from deterministic
+/// policy rejections (see `AppState::data_plane_egress_guard`).
+#[derive(Debug, Clone)]
+pub struct DataPlaneRefusal {
+    pub reason: String,
+    /// `true` = environment-jitter class (DNS timeout / resolution error /
+    /// empty result / join failure): short-lived, must NOT land in a long
+    /// negative cache. `false` = deterministic policy rejection (blocklisted
+    /// name, private literal IP, resolved private IP).
+    pub transient: bool,
+}
+
+impl From<DataPlaneRefusal> for String {
+    fn from(r: DataPlaneRefusal) -> String {
+        r.reason
     }
-    // B7: the operator allowlist (LAN model servers — exact host OR literal
-    // IP) skips the name/IP policy and the DNS re-check, mirroring the probe
-    // path.
+}
+
+/// Injectable DNS lookup outcome for `check_data_plane_url_with_resolver`
+/// (deterministic unit tests without real wall-clock DNS).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DnsLookupError {
+    /// Resolution exceeded the fail-closed bound.
+    Timeout,
+    /// Resolver returned an error.
+    Failure(String),
+}
+
+fn data_plane_refusal(reason: impl Into<String>) -> DataPlaneRefusal {
+    DataPlaneRefusal {
+        reason: reason.into(),
+        transient: false,
+    }
+}
+
+/// Shared data-plane fast policy (VULN-07/F6): scheme + in-cluster/metadata
+/// name blocklist + operator allowlist + literal-IP blocklist. NO DNS — used
+/// by both the direct check (before resolution) and the proxied fast path.
+/// Loopback stays ALLOWED (documented data-plane shape — local Ollama);
+/// `PONYLLM_PROBE_ALLOWLIST` lifts LAN model-server names (B7).
+pub(crate) fn check_data_plane_policy_fast(raw: &str) -> Result<(), DataPlaneRefusal> {
+    let host = parse_host(raw).map_err(data_plane_refusal)?;
+    if let Some(reason) = data_plane_blocked_name(&host) {
+        return Err(data_plane_refusal(reason));
+    }
     if probe_allowlisted(&host) {
         return Ok(());
     }
     if let Ok(ip) = host.parse::<IpAddr>() {
         if is_blocked_ip_with(&ip, true) {
-            return Err(format!(
+            return Err(data_plane_refusal(format!(
                 "data-plane upstream '{}' resolves to a blocked address ({})",
                 host, ip
-            ));
+            )));
         }
         return Ok(());
     }
-    let host_for_lookup = host.clone();
-    // Same bounded getaddrinfo discipline as the probe path (fail-closed).
-    let lookup = tokio::task::spawn_blocking(move || {
-        (host_for_lookup.as_str(), 0)
-            .to_socket_addrs()
-            .map(|it| it.map(|s| s.ip()).collect::<Vec<IpAddr>>())
-            .map_err(|e| format!("DNS resolution failed for '{}': {}", host_for_lookup, e))
-    });
-    let addrs: Vec<IpAddr> = match tokio::time::timeout(std::time::Duration::from_secs(5), lookup).await
-    {
-        Ok(Ok(Ok(addrs))) => addrs,
-        Ok(Ok(Err(e))) => return Err(e),
-        Ok(Err(e)) => return Err(format!("DNS lookup task failed: {}", e)),
-        Err(_) => {
-            return Err(format!(
-                "DNS resolution timed out for '{}' (blocked fail-closed)",
-                host
-            ))
-        }
+    Ok(())
+}
+
+/// Whether an effective proxy URL is eligible for the data-plane proxied fast
+/// path (skip local DNS). MUST mirror the actual client construction so the
+/// guard never thinks "proxied" while the client dials direct:
+/// - scheme must be `http`/`https` (workspace reqwest has NO socks feature,
+///   so `Proxy::all("socks5://…")` fails and the client silently falls back
+///   to a direct dial — skipping DNS there would remove SSRF protection);
+/// - `reqwest::Proxy::all` must parse it (same source as the client build);
+/// - the target host must not be no_proxy-exempt (`localhost`/`127.x` dial
+///   direct regardless of the proxy);
+/// - the proxy URL itself must pass `check_proxy_url_fast` (defense in depth
+///   if a config write poisoned it after the write-time check).
+pub fn proxy_fast_path_eligible(proxy_url: &str, target_url: &str) -> bool {
+    let trimmed = proxy_url.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let scheme_end = match trimmed.find("://") {
+        Some(e) => e,
+        None => return false,
     };
+    let scheme = trimmed[..scheme_end].to_ascii_lowercase();
+    if scheme != "http" && scheme != "https" {
+        return false;
+    }
+    if reqwest::Proxy::all(trimmed).is_err() {
+        return false;
+    }
+    if check_proxy_url_fast(trimmed).is_err() {
+        return false;
+    }
+    match parse_host(target_url) {
+        Ok(host) => {
+            let lower = host.trim().trim_end_matches('.').to_ascii_lowercase();
+            if lower == "localhost" || lower == "127.0.0.1" || lower.starts_with("127.") {
+                return false;
+            }
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+/// Data-plane (inference) upstream policy check (VULN-07/F6) with an
+/// injectable resolver seam.
+///
+/// Fast policy first (scheme / name / literal-IP / allowlist, no DNS), then —
+/// ONLY for non-allowlisted hostnames — the resolver is consulted and EVERY
+/// resolved address must pass the shared IP policy (same block table as
+/// `check_probe_url`, with `allow_loopback=true` for the data plane). The
+/// resolution runs on `spawn_blocking` bounded 5s fail-closed so a hung
+/// authoritative server cannot pin an async worker; refusal is classified
+/// `transient` when DNS itself failed (timeout / error / empty / join), and
+/// deterministic when a private address was resolved.
+pub async fn check_data_plane_url_with_resolver<F>(raw: &str, resolver: F) -> Result<(), DataPlaneRefusal>
+where
+    F: Fn(&str) -> Result<Vec<IpAddr>, DnsLookupError> + Send + 'static,
+{
+    check_data_plane_policy_fast(raw)?;
+    let host = parse_host(raw).map_err(data_plane_refusal)?;
+    // Literals and allowlisted names were decided by the fast policy; a
+    // hostname here still needs resolution.
+    if probe_allowlisted(&host) || host.parse::<IpAddr>().is_ok() {
+        return Ok(());
+    }
+    let host_for_lookup = host.clone();
+    let lookup = tokio::task::spawn_blocking(move || resolver(&host_for_lookup));
+    let addrs: Vec<IpAddr> =
+        match tokio::time::timeout(std::time::Duration::from_secs(5), lookup).await {
+            Ok(Ok(Ok(addrs))) => addrs,
+            Ok(Ok(Err(e))) => {
+                return Err(match e {
+                    DnsLookupError::Timeout => DataPlaneRefusal {
+                        reason: format!(
+                            "DNS resolution timed out for '{}' (blocked fail-closed)",
+                            host
+                        ),
+                        transient: true,
+                    },
+                    DnsLookupError::Failure(msg) => DataPlaneRefusal {
+                        reason: format!("DNS resolution failed for '{}': {}", host, msg),
+                        transient: true,
+                    },
+                })
+            }
+            Ok(Err(e)) => {
+                return Err(DataPlaneRefusal {
+                    reason: format!("DNS lookup task failed: {}", e),
+                    transient: true,
+                })
+            }
+            Err(_) => {
+                return Err(DataPlaneRefusal {
+                    reason: format!(
+                        "DNS resolution timed out for '{}' (blocked fail-closed)",
+                        host
+                    ),
+                    transient: true,
+                })
+            }
+        };
     if addrs.is_empty() {
-        return Err(format!("DNS resolution returned no addresses for '{}'", host));
+        return Err(DataPlaneRefusal {
+            reason: format!("DNS resolution returned no addresses for '{}'", host),
+            transient: true,
+        });
     }
     for ip in &addrs {
         if is_blocked_ip_with(ip, true) {
-            return Err(format!(
+            return Err(data_plane_refusal(format!(
                 "data-plane upstream '{}' resolves to a blocked address ({})",
                 host, ip
-            ));
+            )));
         }
     }
     Ok(())
+}
+
+/// Data-plane (inference) upstream policy check for targets dialed DIRECTLY
+/// (the dial-time re-validation documented on the old `check_data_plane_url`).
+/// DNS is re-resolved here at dial time via the system resolver (blocking
+/// `getaddrinfo` offloaded via `spawn_blocking`, bounded 5s fail-closed) so a
+/// provider hostname rebinding to an internal address AFTER the write-time
+/// check is refused before the connection is attempted.
+pub async fn check_data_plane_url(raw: &str) -> Result<(), DataPlaneRefusal> {
+    check_data_plane_url_with_resolver(raw, |host| {
+        (host, 0)
+            .to_socket_addrs()
+            .map(|it| it.map(|s| s.ip()).collect::<Vec<IpAddr>>())
+            .map_err(|e| DnsLookupError::Failure(format!("{}", e)))
+    })
+    .await
+}
+
+/// Data-plane policy check for targets dialed through an explicit forward
+/// proxy (proxied fast path): the trusted proxy owns DNS + egress for the
+/// target, the gateway's local resolution does not determine where bytes go,
+/// and for GFW-blocked domains local DNS is unreliable (observed >5s hangs
+/// through CoreDNS→Chinese public resolvers). Fast policy only — name /
+/// literal / allowlist, NO DNS. See
+/// `.agents/notes/proposed/bug-fix/2026-10-06-egress-guard-proxied-dns-skip.md`.
+pub async fn check_data_plane_url_proxied(raw: &str) -> Result<(), DataPlaneRefusal> {
+    check_data_plane_policy_fast(raw)
 }
 
 #[cfg(test)]
