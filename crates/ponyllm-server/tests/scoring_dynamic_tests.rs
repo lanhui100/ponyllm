@@ -8,6 +8,9 @@ fn test_node_latency_metrics_dynamic_update_and_speed_scoring() {
     let mut providers = HashMap::new();
 
     let p_fast = ProviderConfig {
+    egress_pool: vec![],
+    egress_strategy: "round_robin".to_string(),
+
     rate_limits: None,
         base_url: "https://fast.example.com".to_string(),
         default_model: "test-model".to_string(),
@@ -38,6 +41,9 @@ fn test_node_latency_metrics_dynamic_update_and_speed_scoring() {
     };
 
     let p_slow = ProviderConfig {
+    egress_pool: vec![],
+    egress_strategy: "round_robin".to_string(),
+
     rate_limits: None,
         base_url: "https://slow.example.com".to_string(),
         default_model: "test-model".to_string(),

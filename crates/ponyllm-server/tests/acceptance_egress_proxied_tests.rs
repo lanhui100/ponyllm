@@ -33,6 +33,9 @@ fn state_with_proxy(proxy: Option<&str>) -> Arc<AppState> {
     cfg.providers.insert(
         "px".to_string(),
         ProviderConfig {
+            egress_pool: vec![],
+            egress_strategy: "round_robin".to_string(),
+
             base_url: "http://203.0.113.88/v1".to_string(),
             default_model: "px-model".to_string(),
             proxy: proxy.map(|s| s.to_string()),
@@ -294,6 +297,9 @@ fn state_with_gateway_proxy(gateway_proxy: Option<&str>, use_system_proxy: bool)
     cfg.providers.insert(
         "px".to_string(),
         ProviderConfig {
+            egress_pool: vec![],
+            egress_strategy: "round_robin".to_string(),
+
             base_url: "http://203.0.113.88/v1".to_string(),
             default_model: "px-model".to_string(),
             ..Default::default()
@@ -413,6 +419,9 @@ async fn reg2_client_actually_dials_proxy_provider_level() {
     cfg.providers.insert(
         "px".to_string(),
         ProviderConfig {
+            egress_pool: vec![],
+            egress_strategy: "round_robin".to_string(),
+
             base_url: "http://203.0.113.88/v1".to_string(),
             default_model: "px-model".to_string(),
             proxy: Some(proxy_url),

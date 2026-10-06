@@ -62,6 +62,9 @@ impl WriteTestHarness {
         )];
 
         let provider_sec = ProviderSection {
+    egress_pool: vec![],
+    egress_strategy: "round_robin".to_string(),
+
     rate_limits: None,
             base_url: "https://api.openai.com/v1".to_string(),
             default_model: "gpt-4o".to_string(),
@@ -158,6 +161,9 @@ impl WriteTestHarness {
         gw_config.providers.insert(
             "openai".to_string(),
             ProviderConfig {
+    egress_pool: vec![],
+    egress_strategy: "round_robin".to_string(),
+
     rate_limits: None,
                 base_url: "https://api.openai.com/v1".to_string(),
                 default_model: "gpt-4o".to_string(),
@@ -971,6 +977,9 @@ async fn test_provider_upstream_models() {
         providers.insert(
             pname.to_string(),
             ProviderSection {
+    egress_pool: vec![],
+    egress_strategy: "round_robin".to_string(),
+
     rate_limits: None,
                 base_url: base,
                 default_model: "m-a".to_string(),
@@ -1007,6 +1016,9 @@ async fn test_provider_upstream_models() {
         gw_config.providers.insert(
             pname.clone(),
             ProviderConfig {
+    egress_pool: vec![],
+    egress_strategy: "round_robin".to_string(),
+
     rate_limits: None,
                 base_url: psec.base_url.clone(),
                 default_model: psec.default_model.clone(),
@@ -1170,6 +1182,9 @@ async fn test_dial_test_blocked_target_refused() {
     let api_key = "admin-secret-token".to_string();
 
     let provider_sec = ProviderSection {
+    egress_pool: vec![],
+    egress_strategy: "round_robin".to_string(),
+
     rate_limits: None,
         base_url: "http://169.254.169.254/".to_string(),
         default_model: "m".to_string(),
@@ -1206,6 +1221,9 @@ async fn test_dial_test_blocked_target_refused() {
     gw_config.providers.insert(
         "meta".to_string(),
         ProviderConfig {
+    egress_pool: vec![],
+    egress_strategy: "round_robin".to_string(),
+
     rate_limits: None,
             base_url: "http://169.254.169.254/".to_string(),
             default_model: "m".to_string(),

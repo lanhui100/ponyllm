@@ -111,6 +111,8 @@ async fn test_model_echo_policy_and_auto_routing() {
     config.providers.insert(
         "deepseek".to_string(),
         ProviderConfig {
+    egress_pool: vec![],
+    egress_strategy: "round_robin".to_string(),
     rate_limits: None,
             base_url: format!("http://{}", upstream_addr),
             default_model: "deepseek-v4-flash".to_string(),
@@ -144,6 +146,8 @@ async fn test_model_echo_policy_and_auto_routing() {
     config.providers.insert(
         "openai".to_string(),
         ProviderConfig {
+    egress_pool: vec![],
+    egress_strategy: "round_robin".to_string(),
     rate_limits: None,
             base_url: format!("http://{}", upstream_addr),
             default_model: "gpt-4o-mini".to_string(),
@@ -287,6 +291,8 @@ fn test_is_anthropic_upstream_heuristic_lock() {
     config.providers.insert(
         "ant-p".to_string(),
         ProviderConfig {
+    egress_pool: vec![],
+    egress_strategy: "round_robin".to_string(),
     rate_limits: None,
             base_url: "https://api.deepseek.com/anthropic".to_string(),
             default_model: "m-ant".to_string(),
@@ -309,6 +315,8 @@ fn test_is_anthropic_upstream_heuristic_lock() {
     config.providers.insert(
         "chat-p".to_string(),
         ProviderConfig {
+    egress_pool: vec![],
+    egress_strategy: "round_robin".to_string(),
     rate_limits: None,
             base_url: "https://api.deepseek.com".to_string(),
             default_model: "m-chat".to_string(),
@@ -356,6 +364,8 @@ fn test_protocol_resolution_priority_and_overrides() {
             _ => (None, None, None),
         };
         ProviderConfig {
+    egress_pool: vec![],
+    egress_strategy: "round_robin".to_string(),
     rate_limits: None,
             base_url: base.to_string(),
             default_model: model.to_string(),
@@ -445,6 +455,8 @@ fn test_models_listing_exposes_native_protocol() {
     config.providers.insert(
         "op".to_string(),
         ProviderConfig {
+    egress_pool: vec![],
+    egress_strategy: "round_robin".to_string(),
     rate_limits: None,
             base_url: "https://op.example.com".to_string(),
             default_model: "muse-spark".to_string(),
@@ -488,6 +500,8 @@ fn test_native_protocol_wins_ties_for_passthrough_first() {
         config.providers.insert(
             name.to_string(),
             ProviderConfig {
+    egress_pool: vec![],
+    egress_strategy: "round_robin".to_string(),
     rate_limits: None,
                 base_url: format!("https://{}.example.com", name),
                 default_model: "duo".to_string(),
@@ -537,6 +551,8 @@ fn test_inbound_native_endpoint_wins_over_provider_default() {
     config.providers.insert(
         "deepseek".to_string(),
         ProviderConfig {
+    egress_pool: vec![],
+    egress_strategy: "round_robin".to_string(),
     rate_limits: None,
             base_url: "https://api.deepseek.com".to_string(),
             default_model: "deepseek-chat".to_string(),
@@ -650,6 +666,8 @@ async fn test_cross_provider_transparent_failover() {
     config.providers.insert(
         "broken_provider".to_string(),
         ProviderConfig {
+    egress_pool: vec![],
+    egress_strategy: "round_robin".to_string(),
     rate_limits: None,
             base_url: "http://127.0.0.1:1".to_string(), // Dead port
             default_model: "deepseek-v4-flash".to_string(),
@@ -683,6 +701,8 @@ async fn test_cross_provider_transparent_failover() {
     config.providers.insert(
         "backup_provider".to_string(),
         ProviderConfig {
+    egress_pool: vec![],
+    egress_strategy: "round_robin".to_string(),
     rate_limits: None,
             base_url: format!("http://{}", healthy_addr),
             default_model: "deepseek-v4-flash".to_string(),
@@ -848,6 +868,8 @@ async fn spawn_quota_failover_gateway(
         config.providers.insert(
             p_name.to_string(),
             ProviderConfig {
+                egress_pool: vec![],
+                egress_strategy: "round_robin".to_string(),
                 rate_limits: None,
                 base_url: format!("http://{}", base),
                 default_model: "quota-test-model".to_string(),
@@ -1098,6 +1120,8 @@ fn test_models_list_exposes_per_provider_aliases() {
         config.providers.insert(
             p.to_string(),
             ProviderConfig {
+                egress_pool: vec![],
+                egress_strategy: "round_robin".to_string(),
                 rate_limits: None,
                 base_url: "https://api.example.com".to_string(),
                 default_model: "shared-model".to_string(),
@@ -1263,6 +1287,8 @@ async fn test_anthropic_messages_routing_and_model_echo() {
     config.providers.insert(
         "anthropic".to_string(),
         ProviderConfig {
+    egress_pool: vec![],
+    egress_strategy: "round_robin".to_string(),
     rate_limits: None,
             base_url: format!("http://{}/v1/messages", upstream_addr),
             default_model: "claude-3-7-sonnet".to_string(),
@@ -1378,6 +1404,8 @@ async fn test_gateway_configuration_hot_reload() {
     gw_config.providers.insert(
         "prov_a".to_string(),
         ProviderConfig {
+    egress_pool: vec![],
+    egress_strategy: "round_robin".to_string(),
     rate_limits: None,
             base_url: "http://127.0.0.1:12345/v1".to_string(),
             default_model: "model-a".to_string(),
@@ -1437,6 +1465,8 @@ async fn test_gateway_configuration_hot_reload() {
     new_config.providers.insert(
         "prov_b".to_string(),
         ProviderConfig {
+    egress_pool: vec![],
+    egress_strategy: "round_robin".to_string(),
     rate_limits: None,
             base_url: format!("http://{}/v1", mock_b_addr),
             default_model: "model-b".to_string(),
@@ -1549,6 +1579,8 @@ async fn test_large_payload_handling_with_1m_context_support() {
     config.providers.insert(
         "deepseek".to_string(),
         ProviderConfig {
+    egress_pool: vec![],
+    egress_strategy: "round_robin".to_string(),
     rate_limits: None,
             base_url: format!("http://{}", upstream_addr),
             default_model: "deepseek-v4-flash".to_string(),
@@ -1618,6 +1650,8 @@ async fn test_custom_request_body_limit_rejection_with_helpful_error() {
     config.providers.insert(
         "test-p".to_string(),
         ProviderConfig {
+    egress_pool: vec![],
+    egress_strategy: "round_robin".to_string(),
     rate_limits: None,
             base_url: "http://127.0.0.1:9".to_string(),
             default_model: "test-model".to_string(),
@@ -1710,6 +1744,8 @@ async fn test_responses_cross_provider_failover() {
         config.providers.insert(
             name.to_string(),
             ProviderConfig {
+    egress_pool: vec![],
+    egress_strategy: "round_robin".to_string(),
     rate_limits: None,
                 base_url: url,
                 default_model: "muse-spark-test".to_string(),
@@ -1759,6 +1795,8 @@ async fn test_responses_cross_provider_failover() {
 
 fn cross_protocol_provider(base_url: String, model: &str, proto: UpstreamProtocol) -> ProviderConfig {
         ProviderConfig {
+    egress_pool: vec![],
+    egress_strategy: "round_robin".to_string(),
     rate_limits: None,
         base_url,
         default_model: model.to_string(),
@@ -2174,6 +2212,8 @@ async fn test_provider_proxy_routing_and_isolation() {
     config.providers.insert(
         "proxied_prov".to_string(),
         ProviderConfig {
+    egress_pool: vec![],
+    egress_strategy: "round_robin".to_string(),
     rate_limits: None,
             base_url: "https://example.com".to_string(),
             default_model: "mock".to_string(),
@@ -2184,6 +2224,8 @@ async fn test_provider_proxy_routing_and_isolation() {
     config.providers.insert(
         "direct_prov".to_string(),
         ProviderConfig {
+    egress_pool: vec![],
+    egress_strategy: "round_robin".to_string(),
     rate_limits: None,
             base_url: "https://example.com".to_string(),
             default_model: "mock".to_string(),
@@ -2203,6 +2245,8 @@ async fn test_model_specific_base_url_routing() {
     let mut config = GatewayConfig::default();
     config.auth_mode = ponyllm_config::AuthMode::Open; // F1 migration: default is now secured; these behavior tests opt into open mode
     let mut prov = ProviderConfig {
+    egress_pool: vec![],
+    egress_strategy: "round_robin".to_string(),
     rate_limits: None,
         base_url: "https://provider.example.com/v1".to_string(),
         default_model: "default-model".to_string(),
@@ -2248,6 +2292,8 @@ fn test_deepseek_v41_flash_alias_routes_to_live_upstream_name() {
     config.providers.insert(
         "deepseek".to_string(),
         ProviderConfig {
+    egress_pool: vec![],
+    egress_strategy: "round_robin".to_string(),
     rate_limits: None,
             base_url: "https://api.deepseek.com".to_string(),
             default_model: "deepseek-flash".to_string(),
@@ -2277,6 +2323,8 @@ fn test_deepseek_v41_flash_alias_routes_to_live_upstream_name() {
     config2.providers.insert(
         "deepseek".to_string(),
         ProviderConfig {
+    egress_pool: vec![],
+    egress_strategy: "round_robin".to_string(),
     rate_limits: None,
             base_url: "https://api.deepseek.com".to_string(),
             default_model: "deepseek-flash".to_string(),
@@ -2331,6 +2379,8 @@ async fn test_deepseek_v41_flash_alias_echo_and_wire_model() {
     config.providers.insert(
         "deepseek".to_string(),
         ProviderConfig {
+    egress_pool: vec![],
+    egress_strategy: "round_robin".to_string(),
     rate_limits: None,
             base_url: format!("http://{}", upstream_addr),
             default_model: "deepseek-flash".to_string(),
@@ -2378,6 +2428,8 @@ fn priority_provider(name: &str, priority: Option<u32>, input_price: f64) -> (St
     (
         name.to_string(),
         ProviderConfig {
+    egress_pool: vec![],
+    egress_strategy: "round_robin".to_string(),
     rate_limits: None,
             base_url: format!("https://{}.example.com", name),
             default_model: "duo".to_string(),

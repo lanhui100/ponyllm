@@ -58,6 +58,9 @@ async fn test_thinking_output_safeguard_chat_flooring() {
     config.providers.insert(
         "deepseek".to_string(),
         ProviderConfig {
+    egress_pool: vec![],
+    egress_strategy: "round_robin".to_string(),
+
     rate_limits: None,
             base_url: format!("http://{}", upstream_addr),
             default_model: "deepseek-reasoner".to_string(),
@@ -197,6 +200,9 @@ async fn test_thinking_output_safeguard_messages_flooring() {
     config.providers.insert(
         "anthropic".to_string(),
         ProviderConfig {
+    egress_pool: vec![],
+    egress_strategy: "round_robin".to_string(),
+
     rate_limits: None,
             base_url: format!("http://{}", upstream_addr),
             default_model: "claude-3-7-sonnet".to_string(),

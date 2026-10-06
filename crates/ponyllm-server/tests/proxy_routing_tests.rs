@@ -4,6 +4,9 @@ use ponyllm_server::state::AppState;
 #[test]
 fn test_effective_proxy_resolution() {
     let mut provider = ProviderConfig {
+    egress_pool: vec![],
+    egress_strategy: "round_robin".to_string(),
+
     rate_limits: None,
         base_url: "https://api.example.com".to_string(),
         default_model: "default-model".to_string(),
@@ -89,6 +92,9 @@ fn test_app_state_http_client_routing_and_pooling() {
     config.providers.insert(
         "opencode-zen".to_string(),
         ProviderConfig {
+    egress_pool: vec![],
+    egress_strategy: "round_robin".to_string(),
+
     rate_limits: None,
             base_url: "https://access.ponyjob.top".to_string(),
             default_model: "zen-chat".to_string(),
@@ -116,6 +122,9 @@ fn test_app_state_http_client_routing_and_pooling() {
     config.providers.insert(
         "foreign-provider".to_string(),
         ProviderConfig {
+    egress_pool: vec![],
+    egress_strategy: "round_robin".to_string(),
+
     rate_limits: None,
             base_url: "https://api.foreign.com".to_string(),
             default_model: "claude-3-7".to_string(),

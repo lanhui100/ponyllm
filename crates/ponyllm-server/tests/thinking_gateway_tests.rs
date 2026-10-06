@@ -82,6 +82,8 @@ async fn test_thinking_scrubbing_for_non_reasoning_models() {
             proxy: None,
             timeout_secs: None,
             ttfb_timeout_secs: None,
+            egress_pool: vec![],
+            egress_strategy: "round_robin".to_string(),
         },
     );
 
@@ -233,6 +235,8 @@ async fn test_thinking_forwarding_and_clamping_for_reasoning_models() {
             proxy: None,
             timeout_secs: None,
             ttfb_timeout_secs: None,
+            egress_pool: vec![],
+            egress_strategy: "round_robin".to_string(),
         },
     );
 
@@ -363,6 +367,8 @@ async fn test_cross_protocol_thinking_translation() {
             proxy: None,
             timeout_secs: None,
             ttfb_timeout_secs: None,
+            egress_pool: vec![],
+            egress_strategy: "round_robin".to_string(),
         },
     );
 
@@ -471,6 +477,8 @@ async fn test_claude_opus_5_5_adaptive_thinking_gateway() {
             proxy: None,
             timeout_secs: None,
             ttfb_timeout_secs: None,
+            egress_pool: vec![],
+            egress_strategy: "round_robin".to_string(),
         },
     );
 
@@ -603,6 +611,8 @@ async fn test_thinking_precedence_header_wins() {
             proxy: None,
             timeout_secs: None,
             ttfb_timeout_secs: None,
+            egress_pool: vec![],
+            egress_strategy: "round_robin".to_string(),
         },
     );
 
@@ -715,6 +725,8 @@ async fn test_responses_upstream_thinking_serialization_omits_top_level_reasonin
             proxy: None,
             timeout_secs: None,
             ttfb_timeout_secs: None,
+            egress_pool: vec![],
+            egress_strategy: "round_robin".to_string(),
         },
     );
 
@@ -829,6 +841,8 @@ async fn test_antigravity_gemini3_thinking_suffix_routing() {
             proxy: None,
             timeout_secs: None,
             ttfb_timeout_secs: None,
+            egress_pool: vec![],
+            egress_strategy: "round_robin".to_string(),
         },
     );
 

@@ -5,6 +5,9 @@ use ponyllm_server::{AppState, GatewayConfig, ModelSpec, ProviderConfig};
 async fn test_empty_stop_early_convergence_triggers_model_fallback() {
     let mut config = GatewayConfig::default();
     let prov = ProviderConfig {
+        egress_pool: vec![],
+        egress_strategy: "round_robin".to_string(),
+
         base_url: "https://example.com".to_string(),
         default_model: "gemini-3.8-flash-high".to_string(),
         strategy: "priority".to_string(),

@@ -74,6 +74,9 @@ impl TestHarness {
         ];
 
         let provider_sec = ProviderSection {
+    egress_pool: vec![],
+    egress_strategy: "round_robin".to_string(),
+
     rate_limits: None,
             base_url: "https://api.openai.com/v1".to_string(),
             default_model: "gpt-4o".to_string(),
@@ -183,6 +186,9 @@ impl TestHarness {
         gw_config.providers.insert(
             "openai".to_string(),
             ProviderConfig {
+    egress_pool: vec![],
+    egress_strategy: "round_robin".to_string(),
+
     rate_limits: None,
                 base_url: "https://api.openai.com/v1".to_string(),
                 default_model: "gpt-4o".to_string(),

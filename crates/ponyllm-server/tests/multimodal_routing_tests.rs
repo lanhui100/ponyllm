@@ -17,6 +17,8 @@ fn make_multimodal_provider(
     tier: ModelTier,
 ) -> ProviderConfig {
         ProviderConfig {
+    egress_pool: vec![],
+    egress_strategy: "round_robin".to_string(),
     rate_limits: None,
         base_url,
         default_model: model.to_string(),

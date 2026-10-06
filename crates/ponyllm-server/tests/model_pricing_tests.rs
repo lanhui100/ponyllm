@@ -6,6 +6,9 @@ use std::collections::HashMap;
 #[test]
 fn test_model_spec_pricing_inheritance_and_override() {
     let provider = ProviderConfig {
+    egress_pool: vec![],
+    egress_strategy: "round_robin".to_string(),
+
     rate_limits: None,
         base_url: "https://api.deepseek.com".to_string(),
         default_model: "deepseek-chat".to_string(),
@@ -111,6 +114,9 @@ fn test_economy_routing_respects_model_level_pricing() {
 
     // Provider A: default is cheap (0.1), but special-model is expensive (2.0)
     let p_a = ProviderConfig {
+    egress_pool: vec![],
+    egress_strategy: "round_robin".to_string(),
+
     rate_limits: None,
         base_url: "https://api.a.com".to_string(),
         default_model: "special-model".to_string(),
@@ -147,6 +153,9 @@ fn test_economy_routing_respects_model_level_pricing() {
 
     // Provider B: default is expensive (1.0), but special-model is discounted (0.3)
     let p_b = ProviderConfig {
+    egress_pool: vec![],
+    egress_strategy: "round_robin".to_string(),
+
     rate_limits: None,
         base_url: "https://api.b.com".to_string(),
         default_model: "special-model".to_string(),
@@ -204,6 +213,9 @@ fn test_economy_routing_respects_model_level_pricing() {
 #[test]
 fn test_pricing_anti_inversion_and_free_model_preservation() {
     let p = ProviderConfig {
+    egress_pool: vec![],
+    egress_strategy: "round_robin".to_string(),
+
     rate_limits: None,
         base_url: "https://api.example.com".to_string(),
         default_model: "base".to_string(),
@@ -291,6 +303,9 @@ fn test_hot_cache_probe_guides_economy_routing() {
 
     // Provider 1: Standard price $1.00, cached $0.10
     let p1 = ProviderConfig {
+    egress_pool: vec![],
+    egress_strategy: "round_robin".to_string(),
+
     rate_limits: None,
         base_url: "https://api.p1.com".to_string(),
         default_model: "chat".to_string(),
@@ -312,6 +327,9 @@ fn test_hot_cache_probe_guides_economy_routing() {
 
     // Provider 2: Standard price $0.80, cached $0.40
     let p2 = ProviderConfig {
+    egress_pool: vec![],
+    egress_strategy: "round_robin".to_string(),
+
     rate_limits: None,
         base_url: "https://api.p2.com".to_string(),
         default_model: "chat".to_string(),

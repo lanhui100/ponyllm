@@ -6,6 +6,9 @@ use ponyllm_server::{AppState, GatewayConfig, ModelSpec, ProviderConfig};
 async fn test_model_fallbacks_routing() {
     let mut config = GatewayConfig::default();
     let prov = ProviderConfig {
+        egress_pool: vec![],
+        egress_strategy: "round_robin".to_string(),
+
         base_url: "https://example.com".to_string(),
         default_model: "gemini-3.8-flash-high".to_string(),
         strategy: "latency".to_string(),
@@ -45,6 +48,9 @@ async fn test_model_fallbacks_routing() {
 async fn test_model_fallbacks_chain_and_cycle_prevention() {
     let mut config = GatewayConfig::default();
     let prov = ProviderConfig {
+        egress_pool: vec![],
+        egress_strategy: "round_robin".to_string(),
+
         base_url: "https://example.com".to_string(),
         default_model: "model-a".to_string(),
         strategy: "latency".to_string(),

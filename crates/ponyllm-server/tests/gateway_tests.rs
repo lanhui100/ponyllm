@@ -9,6 +9,8 @@ use ponyllm_server::{create_app, AppState, GatewayConfig, ProviderConfig};
 
 fn make_mock_provider_config(base_url: &str, default_model: &str, models: Vec<&str>) -> ProviderConfig {
         ProviderConfig {
+    egress_pool: vec![],
+    egress_strategy: "round_robin".to_string(),
     rate_limits: None,
         base_url: base_url.to_string(),
         default_model: default_model.to_string(),

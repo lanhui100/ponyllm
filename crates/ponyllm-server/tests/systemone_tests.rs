@@ -33,6 +33,9 @@ async fn systemone_passthrough_preserves_body_and_records_usage() {
     config.providers.insert(
         "chat-only".to_string(),
         ProviderConfig {
+    egress_pool: vec![],
+    egress_strategy: "round_robin".to_string(),
+
     rate_limits: None,
             base_url: format!("http://{}", addr),
             default_model: "chat-only-model".to_string(),
@@ -55,6 +58,9 @@ async fn systemone_passthrough_preserves_body_and_records_usage() {
     config.providers.insert(
         "zen-jev".to_string(),
         ProviderConfig {
+    egress_pool: vec![],
+    egress_strategy: "round_robin".to_string(),
+
     rate_limits: None,
             base_url: format!("http://{}", addr),
             default_model: "jev-1.13-free".to_string(),
@@ -140,6 +146,9 @@ async fn spawn_systemone_test_gateway() -> (SocketAddr, Arc<AppState>) {
     config.auth_mode = ponyllm_config::AuthMode::Open; // F1 migration: default is now secured; these behavior tests opt into open mode
     config.api_key = "none".to_string();
     config.providers.insert("zen-jev".to_string(), ProviderConfig {
+    egress_pool: vec![],
+    egress_strategy: "round_robin".to_string(),
+
     rate_limits: None,
         base_url: format!("http://{upstream_addr}"), default_model: "jev-1.13-free".to_string(),
         strategy: "round_robin".to_string(), billing_mode: BillingMode::Free,

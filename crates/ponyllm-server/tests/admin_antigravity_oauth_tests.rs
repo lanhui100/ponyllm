@@ -613,6 +613,9 @@ async fn test_admin_test_key_lock_busy_returns_429() {
     if let Some(store) = &harness.state.config_store {
         let (mut file, ver) = store.load().await.unwrap();
         let p_sec = ponyllm_config::ProviderSection {
+    egress_pool: vec![],
+    egress_strategy: "round_robin".to_string(),
+
     rate_limits: None,
             base_url: "https://daily-cloudcode-pa.googleapis.com".to_string(),
             default_model: "claude-sonnet-4-6".to_string(),

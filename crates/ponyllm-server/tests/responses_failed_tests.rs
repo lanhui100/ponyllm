@@ -21,6 +21,8 @@ use ponyllm_server::{create_app, AppState, GatewayConfig, ProviderConfig};
 
 fn provider(base_url: String, model: &str, proto: UpstreamProtocol, price: f64) -> ProviderConfig {
         ProviderConfig {
+    egress_pool: vec![],
+    egress_strategy: "round_robin".to_string(),
     rate_limits: None,
         base_url,
         default_model: model.to_string(),

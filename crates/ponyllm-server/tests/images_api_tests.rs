@@ -25,6 +25,8 @@ fn image_provider(base_url: String) -> ProviderConfig {
     };
     spec.protocol = Some(UpstreamProtocol::Antigravity);
     ProviderConfig {
+        egress_pool: vec![],
+        egress_strategy: "round_robin".to_string(),
         base_url,
         default_model: "gemini-3.1-flash-image".to_string(),
         strategy: "round_robin".to_string(),

@@ -43,6 +43,9 @@ impl QuotaHarness {
         ];
 
         let provider_sec = ProviderSection {
+    egress_pool: vec![],
+    egress_strategy: "round_robin".to_string(),
+
     rate_limits: None,
             base_url: "https://api.example.com/v1".to_string(),
             default_model: "probe-model".to_string(),
@@ -110,6 +113,9 @@ impl QuotaHarness {
         gw_config.providers.insert(
             "prober".to_string(),
             ProviderConfig {
+    egress_pool: vec![],
+    egress_strategy: "round_robin".to_string(),
+
     rate_limits: None,
                 base_url: "https://api.example.com/v1".to_string(),
                 default_model: "probe-model".to_string(),

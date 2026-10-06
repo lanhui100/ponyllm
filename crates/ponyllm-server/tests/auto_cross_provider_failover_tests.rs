@@ -10,6 +10,9 @@ fn test_auto_cross_provider_failover_when_primary_cooled() {
     
     // Provider A: Primary DeepSeek, standard tier
     let p_a = ProviderConfig {
+        egress_pool: vec![],
+        egress_strategy: "round_robin".to_string(),
+
         base_url: "https://api.deepseek.com/v1".to_string(),
         default_model: "deepseek-chat".to_string(),
         models: vec!["deepseek-chat".to_string()],
@@ -25,6 +28,9 @@ fn test_auto_cross_provider_failover_when_primary_cooled() {
 
     // Provider B: Fallback Qwen, standard tier
     let p_b = ProviderConfig {
+        egress_pool: vec![],
+        egress_strategy: "round_robin".to_string(),
+
         base_url: "https://api.qwen.com/v1".to_string(),
         default_model: "qwen-max".to_string(),
         models: vec!["qwen-max".to_string()],
