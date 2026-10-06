@@ -1151,7 +1151,7 @@ function waterBarWidth(percent: number | null): string {
         </div>
 
         <!-- 底部区：容量水位 + 周期统计3个小面板紧贴底部 -->
-        <div class="flex flex-col gap-2.5 mt-auto">
+        <div class="flex flex-col gap-[30px] mt-auto">
           <!-- Gemini 容量水位条 (横向双列紧凑展开) -->
           <div class="p-3 rounded-lg bg-slate-50/60 border border-slate-100/80">
             <div class="flex items-center justify-between text-xs text-slate-500 mb-1.5 font-medium">
@@ -1161,7 +1161,7 @@ function waterBarWidth(percent: number | null): string {
               </span>
               <span class="text-[11px] text-slate-400">基于当前 {{ activeKeys.length }} 个就绪账号会话余量加权聚合</span>
             </div>
-            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-9">
               <!-- 5 小时窗口水位 -->
               <div class="space-y-1">
                 <div class="flex items-center justify-between text-xs">
