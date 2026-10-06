@@ -1,40 +1,11 @@
 import { defineStore } from 'pinia';
 import { ref } from 'vue';
 
+// VULN-05 (Phase-3): Bearer token 不再经 sessionStorage 持久化。
+// 该键常量保留导出仅作验收断言锚点（"永不读写"），业务代码不得读写。
 export const SESSION_TOKEN_STORAGE_KEY = 'ponyllm_session_token';
+// 发版强制下线版本钉：非敏感 UI 状态，按契约保留 sessionStorage。
 export const SESSION_GATEWAY_VERSION_KEY = 'ponyllm_gateway_version';
-
-function getInitialToken(): string {
-  try {
-    if (typeof window !== 'undefined' && window.sessionStorage) {
-      const raw = window.sessionStorage.getItem(SESSION_TOKEN_STORAGE_KEY);
-      if (typeof raw === 'string') {
-        const trimmed = raw.trim();
-        if (trimmed && trimmed !== 'null' && trimmed !== 'undefined') {
-          return trimmed;
-        }
-      }
-    }
-  } catch {
-    // Fallback if sessionStorage is inaccessible (e.g. strict security sandboxes)
-  }
-  return '';
-}
-
-function persistToken(nextToken: string): void {
-  try {
-    if (typeof window !== 'undefined' && window.sessionStorage) {
-      // Always remove first to prevent stale token retention if setItem throws (quota/sandbox)
-      window.sessionStorage.removeItem(SESSION_TOKEN_STORAGE_KEY);
-      if (nextToken) {
-        window.sessionStorage.setItem(SESSION_TOKEN_STORAGE_KEY, nextToken);
-      }
-    }
-  } catch (err) {
-    // Non-blocking fallback for quota exceeded or strict sandboxes
-    console.warn('[PonyLLM] sessionStorage persistence unavailable, falling back to memory only:', err);
-  }
-}
 
 function readStoredGatewayVersion(): string {
   try {
@@ -60,27 +31,46 @@ function writeStoredGatewayVersion(version: string): void {
   }
 }
 
-// Session store with tab-scoped sessionStorage persistence.
-// Maintains login across page reloads (F5) without leaking to persistent disk storage.
+// Session store（VULN-05 重构）：
+// - cookie 模式（会话端点启用）：凭据由 HttpOnly cookie 接管，token 恒空，
+//   `loggedIn` 为内存"已登录"态；
+// - legacy 模式（会话端点未启用，404 回退）：token 仅存内存 ref（旧部署
+//   向后兼容，见 negotiateSessionMode）。
+// 无论哪种模式，会话端点启用时 XSS 可读存储不再承载凭据。
 export const useSessionStore = defineStore('session', () => {
-  const token = ref<string>(getInitialToken());
+  const token = ref<string>('');
+  const loggedIn = ref<boolean>(false);
+  const sessionMode = ref<'unknown' | 'cookie' | 'legacy'>('unknown');
   // Single-flight flag: the first 401 owns the redirect; reset on login/logout
   // so the next session can redirect again (P0-2 hardening).
   const unauthorizedHandled = ref<boolean>(false);
 
-  function login(nextToken: string): void {
-    const trimmed = nextToken.trim();
-    token.value = trimmed;
-    unauthorizedHandled.value = false;
-    persistToken(trimmed);
+  /// 统一会话判定（router 守卫 / alova / telemetry 共用；替代旧 `token !== ''`）。
+  function hasSession(): boolean {
+    return sessionMode.value === 'cookie' ? loggedIn.value : token.value !== '';
   }
 
-  /// Explicit logout (login page): clears the token AND re-arms the flag so
+  /// legacy 模式登录：内存 token。
+  function login(nextToken: string): void {
+    token.value = nextToken.trim();
+    loggedIn.value = true;
+    unauthorizedHandled.value = false;
+  }
+
+  /// cookie 模式登录成功：token 丢弃（HttpOnly cookie 接管），仅记"已登录"。
+  function loginCookieMode(): void {
+    token.value = '';
+    loggedIn.value = true;
+    sessionMode.value = 'cookie';
+    unauthorizedHandled.value = false;
+  }
+
+  /// Explicit logout (login page): clears memory session AND re-arms the flag so
   /// the next session can redirect on 401.
   function logout(): void {
     token.value = '';
+    loggedIn.value = false;
     unauthorizedHandled.value = false;
-    persistToken('');
   }
 
   /// P2: release-forced logout. Compares the gateway `/health` version against
@@ -98,12 +88,11 @@ export const useSessionStore = defineStore('session', () => {
     return false;
   }
 
-  /// Token wipe WITHOUT re-arming: used by the 401 single-flight path AFTER a
-  /// successful claim. Re-arming here would let a concurrent second 401 claim
-  /// the redirect again (P1-1: claim-then-wipe must not self-destruct).
+  /// Token/session wipe WITHOUT re-arming: used by the 401 single-flight path
+  /// AFTER a successful claim (P1-1: claim-then-wipe must not self-destruct).
   function clearToken(): void {
     token.value = '';
-    persistToken('');
+    loggedIn.value = false;
   }
 
   function markUnauthorizedHandled(): boolean {
@@ -114,6 +103,46 @@ export const useSessionStore = defineStore('session', () => {
     return true;
   }
 
-  return { token, unauthorizedHandled, login, logout, logoutIfGatewayUpgraded, clearToken, markUnauthorizedHandled };
-});
+  /// 会话端点协商（幂等缓存，router 守卫首次导航触发）：
+  /// - GET /api/admin/session 200  → cookie 模式 + 已登录
+  /// - 401（含 session_expired 信封）→ cookie 模式 + 未登录
+  /// - 404（端点未启用）→ legacy 回退（向后兼容旧部署）
+  /// - 其它/网络错误 → 保持 unknown（401 统一路径兜底）
+  async function negotiateSessionMode(): Promise<'unknown' | 'cookie' | 'legacy'> {
+    if (sessionMode.value !== 'unknown') {
+      return sessionMode.value;
+    }
+    try {
+      const resp = await fetch('/api/admin/session', {
+        method: 'GET',
+        credentials: 'same-origin',
+      });
+      if (resp.status === 200) {
+        sessionMode.value = 'cookie';
+        loggedIn.value = true;
+      } else if (resp.status === 401) {
+        sessionMode.value = 'cookie';
+        loggedIn.value = false;
+      } else if (resp.status === 404) {
+        sessionMode.value = 'legacy';
+      }
+    } catch {
+      // 网关不可达：保持 unknown，后续 401 统一路径兜底。
+    }
+    return sessionMode.value;
+  }
 
+  return {
+    token,
+    loggedIn,
+    sessionMode,
+    hasSession,
+    login,
+    loginCookieMode,
+    logout,
+    logoutIfGatewayUpgraded,
+    clearToken,
+    markUnauthorizedHandled,
+    negotiateSessionMode,
+  };
+});

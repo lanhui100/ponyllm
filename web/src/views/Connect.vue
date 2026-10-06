@@ -179,26 +179,49 @@ async function submit(): Promise<void> {
   }
   loading.value = true;
   try {
-    const resp = await fetch(PROBE_PATH, {
+    // VULN-05: 优先会话端点（Bearer 交换 → 后端 Set-Cookie HttpOnly 接管），
+    // 成功即丢弃内存 token（cookie 已掌凭据）。
+    const sessionResp = await fetch('/api/admin/session', {
+      method: 'POST',
       headers: { Authorization: bearerValue(candidate) },
+      credentials: 'same-origin',
     });
-    // Tight: only 2xx logs in (P1-4). 401 => bad token; anything else (403/404/
-    // 500) surfaces its status instead of silently "succeeding".
-    // P2: 403 => scoped key 角色不足（换高权 key）；401 文案带 strict 指引。
-    if (resp.status === 401) {
+    if (sessionResp.status === 200) {
+      session.loginCookieMode();
+      await enterDashboard();
+      return;
+    }
+    if (sessionResp.status === 401) {
       error.value = 'Token 无效（401）。若网关已切 strict 模式，旧版单 token 会被拒绝，请改用分级 key（ponyllm keys issue --scope <admin|inference|readonly>）。';
       return;
     }
-    if (resp.status === 403) {
+    if (sessionResp.status === 403) {
       error.value = '权限不足（403）：该 key 作用域不够，请更换高权限 key 后重试。';
       return;
     }
-    if (!resp.ok) {
-      error.value = `网关异常（${resp.status}）`;
+    if (sessionResp.status === 404) {
+      // 会话端点未启用（legacy 部署）→ 回退原探测流程（token 内存 + 兼容保底）。
+      const resp = await fetch(PROBE_PATH, {
+        headers: { Authorization: bearerValue(candidate) },
+      });
+      // Tight: only 2xx logs in (P1-4).
+      if (resp.status === 401) {
+        error.value = 'Token 无效（401）。若网关已切 strict 模式，旧版单 token 会被拒绝，请改用分级 key（ponyllm keys issue --scope <admin|inference|readonly>）。';
+        return;
+      }
+      if (resp.status === 403) {
+        error.value = '权限不足（403）：该 key 作用域不够，请更换高权限 key 后重试。';
+        return;
+      }
+      if (!resp.ok) {
+        error.value = `网关异常（${resp.status}）`;
+        return;
+      }
+      session.login(candidate);
+      await enterDashboard();
       return;
     }
-    session.login(candidate);
-    await enterDashboard();
+    error.value = `网关异常（${sessionResp.status}）`;
   } catch {
     error.value = '网关不可达';
   } finally {

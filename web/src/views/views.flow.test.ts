@@ -43,6 +43,10 @@ describe('WEB-02 End-to-End User Flow (Connect -> Dashboard -> Recorder)', () =>
     expect(session.token).toBe('');
 
     globalThis.fetch = vi.fn().mockImplementation((url: string) => {
+      // VULN-05 (Phase-3): 会话端点未启用（legacy 部署）→ 404 回退 token 内存流程
+      if (url.includes('/api/admin/session')) {
+        return Promise.resolve(new Response(JSON.stringify({ error: { code: 'not_found' } }), { status: 404 }));
+      }
       if (url.includes('/v1/models')) {
         return Promise.resolve(new Response(JSON.stringify({ object: 'list', data: [] }), { status: 200 }));
       }
@@ -75,6 +79,10 @@ describe('WEB-02 End-to-End User Flow (Connect -> Dashboard -> Recorder)', () =>
     session.logout();
 
     globalThis.fetch = vi.fn().mockImplementation((url: string) => {
+      // VULN-05 (Phase-3): 会话端点未启用（legacy 部署）→ 404 回退 token 内存流程
+      if (url.includes('/api/admin/session')) {
+        return Promise.resolve(new Response(JSON.stringify({ error: { code: 'not_found' } }), { status: 404 }));
+      }
       if (url.includes('/v1/models')) {
         return Promise.resolve(new Response(JSON.stringify({ object: 'list', data: [] }), { status: 200 }));
       }

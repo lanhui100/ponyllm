@@ -121,6 +121,13 @@ export function sanitizeRedirectUrl(fullPath: string): string {
 router.beforeEach(async (to) => {
   const session = useSessionStore();
 
+  // VULN-05 (Phase-3): 会话端点协商（幂等缓存）——GET /api/admin/session：
+  // 200 → cookie 模式已登录；401(session_expired) → cookie 模式未登录；
+  // 404 → legacy 回退（token 内存 / 旧部署兼容）。协商后统一走 hasSession()。
+  if (session.sessionMode === 'unknown') {
+    await session.negotiateSessionMode();
+  }
+
   // 1. Support URL fragment/hash (#token= / #key=) to pass tokens securely:
   // Browser fragment is never sent to the server (not in access logs, referrer, or CDN cache).
   // Clean hash via Vue Router native replace to preserve router internal history.state and scroll.
@@ -163,7 +170,7 @@ router.beforeEach(async (to) => {
   // `meta: { requiresAuth: true }` is automatically guarded; forgetting the
   // meta is the only way to bypass, and it is visible in the route table.
   const requiresAuth = to.matched.some((record) => record.meta.requiresAuth === true);
-  return decideRoute(to.path, to.fullPath, requiresAuth, session.token !== '', probeOpenMode);
+  return decideRoute(to.path, to.fullPath, requiresAuth, session.hasSession(), probeOpenMode);
 });
 
 // Pure guard decision (unit-testable without router singleton state).

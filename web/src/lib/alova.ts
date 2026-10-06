@@ -91,6 +91,9 @@ export const alova = createAlova({
   responded: {
     async onSuccess(response: globalThis.Response, _method: Method) {
       if (response.status === 401) {
+        // VULN-05 (Phase-3): cookie 会话过期/无效统一走 401 单飞路径——
+        // handleUnauthorizedResponse 清内存态（token + loggedIn）并单飞跳
+        // /connect；后端 `session_expired` 信封在此被统一覆盖，无需分支。
         handleUnauthorizedResponse();
         throw new UnauthorizedError();
       }

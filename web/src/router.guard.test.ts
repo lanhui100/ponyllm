@@ -222,21 +222,23 @@ describe('URL token direct authorization', () => {
     expect(window.sessionStorage.getItem('ponyllm_gateway_version')).toBe('1.3.0');
   });
 
-  it('page refresh preserves token from sessionStorage', async () => {
+  it('VULN-05: token is memory-only — page refresh does NOT restore from sessionStorage', async () => {
     const session = useSessionStore();
     session.login('session-persistent-token');
-    expect(window.sessionStorage.getItem('ponyllm_session_token')).toBe('session-persistent-token');
+    // VULN-05: token 不再写入 sessionStorage（XSS 可读存储不再承载凭据）
+    expect(window.sessionStorage.getItem('ponyllm_session_token')).toBeNull();
 
-    // Simulate page reload by creating a fresh Pinia instance
+    // Simulate page reload by creating a fresh Pinia instance:
+    // memory-only token is gone（cookie 模式将由守卫重新协商，无 cookie 即未登录）。
     setActivePinia(createPinia());
     const reloadedSession = useSessionStore();
-    expect(reloadedSession.token).toBe('session-persistent-token');
+    expect(reloadedSession.token).toBe('');
 
-    // Guard permits directly without redirecting to /connect
-    const verdict = await decideRoute('/dashboard', '/dashboard', true, reloadedSession.token !== '', async () => false);
-    expect(verdict).toBe(true);
+    // 刷新后 hasSession()=false → 守卫重定向 /connect（probe 关闭时不直通）
+    const verdict = await decideRoute('/dashboard', '/dashboard', true, reloadedSession.hasSession(), async () => false);
+    expect(verdict).toEqual({ path: '/connect', query: { redirect: '/dashboard' } });
 
-    // Logout clears both store and sessionStorage
+    // Logout clears memory state（token 路径不触及 sessionStorage）
     reloadedSession.logout();
     expect(reloadedSession.token).toBe('');
     expect(window.sessionStorage.getItem('ponyllm_session_token')).toBeNull();
