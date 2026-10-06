@@ -176,6 +176,47 @@ else
     fail "F11 crates/ponyllm-server/src/app.rs 不存在"
 fi
 
+# ==============================================================================
+# Phase-3（task-9）：VULN-14 集群 NetworkPolicy + SRI
+# ==============================================================================
+
+# --- VULN-14：networkpolicy policyTypes 含 Ingress，仅放行 kube-system/monitor/ponyllm → 8080 ---
+NP="deploy/ponyllm-networkpolicy.yaml"
+if [ -f "$NP" ]; then
+    if grep -q 'policyTypes:' "$NP" && grep -A3 'policyTypes:' "$NP" | grep -q 'Ingress'; then
+        pass "VULN-14 $NP policyTypes 含 Ingress"
+    else
+        fail "VULN-14 $NP policyTypes 缺 Ingress（当前仅 Egress → FAIL，红相成立）"
+    fi
+    # ingress 规则须显式放行上述三 ns 到 8080（kube-system 单独出现可能是 egress DNS
+    # 规则 → 以 ingress: 键 + 8080 端口 + ponyllm ns 为锚）
+    if grep -q '^  ingress:' "$NP" \
+        && grep -qE 'kubernetes.io/metadata.name: (kube-system|monitor|ponyllm)$' "$NP" \
+        && grep -q 'port: 8080' "$NP"; then
+        pass "VULN-14 ingress 仅放行 kube-system/monitor/ponyllm 到 8080"
+    else
+        fail "VULN-14 ingress 规则未收敛至 kube-system/monitor/ponyllm:8080（红相成立）"
+    fi
+else
+    fail "VULN-14 $NP 不存在（红相成立）"
+fi
+
+# --- SRI：构建产物 index.html script/link 含 integrity="sha384-…" + crossorigin ---
+if grep -qE 'vite-plugin-sri|rollup-plugin-sri' web/package.json; then
+    pass "SRI 构建配置声明 SRI 插件"
+else
+    fail "SRI web/package.json 缺 SRI 构建插件（vite-plugin-sri 等；红相成立）"
+fi
+if [ -f web/dist/index.html ]; then
+    if grep -qE 'integrity="sha384-' web/dist/index.html && grep -q 'crossorigin' web/dist/index.html; then
+        pass "SRI web/dist/index.html script/link 含 integrity=sha384-… + crossorigin"
+    else
+        fail "SRI web/dist/index.html 缺 integrity=\"sha384-…\" 或 crossorigin（红相成立）"
+    fi
+else
+    echo "SKIP  SRI web/dist/index.html 未构建（构建产物；由构建后复验）"
+fi
+
 echo "----------------------------------------"
 if [ "$FAILS" -eq 0 ]; then
     echo "sec-acceptance: 全部通过"
