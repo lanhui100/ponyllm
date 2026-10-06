@@ -191,10 +191,18 @@ pub async fn handle_get_model_provider_model(
 
 async fn get_model_by_id(state: Arc<AppState>, model_id: &str) -> impl IntoResponse {
     let models = state.list_all_models();
-    if let Some((m_id, provider_name, display_name, protocol)) = models.into_iter().find(|(m, _, _, _)| m == model_id) {
+    // Match exact model_id, or if model_id is bare name, match entry with `/<model_id>`
+    if let Some((m_id, provider_name, display_name, protocol)) = models.into_iter().find(|(m, _, _, _)| {
+        m == model_id || m.strip_suffix(&format!("/{}", model_id)).is_some() || m.ends_with(&format!("/{}", model_id))
+    }) {
+        let resp_id = if m_id != model_id && (m_id.ends_with(&format!("/{}", model_id))) {
+            model_id
+        } else {
+            &m_id
+        };
         (
             StatusCode::OK,
-            Json(format_model_json(&m_id, &provider_name, display_name.as_deref(), &protocol)),
+            Json(format_model_json(resp_id, &provider_name, display_name.as_deref(), &protocol)),
         )
             .into_response()
     } else {

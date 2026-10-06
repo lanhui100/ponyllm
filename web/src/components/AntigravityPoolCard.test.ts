@@ -739,6 +739,7 @@ describe('AntigravityPoolCard Component', () => {
     await nextTick();
 
     // 持久化基准生效
+    expect(container.textContent).toContain('周期基准用量');
     expect(container.textContent).toContain('5小时');
     expect(container.textContent).toContain('自然周');
     expect(container.textContent).toContain('自然月');
@@ -747,6 +748,94 @@ describe('AntigravityPoolCard Component', () => {
     expect(container.textContent).toContain('1.25M');
     // 周度持久化均值 7M
     expect(container.textContent).toContain('7M');
+
+    app.unmount();
+    document.body.removeChild(container);
+  });
+
+  it('renders realistic cycle baseline without 4.33x fake multiplier and ignores unfinished slices', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+
+    const keys: KeyView[] = [
+      {
+        id: 'acc-real-1',
+        provider: 'antigravity',
+        masked_key: 'ya29.***',
+        state: 'active',
+        priority: 1,
+        weight: 10,
+        usage: {
+          account_tier: 'pro',
+          // 仅有一个打满完成的 5h 周期
+          completed_5h_stats: {
+            count: 1,
+            total_tokens: 1_200_000,
+            avg_tokens: 1_200_000,
+            prompt_tokens: 1_000_000,
+            completion_tokens: 200_000,
+            cached_tokens: 0,
+            requests: 10,
+          },
+          // 具有预估周容量
+          estimated_capacity_weekly: 5_000_000,
+          window_5h: { total_tokens: 1_200_000, prompt_tokens: 1_000_000, completion_tokens: 200_000, cached_tokens: 0, requests: 10 },
+          window_weekly: { total_tokens: 1_200_000, prompt_tokens: 1_000_000, completion_tokens: 200_000, cached_tokens: 0, requests: 10 },
+          confidence: 0.9,
+          // 未完成的月度窗口：无真实月度窗口数据
+        },
+      },
+      {
+        id: 'acc-real-2',
+        provider: 'antigravity',
+        masked_key: 'ya29.***',
+        state: 'active',
+        priority: 2,
+        weight: 10,
+        usage: {
+          account_tier: 'pro',
+          // 仅跑了 10,000 token 的未打满实时切片，未完成周期，无打满记录与推算容量
+          window_5h: {
+            total_tokens: 10_000,
+            prompt_tokens: 8_000,
+            completion_tokens: 2_000,
+            cached_tokens: 0,
+            requests: 2,
+          },
+          window_weekly: {
+            total_tokens: 10_000,
+            prompt_tokens: 8_000,
+            completion_tokens: 2_000,
+            cached_tokens: 0,
+            requests: 2,
+          },
+          confidence: 0.1,
+        },
+      },
+    ];
+
+    const app = createApp(AntigravityPoolCard, {
+      keys,
+      keyTestResults: {},
+      adminWriteEnabled: true,
+    });
+    app.mount(container);
+    await nextTick();
+
+    // 标题与副标题验证
+    expect(container.textContent).toContain('周期基准用量');
+    expect(container.textContent).toContain('多账号真实测定的单账号周期用量基准');
+    expect(container.textContent).toContain('基于当前 2 个就绪账号剩余额度');
+
+    // 5h 均值：未打满的 acc-real-2 不应拉低 acc-real-1 打满的 1.2M
+    expect(container.textContent).toContain('1.2M');
+
+    // 自然周均值：5M
+    expect(container.textContent).toContain('5M');
+
+    // 自然月均值：绝不出现 5M * 4.33 = 21.65M 的虚假数字，在无月度真实统计时应显示 '--'
+    expect(container.textContent).not.toContain('21.65M');
+    expect(container.textContent).not.toContain('22M');
 
     app.unmount();
     document.body.removeChild(container);

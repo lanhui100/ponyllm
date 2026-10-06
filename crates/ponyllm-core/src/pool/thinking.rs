@@ -116,6 +116,13 @@ impl ModelThinkingSpec {
 
         if is_non_reasoner {
             Self::non_reasoner()
+        } else if lower.contains("gemini-3") {
+            // For gemini-3 models, default is tiered (represented as Off for effort to avoid forcing -high),
+            // while supporting full reasoning range (Off through Max) so client can request any effort.
+            Self {
+                default_effort: ReasoningEffort::Off,
+                max_effort: ReasoningEffort::Max,
+            }
         } else {
             Self::standard_reasoner()
         }

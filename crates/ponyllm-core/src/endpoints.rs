@@ -34,11 +34,19 @@ pub fn normalize_systemone_url(base_url: &str) -> String {
 /// Canonical upstream model name for known retired/renamed aliases.
 ///
 /// DeepSeek's live API name is `deepseek-flash` (`deepseek-v4.1-flash` was
-/// never a valid upstream name and is rejected with 400). Normalize the alias
-/// centrally so the gateway and the embedded SDK route identically.
+/// never a valid upstream name and is rejected with 400).
+/// Gemini 3's suffix models (`gemini-3.8-flash-high`, `-medium`, `-low`, `-tiered`)
+/// are internal variants that route to `gemini-3.8-flash`.
 pub fn canonicalize_model_name(model: &str) -> String {
-    if model.eq_ignore_ascii_case("deepseek-v4.1-flash") {
+    let lower = model.to_ascii_lowercase();
+    if lower == "deepseek-v4.1-flash" {
         "deepseek-flash".to_string()
+    } else if lower == "gemini-3.8-flash-high"
+        || lower == "gemini-3.8-flash-medium"
+        || lower == "gemini-3.8-flash-low"
+        || lower == "gemini-3.8-flash-tiered"
+    {
+        "gemini-3.8-flash".to_string()
     } else {
         model.to_string()
     }

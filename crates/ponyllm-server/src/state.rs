@@ -2367,9 +2367,6 @@ async fn advance_rotated_at(
         let config = self.config.read();
         let mut provider_names: Vec<&String> = config.providers.keys().collect();
         provider_names.sort();
-        // Literal model names configured anywhere: `provider/model` aliases
-        // must never shadow a literal name (literal names win routing via the
-        // exact-match step in `resolve_pinned_targets`).
         let literal_names: std::collections::HashSet<&str> = config
             .providers
             .values()
@@ -2380,10 +2377,6 @@ async fn advance_rotated_at(
                     .chain(std::iter::once(cfg.default_model.as_str()).filter(|d| !d.is_empty()))
             })
             .collect();
-        // Provider count per model name: aliases are only emitted for models
-        // shared by ≥2 providers — that is the only case where pinning
-        // (`provider/model`) actually disambiguates, and it keeps the list
-        // from ballooning for single-provider models.
         let mut model_provider_count: std::collections::HashMap<&str, usize> =
             std::collections::HashMap::new();
         for cfg in config.providers.values() {
@@ -2393,66 +2386,68 @@ async fn advance_rotated_at(
                 .map(String::as_str)
                 .chain(std::iter::once(cfg.default_model.as_str()).filter(|d| !d.is_empty()))
             {
-                *model_provider_count.entry(m).or_insert(0) += 1;
+                let canonical_m = if m.starts_with("gemini-3.8-flash-") {
+                    "gemini-3.8-flash"
+                } else {
+                    m
+                };
+                *model_provider_count.entry(canonical_m).or_insert(0) += 1;
             }
         }
         for provider_name in &provider_names {
             let cfg = &config.providers[*provider_name];
             let mut add_model_and_alias = |m: &str| {
+                // If model is an internal gemini-3.8-flash variant suffix, normalize to base gemini-3.8-flash for client listing
+                let canonical_m = if m.starts_with("gemini-3.8-flash-") {
+                    "gemini-3.8-flash"
+                } else {
+                    m
+                };
+
                 let proto = cfg
                     .native_protocol(m)
+                    .or_else(|| cfg.native_protocol(canonical_m))
                     .map(|p| p.to_string())
                     .unwrap_or_else(|| {
                         infer_legacy_protocol(provider_name, &cfg.base_url).to_string()
                     });
-                if !seen.contains(m) {
-                    result.push((m.to_string(), provider_name.to_string(), None, proto.clone()));
-                    seen.insert(m.to_string());
-                }
                 let spec = cfg.get_model_spec(m);
-                // Per-provider explicit alias (`provider/model`, e.g.
-                // `sense/deepseek-v4-flash`): the bare name is deduped to one
-                // list entry although every provider carrying it remains a
-                // failover candidate at runtime. Emitted only when the model
-                // is shared by ≥2 providers and the alias string does not
-                // collide with a configured literal model name.
-                let shared = model_provider_count.get(m).copied().unwrap_or(0) >= 2;
-                let prefixed = format!("{}/{}", provider_name, m);
-                if shared && !seen.contains(&prefixed) {
-                    if literal_names.contains(prefixed.as_str()) {
-                        tracing::warn!(
-                            provider = %provider_name,
-                            model = %m,
-                            alias = %prefixed,
-                            "skipping provider/model alias: collides with a configured literal model name (literal names take routing precedence)"
-                        );
-                    } else {
-                        let alias_display = spec
-                            .display_name
-                            .clone()
-                            .unwrap_or_else(|| format!("{} ({})", m, provider_name));
-                        result.push((
-                            prefixed.clone(),
-                            provider_name.to_string(),
-                            Some(alias_display),
-                            proto.clone(),
-                        ));
-                        seen.insert(prefixed.clone());
-                    }
+
+                // 1. Bare model entry (deduped across providers)
+                if !seen.contains(canonical_m) {
+                    result.push((canonical_m.to_string(), provider_name.to_string(), None, proto.clone()));
+                    seen.insert(canonical_m.to_string());
                 }
+
+                // 2. Format provider-qualified alias provider/model
+                let shared = model_provider_count.get(canonical_m).copied().unwrap_or(0) >= 2;
+                let prefixed = format!("{}/{}", provider_name, canonical_m);
+                if shared && !seen.contains(&prefixed) && !literal_names.contains(prefixed.as_str()) {
+                    let alias_display = spec
+                        .display_name
+                        .clone()
+                        .unwrap_or_else(|| format!("{} ({})", canonical_m, provider_name));
+                    result.push((
+                        prefixed.clone(),
+                        provider_name.to_string(),
+                        Some(alias_display),
+                        proto.clone(),
+                    ));
+                    seen.insert(prefixed.clone());
+                }
+
                 if parse_context_capacity_tokens(&spec.context_window) >= 1048576 {
-                    let alias_1m = format!("{}[1m]", m);
+                    let alias_1m = format!("{}[1m]", canonical_m);
                     if !seen.contains(&alias_1m) {
-                        result.push((alias_1m.clone(), provider_name.to_string(), Some(format!("{} (1M 长上下文)", m)), proto.clone()));
+                        result.push((alias_1m.clone(), provider_name.to_string(), Some(format!("{} (1M 长上下文)", canonical_m)), proto.clone()));
                         seen.insert(alias_1m);
                     }
-                    // Provider-scoped [1m] alias for shared 1M models.
                     let prefixed_1m = format!("{}[1m]", prefixed);
                     if shared && !seen.contains(&prefixed_1m) && !literal_names.contains(prefixed.as_str()) {
                         result.push((
                             prefixed_1m.clone(),
                             provider_name.to_string(),
-                            Some(format!("{}[1m] ({})", m, provider_name)),
+                            Some(format!("{}[1m] ({})", canonical_m, provider_name)),
                             proto.clone(),
                         ));
                         seen.insert(prefixed_1m);

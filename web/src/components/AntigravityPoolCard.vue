@@ -383,13 +383,13 @@ const slotMatrix = computed<HeatSlotItem[]>(() => {
     if (usage) {
       const tierLabel = usage.account_tier === 'pro' ? '⭐ Pro 会员' : usage.account_tier === 'standard' ? '🔹 标准会员' : usage.account_tier === 'calibrating' ? '🔄 测算中' : usage.account_tier === 'unknown' ? '⏳ 待调用' : '⚪ 普通账号';
       tierBadge = ` [${tierLabel}]`;
-      const h5Tokens = formatTokenHuman(usage.window_5h.total_tokens);
+      const h5Tokens = formatTokenHuman(usage.window_5h?.total_tokens ?? 0);
       const capTokens = usage.estimated_capacity_5h ? ` / 额度 ~${formatTokenHuman(usage.estimated_capacity_5h)}` : '';
-      const wTokens = formatTokenHuman(usage.window_weekly.total_tokens);
-      const cacheRatio = usage.window_5h.total_tokens > 0 && usage.window_5h.cached_tokens > 0
+      const wTokens = formatTokenHuman(usage.window_weekly?.total_tokens ?? 0);
+      const cacheRatio = (usage.window_5h?.total_tokens ?? 0) > 0 && (usage.window_5h?.cached_tokens ?? 0) > 0
         ? ` (缓存命中 ${formatTokenHuman(usage.window_5h.cached_tokens)})`
         : '';
-      usageSummary = `\n5小时已用: ${h5Tokens} (${usage.window_5h.requests}次)${capTokens}${cacheRatio}\n本周累计: ${wTokens} (${usage.window_weekly.requests}次)`;
+      usageSummary = `\n5小时已用: ${h5Tokens} (${usage.window_5h?.requests ?? 0}次)${capTokens}${cacheRatio}\n本周累计: ${wTokens} (${usage.window_weekly?.requests ?? 0}次)`;
     }
 
     if (k.state === 'disabled') {
@@ -773,15 +773,8 @@ const factualCycleSummary = computed(() => {
         standardCount5h += 1;
         standardTokens5h += usage.estimated_capacity_5h;
       }
-    } else if (usage.window_5h && usage.window_5h.total_tokens > 0) {
-      // 当前周期真实已跑用量兜底
-      totalTokens5h += usage.window_5h.total_tokens;
-      totalPrompt5h += usage.window_5h.prompt_tokens;
-      totalComp5h += usage.window_5h.completion_tokens;
-      totalCached5h += usage.window_5h.cached_tokens;
-      totalRequests5h += usage.window_5h.requests;
-      count5h += 1;
     }
+    // 未打满且未推算容量的实时切片，不作为单账号完整周期的容量基准分母，避免拉低真实额度
 
     // 2. 周度额度反推与消耗
     if (usage.estimated_capacity_weekly && usage.estimated_capacity_weekly > 0) {
@@ -791,13 +784,6 @@ const factualCycleSummary = computed(() => {
       totalCompWeekly += usage.window_weekly?.completion_tokens ?? 0;
       totalCachedWeekly += usage.window_weekly?.cached_tokens ?? 0;
       totalRequestsWeekly += usage.window_weekly?.requests ?? 0;
-    } else if (usage.window_weekly && usage.window_weekly.total_tokens > 0) {
-      totalTokensWeekly += usage.window_weekly.total_tokens;
-      weeklyAccounts += 1;
-      totalPromptWeekly += usage.window_weekly.prompt_tokens;
-      totalCompWeekly += usage.window_weekly.completion_tokens;
-      totalCachedWeekly += usage.window_weekly.cached_tokens;
-      totalRequestsWeekly += usage.window_weekly.requests;
     }
 
     // 3. 月度客观消耗
@@ -827,11 +813,11 @@ const factualCycleSummary = computed(() => {
   const liveAvgCachedWeekly = weeklyAccounts > 0 ? Math.round(totalCachedWeekly / weeklyAccounts) : 0;
   const liveAvgRequestsWeekly = weeklyAccounts > 0 ? Math.round(totalRequestsWeekly / weeklyAccounts) : 0;
 
-  const liveAvgMonthly = liveAvgWeekly > 0 ? Math.round(liveAvgWeekly * 4.33) : (monthlyAccounts > 0 ? Math.round(totalTokensMonthly / monthlyAccounts) : 0);
-  const liveAvgPromptMonthly = monthlyAccounts > 0 ? Math.round(totalPromptMonthly / monthlyAccounts) : (liveAvgPromptWeekly > 0 ? Math.round(liveAvgPromptWeekly * 4.33) : 0);
-  const liveAvgCompMonthly = monthlyAccounts > 0 ? Math.round(totalCompMonthly / monthlyAccounts) : (liveAvgCompWeekly > 0 ? Math.round(liveAvgCompWeekly * 4.33) : 0);
-  const liveAvgCachedMonthly = monthlyAccounts > 0 ? Math.round(totalCachedMonthly / monthlyAccounts) : (liveAvgCachedWeekly > 0 ? Math.round(liveAvgCachedWeekly * 4.33) : 0);
-  const liveAvgRequestsMonthly = monthlyAccounts > 0 ? Math.round(totalRequestsMonthly / monthlyAccounts) : (liveAvgRequestsWeekly > 0 ? Math.round(liveAvgRequestsWeekly * 4.33) : 0);
+  const liveAvgMonthly = monthlyAccounts > 0 ? Math.round(totalTokensMonthly / monthlyAccounts) : 0;
+  const liveAvgPromptMonthly = monthlyAccounts > 0 ? Math.round(totalPromptMonthly / monthlyAccounts) : 0;
+  const liveAvgCompMonthly = monthlyAccounts > 0 ? Math.round(totalCompMonthly / monthlyAccounts) : 0;
+  const liveAvgCachedMonthly = monthlyAccounts > 0 ? Math.round(totalCachedMonthly / monthlyAccounts) : 0;
+  const liveAvgRequestsMonthly = monthlyAccounts > 0 ? Math.round(totalRequestsMonthly / monthlyAccounts) : 0;
 
   // ---- 池级跨账号跨周期持久化累计基准（后端快照归档，跨发布/账号增删不归零）----
   // 只要有持久化观测（含打满周期），即优先生效；否则回退到上面实时在册账号计算。
@@ -1120,11 +1106,14 @@ function waterBarWidth(percent: number | null): string {
 
       <!-- 右侧现代精简排版：标题置顶，上方剩余空间居中放数字，底部对齐周期测定与容量水位 (占 8 列) -->
       <div class="lg:col-span-8 flex flex-col justify-between">
-        <!-- 上方：加权用量统计（标题置顶，数字在剩余空间居中，左右留出边距） -->
+        <!-- 上方：周期基准用量（标题置顶，数字在剩余空间居中，左右留出边距） -->
         <div class="flex-1 flex flex-col px-3 sm:px-4 pt-1">
-          <div class="flex items-center gap-1 text-xs text-slate-500 font-medium shrink-0">
-            <Icons name="activity" size="13" class="text-slate-700" />
-            加权用量统计
+          <div class="flex items-center justify-between gap-1 text-xs text-slate-500 font-medium shrink-0">
+            <div class="flex items-center gap-1">
+              <Icons name="activity" size="13" class="text-slate-700" />
+              周期基准用量
+            </div>
+            <span class="text-[11px] text-slate-400 font-normal">多账号真实测定的单账号周期用量基准</span>
           </div>
           <div class="flex-1 flex flex-col justify-center py-2">
             <div class="grid grid-cols-3 gap-3">
@@ -1159,7 +1148,7 @@ function waterBarWidth(percent: number | null): string {
                 <Icons name="sparkles" size="14" class="text-slate-700" />
                 Gemini 容量水位
               </span>
-              <span class="text-[11px] text-slate-400">基于当前 {{ activeKeys.length }} 个就绪账号会话余量加权聚合</span>
+              <span class="text-[11px] text-slate-400">基于当前 {{ activeKeys.length }} 个就绪账号剩余额度</span>
             </div>
             <div class="grid grid-cols-1 sm:grid-cols-2 gap-9">
               <!-- 5 小时窗口水位 -->

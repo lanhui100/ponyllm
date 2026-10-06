@@ -895,11 +895,26 @@ async fn test_antigravity_gemini3_thinking_suffix_routing() {
         .unwrap();
     assert_eq!(resp.status(), 200);
 
+    // 5. Explicit Low via provider-prefixed syntax -> routes to -low
+    let resp = client
+        .post(format!("http://{}/v1/chat/completions", gateway_addr))
+        .json(&json!({
+            "model": "antigravity/gemini-3.8-flash",
+            "messages": [{"role": "user", "content": "hello"}],
+            "reasoning_effort": "low"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
     let reqs = captured_requests.lock().clone();
-    assert_eq!(reqs.len(), 4);
+    assert_eq!(reqs.len(), 5);
     assert_eq!(reqs[0]["model"], "gemini-3.8-flash-low");
     assert_eq!(reqs[1]["model"], "gemini-3.8-flash-medium");
     assert_eq!(reqs[2]["model"], "gemini-3.8-flash-high");
     // Request 4: when not explicitly requested, defaults to -tiered
     assert_eq!(reqs[3]["model"], "gemini-3.8-flash-tiered");
+    // Request 5: provider-prefixed route with low effort
+    assert_eq!(reqs[4]["model"], "gemini-3.8-flash-low");
 }
