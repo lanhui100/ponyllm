@@ -137,15 +137,23 @@ pub struct PeriodObservation {
 }
 
 /// Aggregates usage slices into closed, aligned wall-clock periods of
-/// `period_ms`. A period is closed when its end is `<= now_ms`; slices inside
-/// the partial current period are ignored. Empty periods are skipped. Output
-/// is sorted ascending by `period_end_ms`.
+/// `period_ms`. A period is closed when its end is `<= now_ms`. Slices inside
+/// the partial current period are ignored.
+///
+/// To prevent a freshly created account (or one with only a few days of data)
+/// from closing a multi-day window (e.g. 7d or 30d) prematurely when its earliest
+/// slice happens to land near an epoch-aligned boundary, a period is only considered
+/// valid if the slices span a substantial portion of the period (at least 60% of period_ms),
+/// or for short periods (5h).
 pub fn aligned_period_observations(
     slices: &[UsageSlice],
     period_ms: u64,
     now_ms: u64,
 ) -> Vec<PeriodObservation> {
-    let mut map: BTreeMap<u64, PeriodObservation> = BTreeMap::new();
+    if slices.is_empty() {
+        return Vec::new();
+    }
+    let mut map: BTreeMap<u64, (PeriodObservation, u64, u64)> = BTreeMap::new(); // (entry, min_ts, max_ts)
     for s in slices {
         // Align the slice's start to its containing period; the period is
         // closed once its end boundary has passed.
@@ -154,19 +162,43 @@ pub fn aligned_period_observations(
         if period_end > now_ms {
             continue; // partial/current period — not a full observation yet
         }
-        let entry = map.entry(period_end).or_default();
-        entry.period_end_ms = period_end;
-        entry.prompt_tokens = entry.prompt_tokens.saturating_add(s.prompt_tokens);
-        entry.completion_tokens = entry.completion_tokens.saturating_add(s.completion_tokens);
-        entry.cached_tokens = entry.cached_tokens.saturating_add(s.cached_tokens);
-        entry.total_tokens = entry
+        let entry = map.entry(period_end).or_insert_with(|| {
+            (
+                PeriodObservation {
+                    period_end_ms: period_end,
+                    ..Default::default()
+                },
+                s.timestamp_ms,
+                s.timestamp_ms,
+            )
+        });
+        entry.0.prompt_tokens = entry.0.prompt_tokens.saturating_add(s.prompt_tokens);
+        entry.0.completion_tokens = entry.0.completion_tokens.saturating_add(s.completion_tokens);
+        entry.0.cached_tokens = entry.0.cached_tokens.saturating_add(s.cached_tokens);
+        entry.0.total_tokens = entry.0
             .total_tokens
             .saturating_add(s.prompt_tokens)
             .saturating_add(s.completion_tokens);
-        entry.requests = entry.requests.saturating_add(s.requests);
+        entry.0.requests = entry.0.requests.saturating_add(s.requests);
+        entry.1 = entry.1.min(s.timestamp_ms);
+        entry.2 = entry.2.max(s.timestamp_ms);
     }
+
     map.into_values()
-        .filter(|o| o.total_tokens > 0)
+        .filter_map(|(obs, min_t, max_t)| {
+            if obs.total_tokens == 0 {
+                return None;
+            }
+            // For multi-day periods (7d, 30d), ensure the slices span at least 60% of the period,
+            // preventing 1-2 days of traffic from falsely closing a 30-day epoch period.
+            if period_ms >= SEVEN_DAYS_MS {
+                let span = max_t.saturating_sub(min_t);
+                if span < (period_ms * 6 / 10) {
+                    return None;
+                }
+            }
+            Some(obs)
+        })
         .collect()
 }
 
