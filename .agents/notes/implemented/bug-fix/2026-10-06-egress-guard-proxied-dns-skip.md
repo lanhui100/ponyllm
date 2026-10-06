@@ -63,10 +63,19 @@ antigravity → `pproxy-host.ponyllm.svc:8899` CONNECT 代理，代理自行解�
   解析到内网不再被网关拦截）——现网代理为受信出海出口且自带 egress ACL，判定为显式
   Non-Goal 信任边界；代理 host 拨号时复验 `check_proxy_url_fast` 收窄残余面。
 - use_system_proxy=true 且无显式代理 → 一律完整检查（保守侧，宁多解析不少解析）。
+- **Review hardening（对抗审查 2 轮后落地，commit 7f28cf2）**：
+  - 修复预存倒置 `proxy_opt = url.trim().is_empty().then(|| url)`（客户端缓存未命中即建
+    直连客户端，与 guard 的 proxied 判定脱钩）→ 非空代理 URL 必建代理客户端，回归用例为
+    本地 CONNECT 代理 e2e（provider 级 + gateway 级两形状断言客户端真实走代理）。
+  - `use_system_proxy=true` 时 guard 强制完整检查（env NO_PROXY 可绕过显式代理，
+    Non-Goal 保守覆盖，命中即 DNS 照跑）。
+  - 单飞 owner 以 `InflightEntry` RAII Drop guard 兜底：owner 取消/panic 时移除
+    (mode,host) 条目，waiter 有界等待后可接管为新 owner，杜绝 stale-Occupied 永久 hang。
 - 一次 DNS 瞬时抖动不再造成 10s 保证 503：瞬时失败 1s 内快速重检，恢复即放行。
-- 验收（implemented 时全绿）：acceptance_egress_proxied_tests（8 用例：代理零 DNS 放行/
+- 验收（implemented 时全绿）：acceptance_egress_proxied_tests（12 用例：代理零 DNS 放行/
   直连瞬时拒绝 TTL≤2s/socks5 与不可解析代理强制全检查/确定性拒绝缓存/mode 隔离/注入
-  resolver 分类全表/fast-direct 签名钉死）、acceptance_sec_egress_cache_tests（新键形态
-  ≤15s/≤30s 上界）、acceptance_sec_ssrf_tests、ponyllm-server 全量回归无失败。
-- 单飞去重引入并发复杂度——以 3 次熔断预算兜底，失败隔离分支回滚至红相锚定提交
-  （56a385f）。
+  resolver 分类全表/fast-direct 签名钉死/gateway-default 代理形状/客户端真实走代理 e2e×2/
+  use_system_proxy 降级）、acceptance_sec_egress_cache_tests（新键形态 ≤15s/≤30s 上界）、
+  acceptance_sec_ssrf_tests、ponyllm-server 全量回归无失败。
+- 单飞去重引入并发复杂度——以 RAII Drop guard + 有界等待兜底（消除取消泄漏），并以
+  3 次熔断预算兜底失败隔离，可回滚至红相锚定提交（56a385f）。
