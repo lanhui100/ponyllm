@@ -87,6 +87,11 @@ export const alova = createAlova({
   beforeRequest(method: Method) {
     const session = useSessionStore();
     Object.assign(method.config.headers ??= {}, authHeaders(session.token));
+    // R-S4 (Phase-3b): cookie 模式写请求（非 GET/HEAD）带 X-Pony-Session（CSRF
+    // 双提交）；sid 来自内存（换发/探活响应体 body.sid），不落 storage。
+    if (session.sessionMode === 'cookie' && session.sid && method.type !== 'GET' && method.type !== 'HEAD') {
+      (method.config.headers as Record<string, string>)['X-Pony-Session'] = session.sid;
+    }
   },
   responded: {
     async onSuccess(response: globalThis.Response, _method: Method) {

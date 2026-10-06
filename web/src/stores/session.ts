@@ -41,6 +41,9 @@ export const useSessionStore = defineStore('session', () => {
   const token = ref<string>('');
   const loggedIn = ref<boolean>(false);
   const sessionMode = ref<'unknown' | 'cookie' | 'legacy'>('unknown');
+  // R-S4 (Phase-3b): CSRF 双提交通道 —— cookie 会话 sid 仅存内存（来自换发/探活
+  // 响应体 body.sid，后端 R-S8），用于写请求 X-Pony-Session 头；不落任何 storage。
+  const sid = ref<string | null>(null);
   // Single-flight flag: the first 401 owns the redirect; reset on login/logout
   // so the next session can redirect again (P0-2 hardening).
   const unauthorizedHandled = ref<boolean>(false);
@@ -57,19 +60,31 @@ export const useSessionStore = defineStore('session', () => {
     unauthorizedHandled.value = false;
   }
 
-  /// cookie 模式登录成功：token 丢弃（HttpOnly cookie 接管），仅记"已登录"。
-  function loginCookieMode(): void {
+  /// cookie 模式登录成功：token 丢弃（HttpOnly cookie 接管），仅记"已登录"；
+  /// `sessionSid` 来自换发响应体 body.sid（R-S4 内存 CSRF 通道）。
+  function loginCookieMode(sessionSid?: string | null): void {
     token.value = '';
     loggedIn.value = true;
     sessionMode.value = 'cookie';
+    sid.value = typeof sessionSid === 'string' && sessionSid.trim() !== '' ? sessionSid.trim() : null;
     unauthorizedHandled.value = false;
   }
 
-  /// Explicit logout (login page): clears memory session AND re-arms the flag so
-  /// the next session can redirect on 401.
+  /// Explicit logout：cookie 模式先 fire-and-forget 服务端吊销（best-effort，
+  /// 失败/404 不影响清态），再清内存态并重挂单飞旗标。
   function logout(): void {
+    if (sessionMode.value === 'cookie') {
+      void fetch('/api/admin/session/revoke', {
+        method: 'POST',
+        headers: sid.value ? { 'X-Pony-Session': sid.value } : {},
+        credentials: 'same-origin',
+      }).catch(() => {
+        // best-effort: 吊销失败（网络/端点禁用）不阻塞本地清态
+      });
+    }
     token.value = '';
     loggedIn.value = false;
+    sid.value = null;
     unauthorizedHandled.value = false;
   }
 
@@ -93,6 +108,7 @@ export const useSessionStore = defineStore('session', () => {
   function clearToken(): void {
     token.value = '';
     loggedIn.value = false;
+    sid.value = null;
   }
 
   function markUnauthorizedHandled(): boolean {
@@ -104,7 +120,7 @@ export const useSessionStore = defineStore('session', () => {
   }
 
   /// 会话端点协商（幂等缓存，router 守卫首次导航触发）：
-  /// - GET /api/admin/session 200  → cookie 模式 + 已登录
+  /// - GET /api/admin/session 200  → cookie 模式 + 已登录（并存响应体 sid 至内存）
   /// - 401（含 session_expired 信封）→ cookie 模式 + 未登录
   /// - 404（端点未启用）→ legacy 回退（向后兼容旧部署）
   /// - 其它/网络错误 → 保持 unknown（401 统一路径兜底）
@@ -118,13 +134,18 @@ export const useSessionStore = defineStore('session', () => {
         credentials: 'same-origin',
       });
       if (resp.status === 200) {
+        const body = (await resp.json().catch(() => ({}))) as { sid?: unknown; authenticated?: unknown };
         sessionMode.value = 'cookie';
-        loggedIn.value = true;
+        loggedIn.value = body?.authenticated !== false;
+        sid.value =
+          typeof body?.sid === 'string' && body.sid.trim() !== '' ? body.sid.trim() : null;
       } else if (resp.status === 401) {
         sessionMode.value = 'cookie';
         loggedIn.value = false;
+        sid.value = null;
       } else if (resp.status === 404) {
         sessionMode.value = 'legacy';
+        sid.value = null;
       }
     } catch {
       // 网关不可达：保持 unknown，后续 401 统一路径兜底。
@@ -136,6 +157,7 @@ export const useSessionStore = defineStore('session', () => {
     token,
     loggedIn,
     sessionMode,
+    sid,
     hasSession,
     login,
     loginCookieMode,

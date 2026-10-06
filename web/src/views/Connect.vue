@@ -187,7 +187,9 @@ async function submit(): Promise<void> {
       credentials: 'same-origin',
     });
     if (sessionResp.status === 200) {
-      session.loginCookieMode();
+      // R-S4: 换发响应体携带 sid（后端 R-S8），入内存供写请求 CSRF 双提交头
+      const body = (await sessionResp.json().catch(() => ({}))) as { sid?: unknown };
+      session.loginCookieMode(typeof body?.sid === 'string' ? body.sid : null);
       await enterDashboard();
       return;
     }
