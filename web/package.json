@@ -38,7 +38,9 @@
   },
   "pnpm": {
     "overrides": {
-      "brace-expansion": "2.1.7"
+      "brace-expansion": "2.1.7",
+      "source-map-js": "^1.2.2",
+      "@vue/server-renderer": "^3.5.42"
     }
   }
 }

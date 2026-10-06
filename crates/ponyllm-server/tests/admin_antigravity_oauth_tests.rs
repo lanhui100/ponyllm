@@ -372,6 +372,7 @@ async fn test_oauth2_callback_google_error_propagation() {
                 code: None,
                 error: None,
                 redirect_uri: Some("http://localhost:8080/oauth2callback".to_string()),
+                consumed: false,
             },
         );
     }
@@ -438,6 +439,7 @@ async fn test_oauth2_callback_xss_prevention_and_security_headers() {
                 code: None,
                 error: None,
                 redirect_uri: Some("http://127.0.0.1:8080/oauth2callback".to_string()),
+                consumed: false,
             },
         );
     }
