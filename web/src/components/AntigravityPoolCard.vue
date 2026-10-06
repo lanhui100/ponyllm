@@ -1118,32 +1118,34 @@ function waterBarWidth(percent: number | null): string {
         </div>
       </div>
 
-      <!-- 右侧现代精简排版：上方剩余空间居中放数字，底部对齐周期测定与容量水位 (占 8 列) -->
+      <!-- 右侧现代精简排版：标题置顶，上方剩余空间居中放数字，底部对齐周期测定与容量水位 (占 8 列) -->
       <div class="lg:col-span-8 flex flex-col justify-between">
-        <!-- 上方：加权用量统计在剩余空间中居中显示 -->
-        <div class="flex-1 flex flex-col justify-center py-2">
-          <div class="flex items-center gap-1 text-xs text-slate-500 font-medium mb-3">
+        <!-- 上方：加权用量统计（标题置顶，数字在剩余空间居中，左右留出边距） -->
+        <div class="flex-1 flex flex-col px-3 sm:px-4 pt-1">
+          <div class="flex items-center gap-1 text-xs text-slate-500 font-medium shrink-0">
             <Icons name="activity" size="13" class="text-slate-700" />
             加权用量统计
           </div>
-          <div class="grid grid-cols-3 gap-3">
-            <div class="flex flex-col">
-              <span class="text-[10px] text-slate-400 mb-1.5">5小时用量</span>
-              <span class="text-4xl sm:text-5xl font-bold font-mono tracking-tight text-slate-900 tabular-nums leading-none">
-                {{ factualCycleSummary.avg5h > 0 ? formatTokenHuman(factualCycleSummary.avg5h) : '--' }}
-              </span>
-            </div>
-            <div class="flex flex-col">
-              <span class="text-[10px] text-slate-400 mb-1.5">自然周用量</span>
-              <span class="text-4xl sm:text-5xl font-bold font-mono tracking-tight text-slate-900 tabular-nums leading-none">
-                {{ factualCycleSummary.avgWeekly > 0 ? formatTokenHuman(factualCycleSummary.avgWeekly) : '--' }}
-              </span>
-            </div>
-            <div class="flex flex-col">
-              <span class="text-[10px] text-slate-400 mb-1.5">自然月用量</span>
-              <span class="text-4xl sm:text-5xl font-bold font-mono tracking-tight text-slate-900 tabular-nums leading-none">
-                {{ factualCycleSummary.avgMonthly > 0 ? formatTokenHuman(factualCycleSummary.avgMonthly) : '--' }}
-              </span>
+          <div class="flex-1 flex flex-col justify-center py-2">
+            <div class="grid grid-cols-3 gap-3">
+              <div class="flex flex-col">
+                <span class="text-[10px] text-slate-400 mb-1.5">5小时用量</span>
+                <span class="text-4xl sm:text-5xl font-bold font-mono tracking-tight text-slate-900 tabular-nums leading-none">
+                  {{ factualCycleSummary.avg5h > 0 ? formatTokenHuman(factualCycleSummary.avg5h) : '--' }}
+                </span>
+              </div>
+              <div class="flex flex-col">
+                <span class="text-[10px] text-slate-400 mb-1.5">自然周用量</span>
+                <span class="text-4xl sm:text-5xl font-bold font-mono tracking-tight text-slate-900 tabular-nums leading-none">
+                  {{ factualCycleSummary.avgWeekly > 0 ? formatTokenHuman(factualCycleSummary.avgWeekly) : '--' }}
+                </span>
+              </div>
+              <div class="flex flex-col">
+                <span class="text-[10px] text-slate-400 mb-1.5">自然月用量</span>
+                <span class="text-4xl sm:text-5xl font-bold font-mono tracking-tight text-slate-900 tabular-nums leading-none">
+                  {{ factualCycleSummary.avgMonthly > 0 ? formatTokenHuman(factualCycleSummary.avgMonthly) : '--' }}
+                </span>
+              </div>
             </div>
           </div>
         </div>
