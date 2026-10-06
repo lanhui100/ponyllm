@@ -2016,6 +2016,13 @@
           "provider": {
             "type": "string"
           },
+          "proxy": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Per-model outbound proxy override (`Some(url)` = this model dials\nthrough the proxy; `None` = direct / inherits the provider default)."
+          },
           "rate_limits": {
             "oneOf": [
               {
