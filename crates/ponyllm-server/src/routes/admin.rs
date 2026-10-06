@@ -208,6 +208,10 @@ pub struct ModelView {
     pub protocol: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
+    /// Per-model outbound proxy override (`Some(url)` = this model dials
+    /// through the proxy; `None` = direct / inherits the provider default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy: Option<String>,
     pub thinking_default: String,
     pub thinking_max: String,
     /// Model-level price overrides (`None` inherits the provider baseline).
@@ -1996,6 +2000,7 @@ pub async fn handle_admin_provider_models(
                 top_p: m.top_p,
                 display_name: m.display_name.clone(),
                 priority: m.priority,
+                proxy: m.proxy.clone(),
                 rate_limits: m.rate_limits.map(Into::into),
             }
         })
@@ -2039,6 +2044,7 @@ pub async fn handle_admin_models(State(state): State<Arc<AppState>>) -> impl Int
                 top_p: m.top_p,
                 display_name: m.display_name.clone(),
                 priority: m.priority,
+                proxy: m.proxy.clone(),
                 rate_limits: m.rate_limits.map(Into::into),
             });
         }
@@ -2157,15 +2163,22 @@ pub async fn handle_admin_create_model(
                 .into_response();
         }
     }
-    if let Some(ref proxy) = payload.proxy {
-        if !proxy.trim().is_empty() {
-            if let Err(reason) = crate::egress::check_proxy_url_fast(proxy) {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({"error": {"message": format!("proxy blocked by egress policy: {}", reason), "code": "egress_blocked"}})),
-                )
-                    .into_response();
-            }
+    // Per-model outbound proxy: normalize empty/"direct" to `None` (direct)
+    // so the web toggle round-trips cleanly; gate real URLs like the other
+    // outbound targets (loopback pproxy is the documented shape).
+    let model_proxy: Option<String> = payload
+        .proxy
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("direct"))
+        .map(str::to_string);
+    if let Some(ref proxy) = model_proxy {
+        if let Err(reason) = crate::egress::check_proxy_url_fast(proxy) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": {"message": format!("proxy blocked by egress policy: {}", reason), "code": "egress_blocked"}})),
+            )
+                .into_response();
         }
     }
 
@@ -2207,7 +2220,7 @@ pub async fn handle_admin_create_model(
         base_url: base_url.clone(),
         thinking_default: think_def,
         thinking_max: think_max,
-        proxy: payload.proxy.clone(),
+        proxy: model_proxy.clone(),
         timeout_secs: payload.timeout_secs,
         fallbacks: payload.fallbacks.clone().unwrap_or_default(),
     };
@@ -2247,7 +2260,7 @@ pub async fn handle_admin_create_model(
         base_url: base_url.clone(),
         thinking_default: think_def,
         thinking_max: think_max,
-        proxy: payload.proxy,
+        proxy: model_proxy.clone(),
         timeout_secs: payload.timeout_secs,
         fallbacks: payload.fallbacks.clone().unwrap_or_default(),
     };
@@ -2293,6 +2306,7 @@ pub async fn handle_admin_create_model(
             temperature: payload.temperature,
             top_p: payload.top_p,
             priority: payload.priority,
+            proxy: model_proxy,
             rate_limits: payload.rate_limits,
         }),
     )
@@ -2452,8 +2466,16 @@ pub async fn handle_admin_update_model(
     if let Some(ref tm) = payload.thinking_max {
         existing_config.thinking_max = parse_effort_opt(tm);
     }
+    // Per-model outbound proxy: normalize empty/"direct" to `None` so the
+    // web toggle can turn proxying OFF for a model (empty would otherwise
+    // trip the URL policy gate below); absent (`None`) leaves it untouched.
     if payload.proxy.is_some() {
-        existing_config.proxy = payload.proxy.clone();
+        existing_config.proxy = payload
+            .proxy
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("direct"))
+            .map(str::to_string);
     }
     if let Some(t) = payload.timeout_secs {
         existing_config.timeout_secs = Some(t);
@@ -2595,6 +2617,7 @@ pub async fn handle_admin_update_model(
         temperature: existing_config.temperature,
         top_p: existing_config.top_p,
         priority: existing_config.priority,
+        proxy: existing_config.proxy.clone(),
         rate_limits: existing_config.rate_limits.map(Into::into),
     })
     .into_response()

@@ -70,6 +70,8 @@ export interface ModelView {
   thinking_max: string;
   protocol?: string | null;
   base_url?: string | null;
+  /** Per-model outbound proxy override (`Some` = 该模型经代理拨上游；`None` = 直连/继承服务商). */
+  proxy?: string | null;
   input_price?: number | null;
   cached_price?: number | null;
   output_price?: number | null;

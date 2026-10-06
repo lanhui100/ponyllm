@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from 'vue';
+import { ref, computed } from 'vue';
 import type { ModelView, CreateModelPayload, UpdateModelPayload, PricingMode, PricingPeriod } from '../../types/admin';
 import { adminApi } from '../../lib/adminApi';
 import Icons from '../ui/Icons.vue';
@@ -49,6 +49,9 @@ const PROTOCOL_OPTIONS = [
   { value: 'messages', label: 'Anthropic Messages' },
   { value: 'responses', label: 'OpenAI Responses' },
 ] as const;
+
+/** 模型"走代理"开关打开时的默认代理地址（本机 pproxy 出海代理，与 /api/admin/proxy/status 探测一致）。 */
+const DEFAULT_MODEL_PROXY = 'http://127.0.0.1:8899';
 
 const MODALITIES = [
   { id: 'text', icon: 'file-text' as const, label: '文本' },
@@ -104,6 +107,7 @@ const form = ref({
   output_types: ['text'] as string[],
   protocol: '',
   base_url: '',
+  proxy: '',
   temperature: '',
   top_p: '',
   priority: '',
@@ -117,6 +121,14 @@ const form = ref({
 
 /** 用户显式清除短窗限额（提交 rate_limits=null）；false=未清除（缺省不改动既有值）。 */
 const rateLimitsCleared = ref(false);
+
+/** 模型"走代理"开关：开=form.proxy 非空（经代理拨上游），关=直连/继承服务商。 */
+const proxyEnabled = computed({
+  get: () => form.value.proxy.trim() !== '',
+  set: (checked: boolean) => {
+    form.value.proxy = checked ? (form.value.proxy.trim() || DEFAULT_MODEL_PROXY) : '';
+  },
+});
 
 function addPricingPeriod() {
   form.value.pricing_periods.push({
@@ -234,6 +246,7 @@ function openAddInline() {
     output_types: ['text'],
     protocol: '',
     base_url: '',
+    proxy: '',
     temperature: '',
     top_p: '',
     priority: '',
@@ -291,6 +304,7 @@ function openEditInline(model: ModelView) {
     output_types: model.output_types && model.output_types.length > 0 ? [...model.output_types] : ['text'],
     protocol: normalizeProtocol(model.protocol),
     base_url: model.base_url || '',
+    proxy: model.proxy || '',
     temperature: model.temperature != null ? String(model.temperature) : '',
     top_p: model.top_p != null ? String(model.top_p) : '',
     priority: model.priority != null ? String(model.priority) : '',
@@ -305,6 +319,7 @@ function openEditInline(model: ModelView) {
   showAdvanced.value = Boolean(
     model.protocol ||
       model.base_url ||
+      model.proxy ||
       model.display_name ||
       model.temperature != null ||
       model.top_p != null ||
@@ -474,6 +489,7 @@ async function handleSubmit() {
       output_types: form.value.output_types,
       protocol: form.value.protocol ? form.value.protocol.trim() : '',
       base_url: form.value.base_url ? form.value.base_url.trim() : '',
+      proxy: form.value.proxy.trim(),
       display_name: form.value.display_name ? form.value.display_name.trim() : '',
       pricing_mode: (validPeriods.length > 0 ? 'peak_valley' : 'uniform') as PricingMode,
       pricing_periods: validPeriods,
@@ -836,6 +852,38 @@ function getTierBadgeVariant(tier?: string) {
                       </div>
                     </div>
 
+                    <!-- 走代理开关 (同一行2列)：开=该模型经代理拨上游，关=直连/继承服务商 -->
+                    <div class="grid grid-cols-1 sm:grid-cols-12 gap-2 sm:gap-4 items-center">
+                      <label class="sm:col-span-3 text-slate-600 font-medium text-xs">
+                        <span class="flex items-center gap-1">
+                          <span>走代理</span>
+                          <UiTooltip content="开启后该模型经下方代理地址拨上游（默认本机 pproxy http://127.0.0.1:8899）；关闭则直连。留空继承服务商配置。">
+                            <Icons name="info" size="12" class="text-slate-400 cursor-pointer" />
+                          </UiTooltip>
+                        </span>
+                      </label>
+                      <div class="sm:col-span-9">
+                        <label class="inline-flex items-center gap-1.5 text-xs text-slate-600 select-none cursor-pointer">
+                          <input
+                            v-model="proxyEnabled"
+                            type="checkbox"
+                            class="rounded border-slate-300 text-slate-900 focus:ring-0 cursor-pointer"
+                            data-testid="model-proxy-enabled"
+                          />
+                          <span>{{ proxyEnabled ? '经代理拨上游' : '直连' }}</span>
+                        </label>
+                        <input
+                          v-if="proxyEnabled"
+                          v-model="form.proxy"
+                          type="text"
+                          placeholder="例如: http://127.0.0.1:8899"
+                          class="mt-1.5 w-full bg-white border border-slate-200/80 rounded-lg px-2.5 py-1.5 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-slate-400/20 focus:border-slate-500"
+                          data-testid="model-proxy-input"
+                        />
+                        <p v-else class="text-3xs text-slate-400 mt-1">关闭 = 直连；需要该模型经代理（如 pproxy 出海）访问上游时打开此开关。</p>
+                      </div>
+                    </div>
+
                     <!-- 默认采样参数 (请求未传时生效，同一行2列) -->
                     <div class="grid grid-cols-1 sm:grid-cols-12 gap-2 sm:gap-4 items-center">
                       <label class="sm:col-span-3 text-slate-600 font-medium text-xs">默认采样</label>
@@ -1191,7 +1239,11 @@ function getTierBadgeVariant(tier?: string) {
               v-if="m.protocol"
               variant="secondary"
               class="hidden md:inline-flex items-center text-3xs font-mono font-normal"
-              :title="m.base_url ? `协议: ${m.protocol} · Base URL: ${m.base_url}` : `协议: ${m.protocol}`"
+              :title="
+                m.base_url
+                  ? `协议: ${m.protocol} · Base URL: ${m.base_url}${m.proxy ? ` · 走代理: ${m.proxy}` : ''}`
+                  : `协议: ${m.protocol}${m.proxy ? ` · 走代理: ${m.proxy}` : ''}`
+              "
             >
               {{ m.protocol }}
             </UiBadge>
@@ -1507,6 +1559,38 @@ function getTierBadgeVariant(tier?: string) {
                           class="w-full bg-white border border-slate-200/80 rounded-lg px-2.5 py-1.5 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-slate-400/20 focus:border-slate-500"
                           data-testid="model-base-url-input"
                         />
+                      </div>
+                    </div>
+
+                    <!-- 走代理开关 (同一行2列)：开=该模型经代理拨上游，关=直连/继承服务商 -->
+                    <div class="grid grid-cols-1 sm:grid-cols-12 gap-2 sm:gap-4 items-center">
+                      <label class="sm:col-span-3 text-slate-600 font-medium text-xs">
+                        <span class="flex items-center gap-1">
+                          <span>走代理</span>
+                          <UiTooltip content="开启后该模型经下方代理地址拨上游（默认本机 pproxy http://127.0.0.1:8899）；关闭则直连。留空继承服务商配置。">
+                            <Icons name="info" size="12" class="text-slate-400 cursor-pointer" />
+                          </UiTooltip>
+                        </span>
+                      </label>
+                      <div class="sm:col-span-9">
+                        <label class="inline-flex items-center gap-1.5 text-xs text-slate-600 select-none cursor-pointer">
+                          <input
+                            v-model="proxyEnabled"
+                            type="checkbox"
+                            class="rounded border-slate-300 text-slate-900 focus:ring-0 cursor-pointer"
+                            data-testid="model-proxy-enabled"
+                          />
+                          <span>{{ proxyEnabled ? '经代理拨上游' : '直连' }}</span>
+                        </label>
+                        <input
+                          v-if="proxyEnabled"
+                          v-model="form.proxy"
+                          type="text"
+                          placeholder="例如: http://127.0.0.1:8899"
+                          class="mt-1.5 w-full bg-white border border-slate-200/80 rounded-lg px-2.5 py-1.5 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-slate-400/20 focus:border-slate-500"
+                          data-testid="model-proxy-input"
+                        />
+                        <p v-else class="text-3xs text-slate-400 mt-1">关闭 = 直连；需要该模型经代理（如 pproxy 出海）访问上游时打开此开关。</p>
                       </div>
                     </div>
 
