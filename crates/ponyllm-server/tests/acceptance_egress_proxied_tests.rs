@@ -454,3 +454,38 @@ async fn reg3_use_system_proxy_conservative_downgrade() {
         "瞬时失败 TTL 必须 ≤ 2s（契约 1s），实际 {ttl:?}"
     );
 }
+
+/// 回归 4（终审低危一致性提示）：`*.localhost` 子域（如 evil.localhost）与客户端静态
+/// no_proxy（"localhost,127.0.0.1"，hyper-util 按域 + *.localhost 子域匹配）对齐 ⇒
+/// no-proxy 豁免：即使显式代理生效，此类目标也会被客户端**直连**，故 guard 不得走
+/// 无 DNS 快路径（否则"守护以为走代理跳过解析、客户端直连"脱钩）。
+///
+/// 环境注记：本机 systemd-resolved 把 `*.localhost` 解析为 `::1`（数据面 loopback
+/// 允许）⇒ 完整检查结果为 Ok；若某环境解析失败（NXDOMAIN）则为 Err。断言按
+/// **环境中立**方式写：(1) 不得出现 `(true, evil.localhost)` 快路径判定缓存；
+/// (2) 判定必须落 direct 全检查 `(false, host)`；(3) 结果与 1 参直连内核一致。
+#[tokio::test]
+async fn reg4_localhost_subdomain_no_proxy_exempt_full_check() {
+    let state = state_with_proxy(Some("http://127.0.0.1:8899"));
+    let url = "https://evil.localhost/v1";
+
+    let res = state
+        .data_plane_egress_guard_for_target("px", "", url)
+        .await;
+    assert!(
+        cache_lookup(&state, (true, "evil.localhost")).is_none(),
+        "*.localhost 属 no_proxy 豁免：不得出现 (true, evil.localhost) 快路径判定缓存"
+    );
+    let _ = cache_lookup(&state, (false, "evil.localhost")).expect(
+        "判定必须走 direct 完整检查（DNS 照跑）并写入 (false, evil.localhost)",
+    );
+
+    // 结果必须与 1 参直连内核一致：快路径被误用（本环境应 Err 时）此处对不齐。
+    let direct_state = Arc::new(AppState::new(GatewayConfig::default()));
+    let direct = direct_state.data_plane_egress_guard(url).await;
+    assert_eq!(
+        res.is_ok(),
+        direct.is_ok(),
+        "for_target 结果必须与 direct 全检查一致（不得误走快路径）"
+    );
+}

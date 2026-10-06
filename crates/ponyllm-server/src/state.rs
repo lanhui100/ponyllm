@@ -480,9 +480,11 @@ struct InflightEntry<'a> {
 impl Drop for InflightEntry<'_> {
     fn drop(&mut self) {
         if !self.removed {
-            if let Ok(mut map) = self.map.lock() {
-                map.remove(&self.key);
-            }
+            // into_inner aligns with the codebase's cache-lock idiom: a
+            // poisoned mutex must still remove the stale entry, otherwise a
+            // cancelled owner could strand the key on the poison path too.
+            let mut map = self.map.lock().unwrap_or_else(|p| p.into_inner());
+            map.remove(&self.key);
         }
     }
 }

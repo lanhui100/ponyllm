@@ -454,7 +454,16 @@ pub fn proxy_fast_path_eligible(proxy_url: &str, target_url: &str) -> bool {
     match parse_host(target_url) {
         Ok(host) => {
             let lower = host.trim().trim_end_matches('.').to_ascii_lowercase();
-            if lower == "localhost" || lower == "127.0.0.1" || lower.starts_with("127.") {
+            // Align with the client's static no_proxy list ("localhost,127.0.0.1",
+            // matched by hyper-util as domain + *.localhost subdomains): any of
+            // these dial DIRECT even with an explicit proxy, so the guard must
+            // NOT skip DNS for them (a *.localhost target would otherwise pass
+            // the fast policy while the client bypasses the proxy).
+            if lower == "localhost"
+                || lower == "127.0.0.1"
+                || lower.starts_with("127.")
+                || lower.ends_with(".localhost")
+            {
                 return false;
             }
             true
