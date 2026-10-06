@@ -123,11 +123,6 @@ pub fn classify_quota_family(model: &str) -> Option<QuotaFamily> {
     }
 }
 
-/// Conservative reset horizon when an exhausted quota bucket advertises no
-/// `reset_time`: far enough to stop the 429 storm, short enough that a stale
-/// verdict self-expires and never over-blocks past a real recovery.
-const DEFAULT_EXHAUSTED_RESET_FALLBACK_HOURS: i64 = 6;
-
 fn group_matches_family(name: &str, family: QuotaFamily) -> bool {
     let n = name.to_ascii_lowercase();
     match family {
@@ -227,11 +222,12 @@ pub struct ApiKeyEntry {
     /// by the executor for attempt/success accounting (M1/M2, ADR
     /// `2026-09-30-unified-quota-metering-governance-kernel`).
     pub short_meter: Arc<crate::pool::meter::ShortWindowMeter>,
-    /// Antigravity quota-group exhaustion ledger: group display_name → wall-clock
-    /// reset of its (exhausted) weekly bucket. Kept separate from the key-level
-    /// cooldown because exhaustion is *family-scoped*: a key with Gemini weekly
-    /// exhausted can still serve Claude/GPT and must stay schedulable for those
-    /// requests (ADR `2026-10-04-antigravity-group-quota-aware-scheduling`).
+    /// Antigravity family-exhaustion ledger: canonical family group name →
+    /// wall-clock reset of a *live upstream 429*. Written only by
+    /// [`Self::set_family_quota_exhausted`] (real 429); probe bucket data is
+    /// read-only and never persisted here. Used for 429 semantics
+    /// classification and honest unlock hints, not for selection-time
+    /// pre-rejection (ADR `2026-10-04-antigravity-group-quota-aware-scheduling`).
     pub quota_group_exhausted: Arc<RwLock<HashMap<String, DateTime<Utc>>>>,
 }
 
@@ -357,51 +353,29 @@ impl ApiKeyEntry {
         }
     }
 
-    /// Record Antigravity quota-group bucket exhaustion into the family-scoped
-    /// ledger. A group is exhausted when ANY of its window buckets (weekly or
-    /// 5h/individual — the incident 429 "Individual quota reached ... Resets
-    /// in 3h56m" is exactly the individual class) reads `remaining_fraction
-    /// <= 0.0`; the group stays blocked for that family until the farthest
-    /// reset. A bucket without `reset_time` falls back to a conservative
-    /// horizon so a missing field never re-opens the storm. Everything else is
-    /// cleared so recovered groups become schedulable immediately.
+    /// Probe-verdict ingestion for Antigravity quota-group buckets.
+    ///
+    /// **Probe bucket data is read-only for family-exhaustion purposes** (ADR:
+    /// `2026-10-04-antigravity-group-quota-aware-scheduling`): a bucket at
+    /// `remaining_fraction <= 0.0` must neither insert a verdict into the
+    /// family ledger nor clear one. A real family-exhaustion verdict may only
+    /// be written by a live upstream 429 ([`Self::set_family_quota_exhausted`]).
+    /// This entry point only *decays* already-written ledger verdicts whose
+    /// reset horizon has passed, so a stale wall-clock verdict self-expires.
+    /// The grouped bucket windows / fallback horizon remain available to the
+    /// caller as read-only metadata (quota display, unlock hints); they are not
+    /// persisted here as verdicts.
     pub fn apply_quota_groups(&self, groups: Option<&[QuotaSummaryGroup]>, now: DateTime<Utc>) {
+        let _ = groups;
         let mut ledger = self.quota_group_exhausted.write();
-        // Drop entries whose reset has already passed (stale verdicts).
         ledger.retain(|_, reset| *reset > now);
-        match groups {
-            None => {}
-            Some(groups) => {
-                for g in groups {
-                    let mut exhausted_reset: Option<DateTime<Utc>> = None;
-                    for b in &g.buckets {
-                        if b.remaining_fraction <= 0.0 {
-                            let reset = b.reset_time.unwrap_or_else(|| {
-                                now + chrono::Duration::hours(DEFAULT_EXHAUSTED_RESET_FALLBACK_HOURS)
-                            });
-                            exhausted_reset = Some(match exhausted_reset {
-                                Some(cur) => cur.max(reset),
-                                None => reset,
-                            });
-                        }
-                    }
-                    if let Some(reset) = exhausted_reset {
-                        if reset > now {
-                            ledger.insert(g.display_name.clone(), reset);
-                            continue;
-                        }
-                    }
-                    ledger.remove(&g.display_name);
-                }
-            }
-        }
     }
 
     /// Request-path 429 writeback (ADR
     /// `2026-10-04-antigravity-group-quota-aware-scheduling`): an upstream
     /// quota rejection for a known family records the family group's reset
-    /// directly, so the pre-exclusion ledger self-heals between keepalive
-    /// refreshes instead of waiting for the next probe.
+    /// directly. This is the ONLY write path into the family-exhausted ledger;
+    /// probe bucket data must never be persisted here.
     pub fn set_family_quota_exhausted(&self, family: QuotaFamily, reset_at: DateTime<Utc>) {
         if reset_at <= Utc::now() {
             return;
@@ -412,7 +386,8 @@ impl ApiKeyEntry {
     }
 
     /// Whether this key is currently group-exhausted for the given family:
-    /// true only when a matching group has an unexpired weekly-exhaustion reset.
+    /// true only when a matching group has an unexpired real-429
+    /// family-exhaustion reset.
     /// `None` (unknown family / non-Antigravity provider) never filters.
     pub fn quota_group_exhausted_for(&self, family: Option<QuotaFamily>, now: DateTime<Utc>) -> bool {
         let Some(family) = family else { return false };

@@ -778,11 +778,12 @@ async fn handle_admin_quota_inner(q: QuotaQuery, state: Arc<AppState>) -> Vec<Qu
                         view.source = "buckets".to_string();
                         view.quota = Some(items);
                         view.quota_groups = Some(groups);
-                        // Family-scoped quota-group verdicts: apply the fresh
-                        // weekly-bucket exhaustion ledger to the live key entry
-                        // (ADR `2026-10-04-antigravity-group-quota-aware-scheduling`),
-                        // so a manual refresh immediately stops scheduling an
-                        // exhausted family instead of waiting for the next 429.
+                        // Probe bucket data is read-only metadata (ADR
+                        // `2026-10-04-antigravity-group-quota-aware-scheduling`):
+                        // it feeds the quota view and decays stale ledger
+                        // entries, but it must NOT pre-block a family.
+                        // Only a real upstream 429 writes the family-exhausted
+                        // ledger.
                         if let Some(entry) = pool.snapshot_keys().into_iter().find(|k| k.id == id) {
                             entry.apply_quota_groups(snapshot.quota_groups.as_deref(), chrono::Utc::now());
                         }
@@ -3289,13 +3290,12 @@ pub async fn handle_admin_test_key(
                         let has_positive_quota = snapshot.models.values().any(|m| m.remaining_fraction > 0.0);
                         let pools = state.pools.read();
                         if let Some(pool) = pools.get(&p_name) {
-                            // Family-scoped quota-group verdicts (ADR
+                            // Probe quota-group snapshots are read-only
+                            // metadata (ADR
                             // `2026-10-04-antigravity-group-quota-aware-scheduling`):
-                            // a weekly-exhausted group (e.g. Gemini Models)
-                            // blocks only that family's traffic on this key;
-                            // Claude/GPT headroom on the same account stays
-                            // usable. This replaces the previous whole-key
-                            // cooldown that mis-shelved mixed accounts for days.
+                            // they feed the admin view/hints, not the
+                            // family-exhausted ledger. Real upstream 429
+                            // writeback is the only family-ledger producer.
                             if let Some(entry) = pool
                                 .snapshot_keys()
                                 .into_iter()

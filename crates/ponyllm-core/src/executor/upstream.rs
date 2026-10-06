@@ -1606,9 +1606,9 @@ impl UpstreamExecutor {
                 .and_then(|first| first.get("content").and_then(|c| c.as_str()))
                 .and_then(crate::pool::hot_cache::PrefixFingerprint::compute)
                 .map(|fp| fp.as_u64());
-            // Antigravity quota-group aware selection: the requested model's
-            // family decides which quota group (Gemini vs Claude/GPT) must have
-            // headroom for this key to be schedulable.
+            // Family hint for 429 semantics only: selection no longer rejects
+            // by probed family-exhaustion; the family ledger only records live
+            // upstream 429 outcomes for later 429 classification.
             let quota_family = body
                 .get("model")
                 .and_then(|m| m.as_str())
@@ -1781,9 +1781,10 @@ impl UpstreamExecutor {
                         };
                         self.pool.record_error(&key.id, pool_err);
                         // Family-scoped 429 writeback: an upstream quota reset
-                        // records the family group's exhaustion immediately, so
-                        // the pre-exclusion ledger self-heals between keepalive
-                        // refreshes instead of waiting for the next probe
+                        // records the family group's exhaustion immediately and
+                        // is the ONLY source of family-ledger verdicts. The
+                        // ledger is used for later 429 semantics + honest
+                        // unlock hints, never for selection-time pre-rejection
                         // (ADR 2026-10-04-antigravity-group-quota-aware-scheduling).
                         if key.is_antigravity() {
                             if let (Some(fam), Some(reset)) = (quota_family, quota_reset) {
@@ -1926,9 +1927,9 @@ impl UpstreamExecutor {
                 .and_then(|first| first.get("content").and_then(|c| c.as_str()))
                 .and_then(crate::pool::hot_cache::PrefixFingerprint::compute)
                 .map(|fp| fp.as_u64());
-            // Antigravity quota-group aware selection: the requested model's
-            // family decides which quota group (Gemini vs Claude/GPT) must have
-            // headroom for this key to be schedulable.
+            // Family hint for 429 semantics only: selection no longer rejects
+            // by probed family-exhaustion; the family ledger only records live
+            // upstream 429 outcomes for later 429 classification.
             let quota_family = body
                 .get("model")
                 .and_then(|m| m.as_str())
@@ -1939,7 +1940,6 @@ impl UpstreamExecutor {
                         k.id == *pk
                             && k.current_state() == crate::pool::entry::KeyState::Active
                             && KeyPool::budget_ok(k, self.rate_limits.as_ref())
-                            && !k.quota_group_exhausted_for(quota_family, chrono::Utc::now())
                     })
                 } else {
                     None
@@ -2108,9 +2108,10 @@ impl UpstreamExecutor {
                         };
                         self.pool.record_error(&key.id, pool_err);
                         // Family-scoped 429 writeback: an upstream quota reset
-                        // records the family group's exhaustion immediately, so
-                        // the pre-exclusion ledger self-heals between keepalive
-                        // refreshes instead of waiting for the next probe
+                        // records the family group's exhaustion immediately and
+                        // is the ONLY source of family-ledger verdicts. The
+                        // ledger is used for later 429 semantics + honest
+                        // unlock hints, never for selection-time pre-rejection
                         // (ADR 2026-10-04-antigravity-group-quota-aware-scheduling).
                         if key.is_antigravity() {
                             if let (Some(fam), Some(reset)) = (quota_family, quota_reset) {

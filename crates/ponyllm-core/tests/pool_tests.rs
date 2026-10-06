@@ -413,29 +413,46 @@ fn gemini_groups(gemini_weekly: f64, reset: chrono::DateTime<chrono::Utc>) -> Ve
 }
 
 #[test]
-fn test_apply_quota_groups_records_family_exhaustion_and_recovers() {
+fn test_apply_quota_groups_never_writes_family_ledger_and_only_decays() {
+    // New contract (family-quota reactive failover): probe bucket data is
+    // read-only for family-exhaustion. apply_quota_groups must NEVER insert
+    // a family verdict, from any bucket class, and must NOT clear one either.
+    // The sole remaining effect is decaying ledger entries whose reset has
+    // already passed so a stale wall-clock verdict self-expires.
     let entry = ApiKeyEntry::new("ag-1", "sk-1", 1, 10);
     let now = chrono::Utc::now();
     let future = now + chrono::Duration::hours(24);
 
-    // Gemini weekly exhausted -> only Gemini family is blocked.
     entry.apply_quota_groups(Some(&gemini_groups(0.0, future)), now);
-    assert!(entry.quota_group_exhausted_for(Some(ponyllm_core::pool::entry::QuotaFamily::Gemini), now));
+    assert!(!entry.quota_group_exhausted_for(Some(ponyllm_core::pool::entry::QuotaFamily::Gemini), now));
     assert!(!entry.quota_group_exhausted_for(Some(ponyllm_core::pool::entry::QuotaFamily::ThirdParty), now));
     assert!(!entry.quota_group_exhausted_for(None, now));
 
-    // Weekly recovered -> both families schedulable again.
     entry.apply_quota_groups(Some(&gemini_groups(1.0, future)), now);
     assert!(!entry.quota_group_exhausted_for(Some(ponyllm_core::pool::entry::QuotaFamily::Gemini), now));
-    assert!(!entry.quota_group_exhausted_for(Some(ponyllm_core::pool::entry::QuotaFamily::ThirdParty), now));
 
-    // Reset already passed -> verdict expires on its own.
     let past = now - chrono::Duration::hours(1);
     entry.apply_quota_groups(Some(&gemini_groups(0.0, past)), now);
     assert!(!entry.quota_group_exhausted_for(Some(ponyllm_core::pool::entry::QuotaFamily::Gemini), now));
 
-    // Ledger round-trips through the snapshot/restore pair (hot-reload survival).
-    entry.apply_quota_groups(Some(&gemini_groups(0.0, future)), now);
+    // Decay: a pre-existing (real 429) ledger entry whose reset has passed
+    // is pruned; one still in the future survives.
+    let past_ledger = std::collections::HashMap::from([
+        ("Gemini Models".to_string(), now - chrono::Duration::hours(1)),
+        ("Claude and GPT models".to_string(), future),
+    ]);
+    entry.restore_quota_group_exhaustions(past_ledger);
+    entry.apply_quota_groups(None, now);
+    let pruned = entry.quota_group_exhaustions();
+    assert!(!pruned.contains_key("Gemini Models"), "expired entry must be pruned");
+    assert!(pruned.contains_key("Claude and GPT models"), "live entry must survive");
+
+    // Real 429 writeback is the only writer; snapshot/restore round-trips
+    // it verbatim through the pool rebuild path (hot-reload survival).
+    entry.set_family_quota_exhausted(
+        ponyllm_core::pool::entry::QuotaFamily::Gemini,
+        future,
+    );
     let ledger = entry.quota_group_exhaustions();
     let revived = ApiKeyEntry::new("ag-1", "sk-1", 1, 10);
     revived.restore_quota_group_exhaustions(ledger);
@@ -443,43 +460,59 @@ fn test_apply_quota_groups_records_family_exhaustion_and_recovers() {
 }
 
 #[test]
-fn test_pool_family_selection_skips_group_exhausted_key() {
+fn test_pool_family_selection_does_not_pre_reject_group_exhausted_key() {
+    // New reactive contract (ADR 2026-10-06 family-quota reactive failover):
+    // a family ledger entry alone must NEVER exclude a key at selection time.
+    // The ledger is recorded/read for failover bookkeeping and gateway-side
+    // "exhausted" reporting, but selection stays key-level (state/budget/
+    // permission); only a real upstream 429 cooling the key can pull it.
     let pool = KeyPool::new("antigravity", RoutingStrategy::Priority);
     let key1 = ApiKeyEntry::new("ag-gemini-exhausted", "sk-1", 1, 10);
     let key2 = ApiKeyEntry::new("ag-healthy", "sk-2", 2, 10);
     let now = chrono::Utc::now();
     let future = now + chrono::Duration::hours(24);
-    key1.apply_quota_groups(Some(&gemini_groups(0.0, future)), now);
+    key1.set_family_quota_exhausted(
+        ponyllm_core::pool::entry::QuotaFamily::Gemini,
+        future,
+    );
     pool.add_key(key1);
     pool.add_key(key2);
 
-    // Gemini request must NOT land on the Gemini-exhausted (higher-priority) key.
+    // The verdict is recorded in the ledger (read path stays faithful)…
+    let snapshot = pool.snapshot_keys();
+    let k1 = snapshot.iter().find(|k| k.id == "ag-gemini-exhausted").unwrap();
+    assert!(k1.quota_group_exhausted_for(Some(ponyllm_core::pool::entry::QuotaFamily::Gemini), now));
+    assert!(!k1.quota_group_exhausted_for(Some(ponyllm_core::pool::entry::QuotaFamily::ThirdParty), now));
+
+    // …but selection is NOT driven by it: the higher-priority key is still picked.
     let gemini_key = pool
         .select_key_with_affinity_for_family(None, &[], None, Some(ponyllm_core::pool::entry::QuotaFamily::Gemini))
         .unwrap();
-    assert_eq!(gemini_key.id, "ag-healthy");
+    assert_eq!(gemini_key.id, "ag-gemini-exhausted");
 
-    // Third-party request may still use the same account (Claude/GPT weekly is fine).
+    // Third-party selection likewise.
     let third_party_key = pool
         .select_key_with_affinity_for_family(None, &[], None, Some(ponyllm_core::pool::entry::QuotaFamily::ThirdParty))
         .unwrap();
     assert_eq!(third_party_key.id, "ag-gemini-exhausted");
 
-    // Legacy family-less selection keeps the old behavior (no filtering).
+    // Legacy family-less selection keeps the old behavior (no family arg).
     let legacy_key = pool.select_key_with_affinity(None, &[], None).unwrap();
     assert_eq!(legacy_key.id, "ag-gemini-exhausted");
 }
 
 #[test]
-fn test_apply_quota_groups_tracks_individual_bucket_exhaustion() {
+fn test_apply_quota_groups_does_not_mark_individual_bucket_exhaustion() {
+    // New contract (family-quota reactive failover): probe buckets never
+    // write the family ledger — even the incident 429 class ("Individual
+    // quota reached ... Resets in 3h56m", mapped to the 5h/individual
+    // bucket) must not mark the family via apply_quota_groups. A real
+    // verdict only lands via set_family_quota_exhausted (upstream 429).
     use ponyllm_core::pool::entry::QuotaFamily;
     let entry = ApiKeyEntry::new("ag-1", "sk-1", 1, 10);
     let now = chrono::Utc::now();
     let reset = now + chrono::Duration::hours(4);
 
-    // The incident 429 class: "Individual quota reached ... Resets in 3h56m"
-    // maps to the 5h/individual bucket, not weekly. Exhausted individual bucket
-    // must block the family too.
     let groups = vec![ponyllm_core::pool::antigravity::QuotaSummaryGroup {
         display_name: "Gemini Models".to_string(),
         description: None,
@@ -497,8 +530,8 @@ fn test_apply_quota_groups_tracks_individual_bucket_exhaustion() {
         ],
     }];
     entry.apply_quota_groups(Some(&groups), now);
-    assert!(entry.quota_group_exhausted_for(Some(QuotaFamily::Gemini), now));
-    // Weekly alone positive does not block.
+    assert!(!entry.quota_group_exhausted_for(Some(QuotaFamily::Gemini), now));
+    // Healthy grouped buckets neither.
     let groups_ok = vec![ponyllm_core::pool::antigravity::QuotaSummaryGroup {
         display_name: "Gemini Models".to_string(),
         description: None,
@@ -509,13 +542,13 @@ fn test_apply_quota_groups_tracks_individual_bucket_exhaustion() {
 }
 
 #[test]
-fn test_apply_quota_groups_falls_back_without_reset_time() {
+fn test_apply_quota_groups_ignores_exhausted_bucket_without_reset_time() {
     use ponyllm_core::pool::entry::QuotaFamily;
     let entry = ApiKeyEntry::new("ag-1", "sk-1", 1, 10);
     let now = chrono::Utc::now();
-    // Exhausted weekly bucket with NO reset_time: the fallback horizon must
-    // still record the verdict (previously it was silently dropped and the key
-    // kept getting selected into 429s).
+    // Exhausted weekly bucket with NO reset_time: previously a fallback
+    // horizon was written into the ledger. Under the reactive contract the
+    // probe must NOT synthesize the verdict at all — a real 429 writes it.
     let groups = vec![ponyllm_core::pool::antigravity::QuotaSummaryGroup {
         display_name: "Gemini Models".to_string(),
         description: None,
@@ -530,7 +563,8 @@ fn test_apply_quota_groups_falls_back_without_reset_time() {
         }],
     }];
     entry.apply_quota_groups(Some(&groups), now);
-    assert!(entry.quota_group_exhausted_for(Some(QuotaFamily::Gemini), now));
+    assert!(!entry.quota_group_exhausted_for(Some(QuotaFamily::Gemini), now));
+    assert!(entry.quota_group_exhaustions().is_empty());
 }
 
 #[test]
@@ -560,9 +594,13 @@ fn test_set_family_quota_exhausted_and_pool_helpers() {
     // any_key_family_exhausted_any().
     assert_eq!(pool.get_key_status("ag-1"), Some(KeyState::Active));
     assert!(!pool.no_schedulable_keys());
-    // Gemini selection must skip ag-1 and land on ag-2.
+    // The verdict is genuinely recorded on the entry…
+    let snap = pool.snapshot_keys();
+    let k1 = snap.iter().find(|k| k.id == "ag-1").unwrap();
+    assert!(k1.quota_group_exhausted_for(Some(QuotaFamily::Gemini), now));
+    // …but selection no longer pre-rejects it: the higher-priority key wins.
     let picked = pool
         .select_key_with_affinity_for_family(None, &[], None, Some(QuotaFamily::Gemini))
         .unwrap();
-    assert_eq!(picked.id, "ag-2");
+    assert_eq!(picked.id, "ag-1");
 }

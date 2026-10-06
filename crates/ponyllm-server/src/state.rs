@@ -1739,13 +1739,12 @@ async fn advance_rotated_at(
                         }
                     }
 
-                    // Family-scoped quota-group verdicts (ADR
-                    // `2026-10-04-antigravity-group-quota-aware-scheduling`):
-                    // a key whose Gemini weekly bucket is exhausted must stop
-                    // being selected for Gemini requests now — not after the
-                    // first upstream 429 burns an attempt. Applied regardless
-                    // of `current_fraction` so a missing 5h bucket cannot
-                    // skip the weekly exhaustion verdict.
+                    // Probe-sourced quota groups are read-only metadata
+                    // (ADR `2026-10-04-antigravity-group-quota-aware-scheduling`):
+                    // they refresh the entry's decayed verdicts for the
+                    // admin view/unlock hints, but they NO LONGER pre-write
+                    // a family-exhausted verdict that would block selection.
+                    // Real-429 writeback is the only ledger producer now.
                     if let Some(pool) = self.pools.read().get(&provider) {
                         if let Some(entry) = pool.snapshot_keys().into_iter().find(|k| k.id == key_id) {
                             entry.apply_quota_groups(snapshot.quota_groups.as_deref(), chrono::Utc::now());

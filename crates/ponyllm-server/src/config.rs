@@ -538,10 +538,11 @@ fn default_auth_lockout_secs() -> u64 {
 }
 
 fn default_antigravity_refresh_interval_secs() -> u64 {
-    // 15 minutes: the family-quota pre-exclusion ledger (ADR
+    // 15 minutes: the family-quota verdict ledger (real upstream 429 writebacks
+    // only; ADR
     // 2026-10-04-antigravity-group-quota-aware-scheduling) is only as fresh as
     // the keepalive refresh rhythm. The old 24h default let a weekly bucket
-    // exhaust and stay invisible to scheduling for a full day — every request
+    // exhaust and stay invisible to 429 semantics for a full day — every request
     // in that window burned one upstream 429 before the pool cooled. ~40
     // probes/hour across a 10-key pool is negligible egress cost.
     900

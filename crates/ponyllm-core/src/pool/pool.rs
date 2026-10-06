@@ -209,27 +209,30 @@ impl KeyPool {
         self.select_key_with_affinity_for_family(affinity_seed, excluded_key_ids, limits, None)
     }
 
-    /// Select key with KV-cache / session affinity, additionally excluding keys
-    /// whose Antigravity quota *group* for the requested model family is
-    /// exhausted (e.g. Gemini weekly = 0 while Claude/GPT weekly still has
-    /// headroom). `family = None` keeps the legacy key-level semantics, so
-    /// non-Antigravity providers and unclassified models never get filtered.
+    /// Select key with KV-cache / session affinity.
+    ///
+    /// The `family` hint is retained for API compatibility but **not** used to
+    /// pre-reject keys whose family ledger (from a real upstream 429 or a
+    /// probe bucket snapshot) currently has an unexpired verdict. Selection-time
+    /// family gating is removed (ADR: `2026-10-04-antigravity-group-quota-aware-scheduling`):
+    /// the family ledger only records live 429 outcomes for post-hoc 429
+    /// semantics and honest unlock hints; it must never decide which key is
+    /// schedulable. `family = None` keeps legacy key-level semantics, so
+    /// non-Antigravity providers and unclassified models are never filtered.
     pub fn select_key_with_affinity_for_family(
         &self,
         affinity_seed: Option<u64>,
         excluded_key_ids: &[String],
         limits: Option<&RateLimits>,
-        family: Option<crate::pool::entry::QuotaFamily>,
+        _family: Option<crate::pool::entry::QuotaFamily>,
     ) -> Result<Arc<ApiKeyEntry>> {
         let keys = self.keys.read();
-        let now = chrono::Utc::now();
         let active_keys: Vec<Arc<ApiKeyEntry>> = keys
             .iter()
             .filter(|k| {
                 k.current_state() == KeyState::Active
                     && !excluded_key_ids.iter().any(|ex| ex == &k.id)
                     && Self::budget_ok(k, limits)
-                    && !k.quota_group_exhausted_for(family, now)
             })
             .cloned()
             .collect();
@@ -585,8 +588,8 @@ impl KeyPool {
     }
 
     /// True when any *non-disabled* key carries an unexpired quota-group
-    /// exhaustion for some family. Feeds the H1 quota-boundary reclassification
-    /// (extractors::pool_quota_exhausted): after family-aware selection,
+    /// exhaustion for some family (real upstream 429 writeback only). Feeds the
+    /// H1 quota-boundary reclassification (extractors::pool_quota_exhausted):
     /// `NoAvailableKey` with family-exhausted keys present is a quota boundary,
     /// not a transient no-key error — the routing guard must stop before
     /// draining a second provider (ADR
