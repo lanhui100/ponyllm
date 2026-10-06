@@ -1483,6 +1483,23 @@
               "null"
             ]
           },
+          "egress_pool": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Egress pool entries (contract `2026-10-07-egress-pool-contract`):\n`direct`/`none`/empty = gateway node egress, otherwise a proxy URL.\nEmpty/absent = legacy `proxy` semantics."
+          },
+          "egress_strategy": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Egress rotation strategy: `round_robin` (default) | `priority`."
+          },
           "input_price": {
             "type": "number",
             "format": "double"
@@ -2130,7 +2147,8 @@
           "input_price",
           "cached_price",
           "output_price",
-          "models"
+          "models",
+          "egress_strategy"
         ],
         "properties": {
           "base_url": {
@@ -2157,6 +2175,20 @@
               "string",
               "null"
             ]
+          },
+          "egress_pool": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Egress pool (contract `2026-10-07-egress-pool-contract`): ordered exit\nshapes (`direct` or a proxy URL). Omitted/`null` = legacy single-`proxy`\nsemantics. `Some([])` after a clear is serialized as `[]`."
+          },
+          "egress_strategy": {
+            "type": "string",
+            "description": "Egress rotation strategy: `round_robin` | `priority` (default round_robin)."
           },
           "input_price": {
             "type": "number",
@@ -2393,6 +2425,34 @@
           }
         }
       },
+      "QuotaEgressView": {
+        "type": "object",
+        "description": "One egress entry row in the admin quota view (contract C7, frozen wire\nkeys): `index` = position in the pool, `entry` = `\"direct\"` or the raw\nproxy URL, `state` = `\"active\" | \"cooling\"`, `cooldown_reset_at` = RFC 3339\nwhile cooling.",
+        "required": [
+          "index",
+          "entry",
+          "state"
+        ],
+        "properties": {
+          "cooldown_reset_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "entry": {
+            "type": "string"
+          },
+          "index": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "state": {
+            "type": "string"
+          }
+        }
+      },
       "QuotaKeyView": {
         "type": "object",
         "required": [
@@ -2431,6 +2491,16 @@
               "null"
             ],
             "description": "Reason why the key was permanently disabled, if state is `disabled`."
+          },
+          "egress": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/QuotaEgressView"
+            },
+            "description": "Provider-level egress pool view (contract `2026-10-07-egress-pool-contract`,\nC7): one row per exit with live state / cooldown_reset_at. `null`/absent\nfor pool-less providers (legacy proxy semantics)."
           },
           "error_message": {
             "type": [
@@ -2793,6 +2863,23 @@
               "string",
               "null"
             ]
+          },
+          "egress_pool": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Egress pool entries (contract `2026-10-07-egress-pool-contract`):\nexplicit `[]` clears the pool and falls back to the single-`proxy`\nsemantics; absent (`None`) leaves it untouched; entries are validated\nwith the shared egress policy (400 `egress_blocked` on refusal)."
+          },
+          "egress_strategy": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Egress rotation strategy: `round_robin` (default) | `priority`."
           },
           "messages_url": {
             "type": [

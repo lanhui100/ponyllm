@@ -1,10 +1,11 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use parking_lot::Mutex;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE, USER_AGENT};
 use serde_json::{json, Value};
 use crate::error::{CoreError, GatewayErrorKind, Result};
-use crate::pool::{ApiKeyEntry, KeyPool, KeyState, PoolErrorType};
+use crate::pool::{ApiKeyEntry, EgressEntry, EgressPool, KeyPool, KeyState, PoolErrorType};
 use crate::telemetry::{GatewayEvent, StageTimings};
 
 /// One upstream attempt outcome inside an executor retry loop.
@@ -90,6 +91,18 @@ pub struct UpstreamExecutor {
     /// Optional preferred/pinned key id: when specified, key selection attempts
     /// to lock to this specific key (e.g. for per-account in-place retries).
     pinned_key: Option<String>,
+    /// Optional egress pool: per-attempt exit-IP rotation (contract
+    /// `2026-10-07-egress-pool-contract`). `None` = legacy single-proxy
+    /// semantics — the executor behavior is byte-identical to before.
+    /// When `Some`, every attempt selects one exit via
+    /// [`EgressPool::select_egress`]; `direct` entries dial on the base
+    /// `client`, proxy entries dial on the per-URL client from
+    /// `egress_clients`. A quota-exhaustion 429 cools only that exit.
+    egress_pool: Option<Arc<EgressPool>>,
+    /// Per-proxy-URL upstream clients aligned with `egress_pool` entries
+    /// (built by the server with the same timeouts as the base client).
+    /// `Some` only when `egress_pool` is `Some`.
+    egress_clients: Option<HashMap<String, reqwest::Client>>,
 }
 
 impl std::fmt::Debug for UpstreamExecutor {
@@ -1115,7 +1128,23 @@ impl UpstreamExecutor {
             ttfb_timeout: Some(DEFAULT_UPSTREAM_TTFB_TIMEOUT),
             excluded_keys: Vec::new(),
             pinned_key: None,
+            egress_pool: None,
+            egress_clients: None,
         }
+    }
+
+    /// Adopt an egress pool for per-attempt exit-IP rotation. `clients` maps
+    /// each proxy URL present in the pool to an upstream client built with
+    /// the same timeout as the base client; direct entries reuse the base
+    /// `client`. Pass `None`/`None` to keep the legacy single-proxy behavior.
+    pub fn with_egress(
+        mut self,
+        pool: Option<Arc<EgressPool>>,
+        clients: Option<HashMap<String, reqwest::Client>>,
+    ) -> Self {
+        self.egress_pool = pool;
+        self.egress_clients = clients;
+        self
     }
 
     /// Pin key selection to a specific key id (e.g. for single-account in-place retry).
@@ -1693,7 +1722,41 @@ impl UpstreamExecutor {
                 }
             };
 
-            let req = self.client.post(url).headers(headers).json(effective_body.as_ref());
+            let mut egress_entry: Option<Arc<EgressEntry>> = None;
+            let req = match &self.egress_pool {
+                None => self.client.post(url).headers(headers).json(effective_body.as_ref()),
+                Some(eg_pool) => match eg_pool.select_egress() {
+                    Ok(entry) => {
+                        // `direct` exits dial on the base client; proxy exits
+                        // dial on the per-URL client (distinct exit IP per
+                        // proxy). Keep the selected entry so a quota 429 cools
+                        // exactly this exit.
+                        let client = entry
+                            .url
+                            .as_deref()
+                            .and_then(|u| self.egress_clients.as_ref().and_then(|cs| cs.get(u)))
+                            .unwrap_or(&self.client);
+                        egress_entry = Some(entry);
+                        client.post(url).headers(headers).json(effective_body.as_ref())
+                    }
+                    Err(e) => {
+                        // Every egress is cooling (quota-bound) or the pool is
+                        // empty: all keys of this provider share the pool, so
+                        // no other key can succeed. Fail fast with
+                        // quota_exhausted (contract C6).
+                        last_error = format!("No available egress for {}: {}", key.id, e);
+                        last_kind = GatewayErrorKind::QuotaExhausted;
+                        attempt_kinds.push(last_kind.clone());
+                        self.emit_both(&key.id, attempt_idx, None, last_kind.clone(), last_error.clone(), None, attempt_start.elapsed());
+                        return Err(CoreError::AllRetriesFailed {
+                            retries: attempt,
+                            attempted_keys,
+                            last_error,
+                            kind: last_kind,
+                        });
+                    }
+                },
+            };
 
             let resp = match self.send_guarded(req).await {
                 Ok(r) => r,
@@ -1702,6 +1765,9 @@ impl UpstreamExecutor {
                     last_kind = GatewayErrorKind::UpstreamUnavailable;
                     attempt_kinds.push(last_kind.clone());
                     self.pool.record_error(&key.id, PoolErrorType::NetworkError);
+                    if let (Some(eg_pool), Some(eg_entry)) = (&self.egress_pool, &egress_entry) {
+                        eg_pool.record_transient_failure(&eg_entry.id);
+                    }
                     if let Some(delay) = transient_retry_delay(&self.pool, &key.id, attempt, max_attempts, None) {
                         attempted_keys.retain(|id| id != &key.id);
                         self.emit_both(&key.id, attempt_idx, None, last_kind.clone(), last_error.clone(), None, attempt_start.elapsed());
@@ -1780,6 +1846,18 @@ impl UpstreamExecutor {
                             _ => None,
                         };
                         self.pool.record_error(&key.id, pool_err);
+                        // Egress-level quota cooldown (contract
+                        // 2026-10-07-egress-pool-contract): a quota-exhaustion
+                        // 429 cools ONLY the offending exit for the advertised
+                        // reset — body `Resets in` > `Retry-After` header >
+                        // 900s default (record_quota_exhausted's internal
+                        // fallback). Transient failures never cool an exit.
+                        if let (Some(eg_pool), Some(eg_entry)) = (&self.egress_pool, &egress_entry) {
+                            if is_quota {
+                                let body_reset = parse_reset_duration(&err_body);
+                                eg_pool.record_quota_exhausted(&eg_entry.id, body_reset.or(retry_after));
+                            }
+                        }
                         // Family-scoped 429 writeback: an upstream quota reset
                         // records the family group's exhaustion immediately and
                         // is the ONLY source of family-ledger verdicts. The
@@ -1850,10 +1928,20 @@ impl UpstreamExecutor {
                         last_kind = GatewayErrorKind::QuotaExhausted;
                         attempt_kinds.push(last_kind.clone());
                         self.pool.record_error(&key.id, PoolErrorType::QuotaExhausted { retry_after });
+                        // 402 is balance exhaustion = quota boundary: cool the
+                        // exit that carried this attempt (contract egress
+                        // semantics — each exit keeps an independent ledger).
+                        if let (Some(eg_pool), Some(eg_entry)) = (&self.egress_pool, &egress_entry) {
+                            let body_reset = parse_reset_duration(&err_body);
+                            eg_pool.record_quota_exhausted(&eg_entry.id, body_reset.or(retry_after));
+                        }
                     } else if status.is_server_error() {
                         last_kind = GatewayErrorKind::UpstreamUnavailable;
                         attempt_kinds.push(last_kind.clone());
                         self.pool.record_error(&key.id, PoolErrorType::ServerError);
+                        if let (Some(eg_pool), Some(eg_entry)) = (&self.egress_pool, &egress_entry) {
+                            eg_pool.record_transient_failure(&eg_entry.id);
+                        }
                         if let Some(delay) = transient_retry_delay(&self.pool, &key.id, attempt, max_attempts, None) {
                             attempted_keys.retain(|id| id != &key.id);
                             self.emit_both(&key.id, attempt_idx, Some(status_code), last_kind.clone(), last_error.clone(), Some(err_body), attempt_start.elapsed());
@@ -2029,7 +2117,41 @@ impl UpstreamExecutor {
                 }
             };
 
-            let req = self.client.post(url).headers(headers).json(effective_body.as_ref());
+            let mut egress_entry: Option<Arc<EgressEntry>> = None;
+            let req = match &self.egress_pool {
+                None => self.client.post(url).headers(headers).json(effective_body.as_ref()),
+                Some(eg_pool) => match eg_pool.select_egress() {
+                    Ok(entry) => {
+                        // `direct` exits dial on the base client; proxy exits
+                        // dial on the per-URL client (distinct exit IP per
+                        // proxy). Keep the selected entry so a quota 429 cools
+                        // exactly this exit.
+                        let client = entry
+                            .url
+                            .as_deref()
+                            .and_then(|u| self.egress_clients.as_ref().and_then(|cs| cs.get(u)))
+                            .unwrap_or(&self.client);
+                        egress_entry = Some(entry);
+                        client.post(url).headers(headers).json(effective_body.as_ref())
+                    }
+                    Err(e) => {
+                        // Every egress is cooling (quota-bound) or the pool is
+                        // empty: all keys of this provider share the pool, so
+                        // no other key can succeed. Fail fast with
+                        // quota_exhausted (contract C6).
+                        last_error = format!("No available egress for {}: {}", key.id, e);
+                        last_kind = GatewayErrorKind::QuotaExhausted;
+                        attempt_kinds.push(last_kind.clone());
+                        self.emit_both(&key.id, attempt_idx, None, last_kind.clone(), last_error.clone(), None, attempt_start.elapsed());
+                        return Err(CoreError::AllRetriesFailed {
+                            retries: attempt,
+                            attempted_keys,
+                            last_error,
+                            kind: last_kind,
+                        });
+                    }
+                },
+            };
 
             let resp = match self.send_guarded(req).await {
                 Ok(r) => r,
@@ -2038,6 +2160,9 @@ impl UpstreamExecutor {
                     last_kind = GatewayErrorKind::UpstreamUnavailable;
                     attempt_kinds.push(last_kind.clone());
                     self.pool.record_error(&key.id, PoolErrorType::NetworkError);
+                    if let (Some(eg_pool), Some(eg_entry)) = (&self.egress_pool, &egress_entry) {
+                        eg_pool.record_transient_failure(&eg_entry.id);
+                    }
                     if let Some(delay) = transient_retry_delay(&self.pool, &key.id, attempt, max_attempts, None) {
                         attempted_keys.retain(|id| id != &key.id);
                         self.emit_both(&key.id, attempt_idx, None, last_kind.clone(), last_error.clone(), None, attempt_start.elapsed());
@@ -2107,6 +2232,18 @@ impl UpstreamExecutor {
                             _ => None,
                         };
                         self.pool.record_error(&key.id, pool_err);
+                        // Egress-level quota cooldown (contract
+                        // 2026-10-07-egress-pool-contract): a quota-exhaustion
+                        // 429 cools ONLY the offending exit for the advertised
+                        // reset — body `Resets in` > `Retry-After` header >
+                        // 900s default (record_quota_exhausted's internal
+                        // fallback). Transient failures never cool an exit.
+                        if let (Some(eg_pool), Some(eg_entry)) = (&self.egress_pool, &egress_entry) {
+                            if is_quota {
+                                let body_reset = parse_reset_duration(&err_body);
+                                eg_pool.record_quota_exhausted(&eg_entry.id, body_reset.or(retry_after));
+                            }
+                        }
                         // Family-scoped 429 writeback: an upstream quota reset
                         // records the family group's exhaustion immediately and
                         // is the ONLY source of family-ledger verdicts. The
@@ -2177,10 +2314,20 @@ impl UpstreamExecutor {
                         last_kind = GatewayErrorKind::QuotaExhausted;
                         attempt_kinds.push(last_kind.clone());
                         self.pool.record_error(&key.id, PoolErrorType::QuotaExhausted { retry_after });
+                        // 402 is balance exhaustion = quota boundary: cool the
+                        // exit that carried this attempt (contract egress
+                        // semantics — each exit keeps an independent ledger).
+                        if let (Some(eg_pool), Some(eg_entry)) = (&self.egress_pool, &egress_entry) {
+                            let body_reset = parse_reset_duration(&err_body);
+                            eg_pool.record_quota_exhausted(&eg_entry.id, body_reset.or(retry_after));
+                        }
                     } else if status.is_server_error() {
                         last_kind = GatewayErrorKind::UpstreamUnavailable;
                         attempt_kinds.push(last_kind.clone());
                         self.pool.record_error(&key.id, PoolErrorType::ServerError);
+                        if let (Some(eg_pool), Some(eg_entry)) = (&self.egress_pool, &egress_entry) {
+                            eg_pool.record_transient_failure(&eg_entry.id);
+                        }
                         if let Some(delay) = transient_retry_delay(&self.pool, &key.id, attempt, max_attempts, None) {
                             attempted_keys.retain(|id| id != &key.id);
                             self.emit_both(&key.id, attempt_idx, Some(status_code), last_kind.clone(), last_error.clone(), Some(err_body), attempt_start.elapsed());

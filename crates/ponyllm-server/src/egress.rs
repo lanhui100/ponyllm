@@ -94,8 +94,7 @@ fn is_blocked_ip(ip: &IpAddr) -> bool {
     // PONYLLM_ALLOW_LOOPBACK_PROBE=1 lifts the *loopback-only* ban for
     // integration tests and local dev (mock upstreams on 127.0.0.1).
     // Private/link-local/metadata ranges stay blocked regardless.
-    let allow_loopback =
-        std::env::var("PONYLLM_ALLOW_LOOPBACK_PROBE").as_deref() == Ok("1");
+    let allow_loopback = std::env::var("PONYLLM_ALLOW_LOOPBACK_PROBE").as_deref() == Ok("1");
     is_blocked_ip_with(ip, allow_loopback)
 }
 
@@ -134,8 +133,7 @@ fn is_blocked_name(host: &str) -> Option<&'static str> {
     let lower = host.trim().trim_end_matches('.').to_ascii_lowercase();
     if lower == "localhost" {
         // Same test/dev escape hatch as loopback IPs (see is_blocked_ip).
-        let allow_loopback =
-            std::env::var("PONYLLM_ALLOW_LOOPBACK_PROBE").as_deref() == Ok("1");
+        let allow_loopback = std::env::var("PONYLLM_ALLOW_LOOPBACK_PROBE").as_deref() == Ok("1");
         if allow_loopback {
             return None;
         }
@@ -144,7 +142,10 @@ fn is_blocked_name(host: &str) -> Option<&'static str> {
     if lower == "svc" || lower.ends_with(".svc") || lower.ends_with(".svc.cluster.local") {
         return Some("kubernetes in-cluster names (*.svc) are not allowed for admin probes");
     }
-    if METADATA_HOSTS.iter().any(|m| lower == *m || lower.ends_with(&format!(".{}", m))) {
+    if METADATA_HOSTS
+        .iter()
+        .any(|m| lower == *m || lower.ends_with(&format!(".{}", m)))
+    {
         return Some("cloud metadata endpoints are not allowed for admin probes");
     }
     None
@@ -247,6 +248,47 @@ pub fn check_proxy_url_fast(raw: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Egress-pool entry policy (contract C3): `direct` / `none` / empty are
+/// legal (gateway node's own exit); any other entry must pass the proxy URL
+/// policy above. Delegates to `ponyllm_config::validate_egress_entry` — the
+/// single source shared with the config-side C3 acceptance tests — so the
+/// config model and the admin write path can never drift apart.
+pub fn check_egress_pool_entry(raw: &str) -> Result<(), String> {
+    ponyllm_config::validate_egress_entry(raw)
+}
+
+/// Redact credentials from an egress entry for admin VIEWS only (review
+/// VIEW-CREDENTIAL-ECHO): `direct` and credential-free entries are returned
+/// verbatim (byte-identical to the configured string — the quota/providers
+/// views key off the raw value); an entry carrying userinfo is rebuilt as
+/// `scheme://host:port` with the userinfo dropped. The runtime executor keeps
+/// the raw URL (pproxy auth must reach the dialer); only display is sanitized.
+pub fn sanitize_egress_entry_for_view(entry: &str) -> String {
+    let trimmed = entry.trim();
+    if trimmed.is_empty()
+        || trimmed.eq_ignore_ascii_case("direct")
+        || trimmed.eq_ignore_ascii_case("none")
+    {
+        return trimmed.to_string();
+    }
+    match reqwest::Url::parse(trimmed) {
+        Ok(url) => {
+            if url.username().is_empty() && url.password().is_none() {
+                // No credentials: keep the configured verbatim string so view
+                // assertions and operator muscle-memory match the config.
+                trimmed.to_string()
+            } else {
+                let host = url.host_str().unwrap_or("");
+                match url.port() {
+                    Some(port) => format!("{}://{}:{}", url.scheme(), host, port),
+                    None => format!("{}://{}", url.scheme(), host),
+                }
+            }
+        }
+        Err(_) => trimmed.to_string(),
+    }
+}
+
 /// Synchronous (no-DNS-for-literals) policy check. Used by the create/update
 /// provider write path so deployments fail fast on obvious mistakes without
 /// paying a DNS lookup inside the write lock.
@@ -318,20 +360,23 @@ pub async fn check_probe_url(raw: &str) -> Result<(), String> {
             .map(|it| it.map(|s| s.ip()).collect::<Vec<IpAddr>>())
             .map_err(|e| format!("DNS resolution failed for '{}': {}", host_for_lookup, e))
     });
-    let addrs: Vec<IpAddr> = match tokio::time::timeout(std::time::Duration::from_secs(5), lookup).await
-    {
-        Ok(Ok(Ok(addrs))) => addrs,
-        Ok(Ok(Err(e))) => return Err(e),
-        Ok(Err(e)) => return Err(format!("DNS lookup task failed: {}", e)),
-        Err(_) => {
-            return Err(format!(
-                "DNS resolution timed out for '{}' (blocked fail-closed)",
-                host
-            ))
-        }
-    };
+    let addrs: Vec<IpAddr> =
+        match tokio::time::timeout(std::time::Duration::from_secs(5), lookup).await {
+            Ok(Ok(Ok(addrs))) => addrs,
+            Ok(Ok(Err(e))) => return Err(e),
+            Ok(Err(e)) => return Err(format!("DNS lookup task failed: {}", e)),
+            Err(_) => {
+                return Err(format!(
+                    "DNS resolution timed out for '{}' (blocked fail-closed)",
+                    host
+                ))
+            }
+        };
     if addrs.is_empty() {
-        return Err(format!("DNS resolution returned no addresses for '{}'", host));
+        return Err(format!(
+            "DNS resolution returned no addresses for '{}'",
+            host
+        ));
     }
     for ip in &addrs {
         if is_blocked_ip(ip) {
@@ -352,9 +397,14 @@ pub async fn check_probe_url(raw: &str) -> Result<(), String> {
 fn data_plane_blocked_name(host: &str) -> Option<&'static str> {
     let lower = host.trim().trim_end_matches('.').to_ascii_lowercase();
     if lower == "svc" || lower.ends_with(".svc") || lower.ends_with(".svc.cluster.local") {
-        return Some("kubernetes in-cluster names (*.svc) are not allowed for data-plane upstreams");
+        return Some(
+            "kubernetes in-cluster names (*.svc) are not allowed for data-plane upstreams",
+        );
     }
-    if METADATA_HOSTS.iter().any(|m| lower == *m || lower.ends_with(&format!(".{}", m))) {
+    if METADATA_HOSTS
+        .iter()
+        .any(|m| lower == *m || lower.ends_with(&format!(".{}", m)))
+    {
         return Some("cloud metadata endpoints are not allowed for data-plane upstreams");
     }
     None
@@ -483,7 +533,10 @@ pub fn proxy_fast_path_eligible(proxy_url: &str, target_url: &str) -> bool {
 /// authoritative server cannot pin an async worker; refusal is classified
 /// `transient` when DNS itself failed (timeout / error / empty / join), and
 /// deterministic when a private address was resolved.
-pub async fn check_data_plane_url_with_resolver<F>(raw: &str, resolver: F) -> Result<(), DataPlaneRefusal>
+pub async fn check_data_plane_url_with_resolver<F>(
+    raw: &str,
+    resolver: F,
+) -> Result<(), DataPlaneRefusal>
 where
     F: Fn(&str) -> Result<Vec<IpAddr>, DnsLookupError> + Send + 'static,
 {
@@ -677,7 +730,10 @@ mod tests {
             get(|| async {
                 (
                     axum::http::StatusCode::FOUND,
-                    [(axum::http::header::LOCATION, "http://169.254.169.254/latest/meta-data/")],
+                    [(
+                        axum::http::header::LOCATION,
+                        "http://169.254.169.254/latest/meta-data/",
+                    )],
                     "redirect",
                 )
             }),

@@ -163,6 +163,7 @@ fn c3_validate_egress_accepts_public_and_loopback_proxies() {
         "http://egress-1.example.com:8899",// public hostname
         "https://egress-2.example.com:443",
         "socks5://192.0.2.10:1080",        // documentation-test range, public
+        "http://user:pass@egress.example.com:8899", // public hostname + userinfo (legal proxy credential)
     ] {
         assert!(
             validate_egress_entry(entry).is_ok(),
@@ -202,6 +203,34 @@ fn c3_validate_egress_rejects_private_linklocal_and_metadata_targets() {
         assert!(
             validate_egress_entry(entry).is_err(),
             "entry '{entry}' must be refused (SSRF / private / metadata policy)"
+        );
+    }
+}
+
+/// C3 SSRF-bypass forms (adversarial review): alternate IPv4 encodings,
+/// fragment tricks and whitespace-in-host must ALL be refused — a hand-rolled
+/// `scheme://host:port` splitter must never misparse these into a loopback/
+/// hostname pass while a real URL parser would dial the private/metadata
+/// target (URL-parser disagreement = classic SSRF).
+#[test]
+fn c3_validate_egress_rejects_ssrf_bypass_forms() {
+    for entry in [
+        // hex IPv4 encoding of 10.0.0.5 — must not pass as "hostname".
+        "http://0xa000005:3128",
+        // octal IPv4 encoding of 10.0.0.5 (012 = 10).
+        "http://012.0.0.5:3128",
+        // Fragment trick: a real URL parser reads host=10.0.0.5 (private);
+        // a naive rsplit('@') sees 127.0.0.1 (loopback → wrongly allowed).
+        "http://10.0.0.5:8080#@127.0.0.1",
+        "http://169.254.169.254#@127.0.0.1",
+        "http://metadata.google.internal#@127.0.0.1",
+        // Whitespace inside the URL: reqwest::Url refuses it; the validator
+        // must too (no silent trim-and-fallback to a "hostname" pass).
+        "http:// 10.0.0.5:8080",
+    ] {
+        assert!(
+            validate_egress_entry(entry).is_err(),
+            "entry '{entry}' must be refused (SSRF bypass form)"
         );
     }
 }

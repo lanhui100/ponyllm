@@ -9,6 +9,8 @@
 //!       to the provider `proxy` semantics;
 //!     - pool entries are validated with the SSRF guard (private / metadata /
 //!       bad scheme ⇒ 400 `egress_blocked`);
+//!     - userinfo credentials in a pool entry are redacted from every admin
+//!       echo (PUT response / GET providers / GET quota egress view);
 //!     - the existing `admin_write_enabled` gate still guards these writes.
 //! C8 — regression: a provider without `egress_pool` keeps today's behavior
 //!     exactly (`proxy` resolution, empty pool, no egress view).
@@ -365,6 +367,65 @@ async fn c7_admin_write_gate_still_guards_egress_writes() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND, "writes must be gated when admin_write_enabled=false");
+}
+
+/// C7 credential hygiene (adversarial review): userinfo in a pool entry is a
+/// legal proxy credential (validation accepts the public hostname), but no
+/// admin echo may leak the `user:pass@` prefix — not the PUT response, not
+/// GET /api/admin/providers, not the GET /api/admin/quota egress view.
+#[tokio::test]
+async fn c7_egress_views_redact_userinfo_credentials() {
+    let h = EgressAdminHarness::new(true).await;
+    let client = reqwest::Client::new();
+
+    let resp = h
+        .auth(
+            client
+                .put(format!("http://{}/api/admin/providers/zen", h.addr))
+                .header("If-Match", "\"0\"")
+                .json(&serde_json::json!({
+                    "egress_pool": ["direct", "http://user:pass@egress.example.com:8899"],
+                })),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "userinfo entry is a legal proxy: {:?}", resp.text().await.unwrap());
+    let put_body: serde_json::Value = resp.json().await.unwrap();
+    let raw_put = serde_json::to_string(&put_body).unwrap();
+    assert!(
+        !raw_put.contains("user:pass@"),
+        "PUT response must not echo pool credentials: {raw_put}"
+    );
+
+    // Read surfaces agree (provider list + live quota egress view).
+    let list: serde_json::Value = h
+        .auth(client.get(format!("http://{}/api/admin/providers", h.addr)))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let raw_list = serde_json::to_string(&list).unwrap();
+    assert!(
+        !raw_list.contains("user:pass@"),
+        "GET providers must not leak pool credentials: {raw_list}"
+    );
+
+    let quota: serde_json::Value = h
+        .auth(client.get(format!("http://{}/api/admin/quota?provider=zen", h.addr)))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let raw_quota = serde_json::to_string(&quota).unwrap();
+    assert!(
+        !raw_quota.contains("user:pass@"),
+        "GET quota egress view must not leak pool credentials: {raw_quota}"
+    );
 }
 
 // ---------- C8: regression — no pool ⇒ exactly today's behavior ----------

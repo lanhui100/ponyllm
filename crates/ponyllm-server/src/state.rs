@@ -1,27 +1,27 @@
-use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 use parking_lot::RwLock;
 use ponyllm_core::error::{CoreError, Result};
 use ponyllm_core::executor::{EventSink, EventSinkCtx};
 use ponyllm_core::pool::refresh_gate::RefreshGate;
 use ponyllm_core::pool::{
     is_context_capacity_compatible, parse_context_capacity_tokens, AntigravityTokenManager,
-    BillingMode, EconomyScorer, GatewayRoutingStrategy, HotCacheTracker, KeyPool, ModelTier,
-    ModelThinkingSpec, NodeLatencyMetrics, PricingConfig, RefreshPersistHook, SpeedScorer,
-    UpstreamProtocol,
+    BillingMode, EconomyScorer, EgressEntry, EgressPool, EgressStrategy, GatewayRoutingStrategy,
+    HotCacheTracker, KeyPool, ModelThinkingSpec, ModelTier, NodeLatencyMetrics, PricingConfig,
+    RefreshPersistHook, SpeedScorer, UpstreamProtocol,
 };
 use ponyllm_core::{canonicalize_model_name, model_aliases};
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
-use ponyllm_core::telemetry::{
-    ConnectivitySampler, EventBus, EventCtx, MetricsCollector, MetricsProjection,
-    StreamProjection, TimeseriesProjection,
-};
-use ponyllm_core::telemetry::{FlightRecorder, GatewayEvent};
-use ponyllm_config::ConfigFile;
 use crate::admin_store::{ConfigStore, ConfigStoreError};
 use crate::config::{GatewayConfig, ProviderConfig};
 use crate::frames::FrameConverter;
 use crate::routes::models::ParsedRequestModel;
+use ponyllm_config::ConfigFile;
+use ponyllm_core::telemetry::{
+    ConnectivitySampler, EventBus, EventCtx, MetricsCollector, MetricsProjection, StreamProjection,
+    TimeseriesProjection,
+};
+use ponyllm_core::telemetry::{FlightRecorder, GatewayEvent};
 
 /// Config backend polling interval surfaced as overview `hot_reload_ms`
 /// (file backend legacy mtime watcher).
@@ -116,7 +116,9 @@ fn spawn_snapshot_saver(
                 key_usages,
                 pool_cycle_benchmark: Default::default(),
             };
-            if let Err(e) = crate::telemetry_snapshot::save_snapshot_with_live_cycles(&path, &snap, live_cycles) {
+            if let Err(e) =
+                crate::telemetry_snapshot::save_snapshot_with_live_cycles(&path, &snap, live_cycles)
+            {
                 tracing::warn!("telemetry snapshot save failed: {}", e);
             }
         })
@@ -158,7 +160,10 @@ pub struct RoutedTarget {
 }
 
 impl RoutedTarget {
-    pub fn resolve_thinking(&self, requested: Option<ponyllm_protocol::common::ReasoningEffort>) -> ponyllm_protocol::common::ReasoningEffort {
+    pub fn resolve_thinking(
+        &self,
+        requested: Option<ponyllm_protocol::common::ReasoningEffort>,
+    ) -> ponyllm_protocol::common::ReasoningEffort {
         self.thinking_spec.resolve(requested)
     }
 
@@ -173,7 +178,9 @@ impl RoutedTarget {
                 return true;
             }
             // Alias tolerance: "file" and "document" are aliases
-            if (t_lower == "file" && mod_lower == "document") || (t_lower == "document" && mod_lower == "file") {
+            if (t_lower == "file" && mod_lower == "document")
+                || (t_lower == "document" && mod_lower == "file")
+            {
                 return true;
             }
             false
@@ -186,7 +193,6 @@ impl RoutedTarget {
 }
 
 impl RoutedTarget {
-
     /// Upstream endpoint path for the resolved protocol: explicit per-protocol
     /// base wins, otherwise the provider base with the legacy normalizers.
     pub fn chat_completions_url(&self) -> String {
@@ -204,7 +210,11 @@ impl RoutedTarget {
     }
 
     pub fn antigravity_url(&self, _stream: bool) -> String {
-        let base = self.endpoint_base.as_deref().unwrap_or(&self.base_url).trim_end_matches('/');
+        let base = self
+            .endpoint_base
+            .as_deref()
+            .unwrap_or(&self.base_url)
+            .trim_end_matches('/');
         format!("{}/v1internal:streamGenerateContent?alt=sse", base)
     }
 
@@ -300,6 +310,12 @@ fn proxy_client_key(url: &str, timeout: std::time::Duration) -> String {
 pub struct AppState {
     pub config: RwLock<GatewayConfig>,
     pub pools: Arc<RwLock<HashMap<String, Arc<KeyPool>>>>,
+    /// Per-provider egress pools (contract `2026-10-07-egress-pool-contract`):
+    /// exit-IP rotation with independent per-entry cooldowns. Populated from
+    /// `config.providers[*].egress_pool` at build/reload time (and rebuilt on
+    /// admin provider writes); absent for pool-less providers (legacy proxy
+    /// semantics). Parallel to `pools` so the admin quota view can read it.
+    pub egress_pools: Arc<RwLock<HashMap<String, Arc<EgressPool>>>>,
     pub flight_recorder: Arc<FlightRecorder>,
     pub metrics: Arc<MetricsCollector>,
     pub hot_cache: Arc<HotCacheTracker>,
@@ -331,7 +347,8 @@ pub struct AppState {
     /// Dashboard telemetry snapshot path (`None` disables persistence).
     pub telemetry_snapshot_path: Option<std::path::PathBuf>,
     /// Pending usage state snapshots waiting for pools to be registered
-    pub pending_restored_usages: Arc<RwLock<HashMap<String, ponyllm_core::pool::usage::KeyUsageStateSnapshot>>>,
+    pub pending_restored_usages:
+        Arc<RwLock<HashMap<String, ponyllm_core::pool::usage::KeyUsageStateSnapshot>>>,
     /// Config backend polling interval surfaced as overview `hot_reload_ms`.
     /// file=500 (legacy mtime watcher), kubernetes=2000 (Secret poll).
     pub config_poll_ms: u64,
@@ -413,10 +430,14 @@ pub(crate) fn parse_admin_allowlist(raw: &[String]) -> Option<Vec<ipnet::IpNet>>
             Ok(net) => out.push(net),
             Err(_) => match s.parse::<std::net::IpAddr>() {
                 Ok(std::net::IpAddr::V4(v4)) => {
-                    out.push(ipnet::IpNet::V4(ipnet::Ipv4Net::new(v4, 32).expect("v4 /32")));
+                    out.push(ipnet::IpNet::V4(
+                        ipnet::Ipv4Net::new(v4, 32).expect("v4 /32"),
+                    ));
                 }
                 Ok(std::net::IpAddr::V6(v6)) => {
-                    out.push(ipnet::IpNet::V6(ipnet::Ipv6Net::new(v6, 128).expect("v6 /128")));
+                    out.push(ipnet::IpNet::V6(
+                        ipnet::Ipv6Net::new(v6, 128).expect("v6 /128"),
+                    ));
                 }
                 Err(_) => {
                     tracing::warn!(cidr = %s, "admin_ip_allowlist: dropping unparseable entry");
@@ -505,9 +526,7 @@ impl AppState {
         let stream_proj = Arc::new(StreamProjection::default());
         let gw_timeout = std::time::Duration::from_secs(config.upstream_timeout_secs);
         let direct_client = ponyllm_core::executor::create_upstream_http_client_with_timeout(
-            None,
-            false,
-            gw_timeout,
+            None, false, gw_timeout,
         );
         let http_client = ponyllm_core::executor::create_upstream_http_client_with_timeout(
             config.proxy.as_deref(),
@@ -522,13 +541,15 @@ impl AppState {
                     && !trimmed.eq_ignore_ascii_case("direct")
                     && !trimmed.eq_ignore_ascii_case("none")
                 {
-                    proxy_clients.entry(proxy_client_key(trimmed, gw_timeout)).or_insert_with(|| {
-                        ponyllm_core::executor::create_upstream_http_client_with_timeout(
-                            Some(trimmed),
-                            config.use_system_proxy,
-                            gw_timeout,
-                        )
-                    });
+                    proxy_clients
+                        .entry(proxy_client_key(trimmed, gw_timeout))
+                        .or_insert_with(|| {
+                            ponyllm_core::executor::create_upstream_http_client_with_timeout(
+                                Some(trimmed),
+                                config.use_system_proxy,
+                                gw_timeout,
+                            )
+                        });
                 }
             }
             for m_spec in &p_cfg.model_specs {
@@ -538,13 +559,15 @@ impl AppState {
                         && !trimmed.eq_ignore_ascii_case("direct")
                         && !trimmed.eq_ignore_ascii_case("none")
                     {
-                        proxy_clients.entry(proxy_client_key(trimmed, gw_timeout)).or_insert_with(|| {
-                            ponyllm_core::executor::create_upstream_http_client_with_timeout(
-                                Some(trimmed),
-                                config.use_system_proxy,
-                                gw_timeout,
-                            )
-                        });
+                        proxy_clients
+                            .entry(proxy_client_key(trimmed, gw_timeout))
+                            .or_insert_with(|| {
+                                ponyllm_core::executor::create_upstream_http_client_with_timeout(
+                                    Some(trimmed),
+                                    config.use_system_proxy,
+                                    gw_timeout,
+                                )
+                            });
                     }
                 }
             }
@@ -567,7 +590,10 @@ impl AppState {
             );
         }
         let telemetry_snapshot_path = resolve_snapshot_path(&config);
-        let pools: Arc<RwLock<HashMap<String, Arc<KeyPool>>>> = Arc::new(RwLock::new(HashMap::new()));
+        let pools: Arc<RwLock<HashMap<String, Arc<KeyPool>>>> =
+            Arc::new(RwLock::new(HashMap::new()));
+        let egress_pools: Arc<RwLock<HashMap<String, Arc<EgressPool>>>> =
+            Arc::new(RwLock::new(Self::build_egress_pools(&config)));
         let mut restored_usages = HashMap::new();
         if let Some(ref path) = telemetry_snapshot_path {
             if path.is_file() {
@@ -581,14 +607,19 @@ impl AppState {
                         tracing::info!("telemetry snapshot restored from {:?}", path);
                     }
                     None => {
-                        tracing::warn!("telemetry snapshot at {:?} unreadable, starting fresh", path);
+                        tracing::warn!(
+                            "telemetry snapshot at {:?} unreadable, starting fresh",
+                            path
+                        );
                     }
                 }
             }
         }
         let pending_restored_usages = Arc::new(RwLock::new(restored_usages));
-        let cluster_telemetry_store = crate::cluster_telemetry::ClusterTelemetryStore::from_env().map(Arc::new);
-        let cluster_telemetry_tracker = Arc::new(crate::cluster_telemetry::ClusterTelemetryTracker::new());
+        let cluster_telemetry_store =
+            crate::cluster_telemetry::ClusterTelemetryStore::from_env().map(Arc::new);
+        let cluster_telemetry_tracker =
+            Arc::new(crate::cluster_telemetry::ClusterTelemetryTracker::new());
 
         if let Some(ref store) = cluster_telemetry_store {
             let store_clone = store.clone();
@@ -635,13 +666,14 @@ impl AppState {
             config.auth_lockout_secs,
         );
         let admin_sessions = config.admin_session_enabled.then(|| {
-            Arc::new(crate::session::SessionStore::new(std::time::Duration::from_secs(
-                config.admin_session_ttl_secs,
-            )))
+            Arc::new(crate::session::SessionStore::new(
+                std::time::Duration::from_secs(config.admin_session_ttl_secs),
+            ))
         });
         Self {
             config: RwLock::new(config),
             pools,
+            egress_pools,
             flight_recorder,
             metrics,
             hot_cache: Arc::new(HotCacheTracker::new()),
@@ -714,7 +746,6 @@ impl AppState {
         crate::telemetry_snapshot::save_snapshot_with_live_cycles(&path, &snap, live_cycles)
     }
 
-
     /// Override the HTTP client (useful for mock transports in tests).
     pub fn with_http_client(mut self, client: reqwest::Client) -> Self {
         self.direct_client = client.clone();
@@ -760,6 +791,9 @@ impl AppState {
     ///
     /// Respects model-level proxy override > provider-level proxy > gateway default.
     /// Connections are pooled and reused across targets pointing to the same proxy endpoint.
+    /// Providers with an egress pool (contract `2026-10-07-egress-pool-contract`)
+    /// get the DIRECT client: the pool REPLACES the single-proxy semantics and
+    /// per-attempt proxy selection happens inside the executor.
     pub fn http_client_for_target(&self, provider_name: &str, model_name: &str) -> reqwest::Client {
         let cfg = self.config.read();
         let timeout_secs = cfg
@@ -774,13 +808,26 @@ impl AppState {
         // (`data_plane_egress_guard_for_target`): a drift here would either
         // break availability (guard thinks proxied, client dials direct) or
         // break SSRF guarantees (guard skips DNS for a direct target).
-        let proxy_url: Option<String> = cfg.effective_proxy_url_for(provider_name, model_name);
+        let has_egress_pool = cfg
+            .providers
+            .get(provider_name)
+            .map(|p| !p.egress_pool.is_empty())
+            .unwrap_or(false);
+        let proxy_url: Option<String> = if has_egress_pool {
+            None
+        } else {
+            cfg.effective_proxy_url_for(provider_name, model_name)
+        };
         drop(cfg);
 
         // Fast paths for the gateway defaults (no per-target override):
         // reuse the prebuilt gateway/direct clients.
         if timeout == gw_timeout {
-            match proxy_url.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            match proxy_url
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
                 None => return self.direct_client.clone(),
                 Some(url) => return self.get_or_create_proxy_client(url, use_sys, timeout),
             }
@@ -833,6 +880,134 @@ impl AppState {
     /// Return the HTTP client for the given provider (inherits provider default proxy).
     pub fn http_client_for_provider(&self, provider_name: &str) -> reqwest::Client {
         self.http_client_for_target(provider_name, "")
+    }
+
+    /// Build per-provider egress pools from a runtime config (contract
+    /// `2026-10-07-egress-pool-contract`). Providers without a non-empty
+    /// `egress_pool` are absent from the map (legacy proxy semantics).
+    fn build_egress_pools(config: &GatewayConfig) -> HashMap<String, Arc<EgressPool>> {
+        let mut out = HashMap::new();
+        for (name, p_cfg) in &config.providers {
+            if let Some(pool) = Self::build_egress_pool_for_cfg(name, p_cfg) {
+                out.insert(name.clone(), pool);
+            }
+        }
+        out
+    }
+
+    /// Build the live `EgressPool` for one provider entry, normalizing
+    /// `direct`/`none`/empty entries and validating proxy URLs against the
+    /// shared egress policy. `None` when the pool is empty (or every entry
+    /// was invalid and dropped) — the legacy proxy path.
+    fn build_egress_pool_for_cfg(name: &str, p_cfg: &ProviderConfig) -> Option<Arc<EgressPool>> {
+        let raw = p_cfg.effective_egress_pool()?;
+        // Strategy must parse like the admin PUT gate (which 400s bad values):
+        // an unparseable strategy never builds a pool — the provider silently
+        // falls back to the legacy proxy semantics with a loud warning, so the
+        // config load and the admin write path agree (review STRATEGY-DRIFT).
+        let strategy = match p_cfg.egress_strategy.parse::<EgressStrategy>() {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(
+                    provider = %name,
+                    strategy = %p_cfg.egress_strategy,
+                    "invalid egress_strategy: {} — egress pool disabled, falling back to proxy semantics",
+                    e
+                );
+                return None;
+            }
+        };
+        let pool = EgressPool::new(name, strategy);
+        for (i, entry) in raw.iter().enumerate() {
+            let id = format!("egress-{}", i);
+            let trimmed = entry.trim();
+            if trimmed.is_empty()
+                || trimmed.eq_ignore_ascii_case("direct")
+                || trimmed.eq_ignore_ascii_case("none")
+            {
+                pool.add_egress(EgressEntry::direct(id));
+                continue;
+            }
+            // Defense in depth: a config that bypassed the admin write gate
+            // must not let a pool entry dial a private/metadata target.
+            if let Err(reason) = ponyllm_config::validate_egress_entry(trimmed) {
+                tracing::warn!(
+                    provider = %name,
+                    entry = %trimmed,
+                    "dropping invalid egress pool entry: {}",
+                    reason
+                );
+                continue;
+            }
+            pool.add_egress(EgressEntry::proxy(id, trimmed));
+        }
+        if pool.is_empty() {
+            None
+        } else {
+            Some(Arc::new(pool))
+        }
+    }
+
+    /// Egress runtime for one provider/model target: the provider's live pool
+    /// (if configured) plus per-proxy-URL upstream clients with the target's
+    /// effective timeout (direct entries reuse the base client). Both `None`
+    /// = legacy single-proxy path, byte-identical to before the contract.
+    pub fn egress_runtime_for_target(
+        &self,
+        provider_name: &str,
+        model_name: &str,
+    ) -> (
+        Option<Arc<EgressPool>>,
+        Option<HashMap<String, reqwest::Client>>,
+    ) {
+        let Some(pool) = self.egress_pools.read().get(provider_name).cloned() else {
+            return (None, None);
+        };
+        let cfg = self.config.read();
+        let timeout_secs = cfg
+            .providers
+            .get(provider_name)
+            .and_then(|p| p.effective_timeout_secs_for_model(model_name))
+            .unwrap_or(cfg.upstream_timeout_secs);
+        let timeout = std::time::Duration::from_secs(timeout_secs);
+        let use_sys = cfg.use_system_proxy;
+        drop(cfg);
+        let mut clients = HashMap::new();
+        for url in pool.proxy_urls() {
+            clients.insert(
+                url.clone(),
+                self.get_or_create_proxy_client(&url, use_sys, timeout),
+            );
+        }
+        (Some(pool), Some(clients))
+    }
+
+    /// Rebuild one provider's egress pool from the current runtime config
+    /// (admin create/update paths). A cleared/empty pool removes the entry,
+    /// falling back to the legacy proxy semantics. When the pool shape
+    /// (entries + strategy) is unchanged, the existing `Arc` is kept so live
+    /// per-exit cooldowns survive no-op admin writes.
+    pub fn rebuild_egress_pool_for(&self, provider_name: &str) {
+        let fresh = {
+            let cfg = self.config.read();
+            cfg.providers
+                .get(provider_name)
+                .and_then(|p| Self::build_egress_pool_for_cfg(provider_name, p))
+        };
+        let mut map = self.egress_pools.write();
+        match fresh {
+            Some(p) => {
+                let shape_changed = map
+                    .get(provider_name)
+                    .is_none_or(|existing| existing.shape() != p.shape());
+                if shape_changed {
+                    map.insert(provider_name.to_string(), p);
+                }
+            }
+            None => {
+                map.remove(provider_name);
+            }
+        }
     }
 
     /// Probe-only variant of [`Self::http_client_for_provider`] (H2 red-team
@@ -911,7 +1086,18 @@ impl AppState {
             // the client also layers system/env proxies and honors NO_PROXY,
             // so an explicit proxy is no longer a guarantee of where bytes
             // go — always run the full direct check (宁多解析不少解析).
-            if cfg.use_system_proxy {
+            let has_egress_pool = cfg
+                .providers
+                .get(provider_name)
+                .map(|p| !p.egress_pool.is_empty())
+                .unwrap_or(false);
+            if has_egress_pool {
+                // The egress pool REPLACES the single-proxy semantics and the
+                // per-attempt exit is unknown at guard time: run the full
+                // direct check so a pool `direct` entry can never skip local
+                // DNS (SSRF decoupling must not regress).
+                false
+            } else if cfg.use_system_proxy {
                 false
             } else {
                 cfg.effective_proxy_url_for(provider_name, model_name)
@@ -940,7 +1126,10 @@ impl AppState {
         let key = (proxied, host.clone());
         loop {
             {
-                let cache = self.egress_guard_cache.lock().unwrap_or_else(|p| p.into_inner());
+                let cache = self
+                    .egress_guard_cache
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner());
                 if let Some(v) = cache.get(&key) {
                     if v.expires_at > std::time::Instant::now() {
                         if v.ok {
@@ -1014,7 +1203,10 @@ impl AppState {
                 },
             };
             {
-                let mut cache = self.egress_guard_cache.lock().unwrap_or_else(|p| p.into_inner());
+                let mut cache = self
+                    .egress_guard_cache
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner());
                 cache.insert(key.clone(), verdict);
             }
             // Remove the in-flight entry BEFORE notifying: a waiter that
@@ -1053,7 +1245,11 @@ impl AppState {
             .filter_map(|k| {
                 let mgr = k.antigravity_manager()?;
                 let state = k.current_state();
-                Some((state == ponyllm_core::pool::KeyState::Active, mgr.project_id(), k.id.clone()))
+                Some((
+                    state == ponyllm_core::pool::KeyState::Active,
+                    mgr.project_id(),
+                    k.id.clone(),
+                ))
             })
             .max_by_key(|(active, _, _)| *active)
             .map(|(_, project, key_id)| (project, key_id))
@@ -1151,13 +1347,15 @@ impl AppState {
                     && !trimmed.eq_ignore_ascii_case("direct")
                     && !trimmed.eq_ignore_ascii_case("none")
                 {
-                    proxy_clients_guard.entry(proxy_client_key(trimmed, gw_timeout)).or_insert_with(|| {
-                        ponyllm_core::executor::create_upstream_http_client_with_timeout(
-                            Some(trimmed),
-                            new_config.use_system_proxy,
-                            gw_timeout,
-                        )
-                    });
+                    proxy_clients_guard
+                        .entry(proxy_client_key(trimmed, gw_timeout))
+                        .or_insert_with(|| {
+                            ponyllm_core::executor::create_upstream_http_client_with_timeout(
+                                Some(trimmed),
+                                new_config.use_system_proxy,
+                                gw_timeout,
+                            )
+                        });
                 }
             }
             for m_spec in &p_cfg.model_specs {
@@ -1167,13 +1365,15 @@ impl AppState {
                         && !trimmed.eq_ignore_ascii_case("direct")
                         && !trimmed.eq_ignore_ascii_case("none")
                     {
-                        proxy_clients_guard.entry(proxy_client_key(trimmed, gw_timeout)).or_insert_with(|| {
-                            ponyllm_core::executor::create_upstream_http_client_with_timeout(
-                                Some(trimmed),
-                                new_config.use_system_proxy,
-                                gw_timeout,
-                            )
-                        });
+                        proxy_clients_guard
+                            .entry(proxy_client_key(trimmed, gw_timeout))
+                            .or_insert_with(|| {
+                                ponyllm_core::executor::create_upstream_http_client_with_timeout(
+                                    Some(trimmed),
+                                    new_config.use_system_proxy,
+                                    gw_timeout,
+                                )
+                            });
                     }
                 }
             }
@@ -1184,6 +1384,25 @@ impl AppState {
             pools_guard.keys().collect::<Vec<_>>()
         );
         self.metrics.record_config_reload();
+
+        // Rebuild egress pools from the new config (contract
+        // `2026-10-07-egress-pool-contract`). A provider whose pool shape
+        // (entries + strategy) is unchanged keeps its live per-exit cooldown
+        // state across the reload — a hot reload must not resurrect an exit
+        // mid-quota-window and hammer it again (same principle as the key
+        // pool's `inherit_runtime_state`).
+        {
+            let fresh = Self::build_egress_pools(&new_config);
+            let mut egress_guard = self.egress_pools.write();
+            egress_guard.retain(|name, old| {
+                fresh
+                    .get(name)
+                    .is_some_and(|new_p| old.shape() == new_p.shape())
+            });
+            for (name, new_p) in fresh {
+                egress_guard.entry(name).or_insert_with(|| new_p);
+            }
+        }
 
         *config_guard = new_config;
         drop(config_guard);
@@ -1418,7 +1637,12 @@ impl AppState {
                                 cfg.config_version += 1;
                                 match store.save(&cfg, &version).await {
                                     Ok(()) => {
-                                        Self::advance_rotated_at(store.clone(), &key_id, throttled_patch.clone()).await;
+                                        Self::advance_rotated_at(
+                                            store.clone(),
+                                            &key_id,
+                                            throttled_patch.clone(),
+                                        )
+                                        .await;
                                         tracing::info!(
                                             provider = %prov,
                                             key_id = %key_id,
@@ -1459,41 +1683,44 @@ impl AppState {
         }
     }
 
-/// Advance the cross-replica Antigravity rotation clock (`rotated_at` Secret
-/// data key), throttled to at most one patch per key per 10 minutes so a
-/// routine refresh does not churn the Secret's resourceVersion every round.
-/// Best-effort: a failed patch only warns — the in-memory freshness map and
-/// the local `rotated_at` read still cover the common paths.
-async fn advance_rotated_at(
-    store: std::sync::Arc<dyn ConfigStore>,
-    key_id: &str,
-    throttled: std::sync::Arc<tokio::sync::Mutex<HashMap<String, std::time::Instant>>>,
-) {
-    const ROTATED_AT_THROTTLE: std::time::Duration = std::time::Duration::from_secs(600);
-    {
-        let map = throttled.lock().await;
-        if let Some(last) = map.get(key_id) {
-            if last.elapsed() < ROTATED_AT_THROTTLE {
-                return; // recently patched
+    /// Advance the cross-replica Antigravity rotation clock (`rotated_at` Secret
+    /// data key), throttled to at most one patch per key per 10 minutes so a
+    /// routine refresh does not churn the Secret's resourceVersion every round.
+    /// Best-effort: a failed patch only warns — the in-memory freshness map and
+    /// the local `rotated_at` read still cover the common paths.
+    async fn advance_rotated_at(
+        store: std::sync::Arc<dyn ConfigStore>,
+        key_id: &str,
+        throttled: std::sync::Arc<tokio::sync::Mutex<HashMap<String, std::time::Instant>>>,
+    ) {
+        const ROTATED_AT_THROTTLE: std::time::Duration = std::time::Duration::from_secs(600);
+        {
+            let map = throttled.lock().await;
+            if let Some(last) = map.get(key_id) {
+                if last.elapsed() < ROTATED_AT_THROTTLE {
+                    return; // recently patched
+                }
+            }
+        }
+        let now_epoch = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        match store.patch_rotated_at(now_epoch).await {
+            Ok(()) => {
+                throttled
+                    .lock()
+                    .await
+                    .insert(key_id.to_string(), std::time::Instant::now());
+            }
+            Err(e) => {
+                // Conflict is expected when another writer bumped the Secret; the
+                // next refresh round retries the patch. Log, never fail the
+                // refresh (the token itself was already persisted).
+                tracing::warn!(key_id, error = %e, "rotated_at patch failed (non-fatal)");
             }
         }
     }
-    let now_epoch = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    match store.patch_rotated_at(now_epoch).await {
-        Ok(()) => {
-            throttled.lock().await.insert(key_id.to_string(), std::time::Instant::now());
-        }
-        Err(e) => {
-            // Conflict is expected when another writer bumped the Secret; the
-            // next refresh round retries the patch. Log, never fail the
-            // refresh (the token itself was already persisted).
-            tracing::warn!(key_id, error = %e, "rotated_at patch failed (non-fatal)");
-        }
-    }
-}
     /// Automatically scan all registered pools and attach rotation hooks for any
     /// AntigravityTokenManagers.
     pub fn attach_antigravity_rotation_hooks_all(&self) {
@@ -1523,7 +1750,9 @@ async fn advance_rotated_at(
             {
                 let enabled = state.config.read().antigravity_auto_refresh;
                 if enabled {
-                    tracing::info!("Starting initial Antigravity quota & token refresh keepalive cycle");
+                    tracing::info!(
+                        "Starting initial Antigravity quota & token refresh keepalive cycle"
+                    );
                     state.perform_antigravity_keepalive_cycle().await;
                     last_run = std::time::Instant::now();
                 }
@@ -1536,11 +1765,16 @@ async fn advance_rotated_at(
 
                 let (enabled, interval_secs) = {
                     let cfg = state.config.read();
-                    (cfg.antigravity_auto_refresh, cfg.antigravity_refresh_interval_secs.max(60))
+                    (
+                        cfg.antigravity_auto_refresh,
+                        cfg.antigravity_refresh_interval_secs.max(60),
+                    )
                 };
 
                 if enabled && last_run.elapsed() >= std::time::Duration::from_secs(interval_secs) {
-                    tracing::info!("Starting scheduled Antigravity quota & token refresh keepalive cycle");
+                    tracing::info!(
+                        "Starting scheduled Antigravity quota & token refresh keepalive cycle"
+                    );
                     state.perform_antigravity_keepalive_cycle().await;
                     last_run = std::time::Instant::now();
                 }
@@ -1554,7 +1788,12 @@ async fn advance_rotated_at(
             return; // graceful shutdown: no refresh work during drain
         }
         // Collect Antigravity key managers without holding locks across async operations.
-        let key_entries: Vec<(String, String, Arc<ponyllm_core::pool::AntigravityTokenManager>, Option<String>)> = {
+        let key_entries: Vec<(
+            String,
+            String,
+            Arc<ponyllm_core::pool::AntigravityTokenManager>,
+            Option<String>,
+        )> = {
             let pools = self.pools.read();
             let cfg = self.config.read();
             let mut list = Vec::new();
@@ -1667,7 +1906,12 @@ async fn advance_rotated_at(
                         hits
                     );
                     if let Some(pool) = self.pools.read().get(&provider) {
-                        pool.record_error(&key_id, ponyllm_core::pool::PoolErrorType::AuthInvalid { reason: Some(reason.clone()) });
+                        pool.record_error(
+                            &key_id,
+                            ponyllm_core::pool::PoolErrorType::AuthInvalid {
+                                reason: Some(reason.clone()),
+                            },
+                        );
                     }
                     continue;
                 }
@@ -1686,7 +1930,11 @@ async fn advance_rotated_at(
 
             // 2. Fetch latest quota snapshot to warm quota buckets
             let probe_client = self.probe_http_client_for_provider(&provider);
-            match mgr.with_client(&probe_client).fetch_quota(base_url.as_deref()).await {
+            match mgr
+                .with_client(&probe_client)
+                .fetch_quota(base_url.as_deref())
+                .await
+            {
                 Ok(snapshot) => {
                     tracing::debug!(
                         provider = %provider,
@@ -1701,18 +1949,28 @@ async fn advance_rotated_at(
                         .unwrap_or_default()
                         .as_millis() as u64;
 
-                    let current_fraction = snapshot.quota_groups.as_ref().and_then(|groups| {
-                        for g in groups {
-                            for b in &g.buckets {
-                                if b.window.eq_ignore_ascii_case("5h") || b.bucket_id.contains("5h") {
-                                    return Some(b.remaining_fraction);
+                    let current_fraction = snapshot
+                        .quota_groups
+                        .as_ref()
+                        .and_then(|groups| {
+                            for g in groups {
+                                for b in &g.buckets {
+                                    if b.window.eq_ignore_ascii_case("5h")
+                                        || b.bucket_id.contains("5h")
+                                    {
+                                        return Some(b.remaining_fraction);
+                                    }
                                 }
                             }
-                        }
-                        None
-                    }).or_else(|| {
-                        snapshot.models.values().next().map(|m| m.remaining_fraction)
-                    });
+                            None
+                        })
+                        .or_else(|| {
+                            snapshot
+                                .models
+                                .values()
+                                .next()
+                                .map(|m| m.remaining_fraction)
+                        });
 
                     let weekly_fraction = snapshot.quota_groups.as_ref().and_then(|groups| {
                         for g in groups {
@@ -1721,7 +1979,12 @@ async fn advance_rotated_at(
                                 let b_id = b.bucket_id.to_lowercase();
                                 let b_desc = b.description.as_deref().unwrap_or("").to_lowercase();
                                 let b_disp = b.display_name.as_deref().unwrap_or("").to_lowercase();
-                                if win == "weekly" || b_id.contains("week") || b_desc.contains("week") || b_disp.contains("周") || b_id.contains("7d") {
+                                if win == "weekly"
+                                    || b_id.contains("week")
+                                    || b_desc.contains("week")
+                                    || b_disp.contains("周")
+                                    || b_id.contains("7d")
+                                {
                                     return Some(b.remaining_fraction);
                                 }
                             }
@@ -1731,10 +1994,14 @@ async fn advance_rotated_at(
 
                     if let Some(frac) = current_fraction {
                         if let Some(pool) = self.pools.read().get(&provider) {
-                            if let Some(entry) = pool.snapshot_keys().into_iter().find(|k| k.id == key_id) {
-                                entry
-                                    .usage_tracker
-                                    .observe_upstream_probe_dual(now_ms, Some(frac), weekly_fraction);
+                            if let Some(entry) =
+                                pool.snapshot_keys().into_iter().find(|k| k.id == key_id)
+                            {
+                                entry.usage_tracker.observe_upstream_probe_dual(
+                                    now_ms,
+                                    Some(frac),
+                                    weekly_fraction,
+                                );
                             }
                         }
                     }
@@ -1746,8 +2013,13 @@ async fn advance_rotated_at(
                     // a family-exhausted verdict that would block selection.
                     // Real-429 writeback is the only ledger producer now.
                     if let Some(pool) = self.pools.read().get(&provider) {
-                        if let Some(entry) = pool.snapshot_keys().into_iter().find(|k| k.id == key_id) {
-                            entry.apply_quota_groups(snapshot.quota_groups.as_deref(), chrono::Utc::now());
+                        if let Some(entry) =
+                            pool.snapshot_keys().into_iter().find(|k| k.id == key_id)
+                        {
+                            entry.apply_quota_groups(
+                                snapshot.quota_groups.as_deref(),
+                                chrono::Utc::now(),
+                            );
                         }
                     }
                 }
@@ -1762,8 +2034,11 @@ async fn advance_rotated_at(
                     // key over a WAF/HTML/scope 403 or transport jitter
                     // (the observed 2026-10-04 `quota_probe_failed` was
                     // exactly such a misread).
-                    if let ponyllm_core::error::CoreError::UpstreamStatusError { status, body } = &e {
-                        if let Some(pool_err) = ponyllm_core::executor::classify_probe_failure(status.as_u16(), body) {
+                    if let ponyllm_core::error::CoreError::UpstreamStatusError { status, body } = &e
+                    {
+                        if let Some(pool_err) =
+                            ponyllm_core::executor::classify_probe_failure(status.as_u16(), body)
+                        {
                             if let Some(pool) = self.pools.read().get(&provider) {
                                 let preview: String =
                                     format!("{pool_err:?}").chars().take(300).collect();
@@ -1832,12 +2107,7 @@ async fn advance_rotated_at(
     }
 
     /// Emit one event on the bus with an explicit provider.
-    pub fn emit(
-        &self,
-        ctx: &EventCtx,
-        provider: Option<String>,
-        event: GatewayEvent,
-    ) -> u64 {
+    pub fn emit(&self, ctx: &EventCtx, provider: Option<String>, event: GatewayEvent) -> u64 {
         self.event_bus.append(ctx, provider, event)
     }
 
@@ -1857,7 +2127,13 @@ async fn advance_rotated_at(
         header_strategy: Option<GatewayRoutingStrategy>,
         prompt: Option<&str>,
     ) -> Result<Vec<RoutedTarget>> {
-        self.resolve_routed_targets_with_prompt_and_protocol(parsed, header_strategy, prompt, None, None)
+        self.resolve_routed_targets_with_prompt_and_protocol(
+            parsed,
+            header_strategy,
+            prompt,
+            None,
+            None,
+        )
     }
 
     /// Same as above with an explicit per-request protocol override
@@ -1872,7 +2148,14 @@ async fn advance_rotated_at(
         proto_override: Option<UpstreamProtocol>,
         inbound: Option<UpstreamProtocol>,
     ) -> Result<Vec<RoutedTarget>> {
-        self.resolve_routed_targets_full(parsed, header_strategy, prompt, proto_override, inbound, &[])
+        self.resolve_routed_targets_full(
+            parsed,
+            header_strategy,
+            prompt,
+            proto_override,
+            inbound,
+            &[],
+        )
     }
 
     /// Full routed targets resolution with modality requirements filtering
@@ -1923,7 +2206,9 @@ async fn advance_rotated_at(
     ) -> Result<RoutedTarget> {
         let mut targets = self.resolve_routed_targets(parsed, header_strategy)?;
         if targets.is_empty() {
-            return Err(CoreError::Internal("No routing candidates available".to_string()));
+            return Err(CoreError::Internal(
+                "No routing candidates available".to_string(),
+            ));
         }
         Ok(targets.remove(0))
     }
@@ -1979,29 +2264,59 @@ async fn advance_rotated_at(
                     )));
                 }
             }
-            return Ok(self.sort_auto_candidates(candidates, strategy, config, cached_provider, inbound));
+            return Ok(self.sort_auto_candidates(
+                candidates,
+                strategy,
+                config,
+                cached_provider,
+                inbound,
+            ));
         }
 
         // Default auto (no explicit tier): Try Standard -> Elevate to Flagship -> Fallback to Light
         let standard_candidates: Vec<RoutedTarget> = self
-            .collect_tier_candidates(ModelTier::Standard, strategy, config, proto_override, inbound)
+            .collect_tier_candidates(
+                ModelTier::Standard,
+                strategy,
+                config,
+                proto_override,
+                inbound,
+            )
             .into_iter()
             .filter(filter_compat)
             .collect();
 
         if !standard_candidates.is_empty() {
-            return Ok(self.sort_auto_candidates(standard_candidates, strategy, config, cached_provider, inbound));
+            return Ok(self.sort_auto_candidates(
+                standard_candidates,
+                strategy,
+                config,
+                cached_provider,
+                inbound,
+            ));
         }
 
         // Adaptive Tier Elevation: Elevate to Flagship if Standard has no matching (or 1M or modality) nodes
         let flagship_candidates: Vec<RoutedTarget> = self
-            .collect_tier_candidates(ModelTier::Flagship, strategy, config, proto_override, inbound)
+            .collect_tier_candidates(
+                ModelTier::Flagship,
+                strategy,
+                config,
+                proto_override,
+                inbound,
+            )
             .into_iter()
             .filter(filter_compat)
             .collect();
 
         if !flagship_candidates.is_empty() {
-            return Ok(self.sort_auto_candidates(flagship_candidates, strategy, config, cached_provider, inbound));
+            return Ok(self.sort_auto_candidates(
+                flagship_candidates,
+                strategy,
+                config,
+                cached_provider,
+                inbound,
+            ));
         }
 
         // Fallback to Light tier
@@ -2012,7 +2327,13 @@ async fn advance_rotated_at(
             .collect();
 
         if !light_candidates.is_empty() {
-            return Ok(self.sort_auto_candidates(light_candidates, strategy, config, cached_provider, inbound));
+            return Ok(self.sort_auto_candidates(
+                light_candidates,
+                strategy,
+                config,
+                cached_provider,
+                inbound,
+            ));
         }
 
         if !required_modalities.is_empty() {
@@ -2061,7 +2382,10 @@ async fn advance_rotated_at(
                     resolve_effective_protocol(p_name, p_cfg, clean, proto_override, inbound);
                 candidates.push(RoutedTarget {
                     provider_name: p_name.clone(),
-                    base_url: spec.base_url.clone().unwrap_or_else(|| p_cfg.base_url.clone()),
+                    base_url: spec
+                        .base_url
+                        .clone()
+                        .unwrap_or_else(|| p_cfg.base_url.clone()),
                     physical_model: clean.clone(),
                     tier: spec.tier,
                     priority: spec.priority,
@@ -2090,11 +2414,19 @@ async fn advance_rotated_at(
                     let thinking_spec = spec.thinking_spec();
                     let pricing = p_cfg.get_model_pricing(effective);
                     let billing_mode = p_cfg.get_model_billing_mode(effective);
-                    let (protocol, endpoint_base) =
-                        resolve_effective_protocol(p_name, p_cfg, effective, proto_override, inbound);
+                    let (protocol, endpoint_base) = resolve_effective_protocol(
+                        p_name,
+                        p_cfg,
+                        effective,
+                        proto_override,
+                        inbound,
+                    );
                     candidates.push(RoutedTarget {
                         provider_name: p_name.clone(),
-                        base_url: spec.base_url.clone().unwrap_or_else(|| p_cfg.base_url.clone()),
+                        base_url: spec
+                            .base_url
+                            .clone()
+                            .unwrap_or_else(|| p_cfg.base_url.clone()),
                         physical_model: effective.to_string(),
                         tier: spec.tier,
                         priority: spec.priority,
@@ -2125,11 +2457,19 @@ async fn advance_rotated_at(
                     let thinking_spec = spec.thinking_spec();
                     let pricing = p_cfg.get_model_pricing(sub_effective);
                     let billing_mode = p_cfg.get_model_billing_mode(sub_effective);
-                    let (protocol, endpoint_base) =
-                        resolve_effective_protocol(prefix, p_cfg, sub_effective, proto_override, inbound);
+                    let (protocol, endpoint_base) = resolve_effective_protocol(
+                        prefix,
+                        p_cfg,
+                        sub_effective,
+                        proto_override,
+                        inbound,
+                    );
                     candidates.push(RoutedTarget {
                         provider_name: prefix.to_string(),
-                        base_url: spec.base_url.clone().unwrap_or_else(|| p_cfg.base_url.clone()),
+                        base_url: spec
+                            .base_url
+                            .clone()
+                            .unwrap_or_else(|| p_cfg.base_url.clone()),
                         physical_model: sub_effective.to_string(),
                         tier: spec.tier,
                         priority: spec.priority,
@@ -2155,7 +2495,10 @@ async fn advance_rotated_at(
             let lower = effective.to_lowercase();
             for (p_name, p_cfg) in &config.providers {
                 if lower.contains(p_name)
-                    || (p_name == "openai" && (lower.starts_with("gpt") || lower.starts_with("o1") || lower.starts_with("o3")))
+                    || (p_name == "openai"
+                        && (lower.starts_with("gpt")
+                            || lower.starts_with("o1")
+                            || lower.starts_with("o3")))
                     || (p_name == "anthropic" && lower.starts_with("claude"))
                     || (p_name == "deepseek" && lower.starts_with("deepseek"))
                 {
@@ -2163,11 +2506,19 @@ async fn advance_rotated_at(
                     let thinking_spec = spec.thinking_spec();
                     let pricing = p_cfg.get_model_pricing(effective);
                     let billing_mode = p_cfg.get_model_billing_mode(effective);
-                    let (protocol, endpoint_base) =
-                        resolve_effective_protocol(p_name, p_cfg, effective, proto_override, inbound);
+                    let (protocol, endpoint_base) = resolve_effective_protocol(
+                        p_name,
+                        p_cfg,
+                        effective,
+                        proto_override,
+                        inbound,
+                    );
                     candidates.push(RoutedTarget {
                         provider_name: p_name.clone(),
-                        base_url: spec.base_url.clone().unwrap_or_else(|| p_cfg.base_url.clone()),
+                        base_url: spec
+                            .base_url
+                            .clone()
+                            .unwrap_or_else(|| p_cfg.base_url.clone()),
                         physical_model: effective.to_string(),
                         tier: spec.tier,
                         priority: spec.priority,
@@ -2188,8 +2539,6 @@ async fn advance_rotated_at(
             }
         }
 
-
-
         if candidates.is_empty() {
             return Err(CoreError::Internal(format!(
                 "No provider configured to handle model '{}'",
@@ -2202,11 +2551,13 @@ async fn advance_rotated_at(
         // append as secondary candidates so if all primary provider targets fail or converge early
         // (e.g. deterministic empty STOP), the router can fail over to the fallback model.
         // We use a visited set and a depth limit of 3 to prevent cyclic/duplicate references.
-        let mut visited_models: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut visited_models: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
         visited_models.insert(clean.clone());
         visited_models.insert(effective.to_string());
 
-        let mut queue: std::collections::VecDeque<(String, usize)> = std::collections::VecDeque::new();
+        let mut queue: std::collections::VecDeque<(String, usize)> =
+            std::collections::VecDeque::new();
         for target in &candidates {
             if let Some(p_cfg) = config.providers.get(&target.provider_name) {
                 let spec = p_cfg.get_model_spec(&target.physical_model);
@@ -2218,20 +2569,27 @@ async fn advance_rotated_at(
                 // Automatic intra-family fallback for Gemini 3:
                 // If gemini-3.*-flash-high or gemini-3.*-flash-tiered experiences empty STOP or upstream choke,
                 // automatically fallback to gemini-3.*-flash-medium within the same provider if supported.
-                if target.physical_model.contains("gemini-3") && (target.physical_model.ends_with("-high") || target.physical_model.ends_with("-tiered")) {
-                    let base = target.physical_model
+                if target.physical_model.contains("gemini-3")
+                    && (target.physical_model.ends_with("-high")
+                        || target.physical_model.ends_with("-tiered"))
+                {
+                    let base = target
+                        .physical_model
                         .strip_suffix("-high")
                         .or_else(|| target.physical_model.strip_suffix("-tiered"))
                         .unwrap_or(&target.physical_model);
                     let med_model = format!("{}-medium", base);
-                    if p_cfg.models.iter().any(|m| m == &med_model) && visited_models.insert(med_model.clone()) {
+                    if p_cfg.models.iter().any(|m| m == &med_model)
+                        && visited_models.insert(med_model.clone())
+                    {
                         queue.push_back((med_model, 1));
                     }
                 }
             }
         }
 
-        let mut sorted_primary = self.sort_candidates(candidates, strategy, config, cached_provider, inbound);
+        let mut sorted_primary =
+            self.sort_candidates(candidates, strategy, config, cached_provider, inbound);
 
         let mut secondary_candidates = Vec::new();
         while let Some((fb_model, depth)) = queue.pop_front() {
@@ -2241,11 +2599,19 @@ async fn advance_rotated_at(
                     let thinking_spec = spec.thinking_spec();
                     let pricing = p_cfg.get_model_pricing(&fb_model);
                     let billing_mode = p_cfg.get_model_billing_mode(&fb_model);
-                    let (protocol, endpoint_base) =
-                        resolve_effective_protocol(p_name, p_cfg, &fb_model, proto_override, inbound);
+                    let (protocol, endpoint_base) = resolve_effective_protocol(
+                        p_name,
+                        p_cfg,
+                        &fb_model,
+                        proto_override,
+                        inbound,
+                    );
                     secondary_candidates.push(RoutedTarget {
                         provider_name: p_name.clone(),
-                        base_url: spec.base_url.clone().unwrap_or_else(|| p_cfg.base_url.clone()),
+                        base_url: spec
+                            .base_url
+                            .clone()
+                            .unwrap_or_else(|| p_cfg.base_url.clone()),
                         physical_model: fb_model.clone(),
                         tier: spec.tier,
                         priority: spec.priority,
@@ -2275,7 +2641,13 @@ async fn advance_rotated_at(
         }
 
         if !secondary_candidates.is_empty() {
-            let sorted_secondary = self.sort_candidates(secondary_candidates, strategy, config, cached_provider, inbound);
+            let sorted_secondary = self.sort_candidates(
+                secondary_candidates,
+                strategy,
+                config,
+                cached_provider,
+                inbound,
+            );
             sorted_primary.extend(sorted_secondary);
         }
 
@@ -2286,10 +2658,7 @@ async fn advance_rotated_at(
             if sorted_primary.is_empty() && before_len > 0 {
                 return Err(CoreError::CapacityExhausted {
                     required_context: "1M".to_string(),
-                    message: format!(
-                        "Model '{}' does not support 1M context requirement",
-                        clean
-                    ),
+                    message: format!("Model '{}' does not support 1M context requirement", clean),
                 });
             }
         }
@@ -2312,10 +2681,19 @@ async fn advance_rotated_at(
             let default_billing = p_cfg.get_model_billing_mode(&p_cfg.default_model);
             if default_spec.tier == tier {
                 let thinking_spec = default_spec.thinking_spec();
-                let (protocol, endpoint_base) = resolve_effective_protocol(p_name, p_cfg, &p_cfg.default_model, proto_override, inbound);
+                let (protocol, endpoint_base) = resolve_effective_protocol(
+                    p_name,
+                    p_cfg,
+                    &p_cfg.default_model,
+                    proto_override,
+                    inbound,
+                );
                 candidates.push(RoutedTarget {
                     provider_name: p_name.clone(),
-                    base_url: default_spec.base_url.clone().unwrap_or_else(|| p_cfg.base_url.clone()),
+                    base_url: default_spec
+                        .base_url
+                        .clone()
+                        .unwrap_or_else(|| p_cfg.base_url.clone()),
                     physical_model: p_cfg.default_model.clone(),
                     tier,
                     priority: default_spec.priority,
@@ -2344,7 +2722,10 @@ async fn advance_rotated_at(
                             resolve_effective_protocol(p_name, p_cfg, m, proto_override, inbound);
                         candidates.push(RoutedTarget {
                             provider_name: p_name.clone(),
-                            base_url: spec.base_url.clone().unwrap_or_else(|| p_cfg.base_url.clone()),
+                            base_url: spec
+                                .base_url
+                                .clone()
+                                .unwrap_or_else(|| p_cfg.base_url.clone()),
                             physical_model: m.clone(),
                             tier,
                             priority: spec.priority,
@@ -2364,8 +2745,6 @@ async fn advance_rotated_at(
                     }
                 }
             }
-
-
         }
         candidates
     }
@@ -2378,7 +2757,14 @@ async fn advance_rotated_at(
         cached_provider: Option<&str>,
         inbound: Option<UpstreamProtocol>,
     ) -> Vec<RoutedTarget> {
-        self.sort_candidates_internal(candidates, strategy, config, cached_provider, inbound, false)
+        self.sort_candidates_internal(
+            candidates,
+            strategy,
+            config,
+            cached_provider,
+            inbound,
+            false,
+        )
     }
 
     fn sort_auto_candidates(
@@ -2414,7 +2800,9 @@ async fn advance_rotated_at(
                 let mut keyed: Vec<(f64, RoutedTarget)> = candidates
                     .into_iter()
                     .map(|c| {
-                        let cached = cached_provider.map(|p| p == c.provider_name).unwrap_or(false);
+                        let cached = cached_provider
+                            .map(|p| p == c.provider_name)
+                            .unwrap_or(false);
                         let score = EconomyScorer::score_candidate(
                             &c.pricing,
                             c.billing_mode,
@@ -2443,7 +2831,9 @@ async fn advance_rotated_at(
                 let mut keyed: Vec<(f64, RoutedTarget)> = candidates
                     .into_iter()
                     .map(|c| {
-                        let cached = cached_provider.map(|p| p == c.provider_name).unwrap_or(false);
+                        let cached = cached_provider
+                            .map(|p| p == c.provider_name)
+                            .unwrap_or(false);
                         let score = EconomyScorer::score_candidate(
                             &c.pricing,
                             c.billing_mode,
@@ -2508,12 +2898,42 @@ async fn advance_rotated_at(
         let mut seen = std::collections::HashSet::new();
 
         // 1. auto virtual models
-        result.push(("auto".to_string(), "ponyllm".to_string(), Some("Auto(智能·主力默认)".to_string()), "auto".to_string()));
-        result.push(("auto:standard".to_string(), "ponyllm".to_string(), Some("Auto(智能·主力)".to_string()), "auto".to_string()));
-        result.push(("auto:flagship".to_string(), "ponyllm".to_string(), Some("Auto(智能·旗舰)".to_string()), "auto".to_string()));
-        result.push(("auto:economy".to_string(), "ponyllm".to_string(), Some("Auto(智能·省钱)".to_string()), "auto".to_string()));
-        result.push(("auto:fastest".to_string(), "ponyllm".to_string(), Some("Auto(智能·极速)".to_string()), "auto".to_string()));
-        result.push(("auto[1m]".to_string(), "ponyllm".to_string(), Some("Auto(智能·1M长上下文)".to_string()), "auto".to_string()));
+        result.push((
+            "auto".to_string(),
+            "ponyllm".to_string(),
+            Some("Auto(智能·主力默认)".to_string()),
+            "auto".to_string(),
+        ));
+        result.push((
+            "auto:standard".to_string(),
+            "ponyllm".to_string(),
+            Some("Auto(智能·主力)".to_string()),
+            "auto".to_string(),
+        ));
+        result.push((
+            "auto:flagship".to_string(),
+            "ponyllm".to_string(),
+            Some("Auto(智能·旗舰)".to_string()),
+            "auto".to_string(),
+        ));
+        result.push((
+            "auto:economy".to_string(),
+            "ponyllm".to_string(),
+            Some("Auto(智能·省钱)".to_string()),
+            "auto".to_string(),
+        ));
+        result.push((
+            "auto:fastest".to_string(),
+            "ponyllm".to_string(),
+            Some("Auto(智能·极速)".to_string()),
+            "auto".to_string(),
+        ));
+        result.push((
+            "auto[1m]".to_string(),
+            "ponyllm".to_string(),
+            Some("Auto(智能·1M长上下文)".to_string()),
+            "auto".to_string(),
+        ));
 
         seen.insert("auto".to_string());
         seen.insert("auto:standard".to_string());
@@ -2578,14 +2998,20 @@ async fn advance_rotated_at(
 
                 // 1. Bare model entry (deduped across providers)
                 if !seen.contains(canonical_m) {
-                    result.push((canonical_m.to_string(), provider_name.to_string(), None, proto.clone()));
+                    result.push((
+                        canonical_m.to_string(),
+                        provider_name.to_string(),
+                        None,
+                        proto.clone(),
+                    ));
                     seen.insert(canonical_m.to_string());
                 }
 
                 // 2. Format provider-qualified alias provider/model
                 let shared = model_provider_count.get(canonical_m).copied().unwrap_or(0) >= 2;
                 let prefixed = format!("{}/{}", provider_name, canonical_m);
-                if shared && !seen.contains(&prefixed) && !literal_names.contains(prefixed.as_str()) {
+                if shared && !seen.contains(&prefixed) && !literal_names.contains(prefixed.as_str())
+                {
                     let alias_display = spec
                         .display_name
                         .clone()
@@ -2602,11 +3028,19 @@ async fn advance_rotated_at(
                 if parse_context_capacity_tokens(&spec.context_window) >= 1048576 {
                     let alias_1m = format!("{}[1m]", canonical_m);
                     if !seen.contains(&alias_1m) {
-                        result.push((alias_1m.clone(), provider_name.to_string(), Some(format!("{} (1M 长上下文)", canonical_m)), proto.clone()));
+                        result.push((
+                            alias_1m.clone(),
+                            provider_name.to_string(),
+                            Some(format!("{} (1M 长上下文)", canonical_m)),
+                            proto.clone(),
+                        ));
                         seen.insert(alias_1m);
                     }
                     let prefixed_1m = format!("{}[1m]", prefixed);
-                    if shared && !seen.contains(&prefixed_1m) && !literal_names.contains(prefixed.as_str()) {
+                    if shared
+                        && !seen.contains(&prefixed_1m)
+                        && !literal_names.contains(prefixed.as_str())
+                    {
                         result.push((
                             prefixed_1m.clone(),
                             provider_name.to_string(),

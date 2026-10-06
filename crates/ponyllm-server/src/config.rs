@@ -1,11 +1,11 @@
-use std::collections::HashMap;
 use ponyllm_core::pool::{
     default_cached_price, default_input_price, default_output_price, BillingMode,
-    GatewayRoutingStrategy, ModelTier, ModelThinkingSpec, PricingConfig, PricingMode, PricingPeriod,
-    RateLimits, UpstreamProtocol,
+    GatewayRoutingStrategy, ModelThinkingSpec, ModelTier, PricingConfig, PricingMode,
+    PricingPeriod, RateLimits, UpstreamProtocol,
 };
 use ponyllm_protocol::common::ReasoningEffort;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ModelSpec {
@@ -123,7 +123,6 @@ impl Default for ModelSpec {
     }
 }
 
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderConfig {
     pub base_url: String,
@@ -167,10 +166,24 @@ pub struct ProviderConfig {
     /// `ponyllm-config::ProviderSection::rate_limits`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rate_limits: Option<RateLimits>,
+    /// Egress pool (contract `2026-10-07-egress-pool-contract`): runtime
+    /// mirror of `ProviderSection::egress_pool`. Non-empty REPLACES the
+    /// provider `proxy` semantics at the executor (per-attempt exit-IP
+    /// rotation); empty = legacy single-proxy behavior (zero migration).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub egress_pool: Vec<String>,
+    /// Egress rotation strategy (`round_robin` default | `priority`), mirror
+    /// of `ProviderSection::egress_strategy`. Only meaningful with a pool.
+    #[serde(default = "default_egress_strategy")]
+    pub egress_strategy: String,
 }
 
 fn default_strategy() -> String {
     "priority".to_string()
+}
+
+fn default_egress_strategy() -> String {
+    "round_robin".to_string()
 }
 
 impl Default for ProviderConfig {
@@ -193,6 +206,8 @@ impl Default for ProviderConfig {
             timeout_secs: None,
             ttfb_timeout_secs: None,
             rate_limits: None,
+            egress_pool: Vec::new(),
+            egress_strategy: default_egress_strategy(),
         }
     }
 }
@@ -299,6 +314,23 @@ impl ProviderConfig {
             .find(|m| m.name == model_name)
             .and_then(|m| m.rate_limits);
         RateLimits::resolve(self.rate_limits.as_ref(), model_limits.as_ref())
+    }
+
+    /// Effective egress pool for this provider (contract
+    /// `2026-10-07-egress-pool-contract`): non-empty pool (trimmed entries in
+    /// order) REPLACES the `proxy` semantics; `None` when no pool is
+    /// configured, signalling the legacy single-proxy path (zero migration).
+    pub fn effective_egress_pool(&self) -> Option<Vec<String>> {
+        if self.egress_pool.is_empty() {
+            None
+        } else {
+            Some(
+                self.egress_pool
+                    .iter()
+                    .map(|e| e.trim().to_string())
+                    .collect(),
+            )
+        }
     }
 
     /// Resolves the effective proxy configuration for a model under this provider.
@@ -647,6 +679,22 @@ impl GatewayConfig {
             }
         }
     }
+
+    /// Effective egress pool for a provider (contract
+    /// `2026-10-07-egress-pool-contract`): `Some(entries)` when the provider
+    /// configured a non-empty pool (which REPLACES its `proxy` semantics at
+    /// the executor); `None` = fall back to the legacy `proxy` resolution
+    /// (`effective_proxy_url_for`). `model_name` is reserved for future
+    /// model-level overrides; today the pool is provider-scoped.
+    pub fn effective_egress_pool_for(
+        &self,
+        provider_name: &str,
+        _model_name: &str,
+    ) -> Option<Vec<String>> {
+        self.providers
+            .get(provider_name)
+            .and_then(|p| p.effective_egress_pool())
+    }
 }
 
 #[cfg(test)]
@@ -658,7 +706,8 @@ mod tests {
         let mut cfg = GatewayConfig::default();
         let mut prov_default = ProviderConfig::default();
         prov_default.base_url = "https://api.example.com".to_string();
-        cfg.providers.insert("default_prov".to_string(), prov_default);
+        cfg.providers
+            .insert("default_prov".to_string(), prov_default);
 
         let mut prov_custom = ProviderConfig::default();
         prov_custom.ttfb_timeout_secs = Some(120);
@@ -666,7 +715,8 @@ mod tests {
 
         let mut prov_disabled = ProviderConfig::default();
         prov_disabled.ttfb_timeout_secs = Some(0);
-        cfg.providers.insert("disabled_prov".to_string(), prov_disabled);
+        cfg.providers
+            .insert("disabled_prov".to_string(), prov_disabled);
 
         let mut prov_tight = ProviderConfig::default();
         prov_tight.ttfb_timeout_secs = Some(10);
@@ -723,6 +773,3 @@ mod tests {
         assert_eq!(cfg.effective_ttfb_timeout("disabled_prov"), None);
     }
 }
-
-
-

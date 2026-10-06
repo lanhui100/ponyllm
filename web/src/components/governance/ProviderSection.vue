@@ -124,6 +124,7 @@ async function handleDelete(name: string) {
             <th>Base URL</th>
             <th>默认模型</th>
             <th>路由策略</th>
+            <th>出口池</th>
             <th>模型数</th>
             <th>计费 ($/M tok)</th>
             <th class="actions-col">操作</th>
@@ -135,6 +136,17 @@ async function handleDelete(name: string) {
             <td class="code-cell">{{ p.base_url }}</td>
             <td>{{ p.default_model || '-' }}</td>
             <td><span class="badge">{{ p.strategy }}</span></td>
+            <td>
+              <span
+                v-if="p.egress_pool && p.egress_pool.length"
+                class="egress-cell"
+                :title="p.egress_pool.join(' → ')"
+                data-testid="egress-pool-cell"
+              >
+                {{ p.egress_pool.length }} 出口 · {{ p.egress_strategy || 'round_robin' }}
+              </span>
+              <span v-else class="muted">—</span>
+            </td>
             <td>{{ p.models }}</td>
             <td class="price-cell">
               入: {{ p.input_price }} / 缓: {{ p.cached_price }} / 出: {{ p.output_price }}
@@ -152,7 +164,7 @@ async function handleDelete(name: string) {
             </td>
           </tr>
           <tr v-if="providers.length === 0">
-            <td colspan="7" class="empty-cell">暂无 Provider 数据</td>
+            <td colspan="8" class="empty-cell">暂无 Provider 数据</td>
           </tr>
         </tbody>
       </table>

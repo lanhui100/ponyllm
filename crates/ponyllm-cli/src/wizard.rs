@@ -242,6 +242,8 @@ pub fn run_interactive_init(output_path: &str) -> Result<(), Box<dyn std::error:
             proxy: provider_proxy,
             timeout_secs: None,
             ttfb_timeout_secs: None,
+            egress_pool: Vec::new(),
+            egress_strategy: ponyllm_config::default_egress_strategy(),
         });
 
         let add_another_provider = Confirm::new("是否继续配置其他大模型提供商?")

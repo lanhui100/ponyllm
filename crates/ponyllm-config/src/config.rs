@@ -1,13 +1,13 @@
+use ponyllm_core::pool::{
+    default_cached_price, default_input_price, default_output_price, BillingMode,
+    GatewayRoutingStrategy, ModelThinkingSpec, ModelTier, PricingConfig, PricingMode,
+    PricingPeriod, UpstreamProtocol,
+};
+use ponyllm_protocol::common::ReasoningEffort;
 use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
 use std::path::Path;
-use ponyllm_core::pool::{
-    default_cached_price, default_input_price, default_output_price, BillingMode,
-    GatewayRoutingStrategy, ModelTier, ModelThinkingSpec, PricingConfig, PricingMode, PricingPeriod,
-    UpstreamProtocol,
-};
-use ponyllm_protocol::common::ReasoningEffort;
 
 use ponyllm_core::telemetry::FlightRecorder;
 use serde::{Deserialize, Serialize};
@@ -293,7 +293,10 @@ pub fn hash_gateway_key(salt: &str, plaintext: &str) -> String {
 
 /// Generate a new scoped gateway key (P1): returns `(plaintext, entry)`.
 /// Plaintext is shown ONCE at issuance; only `entry` (hash) is persisted.
-pub fn generate_scoped_gateway_key(id: impl Into<String>, scope: KeyScope) -> (String, GatewayKeyEntry) {
+pub fn generate_scoped_gateway_key(
+    id: impl Into<String>,
+    scope: KeyScope,
+) -> (String, GatewayKeyEntry) {
     use sha2::{Digest, Sha256};
     let raw = uuid::Uuid::new_v4().simple().to_string();
     let plaintext = format!("{}{}", scope.prefix(), raw);
@@ -350,14 +353,21 @@ fn default_auth_compat() -> AuthCompat {
 /// Fail-fast guard for bind/auth combinations (P0):
 /// open mode (empty/`none` key) on a non-loopback bind is refused at startup.
 /// Returns `Err` with a human-readable reason when the combination is unsafe.
-pub fn validate_bind_auth_combo(bind: &str, api_key: &str, auth_compat: AuthCompat) -> Result<(), String> {
+pub fn validate_bind_auth_combo(
+    bind: &str,
+    api_key: &str,
+    auth_compat: AuthCompat,
+) -> Result<(), String> {
     let _ = auth_compat;
     let trimmed = api_key.trim();
     let open = trimmed.is_empty() || trimmed.eq_ignore_ascii_case("none");
     if !open {
         return Ok(());
     }
-    let host = bind.split_once(':').map(|(h, _)| h.trim()).unwrap_or(bind.trim());
+    let host = bind
+        .split_once(':')
+        .map(|(h, _)| h.trim())
+        .unwrap_or(bind.trim());
     let loopback = host.eq_ignore_ascii_case("127.0.0.1")
         || host.eq_ignore_ascii_case("localhost")
         || host == "::1"
@@ -382,7 +392,10 @@ pub fn validate_gateway_key_strength(key: &str) -> Result<(), String> {
         ));
     }
     if trimmed.chars().all(|c| c.is_ascii_digit()) {
-        return Err("拒绝落盘：网关口令为纯数字（弱口令）。请用 `ponyllm auth --rotate` 生成随机 Key。".to_string());
+        return Err(
+            "拒绝落盘：网关口令为纯数字（弱口令）。请用 `ponyllm auth --rotate` 生成随机 Key。"
+                .to_string(),
+        );
     }
     const BLOCKLIST: &[&str] = &[
         "123456", "password", "qwerty", "admin", "letmein", "ponyllm", "changeme", "secret",
@@ -392,9 +405,15 @@ pub fn validate_gateway_key_strength(key: &str) -> Result<(), String> {
     // containing e.g. "123456" as a random hex run still carries full entropy
     // (uuid-derived suffixes hit this with ~1e-6 probability otherwise).
     // Exact blocklist equality is rejected at any length.
-    let stripped: String = lower.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+    let stripped: String = lower
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect();
     if BLOCKLIST.iter().any(|w| stripped == *w) {
-        return Err("拒绝落盘：网关口令为常见弱口令（弱口令）。请用 `ponyllm auth --rotate` 生成随机 Key。".to_string());
+        return Err(
+            "拒绝落盘：网关口令为常见弱口令（弱口令）。请用 `ponyllm auth --rotate` 生成随机 Key。"
+                .to_string(),
+        );
     }
     if trimmed.len() < 24 && BLOCKLIST.iter().any(|w| lower.contains(w)) {
         return Err("拒绝落盘：网关口令命中常见弱口令（弱口令）。请用 `ponyllm auth --rotate` 生成随机 Key。".to_string());
@@ -684,7 +703,6 @@ impl ModelConfig {
     }
 }
 
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderSection {
     pub base_url: String,
@@ -729,6 +747,18 @@ pub struct ProviderSection {
     /// [`ProviderSection::effective_rate_limits`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rate_limits: Option<RateLimits>,
+    /// Egress pool (contract `2026-10-07-egress-pool-contract`): list of exit
+    /// shapes for per-attempt exit-IP rotation. Each entry is `direct`/`none`/
+    /// empty (the gateway node's own exit IP) or a forward-proxy URL
+    /// (`http(s)://host:port` / `socks5://...` — one distinct exit IP per
+    /// proxy). An explicit pool REPLACES the provider `proxy` semantics;
+    /// empty = legacy single-`proxy` behavior (zero migration).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub egress_pool: Vec<String>,
+    /// Egress rotation strategy: `round_robin` (default) | `priority`.
+    /// Only meaningful when `egress_pool` is non-empty.
+    #[serde(default = "default_egress_strategy")]
+    pub egress_strategy: String,
 }
 
 impl ProviderSection {
@@ -854,6 +884,12 @@ fn default_strategy() -> String {
     "priority".to_string()
 }
 
+/// Default `egress_strategy` when the field is absent from the TOML
+/// (contract C1/C2: `round_robin`).
+pub fn default_egress_strategy() -> String {
+    "round_robin".to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KeySection {
     pub id: String,
@@ -867,7 +903,12 @@ pub struct KeySection {
 }
 
 impl KeySection {
-    pub fn new(id: impl Into<String>, api_key: impl Into<String>, priority: u32, weight: u32) -> Self {
+    pub fn new(
+        id: impl Into<String>,
+        api_key: impl Into<String>,
+        priority: u32,
+        weight: u32,
+    ) -> Self {
         Self {
             id: id.into(),
             api_key: api_key.into(),
@@ -1049,7 +1090,11 @@ impl ConfigFile {
             cfg.commercial.validate()?;
             Ok(cfg)
         } else if let Some(p) = path {
-            Err(format!("指定的配置文件 '{}' 不存在，请检查路径或执行 'ponyllm init' 生成配置", p).into())
+            Err(format!(
+                "指定的配置文件 '{}' 不存在，请检查路径或执行 'ponyllm init' 生成配置",
+                p
+            )
+            .into())
         } else {
             let content = generate_sample_config();
             let cfg: ConfigFile = toml::from_str(content)?;
@@ -1091,7 +1136,10 @@ impl ConfigFile {
 
         let temp_file_name = format!(
             ".{}.tmp.{}.{}",
-            target_path.file_name().and_then(|f| f.to_str()).unwrap_or("ponyllm"),
+            target_path
+                .file_name()
+                .and_then(|f| f.to_str())
+                .unwrap_or("ponyllm"),
             std::process::id(),
             uuid::Uuid::new_v4().simple()
         );
@@ -1134,26 +1182,31 @@ impl ConfigFile {
         cached_price: f64,
         output_price: f64,
     ) {
-        let entry = self.providers.entry(name.to_string()).or_insert_with(|| ProviderSection {
-            base_url: base_url.to_string(),
-            default_model: default_model.to_string(),
-            strategy: strategy.to_string(),
-            billing_mode,
-            input_price,
-            cached_price,
-            output_price,
-            models: Vec::new(),
-            model_configs: Vec::new(),
-            keys: Vec::new(),
-            default_protocol: None,
-            chat_url: None,
-            responses_url: None,
-            messages_url: None,
-            proxy: None,
-            timeout_secs: None,
-            ttfb_timeout_secs: None,
-            rate_limits: None,
-        });
+        let entry = self
+            .providers
+            .entry(name.to_string())
+            .or_insert_with(|| ProviderSection {
+                base_url: base_url.to_string(),
+                default_model: default_model.to_string(),
+                strategy: strategy.to_string(),
+                billing_mode,
+                input_price,
+                cached_price,
+                output_price,
+                models: Vec::new(),
+                model_configs: Vec::new(),
+                keys: Vec::new(),
+                default_protocol: None,
+                chat_url: None,
+                responses_url: None,
+                messages_url: None,
+                proxy: None,
+                timeout_secs: None,
+                ttfb_timeout_secs: None,
+                rate_limits: None,
+                egress_pool: Vec::new(),
+                egress_strategy: default_egress_strategy(),
+            });
         entry.base_url = base_url.to_string();
         entry.default_model = default_model.to_string();
         entry.strategy = strategy.to_string();
@@ -1163,7 +1216,13 @@ impl ConfigFile {
         entry.output_price = output_price;
     }
 
-    pub fn add_provider(&mut self, name: &str, base_url: &str, default_model: &str, strategy: &str) {
+    pub fn add_provider(
+        &mut self,
+        name: &str,
+        base_url: &str,
+        default_model: &str,
+        strategy: &str,
+    ) {
         self.add_provider_full(
             name,
             base_url,
@@ -1176,8 +1235,16 @@ impl ConfigFile {
         );
     }
 
-    pub fn update_provider(&mut self, name: &str, base_url: &str, default_model: &str, strategy: &str) -> Result<(), String> {
-        let p = self.providers.get_mut(name)
+    pub fn update_provider(
+        &mut self,
+        name: &str,
+        base_url: &str,
+        default_model: &str,
+        strategy: &str,
+    ) -> Result<(), String> {
+        let p = self
+            .providers
+            .get_mut(name)
             .ok_or_else(|| format!("提供商 '{}' 不存在", name))?;
         p.base_url = base_url.to_string();
         p.default_model = default_model.to_string();
@@ -1186,26 +1253,41 @@ impl ConfigFile {
     }
 
     pub fn add_model(&mut self, provider: &str, model: &str) -> Result<(), String> {
-        let p = self.providers.get_mut(provider)
-            .ok_or_else(|| format!("提供商 '{}' 不存在，请先使用 'ponyllm provider add' 添加", provider))?;
+        let p = self.providers.get_mut(provider).ok_or_else(|| {
+            format!(
+                "提供商 '{}' 不存在，请先使用 'ponyllm provider add' 添加",
+                provider
+            )
+        })?;
         if !p.models.contains(&model.to_string()) && p.default_model != model {
             p.models.push(model.to_string());
         }
         Ok(())
     }
 
-    pub fn upsert_model_config(&mut self, provider: &str, model_cfg: ModelConfig) -> Result<(), String> {
-        let p = self.providers.get_mut(provider)
+    pub fn upsert_model_config(
+        &mut self,
+        provider: &str,
+        model_cfg: ModelConfig,
+    ) -> Result<(), String> {
+        let p = self
+            .providers
+            .get_mut(provider)
             .ok_or_else(|| format!("提供商 '{}' 不存在", provider))?;
         p.upsert_model_config(model_cfg);
         Ok(())
     }
 
     pub fn remove_model(&mut self, provider: &str, model: &str) -> Result<bool, String> {
-        let p = self.providers.get_mut(provider)
+        let p = self
+            .providers
+            .get_mut(provider)
             .ok_or_else(|| format!("提供商 '{}' 不存在", provider))?;
         if p.default_model == model {
-            return Err(format!("无法直接删除默认主模型 '{}'。若要删除，请先指定其他模型为默认主模型", model));
+            return Err(format!(
+                "无法直接删除默认主模型 '{}'。若要删除，请先指定其他模型为默认主模型",
+                model
+            ));
         }
         let len_models_before = p.models.len();
         p.models.retain(|m| m != model);
@@ -1215,7 +1297,9 @@ impl ConfigFile {
     }
 
     pub fn set_default_model(&mut self, provider: &str, model: &str) -> Result<(), String> {
-        let p = self.providers.get_mut(provider)
+        let p = self
+            .providers
+            .get_mut(provider)
             .ok_or_else(|| format!("提供商 '{}' 不存在", provider))?;
         let old_default = std::mem::replace(&mut p.default_model, model.to_string());
         if !old_default.is_empty() && old_default != model && !p.models.contains(&old_default) {
@@ -1229,10 +1313,21 @@ impl ConfigFile {
         self.providers.remove(name).is_some()
     }
 
-    pub fn add_key(&mut self, provider: &str, id: &str, api_key: &str, priority: u32, weight: u32) -> Result<(), String> {
-        let p = self.providers.get_mut(provider)
-            .ok_or_else(|| format!("提供商 '{}' 不存在，请先使用 'ponyllm provider add' 添加", provider))?;
-        
+    pub fn add_key(
+        &mut self,
+        provider: &str,
+        id: &str,
+        api_key: &str,
+        priority: u32,
+        weight: u32,
+    ) -> Result<(), String> {
+        let p = self.providers.get_mut(provider).ok_or_else(|| {
+            format!(
+                "提供商 '{}' 不存在，请先使用 'ponyllm provider add' 添加",
+                provider
+            )
+        })?;
+
         if let Some(existing) = p.keys.iter_mut().find(|k| k.id == id) {
             existing.api_key = api_key.to_string();
             existing.priority = priority;
@@ -1250,7 +1345,9 @@ impl ConfigFile {
     }
 
     pub fn remove_key(&mut self, provider: &str, id: &str) -> Result<bool, String> {
-        let p = self.providers.get_mut(provider)
+        let p = self
+            .providers
+            .get_mut(provider)
             .ok_or_else(|| format!("提供商 '{}' 不存在", provider))?;
         let len_before = p.keys.len();
         p.keys.retain(|k| k.id != id);
@@ -1303,7 +1400,11 @@ keys = [
 }
 
 impl KeySection {
-    pub fn is_antigravity(&self, provider_protocol: Option<UpstreamProtocol>, provider_name: &str) -> bool {
+    pub fn is_antigravity(
+        &self,
+        provider_protocol: Option<UpstreamProtocol>,
+        provider_name: &str,
+    ) -> bool {
         if let Some(UpstreamProtocol::Antigravity) = provider_protocol {
             return true;
         }
@@ -1320,7 +1421,9 @@ impl KeySection {
         false
     }
 
-    pub fn to_antigravity_credential(&self) -> Result<ponyllm_core::pool::AntigravityCredential, String> {
+    pub fn to_antigravity_credential(
+        &self,
+    ) -> Result<ponyllm_core::pool::AntigravityCredential, String> {
         let trimmed = self.api_key.trim();
         if trimmed.starts_with('{') {
             serde_json::from_str::<ponyllm_core::pool::AntigravityCredential>(trimmed)
@@ -1423,7 +1526,11 @@ mod tests {
         let mut plain = ModelConfig::new("plain");
         plain.priority = None;
         let serialized = toml::to_string(&plain).unwrap();
-        assert!(!serialized.contains("priority"), "None priority must be skipped: {}", serialized);
+        assert!(
+            !serialized.contains("priority"),
+            "None priority must be skipped: {}",
+            serialized
+        );
     }
 
     #[test]
@@ -1439,7 +1546,9 @@ mod tests {
         });
         let toml_str = toml::to_string(&cfg).unwrap();
         let back: ModelConfig = toml::from_str(&toml_str).unwrap();
-        let rl = back.rate_limits.expect("rate_limits must survive TOML roundtrip");
+        let rl = back
+            .rate_limits
+            .expect("rate_limits must survive TOML roundtrip");
         assert_eq!(rl.rpm, Some(10));
         assert_eq!(rl.tpm, Some(2_000_000));
         assert_eq!(rl.window_secs, Some(60));
@@ -1452,10 +1561,8 @@ mod tests {
         assert_eq!(legacy.rate_limits, None);
 
         // Partial tables: missing fields default to `None` (per-field inherit).
-        let partial: ModelConfig = toml::from_str(
-            "name = \"m\"\n\n[rate_limits]\nrpm = 5\n",
-        )
-        .unwrap();
+        let partial: ModelConfig =
+            toml::from_str("name = \"m\"\n\n[rate_limits]\nrpm = 5\n").unwrap();
         let rl = partial.rate_limits.expect("partial table still parses");
         assert_eq!(rl.rpm, Some(5));
         assert_eq!(rl.tpm, None);
@@ -1526,6 +1633,8 @@ mod tests {
                 concurrency: Some(2),
                 count_cached: Some(true),
             }),
+            egress_pool: Vec::new(),
+            egress_strategy: default_egress_strategy(),
         };
         // No model override: full provider default.
         let resolved = prov.effective_rate_limits("m1").unwrap();
@@ -1548,8 +1657,16 @@ mod tests {
         assert_eq!(resolved.rpm, Some(30), "model rpm must override provider");
         assert_eq!(resolved.tpm, Some(1_000_000), "provider tpm inherited");
         assert_eq!(resolved.window_secs, Some(120), "provider window inherited");
-        assert_eq!(resolved.concurrency, Some(2), "provider concurrency inherited");
-        assert_eq!(resolved.count_cached, Some(false), "model count_cached overrides");
+        assert_eq!(
+            resolved.concurrency,
+            Some(2),
+            "provider concurrency inherited"
+        );
+        assert_eq!(
+            resolved.count_cached,
+            Some(false),
+            "model count_cached overrides"
+        );
 
         // Unknown model without any limits: None (unlimited).
         let none_prov = ProviderSection {
@@ -1571,6 +1688,8 @@ mod tests {
             timeout_secs: None,
             ttfb_timeout_secs: None,
             rate_limits: None,
+            egress_pool: Vec::new(),
+            egress_strategy: default_egress_strategy(),
         };
         assert_eq!(none_prov.effective_rate_limits("nope"), None);
     }
@@ -1688,12 +1807,297 @@ cross_provider_quota_failover = true
         assert!(explicit.gateway.cross_provider_quota_failover);
         // Old configs without the field deserialize to the new default `false`
         // (zero migration): quota exhaustion stops at the first provider.
-        let legacy: ConfigFile = toml::from_str(r#"
+        let legacy: ConfigFile = toml::from_str(
+            r#"
 [gateway]
 bind = "127.0.0.1:8080"
-"#)
+"#,
+        )
         .unwrap();
         assert!(!legacy.gateway.cross_provider_quota_failover);
     }
 }
 
+// ---------------------------------------------------------------------------
+// Egress-pool entry validation (contract C3)
+// ---------------------------------------------------------------------------
+
+/// Cloud metadata endpoints that must never be reachable from an egress pool
+/// entry, even if their IPs were to change.
+const EGRESS_METADATA_HOSTS: &[&str] = &[
+    "metadata.google.internal",
+    "metadata.google.com",
+    "instance-data",
+    "169.254.169.254",
+];
+
+/// Operator-managed allowlist (`PONYLLM_PROBE_ALLOWLIST`): entries match the
+/// exact host or any subdomain; literal IPs also match exactly and are
+/// exempted from the name/IP policy — the same hatch the server-side proxy
+/// guard honors, so config-side and admin-write validation agree.
+fn egress_probe_allowlisted(host: &str) -> bool {
+    if let Ok(list) = std::env::var("PONYLLM_PROBE_ALLOWLIST") {
+        let lower = host.trim().trim_end_matches('.').to_ascii_lowercase();
+        for entry in list.split(',') {
+            let e = entry.trim().trim_end_matches('.').to_ascii_lowercase();
+            if !e.is_empty() && (lower == e || lower.ends_with(&format!(".{}", e))) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn egress_blocked_name(host: &str) -> Option<&'static str> {
+    if egress_probe_allowlisted(host) {
+        return None;
+    }
+    let lower = host.trim().trim_end_matches('.').to_ascii_lowercase();
+    if lower == "svc" || lower.ends_with(".svc") || lower.ends_with(".svc.cluster.local") {
+        return Some("kubernetes in-cluster names (*.svc) are not allowed for egress pool entries");
+    }
+    if EGRESS_METADATA_HOSTS
+        .iter()
+        .any(|m| lower == *m || lower.ends_with(&format!(".{}", m)))
+    {
+        return Some("cloud metadata endpoints are not allowed for egress pool entries");
+    }
+    None
+}
+
+/// Shared IPv4 octet policy for egress entries (loopback handled separately by
+/// the caller, mirroring `check_proxy_url_fast`).
+fn egress_blocked_v4(o: [u8; 4]) -> bool {
+    o[0] == 10 // private 10/8
+        || (o[0] == 172 && (16..=31).contains(&o[1])) // 172.16/12
+        || (o[0] == 192 && o[1] == 168) // 192.168/16
+        || (o[0] == 169 && o[1] == 254) // link-local 169.254/16 (metadata)
+        || (o[0] == 100 && (64..=127).contains(&o[1])) // 100.64/10 CGNAT (RFC 6598)
+        || (o[0] == 198 && (18..=19).contains(&o[1])) // 198.18/15 benchmarking (RFC 2544)
+        || o == [0, 0, 0, 0] // 0.0.0.0
+}
+
+/// IPv6 policy for egress entries: unspecified, IPv4-mapped forms (judged by
+/// the embedded IPv4 rules), unique-local and link-local are refused; pure V6
+/// loopback is allowed by the caller before this runs.
+fn egress_blocked_v6(ip: &std::net::Ipv6Addr) -> bool {
+    // Pure V6 unspecified judged FIRST (:: is never a valid exit).
+    if ip.is_unspecified() {
+        return true;
+    }
+    // IPv4-mapped forms (::ffff:10.0.0.1, ::127.0.0.1, …) must be judged by
+    // the embedded IPv4 rules — the V6 predicates below are all false for
+    // such addresses.
+    if let Some(mapped) = ip.to_ipv4() {
+        return egress_blocked_v4(mapped.octets());
+    }
+    ip.is_unique_local() // fc00::/7
+        || ip.is_unicast_link_local() // fe80::/10
+}
+
+fn check_egress_proxy_url(raw: &str) -> Result<(), String> {
+    let trimmed = raw.trim();
+    // Parse with the SAME WHATWG parser the dialer uses (`reqwest::Proxy::all`
+    // builds on the url crate): hex/octal IPv4 literals, fragments and
+    // userinfo must be judged by the parser that will actually dial, or a
+    // private/metadata host sneaks through validation (review
+    // SSRF-BYPASS-EGRESS-POOL — `http://0xa000005:3128` and
+    // `http://10.0.0.5:8080#@127.0.0.1` were accepted by the old manual
+    // parser while the dialer resolved them to 10.0.0.5).
+    let parsed = url::Url::parse(trimmed)
+        .map_err(|e| format!("invalid egress entry '{}': {}", trimmed, e))?;
+    let scheme = parsed.scheme();
+    if scheme != "http" && scheme != "https" && scheme != "socks5" && scheme != "socks5h" {
+        return Err(format!(
+            "egress entry scheme must be http/https/socks5, got '{}'",
+            scheme
+        ));
+    }
+    // Port is optional exactly like the dialer: reqwest's Proxy::all dials
+    // http(s) on the scheme default and socks on 1080 when the port is
+    // omitted, so a port-less entry is NOT a fail-open (the URL parses and
+    // Proxy::all accepts it — no silent direct fallback). What the guard must
+    // refuse are entries Proxy::all cannot use: unknown scheme (above),
+    // unparseable/blank host (url::Url::parse already Err'd), empty host
+    // (below).
+    match parsed.host() {
+        None => Err(format!("egress entry '{}' has no host", trimmed)),
+        Some(url::Host::Ipv4(ip)) => {
+            let o = ip.octets();
+            // Loopback proxy explicitly allowed (documented local pproxy shape).
+            if o[0] == 127 {
+                return Ok(());
+            }
+            if egress_blocked_v4(o) {
+                return Err(format!(
+                    "egress target '{}' resolves to a blocked address ({})",
+                    host_display(&parsed),
+                    ip
+                ));
+            }
+            Ok(())
+        }
+        Some(url::Host::Ipv6(ip)) => {
+            if ip.is_loopback() {
+                return Ok(());
+            }
+            if egress_blocked_v6(&ip) {
+                return Err(format!(
+                    "egress target '{}' resolves to a blocked address ({})",
+                    host_display(&parsed),
+                    ip
+                ));
+            }
+            Ok(())
+        }
+        Some(url::Host::Domain(hostname)) => {
+            if egress_probe_allowlisted(hostname) {
+                return Ok(());
+            }
+            if let Some(reason) = egress_blocked_name(hostname) {
+                // Loopback proxies (local pproxy) are the documented shape;
+                // the name check would otherwise reject `localhost`.
+                let lower = hostname.trim().trim_end_matches('.').to_ascii_lowercase();
+                if lower != "localhost" {
+                    return Err(reason.to_string());
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Host part of a parsed URL for error messages (domain verbatim, IPs in
+/// canonical form).
+fn host_display(parsed: &url::Url) -> String {
+    parsed
+        .host_str()
+        .unwrap_or("<missing-host>")
+        .to_string()
+}
+
+/// Validate one egress-pool entry (contract C3):
+///
+/// - `direct` / `none` / empty / whitespace = legal (gateway node's own exit);
+/// - any other value must be a parseable `http(s)://` / `socks5://`/`socks5h://`
+///   forward-proxy URL whose host passes the same SSRF posture as the
+///   data-plane proxy guard: public or loopback targets allowed; private /
+///   link-local / metadata / in-cluster names refused.
+///
+/// Mirrors `ponyllm-server::egress::check_proxy_url_fast` so config-side
+/// validation and the admin write path agree on one policy. The server's PUT
+/// handler delegates here for the pool entries.
+pub fn validate_egress_entry(raw: &str) -> Result<(), String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty()
+        || trimmed.eq_ignore_ascii_case("direct")
+        || trimmed.eq_ignore_ascii_case("none")
+    {
+        return Ok(());
+    }
+    check_egress_proxy_url(trimmed)
+}
+
+#[cfg(test)]
+mod egress_entry_tests {
+    use super::*;
+
+    #[test]
+    fn accepts_direct_none_and_empty() {
+        for entry in ["direct", "none", "  ", "", "DIRECT", "None"] {
+            assert!(
+                validate_egress_entry(entry).is_ok(),
+                "entry '{entry:?}' must be legal"
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_public_and_loopback_proxies() {
+        for entry in [
+            "http://127.0.0.1:8899",
+            "http://localhost:7890",
+            "http://1.2.3.4:8899",
+            "http://egress-1.example.com:8899",
+            "https://egress-2.example.com:443",
+            "socks5://192.0.2.10:1080",
+            "socks5h://[::1]:1080",
+        ] {
+            assert!(
+                validate_egress_entry(entry).is_ok(),
+                "entry '{entry}' must be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_bad_scheme_and_missing_host() {
+        for entry in [
+            "ftp://example.com:21",
+            "gopher://example.com/",
+            "file:///etc/passwd",
+            "no-scheme-here",
+            "http://",
+        ] {
+            assert!(
+                validate_egress_entry(entry).is_err(),
+                "entry '{entry}' must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_private_linklocal_and_metadata_targets() {
+        for entry in [
+            "http://10.0.0.5:8080",
+            "http://172.16.9.9:3128",
+            "http://192.168.1.1:3128",
+            "http://169.254.169.254:80",
+            "http://metadata.google.internal:80",
+            "http://x.svc.cluster.local:8080",
+            "http://[::ffff:10.0.0.1]:8080",
+            "http://[fe80::1]:8080",
+        ] {
+            assert!(
+                validate_egress_entry(entry).is_err(),
+                "entry '{entry}' must be refused"
+            );
+        }
+    }
+
+    /// Review `SSRF-BYPASS-EGRESS-POOL`: the old hand-rolled parser accepted
+    /// these while the WHATWG dialer (reqwest::Proxy::all) resolved them to
+    /// private/metadata hosts. Validation must parse with the SAME parser.
+    #[test]
+    fn rejects_parser_mismatch_bypass_tricks() {
+        for entry in [
+            "http://0xa000005:3128",           // hex-encoded 10.0.0.5
+            "http://0x0a000005:3128",          // hex-encoded 10.0.0.5 (padded)
+            "http://0252.0.0.1:3128",          // octal-encoded 170.0.0.1 (public) — legal
+            "http://10.0.0.5:8080#@127.0.0.1", // fragment trick: host is 10.0.0.5
+            "http://169.254.169.254#@127.0.0.1", // fragment trick: metadata host
+            "http:// 10.0.0.5:8080",           // blank-host trick
+            "http://:8080",                    // empty host
+            "http://10.0.0.5:8080 ",           // trailing space (trimmed before parse)
+        ] {
+            let trimmed = entry.trim();
+            if trimmed == "http://0252.0.0.1:3128" {
+                continue; // public octal literal — legal, asserted below
+            }
+            assert!(
+                validate_egress_entry(entry).is_err(),
+                "entry '{entry}' must be refused (parser-mismatch bypass)"
+            );
+        }
+        // Octal public literal stays legal (not a bypass).
+        assert!(validate_egress_entry("http://0252.0.0.1:3128").is_ok());
+        // Hex-encoded loopback is still loopback → allowed (documented shape).
+        assert!(validate_egress_entry("http://0x7f000001:3128").is_ok());
+        // Port-less entries stay legal EXACTLY like the dialer: reqwest
+        // Proxy::all defaults http(s) ports and socks to 1080, so accepting
+        // them is not a fail-open (same acceptance as the dialer — review
+        // VALIDATION-FAIL-OPEN).
+        assert!(validate_egress_entry("http://egress-1.example.com").is_ok());
+        assert!(validate_egress_entry("socks5://192.0.2.10").is_ok());
+    }
+}

@@ -251,6 +251,8 @@ pub async fn handle_key_auth_agy(
                 ttfb_timeout_secs: None,
                 keys: vec![],
                 model_configs: vec![],
+                egress_pool: vec![],
+                egress_strategy: ponyllm_config::default_egress_strategy(),
             }
         });
 

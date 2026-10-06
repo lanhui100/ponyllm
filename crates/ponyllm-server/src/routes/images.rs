@@ -382,6 +382,11 @@ async fn run_images_request(
             request_snippet: req_snippet.clone(),
         };
         let http_client = state.http_client_for_target(&provider_name, &target.physical_model);
+        // Egress pool runtime (contract `2026-10-07-egress-pool-contract`):
+        // per-attempt exit-IP rotation when the provider configured a pool;
+        // both `None` = legacy single-proxy path, byte-identical to before.
+        let (egress_pool, egress_clients) =
+            state.egress_runtime_for_target(&provider_name, &target.physical_model);
         let (rate_limits, ttfb_timeout) = {
             let cfg = state.config.read();
             let rl = cfg
@@ -396,6 +401,7 @@ async fn run_images_request(
             .with_opencode_zen(is_opencode_zen_target(&provider_name, &target_url))
             .with_rate_limits(rate_limits)
             .with_ttfb_timeout(ttfb_timeout)
+            .with_egress(egress_pool, egress_clients)
             .with_event_sink(sink_ctx.clone(), state.event_sink(sink_ctx.clone()));
 
         match executor.execute_json_request_with_key(&target_url, &req_val).await {

@@ -12,20 +12,31 @@
 //!
 //! These tests target the ASSUMED frozen interface in
 //! `crates/ponyllm-core/src/pool/egress.rs` (mounted under `pool::`):
-//! - `EgressStrategy::{RoundRobin, Priority}`
-//! - `EgressEntry::direct(id)` / `EgressEntry::proxy(id, url)` with
-//!   `id: String`, `url: Option<String>` (`None` = direct) and per-entry
-//!   cooldown state (`cooldown_remaining`, `cooldown_reset_at`).
+//! - `EgressStrategy::{RoundRobin, Priority}` with `Default` (RoundRobin),
+//!   `FromStr` (`"round_robin"` / `"priority"`, trim + lowercase, Err=String)
+//!   and `Display` (`"round_robin"` / `"priority"`). No serde: `egress_strategy`
+//!   stays a plain string in the TOML model; the core parse entry is
+//!   `EgressStrategy::from_str`, pinned by `c4_egress_strategy_from_str_and_default`.
+//! - `EgressEntry` with `pub id: String` (caller-chosen internal identifier,
+//!   e.g. `"direct"` / `"vps"`) and `pub url: Option<String>` (`None` = direct,
+//!   `Some(proxy_url)` = via that proxy), plus internal cooldown state:
+//!   `EgressEntry::direct(id)` / `EgressEntry::proxy(id, url)`,
+//!   `cooldown_remaining()`, `cooldown_reset_at()`, `set_cooldown(Duration)`,
+//!   `clear_cooldown()` (mirror `ApiKeyEntry`).
 //! - `EgressPool`:
-//!   - `new(provider, strategy)`
-//!   - `add_egress(EgressEntry)`
+//!   - `new(provider: &str, strategy: EgressStrategy) -> Self` (empty pool;
+//!     ids are NOT passed to `new`, they come per-entry via `add_egress`)
+//!   - `add_egress(EgressEntry)` (id unique per pool)
 //!   - `select_egress() -> Result<Arc<EgressEntry>, CoreError>`
-//!     (skips cooling entries; all cooling / empty ⇒ `CoreError::NoAvailableKey`)
-//!   - `record_quota_exhausted(egress_id, Option<Duration>)` — cool that egress
-//!     (None ⇒ 900s)
+//!     (skips cooling entries; empty / all-cooling ⇒
+//!     `Err(CoreError::NoAvailableKey(provider))`)
+//!   - `record_quota_exhausted(egress_id: &str, retry_after: Option<Duration>)`
+//!     — cool THAT egress; `None` ⇒ 900s; wall-clock `cooldown_reset_at`
+//!     derived internally (no caller-provided `SystemTime`)
 //!   - `record_transient_failure(egress_id)` — count only, never cool
 //!   - `egress_cooldown(id) -> (Option<Duration>, Option<SystemTime>)`
 //!   - `all_cooling() -> bool`
+//!   - `clear_egress_cooldown(egress_id: &str)`
 
 use std::time::Duration;
 
@@ -41,6 +52,25 @@ fn two_entry_pool() -> EgressPool {
 }
 
 // ---------- C4: rotation / skip-cooling / degeneracy ----------
+
+/// Pins the canonical string parse entry for `egress_strategy` so the
+/// config→core wiring cannot silently invent a second parser.
+#[test]
+fn c4_egress_strategy_from_str_and_default() {
+    assert_eq!(
+        "round_robin".parse::<EgressStrategy>().unwrap(),
+        EgressStrategy::RoundRobin
+    );
+    assert_eq!(
+        "priority".parse::<EgressStrategy>().unwrap(),
+        EgressStrategy::Priority
+    );
+    assert_eq!(
+        EgressStrategy::default(),
+        EgressStrategy::RoundRobin,
+        "unconfigured egress_strategy must default to round_robin"
+    );
+}
 
 #[test]
 fn c4_round_robin_rotates_across_entries_by_counter() {

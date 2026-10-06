@@ -76,6 +76,13 @@ pub struct ProviderView {
     /// Optional TTFB budget override in seconds for this provider (0 = disabled).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ttfb_timeout_secs: Option<u64>,
+    /// Egress pool (contract `2026-10-07-egress-pool-contract`): ordered exit
+    /// shapes (`direct` or a proxy URL). Omitted/`null` = legacy single-`proxy`
+    /// semantics. `Some([])` after a clear is serialized as `[]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub egress_pool: Option<Vec<String>>,
+    /// Egress rotation strategy: `round_robin` | `priority` (default round_robin).
+    pub egress_strategy: String,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default, ToSchema)]
@@ -375,6 +382,14 @@ pub struct CreateProviderPayload {
     /// without their own override. `None` = no provider-level limit.
     #[serde(default)]
     pub rate_limits: Option<AdminRateLimits>,
+    /// Egress pool entries (contract `2026-10-07-egress-pool-contract`):
+    /// `direct`/`none`/empty = gateway node egress, otherwise a proxy URL.
+    /// Empty/absent = legacy `proxy` semantics.
+    #[serde(default)]
+    pub egress_pool: Option<Vec<String>>,
+    /// Egress rotation strategy: `round_robin` (default) | `priority`.
+    #[serde(default)]
+    pub egress_strategy: Option<String>,
 }
 
 fn default_model_str() -> String {
@@ -430,6 +445,15 @@ pub struct UpdateProviderPayload {
     /// untouched. All-`None` fields = unlimited for those axes.
     #[serde(default, deserialize_with = "deserialize_optional_rate_limits")]
     pub rate_limits: Option<Option<AdminRateLimits>>,
+    /// Egress pool entries (contract `2026-10-07-egress-pool-contract`):
+    /// explicit `[]` clears the pool and falls back to the single-`proxy`
+    /// semantics; absent (`None`) leaves it untouched; entries are validated
+    /// with the shared egress policy (400 `egress_blocked` on refusal).
+    #[serde(default)]
+    pub egress_pool: Option<Vec<String>>,
+    /// Egress rotation strategy: `round_robin` (default) | `priority`.
+    #[serde(default)]
+    pub egress_strategy: Option<String>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -673,6 +697,24 @@ pub struct QuotaKeyView {
     /// True when the refresh probe failed and only memory state is served.
     #[serde(default)]
     pub stale: bool,
+    /// Provider-level egress pool view (contract `2026-10-07-egress-pool-contract`,
+    /// C7): one row per exit with live state / cooldown_reset_at. `null`/absent
+    /// for pool-less providers (legacy proxy semantics).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub egress: Option<Vec<QuotaEgressView>>,
+}
+
+/// One egress entry row in the admin quota view (contract C7, frozen wire
+/// keys): `index` = position in the pool, `entry` = `"direct"` or the raw
+/// proxy URL, `state` = `"active" | "cooling"`, `cooldown_reset_at` = RFC 3339
+/// while cooling.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct QuotaEgressView {
+    pub index: u32,
+    pub entry: String,
+    pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cooldown_reset_at: Option<String>,
 }
 
 #[derive(Debug, Deserialize, utoipa::IntoParams)]
@@ -725,9 +767,7 @@ async fn handle_admin_quota_inner(q: QuotaQuery, state: Arc<AppState>) -> Vec<Qu
             let keys: Vec<(String, ponyllm_core::pool::KeyState)> = pool
                 .list_keys()
                 .into_iter()
-                .filter(|(id, _, _, _)| {
-                    q.key_id.as_ref().is_none_or(|want| id == want)
-                })
+                .filter(|(id, _, _, _)| q.key_id.as_ref().is_none_or(|want| id == want))
                 .map(|(id, _, _, s)| (id, s))
                 .collect();
             out.push((provider, pool.clone(), keys));
@@ -736,8 +776,8 @@ async fn handle_admin_quota_inner(q: QuotaQuery, state: Arc<AppState>) -> Vec<Qu
     };
     let mut views: Vec<QuotaKeyView> = Vec::new();
     for (provider, pool, keys) in snapshot {
-        let is_agy = provider.eq_ignore_ascii_case("agy")
-            || provider.eq_ignore_ascii_case("antigravity");
+        let is_agy =
+            provider.eq_ignore_ascii_case("agy") || provider.eq_ignore_ascii_case("antigravity");
         for (id, key_state) in keys {
             let (cooldown_remaining, cooldown_reset_at) = pool.key_cooldown(&id);
             let state_name = key_state_name(key_state).to_string();
@@ -771,7 +811,29 @@ async fn handle_admin_quota_inner(q: QuotaQuery, state: Arc<AppState>) -> Vec<Qu
                 quota_groups: None,
                 usage: None,
                 stale: false,
+                egress: None,
             };
+            // Egress view (contract C7): live per-exit state from the
+            // provider's egress pool; absent for pool-less providers.
+            if let Some(eg_pool) = state.egress_pools.read().get(&provider) {
+                view.egress = Some(
+                    eg_pool
+                        .status()
+                        .into_iter()
+                        .map(|s| QuotaEgressView {
+                            index: s.index as u32,
+                            // Credentials redacted from the VIEW only; the
+                            // executor keeps the raw URL for dialing
+                            // (VIEW-CREDENTIAL-ECHO review).
+                            entry: crate::egress::sanitize_egress_entry_for_view(&s.entry),
+                            state: s.state.as_str().to_string(),
+                            cooldown_reset_at: s
+                                .cooldown_reset_at
+                                .map(|t| chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339()),
+                        })
+                        .collect(),
+                );
+            }
             if q.refresh && is_agy {
                 match refresh_agy_quota(&state, &provider, &id).await {
                     Some((items, groups, snapshot)) => {
@@ -785,7 +847,10 @@ async fn handle_admin_quota_inner(q: QuotaQuery, state: Arc<AppState>) -> Vec<Qu
                         // Only a real upstream 429 writes the family-exhausted
                         // ledger.
                         if let Some(entry) = pool.snapshot_keys().into_iter().find(|k| k.id == id) {
-                            entry.apply_quota_groups(snapshot.quota_groups.as_deref(), chrono::Utc::now());
+                            entry.apply_quota_groups(
+                                snapshot.quota_groups.as_deref(),
+                                chrono::Utc::now(),
+                            );
                         }
                     }
                     None => {
@@ -798,20 +863,24 @@ async fn handle_admin_quota_inner(q: QuotaQuery, state: Arc<AppState>) -> Vec<Qu
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_millis() as u64;
-            let current_fraction = view.quota_groups.as_ref().and_then(|groups| {
-                for g in groups {
-                    for b in &g.buckets {
-                        if b.window.eq_ignore_ascii_case("5h") || b.bucket_id.contains("5h") {
-                            return Some(b.remaining_fraction);
+            let current_fraction = view
+                .quota_groups
+                .as_ref()
+                .and_then(|groups| {
+                    for g in groups {
+                        for b in &g.buckets {
+                            if b.window.eq_ignore_ascii_case("5h") || b.bucket_id.contains("5h") {
+                                return Some(b.remaining_fraction);
+                            }
                         }
                     }
-                }
-                None
-            }).or_else(|| {
-                view.quota.as_ref().and_then(|items| {
-                    items.first().map(|m| m.remaining_fraction)
+                    None
                 })
-            });
+                .or_else(|| {
+                    view.quota
+                        .as_ref()
+                        .and_then(|items| items.first().map(|m| m.remaining_fraction))
+                });
 
             let weekly_fraction = view.quota_groups.as_ref().and_then(|groups| {
                 for g in groups {
@@ -820,7 +889,12 @@ async fn handle_admin_quota_inner(q: QuotaQuery, state: Arc<AppState>) -> Vec<Qu
                         let b_id = b.bucket_id.to_lowercase();
                         let b_desc = b.description.as_deref().unwrap_or("").to_lowercase();
                         let b_disp = b.display_name.as_deref().unwrap_or("").to_lowercase();
-                        if win == "weekly" || b_id.contains("week") || b_desc.contains("week") || b_disp.contains("周") || b_id.contains("7d") {
+                        if win == "weekly"
+                            || b_id.contains("week")
+                            || b_desc.contains("week")
+                            || b_disp.contains("周")
+                            || b_id.contains("7d")
+                        {
                             return Some(b.remaining_fraction);
                         }
                     }
@@ -830,11 +904,17 @@ async fn handle_admin_quota_inner(q: QuotaQuery, state: Arc<AppState>) -> Vec<Qu
 
             if let Some(entry) = pool.snapshot_keys().into_iter().find(|k| k.id == id) {
                 if let Some(frac) = current_fraction {
-                    entry
-                        .usage_tracker
-                        .observe_upstream_probe_dual(now_ms, Some(frac), weekly_fraction);
+                    entry.usage_tracker.observe_upstream_probe_dual(
+                        now_ms,
+                        Some(frac),
+                        weekly_fraction,
+                    );
                 }
-                view.usage = Some(entry.usage_tracker.estimate_capacity_dual(now_ms, current_fraction, weekly_fraction));
+                view.usage = Some(entry.usage_tracker.estimate_capacity_dual(
+                    now_ms,
+                    current_fraction,
+                    weekly_fraction,
+                ));
             }
             views.push(view);
         }
@@ -908,9 +988,7 @@ pub struct QuotaCycleBenchmarkView {
 
 /// Read-only pool-level cycle benchmark (`GET /api/admin/quota/benchmark`).
 #[utoipa::path(get, path = "/api/admin/quota/benchmark", responses((status = 200, body = QuotaCycleBenchmarkView)))]
-pub async fn handle_admin_quota_benchmark(
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
+pub async fn handle_admin_quota_benchmark(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let path = match &state.telemetry_snapshot_path {
         Some(p) => p.clone(),
         None => {
@@ -986,8 +1064,7 @@ async fn refresh_agy_quota(
                 ponyllm_core::executor::classify_probe_failure(status.as_u16(), &body)
             {
                 if let Some(pool) = state.pools.read().get(provider) {
-                    let preview: String =
-                        format!("{pool_err:?}").chars().take(300).collect();
+                    let preview: String = format!("{pool_err:?}").chars().take(300).collect();
                     tracing::warn!(
                         provider = %provider,
                         key_id = %key_id,
@@ -1011,7 +1088,9 @@ async fn refresh_agy_quota(
             remaining_fraction: m.remaining_fraction,
             reset_time: m.reset_time.map(|t| t.to_rfc3339()),
             reset_time_beijing: m.reset_time.map(|t| {
-                (t + chrono::Duration::hours(8)).format("%Y-%m-%d %H:%M:%S").to_string()
+                (t + chrono::Duration::hours(8))
+                    .format("%Y-%m-%d %H:%M:%S")
+                    .to_string()
             }),
             time_until_reset: None,
         });
@@ -1155,7 +1234,9 @@ enum AdminStoreGuard<T> {
 /// [`ADMIN_STORE_DEGRADE_TIMEOUT`], the admin layer is told to answer HTTP 503
 /// `admin_store_degraded` immediately instead of waiting for the store's own
 /// (longer) timeout — the "1 秒内快速返回 503 降级响应" contract.
-async fn admin_store_guarded<T, F>(fut: F) -> AdminStoreGuard<Result<T, crate::admin_store::ConfigStoreError>>
+async fn admin_store_guarded<T, F>(
+    fut: F,
+) -> AdminStoreGuard<Result<T, crate::admin_store::ConfigStoreError>>
 where
     F: std::future::Future<Output = Result<T, crate::admin_store::ConfigStoreError>>,
 {
@@ -1303,9 +1384,7 @@ fn check_if_match(
     headers: &HeaderMap,
     current_version: u64,
 ) -> Result<(), axum::response::Response> {
-    let if_match_val = headers
-        .get(header::IF_MATCH)
-        .and_then(|h| h.to_str().ok());
+    let if_match_val = headers.get(header::IF_MATCH).and_then(|h| h.to_str().ok());
 
     let Some(raw) = if_match_val else {
         return Err((
@@ -1390,7 +1469,9 @@ fn parse_effort_opt(s: &str) -> Option<ponyllm_protocol::common::ReasoningEffort
 fn parse_pool_strategy(s: &str) -> ponyllm_core::pool::RoutingStrategy {
     match s.trim().to_ascii_lowercase().as_str() {
         "priority" => ponyllm_core::pool::RoutingStrategy::Priority,
-        "weighted_round_robin" | "weighted" => ponyllm_core::pool::RoutingStrategy::WeightedRoundRobin,
+        "weighted_round_robin" | "weighted" => {
+            ponyllm_core::pool::RoutingStrategy::WeightedRoundRobin
+        }
         "round_robin" => ponyllm_core::pool::RoutingStrategy::RoundRobin,
         // Sticky default: unknown/empty values pin to the primary key so
         // upstream prompt-cache affinity and quota depth are preserved.
@@ -1413,7 +1494,6 @@ fn attach_rotation_hook(
 ) {
     state.attach_antigravity_rotation_hook(provider_name, mgr);
 }
-
 
 /// Build a live pool entry from a stored key (P0-4). Antigravity
 /// credentials must go through their `TokenManager` — constructing a
@@ -1505,12 +1585,25 @@ pub async fn handle_admin_providers(State(state): State<Arc<AppState>>) -> impl 
             cached_price: p.cached_price,
             output_price: p.output_price,
             models: p.model_specs.len(),
-            default_protocol: p.default_protocol.map(|proto| format!("{proto:?}").to_lowercase()),
+            default_protocol: p
+                .default_protocol
+                .map(|proto| format!("{proto:?}").to_lowercase()),
             chat_url: p.chat_url.clone(),
             responses_url: p.responses_url.clone(),
             messages_url: p.messages_url.clone(),
             rate_limits: p.rate_limits.map(Into::into),
             ttfb_timeout_secs: p.ttfb_timeout_secs,
+            egress_pool: if p.egress_pool.is_empty() {
+                None
+            } else {
+                Some(
+                    p.egress_pool
+                        .iter()
+                        .map(|e| crate::egress::sanitize_egress_entry_for_view(e))
+                        .collect(),
+                )
+            },
+            egress_strategy: p.egress_strategy.clone(),
         })
         .collect();
     views.sort_by(|a, b| a.name.cmp(&b.name));
@@ -1565,7 +1658,10 @@ pub async fn handle_admin_create_provider(
         "free" => BillingMode::Free,
         _ => BillingMode::Metered,
     };
-    let default_proto = payload.default_protocol.as_deref().and_then(parse_protocol_opt);
+    let default_proto = payload
+        .default_protocol
+        .as_deref()
+        .and_then(parse_protocol_opt);
 
     // H2: same strict field validation as the CLI (scheme/format), plus an
     // egress guard on every URL the gateway will later dial from admin
@@ -1613,6 +1709,29 @@ pub async fn handle_admin_create_provider(
             }
         }
     }
+    // Egress pool entries (contract C3/C7): same SSRF posture as the proxy
+    // guard — direct/none/empty legal, proxy URLs validated, private/
+    // metadata/bad-scheme refused; the strategy string must parse.
+    if let Some(ref pool) = payload.egress_pool {
+        for entry in pool {
+            if let Err(reason) = crate::egress::check_egress_pool_entry(entry) {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": {"message": format!("egress pool entry blocked by egress policy: {}", reason), "code": "egress_blocked"}})),
+                )
+                    .into_response();
+            }
+        }
+    }
+    if let Some(ref s) = payload.egress_strategy {
+        if s.parse::<ponyllm_core::pool::EgressStrategy>().is_err() {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": {"message": format!("invalid egress_strategy '{}': must be round_robin or priority", s), "code": "invalid_egress_strategy"}})),
+            )
+                .into_response();
+        }
+    }
 
     if let Some(ref rl) = payload.rate_limits {
         if let Err(msg) = RateLimits::from(*rl).validate() {
@@ -1623,6 +1742,12 @@ pub async fn handle_admin_create_provider(
                 .into_response();
         }
     }
+
+    let egress_pool = payload.egress_pool.clone().unwrap_or_default();
+    let egress_strategy = payload
+        .egress_strategy
+        .clone()
+        .unwrap_or_else(ponyllm_config::default_egress_strategy);
 
     let p_sec = ProviderSection {
         rate_limits: payload.rate_limits.map(Into::into),
@@ -1643,6 +1768,8 @@ pub async fn handle_admin_create_provider(
         proxy: payload.proxy.clone(),
         timeout_secs: payload.timeout_secs,
         ttfb_timeout_secs: payload.ttfb_timeout_secs,
+        egress_pool: egress_pool.clone(),
+        egress_strategy: egress_strategy.clone(),
     };
     file.providers.insert(name.clone(), p_sec);
 
@@ -1668,6 +1795,8 @@ pub async fn handle_admin_create_provider(
         proxy: payload.proxy,
         timeout_secs: payload.timeout_secs,
         ttfb_timeout_secs: payload.ttfb_timeout_secs,
+        egress_pool: egress_pool.clone(),
+        egress_strategy: egress_strategy.clone(),
     };
     state.config.write().providers.insert(name.clone(), p_cfg);
 
@@ -1676,6 +1805,8 @@ pub async fn handle_admin_create_provider(
         .pools
         .write()
         .insert(name.clone(), Arc::new(KeyPool::new(&name, core_strat)));
+    // Live egress pool (contract C7): built from the just-written config.
+    state.rebuild_egress_pool_for(&name);
 
     tracing::info!(provider = %name, "admin created provider");
 
@@ -1697,6 +1828,17 @@ pub async fn handle_admin_create_provider(
             messages_url: payload.messages_url,
             rate_limits: payload.rate_limits,
             ttfb_timeout_secs: payload.ttfb_timeout_secs,
+            egress_pool: if egress_pool.is_empty() {
+                None
+            } else {
+                Some(
+                    egress_pool
+                        .iter()
+                        .map(|e| crate::egress::sanitize_egress_entry_for_view(e))
+                        .collect(),
+                )
+            },
+            egress_strategy,
         }),
     )
         .into_response()
@@ -1853,6 +1995,34 @@ pub async fn handle_admin_update_provider(
                 .into_response();
         }
     }
+    // Egress pool patch (contract C7): entries validated with the shared
+    // egress policy; explicit `[]` clears the pool and falls back to the
+    // single-`proxy` semantics; absent leaves it untouched.
+    if let Some(ref pool) = payload.egress_pool {
+        for entry in pool {
+            if let Err(reason) = crate::egress::check_egress_pool_entry(entry) {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": {"message": format!("egress pool entry blocked by egress policy: {}", reason), "code": "egress_blocked"}})),
+                )
+                    .into_response();
+            }
+        }
+        p.egress_pool = pool.clone();
+    }
+    if let Some(ref strategy) = payload.egress_strategy {
+        if strategy
+            .parse::<ponyllm_core::pool::EgressStrategy>()
+            .is_err()
+        {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": {"message": format!("invalid egress_strategy '{}': must be round_robin or priority", strategy), "code": "invalid_egress_strategy"}})),
+            )
+                .into_response();
+        }
+        p.egress_strategy = strategy.clone();
+    }
 
     let updated_p = p.clone();
 
@@ -1873,6 +2043,8 @@ pub async fn handle_admin_update_provider(
         p_cfg.timeout_secs = updated_p.timeout_secs;
         p_cfg.ttfb_timeout_secs = updated_p.ttfb_timeout_secs;
         p_cfg.rate_limits = updated_p.rate_limits;
+        p_cfg.egress_pool = updated_p.egress_pool.clone();
+        p_cfg.egress_strategy = updated_p.egress_strategy.clone();
     }
 
     if payload.strategy.is_some() || payload.proxy.is_some() {
@@ -1888,6 +2060,9 @@ pub async fn handle_admin_update_provider(
         }
         state.pools.write().insert(name.clone(), new_pool);
     }
+    // Live egress pool (contract C7): rebuild from the patched config,
+    // preserving live per-exit cooldowns when the pool shape did not change.
+    state.rebuild_egress_pool_for(&name);
 
     tracing::info!(provider = %name, "admin updated provider");
 
@@ -1901,12 +2076,26 @@ pub async fn handle_admin_update_provider(
         cached_price: updated_p.cached_price,
         output_price: updated_p.output_price,
         models: updated_p.models.len(),
-        default_protocol: updated_p.default_protocol.map(|pr| format!("{pr:?}").to_lowercase()),
+        default_protocol: updated_p
+            .default_protocol
+            .map(|pr| format!("{pr:?}").to_lowercase()),
         chat_url: updated_p.chat_url,
         responses_url: updated_p.responses_url,
         messages_url: updated_p.messages_url,
         rate_limits: updated_p.rate_limits.map(Into::into),
         ttfb_timeout_secs: updated_p.ttfb_timeout_secs,
+        egress_pool: if updated_p.egress_pool.is_empty() {
+            None
+        } else {
+            Some(
+                updated_p
+                    .egress_pool
+                    .iter()
+                    .map(|e| crate::egress::sanitize_egress_entry_for_view(e))
+                    .collect(),
+            )
+        },
+        egress_strategy: updated_p.egress_strategy.clone(),
     };
 
     (
@@ -1950,6 +2139,7 @@ pub async fn handle_admin_delete_provider(
 
     state.config.write().providers.remove(&name);
     state.pools.write().remove(&name);
+    state.egress_pools.write().remove(&name);
 
     tracing::info!(provider = %name, "admin deleted provider");
 
@@ -2097,7 +2287,11 @@ pub async fn handle_admin_create_model(
             .into_response();
     }
 
-    let tier = payload.tier.as_deref().map(parse_tier).unwrap_or(ModelTier::Standard);
+    let tier = payload
+        .tier
+        .as_deref()
+        .map(parse_tier)
+        .unwrap_or(ModelTier::Standard);
     if let Err(msg) = ponyllm_config::validate_model_pricing(
         payload.input_price,
         payload.cached_price,
@@ -2127,7 +2321,10 @@ pub async fn handle_admin_create_model(
             .into_response();
     }
     let proto = payload.protocol.as_deref().and_then(parse_protocol_opt);
-    let think_def = payload.thinking_default.as_deref().and_then(parse_effort_opt);
+    let think_def = payload
+        .thinking_default
+        .as_deref()
+        .and_then(parse_effort_opt);
     let think_max = payload.thinking_max.as_deref().and_then(parse_effort_opt);
     let ctx_win = payload.context_window.unwrap_or_else(|| "128K".to_string());
     let max_out = payload.max_output.unwrap_or_else(|| "16K".to_string());
@@ -2293,7 +2490,7 @@ pub async fn handle_admin_create_model(
                 UpstreamProtocol::Responses => "responses".to_string(),
                 UpstreamProtocol::Anthropic => "messages".to_string(),
                 UpstreamProtocol::Antigravity => "antigravity".to_string(),
-                    UpstreamProtocol::Systemone => "systemone".to_string(),
+                UpstreamProtocol::Systemone => "systemone".to_string(),
             }),
             base_url,
             thinking_default: format!("{effective_def:?}"),
@@ -2582,7 +2779,12 @@ pub async fn handle_admin_update_model(
     let spec_obj = m_spec.thinking_spec();
     let effective_def = spec_obj.resolve(None);
 
-    if let Some(p_cfg) = state.config.write().providers.get_mut(&target_provider_name) {
+    if let Some(p_cfg) = state
+        .config
+        .write()
+        .providers
+        .get_mut(&target_provider_name)
+    {
         if !p_cfg.models.contains(&name) {
             p_cfg.models.push(name.clone());
         }
@@ -2604,7 +2806,7 @@ pub async fn handle_admin_update_model(
             UpstreamProtocol::Responses => "responses".to_string(),
             UpstreamProtocol::Anthropic => "messages".to_string(),
             UpstreamProtocol::Antigravity => "antigravity".to_string(),
-                    UpstreamProtocol::Systemone => "systemone".to_string(),
+            UpstreamProtocol::Systemone => "systemone".to_string(),
         }),
         base_url: existing_config.base_url,
         thinking_default: format!("{effective_def:?}"),
@@ -2613,7 +2815,11 @@ pub async fn handle_admin_update_model(
         cached_price: existing_config.cached_price,
         output_price: existing_config.output_price,
         pricing_mode: existing_config.pricing_mode.map(Into::into),
-        pricing_periods: existing_config.pricing_periods.into_iter().map(Into::into).collect(),
+        pricing_periods: existing_config
+            .pricing_periods
+            .into_iter()
+            .map(Into::into)
+            .collect(),
         display_name: existing_config.display_name,
         temperature: existing_config.temperature,
         top_p: existing_config.top_p,
@@ -2691,7 +2897,12 @@ pub async fn handle_admin_delete_model(
         Err(resp) => return resp,
     };
 
-    if let Some(p_cfg) = state.config.write().providers.get_mut(&target_provider_name) {
+    if let Some(p_cfg) = state
+        .config
+        .write()
+        .providers
+        .get_mut(&target_provider_name)
+    {
         p_cfg.models.retain(|m| m != &name);
         p_cfg.model_specs.retain(|m| m.name != name);
         if let Some(ref new_def) = updated_default_model {
@@ -2730,7 +2941,8 @@ pub async fn handle_admin_keys(State(state): State<Arc<AppState>>) -> impl IntoR
                 .map(|k| k.api_key.clone())
                 .unwrap_or_default();
             let (cooldown_remaining, cooldown_reset_at) = pool.key_cooldown(&id);
-            let usage = pool.snapshot_keys()
+            let usage = pool
+                .snapshot_keys()
                 .into_iter()
                 .find(|k| k.id == id)
                 .map(|k| {
@@ -2812,9 +3024,9 @@ pub async fn handle_admin_create_key(
             .into_response();
     }
 
-    let final_priority = payload.priority.unwrap_or_else(|| {
-        p_sec.keys.iter().map(|k| k.priority).max().unwrap_or(0) + 1
-    });
+    let final_priority = payload
+        .priority
+        .unwrap_or_else(|| p_sec.keys.iter().map(|k| k.priority).max().unwrap_or(0) + 1);
     let final_weight = payload.weight.unwrap_or(10);
 
     p_sec.keys.push(KeySection {
@@ -2865,14 +3077,10 @@ pub async fn handle_admin_create_key(
     )
         .into_response();
 
-    resp.headers_mut().insert(
-        header::CACHE_CONTROL,
-        HeaderValue::from_static("no-store"),
-    );
-    resp.headers_mut().insert(
-        header::PRAGMA,
-        HeaderValue::from_static("no-cache"),
-    );
+    resp.headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    resp.headers_mut()
+        .insert(header::PRAGMA, HeaderValue::from_static("no-cache"));
     resp
 }
 
@@ -2937,7 +3145,11 @@ pub async fn handle_admin_update_key(
         if let Some(w) = payload.weight {
             key_sec.weight = w;
         }
-        (parse_pool_strategy(&p_sec.strategy), key_sec.clone(), p_sec.keys.clone())
+        (
+            parse_pool_strategy(&p_sec.strategy),
+            key_sec.clone(),
+            p_sec.keys.clone(),
+        )
     };
 
     let new_ver = match save_store_config(&state, &mut file, &store_version).await {
@@ -2972,7 +3184,9 @@ pub async fn handle_admin_update_key(
 
     tracing::info!(provider = %target_provider_name, key_id = %id, priority = updated_key_sec.priority, weight = updated_key_sec.weight, "admin updated key");
 
-    let status = new_pool.get_key_status(&id).unwrap_or(ponyllm_core::pool::KeyState::Active);
+    let status = new_pool
+        .get_key_status(&id)
+        .unwrap_or(ponyllm_core::pool::KeyState::Active);
     let (cooldown_remaining, cooldown_reset_at) = new_pool.key_cooldown(&id);
 
     let disabled_reason = if status == ponyllm_core::pool::KeyState::Disabled {
@@ -3060,7 +3274,7 @@ pub async fn handle_admin_delete_key(
     };
 
     let (strat, remaining_keys) = {
-    let p_sec = file.providers.get_mut(&target_provider_name).unwrap();
+        let p_sec = file.providers.get_mut(&target_provider_name).unwrap();
         p_sec.keys.retain(|k| k.id != id);
         (parse_pool_strategy(&p_sec.strategy), p_sec.keys.clone())
     };
@@ -3116,16 +3330,13 @@ pub async fn handle_admin_test_key(
         Err(resp) => return resp,
     };
 
-    let found = file
-        .providers
-        .iter()
-        .find_map(|(p_name, p_sec)| {
-            p_sec
-                .keys
-                .iter()
-                .find(|k| k.id == id)
-                .map(|k| (p_name.clone(), p_sec.clone(), k.clone()))
-        });
+    let found = file.providers.iter().find_map(|(p_name, p_sec)| {
+        p_sec
+            .keys
+            .iter()
+            .find(|k| k.id == id)
+            .map(|k| (p_name.clone(), p_sec.clone(), k.clone()))
+    });
 
     let Some((p_name, p_sec, key_sec)) = found else {
         return (
@@ -3230,11 +3441,18 @@ pub async fn handle_admin_test_key(
                                     let now = chrono::Utc::now();
                                     let diff = if utc_dt > now {
                                         let dur = utc_dt - now;
-                                        format!("{}小时{}分后", dur.num_hours(), dur.num_minutes() % 60)
+                                        format!(
+                                            "{}小时{}分后",
+                                            dur.num_hours(),
+                                            dur.num_minutes() % 60
+                                        )
                                     } else {
                                         "已就绪".to_string()
                                     };
-                                    (Some(bj_dt.format("%Y-%m-%d %H:%M:%S").to_string()), Some(diff))
+                                    (
+                                        Some(bj_dt.format("%Y-%m-%d %H:%M:%S").to_string()),
+                                        Some(diff),
+                                    )
                                 }
                                 None => (None, None),
                             };
@@ -3263,11 +3481,22 @@ pub async fn handle_admin_test_key(
                                                     let now = chrono::Utc::now();
                                                     let diff = if utc_dt > now {
                                                         let dur = utc_dt - now;
-                                                        format!("{}小时{}分后", dur.num_hours(), dur.num_minutes() % 60)
+                                                        format!(
+                                                            "{}小时{}分后",
+                                                            dur.num_hours(),
+                                                            dur.num_minutes() % 60
+                                                        )
                                                     } else {
                                                         "已就绪".to_string()
                                                     };
-                                                    (Some(bj_dt.format("%Y-%m-%d %H:%M:%S").to_string()), Some(diff))
+                                                    (
+                                                        Some(
+                                                            bj_dt
+                                                                .format("%Y-%m-%d %H:%M:%S")
+                                                                .to_string(),
+                                                        ),
+                                                        Some(diff),
+                                                    )
                                                 }
                                                 None => (None, None),
                                             };
@@ -3287,7 +3516,8 @@ pub async fn handle_admin_test_key(
                                 .collect()
                         });
 
-                        let has_positive_quota = snapshot.models.values().any(|m| m.remaining_fraction > 0.0);
+                        let has_positive_quota =
+                            snapshot.models.values().any(|m| m.remaining_fraction > 0.0);
                         let pools = state.pools.read();
                         if let Some(pool) = pools.get(&p_name) {
                             // Probe quota-group snapshots are read-only
@@ -3328,19 +3558,27 @@ pub async fn handle_admin_test_key(
                         (
                             Some(list),
                             groups_view,
-                            format!("probe ok (quota fetched for {} models)", snapshot.models.len()),
+                            format!(
+                                "probe ok (quota fetched for {} models)",
+                                snapshot.models.len()
+                            ),
                             None,
                         )
                     }
-                                        Err(e) => {
+                    Err(e) => {
                         // 探针撞到上游 403 时与请求路径同处理（资格类 → 长冷冻
                         // 等）：记录池动作 + 前端用 error_code 区分
                         // `eligibility_frozen`，而不是笼统报 quota_probe_failed。
                         let mut probe_error_code: Option<String> = None;
-                        if let ponyllm_core::error::CoreError::UpstreamStatusError { status, body } = &e {
-                            if let Some(pool_err) =
-                                ponyllm_core::executor::classify_probe_failure(status.as_u16(), body)
-                            {
+                        if let ponyllm_core::error::CoreError::UpstreamStatusError {
+                            status,
+                            body,
+                        } = &e
+                        {
+                            if let Some(pool_err) = ponyllm_core::executor::classify_probe_failure(
+                                status.as_u16(),
+                                body,
+                            ) {
                                 // 把确定性 403 类别映射为稳定 error_code，
                                 // 而非只特判 eligibility——policy/validation
                                 // 同样不能被笼统报成 quota_probe_failed。
@@ -3357,10 +3595,8 @@ pub async fn handle_admin_test_key(
                                     _ => "quota_probe_failed".to_string(),
                                 });
                                 if let Some(pool) = state.pools.read().get(&p_name) {
-                                    let preview: String = format!("{pool_err:?}")
-                                        .chars()
-                                        .take(300)
-                                        .collect();
+                                    let preview: String =
+                                        format!("{pool_err:?}").chars().take(300).collect();
                                     tracing::warn!(
                                         provider = %p_name,
                                         key_id = %key_sec.id,
@@ -3372,14 +3608,20 @@ pub async fn handle_admin_test_key(
                                 }
                             }
                         }
-                        (None, None, format!("quota fetch error: {}", e), probe_error_code)
+                        (
+                            None,
+                            None,
+                            format!("quota fetch error: {}", e),
+                            probe_error_code,
+                        )
                     }
                 };
 
                 // quota 探测失败不能再包装成成功：否则前端会继续沿用
                 // localStorage 里的旧额度快照，把不可用账号画成绿色。
                 let quota_failed = quota_view.is_none() && quota_groups_view.is_none();
-                let is_validation = ponyllm_core::executor::is_account_validation_required(&quota_msg);
+                let is_validation =
+                    ponyllm_core::executor::is_account_validation_required(&quota_msg);
                 KeyTestView {
                     success: !quota_failed,
                     latency_ms,
@@ -3404,14 +3646,17 @@ pub async fn handle_admin_test_key(
                 latency_ms,
                 http_status: Some(429),
                 error_code: Some("lock_busy".to_string()),
-                message: "OAuth token refresh lock is currently held by another replica; retry shortly".to_string(),
+                message:
+                    "OAuth token refresh lock is currently held by another replica; retry shortly"
+                        .to_string(),
                 quota: None,
                 quota_groups: None,
                 usage: None,
             },
             Err(e) => {
-                let is_invalid_grant = matches!(&e, ponyllm_core::error::CoreError::AuthInvalid { .. })
-                    || e.to_string().to_ascii_lowercase().contains("invalid_grant");
+                let is_invalid_grant =
+                    matches!(&e, ponyllm_core::error::CoreError::AuthInvalid { .. })
+                        || e.to_string().to_ascii_lowercase().contains("invalid_grant");
                 KeyTestView {
                     success: false,
                     latency_ms,
@@ -3564,18 +3809,25 @@ pub async fn handle_admin_test_key(
         .unwrap_or_default()
         .as_millis() as u64;
 
-    let current_fraction = test_view.quota_groups.as_ref().and_then(|groups| {
-        for g in groups {
-            for b in &g.buckets {
-                if b.window.eq_ignore_ascii_case("5h") || b.bucket_id.contains("5h") {
-                    return Some(b.remaining_fraction);
+    let current_fraction = test_view
+        .quota_groups
+        .as_ref()
+        .and_then(|groups| {
+            for g in groups {
+                for b in &g.buckets {
+                    if b.window.eq_ignore_ascii_case("5h") || b.bucket_id.contains("5h") {
+                        return Some(b.remaining_fraction);
+                    }
                 }
             }
-        }
-        None
-    }).or_else(|| {
-        test_view.quota.as_ref().and_then(|items| items.first().map(|m| m.remaining_fraction))
-    });
+            None
+        })
+        .or_else(|| {
+            test_view
+                .quota
+                .as_ref()
+                .and_then(|items| items.first().map(|m| m.remaining_fraction))
+        });
 
     let weekly_fraction = test_view.quota_groups.as_ref().and_then(|groups| {
         for g in groups {
@@ -3584,7 +3836,12 @@ pub async fn handle_admin_test_key(
                 let b_id = b.bucket_id.to_lowercase();
                 let b_desc = b.description.as_deref().unwrap_or("").to_lowercase();
                 let b_disp = b.display_name.as_deref().unwrap_or("").to_lowercase();
-                if win == "weekly" || b_id.contains("week") || b_desc.contains("week") || b_disp.contains("周") || b_id.contains("7d") {
+                if win == "weekly"
+                    || b_id.contains("week")
+                    || b_desc.contains("week")
+                    || b_disp.contains("周")
+                    || b_id.contains("7d")
+                {
                     return Some(b.remaining_fraction);
                 }
             }
@@ -3595,11 +3852,17 @@ pub async fn handle_admin_test_key(
     if let Some(pool) = state.pools.read().get(&p_name) {
         if let Some(entry) = pool.snapshot_keys().into_iter().find(|k| k.id == id) {
             if let Some(frac) = current_fraction {
-                entry
-                    .usage_tracker
-                    .observe_upstream_probe_dual(now_ms, Some(frac), weekly_fraction);
+                entry.usage_tracker.observe_upstream_probe_dual(
+                    now_ms,
+                    Some(frac),
+                    weekly_fraction,
+                );
             }
-            test_view.usage = Some(entry.usage_tracker.estimate_capacity_dual(now_ms, current_fraction, weekly_fraction));
+            test_view.usage = Some(entry.usage_tracker.estimate_capacity_dual(
+                now_ms,
+                current_fraction,
+                weekly_fraction,
+            ));
         }
     }
 
@@ -3647,7 +3910,8 @@ pub async fn handle_admin_put_strategy(
         )
             .into_response();
     };
-    let Ok(new_strategy) = strategy_str.parse::<ponyllm_core::pool::GatewayRoutingStrategy>() else {
+    let Ok(new_strategy) = strategy_str.parse::<ponyllm_core::pool::GatewayRoutingStrategy>()
+    else {
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({"error": {"message": format!("unknown strategy '{strategy_str}'"), "code": "invalid_strategy"}})),
@@ -3826,7 +4090,13 @@ pub async fn handle_gateway_keys_issue(
     };
     // Mirror to memory (same-request auth must see the new key; contract
     // requires revoke to sync memory before responding — issuance too).
-    if let Some(stored) = file.gateway.gateway_keys.iter().find(|k| k.id == id).cloned() {
+    if let Some(stored) = file
+        .gateway
+        .gateway_keys
+        .iter()
+        .find(|k| k.id == id)
+        .cloned()
+    {
         let mut cfg = state.config.write();
         if let Some(slot) = cfg.gateway_keys.iter_mut().find(|k| k.id == id) {
             *slot = stored;
@@ -3847,14 +4117,10 @@ pub async fn handle_gateway_keys_issue(
         }),
     )
         .into_response();
-    resp.headers_mut().insert(
-        header::CACHE_CONTROL,
-        HeaderValue::from_static("no-store"),
-    );
-    resp.headers_mut().insert(
-        header::PRAGMA,
-        HeaderValue::from_static("no-cache"),
-    );
+    resp.headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    resp.headers_mut()
+        .insert(header::PRAGMA, HeaderValue::from_static("no-cache"));
     resp
 }
 
@@ -3945,10 +4211,7 @@ pub async fn handle_admin_auth_rotate(
     // open mode has no credential and keeps its 409 below.
     {
         let cfg = state.config.read();
-        let strict = matches!(
-            cfg.auth_compat,
-            ponyllm_config::AuthCompat::Strict
-        );
+        let strict = matches!(cfg.auth_compat, ponyllm_config::AuthCompat::Strict);
         let entries = cfg.gateway_keys.clone();
         let legacy = cfg.api_key.clone();
         let open = (legacy.trim().is_empty() || legacy.trim().eq_ignore_ascii_case("none"))
@@ -3979,20 +4242,18 @@ pub async fn handle_admin_auth_rotate(
         Err(resp) => return resp,
     };
     state.config.write().api_key = new_token.clone();
-    tracing::info!(
-        config_version = new_version,
-        "admin rotated gateway token"
-    );
+    tracing::info!(config_version = new_version, "admin rotated gateway token");
     let rotated_at = chrono::Utc::now().to_rfc3339();
-    let mut resp = Json(RotateView { new_token, rotated_at, config_version: new_version }).into_response();
-    resp.headers_mut().insert(
-        header::CACHE_CONTROL,
-        HeaderValue::from_static("no-store"),
-    );
-    resp.headers_mut().insert(
-        header::PRAGMA,
-        HeaderValue::from_static("no-cache"),
-    );
+    let mut resp = Json(RotateView {
+        new_token,
+        rotated_at,
+        config_version: new_version,
+    })
+    .into_response();
+    resp.headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    resp.headers_mut()
+        .insert(header::PRAGMA, HeaderValue::from_static("no-cache"));
     resp
 }
 
@@ -4028,13 +4289,21 @@ fn render_oauth_callback_html(
     error: Option<&str>,
     target_origin: Option<&str>,
 ) -> String {
-    let title = if success { "Google 授权成功" } else { "Google 授权失败" };
+    let title = if success {
+        "Google 授权成功"
+    } else {
+        "Google 授权失败"
+    };
     let status_icon = if success {
         r##"<div style="width:52px;height:52px;border-radius:50%;background:#059669;display:flex;align-items:center;justify-content:center;margin:0 auto 16px;box-shadow:0 0 20px rgba(16,185,129,0.35);"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg></div>"##
     } else {
         r##"<div style="width:52px;height:52px;border-radius:50%;background:#dc2626;display:flex;align-items:center;justify-content:center;margin:0 auto 16px;box-shadow:0 0 20px rgba(239,68,68,0.35);"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg></div>"##
     };
-    let main_heading = if success { "授权已成功完成" } else { "授权未能完成" };
+    let main_heading = if success {
+        "授权已成功完成"
+    } else {
+        "授权未能完成"
+    };
     let raw_desc = if success {
         "已接收到 Google 授权凭据，正在通知 PonyLLM Web 控制台自动闭环..."
     } else {
@@ -4042,16 +4311,25 @@ fn render_oauth_callback_html(
     };
     let sub_desc = escape_html(raw_desc);
 
-    let js_code = escape_json_for_html_script(&serde_json::to_string(&code.unwrap_or("")).unwrap_or_default());
-    let js_state = escape_json_for_html_script(&serde_json::to_string(&state.unwrap_or("")).unwrap_or_default());
-    let js_error = escape_json_for_html_script(&serde_json::to_string(&error.unwrap_or("")).unwrap_or_default());
+    let js_code = escape_json_for_html_script(
+        &serde_json::to_string(&code.unwrap_or("")).unwrap_or_default(),
+    );
+    let js_state = escape_json_for_html_script(
+        &serde_json::to_string(&state.unwrap_or("")).unwrap_or_default(),
+    );
+    let js_error = escape_json_for_html_script(
+        &serde_json::to_string(&error.unwrap_or("")).unwrap_or_default(),
+    );
     let js_success = if success { "true" } else { "false" };
     let js_target_origin = match target_origin {
-        Some(o) if !o.trim().is_empty() => serde_json::to_string(o).unwrap_or_else(|_| "window.location.origin".to_string()),
+        Some(o) if !o.trim().is_empty() => {
+            serde_json::to_string(o).unwrap_or_else(|_| "window.location.origin".to_string())
+        }
         _ => "window.location.origin".to_string(),
     };
 
-    format!(r##"<!DOCTYPE html>
+    format!(
+        r##"<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
     <meta charset="utf-8">
@@ -4118,7 +4396,8 @@ fn render_oauth_callback_html(
         }})();
     </script>
 </body>
-</html>"##)
+</html>"##
+    )
 }
 
 /// Public OAuth2 callback endpoint (`GET /oauth2callback`), exempt from auth.
@@ -4171,7 +4450,6 @@ pub async fn handle_oauth2_callback(
         }
     }
 
-
     let html = render_oauth_callback_html(
         success,
         code.as_deref(),
@@ -4182,7 +4460,10 @@ pub async fn handle_oauth2_callback(
 
     let mut resp = (
         StatusCode::OK,
-        [(header::CONTENT_TYPE, HeaderValue::from_static("text/html; charset=utf-8"))],
+        [(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("text/html; charset=utf-8"),
+        )],
         html,
     )
         .into_response();
@@ -4191,10 +4472,8 @@ pub async fn handle_oauth2_callback(
         header::CACHE_CONTROL,
         HeaderValue::from_static("no-store, no-cache, must-revalidate"),
     );
-    resp.headers_mut().insert(
-        header::PRAGMA,
-        HeaderValue::from_static("no-cache"),
-    );
+    resp.headers_mut()
+        .insert(header::PRAGMA, HeaderValue::from_static("no-cache"));
     resp.headers_mut().insert(
         header::HeaderName::from_static("content-security-policy"),
         HeaderValue::from_static("default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; frame-ancestors 'none'"),
@@ -4209,7 +4488,6 @@ pub async fn handle_oauth2_callback(
     );
     resp
 }
-
 
 #[utoipa::path(
     get,
@@ -4230,10 +4508,7 @@ pub async fn handle_admin_antigravity_pending(
     // never the code (`AntigravityPendingView.code` omits None via serde).
     let is_admin = {
         let cfg = state.config.read();
-        let strict = matches!(
-            cfg.auth_compat,
-            ponyllm_config::AuthCompat::Strict
-        );
+        let strict = matches!(cfg.auth_compat, ponyllm_config::AuthCompat::Strict);
         let entries = cfg.gateway_keys.clone();
         let legacy = cfg.api_key.clone();
         matches!(
@@ -4270,15 +4545,13 @@ pub async fn handle_admin_antigravity_pending(
         (status = 200, body = ProxyStatusView)
     )
 )]
-pub async fn handle_admin_proxy_status(
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
+pub async fn handle_admin_proxy_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     // 1. First check configured provider/gateway proxy if any
     let configured_proxy: Option<String> = {
         let cfg = state.config.read();
-        cfg.proxy.clone().or_else(|| {
-            cfg.providers.values().find_map(|p| p.proxy.clone())
-        })
+        cfg.proxy
+            .clone()
+            .or_else(|| cfg.providers.values().find_map(|p| p.proxy.clone()))
     };
 
     if let Some(cfg_proxy) = configured_proxy {
@@ -4298,7 +4571,9 @@ pub async fn handle_admin_proxy_status(
 
     // 2. Next probe local pproxy (127.0.0.1:8899)
     let pproxy_addr = std::net::SocketAddr::from(([127, 0, 0, 1], 8899));
-    let pproxy_active = std::net::TcpStream::connect_timeout(&pproxy_addr, std::time::Duration::from_millis(50)).is_ok();
+    let pproxy_active =
+        std::net::TcpStream::connect_timeout(&pproxy_addr, std::time::Duration::from_millis(50))
+            .is_ok();
 
     if pproxy_active {
         let proxy_url = "http://127.0.0.1:8899".to_string();
@@ -4372,11 +4647,10 @@ async fn measure_proxy_latency(proxy_url: &str) -> Option<u64> {
 /// never be smuggled into the authorization link (security audit
 /// 2026-09-13, "redirect_uri 白名单").
 pub(crate) fn validate_antigravity_redirect_uri(uri: &str) -> Result<(), String> {
-    let parsed = reqwest::Url::parse(uri)
-        .map_err(|_| {
-            let sanitized: String = uri.chars().take(64).filter(|c| !c.is_control()).collect();
-            format!("redirect_uri 不是合法 URL: {sanitized}")
-        })?;
+    let parsed = reqwest::Url::parse(uri).map_err(|_| {
+        let sanitized: String = uri.chars().take(64).filter(|c| !c.is_control()).collect();
+        format!("redirect_uri 不是合法 URL: {sanitized}")
+    })?;
     let scheme_ok = matches!(parsed.scheme(), "http" | "https");
     let host_ok = matches!(parsed.host_str(), Some("localhost" | "127.0.0.1"));
     let path_ok = parsed.path() == "/oauth2callback";
@@ -4393,7 +4667,14 @@ pub(crate) fn validate_antigravity_redirect_uri(uri: &str) -> Result<(), String>
     let canonical = parsed.as_str() == uri;
     let no_userinfo = parsed.username().is_empty() && parsed.password().is_none();
     let port_ok = parsed.port().map(|p| p != 0).unwrap_or(true);
-    if scheme_ok && host_ok && path_ok && no_query && no_fragment && canonical && no_userinfo && port_ok
+    if scheme_ok
+        && host_ok
+        && path_ok
+        && no_query
+        && no_fragment
+        && canonical
+        && no_userinfo
+        && port_ok
     {
         return Ok(());
     }
@@ -4423,7 +4704,8 @@ fn resolve_antigravity_redirect_uri(inferred: Option<String>, payload: Option<St
     })
 }
 
-fn reject_invalid_redirect_uri(msg: String) -> axum::response::Response {    (
+fn reject_invalid_redirect_uri(msg: String) -> axum::response::Response {
+    (
         StatusCode::BAD_REQUEST,
         Json(json!({"error": {"message": msg, "code": "invalid_redirect_uri"}})),
     )
@@ -4459,7 +4741,8 @@ pub async fn handle_admin_antigravity_auth_url(
     {
         let mut pending_map = state.pending_antigravity_oauth.write();
         let now = Instant::now();
-        pending_map.retain(|_, v| now.duration_since(v.created_at).as_secs() < PENDING_EXPIRATION_SECS);
+        pending_map
+            .retain(|_, v| now.duration_since(v.created_at).as_secs() < PENDING_EXPIRATION_SECS);
         if pending_map.len() >= MAX_PENDING_OAUTH {
             if let Some(oldest_key) = pending_map
                 .iter()
@@ -4480,7 +4763,6 @@ pub async fn handle_admin_antigravity_auth_url(
             },
         );
     }
-
 
     let auth_url = ponyllm_core::pool::build_authorization_url(&redirect_uri, &state_key);
 
@@ -4506,15 +4788,34 @@ pub async fn handle_admin_authorize_antigravity(
         Err(resp) => return resp,
     };
 
-    let target_provider = match payload.provider.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    let target_provider = match payload
+        .provider
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         Some(p) => p.to_string(),
         None => "antigravity".to_string(),
     };
 
     // 1. Synthesize effective proxy (payload -> store.provider -> store.gateway -> detect_system_proxy)
-    let explicit_payload_proxy = payload.proxy.as_deref().map(str::trim).filter(|s| !s.is_empty());
-    let store_provider_proxy = file.providers.get(&target_provider).and_then(|p| p.proxy.as_deref()).map(str::trim).filter(|s| !s.is_empty());
-    let gateway_proxy = file.gateway.proxy.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let explicit_payload_proxy = payload
+        .proxy
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let store_provider_proxy = file
+        .providers
+        .get(&target_provider)
+        .and_then(|p| p.proxy.as_deref())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let gateway_proxy = file
+        .gateway
+        .proxy
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
     let detected_proxy = ponyllm_core::detect_system_proxy();
 
     let effective_proxy: Option<String> = explicit_payload_proxy
@@ -4537,8 +4838,12 @@ pub async fn handle_admin_authorize_antigravity(
     }
 
     // 2. Parse OAuth input (extract code and potential redirect_uri, or catch Google error)
-    let (code, inferred_redirect) = match ponyllm_core::pool::parse_oauth_callback_input(&payload.code_or_url) {
-        Some(ponyllm_core::pool::ParsedOAuthCallback::Code { code, redirect_uri, .. }) => (code, redirect_uri),
+    let (code, inferred_redirect) = match ponyllm_core::pool::parse_oauth_callback_input(
+        &payload.code_or_url,
+    ) {
+        Some(ponyllm_core::pool::ParsedOAuthCallback::Code {
+            code, redirect_uri, ..
+        }) => (code, redirect_uri),
         Some(ponyllm_core::pool::ParsedOAuthCallback::Error { error, description }) => {
             let msg = description.unwrap_or(error);
             return (
@@ -4573,7 +4878,10 @@ pub async fn handle_admin_authorize_antigravity(
 
     // 3. Build HTTP client with effective proxy for code exchange (Strict Fail-Closed)
     let http_client = if let Some(ref proxy_url) = effective_proxy {
-        match ponyllm_core::executor::try_create_upstream_http_client_with_options(Some(proxy_url), false) {
+        match ponyllm_core::executor::try_create_upstream_http_client_with_options(
+            Some(proxy_url),
+            false,
+        ) {
             Ok(c) => c,
             Err(e) => {
                 return (
@@ -4604,7 +4912,12 @@ pub async fn handle_admin_authorize_antigravity(
         }
     };
 
-    let final_id = if let Some(custom) = payload.id.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    let final_id = if let Some(custom) = payload
+        .id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         custom.to_string()
     } else if let Some(ref email) = auth_res.email {
         format!("ag-{}", email)
@@ -4613,9 +4926,11 @@ pub async fn handle_admin_authorize_antigravity(
     };
 
     let (provider_base_url, effective_priority, effective_weight) = {
-        let p_sec = file.providers.entry(target_provider.clone()).or_insert_with(|| {
-            ProviderSection {
-    rate_limits: None,
+        let p_sec = file
+            .providers
+            .entry(target_provider.clone())
+            .or_insert_with(|| ProviderSection {
+                rate_limits: None,
                 base_url: ponyllm_core::pool::DEFAULT_ANTIGRAVITY_ENDPOINT.to_string(),
                 default_model: "claude-sonnet-4-6".to_string(),
                 strategy: "priority".to_string(),
@@ -4638,8 +4953,9 @@ pub async fn handle_admin_authorize_antigravity(
                 ttfb_timeout_secs: None,
                 keys: vec![],
                 model_configs: vec![],
-            }
-        });
+                egress_pool: vec![],
+                egress_strategy: ponyllm_config::default_egress_strategy(),
+            });
 
         // Ensure provider proxy is set to effective proxy if not configured,
         // guaranteeing egress IP consistency across data plane and RTR!
@@ -4649,9 +4965,9 @@ pub async fn handle_admin_authorize_antigravity(
             }
         }
 
-        let effective_priority = payload.priority.unwrap_or_else(|| {
-            p_sec.keys.iter().map(|k| k.priority).max().unwrap_or(0) + 1
-        });
+        let effective_priority = payload
+            .priority
+            .unwrap_or_else(|| p_sec.keys.iter().map(|k| k.priority).max().unwrap_or(0) + 1);
         let effective_weight = payload.weight.unwrap_or(10);
 
         if let Some(existing_key) = p_sec.keys.iter_mut().find(|k| k.id == final_id) {
@@ -4683,9 +4999,11 @@ pub async fn handle_admin_authorize_antigravity(
     let p_sec = file.providers.get(&target_provider).unwrap();
     {
         let mut gw_cfg = state.config.write();
-        let entry = gw_cfg.providers.entry(target_provider.clone()).or_insert_with(|| {
-            ProviderConfig {
-    rate_limits: None,
+        let entry = gw_cfg
+            .providers
+            .entry(target_provider.clone())
+            .or_insert_with(|| ProviderConfig {
+                rate_limits: None,
                 base_url: p_sec.base_url.clone(),
                 default_model: p_sec.default_model.clone(),
                 strategy: p_sec.strategy.clone(),
@@ -4702,8 +5020,9 @@ pub async fn handle_admin_authorize_antigravity(
                 proxy: p_sec.proxy.clone(),
                 timeout_secs: p_sec.timeout_secs,
                 ttfb_timeout_secs: p_sec.ttfb_timeout_secs,
-            }
-        });
+                egress_pool: p_sec.egress_pool.clone(),
+                egress_strategy: p_sec.egress_strategy.clone(),
+            });
         entry.default_protocol = p_sec.default_protocol;
         entry.proxy = p_sec.proxy.clone();
         entry.timeout_secs = p_sec.timeout_secs;
@@ -4729,10 +5048,14 @@ pub async fn handle_admin_authorize_antigravity(
             let strat = parse_pool_strategy(&p_sec.strategy);
             Arc::new(KeyPool::new(&target_provider, strat))
         });
-        let entry = ApiKeyEntry::new_antigravity(&final_id, mgr.clone(), effective_priority, effective_weight);
+        let entry = ApiKeyEntry::new_antigravity(
+            &final_id,
+            mgr.clone(),
+            effective_priority,
+            effective_weight,
+        );
         pool.add_key(entry);
     }
-
 
     // Clean up consumed pending state (F5 one-shot: mark consumed, then drop
     // the entry so no later callback can re-inject into this flow).
@@ -4748,7 +5071,9 @@ pub async fn handle_admin_authorize_antigravity(
     // H2: gate the endpoint first — a hostile provider base_url must not
     // receive the fresh Bearer token. On block, skip quota (None) but keep
     // the authorized key (the credential itself is already stored).
-    let quota_allowed = crate::egress::check_probe_url(&provider_base_url).await.is_ok();
+    let quota_allowed = crate::egress::check_probe_url(&provider_base_url)
+        .await
+        .is_ok();
     if !quota_allowed {
         tracing::warn!(
             provider = %target_provider,
@@ -4759,84 +5084,94 @@ pub async fn handle_admin_authorize_antigravity(
         // H2 red-team B2: same no-redirect probe client as the dial paths.
         let probe_client = state.probe_http_client_for_provider(&target_provider);
         match tokio::time::timeout(
-        std::time::Duration::from_secs(4),
-        mgr.with_client(&probe_client)
-            .fetch_quota(Some(&provider_base_url)),
-    )
-    .await
-    {
-        Ok(Ok(snapshot)) => {
-            let mut list = Vec::new();
-            let mut models: Vec<_> = snapshot.models.values().collect();
-            models.sort_by_key(|m| &m.model_id);
-            for m in models {
-                let (beijing_time, remaining_desc) = match m.reset_time {
-                    Some(utc_dt) => {
-                        let bj_dt = utc_dt + chrono::Duration::hours(8);
-                        let now = chrono::Utc::now();
-                        let diff = if utc_dt > now {
-                            let dur = utc_dt - now;
-                            format!("{}小时{}分后", dur.num_hours(), dur.num_minutes() % 60)
-                        } else {
-                            "已就绪".to_string()
-                        };
-                        (Some(bj_dt.format("%Y-%m-%d %H:%M:%S").to_string()), Some(diff))
-                    }
-                    None => (None, None),
-                };
-                list.push(AntigravityQuotaItemView {
-                    model_id: m.model_id.clone(),
-                    remaining_fraction: m.remaining_fraction,
-                    reset_time: m.reset_time.map(|t| t.to_rfc3339()),
-                    reset_time_beijing: beijing_time,
-                    time_until_reset: remaining_desc,
-                });
-            }
+            std::time::Duration::from_secs(4),
+            mgr.with_client(&probe_client)
+                .fetch_quota(Some(&provider_base_url)),
+        )
+        .await
+        {
+            Ok(Ok(snapshot)) => {
+                let mut list = Vec::new();
+                let mut models: Vec<_> = snapshot.models.values().collect();
+                models.sort_by_key(|m| &m.model_id);
+                for m in models {
+                    let (beijing_time, remaining_desc) = match m.reset_time {
+                        Some(utc_dt) => {
+                            let bj_dt = utc_dt + chrono::Duration::hours(8);
+                            let now = chrono::Utc::now();
+                            let diff = if utc_dt > now {
+                                let dur = utc_dt - now;
+                                format!("{}小时{}分后", dur.num_hours(), dur.num_minutes() % 60)
+                            } else {
+                                "已就绪".to_string()
+                            };
+                            (
+                                Some(bj_dt.format("%Y-%m-%d %H:%M:%S").to_string()),
+                                Some(diff),
+                            )
+                        }
+                        None => (None, None),
+                    };
+                    list.push(AntigravityQuotaItemView {
+                        model_id: m.model_id.clone(),
+                        remaining_fraction: m.remaining_fraction,
+                        reset_time: m.reset_time.map(|t| t.to_rfc3339()),
+                        reset_time_beijing: beijing_time,
+                        time_until_reset: remaining_desc,
+                    });
+                }
 
-            let groups_view = snapshot.quota_groups.map(|groups| {
-                groups
-                    .into_iter()
-                    .map(|g| AntigravityQuotaGroupView {
-                        display_name: g.display_name,
-                        description: g.description,
-                        buckets: g
-                            .buckets
-                            .into_iter()
-                            .map(|b| {
-                                let (bj_time, rem_desc) = match b.reset_time {
-                                    Some(utc_dt) => {
-                                        let bj_dt = utc_dt + chrono::Duration::hours(8);
-                                        let now = chrono::Utc::now();
-                                        let diff = if utc_dt > now {
-                                            let dur = utc_dt - now;
-                                            format!("{}小时{}分后", dur.num_hours(), dur.num_minutes() % 60)
-                                        } else {
-                                            "已就绪".to_string()
-                                        };
-                                        (Some(bj_dt.format("%Y-%m-%d %H:%M:%S").to_string()), Some(diff))
+                let groups_view = snapshot.quota_groups.map(|groups| {
+                    groups
+                        .into_iter()
+                        .map(|g| AntigravityQuotaGroupView {
+                            display_name: g.display_name,
+                            description: g.description,
+                            buckets: g
+                                .buckets
+                                .into_iter()
+                                .map(|b| {
+                                    let (bj_time, rem_desc) = match b.reset_time {
+                                        Some(utc_dt) => {
+                                            let bj_dt = utc_dt + chrono::Duration::hours(8);
+                                            let now = chrono::Utc::now();
+                                            let diff = if utc_dt > now {
+                                                let dur = utc_dt - now;
+                                                format!(
+                                                    "{}小时{}分后",
+                                                    dur.num_hours(),
+                                                    dur.num_minutes() % 60
+                                                )
+                                            } else {
+                                                "已就绪".to_string()
+                                            };
+                                            (
+                                                Some(bj_dt.format("%Y-%m-%d %H:%M:%S").to_string()),
+                                                Some(diff),
+                                            )
+                                        }
+                                        None => (None, None),
+                                    };
+                                    AntigravityQuotaBucketView {
+                                        bucket_id: b.bucket_id,
+                                        window: b.window,
+                                        remaining_fraction: b.remaining_fraction,
+                                        reset_time: b.reset_time.map(|t| t.to_rfc3339()),
+                                        reset_time_beijing: bj_time,
+                                        time_until_reset: rem_desc,
+                                        display_name: b.display_name,
+                                        description: b.description,
                                     }
-                                    None => (None, None),
-                                };
-                                AntigravityQuotaBucketView {
-                                    bucket_id: b.bucket_id,
-                                    window: b.window,
-                                    remaining_fraction: b.remaining_fraction,
-                                    reset_time: b.reset_time.map(|t| t.to_rfc3339()),
-                                    reset_time_beijing: bj_time,
-                                    time_until_reset: rem_desc,
-                                    display_name: b.display_name,
-                                    description: b.description,
-                                }
-                            })
-                            .collect(),
-                    })
-                    .collect()
-            });
+                                })
+                                .collect(),
+                        })
+                        .collect()
+                });
 
-            (Some(list), groups_view)
+                (Some(list), groups_view)
+            }
+            _ => (None, None),
         }
-        _ => (None, None),
-    }
     } else {
         (None, None)
     };
@@ -4853,14 +5188,10 @@ pub async fn handle_admin_authorize_antigravity(
         }),
     )
         .into_response();
-    resp.headers_mut().insert(
-        header::CACHE_CONTROL,
-        HeaderValue::from_static("no-store"),
-    );
-    resp.headers_mut().insert(
-        header::PRAGMA,
-        HeaderValue::from_static("no-cache"),
-    );
+    resp.headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    resp.headers_mut()
+        .insert(header::PRAGMA, HeaderValue::from_static("no-cache"));
     resp
 }
 
@@ -4938,7 +5269,11 @@ pub async fn handle_admin_provider_upstream_models(
         let Some(p_sec) = file.providers.get(&name) else {
             return not_found();
         };
-        let Some(key_sec) = p_sec.keys.iter().find(|k| k.is_antigravity(p_sec.default_protocol, &name)) else {
+        let Some(key_sec) = p_sec
+            .keys
+            .iter()
+            .find(|k| k.is_antigravity(p_sec.default_protocol, &name))
+        else {
             return unsupported();
         };
         let pool_mgr = {
@@ -5169,12 +5504,10 @@ impl utoipa::Modify for SecurityAddon {
                     .build(),
             ),
         );
-        openapi.security = Some(vec![
-            utoipa::openapi::security::SecurityRequirement::new(
-                "bearerAuth",
-                Vec::<String>::new(),
-            ),
-        ]);
+        openapi.security = Some(vec![utoipa::openapi::security::SecurityRequirement::new(
+            "bearerAuth",
+            Vec::<String>::new(),
+        )]);
     }
 }
 
@@ -5214,10 +5547,7 @@ pub fn admin_routes() -> axum::Router<Arc<AppState>> {
             "/api/admin/keys/{id}",
             put(handle_admin_update_key).delete(handle_admin_delete_key),
         )
-        .route(
-            "/api/admin/keys/{id}/test",
-            post(handle_admin_test_key),
-        )
+        .route("/api/admin/keys/{id}/test", post(handle_admin_test_key))
         .route("/api/admin/quota", get(handle_admin_quota))
         .route(
             "/api/admin/quota/benchmark",
@@ -5227,7 +5557,10 @@ pub fn admin_routes() -> axum::Router<Arc<AppState>> {
             "/api/admin/strategy",
             get(handle_admin_get_strategy).put(handle_admin_put_strategy),
         )
-        .route("/api/admin/service/status", get(handle_admin_service_status))
+        .route(
+            "/api/admin/service/status",
+            get(handle_admin_service_status),
+        )
         .route("/api/admin/auth/rotate", post(handle_admin_auth_rotate))
         .route(
             "/api/admin/gateway-keys",
@@ -5238,33 +5571,43 @@ pub fn admin_routes() -> axum::Router<Arc<AppState>> {
             post(handle_gateway_keys_revoke),
         )
         .route("/api/admin/proxy/status", get(handle_admin_proxy_status))
-        .route("/api/admin/oauth/antigravity/auth-url", get(handle_admin_antigravity_auth_url))
-        .route("/api/admin/oauth/antigravity/pending", get(handle_admin_antigravity_pending))
-        .route("/api/admin/oauth/antigravity/authorize", post(handle_admin_authorize_antigravity))
-        .layer(axum::middleware::from_fn(|req, next: axum::middleware::Next| async move {
-            let mut res = next.run(req).await;
-            let headers = res.headers_mut();
-            if !headers.contains_key(axum::http::header::CACHE_CONTROL) {
-                headers.insert(
-                    axum::http::header::CACHE_CONTROL,
-                    axum::http::HeaderValue::from_static("no-store"),
-                );
-            }
-            if !headers.contains_key(axum::http::header::PRAGMA) {
-                headers.insert(
-                    axum::http::header::PRAGMA,
-                    axum::http::HeaderValue::from_static("no-cache"),
-                );
-            }
-            res
-        }))
+        .route(
+            "/api/admin/oauth/antigravity/auth-url",
+            get(handle_admin_antigravity_auth_url),
+        )
+        .route(
+            "/api/admin/oauth/antigravity/pending",
+            get(handle_admin_antigravity_pending),
+        )
+        .route(
+            "/api/admin/oauth/antigravity/authorize",
+            post(handle_admin_authorize_antigravity),
+        )
+        .layer(axum::middleware::from_fn(
+            |req, next: axum::middleware::Next| async move {
+                let mut res = next.run(req).await;
+                let headers = res.headers_mut();
+                if !headers.contains_key(axum::http::header::CACHE_CONTROL) {
+                    headers.insert(
+                        axum::http::header::CACHE_CONTROL,
+                        axum::http::HeaderValue::from_static("no-store"),
+                    );
+                }
+                if !headers.contains_key(axum::http::header::PRAGMA) {
+                    headers.insert(
+                        axum::http::header::PRAGMA,
+                        axum::http::HeaderValue::from_static("no-cache"),
+                    );
+                }
+                res
+            },
+        ))
 }
 
 /// Generated OpenAPI document (committed to `web/openapi.json`; regenerated by
 /// `cargo test -p ponyllm-server --test admin_contract_tests openapi_dump`).
 pub fn openapi_json() -> serde_json::Value {
-    serde_json::to_value(<AdminApiDoc as utoipa::OpenApi>::openapi())
-        .expect("openapi serializes")
+    serde_json::to_value(<AdminApiDoc as utoipa::OpenApi>::openapi()).expect("openapi serializes")
 }
 
 #[cfg(test)]
@@ -5276,14 +5619,19 @@ mod antigravity_redirect_uri_tests {
         assert!(validate_antigravity_redirect_uri("http://localhost:51121/oauth2callback").is_ok());
         assert!(validate_antigravity_redirect_uri("http://localhost:8080/oauth2callback").is_ok());
         assert!(validate_antigravity_redirect_uri("http://127.0.0.1:51121/oauth2callback").is_ok());
-        assert!(validate_antigravity_redirect_uri("https://localhost:51121/oauth2callback").is_ok());
+        assert!(
+            validate_antigravity_redirect_uri("https://localhost:51121/oauth2callback").is_ok()
+        );
     }
 
     #[test]
     fn public_domain_rejected_with_actionable_message() {
         let err = validate_antigravity_redirect_uri("https://tokens.ponyjob.top/oauth2callback")
             .unwrap_err();
-        assert!(err.contains("localhost"), "msg must guide to loopback: {err}");
+        assert!(
+            err.contains("localhost"),
+            "msg must guide to loopback: {err}"
+        );
         let err2 = validate_antigravity_redirect_uri("https://evil.example.com/oauth2callback")
             .unwrap_err();
         assert!(err2.contains("localhost"));
@@ -5293,8 +5641,14 @@ mod antigravity_redirect_uri_tests {
     fn wrong_path_or_extra_params_rejected() {
         assert!(validate_antigravity_redirect_uri("http://localhost:51121/").is_err());
         assert!(validate_antigravity_redirect_uri("http://localhost:51121/other").is_err());
-        assert!(validate_antigravity_redirect_uri("http://localhost:51121/oauth2callback?extra=1").is_err());
-        assert!(validate_antigravity_redirect_uri("http://localhost:51121/oauth2callback#frag").is_err());
+        assert!(
+            validate_antigravity_redirect_uri("http://localhost:51121/oauth2callback?extra=1")
+                .is_err()
+        );
+        assert!(
+            validate_antigravity_redirect_uri("http://localhost:51121/oauth2callback#frag")
+                .is_err()
+        );
         assert!(validate_antigravity_redirect_uri("http://evil.com/oauth2callback").is_err());
         assert!(validate_antigravity_redirect_uri("not-a-url").is_err());
     }
@@ -5303,28 +5657,64 @@ mod antigravity_redirect_uri_tests {
     fn non_canonical_or_userinfo_forms_rejected() {
         // Everything here passes a naive host/path check but would reach Google
         // in a form Google never registered → must fail with our message.
-        assert!(validate_antigravity_redirect_uri("http://evil.com@localhost:51121/oauth2callback").is_err());
-        assert!(validate_antigravity_redirect_uri("http://localhost:51121/oauth2callback/../oauth2callback").is_err());
-        assert!(validate_antigravity_redirect_uri("http://localhost:51121/oauth2callback ").is_err());
-        assert!(validate_antigravity_redirect_uri(" http://localhost:51121/oauth2callback").is_err());
+        assert!(validate_antigravity_redirect_uri(
+            "http://evil.com@localhost:51121/oauth2callback"
+        )
+        .is_err());
+        assert!(validate_antigravity_redirect_uri(
+            "http://localhost:51121/oauth2callback/../oauth2callback"
+        )
+        .is_err());
+        assert!(
+            validate_antigravity_redirect_uri("http://localhost:51121/oauth2callback ").is_err()
+        );
+        assert!(
+            validate_antigravity_redirect_uri(" http://localhost:51121/oauth2callback").is_err()
+        );
         assert!(validate_antigravity_redirect_uri("http://localhost:0/oauth2callback").is_err());
-        assert!(validate_antigravity_redirect_uri("http://LOCALHOST:51121/oauth2callback").is_err());
+        assert!(
+            validate_antigravity_redirect_uri("http://LOCALHOST:51121/oauth2callback").is_err()
+        );
         assert!(validate_antigravity_redirect_uri("ftp://localhost:51121/oauth2callback").is_err());
         assert!(validate_antigravity_redirect_uri("javascript:alert(1)").is_err());
         assert!(validate_antigravity_redirect_uri("data:text/html,evil").is_err());
-        assert!(validate_antigravity_redirect_uri("http://localhost.evil.com/oauth2callback").is_err());
-        assert!(validate_antigravity_redirect_uri("http://attacker.com#localhost/oauth2callback").is_err());
-        assert!(validate_antigravity_redirect_uri("http://127.0.0.2:51121/oauth2callback").is_err());
+        assert!(
+            validate_antigravity_redirect_uri("http://localhost.evil.com/oauth2callback").is_err()
+        );
+        assert!(
+            validate_antigravity_redirect_uri("http://attacker.com#localhost/oauth2callback")
+                .is_err()
+        );
+        assert!(
+            validate_antigravity_redirect_uri("http://127.0.0.2:51121/oauth2callback").is_err()
+        );
         assert!(validate_antigravity_redirect_uri("http://[::1]:51121/oauth2callback").is_err());
-        assert!(validate_antigravity_redirect_uri("http://localhost:65536/oauth2callback").is_err());
+        assert!(
+            validate_antigravity_redirect_uri("http://localhost:65536/oauth2callback").is_err()
+        );
         // Hexadecimal / Octal IP representations and special symbol obfuscation
-        assert!(validate_antigravity_redirect_uri("http://0x7f.0.0.1:51121/oauth2callback").is_err());
-        assert!(validate_antigravity_redirect_uri("http://0177.0.0.1:51121/oauth2callback").is_err());
-        assert!(validate_antigravity_redirect_uri("http://2130706433:51121/oauth2callback").is_err());
-        assert!(validate_antigravity_redirect_uri("http://0x7f000001:51121/oauth2callback").is_err());
-        assert!(validate_antigravity_redirect_uri("http://localhost%00:51121/oauth2callback").is_err());
-        assert!(validate_antigravity_redirect_uri("http://localhost%20:51121/oauth2callback").is_err());
-        assert!(validate_antigravity_redirect_uri("http://127.0.0.1%2f@evil.com/oauth2callback").is_err());
+        assert!(
+            validate_antigravity_redirect_uri("http://0x7f.0.0.1:51121/oauth2callback").is_err()
+        );
+        assert!(
+            validate_antigravity_redirect_uri("http://0177.0.0.1:51121/oauth2callback").is_err()
+        );
+        assert!(
+            validate_antigravity_redirect_uri("http://2130706433:51121/oauth2callback").is_err()
+        );
+        assert!(
+            validate_antigravity_redirect_uri("http://0x7f000001:51121/oauth2callback").is_err()
+        );
+        assert!(
+            validate_antigravity_redirect_uri("http://localhost%00:51121/oauth2callback").is_err()
+        );
+        assert!(
+            validate_antigravity_redirect_uri("http://localhost%20:51121/oauth2callback").is_err()
+        );
+        assert!(
+            validate_antigravity_redirect_uri("http://127.0.0.1%2f@evil.com/oauth2callback")
+                .is_err()
+        );
     }
 
     #[test]
@@ -5340,7 +5730,10 @@ mod antigravity_redirect_uri_tests {
             "http://localhost:51122/oauth2callback"
         );
         assert_eq!(
-            resolve_antigravity_redirect_uri(None, Some("http://localhost:8080/oauth2callback".to_string())),
+            resolve_antigravity_redirect_uri(
+                None,
+                Some("http://localhost:8080/oauth2callback".to_string())
+            ),
             "http://localhost:8080/oauth2callback"
         );
         assert_eq!(
@@ -5358,10 +5751,19 @@ mod pool_strategy_tests {
     #[test]
     fn explicit_round_robin_maps_to_round_robin() {
         // Guard the opt-out: deleting the RR arm must turn this red.
-        assert_eq!(parse_pool_strategy("round_robin"), RoutingStrategy::RoundRobin);
+        assert_eq!(
+            parse_pool_strategy("round_robin"),
+            RoutingStrategy::RoundRobin
+        );
         // Normalization matches the CLI serve path (keep in sync).
-        assert_eq!(parse_pool_strategy(" Round_Robin "), RoutingStrategy::RoundRobin);
-        assert_eq!(parse_pool_strategy("ROUND_ROBIN"), RoutingStrategy::RoundRobin);
+        assert_eq!(
+            parse_pool_strategy(" Round_Robin "),
+            RoutingStrategy::RoundRobin
+        );
+        assert_eq!(
+            parse_pool_strategy("ROUND_ROBIN"),
+            RoutingStrategy::RoundRobin
+        );
     }
 
     #[test]
@@ -5382,7 +5784,10 @@ mod pool_strategy_tests {
         // Sticky default: typos pin to the primary key (with a warn),
         // never silently rotate.
         assert_eq!(parse_pool_strategy(""), RoutingStrategy::Priority);
-        assert_eq!(parse_pool_strategy("round-robin"), RoutingStrategy::Priority);
+        assert_eq!(
+            parse_pool_strategy("round-robin"),
+            RoutingStrategy::Priority
+        );
         assert_eq!(parse_pool_strategy("random"), RoutingStrategy::Priority);
     }
 }

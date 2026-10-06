@@ -29,6 +29,10 @@ export interface ProviderView {
   chat_url?: string | null;
   responses_url?: string | null;
   messages_url?: string | null;
+  /** Egress pool (出口池轮询): `direct` 或代理 URL 列表；null/缺省 = 单 proxy 语义。 */
+  egress_pool?: string[] | null;
+  /** Egress rotation strategy: `round_robin` | `priority`. */
+  egress_strategy?: string;
 }
 
 /** 短窗频率限额（M3 统一额度计量内核）：per-key 60s 滑动窗口 + 并发。
@@ -114,6 +118,17 @@ export interface KeyView {
   /** Reason why the key was permanently disabled, if state is `disabled`. */
   disabled_reason?: string | null;
   usage?: KeyCapacityEstimate | null;
+  /** 出口池视图（provider 级，同 provider 每行重复）：每出口 state/cooldown_reset_at。 */
+  egress?: QuotaEgressView[] | null;
+}
+
+/** 管理面出口池条目视图（契约 C7）：index=池内位置、entry="direct"或代理 URL、
+    state="active"|"cooling"、cooldown_reset_at=RFC3339（冷却中）。 */
+export interface QuotaEgressView {
+  index: number;
+  entry: string;
+  state: 'active' | 'cooling' | string;
+  cooldown_reset_at?: string | null;
 }
 
 export interface AntigravityQuotaItemView {
@@ -254,6 +269,10 @@ export interface UpdateProviderPayload {
   responses_url?: string | null;
   messages_url?: string | null;
   proxy?: string | null;
+  /** 出口池条目；显式空数组 = 清空并回退单 proxy 语义。 */
+  egress_pool?: string[] | null;
+  /** 出口轮询策略：`round_robin` | `priority`。 */
+  egress_strategy?: string | null;
 }
 
 export interface CreateModelPayload {

@@ -174,6 +174,8 @@ fn build_gateway_config_and_pools(
                 timeout_secs: p_sec.timeout_secs,
                 ttfb_timeout_secs: p_sec.ttfb_timeout_secs,
                 rate_limits: p_sec.rate_limits,
+                egress_pool: p_sec.egress_pool.clone(),
+                egress_strategy: p_sec.egress_strategy.clone(),
             },
         );
 

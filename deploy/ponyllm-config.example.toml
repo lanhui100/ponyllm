@@ -16,6 +16,19 @@
 base_url = "http://192.0.2.1:8899/<PATH_TOKEN>/opencode/zen/v1"
 default_model = "muse-spark-1.3-contributor-free"
 strategy = "round_robin"
+# 出口池轮询（2026-10-07 egress-pool 契约）：zen 免费档按客户端出口 IP 记账
+# （Redis ratelimit:ip:<ip>:<YYYYMMDD>，与 key 无关），把调度维度从 key 轮询
+# 改为出口池轮询可拆分额度桶。每出口独立记账独立冷却；429 FreeUsageLimitError
+# 只冷却该出口。条目：`direct`/`none`/空 = 网关本机直连出口；http(s):// 或
+# socks5:// = 经该代理出网（每个代理一个独立 IP）。显式配置后替代下方 proxy
+# 字段语义；不配置（或为空）则维持单 proxy 零迁移。
+# egress_pool = [
+#     "direct",                              # 本机出口（如 IPv6 2408:… 直连）
+#     "http://127.0.0.1:8899",               # 本地 pproxy → VPS 出口 192.210.231.8
+#     "http://<tencent-pproxy>:8899",        # 腾讯云出口
+#     "http://<aliyun-pproxy>:8899",         # 阿里云出口
+# ]
+# egress_strategy = "round_robin"   # round_robin（默认）| priority（取首个可用）
 billing_mode = "metered"
 input_price = 0.0
 cached_price = 0.0

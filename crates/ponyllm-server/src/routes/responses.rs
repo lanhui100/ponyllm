@@ -372,6 +372,11 @@ pub async fn handle_responses(
             request_snippet: req_snippet.clone(),
         };
         let http_client = state.http_client_for_target(&provider_name, &target.physical_model);
+        // Egress pool runtime (contract `2026-10-07-egress-pool-contract`):
+        // per-attempt exit-IP rotation when the provider configured a pool;
+        // both `None` = legacy single-proxy path, byte-identical to before.
+        let (egress_pool, egress_clients) =
+            state.egress_runtime_for_target(&provider_name, &target.physical_model);
         // Resolve this target's effective short-window budget (provider default
         // merged with the model override) so budget-filtered key selection and
         // the window-exhaustion Retry-After are honest.
@@ -392,6 +397,7 @@ pub async fn handle_responses(
             .with_opencode_zen(is_opencode_zen_target(&provider_name, &target_url))
             .with_rate_limits(rate_limits)
             .with_ttfb_timeout(ttfb_timeout)
+            .with_egress(egress_pool.clone(), egress_clients.clone())
             .with_event_sink(sink_ctx.clone(), state.event_sink(sink_ctx.clone()));
 
         let empty_stop_tried_keys: Vec<String> = Vec::new();
@@ -515,6 +521,7 @@ pub async fn handle_responses(
                 .with_rate_limits(rate_limits)
                 .with_ttfb_timeout(ttfb_timeout)
                 .with_excluded_keys(&collect_tried_keys)
+                .with_egress(egress_pool.clone(), egress_clients.clone())
                 .with_event_sink(sink_ctx.clone(), state.event_sink(sink_ctx.clone()));
                 match collect_executor.execute_stream_request_with_timing_and_key(&target_url, &collect_req_val).await {
                     Ok((resp, _instant, kid)) => {
