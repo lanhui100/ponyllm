@@ -168,6 +168,14 @@ impl AuthRateLimiter {
         }
     }
 
+    /// R-S2: drop the whole budget for `(ip, prefix)` after a SUCCESSFUL
+    /// authentication — a correct credential clears its own failure history
+    /// so one accidental typo burst does not follow the key forever.
+    pub fn clear_failures(&self, ip: IpAddr, prefix: &'static str) {
+        let mut inner = self.lock_inner();
+        inner.budgets.remove(&(ip, prefix));
+    }
+
     /// Force a full sweep now (R2 contract): drop expired lockouts and empty
     /// budgets. `live_budget_count()` then reflects live state only. The
     /// amortized request paths call `sweep` internally; tests call this

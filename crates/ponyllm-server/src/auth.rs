@@ -479,6 +479,21 @@ pub fn ratelimit_prefix(token: Option<&str>) -> &'static str {
     }
 }
 
+/// R-S6b: constant-time equality for opaque session ids (and similar short
+/// secrets). Length mismatch exits early (length is not secret), otherwise
+/// every byte is XOR-folded with no early exit, so a timing channel cannot
+/// reveal how many leading bytes matched.
+pub fn sids_equal(a: &str, b: &str) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff: u8 = 0;
+    for (x, y) in a.as_bytes().iter().zip(b.as_bytes().iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

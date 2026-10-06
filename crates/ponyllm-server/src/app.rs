@@ -213,13 +213,21 @@ async fn auth_middleware(
         }
     }
 
-    // Phase-3 (VULN-05) session cookie branch: no `Authorization` header +
-    // sessions enabled + a `ponyllm_session` cookie → authenticate with the
-    // scope captured at exchange time. CSRF double-submit: every method
-    // except GET/HEAD must carry `X-Pony-Session` matching the cookie sid
-    // (SameSite=Strict is browser-side defense in depth; this is the
+    // Phase-3 (VULN-05) session cookie branch: no `Authorization` header AND no
+    // `x-api-key` (R-S6: a stale cookie must never shadow a valid credential
+    // header) + sessions enabled + a `ponyllm_session` cookie → authenticate
+    // with the scope captured at exchange time. CSRF double-submit: every
+    // method except GET/HEAD must carry `X-Pony-Session` matching the cookie
+    // sid (SameSite=Strict is browser-side defense in depth; this is the
     // server-enforced check).
-    let session_scope: Option<ponyllm_config::KeyScope> = if headers.get("authorization").is_none()
+    let session_scope: Option<(
+        ponyllm_config::KeyScope,
+        String,
+        Arc<crate::session::SessionStore>,
+    )> = if headers
+        .get("authorization")
+        .is_none()
+        && headers.get("x-api-key").is_none()
     {
         let store_opt = state.admin_session_store.read().clone();
         let sid_opt = store_opt
@@ -233,13 +241,13 @@ async fn auth_middleware(
                         let csrf_ok = headers
                             .get("x-pony-session")
                             .and_then(|v| v.to_str().ok())
-                            .map(|s| s.trim() == sid)
+                            .map(|s| crate::auth::sids_equal(s.trim(), &sid))
                             .unwrap_or(false);
                         if !csrf_ok {
                             return crate::auth::csrf_forbidden();
                         }
                     }
-                    Some(scope)
+                    Some((scope, sid, store))
                 }
                 None => return crate::auth::session_expired(),
             },
@@ -248,10 +256,18 @@ async fn auth_middleware(
     } else {
         None
     };
-    if let Some(scope) = session_scope {
+    if let Some((scope, sid, store)) = session_scope {
         let resource = classify_resource(&method, &path, query.as_deref());
         if scope_allows(scope, resource) {
-            return next.run(req).await;
+            // R-S5: validate already slid the server-side TTL; push the
+            // browser-side expiry in lockstep with a renewal Set-Cookie
+            // (append — never clobber headers the handler may set).
+            let mut resp = next.run(req).await;
+            resp.headers_mut().append(
+                axum::http::header::SET_COOKIE,
+                crate::routes::session::build_renewal_cookie(&sid, store.ttl_secs()),
+            );
+            return resp;
         }
         let name = match resource {
             Resource::Inference => "inference",
@@ -349,7 +365,9 @@ async fn auth_middleware(
 
 /// F4 (VULN-02): fence denial envelope — 404, same shape as the global
 /// fallback, so the admin surface is indistinguishable from a missing route.
-fn admin_fence_denied() -> Response {
+/// `pub(crate)`: also used by the session endpoints (R-S2) which live outside
+/// the middleware.
+pub(crate) fn admin_fence_denied() -> Response {
     (
         StatusCode::NOT_FOUND,
         Json(json!({
