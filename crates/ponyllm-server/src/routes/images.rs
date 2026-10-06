@@ -316,7 +316,7 @@ async fn run_images_request(
     );
 
     let image_part = image.and_then(|raw| extract_image_part(raw, "image/png"));
-    // For image editing, do not force an aspect ratio if not explicitly specified, to preserve upstream image ratio
+    // For image editing, do not force an aspect ratio if not explicitly needed, or preserve upstream image ratio
     let aspect_ratio = if image_part.is_some() && size.is_none() {
         None
     } else {

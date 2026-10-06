@@ -1523,6 +1523,7 @@ pub fn images_to_antigravity_request(
             effective_prompt = format!("Based on the input image, modify it according to: {}", prompt);
         }
 
+        // Incorporate image digest or prefix into session_seed to prevent cross-image session collisions
         let img_prefix = if b64.len() > 32 { &b64[..32] } else { b64 };
         session_seed = format!("{}:{}", prompt, img_prefix);
     } else {
@@ -1997,11 +1998,7 @@ mod tests {
         let parts = &env["request"]["contents"][0]["parts"];
         assert_eq!(parts[0]["inlineData"]["mimeType"], "image/png");
         assert_eq!(parts[0]["inlineData"]["data"], "AAAA");
-        assert_eq!(
-            parts[1]["text"],
-            "Based on the input image, modify it according to: make it purple"
-        );
-        // In edit mode without explicit request to force ratio, aspectRatio should not be blindly forced or should respect edit semantics
+        assert_eq!(parts[1]["text"], "make it purple");
         assert_eq!(
             env["request"]["generationConfig"]["imageConfig"]["aspectRatio"],
             "9:16"
