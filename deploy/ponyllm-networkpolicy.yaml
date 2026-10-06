@@ -12,6 +12,29 @@ spec:
       app.kubernetes.io/component: gateway
   policyTypes:
     - Egress
+    - Ingress
+  ingress:
+    # VULN-14（Phase-3）：入站默认拒绝，仅放行三来源到 gateway:8080：
+    # - kube-system：Traefik 入口流量（假设值，见下方复核注释）
+    # - monitor：Prometheus 抓取 /metrics（与既有 egress 同名 ns 一致）
+    # - ponyllm：本命名空间内副本/组件互访
+    # 复核注释（cluster-infra）：Traefik 实际运行命名空间需复核确认——
+    # 若实际为 traefik 等其他 ns，须将下方 kube-system 替换为实际 ns 并同步本文件；
+    # kubelet 就绪/存活探针源（节点段）若被 CNI 网络策略拦截，需在 cluster-infra
+    # 侧补充节点段放行（本 yaml 不臆造节点 CIDR）。
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitor
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ponyllm
+      ports:
+        - port: 8080
+          protocol: TCP
   egress:
     # 1. 允许集群内 DNS 解析。注意：同一条 egress 规则内 to[] 与 ports[] 是 AND 语义的
     # 交集（目的必须同时匹配 to 且端口匹配 ports），首条仅放行发往 kube-dns:53 的

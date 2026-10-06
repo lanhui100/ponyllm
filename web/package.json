@@ -9,7 +9,7 @@
   },
   "scripts": {
     "dev": "vite",
-    "build": "vue-tsc --noEmit && vite build",
+    "build": "vue-tsc --noEmit && vite build && node ../scripts/gen-sri.mjs",
     "preview": "vite preview",
     "lint": "oxlint --deny-warnings --ignore-pattern \"node_modules/**\" --ignore-pattern \"dist/**\" --ignore-pattern \"src/generated/**\"",
     "typecheck": "vue-tsc --noEmit",
