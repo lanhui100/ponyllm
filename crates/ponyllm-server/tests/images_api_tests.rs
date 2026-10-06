@@ -136,7 +136,7 @@ async fn test_images_edits_json_wire() {
             let parts = &req["request"]["contents"][0]["parts"];
             assert_eq!(parts[0]["inlineData"]["mimeType"], "image/png");
             assert_eq!(parts[0]["inlineData"]["data"], "QUFB");
-            assert_eq!(parts[1]["text"], "make it purple");
+            assert_eq!(parts[1]["text"], "Based on the input image, modify it according to: make it purple");
             Json(antigravity_image_response("RURJVEVE="))
         }),
     );
@@ -181,6 +181,41 @@ async fn test_images_edits_json_wire() {
 }
 
 #[tokio::test]
+async fn test_images_edits_rejects_missing_image() {
+    let pool = Arc::new(KeyPool::new("agy", RoutingStrategy::RoundRobin));
+    pool.add_key(ApiKeyEntry::new("k1", "sk-test", 1, 10));
+    let mut config = GatewayConfig::default();
+    config.auth_mode = ponyllm_config::AuthMode::Open;
+    config.providers.insert(
+        "agy".to_string(),
+        image_provider("http://127.0.0.1:9".to_string()),
+    );
+    let state = Arc::new(AppState::new(config));
+    state.register_pool("agy", pool);
+    let app = create_app(state);
+    let gw = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let gw_addr = gw.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(gw, app).await.unwrap();
+    });
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://{}/v1/images/edits", gw_addr))
+        .json(&json!({
+            "model": "gemini-3.1-flash-image",
+            "prompt": "make it purple"
+            // image missing!
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "missing_image");
+}
+
+#[tokio::test]
 async fn test_images_edits_multipart_wire() {
     let mock = Router::new().route(
         "/v1internal:generateContent",
@@ -189,7 +224,7 @@ async fn test_images_edits_multipart_wire() {
             assert_eq!(parts[0]["inlineData"]["mimeType"], "image/jpeg");
             // base64 of "multipart-bytes"
             assert_eq!(parts[0]["inlineData"]["data"], "bXVsdGlwYXJ0LWJ5dGVz");
-            assert_eq!(parts[1]["text"], "add a halo");
+            assert_eq!(parts[1]["text"], "Based on the input image, modify it according to: add a halo");
             Json(antigravity_image_response("TVVMVElQQVJU"))
         }),
     );

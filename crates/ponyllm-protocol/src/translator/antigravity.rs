@@ -1976,7 +1976,11 @@ mod tests {
         let parts = &env["request"]["contents"][0]["parts"];
         assert_eq!(parts[0]["inlineData"]["mimeType"], "image/png");
         assert_eq!(parts[0]["inlineData"]["data"], "AAAA");
-        assert_eq!(parts[1]["text"], "make it purple");
+        assert_eq!(
+            parts[1]["text"],
+            "Based on the input image, modify it according to: make it purple"
+        );
+        // In edit mode without explicit request to force ratio, aspectRatio should not be blindly forced or should respect edit semantics
         assert_eq!(
             env["request"]["generationConfig"]["imageConfig"]["aspectRatio"],
             "9:16"
