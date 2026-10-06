@@ -180,33 +180,50 @@ fi
 # Phase-3（task-9）：VULN-14 集群 NetworkPolicy + SRI
 # ==============================================================================
 
-# --- VULN-14：networkpolicy policyTypes 含 Ingress，仅放行 kube-system/monitor/ponyllm → 8080 ---
+# --- VULN-14（Phase-3b R-S7）：应用态保持 Egress-only，Ingress 规则移入 pending 文件 ---
+# 应用态不再放开入站（等待 cluster-infra 复核 Traefik 实际 ns / 节点段后再启用），
+# 故验收锚定：① 应用态 policyTypes 不含 Ingress；② pending 文件携带完整 Ingress 契约。
 NP="deploy/ponyllm-networkpolicy.yaml"
+NP_PENDING="deploy/ponyllm-networkpolicy.ingress.pending.yaml"
 if [ -f "$NP" ]; then
     if grep -q 'policyTypes:' "$NP" && grep -A3 'policyTypes:' "$NP" | grep -q 'Ingress'; then
-        pass "VULN-14 $NP policyTypes 含 Ingress"
+        fail "VULN-14 应用态 $NP 含 Ingress（R-S7：应用态必须保持 Egress-only，Ingress 仅存 pending 文件 → 红相成立）"
     else
-        fail "VULN-14 $NP policyTypes 缺 Ingress（当前仅 Egress → FAIL，红相成立）"
-    fi
-    # ingress 规则须显式放行上述三 ns 到 8080（kube-system 单独出现可能是 egress DNS
-    # 规则 → 以 ingress: 键 + 8080 端口 + ponyllm ns 为锚）
-    if grep -q '^  ingress:' "$NP" \
-        && grep -qE 'kubernetes.io/metadata.name: (kube-system|monitor|ponyllm)$' "$NP" \
-        && grep -q 'port: 8080' "$NP"; then
-        pass "VULN-14 ingress 仅放行 kube-system/monitor/ponyllm 到 8080"
-    else
-        fail "VULN-14 ingress 规则未收敛至 kube-system/monitor/ponyllm:8080（红相成立）"
+        pass "VULN-14 应用态 $NP 保持 Egress-only（不含 Ingress）"
     fi
 else
     fail "VULN-14 $NP 不存在（红相成立）"
 fi
-
-# --- SRI：构建产物 index.html script/link 含 integrity="sha384-…" + crossorigin ---
-if grep -qE 'vite-plugin-sri|rollup-plugin-sri' web/package.json; then
-    pass "SRI 构建配置声明 SRI 插件"
+if [ -f "$NP_PENDING" ]; then
+    if grep -q 'policyTypes:' "$NP_PENDING" \
+        && grep -A3 'policyTypes:' "$NP_PENDING" | grep -q 'Ingress' \
+        && grep -q '^  ingress:' "$NP_PENDING" \
+        && grep -qE 'kubernetes.io/metadata.name: (kube-system|monitor|ponyllm)$' "$NP_PENDING" \
+        && grep -q 'port: 8080' "$NP_PENDING"; then
+        pass "VULN-14 pending 文件含 Ingress 契约（仅放行 kube-system/monitor/ponyllm → 8080）"
+    else
+        fail "VULN-14 pending 文件 $NP_PENDING 缺 Ingress 契约（policyTypes+ingress+三 ns+8080；红相成立）"
+    fi
 else
-    fail "SRI web/package.json 缺 SRI 构建插件（vite-plugin-sri 等；红相成立）"
+    fail "VULN-14 pending 文件 $NP_PENDING 不存在（红相成立）"
 fi
+
+# --- SRI：自研 scripts/gen-sri.mjs + build 钩子（Lead 契约裁决：零新依赖） ---
+# ① scripts/gen-sri.mjs 存在；② web/package.json build 脚本调用 gen-sri.mjs；
+# ③ 构建产物 dist/index.html 的 script/link 含 integrity="sha384-…" + crossorigin。
+if [ -f scripts/gen-sri.mjs ]; then
+    pass "SRI scripts/gen-sri.mjs 存在（自研注入器）"
+else
+    fail "SRI scripts/gen-sri.mjs 不存在（Lead 契约：自研 gen-sri.mjs；HEAD 无 → FAIL，红相成立）"
+fi
+
+BUILD_SCRIPT="$(grep -E '^\s*"build"\s*:' web/package.json | head -n1 || true)"
+if [ -n "$BUILD_SCRIPT" ] && echo "$BUILD_SCRIPT" | grep -q 'gen-sri'; then
+    pass "SRI web/package.json build 脚本调用 gen-sri.mjs"
+else
+    fail "SRI web/package.json build 脚本未调用 gen-sri.mjs（当前仅 vue-tsc+vite build；红相成立）"
+fi
+
 if [ -f web/dist/index.html ]; then
     if grep -qE 'integrity="sha384-' web/dist/index.html && grep -q 'crossorigin' web/dist/index.html; then
         pass "SRI web/dist/index.html script/link 含 integrity=sha384-… + crossorigin"

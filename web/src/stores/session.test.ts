@@ -43,3 +43,31 @@ describe('VULN-05 session store: no bearer-token sessionStorage persistence', ()
     ).toHaveLength(0);
   });
 });
+describe('VULN-05 / R-S4: logout revokes the server session in cookie mode', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    window.sessionStorage.clear();
+  });
+
+  it('logout issues POST /api/admin/session/revoke (cookie mode)', async () => {
+    const calls: { url: string; init?: RequestInit }[] = [];
+    vi.stubGlobal(
+      'fetch',
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        calls.push({ url: String(input), init });
+        return new Response(null, { status: 204 });
+      },
+    );
+
+    const session = useSessionStore();
+    session.loginCookieMode();
+    session.logout();
+
+    const revoke = calls.find((c) => c.url.includes('/api/admin/session/revoke'));
+    expect(
+      revoke,
+      'logout 必须调用 POST /api/admin/session/revoke（HEAD 上 logout 纯客户端清内存 → 红相成立）'
+    ).toBeDefined();
+    expect(revoke!.init?.method ?? 'GET').toBe('POST');
+  });
+});
