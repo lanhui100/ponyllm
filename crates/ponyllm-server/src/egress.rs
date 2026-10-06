@@ -1,12 +1,17 @@
-//! Admin-triggered egress guard (H2/SSRF).
+//! Egress guard module (H2/SSRF + VULN-07/F6 data plane).
 //!
-//! The gateway legitimately dials user-configured upstreams on the data
-//! plane, but the *admin-triggered* probes (`upstream-models` list and key
-//! dial-test) turn a stolen/leaked gateway token into a server-side request
-//! forgery primitive: write an attacker-controlled `base_url`/`chat_url`,
-//! then make the gateway fetch it. This module is the single choke point
-//! for those two probes (NOT for the inference data plane, where local
-//! dev servers like Ollama on 127.0.0.1 are legitimate).
+//! Two policy families live here:
+//! - **Admin-triggered probes** (`upstream-models` list and key dial-test):
+//!   a stolen/leaked gateway token must not become a server-side request
+//!   forgery primitive, so `check_probe_url(_fast)` refuses internal
+//!   targets before any probe dial.
+//! - **Data-plane upstreams** (inference): `check_data_plane_url` re-validates
+//!   a routed upstream URL at dial time (DNS-rebinding defense) for DIRECT
+//!   dials, while `check_data_plane_url_proxied` skips local DNS for targets
+//!   dialed through an explicit forward proxy (the trusted proxy owns
+//!   resolution + egress; see ADR 2026-10-06-egress-guard-proxied-dns-skip).
+//!   Local dev servers like Ollama on 127.0.0.1 stay legitimate on the data
+//!   plane.
 //!
 //! Policy:
 //! - scheme must be `http` or `https` (rejects `file:`, `gopher:`, …);

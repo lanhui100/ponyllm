@@ -463,6 +463,30 @@ pub struct EgressGuardVerdict {
     pub expires_at: std::time::Instant,
 }
 
+/// RAII owner guard for the egress single-flight `(proxied, host)` entries.
+///
+/// A cancelled or panicking owner between registration and the explicit
+/// removal would otherwise strand its `(mode, host)` key forever: every
+/// waiter would see a stale `Occupied` entry, never become owner, and loop
+/// through the bounded wait indefinitely (per-host hang / DoS). On `Drop`
+/// (normal return, task cancellation, or panic unwinding) the entry is
+/// removed so the next waiter can take over as owner and complete.
+struct InflightEntry<'a> {
+    map: &'a std::sync::Mutex<HashMap<(bool, String), Arc<tokio::sync::Notify>>>,
+    key: (bool, String),
+    removed: bool,
+}
+
+impl Drop for InflightEntry<'_> {
+    fn drop(&mut self) {
+        if !self.removed {
+            if let Ok(mut map) = self.map.lock() {
+                map.remove(&self.key);
+            }
+        }
+    }
+}
+
 impl std::fmt::Debug for dyn crate::admin_store::ConfigStore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("ConfigStore")
@@ -782,7 +806,19 @@ impl AppState {
         if let Some(client) = write.get(&key) {
             return client.clone();
         }
-        let proxy_opt = url.trim().is_empty().then(|| url);
+        let proxy_opt = if url.trim().is_empty() {
+            None
+        } else {
+            // REGRESSION FIX (egress proxied fast path, ADR
+            // 2026-10-06-egress-guard-proxied-dns-skip): the previous
+            // `url.trim().is_empty().then(|| url)` inverted this — a NON-empty
+            // proxy URL produced `None`, so any cache miss (gateway-default
+            // proxy, or provider/model proxy with a per-target timeout
+            // override) built a DIRECT client while the egress guard assumed
+            // the dial went through the proxy and skipped local DNS → SSRF
+            // decoupling. Non-empty must build the proxied client.
+            Some(url)
+        };
         let client = ponyllm_core::executor::create_upstream_http_client_with_timeout(
             proxy_opt,
             use_system_proxy,
@@ -869,9 +905,17 @@ impl AppState {
     ) -> std::result::Result<(), String> {
         let proxied = {
             let cfg = self.config.read();
-            cfg.effective_proxy_url_for(provider_name, model_name)
-                .map(|p| crate::egress::proxy_fast_path_eligible(&p, url))
-                .unwrap_or(false)
+            // Conservative degradation (ADR Non-Goal): with `use_system_proxy`
+            // the client also layers system/env proxies and honors NO_PROXY,
+            // so an explicit proxy is no longer a guarantee of where bytes
+            // go — always run the full direct check (宁多解析不少解析).
+            if cfg.use_system_proxy {
+                false
+            } else {
+                cfg.effective_proxy_url_for(provider_name, model_name)
+                    .map(|p| crate::egress::proxy_fast_path_eligible(&p, url))
+                    .unwrap_or(false)
+            }
         };
         if proxied {
             tracing::trace!(
@@ -908,8 +952,12 @@ impl AppState {
                 }
             }
             // Register the in-flight entry; only the owner performs the
-            // resolution, waiters get woken and re-check the cache.
-            let (nf, owner) = {
+            // resolution, waiters get woken and re-check the cache. The owner
+            // holds an `InflightEntry` RAII guard so cancellation/panic
+            // between registration and removal cannot strand the key forever
+            // (a stranded key would leave every waiter in the 6s re-check loop
+            // without ever becoming owner → per-host hang / DoS).
+            let (nf, owner_guard) = {
                 let mut inflight = self
                     .egress_guard_inflight
                     .lock()
@@ -918,18 +966,27 @@ impl AppState {
                     std::collections::hash_map::Entry::Vacant(e) => {
                         let nf = Arc::new(tokio::sync::Notify::new());
                         e.insert(nf.clone());
-                        (nf, true)
+                        (
+                            nf,
+                            Some(InflightEntry {
+                                map: &self.egress_guard_inflight,
+                                key: key.clone(),
+                                removed: false,
+                            }),
+                        )
                     }
-                    std::collections::hash_map::Entry::Occupied(o) => (o.get().clone(), false),
+                    std::collections::hash_map::Entry::Occupied(o) => (o.get().clone(), None),
                 }
             };
-            if !owner {
-                // Bounded wait (owner may have raced the removal); re-check
-                // the cache on wake — the verdict is inserted before notify.
+            let Some(mut owner_guard) = owner_guard else {
+                // Waiter: bounded wait (owner may have raced the removal);
+                // re-check the cache on wake — the verdict is inserted before
+                // notify. If the owner was cancelled, its Drop removed the
+                // entry, so this waiter (or the next) becomes the new owner.
                 let _ =
                     tokio::time::timeout(std::time::Duration::from_secs(6), nf.notified()).await;
                 continue;
-            }
+            };
             // Owner: resolve outside any lock.
             let checked = if proxied {
                 crate::egress::check_data_plane_url_proxied(url).await
@@ -971,6 +1028,7 @@ impl AppState {
             if let Some(nf) = wake {
                 nf.notify_waiters();
             }
+            owner_guard.removed = true;
             return checked.map_err(String::from);
         }
     }
