@@ -227,6 +227,9 @@ pub async fn handle_chat_completions(
 
         if effective_thinking.is_active() {
             target_req.reasoning_effort = Some(effective_thinking);
+        } else if requested_thinking == Some(ponyllm_protocol::common::ReasoningEffort::Off) {
+            // Explicitly requested Off: send None / none to upstream so reasoning is explicitly turned off
+            target_req.reasoning_effort = Some(ponyllm_protocol::common::ReasoningEffort::Off);
         } else {
             target_req.reasoning_effort = None;
             target_req.extra.remove("reasoning_effort");
@@ -328,13 +331,21 @@ pub async fn handle_chat_completions(
             }
             ponyllm_core::pool::UpstreamProtocol::Chat => {
                 let url = target.chat_completions_url();
-                let val = match serde_json::to_value(&target_req) {
+                let mut val = match serde_json::to_value(&target_req) {
                     Ok(v) => v,
                     Err(e) => {
                         last_error = format!("Invalid JSON for {}: {}", target.provider_name, e);
                         continue;
                     }
                 };
+                // When explicit Off is requested, send OpenAI/Sense compatible `reasoning_effort: "none"`
+                // and `thinking: {"type": "disabled"}` to ensure upstream models (such as deepseek-v4-flash) disable reasoning.
+                if requested_thinking == Some(ponyllm_protocol::common::ReasoningEffort::Off) {
+                    if let Some(obj) = val.as_object_mut() {
+                        obj.insert("reasoning_effort".to_string(), serde_json::json!("none"));
+                        obj.insert("thinking".to_string(), serde_json::json!({ "type": "disabled" }));
+                    }
+                }
                 (url, val)
             }
             ponyllm_core::pool::UpstreamProtocol::Antigravity => {
@@ -962,7 +973,21 @@ pub async fn handle_chat_completions(
                         ponyllm_core::pool::UpstreamProtocol::Antigravity => {
                             antigravity_to_chat_response(&resp_val, &target.physical_model)
                         }
-                        _ => resp_val,
+                        _ => {
+                            // If caller explicitly requested thinking off, scrub reasoning_content from upstream chat response
+                            let mut v = resp_val;
+                            if requested_thinking == Some(ponyllm_protocol::common::ReasoningEffort::Off) {
+                                if let Some(choices) = v.get_mut("choices").and_then(|c| c.as_array_mut()) {
+                                    for choice in choices {
+                                        if let Some(msg) = choice.get_mut("message").and_then(|m| m.as_object_mut()) {
+                                            msg.remove("reasoning_content");
+                                            msg.remove("reasoning");
+                                        }
+                                    }
+                                }
+                            }
+                            v
+                        }
                     };
 
                     // Model Echo Rule: Strictly echo requested model name in response body
@@ -1243,9 +1268,10 @@ pub(crate) fn retry_unlock_hint(
     match kind {
         GatewayErrorKind::RateLimitExceeded { .. } | GatewayErrorKind::QuotaExhausted => {
             pool_longest_unlock(pool, limits)
-                // Family-quota boundary: keys stay Active (pre-excluded, not
-                // cooled), so cooldown-based unlocks are empty — the honest
-                // hint is the earliest family group reset (review 2026-10-04).
+                // Family-quota boundary: keys stay Active (a family-ledger
+                // verdict does not cool them), so cooldown-based unlocks are
+                // empty — the honest hint is the earliest family group reset
+                // (review 2026-10-04).
                 .or_else(|| pool.earliest_family_reset_any())
         }
         GatewayErrorKind::LockContention => {

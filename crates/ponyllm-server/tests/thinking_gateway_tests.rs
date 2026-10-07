@@ -137,10 +137,23 @@ async fn test_thinking_scrubbing_for_non_reasoning_models() {
         .unwrap();
     assert_eq!(resp3.status(), 200);
 
-    // Verify all captured upstream payloads have reasoning_effort and thinking removed!
+    // 4. Send request with explicit reasoning_effort = "off"
+    let resp4 = client
+        .post(format!("http://{}/v1/chat/completions", gateway_addr))
+        .json(&json!({
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "Hi off"}],
+            "reasoning_effort": "off"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp4.status(), 200);
+
+    // Verify captured upstream payloads
     let reqs = captured_requests.lock().clone();
-    assert_eq!(reqs.len(), 3);
-    for (i, req) in reqs.iter().enumerate() {
+    assert_eq!(reqs.len(), 4);
+    for (i, req) in reqs[0..3].iter().enumerate() {
         assert!(
             req.get("reasoning_effort").is_none() || req["reasoning_effort"].is_null(),
             "Request {} should not have reasoning_effort: {:?}",
@@ -160,6 +173,9 @@ async fn test_thinking_scrubbing_for_non_reasoning_models() {
             req
         );
     }
+    // Request 4 explicitly passed off, must transmit reasoning_effort: "none" and thinking: {type: disabled}
+    assert_eq!(reqs[3]["reasoning_effort"], "none");
+    assert_eq!(reqs[3]["thinking"]["type"], "disabled");
 }
 
 #[tokio::test]

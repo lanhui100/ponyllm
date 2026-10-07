@@ -323,18 +323,26 @@ pub async fn handle_messages(
                 };
                 if effective_thinking.is_active() {
                     chat_req.reasoning_effort = Some(effective_thinking);
+                } else if requested_thinking == Some(ponyllm_protocol::common::ReasoningEffort::Off) {
+                    chat_req.reasoning_effort = Some(ponyllm_protocol::common::ReasoningEffort::Off);
                 } else {
                     chat_req.reasoning_effort = None;
                     chat_req.extra.remove("reasoning_effort");
                     chat_req.extra.remove("thinking");
                 }
-                let val = match serde_json::to_value(&chat_req) {
+                let mut val = match serde_json::to_value(&chat_req) {
                     Ok(v) => v,
                     Err(e) => {
                         last_error = format!("Serialization error for {}: {}", target.provider_name, e);
                         continue;
                     }
                 };
+                if requested_thinking == Some(ponyllm_protocol::common::ReasoningEffort::Off) {
+                    if let Some(obj) = val.as_object_mut() {
+                        obj.insert("reasoning_effort".to_string(), serde_json::json!("none"));
+                        obj.insert("thinking".to_string(), serde_json::json!({ "type": "disabled" }));
+                    }
+                }
                 (url, val)
             }
             ponyllm_core::pool::UpstreamProtocol::Anthropic => {
