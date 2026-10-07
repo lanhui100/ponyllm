@@ -698,5 +698,35 @@ mod tests {
         );
         assert!(quota.to_ascii_lowercase().contains("insufficient_quota"), "msg: {quota}");
     }
+
+    #[test]
+    fn format_exhausted_message_scrubs_quota_wording_for_upstream_transport() {
+        use ponyllm_core::error::GatewayErrorKind;
+
+        // Transport fault (kind == UpstreamUnavailable, pool_exhausted=false):
+        // the aggregated message carries the honest "timeout/network" class and
+        // the raw upstream detail may embed quota wording (Sense/商汤
+        // mislabels, or the dsh incident's false quota phrasing). The client
+        // copy must never leak insufficient_quota / quota_exhausted / any
+        // quota wording, or dsh's isQuotaExceededError would promote a pure
+        // upstream timeout into a false "当前请求的额度已用尽".
+        let raw = "Request failed after 3 attempts across keys [\"k1\",\"k2\"]: 2 timeout/network: Network error with k1: upstream TTFB timeout after 50ms (no response headers); Network error with k2: upstream TTFB timeout after 50ms (no response headers); {\"error\":{\"message\":\"individual quota reached\",\"code\":\"insufficient_quota\"}}";
+        let msg = super::format_exhausted_message(
+            "gemini-3.8-flash",
+            &GatewayErrorKind::UpstreamUnavailable,
+            raw,
+            false,
+            "req-upstream-transport",
+        );
+        let lower = msg.to_ascii_lowercase();
+        assert!(!lower.contains("insufficient_quota"), "msg: {msg}");
+        assert!(!lower.contains("quota_exhausted"), "msg: {msg}");
+        assert!(!lower.contains("quota"), "msg: {msg}");
+        assert!(msg.contains("upstream-side failure"), "msg: {msg}");
+        assert!(msg.contains("timeout/network"), "msg: {msg}");
+        assert!(msg.contains("gemini-3.8-flash"), "msg: {msg}");
+        assert!(msg.contains("req-upstream-transport"), "msg: {msg}");
+        assert!(msg.contains("keys [redacted]"), "msg: {msg}");
+    }
 }
 
