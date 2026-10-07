@@ -1372,6 +1372,10 @@ bind = "127.0.0.1:8080"
 max_retries = 3
 flight_recorder_capacity = 200
 
+# 空 STOP 透明重试墙钟总预算（秒）：None→默认 75s；Some(0)→禁用墙钟
+# （警告：会复活下游 DSH ~300s stream idle timeout 事故，不推荐）
+empty_stop_total_timeout_secs = 75
+
 # DeepSeek Provider (三协议合一: /v1/chat/completions, /v1/responses, /v1/messages)
 [providers.deepseek]
 base_url = "https://api.deepseek.com"

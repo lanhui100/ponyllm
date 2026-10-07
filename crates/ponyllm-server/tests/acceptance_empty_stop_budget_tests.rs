@@ -363,6 +363,57 @@ async fn test_c7_retry_after_header_on_budget_break() {
 }
 
 // ================================================================
+// C7b：非流式（stream:false）collect break 的 503 响应也必须带 Retry-After（>0）
+// ================================================================
+
+#[tokio::test]
+async fn test_c7b_retry_after_header_on_non_stream_collect_break() {
+    // 非流式 antigravity 请求走 stream collector（chat.rs 非流式分支）：
+    // 持续空 STOP → 3 次 first-frame 后 deterministic 早收敛 break 为
+    // UpstreamUnavailable。当前实现 FIX-3（collect 循环墙钟/Retry-After 回填）
+    // 未落地 → break 分支不回填 last_retry_after → 无 Retry-After 头（红）。
+    // 断言语义对齐 gateway_tests 非流式错误响应（status + error.code）。
+    let harness = spawn_empty_stop_harness(3, Some(1), Duration::ZERO).await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post(format!("{}/v1/chat/completions", harness.base))
+        .json(&json!({
+            "model": "gemini-3.8-flash-high",
+            "stream": false,
+            "messages": [{"role": "user", "content": "hi"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resp.status(),
+        503,
+        "C7b: 非流式空 STOP break 必须 503（UpstreamUnavailable），实际 {}",
+        resp.status()
+    );
+    // 先克隆 Retry-After 头（resp.json() 会消费响应，之后不能再借用）。
+    let retry_after = resp.headers().get("retry-after").cloned();
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(
+        body["error"]["code"], "upstream_unavailable",
+        "C7b: error.code 必须为 upstream_unavailable，body={body}"
+    );
+    assert!(
+        retry_after.is_some(),
+        "C7b: 非流式 collect break 必须回填 Retry-After 头（防下游紧绑定重试）"
+    );
+    let secs: u64 = retry_after
+        .unwrap()
+        .to_str()
+        .expect("retry-after 必须是 ASCII 秒数")
+        .parse()
+        .expect("retry-after 必须是合法 u64");
+    assert!(secs > 0, "C7b: Retry-After 必须 >0，当前 {secs}");
+}
+
+// ================================================================
 // C8：既有测试不回归 —— 由全量门禁 `cargo test --workspace` 承担，
 // 不在本文件重复（Red 阶段本就允许全量门禁其他用例继续绿）。
 // ================================================================

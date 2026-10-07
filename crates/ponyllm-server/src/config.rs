@@ -463,6 +463,10 @@ pub struct GatewayConfig {
     /// Request-level wall-clock budget (seconds) for the pre-commit empty-STOP
     /// transparent retry phase. None resolves to 75s; Some(0) disables the
     /// bound (warning: can resurrect the downstream 300s idle-timeout incident).
+    /// Note: Some(0) only disables the wall-clock gate — the tightened attempt
+    /// budget (MIN=8 / PER_KEY=2 / CAP=12) and the Retry-After pacing on
+    /// empty-STOP breaks still apply; this is not a full revert to pre-fix
+    /// behavior.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub empty_stop_total_timeout_secs: Option<u64>,
     #[serde(default = "default_request_body_limit")]

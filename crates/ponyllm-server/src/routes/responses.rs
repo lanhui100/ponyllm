@@ -177,6 +177,11 @@ pub async fn handle_responses(
     // (config Some(0) / disabled) removes the gate entirely.
     let empty_stop_budget = state.config.read().effective_empty_stop_timeout();
     let empty_stop_deadline = empty_stop_budget.map(|b| tokio::time::Instant::now() + b);
+    // Per-target budget slice (adversarial review FIX-2): each routed target
+    // gets at most budget/N of the request wall-clock, so a slow first target
+    // cannot starve failover attempts on later providers. The global deadline
+    // still bounds the whole request (sum of slices <= budget).
+    let per_target_budget = empty_stop_budget.map(|b| b / (targets.len().max(1) as u32));
 
     for target in targets {
         // Stop before touching the next provider's quota when the previous
@@ -409,6 +414,14 @@ pub async fn handle_responses(
             .with_event_sink(sink_ctx.clone(), state.event_sink(sink_ctx.clone()));
 
         let empty_stop_tried_keys: Vec<String> = Vec::new();
+        // Per-target deadline (adversarial review FIX-2): min(global request
+        // deadline, this target's entry-time + budget/N slice). All wall-clock
+        // `remaining` computations inside the retry loops below source from
+        // this per-target deadline.
+        let target_deadline = empty_stop_deadline.map(|global| {
+            let slice = per_target_budget.unwrap_or_default();
+            global.min(tokio::time::Instant::now() + slice)
+        });
         // Handle streaming request: pass through upstream SSE unchanged
         if is_streaming {
             match executor.execute_stream_request_with_timing_and_key(&target_url, &req_val).await {
@@ -522,7 +535,7 @@ pub async fn handle_responses(
                 collect_attempt += 1;
                 // Wall-clock gate (contract ruling 7): shared request-level
                 // deadline; never dial with no budget left.
-                let remaining_c = empty_stop_deadline
+                let remaining_c = target_deadline
                     .map(|d| d.saturating_duration_since(tokio::time::Instant::now()));
                 if let Some(r) = remaining_c {
                     if r.is_zero() {
@@ -543,7 +556,12 @@ pub async fn handle_responses(
                 .with_downstream_headers(&headers)
                 .with_opencode_zen(is_opencode_zen_target(&provider_name, &target_url))
                 .with_rate_limits(rate_limits)
-                .with_ttfb_timeout(ttfb_timeout.map(|t| remaining_c.map_or(t, |r| t.min(r))))
+                .with_ttfb_timeout(if collect_attempt == 1 {
+                    // FIX-1: first attempt keeps the configured TTFB verbatim.
+                    ttfb_timeout
+                } else {
+                    ttfb_timeout.map(|t| remaining_c.map_or(t, |r| t.min(r)))
+                })
                 .with_excluded_keys(&collect_tried_keys)
                 .with_egress(egress_pool.clone(), egress_clients.clone())
                 .with_event_sink(sink_ctx.clone(), state.event_sink(sink_ctx.clone()));
@@ -608,7 +626,7 @@ pub async fn handle_responses(
                         {
                             // Wall-clock gate (contract ruling 7): with no
                             // budget left, cycling the pool again is pointless.
-                            let remaining_now = empty_stop_deadline
+                            let remaining_now = target_deadline
                                 .map(|d| d.saturating_duration_since(tokio::time::Instant::now()));
                             if let Some(r) = remaining_now {
                                 if r.is_zero() {
@@ -819,7 +837,16 @@ pub async fn handle_responses(
                 }
                 last_pool_exhausted = matches!(err, CoreError::NoAvailableKey(_)) && collect_tried_keys.is_empty();
                 last_retry_after = crate::extractors::retry_after_secs(&last_kind, retry_unlock_hint(&last_kind, &pool, rate_limits.as_ref()));
-                last_error = err.to_string();
+                let err_text = err.to_string();
+                // Adversarial review FIX-3: empty-STOP collect breaks must
+                // carry Retry-After pacing even when the pool is healthy
+                // (no unlock hint), matching the streaming-loop breaks.
+                if err_text.contains("Antigravity stream collect failed")
+                    || err_text.contains("Antigravity deterministic empty STOP")
+                {
+                    last_retry_after = last_retry_after.or(Some(1));
+                }
+                last_error = err_text;
                 continue;
             }
         }

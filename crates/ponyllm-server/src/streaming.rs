@@ -1014,12 +1014,6 @@ pub fn empty_stop_attempt_budget(pool_keys: usize, max_retries: usize) -> usize 
         .clamp(MIN_EMPTY_STOP_ATTEMPTS, MAX_EMPTY_STOP_ATTEMPTS_CAP)
 }
 
-/// True when the pre-commit empty-STOP retry phase has spent `elapsed` or more
-/// against `budget`; `budget == None` (disabled) never trips.
-pub fn empty_stop_budget_exceeded(elapsed: std::time::Duration, budget: Option<std::time::Duration>) -> bool {
-    budget.map_or(false, |b| elapsed >= b)
-}
-
 /// Classify a collector error string as the upstream transient empty-STOP
 /// anomaly. The marker substring is part of the contract asserted by tests
 /// (`Antigravity stream completed with zero text and zero tool calls
