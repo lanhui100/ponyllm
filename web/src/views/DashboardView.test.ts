@@ -300,4 +300,56 @@ describe('DashboardView Full Feature Integration', () => {
     app.unmount();
     vi.useRealTimers();
   });
+
+  it('filters out deleted providers from ProviderMatrix when providers config changes', async () => {
+    const mockOverview = {
+      version: '0.2.30',
+      config_version: 1,
+      admin_write_enabled: true,
+      auth_enabled: false,
+    };
+    // Only 'openai' exists in current admin config; 'deleted_provider' was deleted
+    const mockProviders = [{ name: 'openai', default_protocol: 'chat', base_url: 'http://localhost' }];
+    const mockStream = {
+      global: { stream_count: 10, total_bytes: 100, total_chunks: 5, total_stalls: 0 },
+      providers: {
+        openai: { provider: 'openai', stream_count: 10, status: 'healthy' },
+        deleted_provider: { provider: 'deleted_provider', stream_count: 5, status: 'degraded' },
+      },
+    };
+
+    globalThis.fetch = vi.fn().mockImplementation((url: string) => {
+      if (url.includes('/api/admin/overview')) {
+        return Promise.resolve(new Response(JSON.stringify(mockOverview), { status: 200 }));
+      }
+      if (url.includes('/api/admin/providers')) {
+        return Promise.resolve(new Response(JSON.stringify(mockProviders), { status: 200 }));
+      }
+      if (url.includes('/api/admin/keys')) {
+        return Promise.resolve(new Response(JSON.stringify([]), { status: 200 }));
+      }
+      if (url.includes('/api/admin/models')) {
+        return Promise.resolve(new Response(JSON.stringify([]), { status: 200 }));
+      }
+      if (url.includes('/v1/telemetry/stream')) {
+        return Promise.resolve(new Response(JSON.stringify(mockStream), { status: 200 }));
+      }
+      if (url.includes('/health')) {
+        return Promise.resolve(new Response(JSON.stringify({ status: 'ok' }), { status: 200 }));
+      }
+      return Promise.resolve(new Response(JSON.stringify({}), { status: 200 }));
+    });
+
+    await router.push('/dashboard');
+    const app = createApp(DashboardView);
+    app.use(router);
+    app.mount(container);
+    await nextTick();
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(container.textContent).toContain('openai');
+    expect(container.textContent).not.toContain('deleted_provider');
+
+    app.unmount();
+  });
 });

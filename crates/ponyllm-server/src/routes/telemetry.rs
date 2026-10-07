@@ -228,8 +228,17 @@ pub async fn handle_get_stream(State(state): State<Arc<AppState>>) -> impl IntoR
 
     let history_24h = state.timeseries_proj.query_history("24h", now_ms);
 
-    // Build the complete set of providers (streaming + pools + connectivity sampler)
+    // Build the complete set of providers (streaming + pools + connectivity sampler).
+    // Providers explicitly configured, pooled, or recorded are included, but any provider
+    // that has been deleted (and thus removed from config, pools, stream_proj, and connectivity_sampler)
+    // will naturally not be present.
     let mut all_provider_names: std::collections::HashSet<String> = base_providers.keys().cloned().collect();
+    {
+        let cfg = state.config.read();
+        for k in cfg.providers.keys() {
+            all_provider_names.insert(k.clone());
+        }
+    }
     {
         let pools = state.pools.read();
         for k in pools.keys() {

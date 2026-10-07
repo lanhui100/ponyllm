@@ -178,6 +178,12 @@ impl ConnectivitySampler {
         self.providers.read().keys().cloned().collect()
     }
 
+    /// 移除指定 provider 的连通性时隙状态（用于 provider 被删除时收敛）。
+    pub fn remove_provider(&self, provider: &str) {
+        let mut write = self.providers.write();
+        write.remove(provider);
+    }
+
     pub fn gateway_slot_count(&self) -> usize {
         self.gateway_slot_count
     }

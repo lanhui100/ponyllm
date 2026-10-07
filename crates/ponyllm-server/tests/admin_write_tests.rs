@@ -481,6 +481,20 @@ async fn test_provider_cud() {
         .unwrap();
     assert_eq!(del_resp.status(), StatusCode::OK);
 
+    // 3.1 Verify deleted provider is removed from telemetry stream
+    let stream_resp = client
+        .get(format!("http://{}/v1/telemetry/stream", harness.addr))
+        .header("Authorization", &auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stream_resp.status(), StatusCode::OK);
+    let stream_json: serde_json::Value = stream_resp.json().await.unwrap();
+    assert!(
+        stream_json["providers"].get("google").is_none(),
+        "Deleted provider 'google' must not appear in /v1/telemetry/stream providers"
+    );
+
     // 4. Delete non-existent provider returns 404
     let not_found_resp = client
         .delete(format!("http://{}/api/admin/providers/non_existent", harness.addr))

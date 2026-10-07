@@ -164,6 +164,22 @@ const speed24h = computed<number | undefined>(() => {
   }
   return 0;
 });
+
+const activeStreamProviders = computed(() => {
+  if (!stream.value?.providers) return undefined;
+  // 当后台已加载提供商配置时，只保留实际配置中存在的提供商，防止已删除提供商残留
+  if (providers.value && providers.value.length > 0) {
+    const validNames = new Set(providers.value.map((p) => p.name));
+    const filtered: Record<string, any> = {};
+    for (const [name, snap] of Object.entries(stream.value.providers)) {
+      if (validNames.has(name)) {
+        filtered[name] = snap;
+      }
+    }
+    return filtered;
+  }
+  return stream.value.providers;
+});
 </script>
 
 <template>
@@ -219,7 +235,7 @@ const speed24h = computed<number | undefined>(() => {
       />
 
       <ProviderMatrix
-        :providers="stream?.providers"
+        :providers="activeStreamProviders"
         :range="selectedRange"
         :provider-tokens="historyData?.provider_tokens"
         :provider-prompt-tokens="historyData?.provider_prompt_tokens"

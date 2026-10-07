@@ -2140,6 +2140,8 @@ pub async fn handle_admin_delete_provider(
     state.config.write().providers.remove(&name);
     state.pools.write().remove(&name);
     state.egress_pools.write().remove(&name);
+    state.stream_proj.remove_node(&name);
+    state.connectivity_sampler.remove_provider(&name);
 
     tracing::info!(provider = %name, "admin deleted provider");
 

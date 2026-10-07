@@ -159,6 +159,12 @@ impl StreamProjection {
             node.restore(&ns);
         }
     }
+
+    /// 移除指定 provider 的指标追踪节点（用于 provider 被删除时收敛）。
+    pub fn remove_node(&self, provider: &str) {
+        let mut write = self.nodes.write();
+        write.remove(provider);
+    }
 }
 
 impl Projection for StreamProjection {
