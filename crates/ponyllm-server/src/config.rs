@@ -460,6 +460,11 @@ pub struct GatewayConfig {
     /// Optional TTFB budget in seconds for upstream calls. None resolves to 90s. Some(0) disables.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upstream_ttfb_timeout_secs: Option<u64>,
+    /// Request-level wall-clock budget (seconds) for the pre-commit empty-STOP
+    /// transparent retry phase. None resolves to 75s; Some(0) disables the
+    /// bound (warning: can resurrect the downstream 300s idle-timeout incident).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub empty_stop_total_timeout_secs: Option<u64>,
     #[serde(default = "default_request_body_limit")]
     pub request_body_limit: usize,
     /// Hourly JSONL event-log directory. `None` (default) keeps events in the
@@ -595,6 +600,7 @@ impl Default for GatewayConfig {
             flight_recorder_capacity: 100,
             upstream_timeout_secs: default_upstream_timeout_secs(),
             upstream_ttfb_timeout_secs: None,
+            empty_stop_total_timeout_secs: None,
             request_body_limit: default_request_body_limit(),
             event_log_dir: None,
             event_log_retention_days: default_event_log_retention_days(),
@@ -647,6 +653,15 @@ impl GatewayConfig {
         } else {
             Some(ponyllm_core::DEFAULT_UPSTREAM_TTFB_TIMEOUT)
         }
+    }
+
+    /// Effective request-level pre-commit empty-STOP retry wall-clock budget:
+    /// `Some(0)` disables the bound (=> None), `Some(s)` resolves to `s`, and
+    /// `None` (gateway unset) falls back to the 75s default.
+    ///
+    /// STUB (red-phase): implemented by the Executor stage.
+    pub fn effective_empty_stop_timeout(&self) -> Option<std::time::Duration> {
+        unimplemented!("effective_empty_stop_timeout: red-phase stub, implementation pending")
     }
 
     /// Same-source effective proxy URL used by BOTH the upstream HTTP client

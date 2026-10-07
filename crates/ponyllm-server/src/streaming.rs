@@ -966,6 +966,18 @@ pub const PER_KEY_EMPTY_STOP_MAX_ATTEMPTS: usize = 5;
 /// coincidence.
 pub const DETERMINISTIC_EMPTY_STOP_THRESHOLD: usize = 3;
 
+/// Hard cap on the number of pre-commit transparent empty-STOP retry attempts,
+/// so a pool-wide empty-STOP epidemic cannot churn through `keys * per-key`
+/// unbounded attempts (see `empty_stop_attempt_budget`).
+pub const MAX_EMPTY_STOP_ATTEMPTS_CAP: usize = 12;
+
+/// Default request-level wall-clock budget for the pre-commit empty-STOP
+/// transparent retry phase. Far smaller than the downstream DSH stream idle
+/// timeout (~300s), so a degraded upstream pool can never hold the downstream
+/// connection silent past the client's idle watchdog. Overridable per gateway
+/// via `empty_stop_total_timeout_secs` (Some(0) disables the bound).
+pub const MAX_EMPTY_STOP_TOTAL_DURATION: std::time::Duration = std::time::Duration::from_secs(75);
+
 /// Jittered exponential backoff before a transparent empty-STOP retry.
 ///
 /// `attempt` is 1-based (the first retry waits ~250ms). Base doubles per
@@ -984,6 +996,21 @@ pub fn empty_stop_retry_delay(attempt: usize) -> std::time::Duration {
     // Jitter factor in [750, 1250] thousandths → [0.75x, 1.25x].
     let factor_milli = 750 + (nanos % 1000) * 500 / 1000;
     std::time::Duration::from_millis(capped * factor_milli / 1000)
+}
+
+/// Unified pre-commit empty-STOP attempt budget shared by the chat / messages /
+/// responses routes: at least `MIN_EMPTY_STOP_ATTEMPTS` attempts, at most
+/// `MAX_EMPTY_STOP_ATTEMPTS_CAP`, scaled by the key pool but never by
+/// `PER_KEY_EMPTY_STOP_MAX_ATTEMPTS` per key (a degraded key gives up after
+/// two in-place tries via key rotation, not by inflating the total budget).
+pub fn empty_stop_attempt_budget(pool_keys: usize, max_retries: usize) -> usize {
+    unimplemented!("empty_stop_attempt_budget: red-phase stub, implementation pending")
+}
+
+/// True when the pre-commit empty-STOP retry phase has spent `elapsed` or more
+/// against `budget`; `budget == None` (disabled) never trips.
+pub fn empty_stop_budget_exceeded(elapsed: std::time::Duration, budget: Option<std::time::Duration>) -> bool {
+    unimplemented!("empty_stop_budget_exceeded: red-phase stub, implementation pending")
 }
 
 /// Classify a collector error string as the upstream transient empty-STOP
