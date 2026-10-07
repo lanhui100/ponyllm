@@ -173,7 +173,7 @@ spec:
       dnsConfig:
         options:
           - name: ndots
-            value: "2"
+            value: "1"
       # 180s 优雅停机窗口：保护 LLM 长文本 / 慢思考（Reasoning）流式连接自然吐完，避免硬杀导致用户端连接被掐断
       terminationGracePeriodSeconds: 180
       serviceAccountName: ponyllm-gateway-sa
@@ -339,7 +339,7 @@ spec:
       dnsConfig:
         options:
           - name: ndots
-            value: "2"
+            value: "1"
       terminationGracePeriodSeconds: 180
       serviceAccountName: ponyllm-gateway-sa
       automountServiceAccountToken: true
@@ -486,7 +486,7 @@ spec:
       dnsConfig:
         options:
           - name: ndots
-            value: "2"
+            value: "1"
       terminationGracePeriodSeconds: 180
       serviceAccountName: ponyllm-gateway-sa
       automountServiceAccountToken: true
@@ -634,7 +634,7 @@ spec:
       dnsConfig:
         options:
           - name: ndots
-            value: "2"
+            value: "1"
       terminationGracePeriodSeconds: 180
       serviceAccountName: ponyllm-gateway-sa
       automountServiceAccountToken: true

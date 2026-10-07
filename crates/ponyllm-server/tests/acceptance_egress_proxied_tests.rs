@@ -1,6 +1,6 @@
 //! 验收测试：egress 守护对显式代理目标跳过本地 DNS + 三态缓存 `(mode, host)` 分键。
 //!
-//! 契约（冻结）：`.agents/notes/proposed/bug-fix/2026-10-06-egress-guard-proxied-dns-skip.md`
+//! 契约（冻结）：`.agents/notes/implemented/bug-fix/2026-10-06-egress-guard-proxied-dns-skip.md`
 //! 与团队任务板 task-1。本文件只依赖契约中的**新 API**（HEAD 上不存在，编译失败 = 红相）：
 //!   - `ponyllm_server::egress::{DataPlaneRefusal, DnsLookupError}`
 //!   - `check_data_plane_url(raw) -> Result<(), DataPlaneRefusal>`（direct 全检查内核）

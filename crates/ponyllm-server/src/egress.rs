@@ -622,7 +622,7 @@ pub async fn check_data_plane_url(raw: &str) -> Result<(), DataPlaneRefusal> {
 /// and for GFW-blocked domains local DNS is unreliable (observed >5s hangs
 /// through CoreDNS→Chinese public resolvers). Fast policy only — name /
 /// literal / allowlist, NO DNS. See
-/// `.agents/notes/proposed/bug-fix/2026-10-06-egress-guard-proxied-dns-skip.md`.
+/// `.agents/notes/implemented/bug-fix/2026-10-06-egress-guard-proxied-dns-skip.md`.
 pub async fn check_data_plane_url_proxied(raw: &str) -> Result<(), DataPlaneRefusal> {
     check_data_plane_policy_fast(raw)
 }
