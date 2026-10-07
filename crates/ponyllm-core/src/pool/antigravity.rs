@@ -9,34 +9,34 @@
 //! `RateLimits` 不约束它（antigravity provider 无 rate_limits 配置 → 无限额）。
 //! 本模块不改结构：令牌刷新/冷却等认证流程保持不动。
 
+use super::refresh_gate::{RefreshGate, RefreshGateGuard};
+use crate::error::{CoreError, Result};
+use chrono::{DateTime, Utc};
+use parking_lot::RwLock;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
-use chrono::{DateTime, Utc};
-use parking_lot::RwLock;
-use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, Mutex};
-use crate::error::{CoreError, Result};
-use super::refresh_gate::{RefreshGate, RefreshGateGuard};
 
 pub const DEFAULT_ANTIGRAVITY_ENDPOINT: &str = "https://daily-cloudcode-pa.googleapis.com";
 pub const DEFAULT_ANTIGRAVITY_OAUTH_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 pub const DEFAULT_ANTIGRAVITY_OAUTH_AUTH_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 pub const DEFAULT_ANTIGRAVITY_OAUTH_REDIRECT_PORT: u16 = 51121;
 pub const DEFAULT_ANTIGRAVITY_CLIENT_ID: &str = match std::str::from_utf8(&[
-    49, 48, 55, 49, 48, 48, 54, 48, 54, 48, 53, 57, 49, 45, 116, 109, 104, 115, 115, 105,
-    110, 50, 104, 50, 49, 108, 99, 114, 101, 50, 51, 53, 118, 116, 111, 108, 111, 106, 104,
-    52, 103, 52, 48, 51, 101, 112, 46, 97, 112, 112, 115, 46, 103, 111, 111, 103, 108, 101,
-    117, 115, 101, 114, 99, 111, 110, 116, 101, 110, 116, 46, 99, 111, 109,
+    49, 48, 55, 49, 48, 48, 54, 48, 54, 48, 53, 57, 49, 45, 116, 109, 104, 115, 115, 105, 110, 50,
+    104, 50, 49, 108, 99, 114, 101, 50, 51, 53, 118, 116, 111, 108, 111, 106, 104, 52, 103, 52, 48,
+    51, 101, 112, 46, 97, 112, 112, 115, 46, 103, 111, 111, 103, 108, 101, 117, 115, 101, 114, 99,
+    111, 110, 116, 101, 110, 116, 46, 99, 111, 109,
 ]) {
     Ok(s) => s,
     Err(_) => unreachable!(),
 };
 pub const DEFAULT_ANTIGRAVITY_CLIENT_SECRET: &str = match std::str::from_utf8(&[
-    71, 79, 67, 83, 80, 88, 45, 75, 53, 56, 70, 87, 82, 52, 56, 54, 76, 100, 76, 74,
-    49, 109, 76, 66, 56, 115, 88, 67, 52, 122, 54, 113, 68, 65, 102,
+    71, 79, 67, 83, 80, 88, 45, 75, 53, 56, 70, 87, 82, 52, 56, 54, 76, 100, 76, 74, 49, 109, 76,
+    66, 56, 115, 88, 67, 52, 122, 54, 113, 68, 65, 102,
 ]) {
     Ok(s) => s,
     Err(_) => unreachable!(),
@@ -106,7 +106,11 @@ impl std::fmt::Debug for AntigravityCredential {
             )
             .field(
                 "access_token",
-                &if self.access_token.as_ref().is_some_and(|t| !t.trim().is_empty()) {
+                &if self
+                    .access_token
+                    .as_ref()
+                    .is_some_and(|t| !t.trim().is_empty())
+                {
                     "(present)"
                 } else {
                     "(missing)"
@@ -177,8 +181,11 @@ pub type RefreshTokenRotatedHook = Arc<dyn Fn(&str, &str) + Send + Sync>;
 /// config truth source (bounded retries, metrics). Returning `Err` records a
 /// `refresh_persist_failure_total` on the server side; the in-memory token is
 /// still kept (the rebuild path guards against stale-Secret overwrites).
-pub type RefreshPersistHook =
-    Arc<dyn Fn(String) -> Pin<Box<dyn Future<Output = std::result::Result<(), String>> + Send>> + Send + Sync>;
+pub type RefreshPersistHook = Arc<
+    dyn Fn(String) -> Pin<Box<dyn Future<Output = std::result::Result<(), String>> + Send>>
+        + Send
+        + Sync,
+>;
 
 #[derive(Clone)]
 pub struct AntigravityTokenManager {
@@ -312,7 +319,8 @@ impl AntigravityTokenManager {
                     let offset = (std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .map(|d| d.subsec_nanos() as u64 % (2 * span + 1))
-                        .unwrap_or(span)) as i64 - span as i64;
+                        .unwrap_or(span)) as i64
+                        - span as i64;
                     let delay = (base as i64 + offset).max(50) as u64;
                     tokio::time::sleep(Duration::from_millis(delay)).await;
 
@@ -382,7 +390,9 @@ impl AntigravityTokenManager {
         if let Some(ref sender) = *lock {
             let mut rx = sender.subscribe();
             drop(lock); // Release mutex so other tasks can wait on rx
-            let recv_res = tokio::time::timeout(REFRESH_CRITICAL_TIMEOUT + Duration::from_secs(2), rx.recv()).await;
+            let recv_res =
+                tokio::time::timeout(REFRESH_CRITICAL_TIMEOUT + Duration::from_secs(2), rx.recv())
+                    .await;
             return match recv_res {
                 Ok(Ok(RefreshOutcome::Token(token))) => Ok(token),
                 Ok(Ok(RefreshOutcome::InvalidGrant(reason))) => Err(CoreError::AuthInvalid {
@@ -393,8 +403,13 @@ impl AntigravityTokenManager {
                     key_id: self.key_id.clone(),
                 }),
                 Ok(Ok(RefreshOutcome::Transient(message))) => Err(CoreError::Internal(message)),
-                Ok(Err(e)) => Err(CoreError::Internal(format!("Failed to receive token broadcast: {}", e))),
-                Err(_) => Err(CoreError::Internal("Timed out waiting for Singleflight token refresh".to_string())),
+                Ok(Err(e)) => Err(CoreError::Internal(format!(
+                    "Failed to receive token broadcast: {}",
+                    e
+                ))),
+                Err(_) => Err(CoreError::Internal(
+                    "Timed out waiting for Singleflight token refresh".to_string(),
+                )),
             };
         }
 
@@ -417,7 +432,9 @@ impl AntigravityTokenManager {
                     tokio::spawn(async move {
                         let mut lock = lock_arc.lock().await;
                         *lock = None;
-                        let _ = tx.send(RefreshOutcome::Transient("Refresh task aborted/cancelled".to_string()));
+                        let _ = tx.send(RefreshOutcome::Transient(
+                            "Refresh task aborted/cancelled".to_string(),
+                        ));
                     });
                 }
             }
@@ -437,38 +454,38 @@ impl AntigravityTokenManager {
         // across an `.await` makes the future non-Send.
         let gate_opt = self.refresh_gate.read().clone();
         let _gate_guard: Option<Box<dyn RefreshGateGuard + Send + Sync>> = match gate_opt {
-                Some(gate) => match gate.try_acquire(&self.key_id).await {
-                    Ok(Some(g)) => Some(g),
-                    Ok(None) => {
-                        tracing::info!(
-                            key_id = %self.key_id,
-                            "antigravity refresh skipped: serialization lock held by another replica"
-                        );
-                        guard.completed = true;
-                        let mut lock = self.refresh_lock.lock().await;
-                        *lock = None;
-                        let _ = tx.send(RefreshOutcome::RefreshSkipped);
-                        return Err(CoreError::RefreshSkipped {
-                            key_id: self.key_id.clone(),
-                        });
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            key_id = %self.key_id,
-                            error = %e,
-                            "antigravity refresh skipped: lock backend unavailable (fail closed)"
-                        );
-                        guard.completed = true;
-                        let mut lock = self.refresh_lock.lock().await;
-                        *lock = None;
-                        let _ = tx.send(RefreshOutcome::RefreshSkipped);
-                        return Err(CoreError::RefreshSkipped {
-                            key_id: self.key_id.clone(),
-                        });
-                    }
-                },
-                None => None,
-            };
+            Some(gate) => match gate.try_acquire(&self.key_id).await {
+                Ok(Some(g)) => Some(g),
+                Ok(None) => {
+                    tracing::info!(
+                        key_id = %self.key_id,
+                        "antigravity refresh skipped: serialization lock held by another replica"
+                    );
+                    guard.completed = true;
+                    let mut lock = self.refresh_lock.lock().await;
+                    *lock = None;
+                    let _ = tx.send(RefreshOutcome::RefreshSkipped);
+                    return Err(CoreError::RefreshSkipped {
+                        key_id: self.key_id.clone(),
+                    });
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        key_id = %self.key_id,
+                        error = %e,
+                        "antigravity refresh skipped: lock backend unavailable (fail closed)"
+                    );
+                    guard.completed = true;
+                    let mut lock = self.refresh_lock.lock().await;
+                    *lock = None;
+                    let _ = tx.send(RefreshOutcome::RefreshSkipped);
+                    return Err(CoreError::RefreshSkipped {
+                        key_id: self.key_id.clone(),
+                    });
+                }
+            },
+            None => None,
+        };
 
         // Post-gate re-check: while we waited to acquire the cross-replica
         // serialization lock, another replica may have already refreshed and
@@ -610,18 +627,29 @@ impl AntigravityTokenManager {
             // recover. Everything else (network blips, 5xx, rate limits)
             // is transient and must not isolate the key.
             if body_text.to_ascii_lowercase().contains("invalid_grant") {
-                let sanitized_desc = if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&body_text) {
-                    let err = parsed.get("error").and_then(|v| v.as_str()).unwrap_or("invalid_grant");
-                    let desc = parsed.get("error_description").and_then(|v| v.as_str()).unwrap_or("");
-                    if desc.is_empty() {
-                        format!("OAuth refresh rejected ({}): {}", status, err)
+                let sanitized_desc =
+                    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&body_text) {
+                        let err = parsed
+                            .get("error")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("invalid_grant");
+                        let desc = parsed
+                            .get("error_description")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        if desc.is_empty() {
+                            format!("OAuth refresh rejected ({}): {}", status, err)
+                        } else {
+                            format!("OAuth refresh rejected ({}): {} - {}", status, err, desc)
+                        }
                     } else {
-                        format!("OAuth refresh rejected ({}): {} - {}", status, err, desc)
-                    }
-                } else {
-                    let clean: String = body_text.chars().filter(|c| !c.is_control()).take(120).collect();
-                    format!("OAuth refresh rejected ({}): {}", status, clean)
-                };
+                        let clean: String = body_text
+                            .chars()
+                            .filter(|c| !c.is_control())
+                            .take(120)
+                            .collect();
+                        format!("OAuth refresh rejected ({}): {}", status, clean)
+                    };
                 return Err(CoreError::AuthInvalid {
                     key_id: self.key_id.clone(),
                     reason: sanitized_desc,
@@ -640,7 +668,9 @@ impl AntigravityTokenManager {
         let access_token = json_val
             .get("access_token")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| CoreError::Internal("Missing access_token in refresh response".to_string()))?
+            .ok_or_else(|| {
+                CoreError::Internal("Missing access_token in refresh response".to_string())
+            })?
             .to_string();
 
         let expires_in_sec = json_val
@@ -656,7 +686,10 @@ impl AntigravityTokenManager {
             "Antigravity OAuth token refreshed successfully"
         );
 
-        let maybe_rotated = json_val.get("refresh_token").and_then(|v| v.as_str()).map(|s| s.trim().to_string());
+        let maybe_rotated = json_val
+            .get("refresh_token")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string());
 
         // Update in-memory credential snapshot
         {
@@ -692,7 +725,10 @@ impl AntigravityTokenManager {
     /// Fetch grouped quota summary (weekly + 5h windows) via retrieveUserQuotaSummary.
     /// Tries the provided endpoint or fallbacks (sandbox -> daily -> prod) as observed across tools.
     /// Returns None on any error so caller can fallback to fetchAvailableModels.
-    pub async fn fetch_quota_summary(&self, endpoint: Option<&str>) -> Option<Vec<QuotaSummaryGroup>> {
+    pub async fn fetch_quota_summary(
+        &self,
+        endpoint: Option<&str>,
+    ) -> Option<Vec<QuotaSummaryGroup>> {
         let access_token = self.get_valid_token().await.ok()?;
         let project = self.project_id();
         let payload = if project.trim().is_empty() {
@@ -725,7 +761,10 @@ impl AntigravityTokenManager {
                 .post(&url)
                 .header(reqwest::header::USER_AGENT, ANTIGRAVITY_USER_AGENT)
                 .header("x-goog-api-client", ANTIGRAVITY_GOOG_API_CLIENT)
-                .header(reqwest::header::AUTHORIZATION, format!("Bearer {}", access_token))
+                .header(
+                    reqwest::header::AUTHORIZATION,
+                    format!("Bearer {}", access_token),
+                )
                 .header(reqwest::header::CONTENT_TYPE, "application/json")
                 .header(reqwest::header::ACCEPT, "application/json")
                 .json(&payload)
@@ -776,7 +815,11 @@ impl AntigravityTokenManager {
                             .to_string();
                         let rem_frac = b_val
                             .get("remainingFraction")
-                            .or_else(|| b_val.get("remaining").and_then(|r| r.get("remainingFraction")))
+                            .or_else(|| {
+                                b_val
+                                    .get("remaining")
+                                    .and_then(|r| r.get("remainingFraction"))
+                            })
                             .and_then(|v| v.as_f64())
                             .unwrap_or(1.0);
                         let reset_raw = b_val
@@ -827,7 +870,9 @@ impl AntigravityTokenManager {
     /// Fetch available models and quota info from Antigravity PA endpoint
     pub async fn fetch_quota(&self, endpoint: Option<&str>) -> Result<AccountQuotaSnapshot> {
         let access_token = self.get_valid_token().await?;
-        let base = endpoint.unwrap_or(DEFAULT_ANTIGRAVITY_ENDPOINT).trim_end_matches('/');
+        let base = endpoint
+            .unwrap_or(DEFAULT_ANTIGRAVITY_ENDPOINT)
+            .trim_end_matches('/');
         let url = format!("{}/v1internal:fetchAvailableModels", base);
 
         let req = self
@@ -835,7 +880,10 @@ impl AntigravityTokenManager {
             .post(&url)
             .header(reqwest::header::USER_AGENT, ANTIGRAVITY_USER_AGENT)
             .header("x-goog-api-client", ANTIGRAVITY_GOOG_API_CLIENT)
-            .header(reqwest::header::AUTHORIZATION, format!("Bearer {}", access_token))
+            .header(
+                reqwest::header::AUTHORIZATION,
+                format!("Bearer {}", access_token),
+            )
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .header(reqwest::header::ACCEPT, "application/json")
             .header("requestType", "agent")
@@ -860,7 +908,10 @@ impl AntigravityTokenManager {
         }
 
         let json_val: serde_json::Value = serde_json::from_str(&body_text).map_err(|e| {
-            CoreError::Internal(format!("Failed to parse fetchAvailableModels response: {}", e))
+            CoreError::Internal(format!(
+                "Failed to parse fetchAvailableModels response: {}",
+                e
+            ))
         })?;
 
         let mut models_map = HashMap::new();
@@ -933,7 +984,9 @@ fn url_decode_component(input: &str) -> String {
             let h1 = chars.next();
             let h2 = chars.next();
             if let (Some(c1), Some(c2)) = (h1, h2) {
-                if let Ok(val) = u8::from_str_radix(std::str::from_utf8(&[c1, c2]).unwrap_or(""), 16) {
+                if let Ok(val) =
+                    u8::from_str_radix(std::str::from_utf8(&[c1, c2]).unwrap_or(""), 16)
+                {
                     bytes.push(val);
                     continue;
                 }
@@ -1150,8 +1203,12 @@ pub async fn exchange_code_for_credential_custom(
         )));
     }
 
-    let json_val: serde_json::Value = serde_json::from_str(&body_text)
-        .map_err(|e| CoreError::Internal(format!("Failed to parse OAuth exchange response JSON: {}", e)))?;
+    let json_val: serde_json::Value = serde_json::from_str(&body_text).map_err(|e| {
+        CoreError::Internal(format!(
+            "Failed to parse OAuth exchange response JSON: {}",
+            e
+        ))
+    })?;
 
     let refresh_token = json_val
         .get("refresh_token")
@@ -1260,7 +1317,11 @@ mod tests {
             project_id: "proj".to_string(),
             expiry: Some(Utc::now() - chrono::Duration::minutes(1)), // expired
         };
-        let mgr = Arc::new(AntigravityTokenManager::new("k1", cred, reqwest::Client::new()));
+        let mgr = Arc::new(AntigravityTokenManager::new(
+            "k1",
+            cred,
+            reqwest::Client::new(),
+        ));
         assert!(mgr.needs_refresh());
     }
 
@@ -1274,7 +1335,11 @@ mod tests {
             project_id: "proj".to_string(),
             expiry: Some(Utc::now() + chrono::Duration::hours(1)),
         };
-        let mgr = Arc::new(AntigravityTokenManager::new("ag-key-rot", cred, reqwest::Client::new()));
+        let mgr = Arc::new(AntigravityTokenManager::new(
+            "ag-key-rot",
+            cred,
+            reqwest::Client::new(),
+        ));
         let rotated = Arc::new(parking_lot::Mutex::new(None));
         let rotated_clone = rotated.clone();
         mgr.set_rotation_hook(Arc::new(move |key_id, new_rf| {
@@ -1285,7 +1350,10 @@ mod tests {
             hook("ag-key-rot", "1//new-refresh-token");
         }
         let captured = rotated.lock().clone();
-        assert_eq!(captured, Some(("ag-key-rot".to_string(), "1//new-refresh-token".to_string())));
+        assert_eq!(
+            captured,
+            Some(("ag-key-rot".to_string(), "1//new-refresh-token".to_string()))
+        );
     }
 
     #[tokio::test]
@@ -1298,7 +1366,11 @@ mod tests {
             project_id: "proj".to_string(),
             expiry: None,
         };
-        let mgr = Arc::new(AntigravityTokenManager::new("ag-cancel-test", cred, reqwest::Client::new()));
+        let mgr = Arc::new(AntigravityTokenManager::new(
+            "ag-cancel-test",
+            cred,
+            reqwest::Client::new(),
+        ));
 
         let mgr_clone = mgr.clone();
         tokio::select! {
@@ -1309,12 +1381,16 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         let lock_guard = mgr.refresh_lock.lock().await;
-        assert!(lock_guard.is_none(), "Singleflight slot must be None after cancellation");
+        assert!(
+            lock_guard.is_none(),
+            "Singleflight slot must be None after cancellation"
+        );
     }
 
     #[test]
     fn test_build_authorization_url() {
-        let url = build_authorization_url("http://localhost:51121/oauth2callback", "nonce-state-123");
+        let url =
+            build_authorization_url("http://localhost:51121/oauth2callback", "nonce-state-123");
         assert!(url.starts_with(DEFAULT_ANTIGRAVITY_OAUTH_AUTH_URL));
         assert!(url.contains(&format!("client_id={}", DEFAULT_ANTIGRAVITY_CLIENT_ID)));
         assert!(url.contains("access_type=offline"));
@@ -1370,19 +1446,31 @@ mod tests {
     fn test_parse_code_from_input() {
         // 1. Full URL with code, scope, state
         let input1 = "http://localhost:51121/oauth2callback?code=4%2F0AY0e-dummy_code&scope=openid&state=123";
-        assert_eq!(parse_code_from_input(input1), Some("4/0AY0e-dummy_code".to_string()));
+        assert_eq!(
+            parse_code_from_input(input1),
+            Some("4/0AY0e-dummy_code".to_string())
+        );
 
         // 2. 127.0.0.1 redirect URL
         let input2 = "http://127.0.0.1:51121/?state=123&code=4/0B9988_code";
-        assert_eq!(parse_code_from_input(input2), Some("4/0B9988_code".to_string()));
+        assert_eq!(
+            parse_code_from_input(input2),
+            Some("4/0B9988_code".to_string())
+        );
 
         // 3. Raw code pasted directly with whitespace
         let input3 = "   4/0AY0e-raw_code_pasted   ";
-        assert_eq!(parse_code_from_input(input3), Some("4/0AY0e-raw_code_pasted".to_string()));
+        assert_eq!(
+            parse_code_from_input(input3),
+            Some("4/0AY0e-raw_code_pasted".to_string())
+        );
 
         // 4. code= format
         let input4 = "code=4/0AY_direct";
-        assert_eq!(parse_code_from_input(input4), Some("4/0AY_direct".to_string()));
+        assert_eq!(
+            parse_code_from_input(input4),
+            Some("4/0AY_direct".to_string())
+        );
 
         // 5. Empty or garbage
         assert_eq!(parse_code_from_input(""), None);
@@ -1445,11 +1533,13 @@ mod tests {
         .expect("exchange should succeed");
 
         assert_eq!(result.credential.refresh_token, "1//0test_refresh");
-        assert_eq!(result.credential.access_token, Some("ya29.test_access".to_string()));
+        assert_eq!(
+            result.credential.access_token,
+            Some("ya29.test_access".to_string())
+        );
         assert_eq!(result.email, Some("user@example.com".to_string()));
     }
 }
-
 
 #[cfg(test)]
 mod ha_gate_tests {
@@ -1466,10 +1556,8 @@ mod ha_gate_tests {
         async fn try_acquire(
             &self,
             _key_id: &str,
-        ) -> std::result::Result<
-            Option<Box<dyn RefreshGateGuard + Send + Sync>>,
-            RefreshGateError,
-        > {
+        ) -> std::result::Result<Option<Box<dyn RefreshGateGuard + Send + Sync>>, RefreshGateError>
+        {
             Ok(None) // another replica holds the lock
         }
     }
@@ -1486,7 +1574,11 @@ mod ha_gate_tests {
             project_id: "proj".to_string(),
             expiry: None,
         };
-        let mgr = Arc::new(AntigravityTokenManager::new("ag-gate-skip", cred, reqwest::Client::new()));
+        let mgr = Arc::new(AntigravityTokenManager::new(
+            "ag-gate-skip",
+            cred,
+            reqwest::Client::new(),
+        ));
         mgr.set_refresh_gate(Some(Arc::new(SkipGate)));
         let persist_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let pc = persist_calls.clone();
@@ -1518,7 +1610,8 @@ mod ha_gate_tests {
     impl RefreshGateGuard for AcquireGuard {}
     impl Drop for AcquireGuard {
         fn drop(&mut self) {
-            self.released.store(true, std::sync::atomic::Ordering::SeqCst);
+            self.released
+                .store(true, std::sync::atomic::Ordering::SeqCst);
         }
     }
 
@@ -1527,10 +1620,8 @@ mod ha_gate_tests {
         async fn try_acquire(
             &self,
             _key_id: &str,
-        ) -> std::result::Result<
-            Option<Box<dyn RefreshGateGuard + Send + Sync>>,
-            RefreshGateError,
-        > {
+        ) -> std::result::Result<Option<Box<dyn RefreshGateGuard + Send + Sync>>, RefreshGateError>
+        {
             Ok(Some(Box::new(AcquireGuard {
                 released: self.released.clone(),
             })))
@@ -1612,10 +1703,7 @@ mod ha_gate_tests {
         // After the call the guard has been dropped → released.
         assert!(released.load(std::sync::atomic::Ordering::SeqCst));
         // Rotation (refresh_token rotated) landed in memory.
-        assert_eq!(
-            mgr.credential_snapshot().refresh_token,
-            "1//rotated_rf"
-        );
+        assert_eq!(mgr.credential_snapshot().refresh_token, "1//rotated_rf");
     }
 
     #[derive(Debug)]
@@ -1629,10 +1717,8 @@ mod ha_gate_tests {
         async fn try_acquire(
             &self,
             _key_id: &str,
-        ) -> std::result::Result<
-            Option<Box<dyn RefreshGateGuard + Send + Sync>>,
-            RefreshGateError,
-        > {
+        ) -> std::result::Result<Option<Box<dyn RefreshGateGuard + Send + Sync>>, RefreshGateError>
+        {
             let count = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if count >= self.succeed_after {
                 Ok(Some(Box::new(NoopRefreshGateGuard)))
@@ -1682,7 +1768,10 @@ mod ha_gate_tests {
             guard.expiry = Some(Utc::now() + chrono::Duration::hours(1));
         });
 
-        let token = mgr.get_valid_token().await.expect("should succeed after retry");
+        let token = mgr
+            .get_valid_token()
+            .await
+            .expect("should succeed after retry");
         assert_eq!(token, "ya29.retry_success_token");
         assert!(calls.load(std::sync::atomic::Ordering::SeqCst) >= 1);
     }
@@ -1754,7 +1843,10 @@ mod ha_gate_tests {
             guard.expiry = Some(Utc::now() + chrono::Duration::hours(1));
         });
 
-        let token = mgr.get_valid_token().await.expect("should pick up cached token during wait");
+        let token = mgr
+            .get_valid_token()
+            .await
+            .expect("should pick up cached token during wait");
         assert_eq!(token, "ya29.injected_by_peer");
     }
 }

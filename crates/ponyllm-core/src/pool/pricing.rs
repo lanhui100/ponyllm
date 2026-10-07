@@ -106,10 +106,14 @@ impl PricingConfig {
     pub fn is_free(&self) -> bool {
         if self.mode == PricingMode::PeakValley && !self.pricing_periods.is_empty() {
             return self.pricing_periods.iter().all(|p| {
-                p.input_price.abs() < 1e-6 && p.cached_price.abs() < 1e-6 && p.output_price.abs() < 1e-6
+                p.input_price.abs() < 1e-6
+                    && p.cached_price.abs() < 1e-6
+                    && p.output_price.abs() < 1e-6
             });
         }
-        self.input_price.abs() < 1e-6 && self.cached_price.abs() < 1e-6 && self.output_price.abs() < 1e-6
+        self.input_price.abs() < 1e-6
+            && self.cached_price.abs() < 1e-6
+            && self.output_price.abs() < 1e-6
     }
 
     /// Resolve effective prices (input, cached, output) for the current moment or fallback to baseline (valley price)
@@ -118,7 +122,11 @@ impl PricingConfig {
             // Use Beijing time UTC+8 as standard convention for peak/valley tariffs
             let tz_offset = chrono::FixedOffset::east_opt(8 * 3600).unwrap();
             let bj_dt = chrono::Utc::now().with_timezone(&tz_offset);
-            if let Some(period) = self.pricing_periods.iter().find(|p| p.matches_datetime(&bj_dt)) {
+            if let Some(period) = self
+                .pricing_periods
+                .iter()
+                .find(|p| p.matches_datetime(&bj_dt))
+            {
                 return (period.input_price, period.cached_price, period.output_price);
             }
             // During off-peak (valley) or non-peak weekends, baseline (uniform input/cached/output) applies
@@ -127,12 +135,21 @@ impl PricingConfig {
     }
 
     /// Estimate total cost for given input tokens, cached state, and expected output tokens
-    pub fn estimate_cost(&self, input_tokens: usize, is_cached: bool, expected_output_tokens: usize) -> f64 {
+    pub fn estimate_cost(
+        &self,
+        input_tokens: usize,
+        is_cached: bool,
+        expected_output_tokens: usize,
+    ) -> f64 {
         if self.is_free() {
             return 0.0;
         }
         let (in_p, ca_p, out_p) = self.resolve_current_prices();
-        let in_rate = if is_cached { ca_p.max(0.0) } else { in_p.max(0.0) };
+        let in_rate = if is_cached {
+            ca_p.max(0.0)
+        } else {
+            in_p.max(0.0)
+        };
         let out_rate = out_p.max(0.0);
         let in_cost = (input_tokens as f64 / 1_000_000.0) * in_rate;
         let out_cost = (expected_output_tokens as f64 / 1_000_000.0) * out_rate;

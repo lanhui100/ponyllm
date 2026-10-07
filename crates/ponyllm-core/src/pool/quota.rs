@@ -16,12 +16,8 @@ impl QuotaLease {
             if curr <= 0 {
                 return None;
             }
-            match counter.compare_exchange_weak(
-                curr,
-                curr - 1,
-                Ordering::AcqRel,
-                Ordering::Relaxed,
-            ) {
+            match counter.compare_exchange_weak(curr, curr - 1, Ordering::AcqRel, Ordering::Relaxed)
+            {
                 Ok(_) => {
                     return Some(Self {
                         counter: counter.clone(),

@@ -1,7 +1,7 @@
-use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 pub const FIVE_HOURS_MS: u64 = 5 * 3600 * 1000;
 pub const SEVEN_DAYS_MS: u64 = 7 * 24 * 3600 * 1000;
@@ -173,9 +173,13 @@ pub fn aligned_period_observations(
             )
         });
         entry.0.prompt_tokens = entry.0.prompt_tokens.saturating_add(s.prompt_tokens);
-        entry.0.completion_tokens = entry.0.completion_tokens.saturating_add(s.completion_tokens);
+        entry.0.completion_tokens = entry
+            .0
+            .completion_tokens
+            .saturating_add(s.completion_tokens);
         entry.0.cached_tokens = entry.0.cached_tokens.saturating_add(s.cached_tokens);
-        entry.0.total_tokens = entry.0
+        entry.0.total_tokens = entry
+            .0
             .total_tokens
             .saturating_add(s.prompt_tokens)
             .saturating_add(s.completion_tokens);
@@ -262,8 +266,9 @@ impl CycleBenchmarkTotals {
     fn absorb_completed(&mut self, r: &CompletedCycleRecord) {
         self.completed_cycles = self.completed_cycles.saturating_add(1);
         self.completed_prompt_tokens = self.completed_prompt_tokens.saturating_add(r.prompt_tokens);
-        self.completed_completion_tokens =
-            self.completed_completion_tokens.saturating_add(r.completion_tokens);
+        self.completed_completion_tokens = self
+            .completed_completion_tokens
+            .saturating_add(r.completion_tokens);
         self.completed_cached_tokens = self.completed_cached_tokens.saturating_add(r.cached_tokens);
         self.completed_total_tokens = self.completed_total_tokens.saturating_add(r.total_tokens);
         self.completed_requests = self.completed_requests.saturating_add(r.requests);
@@ -296,11 +301,7 @@ impl PoolCycleBenchmark {
     /// Both watermarks persist with the archive, so calling this on the same
     /// data twice (crash-replay, restart re-import, repeated saves) never
     /// changes the totals.
-    pub fn merge_usages(
-        &mut self,
-        usages: &BTreeMap<String, KeyUsageStateSnapshot>,
-        now_ms: u64,
-    ) {
+    pub fn merge_usages(&mut self, usages: &BTreeMap<String, KeyUsageStateSnapshot>, now_ms: u64) {
         for (key_id, snap) in usages {
             for kind in [CYCLE_KIND_5H, CYCLE_KIND_WEEKLY, CYCLE_KIND_MONTHLY] {
                 let totals = match kind {
@@ -418,7 +419,8 @@ impl KeyUsageTracker {
         let total = prompt.saturating_add(completion);
         self.lifetime_tokens.fetch_add(total, Ordering::Relaxed);
         self.lifetime_prompt.fetch_add(prompt, Ordering::Relaxed);
-        self.lifetime_completion.fetch_add(completion, Ordering::Relaxed);
+        self.lifetime_completion
+            .fetch_add(completion, Ordering::Relaxed);
         self.lifetime_cached.fetch_add(cached, Ordering::Relaxed);
         self.lifetime_requests.fetch_add(1, Ordering::Relaxed);
 
@@ -457,28 +459,40 @@ impl KeyUsageTracker {
 
         for (&time, slice) in slices.range(cutoff_30d..=now_ms) {
             usage_30d.prompt_tokens = usage_30d.prompt_tokens.saturating_add(slice.prompt_tokens);
-            usage_30d.completion_tokens = usage_30d.completion_tokens.saturating_add(slice.completion_tokens);
+            usage_30d.completion_tokens = usage_30d
+                .completion_tokens
+                .saturating_add(slice.completion_tokens);
             usage_30d.cached_tokens = usage_30d.cached_tokens.saturating_add(slice.cached_tokens);
             usage_30d.requests = usage_30d.requests.saturating_add(slice.requests);
 
             if time >= cutoff_7d {
                 usage_7d.prompt_tokens = usage_7d.prompt_tokens.saturating_add(slice.prompt_tokens);
-                usage_7d.completion_tokens = usage_7d.completion_tokens.saturating_add(slice.completion_tokens);
+                usage_7d.completion_tokens = usage_7d
+                    .completion_tokens
+                    .saturating_add(slice.completion_tokens);
                 usage_7d.cached_tokens = usage_7d.cached_tokens.saturating_add(slice.cached_tokens);
                 usage_7d.requests = usage_7d.requests.saturating_add(slice.requests);
             }
 
             if time >= cutoff_5h {
                 usage_5h.prompt_tokens = usage_5h.prompt_tokens.saturating_add(slice.prompt_tokens);
-                usage_5h.completion_tokens = usage_5h.completion_tokens.saturating_add(slice.completion_tokens);
+                usage_5h.completion_tokens = usage_5h
+                    .completion_tokens
+                    .saturating_add(slice.completion_tokens);
                 usage_5h.cached_tokens = usage_5h.cached_tokens.saturating_add(slice.cached_tokens);
                 usage_5h.requests = usage_5h.requests.saturating_add(slice.requests);
             }
         }
 
-        usage_5h.total_tokens = usage_5h.prompt_tokens.saturating_add(usage_5h.completion_tokens);
-        usage_7d.total_tokens = usage_7d.prompt_tokens.saturating_add(usage_7d.completion_tokens);
-        usage_30d.total_tokens = usage_30d.prompt_tokens.saturating_add(usage_30d.completion_tokens);
+        usage_5h.total_tokens = usage_5h
+            .prompt_tokens
+            .saturating_add(usage_5h.completion_tokens);
+        usage_7d.total_tokens = usage_7d
+            .prompt_tokens
+            .saturating_add(usage_7d.completion_tokens);
+        usage_30d.total_tokens = usage_30d
+            .prompt_tokens
+            .saturating_add(usage_30d.completion_tokens);
         (usage_5h, usage_7d, usage_30d)
     }
 
@@ -489,7 +503,9 @@ impl KeyUsageTracker {
 
         for (&_time, slice) in slices.range(cutoff..=now_ms) {
             usage.prompt_tokens = usage.prompt_tokens.saturating_add(slice.prompt_tokens);
-            usage.completion_tokens = usage.completion_tokens.saturating_add(slice.completion_tokens);
+            usage.completion_tokens = usage
+                .completion_tokens
+                .saturating_add(slice.completion_tokens);
             usage.cached_tokens = usage.cached_tokens.saturating_add(slice.cached_tokens);
             usage.requests = usage.requests.saturating_add(slice.requests);
         }
@@ -532,17 +548,47 @@ impl KeyUsageTracker {
 
         let mut probe = self.last_probe_snapshot.write();
 
-        if let Some((prev_time, prev_frac, prev_lifetime, prev_prompt, prev_comp, prev_cached, prev_reqs)) = *probe {
+        if let Some((
+            prev_time,
+            prev_frac,
+            prev_lifetime,
+            prev_prompt,
+            prev_comp,
+            prev_cached,
+            prev_reqs,
+        )) = *probe
+        {
             // Check for upstream quota reset (fraction jumped upwards by > 5%)
             if remaining_fraction > prev_frac + 0.05 {
                 // An actual completed cycle occurred before this reset!
                 // Guard: only record cycle if previous baseline was initialized (prev_lifetime > 0)
                 if prev_lifetime > 0 {
-                    self.record_completed_cycle(CYCLE_KIND_5H, now_ms, current_lifetime, current_prompt, current_comp, current_cached, current_reqs, prev_lifetime, prev_prompt, prev_comp, prev_cached, prev_reqs);
+                    self.record_completed_cycle(
+                        CYCLE_KIND_5H,
+                        now_ms,
+                        current_lifetime,
+                        current_prompt,
+                        current_comp,
+                        current_cached,
+                        current_reqs,
+                        prev_lifetime,
+                        prev_prompt,
+                        prev_comp,
+                        prev_cached,
+                        prev_reqs,
+                    );
                 }
 
                 // Upstream window reset occurred: reset baseline without fitting
-                *probe = Some((now_ms, remaining_fraction, current_lifetime, current_prompt, current_comp, current_cached, current_reqs));
+                *probe = Some((
+                    now_ms,
+                    remaining_fraction,
+                    current_lifetime,
+                    current_prompt,
+                    current_comp,
+                    current_cached,
+                    current_reqs,
+                ));
                 return;
             }
 
@@ -557,7 +603,9 @@ impl KeyUsageTracker {
                 // Significant consumption jump (tolerance for IEEE 754 precision)
                 if frac_delta >= 0.0095 && token_delta >= 1000 {
                     // Equivalent benchmark tokens: output weighted 3x, cache weighted 0.25x
-                    let eq_tokens = (prompt_delta as f64) + (comp_delta as f64 * 3.0) + (cached_delta as f64 * 0.25);
+                    let eq_tokens = (prompt_delta as f64)
+                        + (comp_delta as f64 * 3.0)
+                        + (cached_delta as f64 * 0.25);
                     // Blended capacity: 60% total tokens baseline + 40% equivalent weighted tokens
                     let raw_capacity = (token_delta as f64 / frac_delta).round() as u64;
                     let eq_capacity = (eq_tokens / frac_delta).round() as u64;
@@ -569,11 +617,14 @@ impl KeyUsageTracker {
                     };
 
                     // Clamping guard: ignore unreasonable outliers
-                    if (MIN_REASONABLE_CAPACITY..=MAX_REASONABLE_CAPACITY).contains(&inferred_capacity) {
+                    if (MIN_REASONABLE_CAPACITY..=MAX_REASONABLE_CAPACITY)
+                        .contains(&inferred_capacity)
+                    {
                         let mut cap = self.cached_capacity.write();
                         if let Some(existing) = *cap {
                             // EWMA smooth capacity (70% historical, 30% new observation)
-                            let smoothed = (existing as f64 * 0.7 + inferred_capacity as f64 * 0.3).round() as u64;
+                            let smoothed = (existing as f64 * 0.7 + inferred_capacity as f64 * 0.3)
+                                .round() as u64;
                             *cap = Some(smoothed);
                         } else {
                             *cap = Some(inferred_capacity);
@@ -583,7 +634,15 @@ impl KeyUsageTracker {
             }
         }
 
-        *probe = Some((now_ms, remaining_fraction, current_lifetime, current_prompt, current_comp, current_cached, current_reqs));
+        *probe = Some((
+            now_ms,
+            remaining_fraction,
+            current_lifetime,
+            current_prompt,
+            current_comp,
+            current_cached,
+            current_reqs,
+        ));
     }
 
     fn observe_weekly_probe(&self, now_ms: u64, weekly_fraction: f64) {
@@ -594,17 +653,55 @@ impl KeyUsageTracker {
         let current_reqs = self.lifetime_requests.load(Ordering::Relaxed);
 
         let mut probe = self.last_probe_weekly.write();
-        if let Some((_prev_time, prev_frac, prev_lifetime, prev_prompt, prev_comp, prev_cached, prev_reqs)) = *probe {
+        if let Some((
+            _prev_time,
+            prev_frac,
+            prev_lifetime,
+            prev_prompt,
+            prev_comp,
+            prev_cached,
+            prev_reqs,
+        )) = *probe
+        {
             // Weekly quota bucket reset: fraction jumped upwards by > 5%.
             if weekly_fraction > prev_frac + 0.05 {
                 if prev_lifetime > 0 {
-                    self.record_completed_cycle(CYCLE_KIND_WEEKLY, now_ms, current_lifetime, current_prompt, current_comp, current_cached, current_reqs, prev_lifetime, prev_prompt, prev_comp, prev_cached, prev_reqs);
+                    self.record_completed_cycle(
+                        CYCLE_KIND_WEEKLY,
+                        now_ms,
+                        current_lifetime,
+                        current_prompt,
+                        current_comp,
+                        current_cached,
+                        current_reqs,
+                        prev_lifetime,
+                        prev_prompt,
+                        prev_comp,
+                        prev_cached,
+                        prev_reqs,
+                    );
                 }
-                *probe = Some((now_ms, weekly_fraction, current_lifetime, current_prompt, current_comp, current_cached, current_reqs));
+                *probe = Some((
+                    now_ms,
+                    weekly_fraction,
+                    current_lifetime,
+                    current_prompt,
+                    current_comp,
+                    current_cached,
+                    current_reqs,
+                ));
                 return;
             }
         }
-        *probe = Some((now_ms, weekly_fraction, current_lifetime, current_prompt, current_comp, current_cached, current_reqs));
+        *probe = Some((
+            now_ms,
+            weekly_fraction,
+            current_lifetime,
+            current_prompt,
+            current_comp,
+            current_cached,
+            current_reqs,
+        ));
     }
 
     /// Archive one completed cycle with a monotonic sequence id (idempotent
@@ -628,7 +725,10 @@ impl KeyUsageTracker {
         if cycle_tokens == 0 {
             return;
         }
-        let seq = self.cycle_seq.fetch_add(1, Ordering::Relaxed).saturating_add(1);
+        let seq = self
+            .cycle_seq
+            .fetch_add(1, Ordering::Relaxed)
+            .saturating_add(1);
         let record = CompletedCycleRecord {
             cycle_end_ms: now_ms,
             kind: kind.to_string(),
@@ -655,7 +755,11 @@ impl KeyUsageTracker {
     }
 
     /// Compute full estimate snapshot with optional weekly fraction for dual-track estimation
-    pub fn estimate_capacity(&self, now_ms: u64, current_remaining_fraction: Option<f64>) -> KeyCapacityEstimate {
+    pub fn estimate_capacity(
+        &self,
+        now_ms: u64,
+        current_remaining_fraction: Option<f64>,
+    ) -> KeyCapacityEstimate {
         self.estimate_capacity_dual(now_ms, current_remaining_fraction, None)
     }
 
@@ -673,7 +777,8 @@ impl KeyUsageTracker {
         let has_benchmarked_cycles = !completed_cycles.is_empty();
 
         let (calibration_status, account_tier, confidence) = if has_benchmarked_cycles {
-            let avg_benchmarked = completed_cycles.iter().map(|c| c.total_tokens).sum::<u64>() / completed_cycles.len() as u64;
+            let avg_benchmarked = completed_cycles.iter().map(|c| c.total_tokens).sum::<u64>()
+                / completed_cycles.len() as u64;
             let tier = if avg_benchmarked >= 350_000 {
                 "pro".to_string()
             } else if avg_benchmarked >= 100_000 {
@@ -692,13 +797,14 @@ impl KeyUsageTracker {
             };
             ("estimated".to_string(), tier, 0.85)
         } else {
-            let (tier, conf) = if window_5h.total_tokens > 200_000 || window_weekly.total_tokens > 500_000 {
-                ("pro".to_string(), 0.50)
-            } else if window_5h.requests > 0 {
-                ("calibrating".to_string(), 0.30)
-            } else {
-                ("unknown".to_string(), 0.0)
-            };
+            let (tier, conf) =
+                if window_5h.total_tokens > 200_000 || window_weekly.total_tokens > 500_000 {
+                    ("pro".to_string(), 0.50)
+                } else if window_5h.requests > 0 {
+                    ("calibrating".to_string(), 0.30)
+                } else {
+                    ("unknown".to_string(), 0.0)
+                };
             ("calibrating".to_string(), tier, conf)
         };
 
@@ -747,7 +853,10 @@ impl KeyUsageTracker {
     }
 
     pub fn export_snapshot(&self) -> KeyUsageStateSnapshot {
-        let last_probe = self.last_probe_snapshot.read().map(|(t, f, lt, ..)| (t, f, lt));
+        let last_probe = self
+            .last_probe_snapshot
+            .read()
+            .map(|(t, f, lt, ..)| (t, f, lt));
         KeyUsageStateSnapshot {
             slices: self.slices.read().values().cloned().collect(),
             cached_capacity: *self.cached_capacity.read(),
@@ -755,8 +864,18 @@ impl KeyUsageTracker {
             completed_5h_records: self.completed_5h_cycles.read().clone(),
             completed_weekly_records: self.completed_weekly_cycles.read().clone(),
             next_cycle_seq: self.cycle_seq.load(Ordering::Relaxed),
-            completed_5h: self.completed_5h_cycles.read().iter().map(|r| (r.cycle_end_ms, r.total_tokens, r.requests)).collect(),
-            completed_weekly: self.completed_weekly_cycles.read().iter().map(|r| (r.cycle_end_ms, r.total_tokens, r.requests)).collect(),
+            completed_5h: self
+                .completed_5h_cycles
+                .read()
+                .iter()
+                .map(|r| (r.cycle_end_ms, r.total_tokens, r.requests))
+                .collect(),
+            completed_weekly: self
+                .completed_weekly_cycles
+                .read()
+                .iter()
+                .map(|r| (r.cycle_end_ms, r.total_tokens, r.requests))
+                .collect(),
         }
     }
 
@@ -773,7 +892,8 @@ impl KeyUsageTracker {
         // records still archive exactly once in the pool benchmark.
         let mut seq_start = snap.next_cycle_seq;
         if !snap.completed_5h_records.is_empty() {
-            let mut records = prepare_imported_records(snap.completed_5h_records, CYCLE_KIND_5H, &mut seq_start);
+            let mut records =
+                prepare_imported_records(snap.completed_5h_records, CYCLE_KIND_5H, &mut seq_start);
             if records.len() > 100 {
                 records = records.split_off(records.len() - 100);
             }
@@ -783,20 +903,27 @@ impl KeyUsageTracker {
             if legacy.len() > 100 {
                 legacy = legacy.split_off(legacy.len() - 100);
             }
-            *self.completed_5h_cycles.write() = legacy.into_iter().map(|(end, tot, req)| CompletedCycleRecord {
-                cycle_end_ms: end,
-                kind: CYCLE_KIND_5H.to_string(),
-                seq: next_seq(&mut seq_start),
-                prompt_tokens: 0,
-                completion_tokens: 0,
-                cached_tokens: 0,
-                total_tokens: tot,
-                requests: req,
-            }).collect();
+            *self.completed_5h_cycles.write() = legacy
+                .into_iter()
+                .map(|(end, tot, req)| CompletedCycleRecord {
+                    cycle_end_ms: end,
+                    kind: CYCLE_KIND_5H.to_string(),
+                    seq: next_seq(&mut seq_start),
+                    prompt_tokens: 0,
+                    completion_tokens: 0,
+                    cached_tokens: 0,
+                    total_tokens: tot,
+                    requests: req,
+                })
+                .collect();
         }
         // Weekly records (structured + legacy tuple list).
         if !snap.completed_weekly_records.is_empty() {
-            let mut records = prepare_imported_records(snap.completed_weekly_records, CYCLE_KIND_WEEKLY, &mut seq_start);
+            let mut records = prepare_imported_records(
+                snap.completed_weekly_records,
+                CYCLE_KIND_WEEKLY,
+                &mut seq_start,
+            );
             if records.len() > 100 {
                 records = records.split_off(records.len() - 100);
             }
@@ -806,16 +933,19 @@ impl KeyUsageTracker {
             if legacy.len() > 100 {
                 legacy = legacy.split_off(legacy.len() - 100);
             }
-            *self.completed_weekly_cycles.write() = legacy.into_iter().map(|(end, tot, req)| CompletedCycleRecord {
-                cycle_end_ms: end,
-                kind: CYCLE_KIND_WEEKLY.to_string(),
-                seq: next_seq(&mut seq_start),
-                prompt_tokens: 0,
-                completion_tokens: 0,
-                cached_tokens: 0,
-                total_tokens: tot,
-                requests: req,
-            }).collect();
+            *self.completed_weekly_cycles.write() = legacy
+                .into_iter()
+                .map(|(end, tot, req)| CompletedCycleRecord {
+                    cycle_end_ms: end,
+                    kind: CYCLE_KIND_WEEKLY.to_string(),
+                    seq: next_seq(&mut seq_start),
+                    prompt_tokens: 0,
+                    completion_tokens: 0,
+                    cached_tokens: 0,
+                    total_tokens: tot,
+                    requests: req,
+                })
+                .collect();
         }
         if seq_start > 0 {
             self.cycle_seq.store(seq_start, Ordering::Relaxed);

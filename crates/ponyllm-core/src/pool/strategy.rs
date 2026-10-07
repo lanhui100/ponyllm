@@ -135,7 +135,10 @@ pub fn parse_context_capacity_tokens(s: &str) -> usize {
 }
 
 /// Check if context capacity transition is valid (Only allows equal or increasing capacity)
-pub fn is_context_capacity_compatible(source_capacity_str: &str, target_capacity_str: &str) -> bool {
+pub fn is_context_capacity_compatible(
+    source_capacity_str: &str,
+    target_capacity_str: &str,
+) -> bool {
     let src = parse_context_capacity_tokens(source_capacity_str);
     let tgt = parse_context_capacity_tokens(target_capacity_str);
     tgt >= src

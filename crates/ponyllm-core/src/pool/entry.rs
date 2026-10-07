@@ -1,10 +1,10 @@
+use crate::pool::antigravity::{AntigravityTokenManager, QuotaSummaryGroup};
+use chrono::{DateTime, Utc};
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
-use chrono::{DateTime, Utc};
-use parking_lot::RwLock;
-use crate::pool::antigravity::{AntigravityTokenManager, QuotaSummaryGroup};
 
 /// Process-wide jitter counter: mixed with wall-clock nanos so concurrent
 /// instances and synchronized retries desynchronize (B1). Not cryptographic,
@@ -46,13 +46,19 @@ pub enum KeyState {
 
 #[derive(Debug, Clone)]
 pub enum PoolErrorType {
-    RateLimit { retry_after: Option<Duration> },
+    RateLimit {
+        retry_after: Option<Duration>,
+    },
     /// Quota exhaustion cools the key down (never permanently disables):
     /// real quota recovers at `resetTime`, fake 429-style throttling clears
     /// on its own. `retry_after` defaults to a conservative 15 minutes when
     /// the upstream gave no explicit signal.
-    QuotaExhausted { retry_after: Option<Duration> },
-    AuthInvalid { reason: Option<String> },
+    QuotaExhausted {
+        retry_after: Option<Duration>,
+    },
+    AuthInvalid {
+        reason: Option<String>,
+    },
     PolicyViolation,
     /// Google 账号需要人工验证（403 VALIDATION_REQUIRED）：永久隔离，
     /// 等人工完成验证/重新授权后恢复；绝不能靠等待额度窗口自动恢复。
@@ -61,7 +67,9 @@ pub enum PoolErrorType {
     /// "Your current account is not eligible for ..."）：账号当前无该产品资格，
     /// 既非瞬态也非永久——长冷冻（数日）后由调度自动路由到池内其它账号，
     /// 请求继续、agent 不中断；账号不摘除、不永久禁用。
-    AccountEligibility { reason: Option<String> },
+    AccountEligibility {
+        reason: Option<String>,
+    },
     ServerError,
     NetworkError,
 }
@@ -238,7 +246,10 @@ impl std::fmt::Debug for ApiKeyEntry {
         f.debug_struct("ApiKeyEntry")
             .field("id", &self.id)
             .field("account_id", &self.account_id)
-            .field("api_key", &crate::telemetry::FlightRecorder::sanitize_key(&self.api_key))
+            .field(
+                "api_key",
+                &crate::telemetry::FlightRecorder::sanitize_key(&self.api_key),
+            )
             .field("auth", &self.auth)
             .field("priority", &self.priority)
             .field("weight", &self.weight)
@@ -247,7 +258,12 @@ impl std::fmt::Debug for ApiKeyEntry {
 }
 
 impl ApiKeyEntry {
-    pub fn new(id: impl Into<String>, api_key: impl Into<String>, priority: u32, weight: u32) -> Self {
+    pub fn new(
+        id: impl Into<String>,
+        api_key: impl Into<String>,
+        priority: u32,
+        weight: u32,
+    ) -> Self {
         let k = api_key.into();
         Self {
             id: id.into(),
@@ -389,7 +405,11 @@ impl ApiKeyEntry {
     /// true only when a matching group has an unexpired real-429
     /// family-exhaustion reset.
     /// `None` (unknown family / non-Antigravity provider) never filters.
-    pub fn quota_group_exhausted_for(&self, family: Option<QuotaFamily>, now: DateTime<Utc>) -> bool {
+    pub fn quota_group_exhausted_for(
+        &self,
+        family: Option<QuotaFamily>,
+        now: DateTime<Utc>,
+    ) -> bool {
         let Some(family) = family else { return false };
         let ledger = self.quota_group_exhausted.read();
         ledger
@@ -411,13 +431,16 @@ impl ApiKeyEntry {
     /// Record a successful request
     pub fn record_success(&self) {
         self.stats.total_requests.fetch_add(1, Ordering::Relaxed);
-        self.stats.successful_requests.fetch_add(1, Ordering::Relaxed);
+        self.stats
+            .successful_requests
+            .fetch_add(1, Ordering::Relaxed);
         self.stats.consecutive_failures.store(0, Ordering::SeqCst);
     }
 
     /// Record token consumption on this key
     pub fn record_tokens(&self, wall_ms: u64, prompt: u64, completion: u64, cached: u64) {
-        self.usage_tracker.record_tokens(wall_ms, prompt, completion, cached);
+        self.usage_tracker
+            .record_tokens(wall_ms, prompt, completion, cached);
     }
 
     /// Clear any active cooldown, immediately returning the key to Active state.
@@ -532,14 +555,20 @@ impl ApiKeyEntry {
     pub fn record_transient_failure(&self) {
         self.stats.total_requests.fetch_add(1, Ordering::Relaxed);
         self.stats.failed_requests.fetch_add(1, Ordering::Relaxed);
-        self.stats.consecutive_failures.fetch_add(1, Ordering::SeqCst);
+        self.stats
+            .consecutive_failures
+            .fetch_add(1, Ordering::SeqCst);
     }
 
     /// Record a failed request and transition state accordingly
     pub fn record_failure(&self, err_type: PoolErrorType) {
         self.stats.total_requests.fetch_add(1, Ordering::Relaxed);
         self.stats.failed_requests.fetch_add(1, Ordering::Relaxed);
-        let consecutive = self.stats.consecutive_failures.fetch_add(1, Ordering::SeqCst) + 1;
+        let consecutive = self
+            .stats
+            .consecutive_failures
+            .fetch_add(1, Ordering::SeqCst)
+            + 1;
 
         // A key already in a 3-day eligibility freeze stays frozen with its
         // calling reason: only an `AccountEligibility` (re-)proof may refresh
@@ -561,11 +590,13 @@ impl ApiKeyEntry {
                         // consecutive hits so a sustained storm backs off
                         // instead of knocking every 5 minutes (B3).
                         let step = consecutive.min(4).saturating_sub(1) as u32;
-                        d.saturating_mul(2u32.saturating_pow(step)).min(Duration::from_secs(7200))
+                        d.saturating_mul(2u32.saturating_pow(step))
+                            .min(Duration::from_secs(7200))
                     }
                     Some(d) => d,
                     None => {
-                        let base_multiplier = 2u64.saturating_pow((consecutive as u32).saturating_sub(1));
+                        let base_multiplier =
+                            2u64.saturating_pow((consecutive as u32).saturating_sub(1));
                         let base_secs = (3u64.saturating_mul(base_multiplier)).min(60);
                         Duration::from_millis(base_secs * 1000 + backoff_jitter_millis(500))
                     }
@@ -588,7 +619,8 @@ impl ApiKeyEntry {
                 }
             }
             PoolErrorType::AuthInvalid { reason } => {
-                let msg = reason.unwrap_or_else(|| "Authentication failed (invalid key)".to_string());
+                let msg =
+                    reason.unwrap_or_else(|| "Authentication failed (invalid key)".to_string());
                 if !frozen_eligibility {
                     *self.stats.disabled_reason.write() = Some(msg);
                 }
@@ -612,7 +644,10 @@ impl ApiKeyEntry {
                 *self.stats.error_reason.write() = Some(bounded);
             }
             PoolErrorType::PolicyViolation => {
-                *self.stats.disabled_reason.write() = Some("Account policy violation / Terms of Service suspension (permanent isolate)".to_string());
+                *self.stats.disabled_reason.write() = Some(
+                    "Account policy violation / Terms of Service suspension (permanent isolate)"
+                        .to_string(),
+                );
             }
             PoolErrorType::AccountValidationRequired => {
                 *self.stats.disabled_reason.write() = Some("Google account verification required (VALIDATION_REQUIRED): complete verification in the Google account, then reauthorize".to_string());

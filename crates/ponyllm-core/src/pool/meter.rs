@@ -142,13 +142,15 @@ impl ShortWindowMeter {
 
     pub fn in_flight_dec(&self) {
         // 防下溢：已为 0 时保持不变（调用方应保证 inc/dec 成对）。
-        let _ = self.in_flight.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
-            if v == 0 {
-                None
-            } else {
-                Some(v - 1)
-            }
-        });
+        let _ = self
+            .in_flight
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+                if v == 0 {
+                    None
+                } else {
+                    Some(v - 1)
+                }
+            });
     }
 
     /// 默认 60s 窗口内的请求数（含失败尝试）。
@@ -311,7 +313,10 @@ mod tests {
         // 无限额 → (None, None)
         assert_eq!(m.remaining(None, None, 60, true), (None, None));
         // 零用量 → 限额全额剩余
-        assert_eq!(m.remaining(Some(10), Some(1000), 60, true), (Some(10), Some(1000)));
+        assert_eq!(
+            m.remaining(Some(10), Some(1000), 60, true),
+            (Some(10), Some(1000))
+        );
         // rpm 无限额、tpm 有限额
         assert_eq!(m.remaining(None, Some(500), 60, true), (None, Some(500)));
     }
@@ -380,7 +385,7 @@ mod tests {
     #[test]
     fn test_earliest_expiry_scans_live_slots() {
         let m = clocked(); // T0 = 1_000_000 ms（5s 对齐）
-        // 无用量：None。
+                           // 无用量：None。
         assert_eq!(m.earliest_expiry(), None);
 
         m.record_attempt(100); // slot @1_000_000 → 60s 后过期

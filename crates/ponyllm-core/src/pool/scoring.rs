@@ -1,6 +1,6 @@
+use crate::pool::pricing::{BillingMode, PricingConfig};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
-use crate::pool::pricing::{BillingMode, PricingConfig};
 
 const DEFAULT_COLD_TTFT_MS: f64 = 800.0;
 const DEFAULT_COLD_TPS: f64 = 40.0;
@@ -60,7 +60,11 @@ impl NodeLatencyMetrics {
 
     pub fn get_avg_gap_ms(&self) -> Option<f64> {
         let v = self.ewma_gap_us.load(Ordering::Relaxed);
-        if v > 0 { Some(v as f64 / 1000.0) } else { None }
+        if v > 0 {
+            Some(v as f64 / 1000.0)
+        } else {
+            None
+        }
     }
 
     pub fn get_stream_count(&self) -> u64 {
@@ -73,7 +77,11 @@ impl NodeLatencyMetrics {
 
     pub fn get_max_gap_ms(&self) -> Option<f64> {
         let v = self.max_gap_us.load(Ordering::Relaxed);
-        if v > 0 { Some(v as f64 / 1000.0) } else { None }
+        if v > 0 {
+            Some(v as f64 / 1000.0)
+        } else {
+            None
+        }
     }
 
     /// Record per-stream flow detail for A/B reuse. Call once per SSE stream
@@ -136,7 +144,11 @@ impl NodeLatencyMetrics {
         let error_count = total.saturating_sub(success);
         let sc = self.get_stream_count();
         let has_activity = sc > 0 || total > 0;
-        let ttft = if has_activity { self.get_ttft_ms() } else { 0.0 };
+        let ttft = if has_activity {
+            self.get_ttft_ms()
+        } else {
+            0.0
+        };
         let tps = if has_activity { self.get_tps() } else { 0.0 };
 
         ProviderFlowSnapshot {
@@ -168,7 +180,8 @@ impl NodeLatencyMetrics {
                 let mut current = self.ewma_ttft_us.load(Ordering::Relaxed);
                 loop {
                     let current_us = current as f64;
-                    let next_us = ((1.0 - EWMA_ALPHA) * current_us + EWMA_ALPHA * sample_us).max(1.0) as u64;
+                    let next_us =
+                        ((1.0 - EWMA_ALPHA) * current_us + EWMA_ALPHA * sample_us).max(1.0) as u64;
                     match self.ewma_ttft_us.compare_exchange_weak(
                         current,
                         next_us,
@@ -190,7 +203,9 @@ impl NodeLatencyMetrics {
                     let mut current = self.ewma_tps_milli.load(Ordering::Relaxed);
                     loop {
                         let current_milli = current as f64;
-                        let next_milli = ((1.0 - EWMA_ALPHA) * current_milli + EWMA_ALPHA * sample_milli).max(1000.0) as u64;
+                        let next_milli = ((1.0 - EWMA_ALPHA) * current_milli
+                            + EWMA_ALPHA * sample_milli)
+                            .max(1000.0) as u64;
                         match self.ewma_tps_milli.compare_exchange_weak(
                             current,
                             next_milli,
@@ -264,7 +279,8 @@ impl NodeLatencyMetrics {
 
     /// 从快照恢复（仅启动时调用）。
     pub fn restore(&self, snap: &NodeLatencySnapshot) {
-        self.ewma_ttft_us.store(snap.ewma_ttft_us, Ordering::Relaxed);
+        self.ewma_ttft_us
+            .store(snap.ewma_ttft_us, Ordering::Relaxed);
         // Safeguard against legacy corrupted snapshot with excessive TPS (> 800 tok/s):
         // Clamps down to default cold TPS to prevent warped dashboard metrics.
         let safe_tps_milli = if snap.ewma_tps_milli > 800_000 {
@@ -273,11 +289,15 @@ impl NodeLatencyMetrics {
             snap.ewma_tps_milli
         };
         self.ewma_tps_milli.store(safe_tps_milli, Ordering::Relaxed);
-        self.total_requests.store(snap.total_requests, Ordering::Relaxed);
-        self.successful_requests.store(snap.successful_requests, Ordering::Relaxed);
-        self.stream_count.store(snap.stream_count, Ordering::Relaxed);
+        self.total_requests
+            .store(snap.total_requests, Ordering::Relaxed);
+        self.successful_requests
+            .store(snap.successful_requests, Ordering::Relaxed);
+        self.stream_count
+            .store(snap.stream_count, Ordering::Relaxed);
         self.ewma_gap_us.store(snap.ewma_gap_us, Ordering::Relaxed);
-        self.total_stalls.store(snap.total_stalls, Ordering::Relaxed);
+        self.total_stalls
+            .store(snap.total_stalls, Ordering::Relaxed);
         self.max_gap_us.store(snap.max_gap_us, Ordering::Relaxed);
     }
 }
@@ -317,7 +337,10 @@ pub struct SpeedScorer;
 
 impl SpeedScorer {
     /// Estimate total latency: TTFT + (ExpectedTokens / TPS * 1000)
-    pub fn estimate_total_latency_ms(metrics: &NodeLatencyMetrics, expected_output_tokens: usize) -> f64 {
+    pub fn estimate_total_latency_ms(
+        metrics: &NodeLatencyMetrics,
+        expected_output_tokens: usize,
+    ) -> f64 {
         let ttft = metrics.get_ttft_ms();
         let tps = metrics.get_tps();
         ttft + (expected_output_tokens as f64 / tps) * 1000.0

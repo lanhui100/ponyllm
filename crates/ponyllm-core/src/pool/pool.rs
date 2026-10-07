@@ -1,12 +1,12 @@
+use super::entry::{ApiKeyEntry, KeyState, PoolErrorType};
+use super::strategy::RoutingStrategy;
+use crate::error::{CoreError, Result};
+use parking_lot::RwLock;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
-use parking_lot::RwLock;
-use serde::{Deserialize, Serialize};
-use crate::error::{CoreError, Result};
-use super::entry::{ApiKeyEntry, KeyState, PoolErrorType};
-use super::strategy::RoutingStrategy;
 
 /// Short-window account rate limits (config-driven budget, ADR
 /// `2026-09-30-unified-quota-metering-governance-kernel`).
@@ -78,7 +78,10 @@ impl RateLimits {
     /// over the provider-level default; both `None` resolve to `None`
     /// (unlimited). Window/cached accounting defaults are applied later by
     /// [`RateLimits::window_secs_effective`] / [`RateLimits::count_cached_effective`].
-    pub fn resolve(provider_default: Option<&RateLimits>, model_override: Option<&RateLimits>) -> Option<RateLimits> {
+    pub fn resolve(
+        provider_default: Option<&RateLimits>,
+        model_override: Option<&RateLimits>,
+    ) -> Option<RateLimits> {
         match (provider_default, model_override) {
             (None, None) => None,
             (Some(p), None) => Some(*p),
@@ -147,7 +150,10 @@ impl KeyPool {
     /// slices, completed cycles, capacity EWMA) of the donor entry with the
     /// same key id into this pool's fresh entries. Keeps per-key cycle history
     /// across config rebuilds — data must not reset on account/config churn.
-    pub fn import_matched_usage_trackers(&self, donors: &HashMap<String, Arc<ApiKeyEntry>>) -> usize {
+    pub fn import_matched_usage_trackers(
+        &self,
+        donors: &HashMap<String, Arc<ApiKeyEntry>>,
+    ) -> usize {
         let mut keys = self.keys.write();
         let mut transplanted = 0usize;
         for entry in keys.iter_mut() {
@@ -172,12 +178,15 @@ impl KeyPool {
 
     pub fn get_key_status(&self, key_id: &str) -> Option<KeyState> {
         let keys = self.keys.read();
-        keys.iter().find(|k| k.id == key_id).map(|k| k.current_state())
+        keys.iter()
+            .find(|k| k.id == key_id)
+            .map(|k| k.current_state())
     }
 
     /// Snapshot of all keys for admin observability (WEB-03): id/priority/weight
     /// plus effective state. Read-only; never exposes the raw key material.
-    pub fn list_keys(&self) -> Vec<(String, u32, u32, KeyState)> {        let keys = self.keys.read();
+    pub fn list_keys(&self) -> Vec<(String, u32, u32, KeyState)> {
+        let keys = self.keys.read();
         keys.iter()
             .map(|k| (k.id.clone(), k.priority, k.weight, k.current_state()))
             .collect()
@@ -264,13 +273,21 @@ impl KeyPool {
 
                 if !account_keys.is_empty() {
                     // Internal balance inside the chosen account to preserve concurrency & RPM
-                    return Ok(Self::select_from_active(account_keys, &self.strategy, &self.rr_counter));
+                    return Ok(Self::select_from_active(
+                        account_keys,
+                        &self.strategy,
+                        &self.rr_counter,
+                    ));
                 }
             }
         }
 
         // Fallback / standard selection
-        Ok(Self::select_from_active(active_keys, &self.strategy, &self.rr_counter))
+        Ok(Self::select_from_active(
+            active_keys,
+            &self.strategy,
+            &self.rr_counter,
+        ))
     }
 
     /// Select the next active, healthy, budget-available key.
@@ -422,7 +439,10 @@ impl KeyPool {
     }
 
     /// [`KeyPool::longest_window_refill_in`] with an explicit budget.
-    pub fn longest_window_refill_in_with_limits(&self, limits: Option<&RateLimits>) -> Option<Duration> {
+    pub fn longest_window_refill_in_with_limits(
+        &self,
+        limits: Option<&RateLimits>,
+    ) -> Option<Duration> {
         let keys = self.keys.read();
         let mut max: Option<Duration> = None;
         for k in keys.iter() {
@@ -457,15 +477,17 @@ impl KeyPool {
     /// `min(earliest_expiry - now, window_secs)` — clamped to the configured
     /// window so it never exceeds what the window can guarantee (M3 caps the
     /// hold at `pool_wait_max` anyway).
-    fn time_until_schedulable(entry: &ApiKeyEntry, limits: Option<&RateLimits>) -> Option<Duration> {
+    fn time_until_schedulable(
+        entry: &ApiKeyEntry,
+        limits: Option<&RateLimits>,
+    ) -> Option<Duration> {
         let cooldown = entry.cooldown_remaining();
         let budget = match limits {
             Some(l) if !Self::budget_ok(entry, Some(l)) => {
                 let window = Duration::from_secs(l.window_secs_effective());
-                entry
-                    .meter()
-                    .earliest_expiry()
-                    .map(|expiry| Duration::from_millis(expiry.saturating_sub(Self::wall_now_ms())).min(window))
+                entry.meter().earliest_expiry().map(|expiry| {
+                    Duration::from_millis(expiry.saturating_sub(Self::wall_now_ms())).min(window)
+                })
             }
             _ => None,
         };
@@ -486,7 +508,14 @@ impl KeyPool {
     }
 
     /// Record token usage on a key
-    pub fn record_tokens(&self, key_id: &str, wall_ms: u64, prompt: u64, completion: u64, cached: u64) {
+    pub fn record_tokens(
+        &self,
+        key_id: &str,
+        wall_ms: u64,
+        prompt: u64,
+        completion: u64,
+        cached: u64,
+    ) {
         let keys = self.keys.read();
         if let Some(entry) = keys.iter().find(|k| k.id == key_id) {
             entry.record_tokens(wall_ms, prompt, completion, cached);
@@ -501,7 +530,10 @@ impl KeyPool {
         // MUST cool down to prevent hammering the upstream without backoff.
         if keys.len() == 1 {
             if let PoolErrorType::RateLimit { retry_after } = &error {
-                if retry_after.map(|d| d <= std::time::Duration::from_secs(60)).unwrap_or(true) {
+                if retry_after
+                    .map(|d| d <= std::time::Duration::from_secs(60))
+                    .unwrap_or(true)
+                {
                     if let Some(entry) = keys.iter().find(|k| k.id == key_id) {
                         if entry.stats.consecutive_failures.load(Ordering::Relaxed) < 2 {
                             entry.record_transient_failure();
@@ -520,7 +552,11 @@ impl KeyPool {
             PoolErrorType::PolicyViolation | PoolErrorType::AccountValidationRequired
         );
         let violations = if is_policy_violation {
-            entry.stats.policy_violations.fetch_add(1, Ordering::Relaxed) + 1
+            entry
+                .stats
+                .policy_violations
+                .fetch_add(1, Ordering::Relaxed)
+                + 1
         } else {
             0
         };
@@ -565,7 +601,9 @@ impl KeyPool {
     /// Count active healthy keys
     pub fn active_key_count(&self) -> usize {
         let keys = self.keys.read();
-        keys.iter().filter(|k| k.current_state() == KeyState::Active).count()
+        keys.iter()
+            .filter(|k| k.current_state() == KeyState::Active)
+            .count()
     }
 
     /// True when no key can currently serve (none Active: all cooling down or
@@ -599,8 +637,7 @@ impl KeyPool {
         let now = chrono::Utc::now();
         keys.iter().any(|k| {
             k.current_state() != KeyState::Disabled
-                && k
-                    .quota_group_exhaustions()
+                && k.quota_group_exhaustions()
                     .values()
                     .any(|reset| *reset > now)
         })
@@ -648,9 +685,10 @@ impl KeyPool {
             if let Some(reason) = old_entry.disabled_reason() {
                 *new_entry.stats.disabled_reason.write() = Some(reason);
             }
-            if let (Some(remaining), Some(reset_at)) =
-                (old_entry.cooldown_remaining(), old_entry.cooldown_reset_at())
-            {
+            if let (Some(remaining), Some(reset_at)) = (
+                old_entry.cooldown_remaining(),
+                old_entry.cooldown_reset_at(),
+            ) {
                 new_entry.set_cooldown(remaining);
                 *new_entry.stats.cooldown_reset_at.write() = Some(reset_at);
                 if let Some(cd_reason) = old_entry.cooldown_reason() {
@@ -688,16 +726,17 @@ impl KeyPool {
     /// Retrieve the disabled reason for a key, if present.
     pub fn key_disabled_reason(&self, key_id: &str) -> Option<String> {
         let keys = self.keys.read();
-        keys.iter().find(|k| k.id == key_id).and_then(|k| k.disabled_reason())
+        keys.iter()
+            .find(|k| k.id == key_id)
+            .and_then(|k| k.disabled_reason())
     }
 
     /// Why a key is currently cooling down, when known (admin surface).
-    pub fn key_cooldown_reason(
-        &self,
-        key_id: &str,
-    ) -> Option<crate::pool::entry::CooldownReason> {
+    pub fn key_cooldown_reason(&self, key_id: &str) -> Option<crate::pool::entry::CooldownReason> {
         let keys = self.keys.read();
-        keys.iter().find(|k| k.id == key_id).and_then(|k| k.cooldown_reason())
+        keys.iter()
+            .find(|k| k.id == key_id)
+            .and_then(|k| k.cooldown_reason())
     }
 
     /// Human-readable reason for a hard non-active state (eligibility freeze /
@@ -705,7 +744,9 @@ impl KeyPool {
     /// exact upstream message in red.
     pub fn key_error_reason(&self, key_id: &str) -> Option<String> {
         let keys = self.keys.read();
-        keys.iter().find(|k| k.id == key_id).and_then(|k| k.error_reason())
+        keys.iter()
+            .find(|k| k.id == key_id)
+            .and_then(|k| k.error_reason())
     }
 
     /// Total keys in pool
@@ -755,20 +796,39 @@ mod tests {
     fn test_rate_limits_validate_rejects_zero_and_over_60_window() {
         // Bounds: 1..=60 are accepted (None defaults to 60s).
         assert!(RateLimits::default().validate().is_ok());
-        assert!((RateLimits { window_secs: Some(1), ..Default::default() }).validate().is_ok());
-        assert!((RateLimits { window_secs: Some(60), ..Default::default() }).validate().is_ok());
+        assert!((RateLimits {
+            window_secs: Some(1),
+            ..Default::default()
+        })
+        .validate()
+        .is_ok());
+        assert!((RateLimits {
+            window_secs: Some(60),
+            ..Default::default()
+        })
+        .validate()
+        .is_ok());
 
         // 0 degenerates the sliding window; > 60 would silently run as 60s
         // (meter ring is 12 × 5s) and loosen the budget ~window_secs/60×.
-        let err0 = (RateLimits { window_secs: Some(0), ..Default::default() })
-            .validate()
-            .unwrap_err();
+        let err0 = (RateLimits {
+            window_secs: Some(0),
+            ..Default::default()
+        })
+        .validate()
+        .unwrap_err();
         assert!(err0.contains("1..=60"), "got: {err0}");
-        let err61 = (RateLimits { window_secs: Some(61), ..Default::default() })
-            .validate()
-            .unwrap_err();
+        let err61 = (RateLimits {
+            window_secs: Some(61),
+            ..Default::default()
+        })
+        .validate()
+        .unwrap_err();
         assert!(err61.contains("1..=60"), "got: {err61}");
-        assert!(err61.contains("CycleStats"), "long-window must point to CycleStats: {err61}");
+        assert!(
+            err61.contains("CycleStats"),
+            "long-window must point to CycleStats: {err61}"
+        );
     }
 
     #[test]
@@ -798,7 +858,9 @@ mod tests {
         };
 
         // Fresh key: the single rpm=1 budget slot is available.
-        let k = pool.select_key_excluding_with_limits(&[], Some(&limits)).unwrap();
+        let k = pool
+            .select_key_excluding_with_limits(&[], Some(&limits))
+            .unwrap();
         assert_eq!(k.id, "k1");
 
         // One attempt recorded (conservative accounting): the budget slot is
@@ -833,7 +895,9 @@ mod tests {
             .record_attempt(0);
 
         // The spent high-priority key is skipped; the fresh fallback wins.
-        let k = pool.select_key_excluding_with_limits(&[], Some(&limits)).unwrap();
+        let k = pool
+            .select_key_excluding_with_limits(&[], Some(&limits))
+            .unwrap();
         assert_eq!(k.id, "fresh");
         assert!(!pool.exhausted_by_window_with_limits(Some(&limits)));
     }
@@ -846,7 +910,9 @@ mod tests {
             concurrency: Some(2),
             ..Default::default()
         };
-        assert!(pool.select_key_excluding_with_limits(&[], Some(&limits)).is_ok());
+        assert!(pool
+            .select_key_excluding_with_limits(&[], Some(&limits))
+            .is_ok());
         pool.snapshot_keys()[0].meter().in_flight_inc();
         pool.snapshot_keys()[0].meter().in_flight_inc();
         // At the cap: no schedulable key.
@@ -855,7 +921,9 @@ mod tests {
             .is_err());
         assert!(pool.exhausted_by_window_with_limits(Some(&limits)));
         pool.snapshot_keys()[0].meter().in_flight_dec();
-        assert!(pool.select_key_excluding_with_limits(&[], Some(&limits)).is_ok());
+        assert!(pool
+            .select_key_excluding_with_limits(&[], Some(&limits))
+            .is_ok());
     }
 
     #[test]
@@ -869,7 +937,10 @@ mod tests {
 
         // Fresh: schedulable now.
         assert!(!pool.exhausted_by_window_with_limits(Some(&limits)));
-        assert_eq!(pool.window_refill_in_with_limits(Some(&limits)), Some(Duration::ZERO));
+        assert_eq!(
+            pool.window_refill_in_with_limits(Some(&limits)),
+            Some(Duration::ZERO)
+        );
         assert_eq!(
             pool.longest_window_refill_in_with_limits(Some(&limits)),
             Some(Duration::ZERO)
@@ -885,8 +956,13 @@ mod tests {
             refill > Duration::from_secs(55) && refill <= Duration::from_secs(RateLimits::DEFAULT_WINDOW_SECS),
             "precise refill must sit within the 5s slot granularity of the 60s window, got {refill:?}"
         );
-        let longest = pool.longest_window_refill_in_with_limits(Some(&limits)).unwrap();
-        assert_eq!(longest, refill, "single-key pool: min and max refill coincide");
+        let longest = pool
+            .longest_window_refill_in_with_limits(Some(&limits))
+            .unwrap();
+        assert_eq!(
+            longest, refill,
+            "single-key pool: min and max refill coincide"
+        );
 
         // No-arg variants ignore the budget dimension (cooldown-only): the
         // active key stays schedulable, so the pool is not window-exhausted.
@@ -916,7 +992,9 @@ mod tests {
         pool.record_error(
             "bad",
             PoolErrorType::AccountEligibility {
-                reason: Some("Your current account is not eligible for Gemini Code Assist".to_string()),
+                reason: Some(
+                    "Your current account is not eligible for Gemini Code Assist".to_string(),
+                ),
             },
         );
         // 坏账号：长冷冻 + 原因可查（管理面红显的输入）。
@@ -936,7 +1014,9 @@ mod tests {
             "error_reason must carry the upstream message"
         );
         // 计划行为：调度跳过冷冻账号，next 请求落到合格账号。
-        let picked = pool.select_key().expect("pool must still have a schedulable key");
+        let picked = pool
+            .select_key()
+            .expect("pool must still have a schedulable key");
         assert_eq!(picked.id, "good", "routing must skip the frozen account");
     }
 
@@ -951,7 +1031,9 @@ mod tests {
         donor.record_error(
             "ag1",
             PoolErrorType::AccountEligibility {
-                reason: Some("Your current account is not eligible for Gemini Code Assist".to_string()),
+                reason: Some(
+                    "Your current account is not eligible for Gemini Code Assist".to_string(),
+                ),
             },
         );
         donor.add_key(ApiKeyEntry::new("ag2", "t2", 2, 10));
@@ -975,14 +1057,20 @@ mod tests {
                 .contains("not eligible"),
             "rebuild must not lose the eligibility reason"
         );
-        let ag2 = rebuilt.key_cooldown("ag2").0.expect("ag2 cooldown must survive");
+        let ag2 = rebuilt
+            .key_cooldown("ag2")
+            .0
+            .expect("ag2 cooldown must survive");
         assert!(
             ag2 >= Duration::from_secs(119),
             "soft cooldown must survive rebuild, got {ag2:?}"
         );
         // 冻结仍然生效：ag1/ag2 都被冻结/冷却，调度只落到重建期间新加入的 ag3。
         let picked = rebuilt.select_key().expect("ag3 must be schedulable");
-        assert_eq!(picked.id, "ag3", "rebuild must not revive the frozen account");
+        assert_eq!(
+            picked.id, "ag3",
+            "rebuild must not revive the frozen account"
+        );
     }
 
     #[test]
@@ -1000,11 +1088,19 @@ mod tests {
         pool.set_key_cooldown("cool2", Duration::from_secs(60));
         assert!(pool.exhausted_by_window_with_limits(Some(&limits)));
         let min = pool.window_refill_in_with_limits(Some(&limits)).unwrap();
-        assert!(min <= Duration::from_secs(10), "min must be <= 10s, got {min:?}");
+        assert!(
+            min <= Duration::from_secs(10),
+            "min must be <= 10s, got {min:?}"
+        );
         assert!(min > Duration::ZERO);
-        let max = pool.longest_window_refill_in_with_limits(Some(&limits)).unwrap();
+        let max = pool
+            .longest_window_refill_in_with_limits(Some(&limits))
+            .unwrap();
         // Monotonic-clock drift shaves microseconds off `set_cooldown`'s 60s.
-        assert!(max >= Duration::from_secs(59), "max must be ~60s, got {max:?}");
+        assert!(
+            max >= Duration::from_secs(59),
+            "max must be ~60s, got {max:?}"
+        );
     }
 
     #[test]
@@ -1021,10 +1117,17 @@ mod tests {
 
         // Session 1 consistent hash maps to one account consistently
         let seed_1 = 42u64;
-        let selected_1 = pool.select_key_with_affinity(Some(seed_1), &[], None).unwrap();
-        let selected_2 = pool.select_key_with_affinity(Some(seed_1), &[], None).unwrap();
+        let selected_1 = pool
+            .select_key_with_affinity(Some(seed_1), &[], None)
+            .unwrap();
+        let selected_2 = pool
+            .select_key_with_affinity(Some(seed_1), &[], None)
+            .unwrap();
         // Both selections stay within the same account!
-        assert_eq!(selected_1.effective_account_id(), selected_2.effective_account_id());
+        assert_eq!(
+            selected_1.effective_account_id(),
+            selected_2.effective_account_id()
+        );
 
         // Soft spillover test: if keys in that chosen account are excluded or cooling down,
         // it gracefully spills over to the other account instead of failing.
@@ -1035,7 +1138,9 @@ mod tests {
             vec!["k3".into()]
         };
 
-        let spillover = pool.select_key_with_affinity(Some(seed_1), &excluded, None).unwrap();
+        let spillover = pool
+            .select_key_with_affinity(Some(seed_1), &excluded, None)
+            .unwrap();
         assert_ne!(spillover.effective_account_id(), chosen_account);
     }
 }

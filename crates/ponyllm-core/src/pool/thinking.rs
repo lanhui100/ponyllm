@@ -138,21 +138,42 @@ mod tests {
         // Standard reasoner (default High, max High)
         let spec = ModelThinkingSpec::standard_reasoner();
         assert_eq!(spec.resolve(None), ReasoningEffort::High);
-        assert_eq!(spec.resolve(Some(ReasoningEffort::Off)), ReasoningEffort::Off);
-        assert_eq!(spec.resolve(Some(ReasoningEffort::Low)), ReasoningEffort::Low);
-        assert_eq!(spec.resolve(Some(ReasoningEffort::Medium)), ReasoningEffort::Medium);
-        assert_eq!(spec.resolve(Some(ReasoningEffort::High)), ReasoningEffort::High);
+        assert_eq!(
+            spec.resolve(Some(ReasoningEffort::Off)),
+            ReasoningEffort::Off
+        );
+        assert_eq!(
+            spec.resolve(Some(ReasoningEffort::Low)),
+            ReasoningEffort::Low
+        );
+        assert_eq!(
+            spec.resolve(Some(ReasoningEffort::Medium)),
+            ReasoningEffort::Medium
+        );
+        assert_eq!(
+            spec.resolve(Some(ReasoningEffort::High)),
+            ReasoningEffort::High
+        );
 
         // Custom clamped reasoner
         let light = ModelThinkingSpec::new(ReasoningEffort::Low, ReasoningEffort::Medium);
         assert_eq!(light.resolve(None), ReasoningEffort::Low);
-        assert_eq!(light.resolve(Some(ReasoningEffort::High)), ReasoningEffort::Medium); // Clamped!
-        assert_eq!(light.resolve(Some(ReasoningEffort::Low)), ReasoningEffort::Low);
+        assert_eq!(
+            light.resolve(Some(ReasoningEffort::High)),
+            ReasoningEffort::Medium
+        ); // Clamped!
+        assert_eq!(
+            light.resolve(Some(ReasoningEffort::Low)),
+            ReasoningEffort::Low
+        );
 
         // Non reasoner (default Off, max Off)
         let non = ModelThinkingSpec::non_reasoner();
         assert_eq!(non.resolve(None), ReasoningEffort::Off);
-        assert_eq!(non.resolve(Some(ReasoningEffort::High)), ReasoningEffort::Off); // Clamped to Off!
+        assert_eq!(
+            non.resolve(Some(ReasoningEffort::High)),
+            ReasoningEffort::Off
+        ); // Clamped to Off!
         assert!(!non.supports_reasoning());
 
         // Name inference defaults to High
@@ -173,13 +194,37 @@ mod tests {
         assert_eq!(embed.max_effort, ReasoningEffort::Off);
 
         // 4-tier match
-        assert_eq!(ModelThinkingSpec::match_4tier_effort(Some("low")), ReasoningEffort::Low);
-        assert_eq!(ModelThinkingSpec::match_4tier_effort(Some("standard")), ReasoningEffort::Medium);
-        assert_eq!(ModelThinkingSpec::match_4tier_effort(Some("deep")), ReasoningEffort::High);
-        assert_eq!(ModelThinkingSpec::match_4tier_effort(Some("xhigh")), ReasoningEffort::Max);
-        assert_eq!(ModelThinkingSpec::match_4tier_effort(Some("ultra")), ReasoningEffort::Max);
-        assert_eq!(ModelThinkingSpec::match_4tier_effort(Some("max")), ReasoningEffort::Max);
-        assert_eq!(ModelThinkingSpec::match_4tier_effort(Some("off")), ReasoningEffort::Off);
-        assert_eq!(ModelThinkingSpec::match_4tier_effort(None), ReasoningEffort::High);
+        assert_eq!(
+            ModelThinkingSpec::match_4tier_effort(Some("low")),
+            ReasoningEffort::Low
+        );
+        assert_eq!(
+            ModelThinkingSpec::match_4tier_effort(Some("standard")),
+            ReasoningEffort::Medium
+        );
+        assert_eq!(
+            ModelThinkingSpec::match_4tier_effort(Some("deep")),
+            ReasoningEffort::High
+        );
+        assert_eq!(
+            ModelThinkingSpec::match_4tier_effort(Some("xhigh")),
+            ReasoningEffort::Max
+        );
+        assert_eq!(
+            ModelThinkingSpec::match_4tier_effort(Some("ultra")),
+            ReasoningEffort::Max
+        );
+        assert_eq!(
+            ModelThinkingSpec::match_4tier_effort(Some("max")),
+            ReasoningEffort::Max
+        );
+        assert_eq!(
+            ModelThinkingSpec::match_4tier_effort(Some("off")),
+            ReasoningEffort::Off
+        );
+        assert_eq!(
+            ModelThinkingSpec::match_4tier_effort(None),
+            ReasoningEffort::High
+        );
     }
 }
