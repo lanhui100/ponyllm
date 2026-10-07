@@ -276,11 +276,11 @@ const aggregatedQuotas = computed(() => {
 
 // 针对各账号提取健康评分与热力方块状态。
 // 色系：绿色单色阶表达可用额度（GitHub Pure Green Monochrome Scale）：
-// 从完全未激活的沉静冷浅灰 (#ebedf0)，到冷却状态的柔青薄荷绿，
+// 从账号存在但未拿到额度的极浅绿占位 (#e6f4ea)，到冷却状态的柔青薄荷绿，
 // 再随可用额度由浅入深逐阶跃迁至充沛深翠绿 (#9be9a8 -> #40c463 -> #30a14e -> #216e39)。
 // 语义色仅用于硬/异常状态，与绿色阶严格分开：琥珀 = 需安全验证；
 // 玫红/深红 = 硬错误（凭据失效 / 资格受限冻结 / 违规停用 / 已禁用 / 探测异常）；
-// 天蓝 = 跨副本锁同步；灰色 = 未知（等待刷新）。eligibility_frozen 专属玫红，
+// 天蓝 = 跨副本锁同步；中灰 (#d0d7de) 仅用于"无账号"的预留空槽位。eligibility_frozen 专属玫红，
 // 表示"上游资格受限、冻结数日、已跳过"，区别于软冷却的薄荷绿。
 export type SlotHeatLevel =
   | 'cooling'
@@ -535,20 +535,21 @@ const slotMatrix = computed<HeatSlotItem[]>(() => {
       return {
         key: k,
         level: 'low',
-        // 尚未探测 / 缓存过期 / 未持久化：沉静浅灰绿，提示等待刷新（未知不判冷）
-        heatClass: 'bg-[#d0d7de]',
+        // 账号存在但尚未探测/缓存过期/未持久化：极浅绿占位，表示"此槽位有账号，仅未拿到额度"，
+        // 与"无账号空槽位"的灰阶 (#d0d7de) 语义严格区分（ADR 2026-10-07-pool-matrix-slot-presence）。
+        heatClass: 'bg-[#e6f4ea] hover:bg-[#d3edda]',
         tooltipText: `账号: ${email}${tierBadge}\n状态: 等待刷新配额${staleNote}${usageSummary}`,
         isCooling: false,
       };
     }
 
-    // 以 Gemini 配额为核心判断等级（兼顾 5h 即时爆发余量与周度余量）；未知按"等待刷新"灰块
+    // 以 Gemini 配额为核心判断等级（兼顾 5h 即时爆发余量与周度余量）；未知按"等待刷新"极浅绿占位
     const g5hFraction = quota.gemini.h5Fraction;
     if (g5hFraction == null) {
       return {
         key: k,
         level: 'low',
-        heatClass: 'bg-[#d0d7de]',
+        heatClass: 'bg-[#e6f4ea] hover:bg-[#d3edda]',
         tooltipText: `账号: ${email}${tierBadge}\n状态: 等待刷新配额${usageSummary}`,
         isCooling: false,
       };

@@ -564,7 +564,7 @@ describe('AntigravityPoolCard Component', () => {
     document.body.removeChild(container);
   });
 
-  it('renders expired cached quota results as neutral waiting-for-refresh placeholder', async () => {
+  it('renders expired cached quota results as pale-green waiting-for-refresh slot (account exists, quota unknown)', async () => {
     const container = document.createElement('div');
     document.body.appendChild(container);
 
@@ -602,8 +602,18 @@ describe('AntigravityPoolCard Component', () => {
     app.mount(container);
     await nextTick();
 
+    // 账号存在但未拿到新鲜额度 -> 极浅绿占位（与"无账号"空槽位的灰阶 #d0d7de 语义区分）
     const cell = container.querySelector('[data-testid="slot-heatmap-cell"]');
-    expect(cell?.className).toContain('bg-[#d0d7de]');
+    expect(cell?.className).toContain('bg-[#e6f4ea]');
+    expect(cell?.className).not.toContain('bg-[#d0d7de]');
+
+    // 无账号的预留空槽位仍为灰阶
+    const emptySlots = container.querySelectorAll('[data-testid="slot-heatmap-empty"]');
+    expect(emptySlots.length).toBeGreaterThan(0);
+    for (const empty of emptySlots) {
+      expect((empty as HTMLElement).className).toContain('bg-[#d0d7de]');
+      expect((empty as HTMLElement).className).not.toContain('bg-[#e6f4ea]');
+    }
 
     // Water level shows waiting placeholder "--" instead of stale 95%
     expect(container.querySelector('[data-testid="gemini-h5-percent"]')?.textContent).toContain('--');
