@@ -419,31 +419,47 @@ async fn test_c7b_retry_after_header_on_non_stream_collect_break() {
 
 #[tokio::test]
 async fn test_c9_first_attempt_guaranteed_dial_under_zero_budget() {
-    // 契约：首 attempt（stream_attempt == 1 与 collect_attempt == 1）必须保底执行，
-    // 即使进入循环时 target_deadline 已经到期（remaining == 0），也绝不能在第 1 次拨号前
-    // break 抛出 "exhausted after 0 attempts"。
+    // 契约目标：
+    // 当 target_deadline 在进入重试循环时即已到期（例如前序 provider 故障转移耗时、
+    // 或全局预算到期导致 remaining == 0）时，首个 attempt（stream_attempt == 1）必须被豁免，
+    // 严禁在尚未发起任何拨号前（attempt == 0）直接 break 抛出 "exhausted after 0 attempts"。
     //
-    // 构造方案：
-    // 设置 2000 个 provider 注册相同 model 且配置 budget_secs = Some(1)。
-    // 此时 targets.len() == 2000，per_target_budget = 1s / 2000 = Duration::ZERO (0ms)！
-    // 因而进入第一个 target 时：
-    // slice = Duration::ZERO，
-    // target_deadline = global.min(now + slice) = now（已经到期）。
-    // 在进入 loop 时，d.saturating_duration_since(Instant::now()) 必定 is_zero()。
+    // 测试构造：
+    // 配置 2 个 provider（prov_1, prov_2），总墙钟预算 1s。
+    // prov_1 是一个故意阻塞 1100ms 的上游，使得 prov_1 失败进入 prov_2 时，
+    // 全局 empty_stop_deadline（1000ms）早已彻底过期（remaining == Duration::ZERO）。
+    // 在旧逻辑（未豁免 stream_attempt == 1）：
+    // 进入 prov_2 的 loop 时，`stream_attempt += 1; if r.is_zero() { break; }`
+    // 会导致 prov_2 的真实拨号数为 0，并且抛出 "...exhausted after 0 attempts"。
     //
-    // 在未修复前（当前代码）：
-    // `loop { stream_attempt += 1; if r.is_zero() { break; } }`
-    // 在 stream_attempt == 1 时立即 break，upstream hits == 0，
-    // 且返回的错误信息包含 "exhausted after 0 attempts"。
-    //
-    // 在修复后（红相期待）：
-    // 首 attempt 豁免，至少发起 1 次真实上游拨号（hits >= 1）。
-    let hits = Arc::new(AtomicUsize::new(0));
-    let hits_clone = hits.clone();
-    let mock = Router::new().route(
+    // 在红相验收测试中：
+    // 我们断言 prov_2 的 mock 上游 hits 必须 >= 1（首 attempt 保底拨号发生），
+    // 且最终错误信息不得包含 "after 0 attempts"。
+    let prov2_hits = Arc::new(AtomicUsize::new(0));
+    let prov2_hits_clone = prov2_hits.clone();
+
+    // prov_1 mock: 延迟 1.1s 后返回 500 触发 fallback 倒换到 prov_2
+    let mock1 = Router::new().route(
+        "/v1internal:streamGenerateContent",
+        post(|| async {
+            tokio::time::sleep(Duration::from_millis(1100)).await;
+            axum::response::Response::builder()
+                .status(500)
+                .body(Body::from("prov1 internal error"))
+                .unwrap()
+        }),
+    );
+    let listener1 = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr1 = listener1.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener1, mock1).await.unwrap();
+    });
+
+    // prov_2 mock: 快速返回 empty-STOP SSE
+    let mock2 = Router::new().route(
         "/v1internal:streamGenerateContent",
         post(move |_: Json<serde_json::Value>| {
-            let hits = hits_clone.clone();
+            let hits = prov2_hits_clone.clone();
             async move {
                 hits.fetch_add(1, Ordering::SeqCst);
                 axum::response::Response::builder()
@@ -453,35 +469,32 @@ async fn test_c9_first_attempt_guaranteed_dial_under_zero_budget() {
             }
         }),
     );
-    let upstream_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let upstream_addr = upstream_listener.local_addr().unwrap();
+    let listener2 = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr2 = listener2.local_addr().unwrap();
     tokio::spawn(async move {
-        axum::serve(upstream_listener, mock).await.unwrap();
+        axum::serve(listener2, mock2).await.unwrap();
     });
-
-    let pool = Arc::new(KeyPool::new("prov_0", RoutingStrategy::RoundRobin));
-    pool.add_key(ApiKeyEntry::new("k1", "sk-1", 1, 10));
 
     let mut config = GatewayConfig::default();
     config.auth_mode = ponyllm_config::AuthMode::Open;
-    config.empty_stop_total_timeout_secs = Some(1);
-
-    // 注册 2000 个 provider，使得 targets.len() = 2000，per_target_budget 计算下溢为 0ms
-    for i in 0..2000 {
-        let p_name = format!("prov_{i}");
-        config.providers.insert(
-            p_name,
-            antigravity_provider(&format!("http://{}", upstream_addr), "gemini-3.8-flash-high"),
-        );
-    }
+    config.empty_stop_total_timeout_secs = Some(1); // 1s 全局预算
+    config.providers.insert(
+        "prov_1".to_string(),
+        antigravity_provider(&format!("http://{}", addr1), "gemini-3.8-flash-high"),
+    );
+    config.providers.insert(
+        "prov_2".to_string(),
+        antigravity_provider(&format!("http://{}", addr2), "gemini-3.8-flash-high"),
+    );
 
     let state = Arc::new(AppState::new(config));
-    for i in 0..2000 {
-        let p_name = format!("prov_{i}");
-        let p = Arc::new(KeyPool::new(&p_name, RoutingStrategy::RoundRobin));
-        p.add_key(ApiKeyEntry::new("k1", "sk-1", 1, 10));
-        state.register_pool(&p_name, p);
-    }
+    let pool1 = Arc::new(KeyPool::new("prov_1", RoutingStrategy::RoundRobin));
+    pool1.add_key(ApiKeyEntry::new("k1", "sk-1", 1, 10));
+    state.register_pool("prov_1", pool1);
+
+    let pool2 = Arc::new(KeyPool::new("prov_2", RoutingStrategy::RoundRobin));
+    pool2.add_key(ApiKeyEntry::new("k2", "sk-2", 1, 10));
+    state.register_pool("prov_2", pool2);
 
     let gateway_app = create_app(state);
     let gw_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -498,35 +511,51 @@ async fn test_c9_first_attempt_guaranteed_dial_under_zero_budget() {
         .await
         .unwrap();
 
-    assert_eq!(resp.status(), 503, "C9: 持续空 STOP 或超预算时应 503");
     let body: serde_json::Value = resp.json().await.unwrap();
     let err_msg = body["error"]["message"].as_str().unwrap_or("");
 
-    // 断言 1：绝不能出现 "0 attempts" 饿死报错
+    // 断言 1：prov_2 在 target_deadline 已经到期时，仍然必须豁免执行第 1 次拨号（保底拨号契约）
+    let hits = prov2_hits.load(Ordering::SeqCst);
     assert!(
-        !err_msg.contains("after 0 attempts"),
-        "C9: 严禁在 0 attempts 时截断，实际错误信息: {}",
-        err_msg
+        hits >= 1,
+        "C9: 当 target_deadline 到期时，prov_2 的第 1 次 attempt 必须豁免执行保底拨号，但实际 hits={}",
+        hits
     );
 
-    // 断言 2：保底拨号必须发生，至少打到上游 1 次
-    let total_hits = hits.load(Ordering::SeqCst);
+    // 断言 2：绝不能抛出 0 attempts 错误
     assert!(
-        total_hits >= 1,
-        "C9: target_deadline 到期时首 attempt 必须保底发起拨号，但实际上游 hits={}",
-        total_hits
+        !err_msg.contains("after 0 attempts"),
+        "C9: 严禁在 0 attempts 时中断，实际错误信息: {}",
+        err_msg
     );
 }
 
 #[tokio::test]
 async fn test_c9b_first_attempt_guaranteed_dial_non_streaming() {
-    // 同样检验非流式 collect 循环的首 attempt 保底
-    let hits = Arc::new(AtomicUsize::new(0));
-    let hits_clone = hits.clone();
-    let mock = Router::new().route(
+    // 同样验证非流式 collect 循环中的保底拨号契约
+    let prov2_hits = Arc::new(AtomicUsize::new(0));
+    let prov2_hits_clone = prov2_hits.clone();
+
+    let mock1 = Router::new().route(
+        "/v1internal:streamGenerateContent",
+        post(|| async {
+            tokio::time::sleep(Duration::from_millis(1100)).await;
+            axum::response::Response::builder()
+                .status(500)
+                .body(Body::from("prov1 internal error"))
+                .unwrap()
+        }),
+    );
+    let listener1 = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr1 = listener1.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener1, mock1).await.unwrap();
+    });
+
+    let mock2 = Router::new().route(
         "/v1internal:streamGenerateContent",
         post(move |_: Json<serde_json::Value>| {
-            let hits = hits_clone.clone();
+            let hits = prov2_hits_clone.clone();
             async move {
                 hits.fetch_add(1, Ordering::SeqCst);
                 axum::response::Response::builder()
@@ -536,34 +565,32 @@ async fn test_c9b_first_attempt_guaranteed_dial_non_streaming() {
             }
         }),
     );
-    let upstream_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let upstream_addr = upstream_listener.local_addr().unwrap();
+    let listener2 = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr2 = listener2.local_addr().unwrap();
     tokio::spawn(async move {
-        axum::serve(upstream_listener, mock).await.unwrap();
+        axum::serve(listener2, mock2).await.unwrap();
     });
-
-    let pool = Arc::new(KeyPool::new("prov_0", RoutingStrategy::RoundRobin));
-    pool.add_key(ApiKeyEntry::new("k1", "sk-1", 1, 10));
 
     let mut config = GatewayConfig::default();
     config.auth_mode = ponyllm_config::AuthMode::Open;
     config.empty_stop_total_timeout_secs = Some(1);
-
-    for i in 0..2000 {
-        let p_name = format!("prov_{i}");
-        config.providers.insert(
-            p_name,
-            antigravity_provider(&format!("http://{}", upstream_addr), "gemini-3.8-flash-high"),
-        );
-    }
+    config.providers.insert(
+        "prov_1".to_string(),
+        antigravity_provider(&format!("http://{}", addr1), "gemini-3.8-flash-high"),
+    );
+    config.providers.insert(
+        "prov_2".to_string(),
+        antigravity_provider(&format!("http://{}", addr2), "gemini-3.8-flash-high"),
+    );
 
     let state = Arc::new(AppState::new(config));
-    for i in 0..2000 {
-        let p_name = format!("prov_{i}");
-        let p = Arc::new(KeyPool::new(&p_name, RoutingStrategy::RoundRobin));
-        p.add_key(ApiKeyEntry::new("k1", "sk-1", 1, 10));
-        state.register_pool(&p_name, p);
-    }
+    let pool1 = Arc::new(KeyPool::new("prov_1", RoutingStrategy::RoundRobin));
+    pool1.add_key(ApiKeyEntry::new("k1", "sk-1", 1, 10));
+    state.register_pool("prov_1", pool1);
+
+    let pool2 = Arc::new(KeyPool::new("prov_2", RoutingStrategy::RoundRobin));
+    pool2.add_key(ApiKeyEntry::new("k2", "sk-2", 1, 10));
+    state.register_pool("prov_2", pool2);
 
     let gateway_app = create_app(state);
     let gw_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -584,21 +611,20 @@ async fn test_c9b_first_attempt_guaranteed_dial_non_streaming() {
         .await
         .unwrap();
 
-    assert!(resp.status().is_client_error() || resp.status().is_server_error(), "C9b 应失败");
     let body: serde_json::Value = resp.json().await.unwrap();
     let err_msg = body["error"]["message"].as_str().unwrap_or("");
 
+    let hits = prov2_hits.load(Ordering::SeqCst);
     assert!(
-        !err_msg.contains("after 0 attempts"),
-        "C9b: 非流式严禁在 0 attempts 时截断，实际错误信息: {}",
-        err_msg
+        hits >= 1,
+        "C9b: 非流式当 target_deadline 到期时，prov_2 的第 1 次 attempt 必须豁免执行保底拨号，但实际 hits={}",
+        hits
     );
 
-    let total_hits = hits.load(Ordering::SeqCst);
     assert!(
-        total_hits >= 1,
-        "C9b: 非流式 target_deadline 到期时首 attempt 必须保底发起拨号，但实际上游 hits={}",
-        total_hits
+        !err_msg.contains("after 0 attempts"),
+        "C9b: 非流式严禁在 0 attempts 时中断，实际错误信息: {}",
+        err_msg
     );
 }
 

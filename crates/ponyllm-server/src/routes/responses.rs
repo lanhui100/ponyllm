@@ -537,15 +537,17 @@ pub async fn handle_responses(
                 // deadline; never dial with no budget left.
                 let remaining_c = target_deadline
                     .map(|d| d.saturating_duration_since(tokio::time::Instant::now()));
-                if let Some(r) = remaining_c {
-                    if r.is_zero() {
-                        last_kind = ponyllm_core::error::GatewayErrorKind::UpstreamUnavailable;
-                        last_error = format!(
-                            "Antigravity stream collect failed: empty-STOP retry wall-clock budget ({}s) exhausted after {} attempts",
-                            empty_stop_budget.map(|b| b.as_secs()).unwrap_or(0),
-                            collect_attempt - 1
-                        );
-                        break (Err(CoreError::Internal(last_error.clone())), None);
+                if collect_attempt > 1 {
+                    if let Some(r) = remaining_c {
+                        if r.is_zero() {
+                            last_kind = ponyllm_core::error::GatewayErrorKind::UpstreamUnavailable;
+                            last_error = format!(
+                                "Antigravity stream collect failed: empty-STOP retry wall-clock budget ({}s) exhausted after {} attempts",
+                                empty_stop_budget.map(|b| b.as_secs()).unwrap_or(0),
+                                collect_attempt - 1
+                            );
+                            break (Err(CoreError::Internal(last_error.clone())), None);
+                        }
                     }
                 }
                 let collect_executor = UpstreamExecutor::with_client(

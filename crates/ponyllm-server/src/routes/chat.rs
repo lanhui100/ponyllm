@@ -493,21 +493,23 @@ pub async fn handle_chat_completions(
                 // more doomed dial.
                 let remaining = target_deadline
                     .map(|d| d.saturating_duration_since(tokio::time::Instant::now()));
-                if let Some(r) = remaining {
-                    if r.is_zero() {
-                        tracing::warn!(
-                            provider = %target.provider_name,
-                            stream_attempt,
-                            "Antigravity empty-STOP retry wall-clock budget exhausted; failing fast"
-                        );
-                        last_kind = ponyllm_core::error::GatewayErrorKind::UpstreamUnavailable;
-                        last_error = format!(
-                            "Antigravity empty-STOP retry wall-clock budget ({}s) exhausted after {} attempts",
-                            empty_stop_budget.map(|b| b.as_secs()).unwrap_or(0),
-                            stream_attempt - 1
-                        );
-                        last_retry_after = crate::extractors::retry_after_secs(&last_kind, retry_unlock_hint(&last_kind, &pool, rate_limits.as_ref())).or(Some(1));
-                        break;
+                if stream_attempt > 1 {
+                    if let Some(r) = remaining {
+                        if r.is_zero() {
+                            tracing::warn!(
+                                provider = %target.provider_name,
+                                stream_attempt,
+                                "Antigravity empty-STOP retry wall-clock budget exhausted; failing fast"
+                            );
+                            last_kind = ponyllm_core::error::GatewayErrorKind::UpstreamUnavailable;
+                            last_error = format!(
+                                "Antigravity empty-STOP retry wall-clock budget ({}s) exhausted after {} attempts",
+                                empty_stop_budget.map(|b| b.as_secs()).unwrap_or(0),
+                                stream_attempt - 1
+                            );
+                            last_retry_after = crate::extractors::retry_after_secs(&last_kind, retry_unlock_hint(&last_kind, &pool, rate_limits.as_ref())).or(Some(1));
+                            break;
+                        }
                     }
                 }
                 // R2: rebuild the attempt executor with the tried-keys list.
@@ -864,15 +866,17 @@ pub async fn handle_chat_completions(
                     // deadline; never dial with no budget left.
                     let remaining_c = target_deadline
                         .map(|d| d.saturating_duration_since(tokio::time::Instant::now()));
-                    if let Some(r) = remaining_c {
-                        if r.is_zero() {
-                            last_kind = ponyllm_core::error::GatewayErrorKind::UpstreamUnavailable;
-                            last_error = format!(
-                                "Antigravity stream collect failed: empty-STOP retry wall-clock budget ({}s) exhausted after {} attempts",
-                                empty_stop_budget.map(|b| b.as_secs()).unwrap_or(0),
-                                collect_attempt - 1
-                            );
-                            break (Err(CoreError::Internal(last_error.clone())), None);
+                    if collect_attempt > 1 {
+                        if let Some(r) = remaining_c {
+                            if r.is_zero() {
+                                last_kind = ponyllm_core::error::GatewayErrorKind::UpstreamUnavailable;
+                                last_error = format!(
+                                    "Antigravity stream collect failed: empty-STOP retry wall-clock budget ({}s) exhausted after {} attempts",
+                                    empty_stop_budget.map(|b| b.as_secs()).unwrap_or(0),
+                                    collect_attempt - 1
+                                );
+                                break (Err(CoreError::Internal(last_error.clone())), None);
+                            }
                         }
                     }
                     let collect_executor = UpstreamExecutor::with_client(
