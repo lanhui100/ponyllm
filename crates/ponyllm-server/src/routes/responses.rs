@@ -19,7 +19,7 @@ use crate::streaming::{
     anthropic_sse_to_responses_stream, antigravity_sse_to_openai_stream,
     chat_sse_to_responses_stream, collect_antigravity_sse_to_json,
     extract_usage_tokens, is_transient_empty_stop_error, passthrough_sse, stall_guard,
-    wrap_telemetry_stream, StreamFailureContext, DEFAULT_TAIL_STALL_IDLE, MIN_EMPTY_STOP_ATTEMPTS,
+    wrap_telemetry_stream, StreamFailureContext, DEFAULT_TAIL_STALL_IDLE,
 };
 use ponyllm_protocol::translator::chat_to_antigravity_request;
 
@@ -169,6 +169,14 @@ pub async fn handle_responses(
     // when the request is an auto-managed virtual model (`auto`) where zero-interruption
     // failover across providers is the explicit contract requested by downstream agents.
     let quota_failover_enabled = parsed.is_auto || state.config.read().cross_provider_quota_failover;
+
+    // Request-level pre-commit empty-STOP retry wall-clock budget (contract
+    // `2026-10-07-empty-stop-budget-contract`, ruling 1-2): one deadline taken
+    // once per request and shared by every target's retry loops, so N targets
+    // cannot accumulate past the downstream DSH ~300s idle watchdog. `None`
+    // (config Some(0) / disabled) removes the gate entirely.
+    let empty_stop_budget = state.config.read().effective_empty_stop_timeout();
+    let empty_stop_deadline = empty_stop_budget.map(|b| tokio::time::Instant::now() + b);
 
     for target in targets {
         // Stop before touching the next provider's quota when the previous
@@ -500,10 +508,11 @@ pub async fn handle_responses(
 
         let mut collect_tried_keys: Vec<String> = Vec::new();
         let (upstream_result, winning_key_id) = if target.upstream_protocol == ponyllm_core::pool::UpstreamProtocol::Antigravity {
-            let max_empty_stop_attempts = executor
-                .max_retries
-                .max(pool.total_key_count())
-                .max(MIN_EMPTY_STOP_ATTEMPTS);
+            // Unified attempt budget (contract `2026-10-07-empty-stop-budget-
+            // contract` ruling 4): shared with chat / messages — also fixes the
+            // previous formula missing the per-key multiplier.
+            let max_empty_stop_attempts =
+                crate::streaming::empty_stop_attempt_budget(pool.total_key_count(), executor.max_retries);
             // R2/R3: same policy as chat.rs (fresh key + fresh requestId,
             // deterministic early convergence).
             let mut collect_attempt = 0usize;
@@ -511,6 +520,21 @@ pub async fn handle_responses(
             let mut collect_consecutive_first_frame: usize = 0;
             loop {
                 collect_attempt += 1;
+                // Wall-clock gate (contract ruling 7): shared request-level
+                // deadline; never dial with no budget left.
+                let remaining_c = empty_stop_deadline
+                    .map(|d| d.saturating_duration_since(tokio::time::Instant::now()));
+                if let Some(r) = remaining_c {
+                    if r.is_zero() {
+                        last_kind = ponyllm_core::error::GatewayErrorKind::UpstreamUnavailable;
+                        last_error = format!(
+                            "Antigravity stream collect failed: empty-STOP retry wall-clock budget ({}s) exhausted after {} attempts",
+                            empty_stop_budget.map(|b| b.as_secs()).unwrap_or(0),
+                            collect_attempt - 1
+                        );
+                        break (Err(CoreError::Internal(last_error.clone())), None);
+                    }
+                }
                 let collect_executor = UpstreamExecutor::with_client(
                     pool.clone(),
                     executor.client.clone(),
@@ -519,7 +543,7 @@ pub async fn handle_responses(
                 .with_downstream_headers(&headers)
                 .with_opencode_zen(is_opencode_zen_target(&provider_name, &target_url))
                 .with_rate_limits(rate_limits)
-                .with_ttfb_timeout(ttfb_timeout)
+                .with_ttfb_timeout(ttfb_timeout.map(|t| remaining_c.map_or(t, |r| t.min(r))))
                 .with_excluded_keys(&collect_tried_keys)
                 .with_egress(egress_pool.clone(), egress_clients.clone())
                 .with_event_sink(sink_ctx.clone(), state.event_sink(sink_ctx.clone()));
@@ -543,7 +567,7 @@ pub async fn handle_responses(
                                             backoff_ms = delay.as_millis() as u64,
                                             "Non-stream Antigravity collect hit transient empty STOP in Responses route; backing off and retrying"
                                         );
-                                        tokio::time::sleep(delay).await;
+                                        tokio::time::sleep(remaining_c.map_or(delay, |r| delay.min(r))).await;
                                         ponyllm_protocol::translator::refresh_antigravity_request_ids(&mut collect_req_val);
                                     }
                                     Some(crate::routes::chat::CollectRetryAction::Deterministic { message }) => {
@@ -582,6 +606,21 @@ pub async fn handle_responses(
                             && !collect_tried_keys.is_empty()
                             && collect_attempt < max_empty_stop_attempts
                         {
+                            // Wall-clock gate (contract ruling 7): with no
+                            // budget left, cycling the pool again is pointless.
+                            let remaining_now = empty_stop_deadline
+                                .map(|d| d.saturating_duration_since(tokio::time::Instant::now()));
+                            if let Some(r) = remaining_now {
+                                if r.is_zero() {
+                                    last_kind = ponyllm_core::error::GatewayErrorKind::UpstreamUnavailable;
+                                    last_error = format!(
+                                        "Antigravity stream collect failed: empty-STOP retry wall-clock budget ({}s) exhausted after {} attempts",
+                                        empty_stop_budget.map(|b| b.as_secs()).unwrap_or(0),
+                                        collect_attempt - 1
+                                    );
+                                    break (Err(CoreError::Internal(last_error.clone())), None);
+                                }
+                            }
                             let delay = crate::streaming::empty_stop_retry_delay(collect_attempt);
                             tracing::warn!(
                                 provider = %provider_name,
@@ -591,7 +630,7 @@ pub async fn handle_responses(
                                 "All eligible keys cycled during non-stream Antigravity empty-STOP retries in Responses route; resetting exclusion list to retry across pool with backoff"
                             );
                             collect_tried_keys.clear();
-                            tokio::time::sleep(delay).await;
+                            tokio::time::sleep(remaining_now.map_or(delay, |r| delay.min(r))).await;
                             ponyllm_protocol::translator::refresh_antigravity_request_ids(&mut collect_req_val);
                             continue;
                         }

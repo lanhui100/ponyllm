@@ -70,6 +70,7 @@ fn build_gateway_config_and_pools(
     gw_config.use_system_proxy = config_file.gateway.use_system_proxy;
     gw_config.upstream_timeout_secs = config_file.gateway.upstream_timeout_secs;
     gw_config.upstream_ttfb_timeout_secs = config_file.gateway.upstream_ttfb_timeout_secs;
+    gw_config.empty_stop_total_timeout_secs = config_file.gateway.empty_stop_total_timeout_secs;
     gw_config.admin_write_enabled = config_file.gateway.admin_write_enabled;
     gw_config.telemetry_snapshot_path = config_file.gateway.telemetry_snapshot_path.clone();
     // P0 auth_compat passthrough (disk format -> runtime config).

@@ -657,11 +657,14 @@ impl GatewayConfig {
 
     /// Effective request-level pre-commit empty-STOP retry wall-clock budget:
     /// `Some(0)` disables the bound (=> None), `Some(s)` resolves to `s`, and
-    /// `None` (gateway unset) falls back to the 75s default.
-    ///
-    /// STUB (red-phase): implemented by the Executor stage.
+    /// `None` (gateway unset) falls back to the 75s default
+    /// (`crate::streaming::MAX_EMPTY_STOP_TOTAL_DURATION`).
     pub fn effective_empty_stop_timeout(&self) -> Option<std::time::Duration> {
-        unimplemented!("effective_empty_stop_timeout: red-phase stub, implementation pending")
+        match self.empty_stop_total_timeout_secs {
+            Some(0) => None,
+            Some(secs) => Some(std::time::Duration::from_secs(secs)),
+            None => Some(crate::streaming::MAX_EMPTY_STOP_TOTAL_DURATION),
+        }
     }
 
     /// Same-source effective proxy URL used by BOTH the upstream HTTP client

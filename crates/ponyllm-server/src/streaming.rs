@@ -953,11 +953,11 @@ pub const DEFAULT_PREAMBLE_DEADLINE: std::time::Duration = std::time::Duration::
 /// transient empty-STOP completions. Empty STOPs fail fast in the preamble
 /// (no downstream bytes committed, no key fault), so a dedicated budget larger
 /// than the generic `max_retries` is cheap and credential-independent.
-pub const MIN_EMPTY_STOP_ATTEMPTS: usize = 15;
+pub const MIN_EMPTY_STOP_ATTEMPTS: usize = 8;
 
 /// Maximum number of consecutive empty-STOP retries on a single account before
 /// failing over to the next candidate key in the pool.
-pub const PER_KEY_EMPTY_STOP_MAX_ATTEMPTS: usize = 5;
+pub const PER_KEY_EMPTY_STOP_MAX_ATTEMPTS: usize = 2;
 
 /// Consecutive early-frame (`frames <= 1`) empty STOPs across distinct keys that flip the verdict
 /// from "transient blip, keep retrying" to "deterministic prompt×model zero
@@ -1004,13 +1004,20 @@ pub fn empty_stop_retry_delay(attempt: usize) -> std::time::Duration {
 /// `PER_KEY_EMPTY_STOP_MAX_ATTEMPTS` per key (a degraded key gives up after
 /// two in-place tries via key rotation, not by inflating the total budget).
 pub fn empty_stop_attempt_budget(pool_keys: usize, max_retries: usize) -> usize {
-    unimplemented!("empty_stop_attempt_budget: red-phase stub, implementation pending")
+    // Contract `2026-10-07-empty-stop-budget-contract` C2 (formula per Lead
+    // ruling, (5,0)->10): the pre-commit budget scales with the key pool —
+    // two in-place tries per key before rotation — but is floored at
+    // `MIN_EMPTY_STOP_ATTEMPTS` (>= small pools / zero-key edge) and hard-capped
+    // at `MAX_EMPTY_STOP_ATTEMPTS_CAP` so a pool-wide empty-STOP epidemic cannot
+    // churn through `keys * per-key` unbounded attempts.
+    std::cmp::max(max_retries, pool_keys.saturating_mul(2))
+        .clamp(MIN_EMPTY_STOP_ATTEMPTS, MAX_EMPTY_STOP_ATTEMPTS_CAP)
 }
 
 /// True when the pre-commit empty-STOP retry phase has spent `elapsed` or more
 /// against `budget`; `budget == None` (disabled) never trips.
 pub fn empty_stop_budget_exceeded(elapsed: std::time::Duration, budget: Option<std::time::Duration>) -> bool {
-    unimplemented!("empty_stop_budget_exceeded: red-phase stub, implementation pending")
+    budget.map_or(false, |b| elapsed >= b)
 }
 
 /// Classify a collector error string as the upstream transient empty-STOP
