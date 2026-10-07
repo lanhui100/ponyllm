@@ -5,6 +5,8 @@ Thumbs.db
 *~
 # Rust 构建产物/依赖目录：
 target/
+# 交叉编译（bookworm glibc 对齐）产物目录：不匹配上面的 target/ 前缀锚定，需显式忽略
+target-*/
 # Web 构建产物/依赖目录（pnpm-lock.yaml 必须提交，pin 可复现）：
 web/dist/
 web/node_modules/
