@@ -785,6 +785,14 @@ const factualCycleSummary = computed(() => {
       totalCompWeekly += usage.window_weekly?.completion_tokens ?? 0;
       totalCachedWeekly += usage.window_weekly?.cached_tokens ?? 0;
       totalRequestsWeekly += usage.window_weekly?.requests ?? 0;
+    } else if (usage.window_weekly && usage.window_weekly.total_tokens > 0) {
+      // 若后端未给出周度推算容量，但有客观周窗口消耗统计，则纳入周度四要素与消耗
+      weeklyAccounts += 1;
+      totalTokensWeekly += usage.window_weekly.total_tokens;
+      totalPromptWeekly += usage.window_weekly.prompt_tokens;
+      totalCompWeekly += usage.window_weekly.completion_tokens;
+      totalCachedWeekly += usage.window_weekly.cached_tokens;
+      totalRequestsWeekly += usage.window_weekly.requests;
     }
 
     // 3. 月度客观消耗
@@ -851,37 +859,102 @@ const factualCycleSummary = computed(() => {
   const completedCyclesCount = persisted5h
     ? persisted5h.completed_cycles + (persistedWeekly?.completed_cycles ?? 0)
     : count5h;
-  const avgPrompt5h = persisted5h && persisted5h.observations > 0
-    ? Math.round(persisted5h.prompt_tokens / persisted5h.observations)
-    : liveAvgPrompt5h;
-  const avgComp5h = persisted5h && persisted5h.observations > 0
-    ? Math.round(persisted5h.completion_tokens / persisted5h.observations)
-    : liveAvgComp5h;
-  const avgCached5h = persisted5h && persisted5h.observations > 0
-    ? Math.round(persisted5h.cached_tokens / persisted5h.observations)
-    : liveAvgCached5h;
-  const avgRequests5h = persisted5h && persisted5h.observations > 0
-    ? Math.round(persisted5h.requests / persisted5h.observations)
-    : liveAvgRequests5h;
+  const avgPrompt5h =
+    persisted5h && persisted5h.observations > 0
+      ? Math.round(persisted5h.prompt_tokens / persisted5h.observations)
+      : persisted5h && persisted5h.completed_cycles > 0
+        ? Math.round(persisted5h.completed_prompt_tokens / persisted5h.completed_cycles)
+        : liveAvgPrompt5h;
+  const avgComp5h =
+    persisted5h && persisted5h.observations > 0
+      ? Math.round(persisted5h.completion_tokens / persisted5h.observations)
+      : persisted5h && persisted5h.completed_cycles > 0
+        ? Math.round(persisted5h.completed_completion_tokens / persisted5h.completed_cycles)
+        : liveAvgComp5h;
+  const avgCached5h =
+    persisted5h && persisted5h.observations > 0
+      ? Math.round(persisted5h.cached_tokens / persisted5h.observations)
+      : persisted5h && persisted5h.completed_cycles > 0
+        ? Math.round(persisted5h.completed_cached_tokens / persisted5h.completed_cycles)
+        : liveAvgCached5h;
+  const avgRequests5h =
+    persisted5h && persisted5h.observations > 0
+      ? Math.round(persisted5h.requests / persisted5h.observations)
+      : persisted5h && persisted5h.completed_cycles > 0
+        ? Math.round(persisted5h.completed_requests / persisted5h.completed_cycles)
+        : liveAvgRequests5h;
 
-  const avgWeekly =
+  // 自然周基准容量：
+  // 1. 若有完整的闭合对齐周期观测，优先使用 observations 均值；
+  // 2. 若周度打满实测归档（completed_cycles）且其数值大于 5 小时基准用量，则采纳实测值；
+  // 3. 若周度尚未打满或记录为早期零星用量（<= 5h 基准），优先回退到 live 在册账号反推容量与实时消耗（或按 5h*5 推算），确保自然周容量符合客观逻辑；
+  // 4. 若 live 亦无数据，则回退到 completed_cycles 或 0。
+  const weeklyCandidate =
     persistedWeekly && persistedWeekly.observations > 0
       ? persistedWeekly.avg_tokens
       : persistedWeekly && persistedWeekly.completed_cycles > 0
         ? persistedWeekly.avg_completed_tokens
-        : liveAvgWeekly;
-  const avgPromptWeekly = persistedWeekly && persistedWeekly.observations > 0
-    ? Math.round(persistedWeekly.prompt_tokens / persistedWeekly.observations)
-    : liveAvgPromptWeekly;
-  const avgCompWeekly = persistedWeekly && persistedWeekly.observations > 0
-    ? Math.round(persistedWeekly.completion_tokens / persistedWeekly.observations)
-    : liveAvgCompWeekly;
-  const avgCachedWeekly = persistedWeekly && persistedWeekly.observations > 0
-    ? Math.round(persistedWeekly.cached_tokens / persistedWeekly.observations)
-    : liveAvgCachedWeekly;
-  const avgRequestsWeekly = persistedWeekly && persistedWeekly.observations > 0
-    ? Math.round(persistedWeekly.requests / persistedWeekly.observations)
-    : liveAvgRequestsWeekly;
+        : 0;
+
+  const avgWeekly =
+    persistedWeekly && persistedWeekly.observations > 0
+      ? persistedWeekly.avg_tokens
+      : weeklyCandidate > avg5h
+        ? weeklyCandidate
+        : liveAvgWeekly > 0
+          ? liveAvgWeekly
+          : weeklyCandidate > 0
+            ? weeklyCandidate
+            : liveAvgWeekly;
+
+  const usePersistedWeeklyCycles =
+    persistedWeekly &&
+    persistedWeekly.completed_cycles > 0 &&
+    (persistedWeekly.observations > 0 || avgWeekly === persistedWeekly.avg_completed_tokens);
+
+  const avgPromptWeekly =
+    persistedWeekly && persistedWeekly.observations > 0
+      ? Math.round(persistedWeekly.prompt_tokens / persistedWeekly.observations)
+      : usePersistedWeeklyCycles
+        ? Math.round(persistedWeekly!.completed_prompt_tokens / persistedWeekly!.completed_cycles)
+        : liveAvgPromptWeekly > 0
+          ? liveAvgPromptWeekly
+          : persistedWeekly && persistedWeekly.completed_cycles > 0
+            ? Math.round(persistedWeekly.completed_prompt_tokens / persistedWeekly.completed_cycles)
+            : 0;
+
+  const avgCompWeekly =
+    persistedWeekly && persistedWeekly.observations > 0
+      ? Math.round(persistedWeekly.completion_tokens / persistedWeekly.observations)
+      : usePersistedWeeklyCycles
+        ? Math.round(persistedWeekly!.completed_completion_tokens / persistedWeekly!.completed_cycles)
+        : liveAvgCompWeekly > 0
+          ? liveAvgCompWeekly
+          : persistedWeekly && persistedWeekly.completed_cycles > 0
+            ? Math.round(persistedWeekly.completed_completion_tokens / persistedWeekly.completed_cycles)
+            : 0;
+
+  const avgCachedWeekly =
+    persistedWeekly && persistedWeekly.observations > 0
+      ? Math.round(persistedWeekly.cached_tokens / persistedWeekly.observations)
+      : usePersistedWeeklyCycles
+        ? Math.round(persistedWeekly!.completed_cached_tokens / persistedWeekly!.completed_cycles)
+        : liveAvgCachedWeekly > 0
+          ? liveAvgCachedWeekly
+          : persistedWeekly && persistedWeekly.completed_cycles > 0
+            ? Math.round(persistedWeekly.completed_cached_tokens / persistedWeekly.completed_cycles)
+            : 0;
+
+  const avgRequestsWeekly =
+    persistedWeekly && persistedWeekly.observations > 0
+      ? Math.round(persistedWeekly.requests / persistedWeekly.observations)
+      : usePersistedWeeklyCycles
+        ? Math.round(persistedWeekly!.completed_requests / persistedWeekly!.completed_cycles)
+        : liveAvgRequestsWeekly > 0
+          ? liveAvgRequestsWeekly
+          : persistedWeekly && persistedWeekly.completed_cycles > 0
+            ? Math.round(persistedWeekly.completed_requests / persistedWeekly.completed_cycles)
+            : 0;
 
   const avgMonthly =
     persistedMonthly && persistedMonthly.observations > 0
@@ -889,18 +962,30 @@ const factualCycleSummary = computed(() => {
       : persistedMonthly && persistedMonthly.completed_cycles > 0
         ? persistedMonthly.avg_completed_tokens
         : liveAvgMonthly;
-  const avgPromptMonthly = persistedMonthly && persistedMonthly.observations > 0
-    ? Math.round(persistedMonthly.prompt_tokens / persistedMonthly.observations)
-    : liveAvgPromptMonthly;
-  const avgCompMonthly = persistedMonthly && persistedMonthly.observations > 0
-    ? Math.round(persistedMonthly.completion_tokens / persistedMonthly.observations)
-    : liveAvgCompMonthly;
-  const avgCachedMonthly = persistedMonthly && persistedMonthly.observations > 0
-    ? Math.round(persistedMonthly.cached_tokens / persistedMonthly.observations)
-    : liveAvgCachedMonthly;
-  const avgRequestsMonthly = persistedMonthly && persistedMonthly.observations > 0
-    ? Math.round(persistedMonthly.requests / persistedMonthly.observations)
-    : liveAvgRequestsMonthly;
+  const avgPromptMonthly =
+    persistedMonthly && persistedMonthly.observations > 0
+      ? Math.round(persistedMonthly.prompt_tokens / persistedMonthly.observations)
+      : persistedMonthly && persistedMonthly.completed_cycles > 0
+        ? Math.round(persistedMonthly.completed_prompt_tokens / persistedMonthly.completed_cycles)
+        : liveAvgPromptMonthly;
+  const avgCompMonthly =
+    persistedMonthly && persistedMonthly.observations > 0
+      ? Math.round(persistedMonthly.completion_tokens / persistedMonthly.observations)
+      : persistedMonthly && persistedMonthly.completed_cycles > 0
+        ? Math.round(persistedMonthly.completed_completion_tokens / persistedMonthly.completed_cycles)
+        : liveAvgCompMonthly;
+  const avgCachedMonthly =
+    persistedMonthly && persistedMonthly.observations > 0
+      ? Math.round(persistedMonthly.cached_tokens / persistedMonthly.observations)
+      : persistedMonthly && persistedMonthly.completed_cycles > 0
+        ? Math.round(persistedMonthly.completed_cached_tokens / persistedMonthly.completed_cycles)
+        : liveAvgCachedMonthly;
+  const avgRequestsMonthly =
+    persistedMonthly && persistedMonthly.observations > 0
+      ? Math.round(persistedMonthly.requests / persistedMonthly.observations)
+      : persistedMonthly && persistedMonthly.completed_cycles > 0
+        ? Math.round(persistedMonthly.completed_requests / persistedMonthly.completed_cycles)
+        : liveAvgRequestsMonthly;
 
   const persistedObservations =
     (persisted5h?.observations ?? 0) +
@@ -1140,26 +1225,22 @@ function waterBarWidth(percent: number | null): string {
           </div>
         </div>
 
-        <!-- 底部区：容量水位 + 周期统计3个小面板紧贴底部 -->
-        <div class="flex flex-col gap-[30px] mt-auto">
-          <!-- Gemini 容量水位条 (横向双列紧凑展开) -->
-          <div class="p-3 rounded-lg bg-slate-50/60 border border-slate-100/80">
-            <div class="flex items-center justify-between text-xs text-slate-500 mb-1.5 font-medium">
-              <span class="inline-flex items-center gap-1 text-slate-700">
-                <Icons name="sparkles" size="14" class="text-slate-700" />
-                Gemini 容量水位
-              </span>
-              <span class="text-[11px] text-slate-400">基于当前 {{ activeKeys.length }} 个就绪账号剩余额度</span>
-            </div>
-            <div class="grid grid-cols-1 sm:grid-cols-2 gap-9">
-              <!-- 5 小时窗口水位 -->
+        <!-- 底部区：容量水位 (拆分为 5小时 与 周度 两个独立小面板) + 周期统计3个小面板紧贴底部 -->
+        <div class="flex flex-col gap-3 mt-auto">
+          <!-- 容量水位：5小时窗口 与 周度窗口 独立双面板 -->
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+            <!-- 5小时容量水位小面板 -->
+            <div class="p-2.5 rounded-lg bg-slate-50/60 border border-slate-100/80 flex flex-col justify-between">
+              <div class="flex items-center justify-between text-xs text-slate-500 mb-1 font-medium">
+                <span class="inline-flex items-center gap-1 text-slate-700">
+                  <Icons name="sparkles" size="13" class="text-slate-700" />
+                  5小时窗口水位
+                </span>
+                <span class="font-mono font-semibold tabular-nums text-right shrink-0" data-testid="gemini-h5-percent" :class="getProgressColor(aggregatedQuotas.gemini.h5Percent).text">
+                  {{ formatWaterPercent(aggregatedQuotas.gemini.h5Percent) }}
+                </span>
+              </div>
               <div class="space-y-1">
-                <div class="flex items-center justify-between text-xs">
-                  <span class="font-medium text-slate-700">5小时窗口</span>
-                  <span class="font-mono font-semibold tabular-nums text-right shrink-0" data-testid="gemini-h5-percent" :class="getProgressColor(aggregatedQuotas.gemini.h5Percent).text">
-                    {{ formatWaterPercent(aggregatedQuotas.gemini.h5Percent) }}
-                  </span>
-                </div>
                 <div class="w-full bg-slate-200/80 rounded-full h-1.5 overflow-hidden">
                   <div
                     class="h-full rounded-full transition-all duration-300"
@@ -1167,18 +1248,25 @@ function waterBarWidth(percent: number | null): string {
                     :style="{ width: waterBarWidth(aggregatedQuotas.gemini.h5Percent) }"
                   />
                 </div>
-                <div class="text-[10px] text-slate-400 text-right truncate">
-                  {{ aggregatedQuotas.gemini.h5Hint }}
+                <div class="flex items-center justify-between text-[10px] text-slate-400">
+                  <span>基于当前 {{ activeKeys.length }} 个就绪账号剩余额度</span>
+                  <span class="truncate ml-1">{{ aggregatedQuotas.gemini.h5Hint }}</span>
                 </div>
               </div>
-              <!-- 周度窗口水位 -->
+            </div>
+
+            <!-- 周度容量水位小面板 -->
+            <div class="p-2.5 rounded-lg bg-slate-50/60 border border-slate-100/80 flex flex-col justify-between">
+              <div class="flex items-center justify-between text-xs text-slate-500 mb-1 font-medium">
+                <span class="inline-flex items-center gap-1 text-slate-700">
+                  <Icons name="sparkles" size="13" class="text-slate-700" />
+                  周度窗口水位
+                </span>
+                <span class="font-mono font-semibold tabular-nums text-right shrink-0" data-testid="gemini-weekly-percent" :class="getProgressColor(aggregatedQuotas.gemini.weeklyPercent).text">
+                  {{ formatWaterPercent(aggregatedQuotas.gemini.weeklyPercent) }}
+                </span>
+              </div>
               <div class="space-y-1">
-                <div class="flex items-center justify-between text-xs">
-                  <span class="font-medium text-slate-700">周度窗口</span>
-                  <span class="font-mono font-semibold tabular-nums text-right shrink-0" data-testid="gemini-weekly-percent" :class="getProgressColor(aggregatedQuotas.gemini.weeklyPercent).text">
-                    {{ formatWaterPercent(aggregatedQuotas.gemini.weeklyPercent) }}
-                  </span>
-                </div>
                 <div class="w-full bg-slate-200/80 rounded-full h-1.5 overflow-hidden">
                   <div
                     class="h-full rounded-full transition-all duration-300"
@@ -1186,8 +1274,9 @@ function waterBarWidth(percent: number | null): string {
                     :style="{ width: waterBarWidth(aggregatedQuotas.gemini.weeklyPercent) }"
                   />
                 </div>
-                <div class="text-[10px] text-slate-400 text-right truncate">
-                  {{ aggregatedQuotas.gemini.weeklyHint }}
+                <div class="flex items-center justify-between text-[10px] text-slate-400">
+                  <span>周配额蓄水</span>
+                  <span class="truncate ml-1">{{ aggregatedQuotas.gemini.weeklyHint }}</span>
                 </div>
               </div>
             </div>

@@ -763,6 +763,114 @@ describe('AntigravityPoolCard Component', () => {
     document.body.removeChild(container);
   });
 
+  it('renders realistic weekly baseline and four factors when completed_weekly_tokens is smaller than 5h', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+
+    const keys: KeyView[] = [
+      {
+        id: 'acc-1',
+        provider: 'antigravity',
+        masked_key: 'ya29.***',
+        state: 'active',
+        priority: 1,
+        weight: 10,
+        usage: {
+          account_tier: 'pro',
+          confidence: 0.98,
+          window_5h: {
+            prompt_tokens: 100_000,
+            completion_tokens: 5_000,
+            cached_tokens: 20_000,
+            total_tokens: 105_000,
+            requests: 10,
+          },
+          window_weekly: {
+            prompt_tokens: 5_000_000,
+            completion_tokens: 200_000,
+            cached_tokens: 1_000_000,
+            total_tokens: 5_200_000,
+            requests: 200,
+          },
+        },
+      },
+    ];
+
+    const app = createApp(AntigravityPoolCard, {
+      keys,
+      keyTestResults: {},
+      adminWriteEnabled: true,
+      benchmark: {
+        persisted_at_ms: 1_700_000_000_000,
+        kind_5h: {
+          observations: 10,
+          avg_tokens: 2_000_000,
+          prompt_tokens: 18_000_000,
+          completion_tokens: 2_000_000,
+          cached_tokens: 5_000_000,
+          total_tokens: 20_000_000,
+          requests: 100,
+          completed_cycles: 0,
+          avg_completed_tokens: 0,
+          completed_prompt_tokens: 0,
+          completed_completion_tokens: 0,
+          completed_cached_tokens: 0,
+          completed_total_tokens: 0,
+          completed_requests: 0,
+          first_observation_ms: 1_600_000_000_000,
+          last_observation_ms: 1_700_000_000_000,
+        },
+        kind_weekly: {
+          observations: 0,
+          avg_tokens: 0,
+          prompt_tokens: 0,
+          completion_tokens: 0,
+          cached_tokens: 0,
+          total_tokens: 0,
+          requests: 0,
+          completed_cycles: 1,
+          avg_completed_tokens: 300_000, // 早期碎片用量（小于 5h 的 2M）
+          completed_prompt_tokens: 290_000,
+          completed_completion_tokens: 10_000,
+          completed_cached_tokens: 50_000,
+          completed_total_tokens: 300_000,
+          completed_requests: 12,
+          first_observation_ms: 0,
+          last_observation_ms: 0,
+        },
+        kind_monthly: {
+          observations: 0,
+          avg_tokens: 0,
+          prompt_tokens: 0,
+          completion_tokens: 0,
+          cached_tokens: 0,
+          total_tokens: 0,
+          requests: 0,
+          completed_cycles: 0,
+          avg_completed_tokens: 0,
+          completed_prompt_tokens: 0,
+          completed_completion_tokens: 0,
+          completed_cached_tokens: 0,
+          completed_total_tokens: 0,
+          completed_requests: 0,
+          first_observation_ms: 0,
+          last_observation_ms: 0,
+        },
+      },
+    });
+    app.mount(container);
+    await nextTick();
+
+    // 周用量应该回退到在册账号客观消耗（5.2M）而非小于 5h 的 300K
+    expect(container.textContent).toContain('5.2M');
+    // 缓存与调用次数也应从 weekly 窗口获取，不为空
+    expect(container.textContent).toContain('1M'); // 1_000_000 cached
+    expect(container.textContent).toContain('200次'); // 200 requests
+
+    app.unmount();
+    document.body.removeChild(container);
+  });
+
   it('renders realistic cycle baseline without 4.33x fake multiplier and ignores unfinished slices', async () => {
     const container = document.createElement('div');
     document.body.appendChild(container);
