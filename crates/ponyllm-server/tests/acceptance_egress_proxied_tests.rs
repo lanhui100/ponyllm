@@ -498,3 +498,51 @@ async fn reg4_localhost_subdomain_no_proxy_exempt_full_check() {
         "for_target 结果必须与 direct 全检查一致（不得误走快路径）"
     );
 }
+
+/// 用例 8：内置 AI 模型提供商白名单放行（方案 B：如 token.sensenova.cn 域名无 DNS 快路径放行）
+#[tokio::test]
+async fn c8_builtin_model_allowlist_bypasses_dns() {
+    // 未设置代理、未设置 PONYLLM_PROBE_ALLOWLIST 环境变量的情况下，
+    // sensenova.cn 及其子域名应走白名单放行（无需真实 DNS 解析），防止公网模型域名受限于递归 DNS 抖动
+    let res = check_data_plane_url("https://token.sensenova.cn/v1/chat/completions").await;
+    assert!(res.is_ok(), "内置白名单域名必须直接放行，实际: {:?}", res.err());
+
+    let res_ds = check_data_plane_url("https://api.deepseek.com/v1").await;
+    assert!(res_ds.is_ok(), "deepseek.com 必须直接放行，实际: {:?}", res_ds.err());
+}
+
+/// 用例 9：DNS 超时瞬态重试机制（方案 A：第一次超时，第二次成功时能够成功自愈）
+#[tokio::test]
+async fn c9_dns_timeout_retry_recovery() {
+    let call_count = std::sync::atomic::AtomicUsize::new(0);
+    let res = check_data_plane_url_with_resolver(
+        "http://unlisted-cloud-provider.example.org/",
+        move |_h: &str| -> Result<Vec<std::net::IpAddr>, DnsLookupError> {
+            let count = call_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if count == 0 {
+                Err(DnsLookupError::Timeout)
+            } else {
+                Ok(vec![std::net::IpAddr::from([203, 0, 113, 88])])
+            }
+        },
+    )
+    .await;
+
+    assert!(res.is_ok(), "第 1 次超时但第 2 次成功时应自愈放行，实际: {:?}", res.err());
+}
+
+/// 用例 10：持续超时坚决 fail-closed（对抗防御：不能无限重试或在持续超时时放行）
+#[tokio::test]
+async fn c10_dns_persistent_timeout_fail_closed() {
+    let res = check_data_plane_url_with_resolver(
+        "http://persistent-timeout-domain.example.org/",
+        |_h: &str| -> Result<Vec<std::net::IpAddr>, DnsLookupError> {
+            Err(DnsLookupError::Timeout)
+        },
+    )
+    .await;
+
+    let err = res.expect_err("持续超时的非白名单域名必须严格 fail-closed 拒绝");
+    assert!(err.transient, "超时错误必须标记为 transient");
+    assert!(err.reason.contains("blocked fail-closed"), "reason 必须包含 fail-closed 描述");
+}

@@ -103,9 +103,30 @@ fn is_blocked_ip(ip: &IpAddr) -> bool {
 /// `10.0.0.5`) also match exactly and are exempted from the name/IP policy
 /// (B7) — the intended escape hatch for LAN model servers / on-prem
 /// proxies.
+/// Also includes well-known cloud AI providers / endpoints (e.g. Sensetime/SenseNova, DeepSeek)
+/// to prevent local recursive DNS timeouts from breaking upstream inference.
+const BUILTIN_MODEL_ALLOWLIST: &[&str] = &[
+    "sensenova.cn",
+    "deepseek.com",
+    "openai.com",
+    "anthropic.com",
+    "moonshot.cn",
+    "baichuan-ai.com",
+    "zhipuai.cn",
+    "bigmodel.cn",
+    "minimax.chat",
+    "stepfun.com",
+    "aliyun.com",
+];
+
 fn probe_allowlisted(host: &str) -> bool {
+    let lower = host.trim().trim_end_matches('.').to_ascii_lowercase();
+    for entry in BUILTIN_MODEL_ALLOWLIST {
+        if lower == *entry || lower.ends_with(&format!(".{}", entry)) {
+            return true;
+        }
+    }
     if let Ok(list) = std::env::var("PONYLLM_PROBE_ALLOWLIST") {
-        let lower = host.trim().trim_end_matches('.').to_ascii_lowercase();
         for entry in list.split(',') {
             let e = entry.trim().trim_end_matches('.').to_ascii_lowercase();
             if !e.is_empty() && (lower == e || lower.ends_with(&format!(".{}", e))) {
@@ -538,7 +559,7 @@ pub async fn check_data_plane_url_with_resolver<F>(
     resolver: F,
 ) -> Result<(), DataPlaneRefusal>
 where
-    F: Fn(&str) -> Result<Vec<IpAddr>, DnsLookupError> + Send + 'static,
+    F: Fn(&str) -> Result<Vec<IpAddr>, DnsLookupError> + Send + Sync + 'static,
 {
     check_data_plane_policy_fast(raw)?;
     let host = parse_host(raw).map_err(data_plane_refusal)?;
@@ -547,13 +568,31 @@ where
     if probe_allowlisted(&host) || host.parse::<IpAddr>().is_ok() {
         return Ok(());
     }
-    let host_for_lookup = host.clone();
-    let lookup = tokio::task::spawn_blocking(move || resolver(&host_for_lookup));
-    let addrs: Vec<IpAddr> =
+    let resolver = std::sync::Arc::new(resolver);
+    // Perform DNS lookup with timeout, and retry once on transient timeout or failure
+    // to absorb transient network jitter before declaring fail-closed.
+    let mut last_refusal: Option<DataPlaneRefusal> = None;
+    let mut addrs: Vec<IpAddr> = Vec::new();
+
+    for attempt in 0..2 {
+        let host_for_lookup = host.clone();
+        let resolver_clone = resolver.clone();
+        let lookup = tokio::task::spawn_blocking(move || resolver_clone(&host_for_lookup));
+
         match tokio::time::timeout(std::time::Duration::from_secs(5), lookup).await {
-            Ok(Ok(Ok(addrs))) => addrs,
+            Ok(Ok(Ok(resolved))) if !resolved.is_empty() => {
+                addrs = resolved;
+                last_refusal = None;
+                break;
+            }
+            Ok(Ok(Ok(_empty))) => {
+                last_refusal = Some(DataPlaneRefusal {
+                    reason: format!("DNS resolution returned no addresses for '{}'", host),
+                    transient: true,
+                });
+            }
             Ok(Ok(Err(e))) => {
-                return Err(match e {
+                last_refusal = Some(match e {
                     DnsLookupError::Timeout => DataPlaneRefusal {
                         reason: format!(
                             "DNS resolution timed out for '{}' (blocked fail-closed)",
@@ -565,29 +604,32 @@ where
                         reason: format!("DNS resolution failed for '{}': {}", host, msg),
                         transient: true,
                     },
-                })
+                });
             }
             Ok(Err(e)) => {
-                return Err(DataPlaneRefusal {
+                last_refusal = Some(DataPlaneRefusal {
                     reason: format!("DNS lookup task failed: {}", e),
                     transient: true,
-                })
+                });
             }
             Err(_) => {
-                return Err(DataPlaneRefusal {
+                last_refusal = Some(DataPlaneRefusal {
                     reason: format!(
                         "DNS resolution timed out for '{}' (blocked fail-closed)",
                         host
                     ),
                     transient: true,
-                })
+                });
             }
-        };
-    if addrs.is_empty() {
-        return Err(DataPlaneRefusal {
-            reason: format!("DNS resolution returned no addresses for '{}'", host),
-            transient: true,
-        });
+        }
+
+        if attempt == 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+
+    if let Some(refusal) = last_refusal {
+        return Err(refusal);
     }
     for ip in &addrs {
         if is_blocked_ip_with(ip, true) {
