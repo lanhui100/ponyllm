@@ -328,12 +328,21 @@ fn extract_response_tokens(body: &Value) -> u64 {
     0
 }
 
-/// Whether a terminal 400 body looks like Google's transient geo-gate
-/// (`FAILED_PRECONDITION: User location is not supported`) rather than a
-/// genuine caller error. Sampling shows these arrive in time-windowed storms
-/// affecting every client of the egress IP equally (reference gateway fails
-/// identically), then clear on their own — while genuine 400s (empty
-/// messages, bad schema) never match this signature.
+/// Whether a network error message reflects an underlying connection/transport/DNS
+/// failure (e.g. proxy unreachable, connection reset/refused, DNS resolution error,
+/// or raw transport failure) rather than a response-phase error.
+pub fn is_network_transport_connect_error(err_str: &str) -> bool {
+    let lower = err_str.to_ascii_lowercase();
+    lower.contains("error sending request")
+        || lower.contains("connection refused")
+        || lower.contains("connection reset")
+        || lower.contains("dns")
+        || lower.contains("broken pipe")
+        || lower.contains("proxy")
+        || lower.contains("channel closed")
+        || lower.contains("failed to lookup address")
+}
+
 pub fn is_transient_geo_gate(status_code: u16, err_body: &str) -> bool {
     if status_code != 400 {
         return false;
@@ -1622,6 +1631,10 @@ impl UpstreamExecutor {
         // Transparent-wait guard: at most one bounded hold on full pool
         // window exhaustion, so the rescue retry cannot spin forever.
         let mut pool_wait_done = false;
+        // Circuit breaker: track consecutive network connection/transport failures
+        // across distinct keys. If the physical wire/proxy is down, failing over
+        // endlessly across all keys in the pool is futile and poisons healthy keys.
+        let mut consecutive_network_failures = 0;
 
         let max_attempts = self.max_retries.max(self.pool.total_key_count()).max(1);
 
@@ -1776,13 +1789,43 @@ impl UpstreamExecutor {
             let resp = match self.send_guarded(req).await {
                 Ok(r) => r,
                 Err(err_str) => {
+                    let is_transport_connect_err = is_network_transport_connect_error(&err_str);
                     last_error = format!("Network error with {}: {}", key.id, err_str);
                     last_kind = GatewayErrorKind::UpstreamUnavailable;
                     attempt_kinds.push(last_kind.clone());
-                    self.pool.record_error(&key.id, PoolErrorType::NetworkError);
+
+                    // Key state protection: if failure is purely network connect/transport,
+                    // record transient failure on the key without poisoning its cooldown status.
+                    if is_transport_connect_err {
+                        self.pool.record_transient_failure(&key.id);
+                        consecutive_network_failures += 1;
+                    } else {
+                        self.pool.record_error(&key.id, PoolErrorType::NetworkError);
+                        consecutive_network_failures = 0;
+                    }
+
                     if let (Some(eg_pool), Some(eg_entry)) = (&self.egress_pool, &egress_entry) {
                         eg_pool.record_transient_failure(&eg_entry.id);
                     }
+
+                    // Network Circuit Breaker: if 3 consecutive attempts across distinct keys
+                    // fail with wire/connection failures, abort failover storm immediately.
+                    if consecutive_network_failures >= 3 && self.pool.total_key_count() > 1 {
+                        tracing::warn!(
+                            consecutive = consecutive_network_failures,
+                            key_id = %key.id,
+                            "Network connection circuit breaker tripped: aborting futile key failover"
+                        );
+                        self.emit_both(&key.id, attempt_idx, None, last_kind.clone(), last_error.clone(), None, attempt_start.elapsed());
+                        let aggregated_error = format!("{}{}", summarize_attempt_failures(&attempt_kinds), if last_error.is_empty() { String::new() } else { format!(": {}", last_error) });
+                        return Err(CoreError::AllRetriesFailed {
+                            retries: attempt + 1,
+                            attempted_keys,
+                            last_error: aggregated_error,
+                            kind: last_kind,
+                        });
+                    }
+
                     if let Some(delay) = transient_retry_delay(&self.pool, &key.id, attempt, max_attempts, None) {
                         attempted_keys.retain(|id| id != &key.id);
                         self.emit_both(&key.id, attempt_idx, None, last_kind.clone(), last_error.clone(), None, attempt_start.elapsed());
@@ -2017,6 +2060,10 @@ impl UpstreamExecutor {
         // Transparent-wait guard: at most one bounded hold on full pool
         // window exhaustion, so the rescue retry cannot spin forever.
         let mut pool_wait_done = false;
+        // Circuit breaker: track consecutive network connection/transport failures
+        // across distinct keys. If the physical wire/proxy is down, failing over
+        // endlessly across all keys in the pool is futile and poisons healthy keys.
+        let mut consecutive_network_failures = 0;
 
         let max_attempts = self.max_retries.max(self.pool.total_key_count()).max(1);
 
@@ -2186,13 +2233,43 @@ impl UpstreamExecutor {
             let resp = match self.send_guarded(req).await {
                 Ok(r) => r,
                 Err(err_str) => {
+                    let is_transport_connect_err = is_network_transport_connect_error(&err_str);
                     last_error = format!("Network error with {}: {}", key.id, err_str);
                     last_kind = GatewayErrorKind::UpstreamUnavailable;
                     attempt_kinds.push(last_kind.clone());
-                    self.pool.record_error(&key.id, PoolErrorType::NetworkError);
+
+                    // Key state protection: if failure is purely network connect/transport,
+                    // record transient failure on the key without poisoning its cooldown status.
+                    if is_transport_connect_err {
+                        self.pool.record_transient_failure(&key.id);
+                        consecutive_network_failures += 1;
+                    } else {
+                        self.pool.record_error(&key.id, PoolErrorType::NetworkError);
+                        consecutive_network_failures = 0;
+                    }
+
                     if let (Some(eg_pool), Some(eg_entry)) = (&self.egress_pool, &egress_entry) {
                         eg_pool.record_transient_failure(&eg_entry.id);
                     }
+
+                    // Network Circuit Breaker: if 3 consecutive attempts across distinct keys
+                    // fail with wire/connection failures, abort failover storm immediately.
+                    if consecutive_network_failures >= 3 && self.pool.total_key_count() > 1 {
+                        tracing::warn!(
+                            consecutive = consecutive_network_failures,
+                            key_id = %key.id,
+                            "Network connection circuit breaker tripped: aborting futile key failover"
+                        );
+                        self.emit_both(&key.id, attempt_idx, None, last_kind.clone(), last_error.clone(), None, attempt_start.elapsed());
+                        let aggregated_error = format!("{}{}", summarize_attempt_failures(&attempt_kinds), if last_error.is_empty() { String::new() } else { format!(": {}", last_error) });
+                        return Err(CoreError::AllRetriesFailed {
+                            retries: attempt + 1,
+                            attempted_keys,
+                            last_error: aggregated_error,
+                            kind: last_kind,
+                        });
+                    }
+
                     if let Some(delay) = transient_retry_delay(&self.pool, &key.id, attempt, max_attempts, None) {
                         attempted_keys.retain(|id| id != &key.id);
                         self.emit_both(&key.id, attempt_idx, None, last_kind.clone(), last_error.clone(), None, attempt_start.elapsed());

@@ -978,7 +978,7 @@ async fn test_executor_mixed_lock_contention_and_network_timeout() {
     let pool = Arc::new(KeyPool::new("prov", RoutingStrategy::RoundRobin));
     // Key 1: Antigravity key with lock contention (remains Active)
     let key1 = ApiKeyEntry::new_antigravity("key-1-lock", mgr, 1, 10);
-    // Key 2: Regular key pointing to unreachable network target (will cool down after reaching threshold)
+    // Key 2: Regular key pointing to unreachable network target (which records transient failure on network disconnect)
     let key2 = ApiKeyEntry::new("key-2-net", "sk-test", 1, 10);
     key2.stats.consecutive_failures.store(2, std::sync::atomic::Ordering::Relaxed);
     pool.add_key(key1);
@@ -1000,9 +1000,9 @@ async fn test_executor_mixed_lock_contention_and_network_timeout() {
     let k1 = pool.snapshot_keys().into_iter().find(|k| k.id == "key-1-lock").unwrap();
     assert_eq!(k1.current_state(), KeyState::Active);
 
-    // Key 2 must be CoolingDown (network error cooled it)
+    // Key 2 must remain Active because pure connection refused is network-level and must not poison the key into Cooldown
     let k2 = pool.snapshot_keys().into_iter().find(|k| k.id == "key-2-net").unwrap();
-    assert_eq!(k2.current_state(), KeyState::CoolingDown);
+    assert_eq!(k2.current_state(), KeyState::Active);
 }
 
 #[tokio::test]

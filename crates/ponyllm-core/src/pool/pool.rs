@@ -522,6 +522,15 @@ impl KeyPool {
         }
     }
 
+    /// Record a transient network failure on a key without counting towards
+    /// cooldown isolation penalties (protects healthy credentials during network outages).
+    pub fn record_transient_failure(&self, key_id: &str) {
+        let keys = self.keys.read();
+        if let Some(entry) = keys.iter().find(|k| k.id == key_id) {
+            entry.record_transient_failure();
+        }
+    }
+
     /// Record an error on a key
     pub fn record_error(&self, key_id: &str, error: PoolErrorType) {
         let keys = self.keys.read();
