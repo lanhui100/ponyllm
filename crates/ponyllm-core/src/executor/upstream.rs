@@ -3273,11 +3273,9 @@ mod pool_wait_tests {
         let pool = Arc::new(KeyPool::new("p", RoutingStrategy::RoundRobin));
         pool.add_key(ApiKeyEntry::new("k1", "sk-1", 1, 10));
         pool.add_key(ApiKeyEntry::new("k2", "sk-2", 1, 10));
-        // 秒级冷却（≥3s）：避免"设冷却→断言调用"间隙在重载 runner 上超过
-        // 亚秒冷却窗口、键提前回填（exhausted 退化 → maybe_window_wait 返回
-        // false）导致的计时抖动（2026-09-30 macOS arm64 runner 实证一次）。
-        pool.set_key_cooldown("k1", Duration::from_secs(3));
-        pool.set_key_cooldown("k2", Duration::from_secs(6));
+        // 秒级冷却（≥10s）：避免在极慢或高负载的 CI runner 上因时钟跨度导致冷却提前恢复
+        pool.set_key_cooldown("k1", Duration::from_secs(10));
+        pool.set_key_cooldown("k2", Duration::from_secs(20));
         // A budget must be configured for the window-shaped hold to apply.
         let executor = UpstreamExecutor::new(pool, 1).with_rate_limits(Some(RateLimits::default()));
 
@@ -3331,9 +3329,8 @@ mod pool_wait_tests {
         // when a budget is configured.
         let pool = Arc::new(KeyPool::new("p", RoutingStrategy::RoundRobin));
         pool.add_key(ApiKeyEntry::new("k1", "sk-1", 1, 10));
-        // 秒级冷却：同上（亚秒冷却在重载 runner 上会被设-调间隙吃光，
-        // 键提前回填导致断言抖失败）。
-        pool.set_key_cooldown("k1", Duration::from_millis(2500));
+        // 秒级冷却（≥10s）：避免在极慢或高负载的 CI runner 上因时钟跨度导致冷却提前恢复
+        pool.set_key_cooldown("k1", Duration::from_secs(10));
         let executor = UpstreamExecutor::new(pool, 1).with_rate_limits(Some(RateLimits::default()));
         let mut done = false;
         let mut keys: Vec<String> = Vec::new();
