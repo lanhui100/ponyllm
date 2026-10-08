@@ -2917,10 +2917,11 @@ impl AppState {
                     })
                     .unwrap_or(auto_models.len() + 10);
 
-                // 4. Model tier: Flagship (0) -> Standard (1) -> Light (2)
+                // 4. Model tier: Standard (0) -> Flagship (1) -> Light (2)
+                // Default Standard tier is tried first for general auto queries, elevating to Flagship when needed
                 let tier_rank = match c.tier {
-                    ModelTier::Flagship => 0,
-                    ModelTier::Standard => 1,
+                    ModelTier::Standard => 0,
+                    ModelTier::Flagship => 1,
                     ModelTier::Light => 2,
                 };
 
