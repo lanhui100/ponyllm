@@ -166,6 +166,10 @@ impl CoreError {
             CoreError::Internal(msg) if msg.starts_with("Antigravity deterministic empty STOP") => {
                 GatewayErrorKind::UpstreamUnavailable
             }
+            CoreError::Internal(msg) if msg.contains("Antigravity OAuth refresh network error")
+                || msg.contains("Antigravity OAuth refresh returned non-success status") => {
+                GatewayErrorKind::UpstreamUnavailable
+            }
             _ => GatewayErrorKind::Internal,
         }
     }
@@ -202,6 +206,16 @@ mod tests {
         };
         assert_eq!(err.kind(), GatewayErrorKind::LockContention);
         assert_eq!(err.kind().kind_name(), "lock_contention");
+        assert!(err.kind().triggers_failover());
+    }
+
+    #[test]
+    fn test_antigravity_oauth_refresh_network_error_classifies_as_upstream_unavailable() {
+        let err = CoreError::Internal(
+            "Antigravity OAuth refresh network error for 'ag-test@gmail.com': error sending request for url (https://oauth2.googleapis.com/token)".to_string()
+        );
+        assert_eq!(err.kind(), GatewayErrorKind::UpstreamUnavailable);
+        assert_eq!(err.kind().kind_name(), "upstream_unavailable");
         assert!(err.kind().triggers_failover());
     }
 
