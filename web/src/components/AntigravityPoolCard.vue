@@ -614,9 +614,9 @@ const totalColumns = computed(() => {
   return Math.max(10, cols);
 });
 
-// 每 5 行为一组，支持垂直排列多组（当前展示 3 组）
+// 每 5 行为一组，支持垂直排列多组（优化为展示 2 组）
 const ROWS_PER_GROUP = 5;
-const GROUP_COUNT = 3;
+const GROUP_COUNT = 2;
 const slotsPerGroup = computed(() => totalColumns.value * ROWS_PER_GROUP);
 const totalSlots = computed(() => slotsPerGroup.value * GROUP_COUNT);
 
@@ -1093,13 +1093,13 @@ function waterBarWidth(percent: number | null): string {
       </div>
     </div>
 
-    <!-- 指标布局区：左侧账户状态，右侧现代精简指标 -->
-    <div class="grid grid-cols-1 lg:grid-cols-12 gap-4 items-stretch">
-      <!-- 账户可用性状态与矩阵槽位 (占 4 列) -->
-      <div class="lg:col-span-4 flex min-h-0 flex-col justify-between p-3 rounded-lg bg-slate-50/60 border border-slate-100/80">
+    <!-- 主内容区：左侧账户状态与矩阵（无嵌套卡片外框），右侧算力值面板重新布局 -->
+    <div class="grid grid-cols-1 lg:grid-cols-12 gap-6 items-stretch">
+      <!-- 账户可用性状态与矩阵槽位 (占 4 列，拆除内层边框与背景) -->
+      <div class="lg:col-span-4 flex min-h-0 flex-col justify-between py-1">
         <div class="flex shrink-0 self-start w-full items-center justify-between text-xs text-slate-500 mb-2 font-medium">
-          <span class="inline-flex items-center gap-1 text-slate-700">
-            <Icons name="check" size="14" class="text-slate-700" />
+          <span class="inline-flex items-center gap-1.5 text-slate-700 font-semibold">
+            <Icons name="check" size="14" class="text-emerald-600" />
             账户可用性状态
           </span>
           <span
@@ -1129,7 +1129,7 @@ function waterBarWidth(percent: number | null): string {
             </div>
           </div>
 
-          <!-- 绝对严格等距矩阵：每 5 行为一组垂直排列，新增一组，外层留足 p-1 与 overflow-visible 避免边缘放大切割 -->
+          <!-- 绝对严格等距矩阵：每 5 行为一组垂直排列（2组），外层留足 p-1 与 overflow-visible 避免边缘放大切割 -->
           <div ref="gridContainerRef" class="my-2.5 w-full overflow-x-auto overflow-y-visible p-1 space-y-2">
             <div
               v-for="(group, gIdx) in matrixGroups"
@@ -1190,57 +1190,32 @@ function waterBarWidth(percent: number | null): string {
         </div>
       </div>
 
-      <!-- 右侧现代精简排版：标题置顶，上方剩余空间居中放数字，底部对齐周期测定与容量水位 (占 8 列) -->
-      <div class="lg:col-span-8 flex flex-col justify-between">
-        <!-- 上方：周期基准用量（标题置顶，数字在剩余空间居中，左右留出边距） -->
-        <div class="flex-1 flex flex-col px-3 sm:px-4 pt-1">
-          <div class="flex items-center justify-between gap-1 text-xs text-slate-500 font-medium shrink-0">
-            <div class="flex items-center gap-1">
-              <Icons name="activity" size="13" class="text-slate-700" />
-              周期基准用量
-            </div>
-            <span class="text-[11px] text-slate-400 font-normal">多账号真实测定的单账号周期用量基准</span>
+      <!-- 右侧算力值核心面板 (占 8 列)：重构布局，分层展现「实时余量水位」与「多周期基准用量」，贴近用户直觉 -->
+      <div class="lg:col-span-8 flex flex-col justify-between pl-0 lg:pl-2">
+        <!-- 上层：实时容量水位条（5小时与周度） -->
+        <div class="mb-4">
+          <div class="flex items-center justify-between text-xs text-slate-500 mb-2 font-medium">
+            <span class="inline-flex items-center gap-1.5 text-slate-700 font-semibold">
+              <Icons name="sparkles" size="13" class="text-amber-500" />
+              实时额度水位
+            </span>
+            <span class="text-[11px] text-slate-400">基于当前 {{ activeKeys.length }} 个就绪账号剩余额度</span>
           </div>
-          <div class="flex-1 flex flex-col justify-center py-2">
-            <div class="grid grid-cols-3 gap-3">
-              <div class="flex flex-col">
-                <span class="text-[10px] text-slate-400 mb-1.5">5小时用量</span>
-                <span class="text-4xl sm:text-5xl font-bold font-mono tracking-tight text-slate-900 tabular-nums leading-none">
-                  {{ factualCycleSummary.avg5h > 0 ? formatTokenHuman(factualCycleSummary.avg5h) : '--' }}
-                </span>
-              </div>
-              <div class="flex flex-col">
-                <span class="text-[10px] text-slate-400 mb-1.5">自然周用量</span>
-                <span class="text-4xl sm:text-5xl font-bold font-mono tracking-tight text-slate-900 tabular-nums leading-none">
-                  {{ factualCycleSummary.avgWeekly > 0 ? formatTokenHuman(factualCycleSummary.avgWeekly) : '--' }}
-                </span>
-              </div>
-              <div class="flex flex-col">
-                <span class="text-[10px] text-slate-400 mb-1.5">自然月用量</span>
-                <span class="text-4xl sm:text-5xl font-bold font-mono tracking-tight text-slate-900 tabular-nums leading-none">
-                  {{ factualCycleSummary.avgMonthly > 0 ? formatTokenHuman(factualCycleSummary.avgMonthly) : '--' }}
-                </span>
-              </div>
-            </div>
-          </div>
-        </div>
 
-        <!-- 底部区：容量水位 (拆分为 5小时 与 周度 两个独立小面板) + 周期统计3个小面板紧贴底部 -->
-        <div class="flex flex-col gap-3 mt-auto">
-          <!-- 容量水位：5小时窗口 与 周度窗口 独立双面板 -->
-          <div class="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <!-- 5小时容量水位小面板 -->
-            <div class="p-2.5 rounded-lg bg-slate-50/60 border border-slate-100/80 flex flex-col justify-between">
-              <div class="flex items-center justify-between text-xs text-slate-500 mb-1 font-medium">
-                <span class="inline-flex items-center gap-1 text-slate-700">
-                  <Icons name="sparkles" size="13" class="text-slate-700" />
-                  5小时窗口水位
-                </span>
-                <span class="font-mono font-semibold tabular-nums text-right shrink-0" data-testid="gemini-h5-percent" :class="getProgressColor(aggregatedQuotas.gemini.h5Percent).text">
+            <div class="p-3 rounded-lg bg-slate-50/70 border border-slate-100/90 flex flex-col justify-between shadow-2xs hover:border-slate-200/80 transition-colors">
+              <div class="flex items-center justify-between text-xs mb-1.5">
+                <span class="font-medium text-slate-700">5小时窗口</span>
+                <span
+                  class="font-mono font-bold tabular-nums text-sm shrink-0"
+                  data-testid="gemini-h5-percent"
+                  :class="getProgressColor(aggregatedQuotas.gemini.h5Percent).text"
+                >
                   {{ formatWaterPercent(aggregatedQuotas.gemini.h5Percent) }}
                 </span>
               </div>
-              <div class="space-y-1">
+              <div class="space-y-1.5">
                 <div class="w-full bg-slate-200/80 rounded-full h-1.5 overflow-hidden">
                   <div
                     class="h-full rounded-full transition-all duration-300"
@@ -1248,25 +1223,25 @@ function waterBarWidth(percent: number | null): string {
                     :style="{ width: waterBarWidth(aggregatedQuotas.gemini.h5Percent) }"
                   />
                 </div>
-                <div class="flex items-center justify-between text-[10px] text-slate-400">
-                  <span>基于当前 {{ activeKeys.length }} 个就绪账号剩余额度</span>
-                  <span class="truncate ml-1">{{ aggregatedQuotas.gemini.h5Hint }}</span>
+                <div class="text-[10px] text-slate-400 text-right truncate">
+                  {{ aggregatedQuotas.gemini.h5Hint }}
                 </div>
               </div>
             </div>
 
             <!-- 周度容量水位小面板 -->
-            <div class="p-2.5 rounded-lg bg-slate-50/60 border border-slate-100/80 flex flex-col justify-between">
-              <div class="flex items-center justify-between text-xs text-slate-500 mb-1 font-medium">
-                <span class="inline-flex items-center gap-1 text-slate-700">
-                  <Icons name="sparkles" size="13" class="text-slate-700" />
-                  周度窗口水位
-                </span>
-                <span class="font-mono font-semibold tabular-nums text-right shrink-0" data-testid="gemini-weekly-percent" :class="getProgressColor(aggregatedQuotas.gemini.weeklyPercent).text">
+            <div class="p-3 rounded-lg bg-slate-50/70 border border-slate-100/90 flex flex-col justify-between shadow-2xs hover:border-slate-200/80 transition-colors">
+              <div class="flex items-center justify-between text-xs mb-1.5">
+                <span class="font-medium text-slate-700">周度窗口</span>
+                <span
+                  class="font-mono font-bold tabular-nums text-sm shrink-0"
+                  data-testid="gemini-weekly-percent"
+                  :class="getProgressColor(aggregatedQuotas.gemini.weeklyPercent).text"
+                >
                   {{ formatWaterPercent(aggregatedQuotas.gemini.weeklyPercent) }}
                 </span>
               </div>
-              <div class="space-y-1">
+              <div class="space-y-1.5">
                 <div class="w-full bg-slate-200/80 rounded-full h-1.5 overflow-hidden">
                   <div
                     class="h-full rounded-full transition-all duration-300"
@@ -1274,91 +1249,143 @@ function waterBarWidth(percent: number | null): string {
                     :style="{ width: waterBarWidth(aggregatedQuotas.gemini.weeklyPercent) }"
                   />
                 </div>
-                <div class="flex items-center justify-between text-[10px] text-slate-400">
-                  <span>周配额蓄水</span>
-                  <span class="truncate ml-1">{{ aggregatedQuotas.gemini.weeklyHint }}</span>
+                <div class="text-[10px] text-slate-400 text-right truncate">
+                  {{ aggregatedQuotas.gemini.weeklyHint }}
                 </div>
               </div>
             </div>
           </div>
+        </div>
 
-          <!-- 5小时 / 自然周 / 自然月 测定基准 (输入大字体 + 右侧紧凑三要素，底部对齐) -->
-          <div class="grid grid-cols-1 sm:grid-cols-3 gap-2">
-          <!-- 5小时 -->
-          <div class="p-2.5 rounded-lg bg-slate-50/60 border border-slate-100/80 flex flex-col justify-between">
-            <div class="text-xs font-semibold text-slate-700 mb-1">5小时</div>
-            <div class="flex items-center justify-between gap-2">
-              <div class="flex flex-col min-w-0">
-                <span class="text-[10px] text-slate-400">输入 Token</span>
-                <span class="text-xl font-bold font-mono tracking-tight text-slate-800 tabular-nums">
-                  {{ factualCycleSummary.avgPrompt5h > 0 ? formatTokenHuman(factualCycleSummary.avgPrompt5h) : (factualCycleSummary.avg5h > 0 ? formatTokenHuman(factualCycleSummary.avg5h) : '--') }}
+        <!-- 下层：周期基准用量及核心四要素 (5小时 / 自然周 / 自然月) -->
+        <div class="flex flex-col mt-auto pt-2 border-t border-slate-100">
+          <div class="flex items-center justify-between text-xs text-slate-500 mb-2 font-medium">
+            <span class="inline-flex items-center gap-1.5 text-slate-700 font-semibold">
+              <Icons name="activity" size="13" class="text-sky-600" />
+              周期基准用量
+            </span>
+            <span class="text-[11px] text-slate-400 font-normal">多账号真实测定的单账号周期用量基准</span>
+          </div>
+
+          <div class="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+            <!-- 5小时基准卡片 -->
+            <div class="p-3 rounded-lg bg-slate-50/70 border border-slate-100/90 flex flex-col justify-between shadow-2xs hover:border-slate-200/80 transition-colors">
+              <div class="flex items-center justify-between mb-1.5">
+                <span class="text-xs font-semibold text-slate-800">5小时</span>
+                <span class="text-[10px] font-medium text-slate-400">单账号基准</span>
+              </div>
+              <div class="mb-2">
+                <span class="text-[10px] text-slate-400 block mb-0.5">基准用量</span>
+                <span class="text-2xl font-bold font-mono tracking-tight text-slate-900 tabular-nums leading-none">
+                  {{ factualCycleSummary.avg5h > 0 ? formatTokenHuman(factualCycleSummary.avg5h) : '--' }}
                 </span>
               </div>
-              <div class="flex flex-col text-[11px] font-mono text-slate-600 space-y-0.5 shrink-0 text-right">
-                <div class="flex items-center justify-end gap-1" title="平均单账号 5h 输出 Completion Token">
-                  <Icons name="arrow-up-right" size="11" class="text-amber-600" />
+              <div class="pt-2 border-t border-slate-200/40 space-y-1 text-[11px] font-mono text-slate-600">
+                <div class="flex items-center justify-between">
+                  <span class="text-[10px] text-slate-400 font-sans">输入</span>
+                  <span>{{ factualCycleSummary.avgPrompt5h > 0 ? formatTokenHuman(factualCycleSummary.avgPrompt5h) : '--' }}</span>
+                </div>
+                <div class="flex items-center justify-between">
+                  <span class="text-[10px] text-slate-400 font-sans flex items-center gap-1">
+                    <Icons name="arrow-up-right" size="11" class="text-amber-600" />
+                    输出
+                  </span>
                   <span>{{ factualCycleSummary.avgComp5h > 0 ? formatTokenHuman(factualCycleSummary.avgComp5h) : '--' }}</span>
                 </div>
-                <div class="flex items-center justify-end gap-1" title="平均单账号 5h 缓存命中 Token">
-                  <Icons name="database" size="11" class="text-sky-600" />
+                <div class="flex items-center justify-between">
+                  <span class="text-[10px] text-slate-400 font-sans flex items-center gap-1">
+                    <Icons name="database" size="11" class="text-sky-600" />
+                    缓存
+                  </span>
                   <span>{{ factualCycleSummary.avgCached5h > 0 ? formatTokenHuman(factualCycleSummary.avgCached5h) : '--' }}</span>
                 </div>
-                <div class="flex items-center justify-end gap-1" title="平均单账号 5h 承载调用次数">
-                  <Icons name="repeat" size="11" class="text-purple-600" />
+                <div class="flex items-center justify-between">
+                  <span class="text-[10px] text-slate-400 font-sans flex items-center gap-1">
+                    <Icons name="repeat" size="11" class="text-purple-600" />
+                    调用
+                  </span>
                   <span>{{ factualCycleSummary.avgRequests5h > 0 ? `${factualCycleSummary.avgRequests5h}次` : '--' }}</span>
                 </div>
               </div>
             </div>
-          </div>
 
-          <!-- 自然周 -->
-          <div class="p-2.5 rounded-lg bg-slate-50/60 border border-slate-100/80 flex flex-col justify-between">
-            <div class="text-xs font-semibold text-slate-700 mb-1">自然周</div>
-            <div class="flex items-center justify-between gap-2">
-              <div class="flex flex-col min-w-0">
-                <span class="text-[10px] text-slate-400">输入 Token</span>
-                <span class="text-xl font-bold font-mono tracking-tight text-slate-800 tabular-nums">
-                  {{ factualCycleSummary.avgPromptWeekly > 0 ? formatTokenHuman(factualCycleSummary.avgPromptWeekly) : (factualCycleSummary.avgWeekly > 0 ? formatTokenHuman(factualCycleSummary.avgWeekly) : '--') }}
+            <!-- 自然周基准卡片 -->
+            <div class="p-3 rounded-lg bg-slate-50/70 border border-slate-100/90 flex flex-col justify-between shadow-2xs hover:border-slate-200/80 transition-colors">
+              <div class="flex items-center justify-between mb-1.5">
+                <span class="text-xs font-semibold text-slate-800">自然周</span>
+                <span class="text-[10px] font-medium text-slate-400">单账号基准</span>
+              </div>
+              <div class="mb-2">
+                <span class="text-[10px] text-slate-400 block mb-0.5">基准用量</span>
+                <span class="text-2xl font-bold font-mono tracking-tight text-slate-900 tabular-nums leading-none">
+                  {{ factualCycleSummary.avgWeekly > 0 ? formatTokenHuman(factualCycleSummary.avgWeekly) : '--' }}
                 </span>
               </div>
-              <div class="flex flex-col text-[11px] font-mono text-slate-600 space-y-0.5 shrink-0 text-right">
-                <div class="flex items-center justify-end gap-1" title="单账号周度输出 Token">
-                  <Icons name="arrow-up-right" size="11" class="text-amber-600" />
+              <div class="pt-2 border-t border-slate-200/40 space-y-1 text-[11px] font-mono text-slate-600">
+                <div class="flex items-center justify-between">
+                  <span class="text-[10px] text-slate-400 font-sans">输入</span>
+                  <span>{{ factualCycleSummary.avgPromptWeekly > 0 ? formatTokenHuman(factualCycleSummary.avgPromptWeekly) : '--' }}</span>
+                </div>
+                <div class="flex items-center justify-between">
+                  <span class="text-[10px] text-slate-400 font-sans flex items-center gap-1">
+                    <Icons name="arrow-up-right" size="11" class="text-amber-600" />
+                    输出
+                  </span>
                   <span>{{ factualCycleSummary.avgCompWeekly > 0 ? formatTokenHuman(factualCycleSummary.avgCompWeekly) : '--' }}</span>
                 </div>
-                <div class="flex items-center justify-end gap-1" title="单账号周度缓存命中 Token">
-                  <Icons name="database" size="11" class="text-sky-600" />
+                <div class="flex items-center justify-between">
+                  <span class="text-[10px] text-slate-400 font-sans flex items-center gap-1">
+                    <Icons name="database" size="11" class="text-sky-600" />
+                    缓存
+                  </span>
                   <span>{{ factualCycleSummary.avgCachedWeekly > 0 ? formatTokenHuman(factualCycleSummary.avgCachedWeekly) : '--' }}</span>
                 </div>
-                <div class="flex items-center justify-end gap-1" title="单账号周度累计调用次数">
-                  <Icons name="repeat" size="11" class="text-purple-600" />
+                <div class="flex items-center justify-between">
+                  <span class="text-[10px] text-slate-400 font-sans flex items-center gap-1">
+                    <Icons name="repeat" size="11" class="text-purple-600" />
+                    调用
+                  </span>
                   <span>{{ factualCycleSummary.avgRequestsWeekly > 0 ? `${factualCycleSummary.avgRequestsWeekly}次` : '--' }}</span>
                 </div>
               </div>
             </div>
-          </div>
 
-          <!-- 自然月 -->
-          <div class="p-2.5 rounded-lg bg-slate-50/60 border border-slate-100/80 flex flex-col justify-between">
-            <div class="text-xs font-semibold text-slate-700 mb-1">自然月</div>
-            <div class="flex items-center justify-between gap-2">
-              <div class="flex flex-col min-w-0">
-                <span class="text-[10px] text-slate-400">输入 Token</span>
-                <span class="text-xl font-bold font-mono tracking-tight text-slate-800 tabular-nums">
-                  {{ factualCycleSummary.avgPromptMonthly > 0 ? formatTokenHuman(factualCycleSummary.avgPromptMonthly) : (factualCycleSummary.avgMonthly > 0 ? formatTokenHuman(factualCycleSummary.avgMonthly) : '--') }}
+            <!-- 自然月基准卡片 -->
+            <div class="p-3 rounded-lg bg-slate-50/70 border border-slate-100/90 flex flex-col justify-between shadow-2xs hover:border-slate-200/80 transition-colors">
+              <div class="flex items-center justify-between mb-1.5">
+                <span class="text-xs font-semibold text-slate-800">自然月</span>
+                <span class="text-[10px] font-medium text-slate-400">单账号基准</span>
+              </div>
+              <div class="mb-2">
+                <span class="text-[10px] text-slate-400 block mb-0.5">基准用量</span>
+                <span class="text-2xl font-bold font-mono tracking-tight text-slate-900 tabular-nums leading-none">
+                  {{ factualCycleSummary.avgMonthly > 0 ? formatTokenHuman(factualCycleSummary.avgMonthly) : '--' }}
                 </span>
               </div>
-              <div class="flex flex-col text-[11px] font-mono text-slate-600 space-y-0.5 shrink-0 text-right">
-                <div class="flex items-center justify-end gap-1" title="单账号月度输出 Token">
-                  <Icons name="arrow-up-right" size="11" class="text-amber-600" />
+              <div class="pt-2 border-t border-slate-200/40 space-y-1 text-[11px] font-mono text-slate-600">
+                <div class="flex items-center justify-between">
+                  <span class="text-[10px] text-slate-400 font-sans">输入</span>
+                  <span>{{ factualCycleSummary.avgPromptMonthly > 0 ? formatTokenHuman(factualCycleSummary.avgPromptMonthly) : '--' }}</span>
+                </div>
+                <div class="flex items-center justify-between">
+                  <span class="text-[10px] text-slate-400 font-sans flex items-center gap-1">
+                    <Icons name="arrow-up-right" size="11" class="text-amber-600" />
+                    输出
+                  </span>
                   <span>{{ factualCycleSummary.avgCompMonthly > 0 ? formatTokenHuman(factualCycleSummary.avgCompMonthly) : '--' }}</span>
                 </div>
-                <div class="flex items-center justify-end gap-1" title="单账号月度缓存命中 Token">
-                  <Icons name="database" size="11" class="text-sky-600" />
+                <div class="flex items-center justify-between">
+                  <span class="text-[10px] text-slate-400 font-sans flex items-center gap-1">
+                    <Icons name="database" size="11" class="text-sky-600" />
+                    缓存
+                  </span>
                   <span>{{ factualCycleSummary.avgCachedMonthly > 0 ? formatTokenHuman(factualCycleSummary.avgCachedMonthly) : '--' }}</span>
                 </div>
-                <div class="flex items-center justify-end gap-1" title="单账号月度累计调用次数">
-                  <Icons name="repeat" size="11" class="text-purple-600" />
+                <div class="flex items-center justify-between">
+                  <span class="text-[10px] text-slate-400 font-sans flex items-center gap-1">
+                    <Icons name="repeat" size="11" class="text-purple-600" />
+                    调用
+                  </span>
                   <span>{{ factualCycleSummary.avgRequestsMonthly > 0 ? `${factualCycleSummary.avgRequestsMonthly}次` : '--' }}</span>
                 </div>
               </div>
@@ -1367,7 +1394,6 @@ function waterBarWidth(percent: number | null): string {
         </div>
       </div>
     </div>
-  </div>
 
     <!-- 单账号专属四要素精确画像抽屉/展开区 (Swiss Minimalist Refined) -->
     <div
