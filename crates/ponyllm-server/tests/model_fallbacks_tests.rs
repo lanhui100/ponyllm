@@ -94,3 +94,72 @@ async fn test_model_fallbacks_chain_and_cycle_prevention() {
     assert_eq!(targets[2].physical_model, "model-c");
 }
 
+#[tokio::test]
+async fn test_gemini_38_flash_multiprovider_deepseek_fallbacks() {
+    let mut config = GatewayConfig::default();
+
+    let antigravity_prov = ProviderConfig {
+        egress_pool: vec![],
+        egress_strategy: "round_robin".to_string(),
+        base_url: "https://antigravity.example.com".to_string(),
+        default_model: "gemini-3.8-flash".to_string(),
+        strategy: "latency".to_string(),
+        models: vec!["gemini-3.8-flash".to_string()],
+        model_specs: vec![
+            ModelSpec {
+                name: "gemini-3.8-flash".to_string(),
+                fallbacks: vec![
+                    "deepseek-v4-flash".to_string(),
+                    "deepseek-flash".to_string(),
+                ],
+                ..ModelSpec::default()
+            },
+        ],
+        ..ProviderConfig::default()
+    };
+
+    let deepseek_prov = ProviderConfig {
+        egress_pool: vec![],
+        egress_strategy: "round_robin".to_string(),
+        base_url: "https://deepseek.example.com".to_string(),
+        default_model: "deepseek-flash".to_string(),
+        strategy: "latency".to_string(),
+        models: vec![
+            "deepseek-v4-flash".to_string(),
+            "deepseek-flash".to_string(),
+        ],
+        model_specs: vec![
+            ModelSpec {
+                name: "deepseek-v4-flash".to_string(),
+                ..ModelSpec::default()
+            },
+            ModelSpec {
+                name: "deepseek-flash".to_string(),
+                ..ModelSpec::default()
+            },
+        ],
+        ..ProviderConfig::default()
+    };
+
+    config.providers.insert("antigravity".to_string(), antigravity_prov);
+    config.providers.insert("deepseek".to_string(), deepseek_prov);
+
+    let state = AppState::new(config);
+
+    let parsed = ParsedRequestModel::parse("antigravity/gemini-3.8-flash");
+    let targets = state
+        .resolve_routed_targets(&parsed, Some(GatewayRoutingStrategy::Speed))
+        .unwrap();
+
+    assert_eq!(targets.len(), 3, "Expected 3 targets: primary + 2 fallbacks");
+
+    assert_eq!(targets[0].provider_name, "antigravity");
+    assert_eq!(targets[0].physical_model, "gemini-3.8-flash");
+
+    assert_eq!(targets[1].provider_name, "deepseek");
+    assert_eq!(targets[1].physical_model, "deepseek-v4-flash");
+
+    assert_eq!(targets[2].provider_name, "deepseek");
+    assert_eq!(targets[2].physical_model, "deepseek-flash");
+}
+
