@@ -3,7 +3,6 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { createApp, nextTick } from 'vue';
 import ModelSubSection from './ModelSubSection.vue';
 import type { ModelView } from '../../types/admin';
-import { adminApi } from '../../lib/adminApi';
 
 let upstreamImpl: () => Promise<{ provider: string; source: string; models: { id: string }[] }>;
 let proxyStatusImpl: () => Promise<any>;
@@ -57,11 +56,32 @@ describe('ModelSubSection model form', () => {
     });
   });
 
-  it('shows sampling/pricing badges for customized models', async () => {
-    const { container, app } = mountSection({ defaultExpanded: true });
+  it('cleans up extra badges on rows, retains tier and shows free badge when free', async () => {
+    const freeModels: ModelView[] = [
+      {
+        ...mockModels[0],
+        name: 'mimo-free',
+        tier: 'Standard',
+      },
+      {
+        ...mockModels[0],
+        name: 'gpt-4o',
+        tier: 'Flagship',
+        input_price: 1.0,
+      },
+    ];
+    const { container, app } = mountSection({ defaultExpanded: true, models: freeModels });
     await nextTick();
-    expect(container.textContent).toContain('T=0.7');
-    expect(container.textContent).toContain('￥定制');
+    // 验证多余徽标已被清理
+    expect(container.textContent).not.toContain('T=0.7');
+    expect(container.textContent).not.toContain('￥定制');
+    // 验证保留 Tier（且中文正确）
+    expect(container.textContent).toContain('主力');
+    expect(container.textContent).toContain('旗舰');
+    // 验证免费徽标仅针对免费模型出现
+    const freeBadges = container.querySelectorAll('[data-testid="model-row-free"]');
+    expect(freeBadges.length).toBe(1);
+    expect(freeBadges[0].textContent).toContain('免费');
     app.unmount();
     document.body.removeChild(container);
   });
@@ -270,24 +290,46 @@ describe('ModelSubSection model form', () => {
     expect(created).not.toBeNull();
     expect(created.priority).toBe(10);
 
-    // Reload with a prioritized model -> badge appears.
-    const priorityModel: ModelView[] = [{ ...mockModels[0], priority: 10 }];
-    const container2 = document.createElement('div');
-    document.body.appendChild(container2);
-    const app2 = createApp(ModelSubSection, {
-      providerName: 'openai',
-      models: priorityModel,
-      adminWriteEnabled: true,
-      defaultExpanded: true,
-    });
-    app2.mount(container2);
+    app.unmount();
+    document.body.removeChild(container);
+  });
+
+  it('correctly normalizes model tier when editing a model (Standard -> Smart, Flagship -> Large, Light -> Fast)', async () => {
+    const testModels: ModelView[] = [
+      {
+        ...mockModels[0],
+        name: 'model-flagship',
+        tier: 'Flagship',
+      },
+      {
+        ...mockModels[0],
+        name: 'model-light',
+        tier: 'Light',
+      },
+    ];
+    const { container, app } = mountSection({ defaultExpanded: true, models: testModels });
     await nextTick();
-    expect(container2.querySelector('[data-testid="model-row-priority"]')?.textContent).toContain('10');
+
+    // 找到第一个模型 (Flagship) 的编辑按钮并点击
+    const editBtns = container.querySelectorAll('[data-testid="edit-model-btn"]');
+    expect(editBtns.length).toBe(2);
+    (editBtns[0] as HTMLButtonElement).click();
+    await nextTick();
+
+    // 检查 Flagship 映射到了 Large 按钮激活
+    const flagshipBtn = container.querySelector('[data-testid="tier-btn-large"]') as HTMLButtonElement;
+    expect(flagshipBtn.className).toContain('bg-slate-900');
+
+    // 点击第二个模型 (Light) 的编辑按钮
+    (editBtns[1] as HTMLButtonElement).click();
+    await nextTick();
+
+    // 检查 Light 映射到了 Fast 按钮激活
+    const lightBtn = container.querySelector('[data-testid="tier-btn-fast"]') as HTMLButtonElement;
+    expect(lightBtn.className).toContain('bg-slate-900');
 
     app.unmount();
     document.body.removeChild(container);
-    app2.unmount();
-    document.body.removeChild(container2);
   });
 
   describe('proxy fallback resolution (red phase acceptance tests)', () => {

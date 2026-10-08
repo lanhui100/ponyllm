@@ -194,10 +194,9 @@ describe('Modern Minimalist UI/UX System-Wide E2E Verification Suite (WEB-07)', 
     await nextTick();
     await new Promise((r) => setTimeout(r, 20));
 
-    // 验证常用参数一等常显 (模型名、分级中文、规范大写上下文)
+    // 验证常用参数一等常显 (模型名、分级中文)
     expect(container.textContent).toContain('gpt-4o');
     expect(container.textContent).toContain('主力');
-    expect(container.textContent).toContain('128K');
 
     // 点击该模型的编辑按钮
     const editModelBtn = container.querySelector('[data-testid="edit-model-btn"]') as HTMLButtonElement;

@@ -220,6 +220,44 @@ function buildRateLimitsPayload(): { rpm?: number; tpm?: number; window_secs?: n
   return limits;
 }
 
+function normalizeTier(tier?: string | null): 'Smart' | 'Large' | 'Fast' {
+  if (!tier) return 'Smart';
+  const t = tier.toLowerCase().trim();
+  switch (t) {
+    case 'fast':
+    case 'light':
+    case 'l':
+      return 'Fast';
+    case 'large':
+    case 'flagship':
+    case 'f':
+      return 'Large';
+    case 'smart':
+    case 'standard':
+    case 's':
+    default:
+      return 'Smart';
+  }
+}
+
+function isModelFree(model: ModelView): boolean {
+  if (model.name.toLowerCase().endsWith('-free')) return true;
+  if (model.pricing_mode === 'peak_valley' && model.pricing_periods && model.pricing_periods.length > 0) {
+    return model.pricing_periods.every(
+      (p) =>
+        Math.abs(Number(p.input_price || 0)) < 1e-6 &&
+        Math.abs(Number(p.cached_price || 0)) < 1e-6 &&
+        Math.abs(Number(p.output_price || 0)) < 1e-6
+    );
+  }
+  return (
+    model.input_price != null &&
+    Math.abs(model.input_price) < 1e-6 &&
+    (model.cached_price == null || Math.abs(model.cached_price) < 1e-6) &&
+    (model.output_price == null || Math.abs(model.output_price) < 1e-6)
+  );
+}
+
 function normalizeProtocol(proto?: string | null): string {
   if (!proto) return '';
   const lower = proto.toLowerCase();
@@ -320,7 +358,7 @@ function openEditInline(model: ModelView) {
   form.value = {
     name: model.name,
     display_name: model.display_name || '',
-    tier: model.tier || 'Smart',
+    tier: normalizeTier(model.tier),
     context_window: cw,
     thinking_default: model.thinking_default || 'High',
     input_types: model.input_types && model.input_types.length > 0 ? [...model.input_types] : ['text'],
@@ -566,14 +604,6 @@ async function handleDelete(name: string) {
   }
 }
 
-function getTierBadgeVariant(tier?: string) {
-  switch (tier?.toLowerCase()) {
-    case 'fast': return 'success';
-    case 'smart': return 'default';
-    case 'large': return 'secondary';
-    default: return 'secondary';
-  }
-}
 </script>
 
 <template>
@@ -1215,99 +1245,15 @@ function getTierBadgeVariant(tier?: string) {
           <div class="flex items-center gap-2.5 min-w-0">
             <span class="font-semibold text-slate-800 text-sm truncate" :title="m.display_name ? `${m.display_name} (${m.name})` : m.name">{{ m.display_name || m.name }}</span>
             <span v-if="m.display_name" class="text-slate-400 text-xs font-mono truncate" :title="m.name">{{ m.name }}</span>
-            <!-- 模型分级与思考强度核心徽标组 (位置统一紧邻排列) -->
-            <UiBadge :variant="getTierBadgeVariant(m.tier)">
+            <!-- 模型分级徽标 (统一为灰色) -->
+            <UiBadge variant="secondary">
               {{ formatTierLabel(m.tier) }}
             </UiBadge>
 
-            <!-- 思考强度简明标记 (紧随模型分级，当非 Off 时展示微标) -->
-            <UiTooltip
-              v-if="m.thinking_default && m.thinking_default !== 'Off'"
-              :content="`思考强度预设: ${m.thinking_default}`"
-            >
-              <UiBadge variant="secondary" class="inline-flex items-center gap-1 cursor-help">
-                <Icons name="brain" size="12" />
-                {{ m.thinking_default }}
-              </UiBadge>
-            </UiTooltip>
-
-            <!-- 统一规范化上下文容量 (消除大小写混用) -->
-            <span class="inline-flex items-center px-2 py-0.5 rounded-md bg-slate-100/90 text-slate-700 text-xs font-mono font-medium border border-slate-200/60 shadow-2xs">
-              {{ formatContextWindow(m.context_window) }}
-            </span>
-
-            <!-- 多模态简明纯图标常显指示 (输入与输出分开，统一图标尺寸与胶囊高度) -->
-            <div class="hidden sm:inline-flex items-center gap-1.5 px-2 py-0.5 bg-slate-100/80 rounded-md border border-slate-200/60 shadow-2xs text-slate-500" data-testid="model-row-modalities">
-              <span class="text-3xs text-slate-500 font-medium select-none">入:</span>
-              <div class="inline-flex items-center gap-1">
-                <span v-for="t in (m.input_types && m.input_types.length > 0 ? m.input_types : ['text'])" :key="`row-in-${t}`" class="inline-flex items-center">
-                  <UiTooltip :content="`输入支持: ${getModalityName(t)}`">
-                    <Icons :name="getModalityIcon(t)" size="14" class="text-slate-600 hover:text-slate-900 transition-colors" />
-                  </UiTooltip>
-                </span>
-              </div>
-              <span class="text-slate-300 text-xs select-none">|</span>
-              <span class="text-3xs text-slate-500 font-medium select-none">出:</span>
-              <div class="inline-flex items-center gap-1">
-                <span v-for="t in (m.output_types && m.output_types.length > 0 ? m.output_types : ['text'])" :key="`row-out-${t}`" class="inline-flex items-center">
-                  <UiTooltip :content="`输出支持: ${getModalityName(t)}`">
-                    <Icons :name="getModalityIcon(t)" size="14" class="text-slate-600 hover:text-slate-900 transition-colors" />
-                  </UiTooltip>
-                </span>
-              </div>
-            </div>
-
-            <!-- 底层协议标签 (若有定制) -->
-            <UiBadge
-              v-if="m.protocol"
-              variant="secondary"
-              class="hidden md:inline-flex items-center text-3xs font-mono font-normal"
-              :title="
-                m.base_url
-                  ? `协议: ${m.protocol} · Base URL: ${m.base_url}${m.proxy ? ` · 走代理: ${m.proxy}` : ''}`
-                  : `协议: ${m.protocol}${m.proxy ? ` · 走代理: ${m.proxy}` : ''}`
-              "
-            >
-              {{ m.protocol }}
+            <!-- 免费徽标 (统一为灰色，仅在模型价格为 0 或名称以 -free 结尾时展示) -->
+            <UiBadge v-if="isModelFree(m)" variant="secondary" data-testid="model-row-free">
+              免费
             </UiBadge>
-
-            <!-- 路由优先级标记 (显式设置的跨服务商偏好) -->
-            <UiTooltip
-              v-if="m.priority != null"
-              :content="`路由优先级: ${m.priority}（数值越大，同名模型跨服务商时越优先被尝试）`"
-            >
-              <UiBadge variant="purple" class="hidden md:inline-flex items-center text-3xs font-mono font-normal cursor-help" data-testid="model-row-priority">
-                ⭐ PRIO={{ m.priority }}
-              </UiBadge>
-            </UiTooltip>
-
-            <!-- 采样/价格定制标记 -->
-            <UiTooltip
-              v-if="m.temperature != null || m.top_p != null"
-              :content="`默认采样: ${m.temperature != null ? `temperature=${m.temperature}` : ''}${m.temperature != null && m.top_p != null ? ' · ' : ''}${m.top_p != null ? `top_p=${m.top_p}` : ''} (请求显式传参时以请求为准)`"
-            >
-              <UiBadge variant="secondary" class="hidden md:inline-flex items-center text-3xs font-mono font-normal cursor-help">
-                T{{ m.temperature != null ? `=${m.temperature}` : '' }}{{ m.top_p != null ? ` P=${m.top_p}` : '' }}
-              </UiBadge>
-            </UiTooltip>
-            <UiTooltip
-              v-if="m.pricing_mode === 'peak_valley' || m.input_price != null || m.cached_price != null || m.output_price != null"
-              :content="m.pricing_mode === 'peak_valley' ? `峰谷价格: 谷价(入${m.input_price ?? '继承'}/缓${m.cached_price ?? '继承'}/出${m.output_price ?? '继承'}) + ${m.pricing_periods?.length || 0}个峰时` : `价格(￥/M): 入${m.input_price ?? '继承'} / 缓${m.cached_price ?? '继承'} / 出${m.output_price ?? '继承'}`"
-            >
-              <UiBadge variant="secondary" class="hidden md:inline-flex items-center text-3xs font-mono font-normal cursor-help">
-                {{ m.pricing_mode === 'peak_valley' ? '峰谷定价' : '￥定制' }}
-              </UiBadge>
-            </UiTooltip>
-
-            <!-- 频率限额标记 (短窗 RPM/TPM/窗口/并发 回显) -->
-            <UiTooltip
-              v-if="m.rate_limits && (m.rate_limits.rpm != null || m.rate_limits.tpm != null || m.rate_limits.concurrency != null || m.rate_limits.window_secs != null || m.rate_limits.count_cached)"
-              :content="`频率限额: ${m.rate_limits.rpm != null ? `RPM=${m.rate_limits.rpm}` : ''}${m.rate_limits.rpm != null && m.rate_limits.tpm != null ? ' · ' : ''}${m.rate_limits.tpm != null ? `TPM=${m.rate_limits.tpm}` : ''}${(m.rate_limits.rpm != null || m.rate_limits.tpm != null) && m.rate_limits.window_secs != null ? ' · ' : ''}${m.rate_limits.window_secs != null ? `窗口=${m.rate_limits.window_secs}s` : ''}${((m.rate_limits.rpm != null || m.rate_limits.tpm != null || m.rate_limits.window_secs != null) && m.rate_limits.concurrency != null) ? ' · ' : ''}${m.rate_limits.concurrency != null ? `并发=${m.rate_limits.concurrency}` : ''}${m.rate_limits.count_cached ? ' · 缓存计TPM' : ''}`"
-            >
-              <UiBadge variant="success" class="hidden md:inline-flex items-center text-3xs font-mono font-normal cursor-help" data-testid="model-row-rate-limits">
-                {{ m.rate_limits.rpm != null ? `R${m.rate_limits.rpm}` : '' }}{{ m.rate_limits.rpm != null && m.rate_limits.tpm != null ? '/' : '' }}{{ m.rate_limits.tpm != null ? `T${m.rate_limits.tpm}` : '' }}{{ m.rate_limits.concurrency != null ? ` C${m.rate_limits.concurrency}` : '' }}
-              </UiBadge>
-            </UiTooltip>
           </div>
 
           <div class="flex items-center gap-1.5 shrink-0">
