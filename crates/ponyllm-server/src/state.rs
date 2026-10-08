@@ -394,6 +394,11 @@ pub struct AppState {
     /// Phase-3 (VULN-05): per-pod HttpOnly-cookie admin session store.
     /// `None` = sessions disabled (routes absent, cookie auth off).
     pub admin_session_store: Arc<parking_lot::RwLock<Option<Arc<crate::session::SessionStore>>>>,
+    /// PonySentry telemetry & error reporting client.
+    pub sentry: Arc<ponyllm_core::sentry::SentryClient>,
+    /// Model circuit breaker: `(provider_name, model_name)` -> cooled_until instant.
+    /// Tracks sudden upstream model deactivations (404 / 400 / 403) to prevent downstream disruptions.
+    pub model_breaker: Arc<parking_lot::RwLock<HashMap<(String, String), std::time::Instant>>>,
 }
 
 /// F1: authentication mode frozen at startup (see `AppState::startup_auth_state`).
@@ -705,10 +710,69 @@ impl AppState {
             trusted_proxies: Arc::new(parking_lot::RwLock::new(trusted)),
             auth_ratelimiter: Arc::new(ratelimiter),
             admin_session_store: Arc::new(parking_lot::RwLock::new(admin_sessions)),
+            sentry: Arc::new({
+                let endpoint = std::env::var("PONY_SENTRY_URL")
+                    .or_else(|_| std::env::var("PONY_SENTRY_DSN"))
+                    .unwrap_or_default();
+                if endpoint.is_empty() {
+                    ponyllm_core::sentry::SentryClient::noop()
+                } else {
+                    let client_token = std::env::var("PONY_SENTRY_CLIENT_TOKEN").ok().filter(|s| !s.is_empty());
+                    ponyllm_core::sentry::SentryClient::new(ponyllm_core::sentry::SentryConfig {
+                        endpoint,
+                        client_token,
+                        environment: std::env::var("PONY_SENTRY_ENVIRONMENT").ok().or_else(|| Some("production".into())),
+                        release: option_env!("CARGO_PKG_VERSION").map(|s| s.to_string()),
+                        buffer_capacity: 1024,
+                    })
+                }
+            }),
+            model_breaker: Arc::new(parking_lot::RwLock::new(HashMap::new())),
         }
     }
 
-    /// Best-effort immediate snapshot save (shutdown/test hooks).
+    /// Record a sudden model outage (404/400 model not found/unsupported) for circuit breaking
+    pub fn record_model_outage(&self, provider: &str, model: &str, cooldown: std::time::Duration) {
+        let until = std::time::Instant::now() + cooldown;
+        let mut breaker = self.model_breaker.write();
+        breaker.insert((provider.to_string(), model.to_string()), until);
+
+        // Report to PonySentry if enabled
+        let mut tags = HashMap::new();
+        tags.insert("event_type".to_string(), "model_circuit_breaker_tripped".to_string());
+        tags.insert("provider".to_string(), provider.to_string());
+        tags.insert("model".to_string(), model.to_string());
+        tags.insert("cooldown_secs".to_string(), cooldown.as_secs().to_string());
+
+        let mut extra = serde_json::Map::new();
+        extra.insert("provider".to_string(), serde_json::json!(provider));
+        extra.insert("model".to_string(), serde_json::json!(model));
+        extra.insert("cooldown_secs".to_string(), serde_json::json!(cooldown.as_secs()));
+
+        self.sentry.capture_error(
+            "ModelOutageCircuitBreaker",
+            &format!("Model '{model}' on provider '{provider}' tripped circuit breaker for {}s due to sudden outage", cooldown.as_secs()),
+            Some(tags),
+            Some(serde_json::Value::Object(extra)),
+        );
+        tracing::warn!(
+            provider = %provider,
+            model = %model,
+            cooldown_secs = cooldown.as_secs(),
+            "Model circuit breaker tripped: model marked down"
+        );
+    }
+
+    /// Check if a model is currently cooling down under the model circuit breaker
+    pub fn is_model_cooling_down(&self, provider: &str, model: &str) -> bool {
+        let now = std::time::Instant::now();
+        let breaker = self.model_breaker.read();
+        if let Some(until) = breaker.get(&(provider.to_string(), model.to_string())) {
+            *until > now
+        } else {
+            false
+        }
+    }
     pub fn save_telemetry_snapshot(&self) -> std::io::Result<()> {
         let path = match &self.telemetry_snapshot_path {
             Some(p) => p.clone(),
@@ -2233,72 +2297,10 @@ impl AppState {
             true
         };
 
-        if let Some(explicit_tier) = parsed.explicit_tier {
-            let candidates: Vec<RoutedTarget> = self
-                .collect_tier_candidates(explicit_tier, strategy, config, proto_override, inbound)
-                .into_iter()
-                .filter(filter_compat)
-                .collect();
-
-            if candidates.is_empty() {
-                if !required_modalities.is_empty() {
-                    return Err(CoreError::UnsupportedModality {
-                        required_modality: required_modalities.join(", "),
-                        message: format!(
-                            "No model candidate in tier '{:?}' supports required modalities {:?}",
-                            explicit_tier, required_modalities
-                        ),
-                    });
-                } else if parsed.is_1m_context {
-                    return Err(CoreError::CapacityExhausted {
-                        required_context: "1M".to_string(),
-                        message: format!(
-                            "No model candidate in tier '{:?}' meets 1M context requirement",
-                            explicit_tier
-                        ),
-                    });
-                } else {
-                    return Err(CoreError::Internal(format!(
-                        "No candidate models configured in gateway for tier '{:?}'",
-                        explicit_tier
-                    )));
-                }
-            }
-            return Ok(self.sort_auto_candidates(
-                candidates,
-                strategy,
-                config,
-                cached_provider,
-                inbound,
-            ));
-        }
-
-        // Default auto (no explicit tier): Try Standard -> Elevate to Flagship -> Fallback to Light
-        let standard_candidates: Vec<RoutedTarget> = self
-            .collect_tier_candidates(
-                ModelTier::Standard,
-                strategy,
-                config,
-                proto_override,
-                inbound,
-            )
-            .into_iter()
-            .filter(filter_compat)
-            .collect();
-
-        if !standard_candidates.is_empty() {
-            return Ok(self.sort_auto_candidates(
-                standard_candidates,
-                strategy,
-                config,
-                cached_provider,
-                inbound,
-            ));
-        }
-
-        // Adaptive Tier Elevation: Elevate to Flagship if Standard has no matching (or 1M or modality) nodes
-        let flagship_candidates: Vec<RoutedTarget> = self
-            .collect_tier_candidates(
+        // Collect all primary (Flagship & Standard) candidates first to maximize agent quality
+        let mut candidates: Vec<RoutedTarget> = Vec::new();
+        candidates.extend(
+            self.collect_tier_candidates(
                 ModelTier::Flagship,
                 strategy,
                 config,
@@ -2306,55 +2308,73 @@ impl AppState {
                 inbound,
             )
             .into_iter()
-            .filter(filter_compat)
-            .collect();
-
-        if !flagship_candidates.is_empty() {
-            return Ok(self.sort_auto_candidates(
-                flagship_candidates,
+            .filter(filter_compat),
+        );
+        candidates.extend(
+            self.collect_tier_candidates(
+                ModelTier::Standard,
                 strategy,
                 config,
-                cached_provider,
+                proto_override,
                 inbound,
-            ));
-        }
-
-        // Fallback to Light tier
-        let light_candidates: Vec<RoutedTarget> = self
-            .collect_tier_candidates(ModelTier::Light, strategy, config, proto_override, inbound)
+            )
             .into_iter()
-            .filter(filter_compat)
-            .collect();
+            .filter(filter_compat),
+        );
 
-        if !light_candidates.is_empty() {
-            return Ok(self.sort_auto_candidates(
-                light_candidates,
-                strategy,
-                config,
-                cached_provider,
-                inbound,
-            ));
+        // If no primary candidates, fall back to Light
+        if candidates.is_empty() {
+            candidates.extend(
+                self.collect_tier_candidates(
+                    ModelTier::Light,
+                    strategy,
+                    config,
+                    proto_override,
+                    inbound,
+                )
+                .into_iter()
+                .filter(filter_compat),
+            );
         }
 
-        if !required_modalities.is_empty() {
-            Err(CoreError::UnsupportedModality {
-                required_modality: required_modalities.join(", "),
-                message: format!(
-                    "No model candidate across any tier supports required modalities {:?}",
-                    required_modalities
-                ),
-            })
-        } else if parsed.is_1m_context {
-            Err(CoreError::CapacityExhausted {
-                required_context: "1M".to_string(),
-                message: "No model candidate across any tier meets 1M context requirement"
-                    .to_string(),
-            })
-        } else {
-            Err(CoreError::Internal(
-                "No candidate models available in gateway for auto routing".to_string(),
-            ))
+        if candidates.is_empty() {
+            // Report to PonySentry if auto candidate pool is completely exhausted
+            let mut tags = HashMap::new();
+            tags.insert("event_type".to_string(), "auto_pool_exhausted".to_string());
+            self.sentry.capture_error(
+                "AutoPoolExhausted",
+                "No candidate models available in gateway for pure auto routing",
+                Some(tags),
+                None,
+            );
+
+            if !required_modalities.is_empty() {
+                return Err(CoreError::UnsupportedModality {
+                    required_modality: required_modalities.join(", "),
+                    message: format!(
+                        "No model candidate supports required modalities {:?}",
+                        required_modalities
+                    ),
+                });
+            } else if parsed.is_1m_context {
+                return Err(CoreError::CapacityExhausted {
+                    required_context: "1M".to_string(),
+                    message: "No model candidate meets 1M context requirement".to_string(),
+                });
+            } else {
+                return Err(CoreError::Internal(
+                    "No candidate models available in gateway for auto routing".to_string(),
+                ));
+            }
         }
+
+        Ok(self.sort_auto_candidates(
+            candidates,
+            strategy,
+            config,
+            cached_provider,
+            inbound,
+        ))
     }
 
     fn resolve_pinned_targets(
@@ -2872,15 +2892,43 @@ impl AppState {
         // (documented in the model-priority ADR); `None` = 0 keeps legacy
         // configurations byte-for-byte identical to the pre-priority ordering.
         if is_auto {
+            let auto_models = _config.auto_models.clone();
             sorted.sort_by_key(|c| {
-                // Live health awareness for auto routing: if all keys of this provider are cooling down or unavailable,
-                // push it down after active healthy providers to guarantee zero downtime.
+                // 1. Health & circuit breaker check:
+                // If model is under model-breaker cooldown or all keys are dead, deprioritize.
+                let is_circuit_broken = self.is_model_cooling_down(&c.provider_name, &c.physical_model);
                 let has_active_keys = self
                     .get_pool(&c.provider_name)
                     .map(|p| p.active_key_count() > 0)
                     .unwrap_or(true);
+                let is_unhealthy = is_circuit_broken || !has_active_keys;
+
+                // 2. Billing mode: Free tier first (0 cost), Paid tier second
+                let is_free = c.billing_mode == BillingMode::Free || c.pricing.is_free();
+                let fee_rank = if is_free { 0 } else { 1 };
+
+                // 3. Auto model preference list match
+                // If model matches user/system auto_models list (exact or prefix), lower rank index wins.
+                let model_rank = auto_models
+                    .iter()
+                    .position(|m| {
+                        m.eq_ignore_ascii_case(&c.physical_model)
+                            || c.physical_model.to_ascii_lowercase().starts_with(&m.to_ascii_lowercase())
+                    })
+                    .unwrap_or(auto_models.len() + 10);
+
+                // 4. Model tier: Flagship (0) -> Standard (1) -> Light (2)
+                let tier_rank = match c.tier {
+                    ModelTier::Flagship => 0,
+                    ModelTier::Standard => 1,
+                    ModelTier::Light => 2,
+                };
+
                 (
-                    !has_active_keys, // false (active) comes before true (cooling/dead)
+                    is_unhealthy, // false (healthy) comes before true (unhealthy/cooling)
+                    fee_rank,     // 0 (Free) comes before 1 (Paid)
+                    model_rank,   // preferred configured auto_models rank
+                    tier_rank,    // Flagship -> Standard -> Light
                     std::cmp::Reverse(c.priority.unwrap_or(0)),
                 )
             });
@@ -2897,50 +2945,14 @@ impl AppState {
         let mut result = Vec::new();
         let mut seen = std::collections::HashSet::new();
 
-        // 1. auto virtual models
+        // 1. auto virtual model (Pure auto only)
         result.push((
             "auto".to_string(),
             "ponyllm".to_string(),
-            Some("Auto(智能·主力默认)".to_string()),
+            Some("Auto(智能·高可用主力)".to_string()),
             "auto".to_string(),
         ));
-        result.push((
-            "auto:standard".to_string(),
-            "ponyllm".to_string(),
-            Some("Auto(智能·主力)".to_string()),
-            "auto".to_string(),
-        ));
-        result.push((
-            "auto:flagship".to_string(),
-            "ponyllm".to_string(),
-            Some("Auto(智能·旗舰)".to_string()),
-            "auto".to_string(),
-        ));
-        result.push((
-            "auto:economy".to_string(),
-            "ponyllm".to_string(),
-            Some("Auto(智能·省钱)".to_string()),
-            "auto".to_string(),
-        ));
-        result.push((
-            "auto:fastest".to_string(),
-            "ponyllm".to_string(),
-            Some("Auto(智能·极速)".to_string()),
-            "auto".to_string(),
-        ));
-        result.push((
-            "auto[1m]".to_string(),
-            "ponyllm".to_string(),
-            Some("Auto(智能·1M长上下文)".to_string()),
-            "auto".to_string(),
-        ));
-
         seen.insert("auto".to_string());
-        seen.insert("auto:standard".to_string());
-        seen.insert("auto:flagship".to_string());
-        seen.insert("auto:economy".to_string());
-        seen.insert("auto:fastest".to_string());
-        seen.insert("auto[1m]".to_string());
 
         // 2. Physical configured models and their [1m] aliases.
         // Iteration is provider-name sorted so the list content and the bare

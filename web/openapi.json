@@ -40,6 +40,50 @@
         }
       }
     },
+    "/api/admin/auto-models": {
+      "get": {
+        "tags": [],
+        "operationId": "handle_admin_get_auto_models",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AutoModelsView"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [],
+        "operationId": "handle_admin_put_auto_models",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PutAutoModelsPayload"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AutoModelsView"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/admin/gateway-keys": {
       "get": {
         "tags": [],
@@ -1196,6 +1240,33 @@
           }
         }
       },
+      "AutoModelsView": {
+        "type": "object",
+        "required": [
+          "auto_models",
+          "active_models_order",
+          "config_version"
+        ],
+        "properties": {
+          "active_models_order": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "auto_models": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "config_version": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
       "CreateKeyPayload": {
         "type": "object",
         "required": [
@@ -2276,6 +2347,20 @@
               "string",
               "null"
             ]
+          }
+        }
+      },
+      "PutAutoModelsPayload": {
+        "type": "object",
+        "required": [
+          "auto_models"
+        ],
+        "properties": {
+          "auto_models": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
           }
         }
       },

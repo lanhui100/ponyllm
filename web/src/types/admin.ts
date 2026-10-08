@@ -244,6 +244,16 @@ export interface ServiceStatusView {
   config_version: number;
 }
 
+export interface AutoModelsView {
+  auto_models: string[];
+  active_models_order: string[];
+  config_version: number;
+}
+
+export interface PutAutoModelsPayload {
+  auto_models: string[];
+}
+
 export interface CreateProviderPayload {
   name: string;
   base_url: string;

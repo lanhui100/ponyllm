@@ -47,6 +47,9 @@ const {
   testSingleKey,
   batchTestAllKeys,
   saveStrategy,
+  autoModels,
+  activeModelsOrder,
+  saveAutoModels,
   clearConflict,
   clearCreatedKeyResult,
   getAntigravityAuthUrl,
@@ -1026,7 +1029,10 @@ onUnmounted(() => {
         <StrategySection
           :current-strategy="strategy"
           :admin-write-enabled="adminWriteEnabled"
+          :auto-models="autoModels"
+          :active-models-order="activeModelsOrder"
           @update="saveStrategy"
+          @update-auto-models="saveAutoModels"
         />
       </div>
 

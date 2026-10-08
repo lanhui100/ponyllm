@@ -54,4 +54,8 @@ serde_yaml = "0.9"
 # Deterministic apiserver REST mock for KubernetesConfigStore 409/CAS tests.
 wiremock = "0.6"
 
+[[test]]
+name = "sentry_integration_test"
+path = "../../tests/sentry_integration_test.rs"
+
 

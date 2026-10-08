@@ -2082,6 +2082,7 @@ pub struct StreamFailureContext {
     pub attempt_start: Option<Instant>,
     pub key_pool: Option<Arc<ponyllm_core::pool::KeyPool>>,
     pub key_id: Option<String>,
+    pub sentry: Option<Arc<ponyllm_core::sentry::SentryClient>>,
 }
 
 /// Telemetry wrapper stream tracking TTFT on first emitted chunk and measuring TPS on completion.
@@ -2253,6 +2254,24 @@ impl<S> TelemetryStream<S> {
             .last_error
             .clone()
             .unwrap_or_else(|| reason.to_string());
+        if let Some(ref sentry) = self.failure_ctx.sentry {
+            let mut tags = std::collections::HashMap::new();
+            tags.insert("provider".to_string(), self.failure_ctx.provider.clone());
+            tags.insert("stream_error".to_string(), "true".to_string());
+            if let Some(ref kid) = self.failure_ctx.key_id {
+                tags.insert("key_id".to_string(), kid.clone());
+            }
+            sentry.capture_error(
+                "StreamFailureError",
+                &error,
+                Some(tags),
+                Some(serde_json::json!({
+                    "request_id": self.failure_ctx.ctx.request_id,
+                    "reason": reason,
+                    "flow": flow,
+                })),
+            );
+        }
         self.emit(
             None,
             GatewayEvent::StreamFailed {
@@ -2726,6 +2745,7 @@ mod tests {
             attempt_start: Some(start),
             key_pool: None,
             key_id: None,
+            sentry: None,
         };
         let s = bytes_stream(vec![
             Bytes::from_static(b"data: one\n\n"),
@@ -3073,6 +3093,7 @@ mod tests {
             attempt_start: Some(start),
             key_pool: None,
             key_id: None,
+            sentry: None,
         };
         let failed = format!(
             "event: response.failed\ndata: {}\n\n",
@@ -3595,6 +3616,7 @@ mod tests {
             attempt_start: Some(start),
             key_pool: None,
             key_id: None,
+            sentry: None,
         };
 
         // Two chunks containing real content: total 20 characters (~6-7 tokens)

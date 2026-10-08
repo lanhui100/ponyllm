@@ -367,8 +367,8 @@ async fn test_write_before_backup_created() {
         .header("Authorization", &auth)
         .header("If-Match", "\"0\"")
         .json(&serde_json::json!({
-            "name": "deepseek",
-            "base_url": "https://api.deepseek.com"
+            "name": "anthropic",
+            "base_url": "https://api.anthropic.com"
         }))
         .send()
         .await
@@ -379,7 +379,7 @@ async fn test_write_before_backup_created() {
     assert!(backup_path.exists(), "Backup file must be created on write");
     let backup_content = std::fs::read_to_string(backup_path).unwrap();
     assert!(backup_content.contains("openai"));
-    assert!(!backup_content.contains("deepseek"));
+    assert!(!backup_content.contains("anthropic"));
 }
 
 // -----------------------------------------------------------------------------

@@ -478,6 +478,25 @@ async fn run_images_request(
         last_pool_exhausted,
         &request_id,
     );
+
+    // PonySentry 埋点上报网关耗尽/失败事件
+    {
+        let mut tags = std::collections::HashMap::new();
+        tags.insert("requested_model".to_string(), requested_raw_model.clone());
+        tags.insert("route".to_string(), "v1/images/generations".to_string());
+        tags.insert("error_kind".to_string(), format!("{:?}", last_kind));
+        state.sentry.capture_error(
+            "GatewayExhaustedError",
+            &format!("Images request failed for model '{}': {}", requested_raw_model, last_error),
+            Some(tags),
+            Some(serde_json::json!({
+                "request_id": request_id,
+                "last_error": last_error,
+                "pool_exhausted": last_pool_exhausted,
+            })),
+        );
+    }
+
     let mut resp = crate::extractors::project_openai_error(&last_kind, &msg);
     inject_telemetry_headers(&mut resp, &request_id, &stages);
     resp

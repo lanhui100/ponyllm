@@ -204,6 +204,16 @@ pub async fn handle_messages(
     let per_target_budget = empty_stop_budget.map(|b| b / (targets.len().max(1) as u32));
 
     for target in targets {
+        // If target is currently cooling down under the model circuit breaker, skip it
+        if parsed.is_auto && state.is_model_cooling_down(&target.provider_name, &target.physical_model) {
+            tracing::warn!(
+                provider = %target.provider_name,
+                model = %target.physical_model,
+                "Model circuit breaker active: skipping cooled down model candidate"
+            );
+            continue;
+        }
+
         // Stop before touching the next provider's quota when the previous
         // provider exhausted its account quota (402 / balance-wording 429 /
         // balance-wording 403 / antigravity quota frames / a pool cooled
@@ -748,6 +758,7 @@ pub async fn handle_messages(
                             attempt_start: Some(attempt_start),
                             key_pool: Some(pool.clone()),
                             key_id: Some(winning_key_id),
+                            sentry: Some(state.sentry.clone()),
                         };
                         let body = match target.upstream_protocol {
                             ponyllm_core::pool::UpstreamProtocol::Anthropic => {
@@ -850,6 +861,26 @@ pub async fn handle_messages(
 
                         tracing::warn!("Provider '{}' stream failed ({}). Attempting fallback...", target.provider_name, err);
                         last_kind = err.kind();
+
+                        // Auto resilience: if model failed with ModelNotFound or 404/400 model error, trigger model circuit breaker & PonySentry report
+                        if parsed.is_auto && matches!(last_kind, ponyllm_core::error::GatewayErrorKind::ModelNotFound) {
+                            state.record_model_outage(&target.provider_name, &target.physical_model, std::time::Duration::from_secs(600));
+
+                            let mut tags = std::collections::HashMap::new();
+                            tags.insert("event_type".to_string(), "auto_model_failover".to_string());
+                            tags.insert("failed_provider".to_string(), target.provider_name.clone());
+                            tags.insert("failed_model".to_string(), target.physical_model.clone());
+                            state.sentry.capture_error(
+                                "AutoModelFailover",
+                                &format!("Auto routed model '{}:{}' failed with ModelNotFound, triggering failover", target.provider_name, target.physical_model),
+                                Some(tags),
+                                Some(serde_json::json!({
+                                    "request_id": request_id,
+                                    "error": err.to_string(),
+                                })),
+                            );
+                        }
+
                         // H1: pool entirely cooled by quota exhaustion reads
                         // as a quota boundary, not a transient no-key error.
                         if !quota_failover_enabled && crate::extractors::pool_quota_exhausted(&err, &pool) {
@@ -1186,6 +1217,26 @@ pub async fn handle_messages(
                 (Err(err), _) => {
                     tracing::warn!("Provider '{}' json request failed ({}). Attempting fallback...", target.provider_name, err);
                     last_kind = err.kind();
+
+                    // Auto resilience: if model failed with ModelNotFound or 404/400 model error, trigger model circuit breaker & PonySentry report
+                    if parsed.is_auto && matches!(last_kind, ponyllm_core::error::GatewayErrorKind::ModelNotFound) {
+                        state.record_model_outage(&target.provider_name, &target.physical_model, std::time::Duration::from_secs(600));
+
+                        let mut tags = std::collections::HashMap::new();
+                        tags.insert("event_type".to_string(), "auto_model_failover".to_string());
+                        tags.insert("failed_provider".to_string(), target.provider_name.clone());
+                        tags.insert("failed_model".to_string(), target.physical_model.clone());
+                        state.sentry.capture_error(
+                            "AutoModelFailover",
+                            &format!("Auto routed model '{}:{}' failed with ModelNotFound, triggering failover", target.provider_name, target.physical_model),
+                            Some(tags),
+                            Some(serde_json::json!({
+                                "request_id": request_id,
+                                "error": err.to_string(),
+                            })),
+                        );
+                    }
+
                     // H1: pool entirely cooled by quota exhaustion reads as a
                     // quota boundary, not a transient no-key error.
                     if !quota_failover_enabled && crate::extractors::pool_quota_exhausted(&err, &pool) {
@@ -1214,6 +1265,25 @@ pub async fn handle_messages(
     // request_id is embedded in the message and exposed as a header, so
     // `ponyllm telemetry` output can be grepped for the failing request.
     let msg = crate::extractors::format_exhausted_message(&requested_raw_model, &last_kind, &last_error, last_pool_exhausted, &request_id);
+
+    // PonySentry 埋点上报网关耗尽/失败事件
+    {
+        let mut tags = std::collections::HashMap::new();
+        tags.insert("requested_model".to_string(), requested_raw_model.clone());
+        tags.insert("route".to_string(), "v1/messages".to_string());
+        tags.insert("error_kind".to_string(), format!("{:?}", last_kind));
+        state.sentry.capture_error(
+            "GatewayExhaustedError",
+            &format!("Messages request failed for model '{}': {}", requested_raw_model, last_error),
+            Some(tags),
+            Some(serde_json::json!({
+                "request_id": request_id,
+                "last_error": last_error,
+                "pool_exhausted": last_pool_exhausted,
+            })),
+        );
+    }
+
     let mut resp = crate::extractors::project_anthropic_error(&last_kind, &msg);
     if let Some(secs) = last_retry_after {
         if let Ok(v) = HeaderValue::from_str(&secs.to_string()) {

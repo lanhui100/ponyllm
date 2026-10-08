@@ -126,6 +126,25 @@ pub async fn handle_systemone(
     }
 
     let message = format_exhausted_message(&model, &last_kind, &last_error, last_pool_exhausted, &request_id);
+
+    // PonySentry 埋点上报网关耗尽/失败事件
+    {
+        let mut tags = std::collections::HashMap::new();
+        tags.insert("requested_model".to_string(), model.clone());
+        tags.insert("route".to_string(), "v1/systemone".to_string());
+        tags.insert("error_kind".to_string(), format!("{:?}", last_kind));
+        state.sentry.capture_error(
+            "GatewayExhaustedError",
+            &format!("Systemone request failed for model '{}': {}", model, last_error),
+            Some(tags),
+            Some(serde_json::json!({
+                "request_id": request_id,
+                "last_error": last_error,
+                "pool_exhausted": last_pool_exhausted,
+            })),
+        );
+    }
+
     let mut response = project_openai_error(&last_kind, &message);
     if let Some(secs) = last_retry_after { if let Ok(value) = secs.to_string().parse() { response.headers_mut().insert("retry-after", value); } }
     let latency = start.elapsed();

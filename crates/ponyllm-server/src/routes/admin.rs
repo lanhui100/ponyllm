@@ -3879,6 +3879,95 @@ pub async fn handle_admin_test_key(
     Json(test_view).into_response()
 }
 
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct AutoModelsView {
+    pub auto_models: Vec<String>,
+    pub active_models_order: Vec<String>,
+    pub config_version: u64,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct PutAutoModelsPayload {
+    pub auto_models: Vec<String>,
+}
+
+#[utoipa::path(get, path = "/api/admin/auto-models", responses((status = 200, body = AutoModelsView)))]
+pub async fn handle_admin_get_auto_models(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let auto_models = state.config.read().auto_models.clone();
+    let (file, _store_version) = match load_store_config(&state).await {
+        Ok((f, ver)) => (f, ver),
+        Err(resp) => return resp.into_response(),
+    };
+
+    // Calculate current effective auto candidates order
+    let dummy_req = crate::routes::models::ParsedRequestModel::parse("auto");
+    let active_models_order = match state.resolve_routed_targets(&dummy_req, None) {
+        Ok(targets) => targets
+            .into_iter()
+            .map(|t| format!("{}:{}", t.provider_name, t.physical_model))
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+
+    Json(AutoModelsView {
+        auto_models,
+        active_models_order,
+        config_version: file.config_version,
+    })
+    .into_response()
+}
+
+#[utoipa::path(put, path = "/api/admin/auto-models", request_body = PutAutoModelsPayload, responses((status = 200, body = AutoModelsView)))]
+pub async fn handle_admin_put_auto_models(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<PutAutoModelsPayload>,
+) -> impl IntoResponse {
+    if let Err(resp) = check_admin_write_enabled(&state) {
+        return resp;
+    }
+    let _lock = state.admin_write_lock.lock().await;
+
+    let (mut file, store_version) = match load_store_config(&state).await {
+        Ok((f, ver)) => (f, ver),
+        Err(resp) => return resp,
+    };
+
+    if let Err(resp) = check_if_match(&headers, file.config_version) {
+        return resp;
+    }
+
+    let cleaned_models: Vec<String> = body
+        .auto_models
+        .into_iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    file.gateway.auto_models = cleaned_models.clone();
+    let new_version = match save_store_config(&state, &mut file, &store_version).await {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
+    state.config.write().auto_models = cleaned_models.clone();
+
+    let dummy_req = crate::routes::models::ParsedRequestModel::parse("auto");
+    let active_models_order = match state.resolve_routed_targets(&dummy_req, None) {
+        Ok(targets) => targets
+            .into_iter()
+            .map(|t| format!("{}:{}", t.provider_name, t.physical_model))
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+
+    Json(AutoModelsView {
+        auto_models: cleaned_models,
+        active_models_order,
+        config_version: new_version,
+    })
+    .into_response()
+}
+
 #[utoipa::path(get, path = "/api/admin/strategy", responses((status = 200, body = StrategyView)))]
 pub async fn handle_admin_get_strategy(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     // Snapshot the strategy before any await so the parking_lot config guard
@@ -5444,6 +5533,8 @@ pub async fn handle_admin_provider_upstream_models(
         handle_gateway_keys_revoke,
         handle_admin_get_strategy,
         handle_admin_put_strategy,
+        handle_admin_get_auto_models,
+        handle_admin_put_auto_models,
         handle_admin_service_status,
         handle_admin_auth_rotate,
         handle_admin_antigravity_auth_url,
@@ -5475,6 +5566,8 @@ pub async fn handle_admin_provider_upstream_models(
         IssueGatewayKeyResponse,
         StrategyView,
         PutStrategyPayload,
+        AutoModelsView,
+        PutAutoModelsPayload,
         ServiceStatusView,
         RotateView,
         AntigravityAuthUrlView,
@@ -5558,6 +5651,10 @@ pub fn admin_routes() -> axum::Router<Arc<AppState>> {
         .route(
             "/api/admin/strategy",
             get(handle_admin_get_strategy).put(handle_admin_put_strategy),
+        )
+        .route(
+            "/api/admin/auto-models",
+            get(handle_admin_get_auto_models).put(handle_admin_put_auto_models),
         )
         .route(
             "/api/admin/service/status",

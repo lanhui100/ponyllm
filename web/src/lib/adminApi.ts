@@ -7,6 +7,8 @@ import type {
   KeyView,
   KeyTestView,
   StrategyView,
+  AutoModelsView,
+  PutAutoModelsPayload,
   CreateProviderPayload,
   UpdateProviderPayload,
   CreateModelPayload,
@@ -68,6 +70,16 @@ export const adminApi = {
 
   getStrategy() {
     return alova.Get<StrategyView>('/api/admin/strategy');
+  },
+
+  getAutoModels() {
+    return alova.Get<AutoModelsView>('/api/admin/auto-models');
+  },
+
+  updateAutoModels(payload: PutAutoModelsPayload, ifMatchVersion?: number | string) {
+    return alova.Put<AutoModelsView>('/api/admin/auto-models', payload, {
+      headers: ifMatchHeaders(ifMatchVersion),
+    });
   },
 
   /** 池级跨账号跨周期持久化累计基准（只读，直接读快照归档）。 */

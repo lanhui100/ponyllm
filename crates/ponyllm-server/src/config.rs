@@ -552,6 +552,9 @@ pub struct GatewayConfig {
     /// Phase-3: session TTL seconds (default 28800 = 8h sliding).
     #[serde(default = "default_admin_session_ttl_secs")]
     pub admin_session_ttl_secs: u64,
+    /// Ordered list of candidate models for pure `auto` routing.
+    #[serde(default = "ponyllm_config::default_auto_models")]
+    pub auto_models: Vec<String>,
 }
 
 fn default_admin_session_enabled() -> bool {
@@ -628,6 +631,7 @@ impl Default for GatewayConfig {
             trusted_proxies: Vec::new(),
             admin_session_enabled: default_admin_session_enabled(),
             admin_session_ttl_secs: default_admin_session_ttl_secs(),
+            auto_models: ponyllm_config::default_auto_models(),
         }
     }
 }

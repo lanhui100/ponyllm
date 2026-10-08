@@ -21,6 +21,7 @@ import type {
   AuthorizeAntigravityResponse,
   ProxyStatusView,
   QuotaCycleBenchmarkView,
+  AutoModelsView,
 } from '../types/admin';
 
 export interface UseAdminConfigOptions {
@@ -141,6 +142,8 @@ export function useAdminConfig(options: UseAdminConfigOptions = {}) {
   const models = ref<ModelView[]>([]);
   const keys = ref<KeyView[]>([]);
   const strategy = ref<string>('economy');
+  const autoModels = ref<string[]>([]);
+  const activeModelsOrder = ref<string[]>([]);
   const configVersion = ref<number>(0);
   const loading = ref<boolean>(false);
   const error = ref<string | null>(null);
@@ -189,6 +192,13 @@ export function useAdminConfig(options: UseAdminConfigOptions = {}) {
         adminApi.getKeys().send(),
         adminApi.getStrategy().send(),
       ]);
+
+      void adminApi.getAutoModels().send().then((am) => {
+        if (am) {
+          autoModels.value = am.auto_models || [];
+          activeModelsOrder.value = am.active_models_order || [];
+        }
+      }).catch(() => {});
 
       overview.value = ov;
       providers.value = pv;
@@ -240,6 +250,13 @@ export function useAdminConfig(options: UseAdminConfigOptions = {}) {
         adminApi.getKeys().send(),
         adminApi.getStrategy().send(),
       ]);
+
+      void adminApi.getAutoModels().send().then((am) => {
+        if (am) {
+          autoModels.value = am.auto_models || [];
+          activeModelsOrder.value = am.active_models_order || [];
+        }
+      }).catch(() => {});
 
       overview.value = ov;
       providers.value = pv;
@@ -444,6 +461,16 @@ export function useAdminConfig(options: UseAdminConfigOptions = {}) {
     return res;
   }
 
+  async function saveAutoModels(modelsList: string[]): Promise<AutoModelsView> {
+    return runWithConflictCheck(async () => {
+      const res = await adminApi.updateAutoModels({ auto_models: modelsList }, configVersion.value).send();
+      autoModels.value = res.auto_models;
+      activeModelsOrder.value = res.active_models_order;
+      configVersion.value = res.config_version;
+      return res;
+    });
+  }
+
   if (autoFetch && getCurrentInstance()) {
     onMounted(() => {
       void fetchAll().catch(() => {});
@@ -483,6 +510,9 @@ export function useAdminConfig(options: UseAdminConfigOptions = {}) {
     testSingleKey,
     batchTestAllKeys,
     saveStrategy,
+    autoModels,
+    activeModelsOrder,
+    saveAutoModels,
     clearConflict,
     clearCreatedKeyResult,
     getAntigravityAuthUrl,

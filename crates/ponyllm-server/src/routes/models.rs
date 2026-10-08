@@ -67,10 +67,11 @@ impl ParsedRequestModel {
         };
 
         let is_auto = base_name.eq_ignore_ascii_case("auto");
-        let clean_model_name = if is_auto {
-            "auto".to_string()
+        let (clean_model_name, explicit_tier, strategy_override, is_1m_context) = if is_auto {
+            // Pure auto: strip all tier/strategy/context tags so auto stays monolithic and unbiased
+            ("auto".to_string(), None, None, false)
         } else {
-            base_name
+            (base_name, explicit_tier, strategy_override, is_1m_context)
         };
 
         Self {

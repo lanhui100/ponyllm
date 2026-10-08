@@ -127,7 +127,7 @@ impl CoreError {
             CoreError::CapacityExhausted { .. } => GatewayErrorKind::CapacityExhausted,
             CoreError::UnsupportedModality { .. } => GatewayErrorKind::ClientBadRequest,
             CoreError::NoAvailableKey(_) => GatewayErrorKind::RateLimitExceeded { retry_after: None },
-            CoreError::UpstreamStatusError { status, .. } => {
+            CoreError::UpstreamStatusError { status, body } => {
                 let code = status.as_u16();
                 if code == 429 {
                     GatewayErrorKind::RateLimitExceeded { retry_after: None }
@@ -135,6 +135,10 @@ impl CoreError {
                     GatewayErrorKind::AuthInvalid
                 } else if code == 402 {
                     GatewayErrorKind::QuotaExhausted
+                } else if code == 404
+                    || (code == 400 && (body.contains("model") || body.contains("not found") || body.contains("unsupported") || body.contains("does not exist")))
+                {
+                    GatewayErrorKind::ModelNotFound
                 } else if status.is_client_error() {
                     GatewayErrorKind::ClientBadRequest
                 } else {

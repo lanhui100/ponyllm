@@ -40,22 +40,23 @@ fn test_parsed_request_model_sanitizer() {
     assert_eq!(p4_tagged.clean_model_name, "meta-llama/llama-3:70b");
     assert_eq!(p4_tagged.strategy_override, Some(GatewayRoutingStrategy::Speed));
 
-    // 5. Auto virtual model: default tier is Standard, supports explicit :flagship
+    // 5. Auto virtual model: pure auto only, strips explicit tier / strategy / 1m
     let p4 = ParsedRequestModel::parse("auto");
     assert_eq!(p4.clean_model_name, "auto");
     assert!(p4.is_auto);
-    assert_eq!(p4.explicit_tier, None); // default resolves to Standard
+    assert_eq!(p4.explicit_tier, None);
 
     let p5 = ParsedRequestModel::parse("auto:flagship:economy");
     assert!(p5.is_auto);
     assert_eq!(p5.clean_model_name, "auto");
-    assert_eq!(p5.explicit_tier, Some(ModelTier::Flagship));
-    assert_eq!(p5.strategy_override, Some(GatewayRoutingStrategy::Economy));
+    assert_eq!(p5.explicit_tier, None); // converged to pure auto
+    assert_eq!(p5.strategy_override, None);
 
     let p6 = ParsedRequestModel::parse("auto[1m]:speed");
     assert!(p6.is_auto);
-    assert!(p6.is_1m_context);
-    assert_eq!(p6.strategy_override, Some(GatewayRoutingStrategy::Speed));
+    assert_eq!(p6.clean_model_name, "auto");
+    assert!(!p6.is_1m_context); // converged to pure auto
+    assert_eq!(p6.strategy_override, None);
 }
 
 #[tokio::test]
@@ -209,7 +210,7 @@ async fn test_model_echo_policy_and_auto_routing() {
     let body: serde_json::Value = echo_resp.json().await.unwrap();
     assert_eq!(body["model"], "deepseek-v4-flash[1m]:economy");
 
-    // 4. Test auto default routing (resolves to Standard tier: gpt-4o-mini)
+    // 4. Test auto default routing (resolves to primary default model: deepseek-v4-flash)
     let auto_resp = client
         .post(format!("http://{}/v1/chat/completions", gateway_addr))
         .json(&json!({
@@ -220,39 +221,11 @@ async fn test_model_echo_policy_and_auto_routing() {
         .await
         .unwrap();
     assert_eq!(auto_resp.status(), 200);
-    assert_eq!(auto_resp.headers().get("x-ponyllm-routed-model").unwrap().to_str().unwrap(), "gpt-4o-mini");
+    assert_eq!(auto_resp.headers().get("x-ponyllm-routed-model").unwrap().to_str().unwrap(), "deepseek-v4-flash");
     let auto_body: serde_json::Value = auto_resp.json().await.unwrap();
     assert_eq!(auto_body["model"], "auto");
 
-    // 5. Test auto:flagship routing (resolves to Flagship tier: deepseek-v4-flash)
-    let auto_flag_resp = client
-        .post(format!("http://{}/v1/chat/completions", gateway_addr))
-        .json(&json!({
-            "model": "auto:flagship",
-            "messages": [{"role": "user", "content": "Hello flagship"}]
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(auto_flag_resp.status(), 200);
-    assert_eq!(auto_flag_resp.headers().get("x-ponyllm-routed-model").unwrap().to_str().unwrap(), "deepseek-v4-flash");
-
-    // 6. Test auto[1m] Adaptive Tier Elevation: Standard has only 128K, so auto[1m] MUST elevate to Flagship 1M!
-    let auto_1m_resp = client
-        .post(format!("http://{}/v1/chat/completions", gateway_addr))
-        .json(&json!({
-            "model": "auto[1m]",
-            "messages": [{"role": "user", "content": "Hello auto 1m"}]
-        }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(auto_1m_resp.status(), 200);
-    assert_eq!(auto_1m_resp.headers().get("x-ponyllm-routed-model").unwrap().to_str().unwrap(), "deepseek-v4-flash");
-    let auto_1m_body: serde_json::Value = auto_1m_resp.json().await.unwrap();
-    assert_eq!(auto_1m_body["model"], "auto[1m]");
-
-    // 7. Test /v1/models listing: must contain auto, auto:standard, auto:flagship, and [1m] alias
+    // 5. Test /v1/models listing: must contain pure auto (without auto:standard, auto:flagship etc.)
     let models_resp = client
         .get(format!("http://{}/v1/models", gateway_addr))
         .send()
@@ -263,22 +236,22 @@ async fn test_model_echo_policy_and_auto_routing() {
     let model_ids: Vec<&str> = models_json["data"].as_array().unwrap().iter().map(|m| m["id"].as_str().unwrap()).collect();
     
     assert!(model_ids.contains(&"auto"));
-    assert!(model_ids.contains(&"auto:standard"));
-    assert!(model_ids.contains(&"auto:flagship"));
-    assert!(model_ids.contains(&"auto:economy"));
-    assert!(model_ids.contains(&"auto:fastest"));
+    assert!(!model_ids.contains(&"auto:standard"));
+    assert!(!model_ids.contains(&"auto:flagship"));
+    assert!(!model_ids.contains(&"auto:economy"));
+    assert!(!model_ids.contains(&"auto:fastest"));
     assert!(model_ids.contains(&"deepseek-v4-flash"));
     assert!(model_ids.contains(&"deepseek-v4-flash[1m]"));
 
-    // 8. Test single model GET /v1/models/:model_id
+    // 6. Test single model GET /v1/models/:model_id
     let single_auto_resp = client
-        .get(format!("http://{}/v1/models/auto:flagship", gateway_addr))
+        .get(format!("http://{}/v1/models/auto", gateway_addr))
         .send()
         .await
         .unwrap();
     assert_eq!(single_auto_resp.status(), 200);
     let single_auto_json: serde_json::Value = single_auto_resp.json().await.unwrap();
-    assert_eq!(single_auto_json["id"], "auto:flagship");
+    assert_eq!(single_auto_json["id"], "auto");
 }
 
 #[test]

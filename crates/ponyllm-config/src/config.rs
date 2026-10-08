@@ -153,6 +153,17 @@ pub struct GatewaySection {
     /// every validated use). `PONYLLM_ADMIN_SESSION_TTL_SECS` overrides (test hook).
     #[serde(default = "default_admin_session_ttl_secs")]
     pub admin_session_ttl_secs: u64,
+    /// Ordered list of candidate models for pure `auto` routing.
+    /// Default order: `["gemini-3.8-flash", "deepseek-v4-flash"]`.
+    #[serde(default = "default_auto_models")]
+    pub auto_models: Vec<String>,
+}
+
+pub fn default_auto_models() -> Vec<String> {
+    vec![
+        "gemini-3.8-flash".to_string(),
+        "deepseek-v4-flash".to_string(),
+    ]
 }
 
 /// Scoped gateway credential (P1): one entry per issued key.
@@ -553,6 +564,7 @@ impl Default for GatewaySection {
             trusted_proxies: Vec::new(),
             admin_session_enabled: default_admin_session_enabled(),
             admin_session_ttl_secs: default_admin_session_ttl_secs(),
+            auto_models: default_auto_models(),
         }
     }
 }

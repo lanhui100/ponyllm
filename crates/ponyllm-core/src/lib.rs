@@ -6,6 +6,7 @@ pub mod executor;
 pub mod telemetry;
 pub mod discovery;
 pub mod endpoints;
+pub mod sentry;
 
 pub use error::{CoreError, GatewayErrorKind, Result};
 pub use pool::*;
