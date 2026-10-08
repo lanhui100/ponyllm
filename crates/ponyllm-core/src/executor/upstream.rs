@@ -1661,19 +1661,20 @@ impl UpstreamExecutor {
                     // misleading generic Internal that downstream reads as
                     // "gateway did attempt upstream" (it did not, for these).
                     if attempt > 0 {
-                        // Honest kind for pure transport exhaustion: when every
-                        // attempt died on the wire (UpstreamUnavailable only),
+                        // Honest kind for pure transport or lock contention exhaustion: when every
+                        // attempt died on the wire (UpstreamUnavailable) or hit cross-replica
+                        // serialization lock contention (LockContention),
                         // a quota cooldown belonging to an UNTRIED key — or a
                         // family-exhaustion verdict left by another request —
                         // is not evidence that THIS request exhausted quota.
                         // Rewriting to QuotaExhausted projected upstream
-                        // unreachability as 429 quota_exhausted and tripped
-                        // dsh's isQuotaExceededError (bugfix 2026-10-13).
-                        let pure_transport = !attempt_kinds.is_empty()
+                        // unreachability/lock contention as 429 quota_exhausted and tripped
+                        // dsh's isQuotaExceededError.
+                        let pure_transient = !attempt_kinds.is_empty()
                             && attempt_kinds
                                 .iter()
-                                .all(|k| matches!(k, GatewayErrorKind::UpstreamUnavailable));
-                        if !pure_transport {
+                                .all(|k| matches!(k, GatewayErrorKind::UpstreamUnavailable | GatewayErrorKind::LockContention));
+                        if !pure_transient {
                             if self.pool.any_key_quota_cooldown() || self.pool.any_key_family_exhausted_any() {
                                 last_kind = GatewayErrorKind::QuotaExhausted;
                             } else if self.pool.exhausted_by_window_with_limits(self.rate_limits.as_ref()) {
@@ -2070,19 +2071,20 @@ impl UpstreamExecutor {
                         // misleading generic Internal that downstream reads as
                         // "gateway did attempt upstream" (it did not, for these).
                         if attempt > 0 {
-                            // Honest kind for pure transport exhaustion: when every
-                            // attempt died on the wire (UpstreamUnavailable only),
+                            // Honest kind for pure transport or lock contention exhaustion: when every
+                            // attempt died on the wire (UpstreamUnavailable) or hit cross-replica
+                            // serialization lock contention (LockContention),
                             // a quota cooldown belonging to an UNTRIED key — or a
                             // family-exhaustion verdict left by another request —
                             // is not evidence that THIS request exhausted quota.
                             // Rewriting to QuotaExhausted projected upstream
-                            // unreachability as 429 quota_exhausted and tripped
-                            // dsh's isQuotaExceededError (bugfix 2026-10-13).
-                            let pure_transport = !attempt_kinds.is_empty()
+                            // unreachability/lock contention as 429 quota_exhausted and tripped
+                            // dsh's isQuotaExceededError.
+                            let pure_transient = !attempt_kinds.is_empty()
                                 && attempt_kinds
                                     .iter()
-                                    .all(|k| matches!(k, GatewayErrorKind::UpstreamUnavailable));
-                            if !pure_transport {
+                                    .all(|k| matches!(k, GatewayErrorKind::UpstreamUnavailable | GatewayErrorKind::LockContention));
+                            if !pure_transient {
                                 if self.pool.any_key_quota_cooldown() || self.pool.any_key_family_exhausted_any() {
                                     last_kind = GatewayErrorKind::QuotaExhausted;
                                 } else if self.pool.exhausted_by_window_with_limits(self.rate_limits.as_ref()) {
