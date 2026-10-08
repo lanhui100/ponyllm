@@ -3,13 +3,18 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { createApp, nextTick } from 'vue';
 import ModelSubSection from './ModelSubSection.vue';
 import type { ModelView } from '../../types/admin';
+import { adminApi } from '../../lib/adminApi';
 
 let upstreamImpl: () => Promise<{ provider: string; source: string; models: { id: string }[] }>;
+let proxyStatusImpl: () => Promise<any>;
 
 vi.mock('../../lib/adminApi', () => ({
   adminApi: {
     getUpstreamModels: (_provider: string) => ({
       send: () => upstreamImpl(),
+    }),
+    getProxyStatus: () => ({
+      send: () => proxyStatusImpl(),
     }),
   },
 }));
@@ -43,6 +48,13 @@ function mountSection(extraProps: Record<string, unknown> = {}) {
 describe('ModelSubSection model form', () => {
   beforeEach(() => {
     upstreamImpl = async () => ({ provider: 'openai', source: 'upstream', models: [] });
+    proxyStatusImpl = async () => ({
+      available: true,
+      proxy_url: 'http://127.0.0.1:8899',
+      proxy_type: 'pproxy',
+      description: '本地代理',
+      hint: '',
+    });
   });
 
   it('shows sampling/pricing badges for customized models', async () => {
@@ -276,5 +288,89 @@ describe('ModelSubSection model form', () => {
     document.body.removeChild(container);
     app2.unmount();
     document.body.removeChild(container2);
+  });
+
+  describe('proxy fallback resolution (red phase acceptance tests)', () => {
+    it('uses gateway/prop-configured default proxy instead of hardcoded 127.0.0.1:8899 when toggled on', async () => {
+      const configuredProxy = 'http://gateway-proxy.internal:8080';
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      const app = createApp(ModelSubSection, {
+        providerName: 'openai',
+        models: [],
+        adminWriteEnabled: true,
+        defaultProxy: configuredProxy,
+      });
+      app.mount(container);
+      await nextTick();
+
+      // 点击添加模型
+      (container.querySelector('[data-testid="add-model-btn"]') as HTMLButtonElement).click();
+      await nextTick();
+      await nextTick();
+
+      // 展开高级配置
+      (container.querySelector('[data-testid="toggle-advanced-btn"]') as HTMLButtonElement).click();
+      await nextTick();
+
+      // 勾选走代理
+      const proxyCheckbox = container.querySelector('[data-testid="model-proxy-enabled"]') as HTMLInputElement;
+      expect(proxyCheckbox).not.toBeNull();
+      proxyCheckbox.checked = true;
+      proxyCheckbox.dispatchEvent(new Event('change'));
+      await nextTick();
+
+      const proxyInput = container.querySelector('[data-testid="model-proxy-input"]') as HTMLInputElement;
+      expect(proxyInput).not.toBeNull();
+      // 断言：当开启代理开关且未手输自定义代理时，应采纳传入的有效代理，绝不能死锁在 http://127.0.0.1:8899
+      expect(proxyInput.value).not.toBe('http://127.0.0.1:8899');
+      expect(proxyInput.value).toBe(configuredProxy);
+
+      app.unmount();
+      document.body.removeChild(container);
+    });
+
+    it('falls back to active proxy fetched from /api/admin/proxy/status when no prop override is provided', async () => {
+      const gatewayProxy = 'http://squid-egress.corp:3128';
+      proxyStatusImpl = async () => ({
+        available: true,
+        proxy_url: gatewayProxy,
+        proxy_type: 'custom',
+        description: 'Gateway Egress Proxy',
+        hint: 'Kubernetes egress proxy active',
+      });
+
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      const app = createApp(ModelSubSection, {
+        providerName: 'openai',
+        models: [],
+        adminWriteEnabled: true,
+      });
+      app.mount(container);
+      await nextTick();
+
+      (container.querySelector('[data-testid="add-model-btn"]') as HTMLButtonElement).click();
+      await nextTick();
+      await nextTick();
+
+      (container.querySelector('[data-testid="toggle-advanced-btn"]') as HTMLButtonElement).click();
+      await nextTick();
+
+      const proxyCheckbox = container.querySelector('[data-testid="model-proxy-enabled"]') as HTMLInputElement;
+      proxyCheckbox.checked = true;
+      proxyCheckbox.dispatchEvent(new Event('change'));
+      await nextTick();
+
+      const proxyInput = container.querySelector('[data-testid="model-proxy-input"]') as HTMLInputElement;
+      expect(proxyInput).not.toBeNull();
+      // 断言：应当优先使用动态探活到的 proxy_url，而非硬编码的 127.0.0.1:8899
+      expect(proxyInput.value).toBe(gatewayProxy);
+
+      app.unmount();
+      document.body.removeChild(container);
+    });
   });
 });

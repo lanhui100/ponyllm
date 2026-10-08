@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue';
+import { ref, computed, onMounted } from 'vue';
 import type { ModelView, CreateModelPayload, UpdateModelPayload, PricingMode, PricingPeriod } from '../../types/admin';
 import { adminApi } from '../../lib/adminApi';
 import Icons from '../ui/Icons.vue';
@@ -18,6 +18,7 @@ const props = defineProps<{
   models: ModelView[];
   adminWriteEnabled: boolean;
   defaultExpanded?: boolean;
+  defaultProxy?: string;
   onDeleteModel?: (name: string, provider?: string) => Promise<void>;
   /** 批量添加执行器（由视图层注入，内部复用带版本控制的 saveModel 循环）。 */
   onBatchCreate?: (
@@ -52,6 +53,28 @@ const PROTOCOL_OPTIONS = [
 
 /** 模型"走代理"开关打开时的默认代理地址（本机 pproxy 出海代理，与 /api/admin/proxy/status 探测一致）。 */
 const DEFAULT_MODEL_PROXY = 'http://127.0.0.1:8899';
+
+/** 动态探测到的网关出口代理地址。 */
+const probedProxyUrl = ref<string>('');
+
+onMounted(() => {
+  adminApi.getProxyStatus().send().then((res) => {
+    if (res && res.proxy_url) {
+      probedProxyUrl.value = res.proxy_url;
+    }
+  }).catch(() => {});
+});
+
+/** 计算有效回退代理地址：优先 props.defaultProxy，其次探测到的网关 proxy_url，最后降级为 DEFAULT_MODEL_PROXY。 */
+function resolveDefaultProxy(): string {
+  if (props.defaultProxy && props.defaultProxy.trim()) {
+    return props.defaultProxy.trim();
+  }
+  if (probedProxyUrl.value && probedProxyUrl.value.trim()) {
+    return probedProxyUrl.value.trim();
+  }
+  return DEFAULT_MODEL_PROXY;
+}
 
 const MODALITIES = [
   { id: 'text', icon: 'file-text' as const, label: '文本' },
@@ -126,7 +149,7 @@ const rateLimitsCleared = ref(false);
 const proxyEnabled = computed({
   get: () => form.value.proxy.trim() !== '',
   set: (checked: boolean) => {
-    form.value.proxy = checked ? (form.value.proxy.trim() || DEFAULT_MODEL_PROXY) : '';
+    form.value.proxy = checked ? (form.value.proxy.trim() || resolveDefaultProxy()) : '';
   },
 });
 

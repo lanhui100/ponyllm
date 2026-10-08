@@ -29,6 +29,8 @@ export interface ProviderView {
   chat_url?: string | null;
   responses_url?: string | null;
   messages_url?: string | null;
+  /** 单代理配置或默认代理（兼容旧语义或上层指定）。 */
+  proxy?: string | null;
   /** Egress pool (出口池轮询): `direct` 或代理 URL 列表；null/缺省 = 单 proxy 语义。 */
   egress_pool?: string[] | null;
   /** Egress rotation strategy: `round_robin` | `priority`. */

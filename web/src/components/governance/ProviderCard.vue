@@ -452,6 +452,7 @@ async function handleDeleteProvider() {
           <ModelSubSection
             :provider-name="provider.name"
             :models="models"
+            :default-proxy="provider.proxy || (provider.egress_pool && provider.egress_pool.find((p: string) => p && p !== 'direct')) || undefined"
             :on-delete-model="onDeleteModel"
             :on-batch-create="onBatchCreate"
             :admin-write-enabled="adminWriteEnabled"
