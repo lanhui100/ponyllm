@@ -1132,8 +1132,11 @@ pub async fn handle_responses(
         &request_id,
     );
 
-    // PonySentry 埋点上报网关耗尽/失败事件
-    {
+    // PonySentry 埋点上报网关耗尽/失败事件（过滤下游客户端 4xx/invalid_request_error 参数错误）
+    let is_client_bad_request = last_error.contains("invalid_request_error")
+        || last_error.contains("400 Bad Request")
+        || last_error.contains("Duplicate function_call_output");
+    if !is_client_bad_request {
         let mut tags = std::collections::HashMap::new();
         tags.insert("requested_model".to_string(), requested_raw_model.clone());
         tags.insert("route".to_string(), "v1/responses".to_string());

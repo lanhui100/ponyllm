@@ -2366,24 +2366,8 @@ impl<S> TelemetryStream<S> {
             .last_error
             .clone()
             .unwrap_or_else(|| reason.to_string());
-        if let Some(ref sentry) = self.failure_ctx.sentry {
-            let mut tags = std::collections::HashMap::new();
-            tags.insert("provider".to_string(), self.failure_ctx.provider.clone());
-            tags.insert("stream_error".to_string(), "true".to_string());
-            if let Some(ref kid) = self.failure_ctx.key_id {
-                tags.insert("key_id".to_string(), kid.clone());
-            }
-            sentry.capture_error(
-                "StreamFailureError",
-                &error,
-                Some(tags),
-                Some(serde_json::json!({
-                    "request_id": self.failure_ctx.ctx.request_id,
-                    "reason": reason,
-                    "flow": flow,
-                })),
-            );
-        }
+        // 注意：StreamFailureError 多为上游模型厂商网络连接抖动或传输中断，
+        // 属于不可行动的外部网络环境问题，不作为 Sentry 错误上报（仅通过 GatewayEvent 记录指标与流日志）。
         self.emit(
             None,
             GatewayEvent::StreamFailed {
