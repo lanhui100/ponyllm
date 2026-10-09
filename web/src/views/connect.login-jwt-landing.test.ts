@@ -1,10 +1,8 @@
 // @vitest-environment happy-dom
-// B005 (W1/W2) 红相契约测试：Connect.vue JWT 登录落点角色感知。
-// 冻结契约：`.dev-team/contracts/wave-4-jwt-admin-bridge.md` W1-W2：
-// - W1: loginWithPassword 返回 role=admin 的 user → router 落 /dashboard；
-// - W2: role=user → 落 /tokens。
-// 红相主锚：当前实现 `enterUserHome()` 恒 `push('/tokens')`（Connect.vue L210-215，
-// 无角色分支）→ W1 FAIL（admin 落 /tokens 而非 /dashboard）；W2 为存量回归守卫。
+// Connect.vue JWT 登录落点契约测试（登录成功默认落 /dashboard）。
+// 契约：
+// - W1: loginWithPassword 返回 role=admin 的 user → router 默认落 /dashboard；
+// - W2: role=user → 默认同样落 /dashboard（登录成功统一默认页）。
 // 防 Flaky 律（test-expert）：挂载/提交/导航结算一律用"有界条件轮询（waitFor）"，
 // 禁止硬编码 sleep —— 全量并行下 setTimeout(N) 不可靠（曾偶发时序竞态）。
 
@@ -158,7 +156,7 @@ describe('Connect.vue: JWT 登录落点角色感知（B005 W1/W2）', () => {
     expect(router.currentRoute.value.path).toBe('/dashboard');
   });
 
-  it('W2: role=user 登录成功 → 落 /tokens（存量行为回归守卫）', async () => {
+  it('W2: role=user 登录成功 → 默认落 /dashboard', async () => {
     const calls: { url: string; init?: RequestInit }[] = [];
     stubFetch(calls, 'user');
     const { container, router } = mountConnect();
@@ -178,6 +176,6 @@ describe('Connect.vue: JWT 登录落点角色感知（B005 W1/W2）', () => {
       calls.some((c) => c.url === '/api/user/login'),
       'user 登录必须 POST /api/user/login',
     ).toBe(true);
-    expect(router.currentRoute.value.path).toBe('/tokens');
+    expect(router.currentRoute.value.path).toBe('/dashboard');
   });
 });

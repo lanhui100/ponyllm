@@ -134,12 +134,12 @@ const typeConfig = computed(() => {
           <button
             v-if="activeItem.closable && !isConfirm"
             type="button"
-            class="absolute top-0 right-0 p-1.5 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-white/40 transition-colors cursor-pointer"
+            class="absolute top-2.5 right-2.5 w-7 h-7 flex items-center justify-center rounded-full text-slate-400 hover:text-slate-700 hover:bg-slate-500/15 transition-colors cursor-pointer"
             aria-label="关闭通知"
             data-testid="toast-close-btn"
             @click="dismissToast(activeItem.id)"
           >
-            <Icons name="cross" size="15" />
+            <Icons name="cross" size="14" />
           </button>
         </div>
 

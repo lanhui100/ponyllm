@@ -207,11 +207,11 @@ async function enterDashboard(): Promise<void> {
   await router.push(safeTarget);
 }
 
-/// B005: JWT 登录成功后的落点 — 角色感知：admin → /dashboard（全管理面，数据面
-/// 由 JWT admin 桥放行）；user → /tokens（用户自助面板）。cookie/legacy（key
-/// 家族）登录仍走 redirect 语义（enterDashboard）。
+/// Web 登录成功后的落点：默认落 /dashboard。
+/// 若 URL 携带了合法重定向目标，优先前往重定向页面（如 /dashboard）。
 async function enterUserHome(): Promise<void> {
-  await router.push(session.role === 'admin' ? '/dashboard' : '/tokens');
+  const target = route.query.redirect ? sanitizeRedirect(route.query.redirect) : '/dashboard';
+  await router.push(target);
 }
 
 async function submit(): Promise<void> {
@@ -232,7 +232,6 @@ async function submit(): Promise<void> {
       const { loginWithPassword } = await import('../lib/userApi');
       const resp = await loginWithPassword(username, password);
       session.loginWithJwt(resp.access_token, resp.user.role);
-      // B005: 角色感知落点（admin→/dashboard 全管理面；user→/tokens 自助面板）。
       await enterUserHome();
       return;
     } catch (loginErr) {

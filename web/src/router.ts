@@ -263,6 +263,9 @@ export async function decideRoute(
 // 401 single-flight redirect: first claimer navigates + stops polling + toasts once.
 setUnauthorizedHandler(() => {
   stopAllPolling();
-  toastHandler?.('登录已过期，请重新连接');
+  // 仅在当前非登录页或从受保护页面被踢出时，提示登录已过期
+  if (router.currentRoute.value.path !== '/connect') {
+    toastHandler?.('登录已过期，请重新连接');
+  }
   void router.push({ path: '/connect', query: { redirect: router.currentRoute.value.fullPath } });
 });

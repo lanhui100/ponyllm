@@ -230,6 +230,8 @@ describe('UI Primitives & Modern Design System', () => {
     // 手动关闭
     const closeBtn = container.querySelector('[data-testid="toast-close-btn"]') as HTMLButtonElement;
     expect(closeBtn).not.toBeNull();
+    expect(closeBtn.className).toContain('rounded-full');
+    expect(closeBtn.className).toContain('hover:bg-slate-500/15');
     closeBtn.click();
     await nextTick();
 
