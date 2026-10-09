@@ -1,27 +1,29 @@
 """黑盒验收测试：ponyllm opencode-zen 免费模型 skill。
 
-契约（只读冻结）：`.dev-team/contracts/zen-free-skill-contract.md`（v1.2，Lead 冻结）
+契约（只读冻结）：`.dev-team/contracts/zen-free-skill-contract.md`（v1.4，Lead 冻结）
 被测对象（只读黑盒）：`skills/ponyllm-zen-free/SKILL.md`、`skills/ponyllm-zen-free/scripts/zen_free.py`
 本文件不 import 任何业务代码，全部通过 `subprocess` 调 `python3 <repo>/skills/ponyllm-zen-free/scripts/zen_free.py ...`。
 
 验收矩阵对应（契约 §6，A1–A9 逐条覆盖，每条至少一个断言函数）：
-  A1 SKILL.md 五要素（真相源/前置/步骤/样例/验证）+ 触发式 description + §2 真相源引用
-  A2 scripts/zen_free.py --help 退出码 0 且列出 §4 全部子命令
-  A3 `list --json` stdout 单一 JSON 对象、含 models 数组、每项含 id（离线路径）
-  A4 `plan step-5-preview-free --json` 合法 CreateModelPayload，tier 缺省 == "L"
-  A5 `plan --tier F` → "F"；非法 tier → 退出码 2（负例）
-  A6 `check-gate`：`-free` 模型三项全 PASS；非 `-free` 模型 I2 必须 FAIL（正反成对）
-  A7 输出/日志不出现 api key 原文（假 key + 离线全文扫描，含错误路径）
+  A1 SKILL.md 六要素**并集**（触发式 description / 前置 / 真相源 / 步骤 / 样例 / 验证——§6 A1 与
+     .agents/skills/README.md 取并集，v1.4 已裁决）+ §2 真相源路径引用
+  A2 scripts/zen_free.py --help 退出码 0、列出 §4 全部子命令，且每个 `<cmd> --help` 退出码 0（§4.4-4）
+  A3 `list --json` stdout 单一 JSON 对象、含 models 数组、每项含 id 且以 -free 结尾（离线路径）
+  A4 `plan step-5-preview-free --json` 裸 CreateModelPayload（§4.4-2 无包装键），tier 缺省 == "L"，
+     size 换算按 §4.3 锚点表（1048576→1M / 1000000→977K / 131072→128K / 65536→64K / 100000→98K / 5000→5K）
+  A5 `plan --tier F` → "F"；非法 tier → 退出码 2（正反成对）
+  A6 `check-gate`：`-free` 三项全 PASS 且退出码 0；非 `-free` 的 I2 必须 FAIL 且退出码 1
+     （§4.4-1：无论是否 --json）
+  A7 输出/日志不出现 api key 原文/前缀（env 与 `--key` 前后挂两种路径，含错误路径）
   A8 缺 key 时 info/plan/probe 退出码 2、stderr 有原因、无 traceback（负例）
-  A9 源码无裸 `except:` / `except X: pass`（AST 静态检查）
+  A9 源码无裸 `except:` / `except X: pass`（AST 静态检查）+ 只用标准库
 
-附加（非 §6 矩阵，契约 §4.1/§4.3 明文要求，离线构造，已在交付报告中单独标注）：
+附加（非 §6 矩阵，契约 §4.1/§4.5 明文要求，离线构造，已在交付报告中单独标注）：
   - §4 通用约定：key 三来源之一 `--key` 可用、配置文件 `provider.opencode.options.apiKey` 可用
   - §4.1：`probe --json` 成功路径必含 ok/protocol/http_status/latency_ms/error_type/gate_failure/
     transport/attempts/output_text/usage
-  - §4.3：7 类 error_type 分类（geo_blocked/gate_failure/usage_limit/protocol_unsupported/
+  - §4.5：7 类 error_type 分类（geo_blocked/gate_failure/usage_limit/protocol_unsupported/
     not_found/transport_error）+ geo_blocked 时 `--via auto` 必须切代理重试
-  - §4「只用标准库」：脚本 import 必须全部落在标准库
 
 红相说明（RED phase）：
   skills/ponyllm-zen-free/** 当前**不存在**（Executor 尚未实现），因此 A1/A2/A3 及其余全部
@@ -135,6 +137,19 @@ LITE_FREE = {
     "cost": {"input": 0, "output": 0, "cache_read": 0},
 }
 
+# 换算尾分支靶子：context/output 都小于 131072 ⇒ 走契约 §4.2 的「其余按 K 向上取整」，
+# 1M/256K/128K 三个桶都盖不到这条分支（100000/1024=97.65 → 98K；5000/1024=4.88 → 5K）。
+TAIL_FREE = {
+    "id": "tail-lite-free",
+    "name": "Tail Lite Free",
+    "reasoning": False,
+    "reasoning_options": [],
+    "tool_call": True,
+    "modalities": {"input": ["text"], "output": ["text"]},
+    "limit": {"context": 100000, "output": 5000},
+    "cost": {"input": 0, "output": 0, "cache_read": 0},
+}
+
 
 def _err_model(model_id: str) -> dict:
     """为 §4.3 错误分类构造的靶子模型（都在 zen 目录内、均为 -free 后缀）。"""
@@ -162,6 +177,7 @@ CATALOG_MODELS = [
     MUSE_FREE,
     MUSE_PAID,
     LITE_FREE,
+    TAIL_FREE,
     ERR_GATE,
     ERR_GEO,
     ERR_USAGE,
@@ -627,18 +643,20 @@ def list_payload_problems(payload) -> list[str]:
     return problems
 
 
-def resolve_payload(obj) -> dict | None:
-    """plan 输出解析：顶层即 payload，或顶层包一层 payload 键（契约 §4.2 措辞二选一，兜底两种形状）。
+WRAPPER_KEYS = frozenset(
+    {"payload", "source", "upstream", "meta", "result", "data", "notes", "note",
+     "warnings", "debug", "logs", "raw", "result_json", "meta_info"}
+)
 
-    身份判定从严：只有同时带 provider 与 name 的对象才算 payload。
-    「必需字段是否齐全」不由这里判（那是 A4 的结构断言），避免两个判定互相吞掉。
+
+def resolve_payload(obj) -> dict | None:
+    """plan 输出解析（契约 v1.4 §4.4-2：`plan --json` **只出裸 payload 本体**，顶层平铺、无包装键）。
+
+    不再接受 `{"payload": {...}}` 套壳形状——已被契约明文排除；顶层必须同时带 provider 与 name。
+    「必需字段是否齐全」不在这里判（那是 A4 的结构断言），避免两个判定互相吞掉。
     """
-    if isinstance(obj, dict):
-        if {"provider", "name"} <= set(obj):
-            return obj
-        inner = obj.get("payload")
-        if isinstance(inner, dict) and {"provider", "name"} <= set(inner):
-            return inner
+    if isinstance(obj, dict) and {"provider", "name"} <= set(obj):
+        return obj
     return None
 
 
@@ -1051,6 +1069,24 @@ def test_a2_help_lists_subcommand(cmd):
     )
 
 
+@pytest.mark.parametrize("cmd", SUBCOMMANDS)
+def test_a2_declared_subcommand_is_real(cmd):
+    """反例：--help 里的子命令名可能只是手写文案（metavar 硬编码），实际 parser 里却没有。
+
+    故除了「--help 列得出来」，还要逐个验证子命令真能被 argparse 受理（`<cmd> --help` 退出码 0）。
+    """
+    cp = subprocess.run(
+        [sys.executable, str(SCRIPT), cmd, "--help"], capture_output=True, text=True, timeout=TIMEOUT_S,
+        env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": os.environ.get("HOME", "/tmp"),
+             "LANG": "C.UTF-8"},
+        cwd=str(REPO_ROOT),
+    )
+    assert cp.returncode == 0, (
+        f"契约 §4 声明的子命令 {cmd} 未被 argparse 受理（`zen_free.py {cmd} --help` 退出码 "
+        f"{cp.returncode}）：--help 文案与真实 parser 已漂移\n--- STDERR ---\n{cp.stderr}"
+    )
+
+
 def test_a2_negative_subcommand_checker_detects_missing():
     full = "usage: zen_free.py {list,info,probe,plan,apply,check-gate} [-h]"
     assert missing_subcommands(full) == [], "判定器自检失败：完整子命令列表被判缺项"
@@ -1188,6 +1224,23 @@ def test_a4_context_window_format(sandbox, home):
     )
 
 
+def test_a4_step5_context_window_anchor(sandbox, home):
+    """契约 v1.4.1 §4.3 锚点：1000000 → `977K`（1000000/1024 = 976.5625 → 就近取整 = 977）。
+
+    上游用**十进制**声明上下文（1000000 ≈ 0.95 MiB）；v1.3 的「>=262144 → 256K」硬桶会把 1M 档旗舰
+    模型向下低估 4 倍，已废止。新规则只在达到 1024-based 的 1M 整点时写 1M，其余一律就近取整
+    （偏差 448 token ≤ 契约上界 512）。
+
+    历史：v1.4 锚点表此格曾误写 976K（截断值），与同表 100000→98K / 5000→5K 的就近取整口径互斥，
+    Lead 已于 v1.4.1 订正为 977K —— 整表现已与 §4.3 公式 `round(value/1024)` 自洽。
+    """
+    payload = _plan(sandbox, home, STEP5["id"])
+    assert payload["context_window"] == "977K", (
+        f"context=1000000 按契约 §4.3 公式/锚点表应为 '977K'（976.5625 就近取整，偏差 448 token），"
+        f"实得 {payload['context_window']!r}"
+    )
+
+
 def test_a4_input_types_subset_of_upstream_with_text(sandbox, home):
     """契约 §4.2：input_types = 上游 modalities.input ∩ 网关 envelope，text 恒含。"""
     payload = _plan(sandbox, home, STEP5["id"])
@@ -1234,11 +1287,25 @@ def test_a4_non_reasoning_model_omits_thinking(sandbox, home):
         )
 
 
+def test_a4_size_conversion_tail_branch(sandbox, home):
+    """契约 §4.2 换算表的尾分支「其余按 K 向上取整」（1M/256K/128K 三桶盖不到，必须单独打靶）。"""
+    payload = _plan(sandbox, home, TAIL_FREE["id"])
+    assert payload["context_window"] == "98K", (
+        f"context=100000 应按 1024 进制向上取整为 '98K'，实得 {payload['context_window']!r}"
+    )
+    assert payload["max_output"] == "5K", (
+        f"output=5000 应向上取整为 '5K'，实得 {payload['max_output']!r}"
+    )
+
+
 def test_a4_negative_payload_resolver_and_keys():
     good = {k: None for k in REQUIRED_PAYLOAD_KEYS}
-    assert resolve_payload(good) is not None, "判定器自检失败：完整 payload 未被识别"
-    assert resolve_payload({"payload": good}) is not None, "判定器自检失败：包一层 payload 未被识别"
-    for bad in ({}, {"provider": "opencode-zen"}, {"name": "x-free"}, {"payload": {"provider": "opencode-zen"}}, [], "x"):
+    assert resolve_payload(good) is not None, "判定器自检失败：裸 payload 未被识别"
+    wrapped = {"payload": good, "source": "cache"}
+    assert resolve_payload(wrapped) is None, (
+        "判定器自检失败：套壳 payload 未被拒绝（契约 v1.4 §4.4-2：只出裸 payload 本体）"
+    )
+    for bad in ({}, {"provider": "opencode-zen"}, {"name": "x-free"}, [], "x"):
         assert resolve_payload(bad) is None, f"判定器自检失败：坏结构 {bad} 被误认成 payload"
     tree = {"payload": {"thinking_default": "Max"}}
     keys = collect_keys(tree)
@@ -1247,6 +1314,22 @@ def test_a4_negative_payload_resolver_and_keys():
     )
     assert has_key(tree, "thinking_default") and not has_key(tree, "thinking_max"), (
         "判定器自检失败：has_key 嵌套查找不正确"
+    )
+
+
+def test_a4_plan_stdout_is_bare_payload(sandbox, home):
+    """契约 v1.4 §4.4-2：plan --json 的 stdout **只出裸 payload 本体**，顶层平铺、无包装键。"""
+    cp = run_skill(sandbox, home, ["plan", STEP5["id"], "--json"], env_key=FAKE_KEY)
+    assert_exit_zero(cp, "plan --json")
+    obj = parse_json_stdout(cp, "plan --json")
+    assert isinstance(obj, dict), f"plan --json 顶层必须是对象（裸 payload），实得 {type(obj).__name__}"
+    wrapped = sorted(set(obj) & WRAPPER_KEYS)
+    assert not wrapped, (
+        f"plan --json 顶层出现包装键 {wrapped}（契约 §4.4-2：顶层平铺 payload 本体，"
+        f"无 source/upstream 等包装）；实得顶层键 {sorted(obj)}"
+    )
+    assert {"provider", "name"} <= set(obj), (
+        f"plan --json 顶层缺身份字段（须顶层平铺 payload），实得 {sorted(obj)}"
     )
 
 
@@ -1320,8 +1403,9 @@ def test_a6_free_model_all_three_pass(sandbox, home):
 
 
 def test_a6_non_free_model_i2_must_fail(sandbox, home):
-    """契约 §3 I2：非 -free 后缀的 zen 模型必须 FAIL（脚本必须拒绝）。"""
+    """契约 §3 I2 + v1.4 §4.4-1：非 -free 后缀的 zen 模型必须 FAIL，且退出码 1。"""
     cp = run_skill(sandbox, home, ["check-gate", MUSE_PAID["id"], "--json"], env_key=FAKE_KEY)
+    assert_exit(cp, 1, f"check-gate {MUSE_PAID['id']}（任一 FAIL ⇒ 退出码 1）")
     verdicts = require_gate_verdicts(cp, MUSE_PAID["id"])
     assert verdicts["I2"] == "FAIL", (
         f"非 -free 模型 {MUSE_PAID['id']} 的 I2（后缀不变式）必须 FAIL，实得 {verdicts}"
@@ -1340,10 +1424,20 @@ def test_a6_non_free_model_other_gates_still_pass(sandbox, home):
 
 
 def test_a6_human_mode_gates_are_machine_readable(sandbox, home):
-    """人读表格（无 --json）同样必须给出三条可机读判定，防止判定器只在 JSON 分支上活着。"""
+    """人读表格（无 --json）同样必须给出三条可机读判定，且退出码口径与 --json 一致（§4.4-1）。"""
     cp = run_skill(sandbox, home, ["check-gate", MUSE_PAID["id"]], env_key=FAKE_KEY)
+    assert_exit(cp, 1, f"check-gate {MUSE_PAID['id']}（人读模式：任一 FAIL ⇒ 退出码 1）")
     verdicts = require_gate_verdicts(cp, f"{MUSE_PAID['id']}（人读模式）")
     assert verdicts["I2"] == "FAIL", f"人读模式下非 -free 模型 I2 必须 FAIL，实得 {verdicts}\n{cp.stdout}"
+
+
+def test_a6_free_model_human_mode_exit_zero(sandbox, home):
+    """正反成对的另一半：人读模式下三项全 PASS ⇒ 退出码 0。"""
+    cp = run_skill(sandbox, home, ["check-gate", STEP5["id"]], env_key=FAKE_KEY)
+    assert_exit_zero(cp, f"check-gate {STEP5['id']}（人读模式：三条全 PASS ⇒ 退出码 0）")
+    verdicts = require_gate_verdicts(cp, f"{STEP5['id']}（人读模式）")
+    failed = sorted(g for g, v in verdicts.items() if v != "PASS")
+    assert not failed, f"人读模式下 -free 模型三项应全 PASS，实得 {verdicts}\n{cp.stdout}"
 
 
 def test_a6_negative_gate_extractor_detects_failures():
@@ -1410,15 +1504,19 @@ def test_a7_negative_key_leak_detector():
 
 
 def test_a7_flag_key_option_is_supported(sandbox, home):
-    """契约 §4 通用约定：`--key` 是优先级最高的 key 来源（argparse 挂点位置未冻结，两种写法取其一即可）。"""
+    """契约 v1.4 §4.4-3：`--key` 挂在子命令**前或后等价**，两种写法都不得泄漏 key。"""
     before = run_skill(sandbox, home, ["--key", FAKE_KEY, "plan", STEP5["id"], "--json"])
     after = run_skill(sandbox, home, ["plan", STEP5["id"], "--key", FAKE_KEY, "--json"])
-    assert before.returncode == 0 or after.returncode == 0, (
-        "契约 §4 声明 --key 为最高优先级 key 来源，两种挂点位置写法都不被接受"
-        f"\n[--key 在子命令前] rc={before.returncode} stderr={before.stderr[:400]}"
-        f"\n[--key 在子命令后] rc={after.returncode} stderr={after.stderr[:400]}"
+    assert_exit_zero(before, "zen_free.py --key <KEY> plan ... --json（--key 前挂）")
+    assert_exit_zero(after, "zen_free.py plan ... --key <KEY> --json（--key 后挂）")
+    # 等价性：两种写法的 payload 必须一致（仅靠 --key 提供凭据，结果不得因挂点而异）
+    p_before = resolve_payload(parse_json_stdout(before, "--key 前挂"))
+    p_after = resolve_payload(parse_json_stdout(after, "--key 后挂"))
+    assert p_before == p_after, (
+        f"--key 前挂/后挂不等价：{json.dumps(p_before, ensure_ascii=False, sort_keys=True)}\n"
+        f"vs {json.dumps(p_after, ensure_ascii=False, sort_keys=True)}"
     )
-    # 反例防回归：--key 这条路径同样不得把 key 原文/前缀打进 stdout 或 stderr
+    # 反例防回归：两条路径都不得把 key 原文/前缀打进 stdout 或 stderr
     for tag, cp in (("子命令前", before), ("子命令后", after)):
         hits = key_leak_hits(cp.stdout + cp.stderr)
         assert not hits, f"--key 挂点在{tag}时泄漏了 {'/'.join(hits)}\nSTDOUT:\n{cp.stdout}\nSTDERR:\n{cp.stderr}"

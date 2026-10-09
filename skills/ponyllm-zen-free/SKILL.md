@@ -72,9 +72,15 @@ python3 <Z> info step-5-preview-free --json
 ```
 
 输出：context/output（含换算后的网关形态）、输入输出模态、`tool_call`、推理档位、`cost`、协议线索。
-判读：`limit.output=65536 → max_output "64K"`；`context=1048576 → "1M"`；`context=1000000 → "256K"`
-（1024 进制，契约 §4.2 的字面规则；只有小于 131072 的值才落到「按 K 向上取整」分支。
-上游用十进制声明而 `1M` 门槛是二进制，这属已知取舍，**不要自行改成按十进制换算**）。
+判读（契约 §4.3，v1.4）：只有达到 1024-based 的 1M 整点才写 `1M`，其余**就近取整**，与真实值偏差 ≤ 512 token：
+`1048576 → "1M"`、`1000000 → "977K"`、`131072 → "128K"`、`65536 → "64K"`、`100000 → "98K"`、`5000 → "5K"`。
+（v1.3 的 `≥262144→256K` / `≥131072→128K` 硬桶已废止：上游用十进制声明，硬桶会把
+`step-5-preview-free` 的 1000000 标成 `256K`、**向下低估 4 倍**，误导 `auto[1m]` 路由门禁与压缩阈值。）
+
+> **历史坑（v1.4.1 已裁决）**：v1.4 锚点表此格曾误写 `976K`（那是 `1000000 // 1024` 的**截断**值），
+> 与同表 `100000→98K` / `5000→5K` 要求的就近取整口径**互斥**——截断会给出 97K/4K，且违反 ≤512 token 上界，
+> 三行里没有任何单一口径能同时满足。Lead 已按**公式优先**订正为 `977K`（偏差 448 token ≤ 512），
+> 整表现已与 `round(value/1024)` 自洽。本 skill 即按此实现。
 
 ### 步骤 3——`probe`：按门禁形态探活（这是唯一能证明「能用」的步骤）
 
@@ -142,8 +148,8 @@ python3 <Z> plan step-5-preview-free --tier xx       # 非法 tier → 退出码
 |---|---|---|
 | provider | 固定 | `opencode-zen` |
 | name | 上游 id | 原样 |
-| context_window | `limit.context` | 1024 进制：≥1048576→`1M`，≥262144→`256K`，≥131072→`128K`，其余按 K 向上取整 |
-| max_output | `limit.output` | 同上（65536→`64K`，131072→`128K`） |
+| context_window | `limit.context` | ≥1048576→`1M`，否则就近取整 `"%dK" % round(v/1024)`（1000000→`977K`、65536→`64K`） |
+| max_output | `limit.output` | 同上（131072→`128K`，65536→`64K`） |
 | input_types | `modalities.input` | 与网关 envelope `text/image/video` 取交集，`text` 恒含 |
 | output_types | `modalities.output` | 文本模型恒 `["text"]` |
 | protocol | `probe --protocol auto` 命中值 | 默认 `chat` |
@@ -159,7 +165,7 @@ python3 <Z> plan step-5-preview-free --tier xx       # 非法 tier → 退出码
   "provider": "opencode-zen",
   "name": "step-5-preview-free",
   "tier": "L",
-  "context_window": "256K",
+  "context_window": "977K",
   "max_output": "64K",
   "input_types": ["text", "image", "video"],
   "output_types": ["text"],
@@ -197,7 +203,7 @@ curl -s -H "Authorization: Bearer <KEY>" -H 'Content-Type: application/json' \
 ## 校准样例
 
 - 正例：`step-5-preview-free` 规格 context 1000000 / output 65536 / 输入 text+image+video /
-  effort low,medium,high / tool_call true / cost 全 0 → `context_window "256K"` + `max_output "64K"` +
+  effort low,medium,high / tool_call true / cost 全 0 → `context_window "977K"` + `max_output "64K"` +
   `input_types [text,image,video]` + `thinking low/high` + `protocol chat` → 门禁三条件实测
   `200 / finish=stop / text="zen-ok"` → 可接入。
 - 正例：`muse-spark-1.3-contributor-free` 直连 403 `not available in your country`（`cf-ray`、`cf-placement: remote-ORD`）

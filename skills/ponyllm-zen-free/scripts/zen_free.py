@@ -187,19 +187,21 @@ def load_catalog() -> dict:
 
 
 def to_size(value) -> str:
-    """契约 §4.2 的 1024 进制换算（上游声明是十进制，此处按契约字面规则，不擅自改成 1M）。
+    """契约 §4.3（v1.4）的 size 换算：只有达到 1024-based 的 1M 整点才写 1M，其余就近取整。
 
-    >=1048576 → 1M；>=262144 → 256K；>=131072 → 128K；其余按 K 向上取整。
+        value >= 1048576  ->  "1M"
+        否则               ->  "%dK" % round(value / 1024)
+
+    就近取整把与真实值的偏差压在 <= 512 token（契约明写的上界）。
+    v1.3 的 `>=262144 -> 256K` / `>=131072 -> 128K` 硬桶已废止：上游用十进制声明
+    （step-5-preview-free 的 context = 1000000 ≈ 0.95MiB），硬桶会把它标成 256K、
+    向下低估 4 倍，误导 auto[1m] 路由门禁与压缩阈值。
     """
     if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
         raise ZenFreeError("上游未提供可用的 size 字段（limit 值=%r），拒绝编造规格" % (value,))
     if value >= 1048576:
         return "1M"
-    if value >= 262144:
-        return "256K"
-    if value >= 131072:
-        return "128K"
-    return "%dK" % (-(-value // 1024))
+    return "%dK" % round(value / 1024)
 
 
 def resolve_tier(raw) -> str:
@@ -970,11 +972,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="zen_free.py",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        description="opencode-zen 免费模型助手：list/info/probe/plan/apply/check-gate。",
-        epilog="子命令：list, info, probe, plan, apply, check-gate",
+        description="opencode-zen 免费模型助手：发现 / 探活 / 元信息 / 字段映射 / 写入网关。",
+        epilog="子命令清单由真实 parser 生成（契约 §4.4 第 4 条：不得硬编码）。",
     )
     parser.add_argument("--key", help="zen api key（优先级高于 $OPENCODE_ZEN_KEY 与 opencode.json）")
-    subs = parser.add_subparsers(dest="command", metavar="{list,info,probe,plan,apply,check-gate}")
+    # metavar 先留空，下面按真实 parser 已注册的子命令回填（见 _finalize_parser）
+    subs = parser.add_subparsers(dest="command")
     subs.required = True
 
     def add_key(sub):
@@ -1025,7 +1028,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_gate.add_argument("--json", action="store_true")
     add_key(p_gate)
     p_gate.set_defaults(func=cmd_check_gate)
+    _finalize_subcommand_metavar(subs)
     return parser
+
+
+def _finalize_subcommand_metavar(subs) -> None:
+    """按真实 parser 已注册的子命令回填 metavar（契约 §4.4 第 4 条）。
+
+    硬编码 metavar 是结构性假放行：从真实 parser 里删掉某个子命令后，硬编码的
+    usage 字符串仍会列出它，于是「--help 列出全部子命令」这条断言失去鉴别力。
+    subs.choices 就是权威列表——只包含真正 add_parser 注册进去的子命令。
+    """
+    subs.metavar = "{%s}" % ",".join(subs.choices)
 
 
 def main(argv=None) -> int:
