@@ -307,15 +307,13 @@ jobs:
           git rebase origin/main
           git push origin main
 
-      - name: Apply manifests
+      - name: Apply non-rolling manifests (IngressRoute)
         run: |
           # --validate=false：跳过 API server OpenAPI 大 payload 下载（GitHub
-          # runner → 175.24.73.251:6443 偶发 http2 连接中断）；清单已由
-          # pre-commit/CI 多轮验证。网络瞬断用 3 次重试兜底。
+          # runner → 175.24.73.251:6443 偶发 http2 连接中断）；网络瞬断用 3 次重试兜底。
+          # IngressRoute 等非 Deployment 资源无滚动语义，单次 apply。
           for i in 1 2 3; do
-            if kubectl apply --validate=false \
-              -f deploy/ponyllm-deployment.yaml \
-              -f deploy/ponyllm-ingress-routes.yaml; then
+            if kubectl apply --validate=false -f deploy/ponyllm-ingress-routes.yaml; then
               exit 0
             fi
             echo "apply attempt $i failed; retrying in 5s"
@@ -323,30 +321,13 @@ jobs:
           done
           exit 1
 
-      - name: Wait for rollout (auto-rollback on failure)
+      - name: Serialized rollout across roles (C1 gate + C3 continuity prober)
+        env:
+          PONYLLM_API_KEY: ${{ secrets.PONYLLM_API_KEY }}
+          PONYLLM_BASE_URL: https://tokens.ponyjob.top
         run: |
-          FAILED=""
-          for deploy in ponyllm-gateway-dev ponyllm-gateway-preprod ponyllm-gateway-proserver ponyllm-gateway-tencent; do
-            ok=""
-            for i in 1 2 3; do
-              if kubectl -n ponyllm rollout status deploy/$deploy --timeout=300s; then
-                ok=1
-                break
-              fi
-              echo "rollout status attempt $i for $deploy failed; retrying in 5s"
-              sleep 5
-            done
-            if [ -z "$ok" ]; then
-              echo "::warning::$deploy rollout failed — rolling back"
-              # 新 Deployment 无先前 revision 时 undo 会报错，|| true 兜底
-              kubectl -n ponyllm rollout undo deploy/$deploy || true
-              FAILED="$FAILED $deploy"
-            fi
-          done
-          if [ -n "$FAILED" ]; then
-            echo "FAIL: rollout failed for:$FAILED"
-            exit 1
-          fi
+          # 逐 role (dev -> preprod -> proserver -> tencent) 串行滚动并执行 drain + 长流门禁
+          bash scripts/serialized-rollout.sh
 
       - name: Post-deploy smoke
         if: env.PONYLLM_API_KEY != ''

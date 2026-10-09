@@ -144,6 +144,7 @@ metadata:
     # IfNotPresent 节点缓存旧 digest → 混合版本），已移除 Keel 注解。
     # 回滚：kubectl rollout undo（revisionHistoryLimit:3）。
 spec:
+  # contract C2: dev single-writer exception — replicas MUST stay 1 — ponyllm-data (RWO local-path) single-mount + telemetry snapshot single-writer (ADR 2026-10-01); preprod/proserver/tencent = 2
   replicas: 1
   revisionHistoryLimit: 3
   strategy:
@@ -315,7 +316,7 @@ metadata:
   annotations:
     # 部署机制：同 ponyllm-gateway-dev（CI digest 钉 + kubectl apply，清单即真相）。
 spec:
-  replicas: 1
+  replicas: 2
   revisionHistoryLimit: 3
   strategy:
     type: RollingUpdate
@@ -470,7 +471,7 @@ metadata:
   annotations:
     # 部署机制：同 ponyllm-gateway-dev（CI digest 钉 + kubectl apply，清单即真相）。
 spec:
-  replicas: 1
+  replicas: 2
   revisionHistoryLimit: 3
   strategy:
     type: RollingUpdate
@@ -622,7 +623,7 @@ metadata:
     # 部署机制：同 ponyllm-gateway-dev（CI digest 钉 + kubectl apply，清单即真相）。
     # tencent 为 control-plane（4C4G，带宽瓶颈）——weight=1 最低流量占比。
 spec:
-  replicas: 1
+  replicas: 2
   revisionHistoryLimit: 3
   strategy:
     type: RollingUpdate

@@ -109,6 +109,13 @@ fn gateway_config() -> GatewayConfig {
     let mut cfg = GatewayConfig::default();
     cfg.auth_mode = ponyllm_config::AuthMode::Open; // F1 migration: default is now secured; these behavior tests opt into open mode
     cfg.admin_write_enabled = true;
+    cfg.providers.insert(
+        "openai".to_string(),
+        ponyllm_server::ProviderConfig {
+            strategy: "priority".to_string(),
+            ..Default::default()
+        },
+    );
     cfg
 }
 
