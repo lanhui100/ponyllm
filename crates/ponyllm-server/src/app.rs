@@ -412,23 +412,67 @@ async fn auth_middleware(State(state): State<Arc<AppState>>, req: Request, next:
         "***".to_string()
     };
 
+    // B005: JWT admin 桥 — 管理面资源且凭据以 `Authorization: Bearer <token>`
+    // 呈现时，先试 JWT 验签（复用 `verify_user_jwt`，含 sub/enabled/tv 实时
+    // 校验；claims.sub 为该用户 id）：
+    // - 验签成功且 `claims.role == "admin"` → 注入
+    //   `CallerIdentity { scope: Admin, key_id: None, user_id: Some(sub) }`
+    //   放行（契约 B1-B7）；
+    // - 验签成功且 `claims.role != "admin"` → 403 forbidden（契约 B8-B9）。
+    //   403 是授权拒绝而非认证失败，不消耗 F2 auth-failure budget（对齐
+    //   466-469 行既有 403 语义）；
+    // - 验签失败（垃圾/过期/用户不存在）→ 不 return，自然回落下方 key 家族
+    //   authenticate（契约 B10/B11 → 401；机器 key → 200 回归不变）。
+    // `x-api-key` 与 bare token 不进入 JWT 桥（机器 key 家族契约不变）。
+    let is_bearer_scheme = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| {
+            let lower = s.trim().to_ascii_lowercase();
+            lower.starts_with("bearer ")
+        })
+        .unwrap_or(false);
+    if is_bearer_scheme
+        && matches!(
+            resource,
+            Resource::AdminRead
+                | Resource::AdminWrite
+                | Resource::TeleFull
+                | Resource::TeleSummary
+                | Resource::Quota
+        )
+    {
+        if let Some(secret) = state.jwt_secret.clone() {
+            if let Ok(claims) = crate::auth::verify_user_jwt(
+                token,
+                &secret,
+                state.jwt_issuer,
+                &state.user_tracker,
+            ) {
+                if claims.role == "admin" {
+                    let mut req = req;
+                    if let Ok(val) = axum::http::HeaderValue::from_str(&claims.sub) {
+                        req.headers_mut()
+                            .insert(axum::http::HeaderName::from_static("x-user-id"), val);
+                    }
+                    req.extensions_mut().insert(crate::auth::CallerIdentity {
+                        scope: ponyllm_config::KeyScope::Admin,
+                        key_id: None,
+                        user_id: Some(claims.sub.clone()),
+                    });
+                    return next.run(req).await;
+                }
+                return crate::auth::forbidden("jwt-user-on-admin");
+            }
+        }
+    }
+
     match authenticate(token, &entries, &legacy_key, strict) {
         AuthVerdict::Invalid => {
             if path.starts_with("/api/admin") {
                 tracing::warn!(client_ip = %client_ip_str, user_agent, token_prefix, %method, %path, reason = "invalid_credential", "admin interface access rejected (invalid credential)");
             }
             state.auth_ratelimiter.record_failure(client_ip, prefix);
-            state.sentry.capture_error(
-                "AuthInvalid",
-                &format!("Invalid credential presented from {}", client_ip_str),
-                Some({
-                    let mut tags = std::collections::HashMap::new();
-                    tags.insert("client_ip".to_string(), client_ip_str.clone());
-                    tags.insert("path".to_string(), path.clone());
-                    tags
-                }),
-                None,
-            );
             crate::auth::invalid_api_key()
         }
         AuthVerdict::LegacyDisabled => {

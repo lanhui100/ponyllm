@@ -128,3 +128,4 @@ pub enum UserRole { Admin, User }
 | **Stage 2 (B002)** | 登录/自助Token/Admin用户管理 API + 权限中间件 | /api/user/** 全套端点、JWT 中间件分支、Resource::UserSelf/UserAdmin、推理面双闸、reload 同步修复、CLI 扩展；红绿测试全绿 | 依赖 B001 |
 | **Stage 3 (B003)** | Web 前端用户面板 | Connect.vue 登录改造、session store jwt 模式、TokensView、GovernanceView users tab、路由守卫/CSP；vitest + 浏览器 E2E | 依赖 B002 |
 | **Stage 4 (B004)** | 集成冒烟与交付收口 | 全量回归、存量测试兼容核对、agent-browser E2E（Console Error=0+截图）、ADR 落盘 implemented、README、NFR 达标报告、收口提交 | 依赖 B003 |
+| **Stage 5 (B005)** | JWT admin 桥与角色感知落点修复 | 解决登录后默认落点 /tokens 与点击 dashboard 报过期 401 故障：后端 auth_middleware 增加 JWT admin 桥分支、前端 Connect.vue 角色感知落点（admin→/dashboard，user→/tokens）、router.ts 增加 user JWT 直访管理面优雅跳 /tokens 守卫；红绿契约测试全绿 | 依赖 B004 |

@@ -177,7 +177,7 @@ router.beforeEach(async (to) => {
   // meta is the only way to bypass, and it is visible in the route table.
   const requiresAuth = to.matched.some((record) => record.meta.requiresAuth === true);
   const requiresAdmin = to.matched.some((record) => record.meta.requiresAdmin === true);
-  return decideRoute(
+  const decision = await decideRoute(
     to.path,
     to.fullPath,
     requiresAuth,
@@ -186,6 +186,18 @@ router.beforeEach(async (to) => {
     requiresAdmin,
     probeOpenMode,
   );
+  if (decision !== true) {
+    return decision;
+  }
+  if (
+    session.sessionMode === 'jwt' &&
+    session.role !== 'admin' &&
+    (to.path === '/dashboard' || to.path === '/recorder' || to.path === '/governance')
+  ) {
+    toastHandler?.('当前账号无管理权限，已跳转我的 Token');
+    return { path: '/tokens', query: {}, replace: true };
+  }
+  return true;
 });
 
 // Pure guard decision (unit-testable without router singleton state).
