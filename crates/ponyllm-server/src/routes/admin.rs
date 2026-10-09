@@ -1286,7 +1286,7 @@ fn store_degraded_response() -> axum::response::Response {
         .into_response()
 }
 
-async fn load_store_config(
+pub(crate) async fn load_store_config(
     state: &AppState,
 ) -> Result<(ConfigFile, crate::admin_store::ConfigVersion), axum::response::Response> {
     let store = state.config_store.as_ref().ok_or_else(|| {
@@ -1303,7 +1303,7 @@ async fn load_store_config(
     }
 }
 
-async fn save_store_config(
+pub(crate) async fn save_store_config(
     state: &AppState,
     cfg: &mut ConfigFile,
     store_version: &crate::admin_store::ConfigVersion,
@@ -1363,7 +1363,7 @@ async fn save_store_config(
     }
 }
 
-fn check_admin_write_enabled(state: &AppState) -> Result<(), axum::response::Response> {
+pub(crate) fn check_admin_write_enabled(state: &AppState) -> Result<(), axum::response::Response> {
     if !state.config.read().admin_write_enabled {
         tracing::warn!("admin write operation rejected: admin_write_enabled is false");
         return Err((
@@ -1380,7 +1380,7 @@ fn check_admin_write_enabled(state: &AppState) -> Result<(), axum::response::Res
     Ok(())
 }
 
-fn check_if_match(
+pub(crate) fn check_if_match(
     headers: &HeaderMap,
     current_version: u64,
 ) -> Result<(), axum::response::Response> {

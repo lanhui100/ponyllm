@@ -1,4 +1,5 @@
-use std::sync::Arc;
+use crate::routes::*;
+use crate::state::AppState;
 use axum::extract::{DefaultBodyLimit, Request, State};
 use axum::http::{HeaderValue, Method, StatusCode};
 use axum::middleware::{from_fn_with_state, Next};
@@ -6,11 +7,10 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde_json::json;
+use std::sync::Arc;
 use tower_http::cors::CorsLayer;
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
-use crate::routes::*;
-use crate::state::AppState;
 
 /// Build the CORS layer (H6).
 ///
@@ -90,13 +90,10 @@ fn allowed_headers() -> Vec<axum::http::HeaderName> {
 
 /// Fixed warning emitted when the web console `dist` directory is missing.
 /// WEB-01 acceptance greps this exact string (stderr + log).
-pub const WEB_DIST_MISSING_WARN: &str = "[web] web/dist 缺失，Web 控制台未托管（网关转发不受影响）；用 `--no-web` 可显式关闭";
+pub const WEB_DIST_MISSING_WARN: &str =
+    "[web] web/dist 缺失，Web 控制台未托管（网关转发不受影响）；用 `--no-web` 可显式关闭";
 
-async fn auth_middleware(
-    State(state): State<Arc<AppState>>,
-    req: Request,
-    next: Next,
-) -> Response {
+async fn auth_middleware(State(state): State<Arc<AppState>>, req: Request, next: Next) -> Response {
     use crate::auth::{authenticate, classify_resource, scope_allows, AuthVerdict, Resource};
     use ponyllm_config::AuthCompat;
     use std::net::{IpAddr, SocketAddr};
@@ -111,6 +108,95 @@ async fn auth_middleware(
     // the routes do not exist, and these paths must fall through to the
     // global fallback (404 — the regression anchor), never 401 here.
     if path == "/api/admin/session" || path == "/api/admin/session/revoke" {
+        return next.run(req).await;
+    }
+
+    // B002: Web user plane (`/api/user/**`) is a JWT-ONLY namespace.
+    // - Disabled plane (`user_plane_enabled=false`): EVERYTHING under
+    //   `/api/user/` — including `/api/user/login` — is hidden (404). This
+    //   must be decided HERE, before the key-family authenticate below, so a
+    //   credential-less POST does not fall through to 401 (red anchor).
+    // - `/api/user/login`: self-authenticating handler (password + JWT issue).
+    // - Everything else: JWT-only. Verification failure is 401 with ZERO
+    //   fallback to the gateway-key family (an admin-scope machine key
+    //   presented against `/api/user/**` must still 401).
+    if path.starts_with("/api/user/") {
+        if !state.user_plane_enabled {
+            return global_fallback().await.into_response();
+        }
+        if path == "/api/user/login" {
+            // Resolve the client IP once (same F3 trust model as the rest of
+            // the middleware) and hand it to the login handler for
+            // check-before-hash rate limiting (ADR: 登录限流复用 AuthRateLimiter
+            // 加 "login" 前缀).
+            let remote_peer: IpAddr = req
+                .extensions()
+                .get::<axum::extract::ConnectInfo<SocketAddr>>()
+                .map(|c| c.0.ip())
+                .unwrap_or(IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
+            let trusted = state.trusted_proxies.read().clone();
+            let client_ip = crate::auth::resolve_client_ip(
+                req.headers()
+                    .get("x-forwarded-for")
+                    .and_then(|v| v.to_str().ok()),
+                req.headers().get("x-real-ip").and_then(|v| v.to_str().ok()),
+                remote_peer,
+                &trusted,
+            );
+            let mut req = req;
+            req.extensions_mut()
+                .insert(crate::auth::ClientIp(client_ip));
+            return next.run(req).await;
+        }
+        let headers = req.headers();
+        let provided: Option<&str> = headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.trim())
+            .filter(|s| {
+                let lower = s.to_ascii_lowercase();
+                lower.starts_with("bearer ")
+            })
+            .map(|s| s[7..].trim());
+        let Some(token) = provided.filter(|t| !t.is_empty()) else {
+            return crate::auth::unauthorized(
+                "Missing or invalid Authorization header: /api/user/** requires a JWT Bearer token",
+            );
+        };
+        let Some(secret) = state.jwt_secret.clone() else {
+            tracing::error!("B002: JWT secret unavailable while user plane enabled");
+            return crate::auth::unauthorized("JWT verification unavailable");
+        };
+        let verified =
+            crate::auth::verify_user_jwt(token, &secret, state.jwt_issuer, &state.user_tracker);
+        let claims = match verified {
+            Ok(c) => c,
+            Err(kind) => {
+                let msg = match kind {
+                    crate::auth::JwtRejection::Expired => "token expired",
+                    crate::auth::JwtRejection::Invalid | crate::auth::JwtRejection::UserInvalid => {
+                        "invalid token"
+                    }
+                };
+                return crate::auth::unauthorized(msg);
+            }
+        };
+        // Role gating (independent of the gateway-key scope matrix):
+        // `/api/user/admin/**` requires claims.role == "admin".
+        let is_admin_route = path.starts_with("/api/user/admin/") || path == "/api/user/admin";
+        if is_admin_route && claims.role != "admin" {
+            return crate::auth::forbidden("user-admin");
+        }
+        let mut req = req;
+        if let Ok(val) = axum::http::HeaderValue::from_str(&claims.sub) {
+            req.headers_mut()
+                .insert(axum::http::HeaderName::from_static("x-user-id"), val);
+        }
+        req.extensions_mut().insert(crate::auth::CallerIdentity {
+            scope: ponyllm_config::KeyScope::Admin,
+            key_id: None,
+            user_id: Some(claims.sub.clone()),
+        });
         return next.run(req).await;
     }
 
@@ -153,9 +239,7 @@ async fn auth_middleware(
         .unwrap_or(IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
     let trusted = state.trusted_proxies.read().clone();
     let client_ip = crate::auth::resolve_client_ip(
-        headers
-            .get("x-forwarded-for")
-            .and_then(|v| v.to_str().ok()),
+        headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()),
         headers.get("x-real-ip").and_then(|v| v.to_str().ok()),
         remote_peer,
         &trusted,
@@ -224,15 +308,11 @@ async fn auth_middleware(
         ponyllm_config::KeyScope,
         String,
         Arc<crate::session::SessionStore>,
-    )> = if headers
-        .get("authorization")
-        .is_none()
-        && headers.get("x-api-key").is_none()
-    {
+    )> = if headers.get("authorization").is_none() && headers.get("x-api-key").is_none() {
         let store_opt = state.admin_session_store.read().clone();
-        let sid_opt = store_opt
-            .as_ref()
-            .and_then(|store| crate::routes::session::session_cookie_sid(headers).map(|sid| (store.clone(), sid)));
+        let sid_opt = store_opt.as_ref().and_then(|store| {
+            crate::routes::session::session_cookie_sid(headers).map(|sid| (store.clone(), sid))
+        });
         match sid_opt {
             Some((store, sid)) => match store.validate(&sid) {
                 Some(scope) => {
@@ -276,6 +356,8 @@ async fn auth_middleware(
             Resource::TeleFull => "telemetry-full",
             Resource::TeleSummary => "telemetry-summary",
             Resource::Quota => "quota",
+            Resource::UserSelf => "user-self",
+            Resource::UserAdmin => "user-admin",
             Resource::Exempt => "exempt",
         };
         tracing::warn!(client_ip = %client_ip_str, user_agent, %method, %path, scope = scope.as_str(), resource = name, reason = "privilege_boundary_violation", "admin privilege boundary violation rejected (403, session cookie)");
@@ -367,12 +449,37 @@ async fn auth_middleware(
             );
             crate::auth::legacy_disabled()
         }
-        AuthVerdict::Allowed { scope, .. } => {
+        AuthVerdict::Allowed {
+            scope,
+            key_id,
+            user_id,
+        } => {
             let resource = classify_resource(&method, &path, query.as_deref());
             if matches!(resource, Resource::Exempt) {
                 return next.run(req).await;
             }
             if scope_allows(scope, resource) {
+                let mut req = req;
+                if let Some(uid) = user_id.as_deref() {
+                    if let Ok(val) = axum::http::HeaderValue::from_str(uid) {
+                        req.headers_mut()
+                            .insert(axum::http::HeaderName::from_static("x-user-id"), val);
+                    }
+                }
+                // B002: surface the authenticated gateway key id to inference
+                // handlers so the token quota gate / settlement can key on it
+                // (same header-injection pattern as x-user-id).
+                if let Some(kid) = key_id.as_deref() {
+                    if let Ok(val) = axum::http::HeaderValue::from_str(kid) {
+                        req.headers_mut()
+                            .insert(axum::http::HeaderName::from_static("x-key-id"), val);
+                    }
+                }
+                req.extensions_mut().insert(crate::auth::CallerIdentity {
+                    scope,
+                    key_id,
+                    user_id,
+                });
                 next.run(req).await
             } else {
                 let name = match resource {
@@ -382,6 +489,8 @@ async fn auth_middleware(
                     Resource::TeleFull => "telemetry-full",
                     Resource::TeleSummary => "telemetry-summary",
                     Resource::Quota => "quota",
+                    Resource::UserSelf => "user-self",
+                    Resource::UserAdmin => "user-admin",
                     Resource::Exempt => "exempt",
                 };
                 if path.starts_with("/api/admin") {
@@ -467,14 +576,26 @@ pub fn create_app(state: Arc<AppState>) -> Router {
     // API routes: guarded by auth_middleware (Bearer / x-api-key, /health & /metrics exempt).
     let mut api = Router::new()
         .route("/health", get(handle_health))
-        .route("/metrics", get(crate::routes::telemetry::handle_get_prometheus_metrics))
-        .route("/oauth2callback", get(crate::routes::handle_oauth2_callback))
+        .route(
+            "/metrics",
+            get(crate::routes::telemetry::handle_get_prometheus_metrics),
+        )
+        .route(
+            "/oauth2callback",
+            get(crate::routes::handle_oauth2_callback),
+        )
         .route("/models", get(handle_list_models))
         .route("/models/{model_id}", get(handle_get_model))
-        .route("/models/{provider}/{model}", get(handle_get_model_provider_model))
+        .route(
+            "/models/{provider}/{model}",
+            get(handle_get_model_provider_model),
+        )
         .route("/v1/models", get(handle_list_models))
         .route("/v1/models/{model_id}", get(handle_get_model))
-        .route("/v1/models/{provider}/{model}", get(handle_get_model_provider_model))
+        .route(
+            "/v1/models/{provider}/{model}",
+            get(handle_get_model_provider_model),
+        )
         .route("/chat/completions", post(handle_chat_completions))
         .route("/v1/chat/completions", post(handle_chat_completions))
         .route("/messages", post(handle_messages))
@@ -493,16 +614,26 @@ pub fn create_app(state: Arc<AppState>) -> Router {
         )
         .route(
             "/systemone",
-            post(handle_systemone).layer(DefaultBodyLimit::max(crate::routes::systemone::SYSTEMONE_MAX_JSON_BYTES)),
+            post(handle_systemone).layer(DefaultBodyLimit::max(
+                crate::routes::systemone::SYSTEMONE_MAX_JSON_BYTES,
+            )),
         )
         .route(
             "/v1/systemone",
-            post(handle_systemone).layer(DefaultBodyLimit::max(crate::routes::systemone::SYSTEMONE_MAX_JSON_BYTES)),
+            post(handle_systemone).layer(DefaultBodyLimit::max(
+                crate::routes::systemone::SYSTEMONE_MAX_JSON_BYTES,
+            )),
         )
         .route("/telemetry/recorder", get(handle_get_recorder))
         .route("/v1/telemetry/recorder", get(handle_get_recorder))
-        .route("/telemetry/recorder/{request_id}", get(handle_get_recorder_frame))
-        .route("/v1/telemetry/recorder/{request_id}", get(handle_get_recorder_frame))
+        .route(
+            "/telemetry/recorder/{request_id}",
+            get(handle_get_recorder_frame),
+        )
+        .route(
+            "/v1/telemetry/recorder/{request_id}",
+            get(handle_get_recorder_frame),
+        )
         .route("/telemetry/metrics", get(handle_get_metrics))
         .route("/v1/telemetry/metrics", get(handle_get_metrics))
         .route("/telemetry/stream", get(handle_get_stream))
@@ -510,6 +641,10 @@ pub fn create_app(state: Arc<AppState>) -> Router {
         .route("/telemetry/history", get(handle_get_history))
         .route("/v1/telemetry/history", get(handle_get_history))
         .merge(admin_routes())
+        // B002: Web user plane mounted under the SAME auth_middleware layer —
+        // the middleware owns `/api/user/**` (JWT-only / disabled-404), so the
+        // router itself needs no extra protection.
+        .merge(crate::routes::user::user_routes())
         .layer(from_fn_with_state(state.clone(), auth_middleware));
 
     // Phase-3 (VULN-05): session API mounted AFTER the auth layer — the
@@ -517,7 +652,9 @@ pub fn create_app(state: Arc<AppState>) -> Router {
     // the middleware path-exemption keeps disabled-mode requests on the 404
     // regression anchor. When disabled the routes simply do not exist.
     if state.admin_session_store.read().is_some() {
-        use crate::routes::session::{handle_session_create, handle_session_probe, handle_session_revoke};
+        use crate::routes::session::{
+            handle_session_create, handle_session_probe, handle_session_revoke,
+        };
         api = api.merge(
             Router::new()
                 .route(
@@ -534,54 +671,58 @@ pub fn create_app(state: Arc<AppState>) -> Router {
     };
     let web = build_web_router(web_enabled, &web_dist_dir);
 
-    let security_headers = axum::middleware::from_fn(|req, next: axum::middleware::Next| async move {
-        let mut res = next.run(req).await;
-        let headers = res.headers_mut();
-        if !headers.contains_key(axum::http::header::X_FRAME_OPTIONS) {
-            headers.insert(
-                axum::http::header::X_FRAME_OPTIONS,
-                axum::http::HeaderValue::from_static("SAMEORIGIN"),
-            );
-        }
-        if !headers.contains_key(axum::http::header::X_CONTENT_TYPE_OPTIONS) {
-            headers.insert(
-                axum::http::header::X_CONTENT_TYPE_OPTIONS,
-                axum::http::HeaderValue::from_static("nosniff"),
-            );
-        }
-        // H6/L2 follow-up: Referrer must never carry ?token= or ?code= to a
-        // third party; the console needs no privileged browser features.
-        // (HSTS/CSP stay at the ingress layer — see deploy notes.)
-        if !headers.contains_key(axum::http::header::REFERRER_POLICY) {
-            headers.insert(
-                axum::http::header::REFERRER_POLICY,
-                axum::http::HeaderValue::from_static("no-referrer"),
-            );
-        }
-        if !headers.contains_key("permissions-policy") {
-            headers.insert(
-                "permissions-policy",
-                axum::http::HeaderValue::from_static(
-                    "camera=(), microphone=(), geolocation=(), payment=()",
-                ),
-            );
-        }
-        if !headers.contains_key(axum::http::header::CONTENT_SECURITY_POLICY) {
-            headers.insert(
+    let security_headers = axum::middleware::from_fn(
+        |req, next: axum::middleware::Next| async move {
+            let mut res = next.run(req).await;
+            let headers = res.headers_mut();
+            if !headers.contains_key(axum::http::header::X_FRAME_OPTIONS) {
+                headers.insert(
+                    axum::http::header::X_FRAME_OPTIONS,
+                    axum::http::HeaderValue::from_static("SAMEORIGIN"),
+                );
+            }
+            if !headers.contains_key(axum::http::header::X_CONTENT_TYPE_OPTIONS) {
+                headers.insert(
+                    axum::http::header::X_CONTENT_TYPE_OPTIONS,
+                    axum::http::HeaderValue::from_static("nosniff"),
+                );
+            }
+            // H6/L2 follow-up: Referrer must never carry ?token= or ?code= to a
+            // third party; the console needs no privileged browser features.
+            // (HSTS/CSP stay at the ingress layer — see deploy notes.)
+            if !headers.contains_key(axum::http::header::REFERRER_POLICY) {
+                headers.insert(
+                    axum::http::header::REFERRER_POLICY,
+                    axum::http::HeaderValue::from_static("no-referrer"),
+                );
+            }
+            if !headers.contains_key("permissions-policy") {
+                headers.insert(
+                    "permissions-policy",
+                    axum::http::HeaderValue::from_static(
+                        "camera=(), microphone=(), geolocation=(), payment=()",
+                    ),
+                );
+            }
+            if !headers.contains_key(axum::http::header::CONTENT_SECURITY_POLICY) {
+                headers.insert(
                 axum::http::header::CONTENT_SECURITY_POLICY,
                 axum::http::HeaderValue::from_static(
                     "default-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'self'; form-action 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self';",
                 ),
             );
-        }
-        if !headers.contains_key(axum::http::header::STRICT_TRANSPORT_SECURITY) {
-            headers.insert(
-                axum::http::header::STRICT_TRANSPORT_SECURITY,
-                axum::http::HeaderValue::from_static("max-age=31536000; includeSubDomains; preload"),
-            );
-        }
-        res
-    });
+            }
+            if !headers.contains_key(axum::http::header::STRICT_TRANSPORT_SECURITY) {
+                headers.insert(
+                    axum::http::header::STRICT_TRANSPORT_SECURITY,
+                    axum::http::HeaderValue::from_static(
+                        "max-age=31536000; includeSubDomains; preload",
+                    ),
+                );
+            }
+            res
+        },
+    );
 
     api.merge(web)
         .fallback(global_fallback)
@@ -640,11 +781,26 @@ fn build_web_router(web_enabled: bool, web_dist_dir: &str) -> Router<Arc<AppStat
 
     let assets_dir = dist.join("assets");
     let index_routes = Router::new()
-        .route("/", axum::routing::get_service(ServeFile::new(index.clone())))
-        .route("/connect", axum::routing::get_service(ServeFile::new(index.clone())))
-        .route("/dashboard", axum::routing::get_service(ServeFile::new(index.clone())))
-        .route("/recorder", axum::routing::get_service(ServeFile::new(index.clone())))
-        .route("/governance", axum::routing::get_service(ServeFile::new(index.clone())))
+        .route(
+            "/",
+            axum::routing::get_service(ServeFile::new(index.clone())),
+        )
+        .route(
+            "/connect",
+            axum::routing::get_service(ServeFile::new(index.clone())),
+        )
+        .route(
+            "/dashboard",
+            axum::routing::get_service(ServeFile::new(index.clone())),
+        )
+        .route(
+            "/recorder",
+            axum::routing::get_service(ServeFile::new(index.clone())),
+        )
+        .route(
+            "/governance",
+            axum::routing::get_service(ServeFile::new(index.clone())),
+        )
         .layer(axum::middleware::from_fn(html_no_cache));
     // R8：/app 前缀服务（ServeDir + SPA fallback）同样需要 no-cache——
     // index_routes 的 layer 只包裹已注册路由，nest_service 注册的 /app 分支
@@ -670,13 +826,12 @@ fn build_web_router(web_enabled: bool, web_dist_dir: &str) -> Router<Arc<AppStat
 ///   启发式缓存歧义；发版后文件名变化即自动取新资源。
 /// - HTML 入口（`/`、`/connect`、`/dashboard`、`/recorder`、`/governance`）：
 ///   `no-cache`，保证发版后 index.html 及时引用新哈希资源。
-async fn assets_cache_headers(
-    req: Request,
-    next: Next,
-) -> Response {
+async fn assets_cache_headers(req: Request, next: Next) -> Response {
     let mut res = next.run(req).await;
     if res.status().is_success()
-        && !res.headers().contains_key(axum::http::header::CACHE_CONTROL)
+        && !res
+            .headers()
+            .contains_key(axum::http::header::CACHE_CONTROL)
     {
         res.headers_mut().insert(
             axum::http::header::CACHE_CONTROL,
@@ -686,13 +841,12 @@ async fn assets_cache_headers(
     res
 }
 
-async fn html_no_cache(
-    req: Request,
-    next: Next,
-) -> Response {
+async fn html_no_cache(req: Request, next: Next) -> Response {
     let mut res = next.run(req).await;
     if res.status().is_success()
-        && !res.headers().contains_key(axum::http::header::CACHE_CONTROL)
+        && !res
+            .headers()
+            .contains_key(axum::http::header::CACHE_CONTROL)
     {
         res.headers_mut().insert(
             axum::http::header::CACHE_CONTROL,
@@ -734,7 +888,11 @@ fn mount_favicon_routes(
     }
     let ico_path = dist.join("favicon.ico");
     // Real ICO wins; legacy dists fall back to the SVG bytes.
-    let ico_file = if ico_path.is_file() { ico_path } else { svg_path.clone() };
+    let ico_file = if ico_path.is_file() {
+        ico_path
+    } else {
+        svg_path.clone()
+    };
 
     router
         .route(
@@ -750,13 +908,17 @@ fn mount_favicon_routes(
 async fn web_disabled() -> impl IntoResponse {
     (
         StatusCode::NOT_FOUND,
-        Json(json!({"error": {"message": "web console disabled (--no-web)", "code": "web_disabled"}})),
+        Json(
+            json!({"error": {"message": "web console disabled (--no-web)", "code": "web_disabled"}}),
+        ),
     )
 }
 
 async fn web_unavailable() -> impl IntoResponse {
     (
         StatusCode::SERVICE_UNAVAILABLE,
-        Json(json!({"error": {"message": "web/dist 缺失，Web 控制台不可用", "code": "web_dist_missing"}})),
+        Json(
+            json!({"error": {"message": "web/dist 缺失，Web 控制台不可用", "code": "web_dist_missing"}}),
+        ),
     )
 }

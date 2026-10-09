@@ -1,46 +1,48 @@
-use std::sync::Arc;
-use std::time::Instant;
-use axum::extract::State;
-use axum::http::{HeaderMap, HeaderValue, StatusCode};
-use axum::response::IntoResponse;
-use axum::Json;
-use futures_util::StreamExt;
-use ponyllm_core::error::CoreError;
-use ponyllm_core::executor::{is_opencode_zen_target, EventSinkCtx, UpstreamExecutor};
-use ponyllm_core::pool::GatewayRoutingStrategy;
-use ponyllm_core::telemetry::{EventCtx, GatewayEvent, StageTimings};
-use ponyllm_protocol::anthropic::messages::{MessageRequest, MessageResponse};
-use ponyllm_protocol::openai::chat::ChatCompletionResponse;
-use ponyllm_protocol::translator::{
-    anthropic_to_chat_request, anthropic_to_responses_request,
-    antigravity_to_messages_response, chat_to_anthropic_response,
-    messages_to_antigravity_request, responses_to_anthropic_response,
-};
-use parking_lot::Mutex;
-use std::str::FromStr;
 use crate::extractors::{format_request_snippet, AppJson};
 use crate::routes::chat::{inject_routing_headers, inject_telemetry_headers, retry_unlock_hint};
 use crate::routes::models::ParsedRequestModel;
 use crate::state::AppState;
 use crate::streaming::{
-    antigravity_sse_to_anthropic_stream, collect_antigravity_sse_to_json,
-    empty_stop_retry_delay, is_transient_empty_stop_error,
-    openai_sse_to_anthropic_stream, passthrough_sse,
+    antigravity_sse_to_anthropic_stream, collect_antigravity_sse_to_json, empty_stop_retry_delay,
+    is_transient_empty_stop_error, openai_sse_to_anthropic_stream, passthrough_sse,
     responses_sse_to_anthropic_stream, stall_guard,
-    verify_antigravity_stream_preamble_with_deadline,
-    wrap_telemetry_stream, AntigravityPreambleResult, StreamFailureContext,
-    DEFAULT_PREAMBLE_DEADLINE, DEFAULT_TAIL_STALL_IDLE,
+    verify_antigravity_stream_preamble_with_deadline, wrap_telemetry_stream,
+    AntigravityPreambleResult, StreamFailureContext, DEFAULT_PREAMBLE_DEADLINE,
+    DEFAULT_TAIL_STALL_IDLE,
 };
+use axum::extract::State;
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
+use axum::response::IntoResponse;
+use axum::Json;
+use futures_util::StreamExt;
+use parking_lot::Mutex;
+use ponyllm_core::error::CoreError;
+use ponyllm_core::executor::{is_opencode_zen_target, EventSinkCtx, UpstreamExecutor};
+use ponyllm_core::pool::GatewayRoutingStrategy;
+use ponyllm_core::telemetry::{EventCtx, GatewayEvent, StageTimings};
 use ponyllm_protocol::anthropic::messages::{AnthropicSystem, AnthropicSystemBlock};
+use ponyllm_protocol::anthropic::messages::{MessageRequest, MessageResponse};
+use ponyllm_protocol::openai::chat::ChatCompletionResponse;
+use ponyllm_protocol::translator::{
+    anthropic_to_chat_request, anthropic_to_responses_request, antigravity_to_messages_response,
+    chat_to_anthropic_response, messages_to_antigravity_request, responses_to_anthropic_response,
+};
+use std::str::FromStr;
+use std::sync::Arc;
+use std::time::Instant;
 
 fn extract_anthropic_prompt(req: &MessageRequest) -> Option<String> {
     if let Some(sys) = &req.system {
         match sys {
             AnthropicSystem::Text(s) => return Some(s.clone()),
             AnthropicSystem::Blocks(blocks) => {
-                let text = blocks.iter().map(|b| match b {
-                    AnthropicSystemBlock::Text { text, .. } => text.as_str(),
-                }).collect::<Vec<_>>().join("\n");
+                let text = blocks
+                    .iter()
+                    .map(|b| match b {
+                        AnthropicSystemBlock::Text { text, .. } => text.as_str(),
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
                 return Some(text);
             }
         }
@@ -79,6 +81,39 @@ pub async fn handle_messages(
             })),
         )
             .into_response();
+    }
+
+    // User access & quota check
+    let caller_user_id = headers
+        .get("x-user-id")
+        .and_then(|h| h.to_str().ok())
+        .map(|s| s.trim().to_string());
+    if let Some(uid) = caller_user_id.as_deref() {
+        if let Err(err) = state.user_tracker.check_access(uid, &req.model) {
+            let status = match err {
+                ponyllm_core::UserCheckError::QuotaExhausted { .. } => {
+                    StatusCode::TOO_MANY_REQUESTS
+                }
+                _ => StatusCode::FORBIDDEN,
+            };
+            return (
+                status,
+                Json(serde_json::json!({
+                    "type": "error",
+                    "error": {
+                        "type": "invalid_request_error",
+                        "message": err.to_string(),
+                    }
+                })),
+            )
+                .into_response();
+        }
+    }
+
+    // B002 token gate: per-key quota + model_limits intersection (second,
+    // multiplicative gate after the user gate).
+    if let Err(resp) = crate::routes::gate::token_gate(&state, &headers, &req.model) {
+        return resp;
     }
 
     // 1. Extract optional X-Pony-Strategy header
@@ -122,8 +157,12 @@ pub async fn handle_messages(
         }
         Err(err) => {
             let (status, err_type) = match err {
-                CoreError::UnsupportedModality { .. } => (StatusCode::BAD_REQUEST, "invalid_request_error"),
-                CoreError::CapacityExhausted { .. } => (StatusCode::TOO_MANY_REQUESTS, "overloaded_error"),
+                CoreError::UnsupportedModality { .. } => {
+                    (StatusCode::BAD_REQUEST, "invalid_request_error")
+                }
+                CoreError::CapacityExhausted { .. } => {
+                    (StatusCode::TOO_MANY_REQUESTS, "overloaded_error")
+                }
                 CoreError::Internal(ref msg) if msg.contains("No provider configured") => {
                     (StatusCode::NOT_FOUND, "not_found_error")
                 }
@@ -178,7 +217,8 @@ pub async fn handle_messages(
         Some(targets[0].provider_name.clone()),
         GatewayEvent::RouteResolved {
             provider: targets[0].provider_name.clone(),
-            translated: targets[0].upstream_protocol != ponyllm_core::pool::UpstreamProtocol::Anthropic,
+            translated: targets[0].upstream_protocol
+                != ponyllm_core::pool::UpstreamProtocol::Anthropic,
             routing_ms,
         },
     );
@@ -188,7 +228,8 @@ pub async fn handle_messages(
     // the operator explicitly opts back into cross-provider quota failover, OR
     // when the request is an auto-managed virtual model (`auto`) where zero-interruption
     // failover across providers is the explicit contract requested by downstream agents.
-    let quota_failover_enabled = parsed.is_auto || state.config.read().cross_provider_quota_failover;
+    let quota_failover_enabled =
+        parsed.is_auto || state.config.read().cross_provider_quota_failover;
 
     // Request-level pre-commit empty-STOP retry wall-clock budget (contract
     // `2026-10-07-empty-stop-budget-contract`, ruling 1-2): one deadline taken
@@ -205,7 +246,9 @@ pub async fn handle_messages(
 
     for target in targets {
         // If target is currently cooling down under the model circuit breaker, skip it
-        if parsed.is_auto && state.is_model_cooling_down(&target.provider_name, &target.physical_model) {
+        if parsed.is_auto
+            && state.is_model_cooling_down(&target.provider_name, &target.physical_model)
+        {
             tracing::warn!(
                 provider = %target.provider_name,
                 model = %target.physical_model,
@@ -256,9 +299,12 @@ pub async fn handle_messages(
             Some(target_req.max_tokens),
             &target.max_output,
             effective_thinking,
-        ).unwrap_or(target_req.max_tokens);
+        )
+        .unwrap_or(target_req.max_tokens);
 
-        let is_adaptive = ponyllm_protocol::anthropic::messages::ThinkingConfig::is_adaptive_model(&target.physical_model);
+        let is_adaptive = ponyllm_protocol::anthropic::messages::ThinkingConfig::is_adaptive_model(
+            &target.physical_model,
+        );
         if effective_thinking.is_active() {
             target_req.reasoning_effort = Some(effective_thinking);
             if is_adaptive {
@@ -267,9 +313,11 @@ pub async fn handle_messages(
                     budget_tokens: None,
                     effort: None,
                 });
-                target_req.output_config = Some(ponyllm_protocol::anthropic::messages::AnthropicOutputConfig {
-                    effort: Some(effective_thinking),
-                });
+                target_req.output_config = Some(
+                    ponyllm_protocol::anthropic::messages::AnthropicOutputConfig {
+                        effort: Some(effective_thinking),
+                    },
+                );
             } else {
                 target_req.thinking = Some(ponyllm_protocol::anthropic::messages::ThinkingConfig {
                     r#type: "enabled".to_string(),
@@ -293,15 +341,18 @@ pub async fn handle_messages(
                 let mut resp_req = match anthropic_to_responses_request(&target_req) {
                     Ok(rr) => rr,
                     Err(e) => {
-                        last_error = format!("Translation error for {}: {}", target.provider_name, e);
+                        last_error =
+                            format!("Translation error for {}: {}", target.provider_name, e);
                         continue;
                     }
                 };
                 if effective_thinking.is_active() {
                     resp_req.reasoning_effort = Some(effective_thinking);
-                    resp_req.reasoning = Some(ponyllm_protocol::openai::responses::ResponseReasoningConfig {
-                        effort: Some(effective_thinking),
-                    });
+                    resp_req.reasoning = Some(
+                        ponyllm_protocol::openai::responses::ResponseReasoningConfig {
+                            effort: Some(effective_thinking),
+                        },
+                    );
                     resp_req.sanitize_thinking_extra();
                 } else {
                     resp_req.reasoning_effort = None;
@@ -310,8 +361,12 @@ pub async fn handle_messages(
                     resp_req.extra.remove("reasoning");
                 }
                 let input_has_content = match &resp_req.input {
-                    ponyllm_protocol::openai::responses::ResponseInput::Text(t) => !t.trim().is_empty(),
-                    ponyllm_protocol::openai::responses::ResponseInput::Items(items) => !items.is_empty(),
+                    ponyllm_protocol::openai::responses::ResponseInput::Text(t) => {
+                        !t.trim().is_empty()
+                    }
+                    ponyllm_protocol::openai::responses::ResponseInput::Items(items) => {
+                        !items.is_empty()
+                    }
                 };
                 if !input_has_content {
                     return (
@@ -329,7 +384,8 @@ pub async fn handle_messages(
                 let val = match serde_json::to_value(&resp_req) {
                     Ok(v) => v,
                     Err(e) => {
-                        last_error = format!("Serialization error for {}: {}", target.provider_name, e);
+                        last_error =
+                            format!("Serialization error for {}: {}", target.provider_name, e);
                         continue;
                     }
                 };
@@ -340,14 +396,17 @@ pub async fn handle_messages(
                 let mut chat_req = match anthropic_to_chat_request(&target_req) {
                     Ok(cr) => cr,
                     Err(e) => {
-                        last_error = format!("Translation error for {}: {}", target.provider_name, e);
+                        last_error =
+                            format!("Translation error for {}: {}", target.provider_name, e);
                         continue;
                     }
                 };
                 if effective_thinking.is_active() {
                     chat_req.reasoning_effort = Some(effective_thinking);
-                } else if requested_thinking == Some(ponyllm_protocol::common::ReasoningEffort::Off) {
-                    chat_req.reasoning_effort = Some(ponyllm_protocol::common::ReasoningEffort::Off);
+                } else if requested_thinking == Some(ponyllm_protocol::common::ReasoningEffort::Off)
+                {
+                    chat_req.reasoning_effort =
+                        Some(ponyllm_protocol::common::ReasoningEffort::Off);
                 } else {
                     chat_req.reasoning_effort = None;
                     chat_req.extra.remove("reasoning_effort");
@@ -356,63 +415,82 @@ pub async fn handle_messages(
                 let mut val = match serde_json::to_value(&chat_req) {
                     Ok(v) => v,
                     Err(e) => {
-                        last_error = format!("Serialization error for {}: {}", target.provider_name, e);
+                        last_error =
+                            format!("Serialization error for {}: {}", target.provider_name, e);
                         continue;
                     }
                 };
                 if requested_thinking == Some(ponyllm_protocol::common::ReasoningEffort::Off) {
                     if let Some(obj) = val.as_object_mut() {
                         obj.insert("reasoning_effort".to_string(), serde_json::json!("none"));
-                        obj.insert("thinking".to_string(), serde_json::json!({ "type": "disabled" }));
+                        obj.insert(
+                            "thinking".to_string(),
+                            serde_json::json!({ "type": "disabled" }),
+                        );
                     }
                 }
                 (url, val)
             }
             ponyllm_core::pool::UpstreamProtocol::Anthropic => {
                 let url = target.messages_url();
-            // Sanitize messages for strict Anthropic upstreams:
-            // Extract any AnthropicRole::System messages into target_req.system,
-            // and normalize Unknown roles to User so upstream never throws 400.
-            let mut extracted_systems = Vec::new();
-            let mut clean_messages = Vec::with_capacity(target_req.messages.len());
-            for mut msg in target_req.messages {
-                match msg.role {
-                    ponyllm_protocol::anthropic::messages::AnthropicRole::System => {
-                        extracted_systems.push(msg.content.as_plain_text());
+                // Sanitize messages for strict Anthropic upstreams:
+                // Extract any AnthropicRole::System messages into target_req.system,
+                // and normalize Unknown roles to User so upstream never throws 400.
+                let mut extracted_systems = Vec::new();
+                let mut clean_messages = Vec::with_capacity(target_req.messages.len());
+                for mut msg in target_req.messages {
+                    match msg.role {
+                        ponyllm_protocol::anthropic::messages::AnthropicRole::System => {
+                            extracted_systems.push(msg.content.as_plain_text());
+                        }
+                        ponyllm_protocol::anthropic::messages::AnthropicRole::Unknown => {
+                            msg.role = ponyllm_protocol::anthropic::messages::AnthropicRole::User;
+                            clean_messages.push(msg);
+                        }
+                        _ => clean_messages.push(msg),
                     }
-                    ponyllm_protocol::anthropic::messages::AnthropicRole::Unknown => {
-                        msg.role = ponyllm_protocol::anthropic::messages::AnthropicRole::User;
-                        clean_messages.push(msg);
-                    }
-                    _ => clean_messages.push(msg),
                 }
-            }
-            if !extracted_systems.is_empty() {
-                let joined = extracted_systems.join("\n\n");
-                target_req.system = match target_req.system {
-                    Some(ponyllm_protocol::anthropic::messages::AnthropicSystem::Text(t)) => {
-                        Some(ponyllm_protocol::anthropic::messages::AnthropicSystem::Text(format!("{}\n\n{}", t, joined)))
-                    }
-                    Some(ponyllm_protocol::anthropic::messages::AnthropicSystem::Blocks(mut blocks)) => {
-                        blocks.push(ponyllm_protocol::anthropic::messages::AnthropicSystemBlock::Text {
-                            text: joined,
-                            cache_control: None,
-                        });
-                        Some(ponyllm_protocol::anthropic::messages::AnthropicSystem::Blocks(blocks))
-                    }
-                    None => Some(ponyllm_protocol::anthropic::messages::AnthropicSystem::Text(joined)),
-                };
-            }
-            target_req.messages = clean_messages;
+                if !extracted_systems.is_empty() {
+                    let joined = extracted_systems.join("\n\n");
+                    target_req.system = match target_req.system {
+                        Some(ponyllm_protocol::anthropic::messages::AnthropicSystem::Text(t)) => {
+                            Some(
+                                ponyllm_protocol::anthropic::messages::AnthropicSystem::Text(
+                                    format!("{}\n\n{}", t, joined),
+                                ),
+                            )
+                        }
+                        Some(ponyllm_protocol::anthropic::messages::AnthropicSystem::Blocks(
+                            mut blocks,
+                        )) => {
+                            blocks.push(
+                                ponyllm_protocol::anthropic::messages::AnthropicSystemBlock::Text {
+                                    text: joined,
+                                    cache_control: None,
+                                },
+                            );
+                            Some(
+                                ponyllm_protocol::anthropic::messages::AnthropicSystem::Blocks(
+                                    blocks,
+                                ),
+                            )
+                        }
+                        None => Some(
+                            ponyllm_protocol::anthropic::messages::AnthropicSystem::Text(joined),
+                        ),
+                    };
+                }
+                target_req.messages = clean_messages;
 
-            let val = match serde_json::to_value(&target_req) {
-                Ok(v) => v,
-                Err(e) => {
-                    last_error = format!("Serialization error for {}: {}", target.provider_name, e);
-                    continue;
-                }
-            };
-            (url, val)
+                let val = match serde_json::to_value(&target_req) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        last_error =
+                            format!("Serialization error for {}: {}", target.provider_name, e);
+                        continue;
+                    }
+                };
+                (url, val)
             }
             ponyllm_core::pool::UpstreamProtocol::Antigravity => {
                 let url = target.antigravity_url(is_streaming);
@@ -422,17 +500,27 @@ pub async fn handle_messages(
                 let (ag_project, ag_salt) = state
                     .peek_antigravity_identity(&target.provider_name)
                     .unwrap_or_else(|| ("aicode-consumers".to_string(), String::new()));
-                let val = match messages_to_antigravity_request(&target_req, &target.physical_model, &ag_project, thinking, &ag_salt) {
+                let val = match messages_to_antigravity_request(
+                    &target_req,
+                    &target.physical_model,
+                    &ag_project,
+                    thinking,
+                    &ag_salt,
+                ) {
                     Ok(v) => v,
                     Err(e) => {
-                        last_error = format!("Translation error for {}: {}", target.provider_name, e);
+                        last_error =
+                            format!("Translation error for {}: {}", target.provider_name, e);
                         continue;
                     }
                 };
                 (url, val)
             }
             ponyllm_core::pool::UpstreamProtocol::Systemone => {
-                last_error = format!("Systemone protocol cannot be served by messages endpoint for {}", target.provider_name);
+                last_error = format!(
+                    "Systemone protocol cannot be served by messages endpoint for {}",
+                    target.provider_name
+                );
                 continue;
             }
         };
@@ -441,7 +529,11 @@ pub async fn handle_messages(
         // to metadata/private/CGNAT/benchmark ranges — re-validated here at
         // dial time (cached per host), not only at provider write time.
         if let Err(reason) = state
-            .data_plane_egress_guard_for_target(&target.provider_name, &target.physical_model, &target_url)
+            .data_plane_egress_guard_for_target(
+                &target.provider_name,
+                &target.physical_model,
+                &target_url,
+            )
             .await
         {
             last_error = reason;
@@ -467,7 +559,8 @@ pub async fn handle_messages(
             stages: stages.clone(),
             request_snippet: req_snippet.clone(),
         };
-        let http_client = state.http_client_for_target(&target.provider_name, &target.physical_model);
+        let http_client =
+            state.http_client_for_target(&target.provider_name, &target.physical_model);
         // Egress pool runtime (contract `2026-10-07-egress-pool-contract`):
         // per-attempt exit-IP rotation when the provider configured a pool;
         // both `None` = legacy single-proxy path, byte-identical to before.
@@ -502,8 +595,10 @@ pub async fn handle_messages(
         // Unified attempt budget (contract `2026-10-07-empty-stop-budget-contract`
         // ruling 4): shared by chat / messages / responses — floored at
         // MIN_EMPTY_STOP_ATTEMPTS, hard-capped at MAX_EMPTY_STOP_ATTEMPTS_CAP.
-        let max_empty_stop_attempts =
-            crate::streaming::empty_stop_attempt_budget(pool.total_key_count(), executor.max_retries);
+        let max_empty_stop_attempts = crate::streaming::empty_stop_attempt_budget(
+            pool.total_key_count(),
+            executor.max_retries,
+        );
 
         // Per-target deadline (adversarial review FIX-2): min(global request
         // deadline, this target's entry-time + budget/N slice). All wall-clock
@@ -518,7 +613,10 @@ pub async fn handle_messages(
         if is_streaming {
             let current_executor = executor;
             let mut stream_attempt = 0;
-            let max_stream_attempts = current_executor.max_retries.max(pool.total_key_count()).max(1);
+            let max_stream_attempts = current_executor
+                .max_retries
+                .max(pool.total_key_count())
+                .max(1);
             // R2: keys already tried by empty-STOP retries (mirrors chat.rs).
             let mut empty_stop_tried_keys: Vec<String> = Vec::new();
             // Per-key empty STOP attempt counter to allow in-place exponential backoff retries.
@@ -550,7 +648,11 @@ pub async fn handle_messages(
                                 empty_stop_budget.map(|b| b.as_secs()).unwrap_or(0),
                                 stream_attempt - 1
                             );
-                            last_retry_after = crate::extractors::retry_after_secs(&last_kind, retry_unlock_hint(&last_kind, &pool, rate_limits.as_ref())).or(Some(1));
+                            last_retry_after = crate::extractors::retry_after_secs(
+                                &last_kind,
+                                retry_unlock_hint(&last_kind, &pool, rate_limits.as_ref()),
+                            )
+                            .or(Some(1));
                             break;
                         }
                     }
@@ -576,13 +678,19 @@ pub async fn handle_messages(
                 .with_pinned_key(active_key_id.clone())
                 .with_egress(egress_pool.clone(), egress_clients.clone())
                 .with_event_sink(sink_ctx.clone(), state.event_sink(sink_ctx.clone()));
-                match attempt_executor.execute_stream_request_with_timing_and_key(&target_url, &attempt_req_val).await {
+                match attempt_executor
+                    .execute_stream_request_with_timing_and_key(&target_url, &attempt_req_val)
+                    .await
+                {
                     Ok((upstream_resp, attempt_start, winning_key_id)) => {
-                        let raw_stream = stall_guard(upstream_resp.bytes_stream(), DEFAULT_TAIL_STALL_IDLE);
+                        let raw_stream =
+                            stall_guard(upstream_resp.bytes_stream(), DEFAULT_TAIL_STALL_IDLE);
 
                         // For Antigravity upstream, verify preamble before committing downstream headers.
                         let mut first_frame_stop = false;
-                        let (final_raw_stream, is_empty_stop_retry) = if target.upstream_protocol == ponyllm_core::pool::UpstreamProtocol::Antigravity {
+                        let (final_raw_stream, is_empty_stop_retry) = if target.upstream_protocol
+                            == ponyllm_core::pool::UpstreamProtocol::Antigravity
+                        {
                             match verify_antigravity_stream_preamble_with_deadline(
                                 raw_stream,
                                 std::time::Duration::from_secs(10),
@@ -591,16 +699,32 @@ pub async fn handle_messages(
                                     // DEFAULT_PREAMBLE_DEADLINE verbatim.
                                     DEFAULT_PREAMBLE_DEADLINE
                                 } else {
-                                    remaining.map_or(DEFAULT_PREAMBLE_DEADLINE, |r| r.min(DEFAULT_PREAMBLE_DEADLINE))
+                                    remaining.map_or(DEFAULT_PREAMBLE_DEADLINE, |r| {
+                                        r.min(DEFAULT_PREAMBLE_DEADLINE)
+                                    })
                                 },
-                            ).await {
+                            )
+                            .await
+                            {
                                 Ok(AntigravityPreambleResult::Ready { buffered, tail }) => {
-                                    let head_stream = futures_util::stream::iter(buffered.into_iter().map(Ok));
+                                    let head_stream =
+                                        futures_util::stream::iter(buffered.into_iter().map(Ok));
                                     let chained = head_stream.chain(tail);
-                                    let boxed: Box<dyn futures_util::Stream<Item = Result<bytes::Bytes, crate::streaming::StallError>> + Send + Unpin> = Box::new(chained);
+                                    let boxed: Box<
+                                        dyn futures_util::Stream<
+                                                Item = Result<
+                                                    bytes::Bytes,
+                                                    crate::streaming::StallError,
+                                                >,
+                                            > + Send
+                                            + Unpin,
+                                    > = Box::new(chained);
                                     (boxed, false)
                                 }
-                                Ok(AntigravityPreambleResult::TransientEmptyStop { frames, shape }) => {
+                                Ok(AntigravityPreambleResult::TransientEmptyStop {
+                                    frames,
+                                    shape,
+                                }) => {
                                     // R1: one line must answer key / latency /
                                     // frame shape (mirrors chat.rs).
                                     // R3: `frames <= 1` means the terminal STOP
@@ -619,7 +743,15 @@ pub async fn handle_messages(
                                         skipped_frames = shape.skipped_frames,
                                         "Antigravity stream preamble completed with empty STOP! Triggering transparent gateway retry."
                                     );
-                                    let boxed: Box<dyn futures_util::Stream<Item = Result<bytes::Bytes, crate::streaming::StallError>> + Send + Unpin> = Box::new(futures_util::stream::empty());
+                                    let boxed: Box<
+                                        dyn futures_util::Stream<
+                                                Item = Result<
+                                                    bytes::Bytes,
+                                                    crate::streaming::StallError,
+                                                >,
+                                            > + Send
+                                            + Unpin,
+                                    > = Box::new(futures_util::stream::empty());
                                     (boxed, true)
                                 }
                                 Ok(AntigravityPreambleResult::DeterministicBlock { reason }) => {
@@ -628,7 +760,15 @@ pub async fn handle_messages(
                                         reason = %reason,
                                         "Antigravity prompt blocked by upstream safety during preamble"
                                     );
-                                    let boxed: Box<dyn futures_util::Stream<Item = Result<bytes::Bytes, crate::streaming::StallError>> + Send + Unpin> = Box::new(futures_util::stream::empty());
+                                    let boxed: Box<
+                                        dyn futures_util::Stream<
+                                                Item = Result<
+                                                    bytes::Bytes,
+                                                    crate::streaming::StallError,
+                                                >,
+                                            > + Send
+                                            + Unpin,
+                                    > = Box::new(futures_util::stream::empty());
                                     (boxed, false)
                                 }
                                 Ok(AntigravityPreambleResult::AbruptTermination) => {
@@ -636,7 +776,15 @@ pub async fn handle_messages(
                                         provider = %target.provider_name,
                                         "Antigravity stream preamble terminated abruptly before content"
                                     );
-                                    let boxed: Box<dyn futures_util::Stream<Item = Result<bytes::Bytes, crate::streaming::StallError>> + Send + Unpin> = Box::new(futures_util::stream::empty());
+                                    let boxed: Box<
+                                        dyn futures_util::Stream<
+                                                Item = Result<
+                                                    bytes::Bytes,
+                                                    crate::streaming::StallError,
+                                                >,
+                                            > + Send
+                                            + Unpin,
+                                    > = Box::new(futures_util::stream::empty());
                                     (boxed, true)
                                 }
                                 Err(e) => {
@@ -645,12 +793,25 @@ pub async fn handle_messages(
                                         error = %e,
                                         "Antigravity stream preamble transport error"
                                     );
-                                    let boxed: Box<dyn futures_util::Stream<Item = Result<bytes::Bytes, crate::streaming::StallError>> + Send + Unpin> = Box::new(futures_util::stream::empty());
+                                    let boxed: Box<
+                                        dyn futures_util::Stream<
+                                                Item = Result<
+                                                    bytes::Bytes,
+                                                    crate::streaming::StallError,
+                                                >,
+                                            > + Send
+                                            + Unpin,
+                                    > = Box::new(futures_util::stream::empty());
                                     (boxed, true)
                                 }
                             }
                         } else {
-                            let boxed: Box<dyn futures_util::Stream<Item = Result<bytes::Bytes, crate::streaming::StallError>> + Send + Unpin> = Box::new(raw_stream);
+                            let boxed: Box<
+                                dyn futures_util::Stream<
+                                        Item = Result<bytes::Bytes, crate::streaming::StallError>,
+                                    > + Send
+                                    + Unpin,
+                            > = Box::new(raw_stream);
                             (boxed, false)
                         };
 
@@ -664,7 +825,8 @@ pub async fn handle_messages(
                                 active_key_empty_stop_count = 1;
                             }
 
-                            let key_exhausted = active_key_empty_stop_count >= crate::streaming::PER_KEY_EMPTY_STOP_MAX_ATTEMPTS;
+                            let key_exhausted = active_key_empty_stop_count
+                                >= crate::streaming::PER_KEY_EMPTY_STOP_MAX_ATTEMPTS;
                             if key_exhausted {
                                 if !empty_stop_tried_keys.iter().any(|k| k == &winning_key_id) {
                                     empty_stop_tried_keys.push(winning_key_id.clone());
@@ -679,14 +841,17 @@ pub async fn handle_messages(
                             } else if !first_frame_stop {
                                 consecutive_first_frame_stops = 0;
                             }
-                            if consecutive_first_frame_stops >= crate::streaming::DETERMINISTIC_EMPTY_STOP_THRESHOLD {
+                            if consecutive_first_frame_stops
+                                >= crate::streaming::DETERMINISTIC_EMPTY_STOP_THRESHOLD
+                            {
                                 tracing::warn!(
                                     provider = %target.provider_name,
                                     attempts = stream_attempt,
                                     consecutive_first_frame_stops,
                                     "Antigravity deterministic empty STOP (first-frame, zero content); converging early to trigger failover"
                                 );
-                                last_kind = ponyllm_core::error::GatewayErrorKind::UpstreamUnavailable;
+                                last_kind =
+                                    ponyllm_core::error::GatewayErrorKind::UpstreamUnavailable;
                                 last_error = format!(
                                     "Antigravity deterministic empty STOP for model '{}' ({} consecutive first-frame zero-content STOPs across distinct keys; gateway converged early, try a different model or prompt)",
                                     target.physical_model, consecutive_first_frame_stops
@@ -694,11 +859,16 @@ pub async fn handle_messages(
                                 // Contract ruling 6/C7: empty-STOP breaks carry
                                 // Retry-After pacing (healthy pool unlock=None
                                 // still gets a 1s floor via `.or(Some(1))`).
-                                last_retry_after = crate::extractors::retry_after_secs(&last_kind, retry_unlock_hint(&last_kind, &pool, rate_limits.as_ref())).or(Some(1));
+                                last_retry_after = crate::extractors::retry_after_secs(
+                                    &last_kind,
+                                    retry_unlock_hint(&last_kind, &pool, rate_limits.as_ref()),
+                                )
+                                .or(Some(1));
                                 break;
                             }
                             if stream_attempt < max_empty_stop_attempts {
-                                let delay = empty_stop_retry_delay(active_key_empty_stop_count.max(1));
+                                let delay =
+                                    empty_stop_retry_delay(active_key_empty_stop_count.max(1));
                                 tracing::warn!(
                                     provider = %target.provider_name,
                                     key_id = %winning_key_id,
@@ -712,7 +882,9 @@ pub async fn handle_messages(
                                 // request-level wall-clock budget.
                                 tokio::time::sleep(remaining.map_or(delay, |r| delay.min(r))).await;
                                 // R2: mutate upstream identity, cut toxic KV-cache affinity and escalate reasoning depth
-                                if target.upstream_protocol == ponyllm_core::pool::UpstreamProtocol::Antigravity {
+                                if target.upstream_protocol
+                                    == ponyllm_core::pool::UpstreamProtocol::Antigravity
+                                {
                                     ponyllm_protocol::translator::mutate_antigravity_request_on_empty_stop(&mut attempt_req_val, stream_attempt);
                                 }
                                 continue;
@@ -727,7 +899,11 @@ pub async fn handle_messages(
                                 "Antigravity stream preamble returned empty STOP across all {} attempts",
                                 stream_attempt
                             );
-                            last_retry_after = crate::extractors::retry_after_secs(&last_kind, retry_unlock_hint(&last_kind, &pool, rate_limits.as_ref())).or(Some(1));
+                            last_retry_after = crate::extractors::retry_after_secs(
+                                &last_kind,
+                                retry_unlock_hint(&last_kind, &pool, rate_limits.as_ref()),
+                            )
+                            .or(Some(1));
                             break;
                         }
 
@@ -744,7 +920,9 @@ pub async fn handle_messages(
 
                         // Stream the raw upstream SSE body. For an OpenAI upstream,
                         // translate OpenAI chat chunks into Anthropic SSE events.
-                        let est_prompt_tokens = serde_json::to_string(&req.messages).map(|s| (s.len() as u64 / 4).max(1)).unwrap_or(1);
+                        let est_prompt_tokens = serde_json::to_string(&req.messages)
+                            .map(|s| (s.len() as u64 / 4).max(1))
+                            .unwrap_or(1);
 
                         // Mid-stream failures (after this started event) are appended
                         // by the telemetry wrapper with the same request_id.
@@ -792,7 +970,8 @@ pub async fn handle_messages(
                             }
                             ponyllm_core::pool::UpstreamProtocol::Systemone => {
                                 return crate::extractors::render_anthropic_error(
-                                    StatusCode::BAD_REQUEST, "invalid_request_error",
+                                    StatusCode::BAD_REQUEST,
+                                    "invalid_request_error",
                                     "Use /v1/systemone for systemone models",
                                 );
                             }
@@ -807,12 +986,16 @@ pub async fn handle_messages(
                         inject_telemetry_headers(&mut resp, &request_id, &stages);
                         if target.physical_model != parsed.clean_model_name {
                             resp.headers_mut().insert(
-                                axum::http::header::HeaderName::from_static("x-ponyllm-fallback-triggered"),
+                                axum::http::header::HeaderName::from_static(
+                                    "x-ponyllm-fallback-triggered",
+                                ),
                                 HeaderValue::from_static("true"),
                             );
                             if let Ok(orig_val) = HeaderValue::from_str(&parsed.clean_model_name) {
                                 resp.headers_mut().insert(
-                                    axum::http::header::HeaderName::from_static("x-ponyllm-original-model"),
+                                    axum::http::header::HeaderName::from_static(
+                                        "x-ponyllm-original-model",
+                                    ),
                                     orig_val,
                                 );
                             }
@@ -833,13 +1016,18 @@ pub async fn handle_messages(
                                 .map(|d| d.saturating_duration_since(tokio::time::Instant::now()));
                             if let Some(r) = remaining_now {
                                 if r.is_zero() {
-                                    last_kind = ponyllm_core::error::GatewayErrorKind::UpstreamUnavailable;
+                                    last_kind =
+                                        ponyllm_core::error::GatewayErrorKind::UpstreamUnavailable;
                                     last_error = format!(
                                         "Antigravity empty-STOP retry wall-clock budget ({}s) exhausted after {} attempts",
                                         empty_stop_budget.map(|b| b.as_secs()).unwrap_or(0),
                                         stream_attempt - 1
                                     );
-                                    last_retry_after = crate::extractors::retry_after_secs(&last_kind, retry_unlock_hint(&last_kind, &pool, rate_limits.as_ref())).or(Some(1));
+                                    last_retry_after = crate::extractors::retry_after_secs(
+                                        &last_kind,
+                                        retry_unlock_hint(&last_kind, &pool, rate_limits.as_ref()),
+                                    )
+                                    .or(Some(1));
                                     break;
                                 }
                             }
@@ -853,22 +1041,45 @@ pub async fn handle_messages(
                             );
                             empty_stop_tried_keys.clear();
                             tokio::time::sleep(remaining_now.map_or(delay, |r| delay.min(r))).await;
-                            if target.upstream_protocol == ponyllm_core::pool::UpstreamProtocol::Antigravity {
-                                ponyllm_protocol::translator::refresh_antigravity_request_ids(&mut attempt_req_val);
+                            if target.upstream_protocol
+                                == ponyllm_core::pool::UpstreamProtocol::Antigravity
+                            {
+                                ponyllm_protocol::translator::refresh_antigravity_request_ids(
+                                    &mut attempt_req_val,
+                                );
                             }
                             continue;
                         }
 
-                        tracing::warn!("Provider '{}' stream failed ({}). Attempting fallback...", target.provider_name, err);
+                        tracing::warn!(
+                            "Provider '{}' stream failed ({}). Attempting fallback...",
+                            target.provider_name,
+                            err
+                        );
                         last_kind = err.kind();
 
                         // Auto resilience: if model failed with ModelNotFound or 404/400 model error, trigger model circuit breaker & PonySentry report
-                        if parsed.is_auto && matches!(last_kind, ponyllm_core::error::GatewayErrorKind::ModelNotFound) {
-                            state.record_model_outage(&target.provider_name, &target.physical_model, std::time::Duration::from_secs(600));
+                        if parsed.is_auto
+                            && matches!(
+                                last_kind,
+                                ponyllm_core::error::GatewayErrorKind::ModelNotFound
+                            )
+                        {
+                            state.record_model_outage(
+                                &target.provider_name,
+                                &target.physical_model,
+                                std::time::Duration::from_secs(600),
+                            );
 
                             let mut tags = std::collections::HashMap::new();
-                            tags.insert("event_type".to_string(), "auto_model_failover".to_string());
-                            tags.insert("failed_provider".to_string(), target.provider_name.clone());
+                            tags.insert(
+                                "event_type".to_string(),
+                                "auto_model_failover".to_string(),
+                            );
+                            tags.insert(
+                                "failed_provider".to_string(),
+                                target.provider_name.clone(),
+                            );
                             tags.insert("failed_model".to_string(), target.physical_model.clone());
                             state.sentry.capture_error(
                                 "AutoModelFailover",
@@ -883,18 +1094,26 @@ pub async fn handle_messages(
 
                         // H1: pool entirely cooled by quota exhaustion reads
                         // as a quota boundary, not a transient no-key error.
-                        if !quota_failover_enabled && crate::extractors::pool_quota_exhausted(&err, &pool) {
+                        if !quota_failover_enabled
+                            && crate::extractors::pool_quota_exhausted(&err, &pool)
+                        {
                             last_kind = ponyllm_core::error::GatewayErrorKind::QuotaExhausted;
                         }
-                        last_pool_exhausted = matches!(err, CoreError::NoAvailableKey(_)) && empty_stop_tried_keys.is_empty();
-                        last_retry_after = crate::extractors::retry_after_secs(&last_kind, retry_unlock_hint(&last_kind, &pool, rate_limits.as_ref()));
+                        last_pool_exhausted = matches!(err, CoreError::NoAvailableKey(_))
+                            && empty_stop_tried_keys.is_empty();
+                        last_retry_after = crate::extractors::retry_after_secs(
+                            &last_kind,
+                            retry_unlock_hint(&last_kind, &pool, rate_limits.as_ref()),
+                        );
                         last_error = err.to_string();
                         break;
                     }
                 }
             }
         } else {
-            let (upstream_result, winning_key_id) = if target.upstream_protocol == ponyllm_core::pool::UpstreamProtocol::Antigravity {
+            let (upstream_result, winning_key_id) = if target.upstream_protocol
+                == ponyllm_core::pool::UpstreamProtocol::Antigravity
+            {
                 tracing::debug!(
                     provider = %target.provider_name,
                     target_url = %target_url,
@@ -918,7 +1137,8 @@ pub async fn handle_messages(
                     if collect_attempt > 1 {
                         if let Some(r) = remaining_c {
                             if r.is_zero() {
-                                last_kind = ponyllm_core::error::GatewayErrorKind::UpstreamUnavailable;
+                                last_kind =
+                                    ponyllm_core::error::GatewayErrorKind::UpstreamUnavailable;
                                 last_error = format!(
                                     "Antigravity stream collect failed: empty-STOP retry wall-clock budget ({}s) exhausted after {} attempts",
                                     empty_stop_budget.map(|b| b.as_secs()).unwrap_or(0),
@@ -945,7 +1165,10 @@ pub async fn handle_messages(
                     .with_excluded_keys(&collect_tried_keys)
                     .with_egress(egress_pool.clone(), egress_clients.clone())
                     .with_event_sink(sink_ctx.clone(), state.event_sink(sink_ctx.clone()));
-                    match collect_executor.execute_stream_request_with_timing_and_key(&target_url, &collect_req_val).await {
+                    match collect_executor
+                        .execute_stream_request_with_timing_and_key(&target_url, &collect_req_val)
+                        .await
+                    {
                         Ok((resp, _instant, kid)) => {
                             if !collect_tried_keys.iter().any(|k| k == &kid) {
                                 collect_tried_keys.push(kid.clone());
@@ -1006,8 +1229,9 @@ pub async fn handle_messages(
                             {
                                 // Wall-clock gate (contract ruling 7): with no
                                 // budget left, cycling the pool again is pointless.
-                                let remaining_now = target_deadline
-                                    .map(|d| d.saturating_duration_since(tokio::time::Instant::now()));
+                                let remaining_now = target_deadline.map(|d| {
+                                    d.saturating_duration_since(tokio::time::Instant::now())
+                                });
                                 if let Some(r) = remaining_now {
                                     if r.is_zero() {
                                         last_kind = ponyllm_core::error::GatewayErrorKind::UpstreamUnavailable;
@@ -1019,7 +1243,8 @@ pub async fn handle_messages(
                                         break (Err(CoreError::Internal(last_error.clone())), None);
                                     }
                                 }
-                                let delay = crate::streaming::empty_stop_retry_delay(collect_attempt);
+                                let delay =
+                                    crate::streaming::empty_stop_retry_delay(collect_attempt);
                                 tracing::warn!(
                                     provider = %target.provider_name,
                                     collect_attempt,
@@ -1028,8 +1253,11 @@ pub async fn handle_messages(
                                     "All eligible keys cycled during non-stream Antigravity empty-STOP retries; resetting exclusion list to retry across pool with backoff"
                                 );
                                 collect_tried_keys.clear();
-                                tokio::time::sleep(remaining_now.map_or(delay, |r| delay.min(r))).await;
-                                ponyllm_protocol::translator::refresh_antigravity_request_ids(&mut collect_req_val);
+                                tokio::time::sleep(remaining_now.map_or(delay, |r| delay.min(r)))
+                                    .await;
+                                ponyllm_protocol::translator::refresh_antigravity_request_ids(
+                                    &mut collect_req_val,
+                                );
                                 continue;
                             }
                             break (Err(e), None);
@@ -1042,7 +1270,8 @@ pub async fn handle_messages(
                 &target.physical_model,
             ) && matches!(
                 target.upstream_protocol,
-                ponyllm_core::pool::UpstreamProtocol::Chat | ponyllm_core::pool::UpstreamProtocol::Responses
+                ponyllm_core::pool::UpstreamProtocol::Chat
+                    | ponyllm_core::pool::UpstreamProtocol::Responses
             ) {
                 // Zen free tier: the Console gate rejects non-stream upstream
                 // bodies even with the tool gate satisfied. Force an upstream
@@ -1056,7 +1285,10 @@ pub async fn handle_messages(
                             .or_insert_with(|| serde_json::json!({"include_usage": true}));
                     }
                 }
-                match executor.execute_stream_request_with_timing_and_key(&target_url, &streamed_val).await {
+                match executor
+                    .execute_stream_request_with_timing_and_key(&target_url, &streamed_val)
+                    .await
+                {
                     Ok((resp, _instant, kid)) => {
                         let raw_stream = resp.bytes_stream();
                         let collected = match target.upstream_protocol {
@@ -1073,14 +1305,23 @@ pub async fn handle_messages(
                                     error = %e,
                                     "Zen free-tier upstream stream collection failed"
                                 );
-                                (Err(CoreError::Internal(format!("Zen stream collect failed: {}", e))), Some(kid))
+                                (
+                                    Err(CoreError::Internal(format!(
+                                        "Zen stream collect failed: {}",
+                                        e
+                                    ))),
+                                    Some(kid),
+                                )
                             }
                         }
                     }
                     Err(e) => (Err(e), None),
                 }
             } else {
-                match executor.execute_json_request_with_key(&target_url, &req_val).await {
+                match executor
+                    .execute_json_request_with_key(&target_url, &req_val)
+                    .await
+                {
                     Ok((val, kid)) => (Ok(val), Some(kid)),
                     Err(e) => (Err(e), None),
                 }
@@ -1095,7 +1336,10 @@ pub async fn handle_messages(
                                 match serde_json::from_value(resp_val) {
                                     Ok(ro) => ro,
                                     Err(e) => {
-                                        last_error = format!("Invalid Responses object from {}: {}", target.provider_name, e);
+                                        last_error = format!(
+                                            "Invalid Responses object from {}: {}",
+                                            target.provider_name, e
+                                        );
                                         continue;
                                     }
                                 };
@@ -1107,21 +1351,32 @@ pub async fn handle_messages(
                                     // through as a success: project it as an
                                     // upstream fault (503, retryable) and try the
                                     // next routed target. Mirrors the chat route.
-                                    last_kind = ponyllm_core::error::GatewayErrorKind::UpstreamUnavailable;
-                                    last_retry_after = crate::extractors::retry_after_secs(&last_kind, retry_unlock_hint(&last_kind, &pool, rate_limits.as_ref()));
-                                    last_error = format!("Upstream {} response failed: {}", target.provider_name, e);
+                                    last_kind =
+                                        ponyllm_core::error::GatewayErrorKind::UpstreamUnavailable;
+                                    last_retry_after = crate::extractors::retry_after_secs(
+                                        &last_kind,
+                                        retry_unlock_hint(&last_kind, &pool, rate_limits.as_ref()),
+                                    );
+                                    last_error = format!(
+                                        "Upstream {} response failed: {}",
+                                        target.provider_name, e
+                                    );
                                     continue;
                                 }
                             }
                         }
                         ponyllm_core::pool::UpstreamProtocol::Chat => {
-                            let chat_resp: ChatCompletionResponse = match serde_json::from_value(resp_val) {
-                                Ok(cr) => cr,
-                                Err(e) => {
-                                    last_error = format!("Invalid response format from {}: {}", target.provider_name, e);
-                                    continue;
-                                }
-                            };
+                            let chat_resp: ChatCompletionResponse =
+                                match serde_json::from_value(resp_val) {
+                                    Ok(cr) => cr,
+                                    Err(e) => {
+                                        last_error = format!(
+                                            "Invalid response format from {}: {}",
+                                            target.provider_name, e
+                                        );
+                                        continue;
+                                    }
+                                };
 
                             match chat_to_anthropic_response(&chat_resp) {
                                 Ok(ar) => ar,
@@ -1135,23 +1390,32 @@ pub async fn handle_messages(
                             match serde_json::from_value(resp_val) {
                                 Ok(ar) => ar,
                                 Err(e) => {
-                                    last_error = format!("Invalid Anthropic response from {}: {}", target.provider_name, e);
+                                    last_error = format!(
+                                        "Invalid Anthropic response from {}: {}",
+                                        target.provider_name, e
+                                    );
                                     continue;
                                 }
                             }
                         }
                         ponyllm_core::pool::UpstreamProtocol::Antigravity => {
-                            let ant_val = antigravity_to_messages_response(&resp_val, &target.physical_model);
+                            let ant_val =
+                                antigravity_to_messages_response(&resp_val, &target.physical_model);
                             match serde_json::from_value(ant_val) {
                                 Ok(ar) => ar,
                                 Err(e) => {
-                                    last_error = format!("Invalid Antigravity translated response from {}: {}", target.provider_name, e);
+                                    last_error = format!(
+                                        "Invalid Antigravity translated response from {}: {}",
+                                        target.provider_name, e
+                                    );
                                     continue;
                                 }
                             }
                         }
                         ponyllm_core::pool::UpstreamProtocol::Systemone => {
-                            last_error = "Systemone protocol cannot be projected as Anthropic messages".to_string();
+                            last_error =
+                                "Systemone protocol cannot be projected as Anthropic messages"
+                                    .to_string();
                             continue;
                         }
                     };
@@ -1160,18 +1424,36 @@ pub async fn handle_messages(
                     ant_resp.model = requested_raw_model.clone();
 
                     let cached_read = ant_resp.usage.cache_read_input_tokens.unwrap_or(0) as u64;
-                    let cached_create = ant_resp.usage.cache_creation_input_tokens.unwrap_or(0) as u64;
+                    let cached_create =
+                        ant_resp.usage.cache_creation_input_tokens.unwrap_or(0) as u64;
                     let prompt_tokens = (ant_resp.usage.input_tokens as u64)
                         .saturating_add(cached_read)
                         .saturating_add(cached_create);
                     let cached_tokens = cached_read;
                     let completion_tokens = ant_resp.usage.output_tokens as u64;
+                    if let Some(uid) = caller_user_id.as_deref() {
+                        state
+                            .user_tracker
+                            .record_tokens(uid, prompt_tokens + completion_tokens);
+                    }
+                    // B002 double settlement: token-leg accounting.
+                    crate::routes::gate::token_record_tokens(
+                        &state,
+                        &headers,
+                        prompt_tokens + completion_tokens,
+                    );
                     if let Some(kid) = winning_key_id.as_deref() {
                         let wall_ms = std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
                             .unwrap_or_default()
                             .as_millis() as u64;
-                        pool.record_tokens(kid, wall_ms, prompt_tokens, completion_tokens, cached_tokens);
+                        pool.record_tokens(
+                            kid,
+                            wall_ms,
+                            prompt_tokens,
+                            completion_tokens,
+                            cached_tokens,
+                        );
                     }
                     let tps = if latency.as_secs_f64() > 0.05 && completion_tokens > 0 {
                         Some((completion_tokens as f64 / latency.as_secs_f64()).max(1.0))
@@ -1202,12 +1484,18 @@ pub async fn handle_messages(
                     inject_telemetry_headers(&mut response, &request_id, &stages);
                     if target.physical_model != parsed.clean_model_name {
                         response.headers_mut().insert(
-                            axum::http::header::HeaderName::from_static("x-ponyllm-fallback-triggered"),
+                            axum::http::header::HeaderName::from_static(
+                                "x-ponyllm-fallback-triggered",
+                            ),
                             axum::http::HeaderValue::from_static("true"),
                         );
-                        if let Ok(orig_val) = axum::http::HeaderValue::from_str(&parsed.clean_model_name) {
+                        if let Ok(orig_val) =
+                            axum::http::HeaderValue::from_str(&parsed.clean_model_name)
+                        {
                             response.headers_mut().insert(
-                                axum::http::header::HeaderName::from_static("x-ponyllm-original-model"),
+                                axum::http::header::HeaderName::from_static(
+                                    "x-ponyllm-original-model",
+                                ),
                                 orig_val,
                             );
                         }
@@ -1215,12 +1503,25 @@ pub async fn handle_messages(
                     return response;
                 }
                 (Err(err), _) => {
-                    tracing::warn!("Provider '{}' json request failed ({}). Attempting fallback...", target.provider_name, err);
+                    tracing::warn!(
+                        "Provider '{}' json request failed ({}). Attempting fallback...",
+                        target.provider_name,
+                        err
+                    );
                     last_kind = err.kind();
 
                     // Auto resilience: if model failed with ModelNotFound or 404/400 model error, trigger model circuit breaker & PonySentry report
-                    if parsed.is_auto && matches!(last_kind, ponyllm_core::error::GatewayErrorKind::ModelNotFound) {
-                        state.record_model_outage(&target.provider_name, &target.physical_model, std::time::Duration::from_secs(600));
+                    if parsed.is_auto
+                        && matches!(
+                            last_kind,
+                            ponyllm_core::error::GatewayErrorKind::ModelNotFound
+                        )
+                    {
+                        state.record_model_outage(
+                            &target.provider_name,
+                            &target.physical_model,
+                            std::time::Duration::from_secs(600),
+                        );
 
                         let mut tags = std::collections::HashMap::new();
                         tags.insert("event_type".to_string(), "auto_model_failover".to_string());
@@ -1239,11 +1540,17 @@ pub async fn handle_messages(
 
                     // H1: pool entirely cooled by quota exhaustion reads as a
                     // quota boundary, not a transient no-key error.
-                    if !quota_failover_enabled && crate::extractors::pool_quota_exhausted(&err, &pool) {
+                    if !quota_failover_enabled
+                        && crate::extractors::pool_quota_exhausted(&err, &pool)
+                    {
                         last_kind = ponyllm_core::error::GatewayErrorKind::QuotaExhausted;
                     }
-                    last_pool_exhausted = matches!(err, CoreError::NoAvailableKey(_)) && collect_tried_keys.is_empty();
-                    last_retry_after = crate::extractors::retry_after_secs(&last_kind, retry_unlock_hint(&last_kind, &pool, rate_limits.as_ref()));
+                    last_pool_exhausted = matches!(err, CoreError::NoAvailableKey(_))
+                        && collect_tried_keys.is_empty();
+                    last_retry_after = crate::extractors::retry_after_secs(
+                        &last_kind,
+                        retry_unlock_hint(&last_kind, &pool, rate_limits.as_ref()),
+                    );
                     let err_text = err.to_string();
                     // Adversarial review FIX-3: empty-STOP collect breaks must
                     // carry Retry-After pacing even when the pool is healthy
@@ -1264,7 +1571,13 @@ pub async fn handle_messages(
     // Correlate the client-visible error with the black-box frame: the
     // request_id is embedded in the message and exposed as a header, so
     // `ponyllm telemetry` output can be grepped for the failing request.
-    let msg = crate::extractors::format_exhausted_message(&requested_raw_model, &last_kind, &last_error, last_pool_exhausted, &request_id);
+    let msg = crate::extractors::format_exhausted_message(
+        &requested_raw_model,
+        &last_kind,
+        &last_error,
+        last_pool_exhausted,
+        &request_id,
+    );
 
     // PonySentry 埋点上报网关耗尽/失败事件
     {
@@ -1274,7 +1587,10 @@ pub async fn handle_messages(
         tags.insert("error_kind".to_string(), format!("{:?}", last_kind));
         state.sentry.capture_error(
             "GatewayExhaustedError",
-            &format!("Messages request failed for model '{}': {}", requested_raw_model, last_error),
+            &format!(
+                "Messages request failed for model '{}': {}",
+                requested_raw_model, last_error
+            ),
             Some(tags),
             Some(serde_json::json!({
                 "request_id": request_id,

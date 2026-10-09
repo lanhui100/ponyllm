@@ -1,7 +1,7 @@
 use ponyllm_core::pool::{
     default_cached_price, default_input_price, default_output_price, BillingMode,
-    GatewayRoutingStrategy, ModelThinkingSpec, ModelTier, PricingConfig, PricingMode,
-    PricingPeriod, RateLimits, UpstreamProtocol,
+    ModelThinkingSpec, ModelTier, PricingConfig, PricingMode, PricingPeriod, RateLimits,
+    UpstreamProtocol,
 };
 use ponyllm_protocol::common::ReasoningEffort;
 use serde::{Deserialize, Serialize};
@@ -447,8 +447,6 @@ fn default_web_dist_dir() -> String {
 pub struct GatewayConfig {
     pub bind_addr: String,
     pub api_key: String,
-    #[serde(default)]
-    pub default_strategy: GatewayRoutingStrategy,
     pub providers: HashMap<String, ProviderConfig>,
     pub max_retries: usize,
     pub flight_recorder_capacity: usize,
@@ -514,6 +512,9 @@ pub struct GatewayConfig {
     /// (salted SHA-256, never plaintext). Empty = legacy single `api_key`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub gateway_keys: Vec<ponyllm_config::GatewayKeyEntry>,
+    /// Managed users (User management & quota governance).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub users: Vec<ponyllm_config::UserEntry>,
     /// Whether background auto-refresh & keepalive for Antigravity accounts is enabled.
     #[serde(default = "default_true")]
     pub antigravity_auto_refresh: bool,
@@ -552,6 +553,17 @@ pub struct GatewayConfig {
     /// Phase-3: session TTL seconds (default 28800 = 8h sliding).
     #[serde(default = "default_admin_session_ttl_secs")]
     pub admin_session_ttl_secs: u64,
+    /// B002: Web user-plane switch (default off). When off, ALL `/api/user/**`
+    /// routes — including `/api/user/login` — are hidden (404). Independent of
+    /// `admin_write_enabled` (ADR `2026-10-09-web-user-jwt-and-token-system.md`).
+    /// `PONYLLM_USER_TOKENS_ENABLED=1` env also enables at app build time.
+    #[serde(default = "default_false")]
+    pub user_tokens_enabled: bool,
+    /// B002: optional JWT signing secret in config. `PONYLLM_JWT_SECRET` env
+    /// wins at app build time. Startup guard fails closed when the plane is
+    /// enabled with login-user entries but no secret is available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jwt_secret: Option<String>,
     /// Ordered list of candidate models for pure `auto` routing.
     #[serde(default = "ponyllm_config::default_auto_models")]
     pub auto_models: Vec<String>,
@@ -601,7 +613,6 @@ impl Default for GatewayConfig {
         Self {
             bind_addr: "127.0.0.1:8080".to_string(),
             api_key: String::new(),
-            default_strategy: GatewayRoutingStrategy::Economy,
             providers: HashMap::new(),
             max_retries: 3,
             flight_recorder_capacity: 100,
@@ -620,6 +631,7 @@ impl Default for GatewayConfig {
             telemetry_snapshot_path: None,
             auth_compat: default_auth_compat(),
             gateway_keys: Vec::new(),
+            users: Vec::new(),
             antigravity_auto_refresh: true,
             antigravity_refresh_interval_secs: default_antigravity_refresh_interval_secs(),
             cross_provider_quota_failover: false,
@@ -631,6 +643,8 @@ impl Default for GatewayConfig {
             trusted_proxies: Vec::new(),
             admin_session_enabled: default_admin_session_enabled(),
             admin_session_ttl_secs: default_admin_session_ttl_secs(),
+            user_tokens_enabled: default_false(),
+            jwt_secret: None,
             auto_models: ponyllm_config::default_auto_models(),
         }
     }

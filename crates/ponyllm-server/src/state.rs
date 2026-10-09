@@ -399,6 +399,21 @@ pub struct AppState {
     /// Model circuit breaker: `(provider_name, model_name)` -> cooled_until instant.
     /// Tracks sudden upstream model deactivations (404 / 400 / 403) to prevent downstream disruptions.
     pub model_breaker: Arc<parking_lot::RwLock<HashMap<(String, String), std::time::Instant>>>,
+    /// Managed user quota & model access tracker.
+    pub user_tracker: Arc<ponyllm_core::UserQuotaTracker>,
+    /// B002: per-token quota tracker (keyed by gateway key id), isomorphic to
+    /// `user_tracker`; populated from `config.gateway_keys` at build/reload.
+    pub token_tracker: Arc<ponyllm_core::TokenQuotaTracker>,
+    /// B002: JWT signing secret (resolved from `PONYLLM_JWT_SECRET` env first,
+    /// then `config.jwt_secret`; never persisted in TOML). `None` + enabled
+    /// plane with login users fails closed at startup (see `AppState::new`).
+    pub jwt_secret: Option<Arc<[u8]>>,
+    /// B002: fixed JWT issuer for sign/verify (matching `Claims.iss`).
+    pub jwt_issuer: &'static str,
+    /// B002: effective user-plane switch latched at startup
+    /// (`PONYLLM_USER_TOKENS_ENABLED=1` env OR `config.user_tokens_enabled`).
+    /// When off, ALL `/api/user/**` routes (incl. login) are hidden (404).
+    pub user_plane_enabled: bool,
 }
 
 /// F1: authentication mode frozen at startup (see `AppState::startup_auth_state`).
@@ -675,6 +690,47 @@ impl AppState {
                 std::time::Duration::from_secs(config.admin_session_ttl_secs),
             ))
         });
+        let user_tracker = {
+            let tracker = Arc::new(ponyllm_core::UserQuotaTracker::new());
+            for user in &config.users {
+                tracker.upsert_user(user.clone());
+            }
+            tracker
+        };
+        let token_tracker = {
+            let tracker = Arc::new(ponyllm_core::TokenQuotaTracker::new());
+            for key in &config.gateway_keys {
+                tracker.upsert(&key.id);
+            }
+            tracker
+        };
+
+        // B002 fail-closed startup guard: `user_tokens_enabled` with at least
+        // one login user (username set) but no JWT secret → refuse to start.
+        // The secret never lives in TOML (ADR `2026-10-09-web-user-jwt-and-token-system.md`);
+        // it is read from `PONYLLM_JWT_SECRET` env first, then the optional
+        // config `jwt_secret` field (test hook / embedded builds).
+        let user_plane_enabled = std::env::var("PONYLLM_USER_TOKENS_ENABLED")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+            || config.user_tokens_enabled;
+        let jwt_secret = std::env::var("PONYLLM_JWT_SECRET")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| config.jwt_secret.clone().filter(|s| !s.trim().is_empty()))
+            .map(|s| Arc::<[u8]>::from(s.into_boxed_str().into_boxed_bytes()));
+        if user_plane_enabled
+            && jwt_secret.is_none()
+            && config
+                .users
+                .iter()
+                .any(|u| u.username.is_some() && u.password_hash.is_some())
+        {
+            panic!(
+                "B002 fail-closed startup guard: user_tokens_enabled with login users \
+                 but no JWT secret (set PONYLLM_JWT_SECRET env or config jwt_secret)"
+            );
+        }
         Self {
             config: RwLock::new(config),
             pools,
@@ -717,17 +773,26 @@ impl AppState {
                 if endpoint.is_empty() {
                     ponyllm_core::sentry::SentryClient::noop()
                 } else {
-                    let client_token = std::env::var("PONY_SENTRY_CLIENT_TOKEN").ok().filter(|s| !s.is_empty());
+                    let client_token = std::env::var("PONY_SENTRY_CLIENT_TOKEN")
+                        .ok()
+                        .filter(|s| !s.is_empty());
                     ponyllm_core::sentry::SentryClient::new(ponyllm_core::sentry::SentryConfig {
                         endpoint,
                         client_token,
-                        environment: std::env::var("PONY_SENTRY_ENVIRONMENT").ok().or_else(|| Some("production".into())),
+                        environment: std::env::var("PONY_SENTRY_ENVIRONMENT")
+                            .ok()
+                            .or_else(|| Some("production".into())),
                         release: option_env!("CARGO_PKG_VERSION").map(|s| s.to_string()),
                         buffer_capacity: 1024,
                     })
                 }
             }),
             model_breaker: Arc::new(parking_lot::RwLock::new(HashMap::new())),
+            user_tracker,
+            token_tracker,
+            jwt_secret,
+            jwt_issuer: "ponyllm",
+            user_plane_enabled,
         }
     }
 
@@ -739,7 +804,10 @@ impl AppState {
 
         // Report to PonySentry if enabled
         let mut tags = HashMap::new();
-        tags.insert("event_type".to_string(), "model_circuit_breaker_tripped".to_string());
+        tags.insert(
+            "event_type".to_string(),
+            "model_circuit_breaker_tripped".to_string(),
+        );
         tags.insert("provider".to_string(), provider.to_string());
         tags.insert("model".to_string(), model.to_string());
         tags.insert("cooldown_secs".to_string(), cooldown.as_secs().to_string());
@@ -747,7 +815,10 @@ impl AppState {
         let mut extra = serde_json::Map::new();
         extra.insert("provider".to_string(), serde_json::json!(provider));
         extra.insert("model".to_string(), serde_json::json!(model));
-        extra.insert("cooldown_secs".to_string(), serde_json::json!(cooldown.as_secs()));
+        extra.insert(
+            "cooldown_secs".to_string(),
+            serde_json::json!(cooldown.as_secs()),
+        );
 
         self.sentry.capture_error(
             "ModelOutageCircuitBreaker",
@@ -1471,6 +1542,24 @@ impl AppState {
         *config_guard = new_config;
         drop(config_guard);
         drop(pools_guard);
+
+        // B002 hot-reload sync: `reload_config_with_pools` wholesale-replaces
+        // the in-memory config, but `user_tracker`/`token_tracker` live OUTSIDE
+        // it — password changes, user CRUD and token churn in a Secret reload
+        // must reach the runtime trackers (ADR `2026-10-09-...` risk "Hot reload
+        // 缺口"). Both `upsert_*` preserve the existing used counters.
+        // Uses the dropped `new_config` values captured before the move: the
+        // replacement above moved `new_config` into the RwLock, so rebuild the
+        // trackers from the current config read instead.
+        {
+            let cfg = self.config.read();
+            for user in &cfg.users {
+                self.user_tracker.upsert_user(user.clone());
+            }
+            for key in &cfg.gateway_keys {
+                self.token_tracker.upsert(&key.id);
+            }
+        }
 
         // File fallback: keys that survived config changes in the persisted
         // snapshot (e.g. temporarily removed then re-added) still restore
@@ -2233,10 +2322,14 @@ impl AppState {
         required_modalities: &[&str],
     ) -> Result<Vec<RoutedTarget>> {
         let config = self.config.read();
+        // The global gateway routing strategy is no longer a config field
+        // (wave-2: Auto smart routing owns ordering). `GatewayRoutingStrategy`'s
+        // `from_str` already aliases `"auto"` to `Balanced`, so requests carrying
+        // neither `x-pony-strategy` nor a model tag fall back to `Balanced`.
         let strategy = parsed
             .strategy_override
             .or(header_strategy)
-            .unwrap_or(config.default_strategy);
+            .unwrap_or(GatewayRoutingStrategy::Balanced);
 
         let cached_provider = prompt.and_then(|p| self.hot_cache.probe_cached_provider(p));
 
@@ -2368,13 +2461,7 @@ impl AppState {
             }
         }
 
-        Ok(self.sort_auto_candidates(
-            candidates,
-            strategy,
-            config,
-            cached_provider,
-            inbound,
-        ))
+        Ok(self.sort_auto_candidates(candidates, strategy, config, cached_provider, inbound))
     }
 
     fn resolve_pinned_targets(
@@ -2896,7 +2983,8 @@ impl AppState {
             sorted.sort_by_key(|c| {
                 // 1. Health & circuit breaker check:
                 // If model is under model-breaker cooldown or all keys are dead, deprioritize.
-                let is_circuit_broken = self.is_model_cooling_down(&c.provider_name, &c.physical_model);
+                let is_circuit_broken =
+                    self.is_model_cooling_down(&c.provider_name, &c.physical_model);
                 let has_active_keys = self
                     .get_pool(&c.provider_name)
                     .map(|p| p.active_key_count() > 0)
@@ -2913,7 +3001,9 @@ impl AppState {
                     .iter()
                     .position(|m| {
                         m.eq_ignore_ascii_case(&c.physical_model)
-                            || c.physical_model.to_ascii_lowercase().starts_with(&m.to_ascii_lowercase())
+                            || c.physical_model
+                                .to_ascii_lowercase()
+                                .starts_with(&m.to_ascii_lowercase())
                     })
                     .unwrap_or(auto_models.len() + 10);
 

@@ -1,27 +1,27 @@
-use std::sync::Arc;
-use std::time::Instant;
-use axum::extract::State;
-use axum::http::{HeaderMap, HeaderValue, StatusCode};
-use axum::response::IntoResponse;
-use axum::Json;
-use ponyllm_core::error::CoreError;
-use ponyllm_core::executor::{is_opencode_zen_target, EventSinkCtx, UpstreamExecutor};
-use ponyllm_core::pool::GatewayRoutingStrategy;
-use ponyllm_core::telemetry::{EventCtx, GatewayEvent, StageTimings};
-use ponyllm_protocol::openai::responses::CreateResponseRequest;
-use parking_lot::Mutex;
-use std::str::FromStr;
 use crate::extractors::{format_request_snippet, AppJson};
 use crate::routes::chat::{inject_routing_headers, inject_telemetry_headers, retry_unlock_hint};
 use crate::routes::models::ParsedRequestModel;
 use crate::state::AppState;
 use crate::streaming::{
     anthropic_sse_to_responses_stream, antigravity_sse_to_openai_stream,
-    chat_sse_to_responses_stream, collect_antigravity_sse_to_json,
-    extract_usage_tokens, is_transient_empty_stop_error, passthrough_sse, stall_guard,
-    wrap_telemetry_stream, StreamFailureContext, DEFAULT_TAIL_STALL_IDLE,
+    chat_sse_to_responses_stream, collect_antigravity_sse_to_json, extract_usage_tokens,
+    is_transient_empty_stop_error, passthrough_sse, stall_guard, wrap_telemetry_stream,
+    StreamFailureContext, DEFAULT_TAIL_STALL_IDLE,
 };
+use axum::extract::State;
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
+use axum::response::IntoResponse;
+use axum::Json;
+use parking_lot::Mutex;
+use ponyllm_core::error::CoreError;
+use ponyllm_core::executor::{is_opencode_zen_target, EventSinkCtx, UpstreamExecutor};
+use ponyllm_core::pool::GatewayRoutingStrategy;
+use ponyllm_core::telemetry::{EventCtx, GatewayEvent, StageTimings};
+use ponyllm_protocol::openai::responses::CreateResponseRequest;
 use ponyllm_protocol::translator::chat_to_antigravity_request;
+use std::str::FromStr;
+use std::sync::Arc;
+use std::time::Instant;
 
 pub async fn handle_responses(
     State(state): State<Arc<AppState>>,
@@ -59,6 +59,47 @@ pub async fn handle_responses(
             .into_response();
     }
 
+    // User access & quota check
+    let caller_user_id = headers
+        .get("x-user-id")
+        .and_then(|h| h.to_str().ok())
+        .map(|s| s.trim().to_string());
+    if let Some(uid) = caller_user_id.as_deref() {
+        if let Err(err) = state.user_tracker.check_access(uid, &req.model) {
+            let (status, code) = match err {
+                ponyllm_core::UserCheckError::QuotaExhausted { .. } => {
+                    (StatusCode::TOO_MANY_REQUESTS, "user_quota_exhausted")
+                }
+                ponyllm_core::UserCheckError::ModelNotAllowed { .. } => {
+                    (StatusCode::FORBIDDEN, "model_forbidden_for_user")
+                }
+                ponyllm_core::UserCheckError::UserDisabled { .. } => {
+                    (StatusCode::FORBIDDEN, "user_disabled")
+                }
+                ponyllm_core::UserCheckError::UserNotFound { .. } => {
+                    (StatusCode::FORBIDDEN, "user_not_found")
+                }
+            };
+            return (
+                status,
+                Json(serde_json::json!({
+                    "error": {
+                        "message": err.to_string(),
+                        "type": "invalid_request_error",
+                        "code": code
+                    }
+                })),
+            )
+                .into_response();
+        }
+    }
+
+    // B002 token gate: per-key quota + model_limits intersection (second,
+    // multiplicative gate after the user gate).
+    if let Err(resp) = crate::routes::gate::token_gate(&state, &headers, &req.model) {
+        return resp;
+    }
+
     // Parse requested model (auto / [1m] / :strategy suffix) and resolve the
     // physical model + provider, mirroring chat/messages routing so virtual
     // model names are correctly mapped upstream.
@@ -66,7 +107,9 @@ pub async fn handle_responses(
     let requested_raw_model = parsed.raw_requested_model.clone();
     let prompt_hint = match &req.input {
         ponyllm_protocol::openai::responses::ResponseInput::Text(t) => Some(t.clone()),
-        ponyllm_protocol::openai::responses::ResponseInput::Items(_) => serde_json::to_string(&req.input).ok(),
+        ponyllm_protocol::openai::responses::ResponseInput::Items(_) => {
+            serde_json::to_string(&req.input).ok()
+        }
     };
     let prompt_ref = prompt_hint.as_deref();
 
@@ -102,9 +145,15 @@ pub async fn handle_responses(
         }
         Err(err) => {
             let (status, code) = match err {
-                ponyllm_core::error::CoreError::UnsupportedModality { .. } => (StatusCode::BAD_REQUEST, "unsupported_modality"),
-                ponyllm_core::error::CoreError::CapacityExhausted { .. } => (StatusCode::TOO_MANY_REQUESTS, "capacity_exhausted"),
-                ponyllm_core::error::CoreError::Internal(ref msg) if msg.contains("No provider configured") => {
+                ponyllm_core::error::CoreError::UnsupportedModality { .. } => {
+                    (StatusCode::BAD_REQUEST, "unsupported_modality")
+                }
+                ponyllm_core::error::CoreError::CapacityExhausted { .. } => {
+                    (StatusCode::TOO_MANY_REQUESTS, "capacity_exhausted")
+                }
+                ponyllm_core::error::CoreError::Internal(ref msg)
+                    if msg.contains("No provider configured") =>
+                {
                     (StatusCode::NOT_FOUND, "model_not_found")
                 }
                 _ => (StatusCode::SERVICE_UNAVAILABLE, "service_unavailable"),
@@ -151,7 +200,8 @@ pub async fn handle_responses(
         Some(targets[0].provider_name.clone()),
         GatewayEvent::RouteResolved {
             provider: targets[0].provider_name.clone(),
-            translated: targets[0].upstream_protocol != ponyllm_core::pool::UpstreamProtocol::Responses,
+            translated: targets[0].upstream_protocol
+                != ponyllm_core::pool::UpstreamProtocol::Responses,
             routing_ms,
         },
     );
@@ -168,7 +218,8 @@ pub async fn handle_responses(
     // the operator explicitly opts back into cross-provider quota failover, OR
     // when the request is an auto-managed virtual model (`auto`) where zero-interruption
     // failover across providers is the explicit contract requested by downstream agents.
-    let quota_failover_enabled = parsed.is_auto || state.config.read().cross_provider_quota_failover;
+    let quota_failover_enabled =
+        parsed.is_auto || state.config.read().cross_provider_quota_failover;
 
     // Request-level pre-commit empty-STOP retry wall-clock budget (contract
     // `2026-10-07-empty-stop-budget-contract`, ruling 1-2): one deadline taken
@@ -185,7 +236,9 @@ pub async fn handle_responses(
 
     for target in targets {
         // If target is currently cooling down under the model circuit breaker, skip it
-        if parsed.is_auto && state.is_model_cooling_down(&target.provider_name, &target.physical_model) {
+        if parsed.is_auto
+            && state.is_model_cooling_down(&target.provider_name, &target.physical_model)
+        {
             tracing::warn!(
                 provider = %target.provider_name,
                 model = %target.physical_model,
@@ -234,9 +287,11 @@ pub async fn handle_responses(
 
         if effective_thinking.is_active() {
             target_req.reasoning_effort = Some(effective_thinking);
-            target_req.reasoning = Some(ponyllm_protocol::openai::responses::ResponseReasoningConfig {
-                effort: Some(effective_thinking),
-            });
+            target_req.reasoning = Some(
+                ponyllm_protocol::openai::responses::ResponseReasoningConfig {
+                    effort: Some(effective_thinking),
+                },
+            );
             target_req.sanitize_thinking_extra();
         } else {
             target_req.reasoning_effort = None;
@@ -256,13 +311,14 @@ pub async fn handle_responses(
 
         let (target_url, req_val) = match target.upstream_protocol {
             ponyllm_core::pool::UpstreamProtocol::Chat => {
-                let mut chat_req = match ponyllm_protocol::translator::responses_to_chat_request(&target_req) {
-                    Ok(cr) => cr,
-                    Err(e) => {
-                        last_error = format!("Translation error for {}: {}", provider_name, e);
-                        continue;
-                    }
-                };
+                let mut chat_req =
+                    match ponyllm_protocol::translator::responses_to_chat_request(&target_req) {
+                        Ok(cr) => cr,
+                        Err(e) => {
+                            last_error = format!("Translation error for {}: {}", provider_name, e);
+                            continue;
+                        }
+                    };
                 if effective_thinking.is_active() {
                     chat_req.reasoning_effort = Some(effective_thinking);
                 } else {
@@ -280,31 +336,40 @@ pub async fn handle_responses(
                 (target.chat_completions_url(), chat_val)
             }
             ponyllm_core::pool::UpstreamProtocol::Anthropic => {
-                let mut ant_req = match ponyllm_protocol::translator::responses_to_anthropic_request(&target_req) {
-                    Ok(ar) => ar,
-                    Err(e) => {
-                        last_error = format!("Translation error for {}: {}", provider_name, e);
-                        continue;
-                    }
-                };
-                let is_adaptive = ponyllm_protocol::anthropic::messages::ThinkingConfig::is_adaptive_model(&target.physical_model);
+                let mut ant_req =
+                    match ponyllm_protocol::translator::responses_to_anthropic_request(&target_req)
+                    {
+                        Ok(ar) => ar,
+                        Err(e) => {
+                            last_error = format!("Translation error for {}: {}", provider_name, e);
+                            continue;
+                        }
+                    };
+                let is_adaptive =
+                    ponyllm_protocol::anthropic::messages::ThinkingConfig::is_adaptive_model(
+                        &target.physical_model,
+                    );
                 if effective_thinking.is_active() {
                     ant_req.reasoning_effort = Some(effective_thinking);
                     if is_adaptive {
-                        ant_req.thinking = Some(ponyllm_protocol::anthropic::messages::ThinkingConfig {
-                            r#type: "adaptive".to_string(),
-                            budget_tokens: None,
-                            effort: None,
-                        });
-                        ant_req.output_config = Some(ponyllm_protocol::anthropic::messages::AnthropicOutputConfig {
-                            effort: Some(effective_thinking),
-                        });
+                        ant_req.thinking =
+                            Some(ponyllm_protocol::anthropic::messages::ThinkingConfig {
+                                r#type: "adaptive".to_string(),
+                                budget_tokens: None,
+                                effort: None,
+                            });
+                        ant_req.output_config = Some(
+                            ponyllm_protocol::anthropic::messages::AnthropicOutputConfig {
+                                effort: Some(effective_thinking),
+                            },
+                        );
                     } else {
-                        ant_req.thinking = Some(ponyllm_protocol::anthropic::messages::ThinkingConfig {
-                            r#type: "enabled".to_string(),
-                            budget_tokens: None,
-                            effort: Some(effective_thinking),
-                        });
+                        ant_req.thinking =
+                            Some(ponyllm_protocol::anthropic::messages::ThinkingConfig {
+                                r#type: "enabled".to_string(),
+                                budget_tokens: None,
+                                effort: Some(effective_thinking),
+                            });
                         ant_req.output_config = None;
                     }
                 } else {
@@ -318,7 +383,8 @@ pub async fn handle_responses(
                 let val = match serde_json::to_value(&ant_req) {
                     Ok(v) => v,
                     Err(e) => {
-                        last_error = format!("Serialization error for {}: {}", target.provider_name, e);
+                        last_error =
+                            format!("Serialization error for {}: {}", target.provider_name, e);
                         continue;
                     }
                 };
@@ -341,13 +407,17 @@ pub async fn handle_responses(
                     .peek_antigravity_identity(&provider_name)
                     .unwrap_or_else(|| ("aicode-consumers".to_string(), String::new()));
                 // First translate Responses request to Chat request, then to Antigravity envelope
-                let mut chat_req = match ponyllm_protocol::translator::responses_to_chat_request(&target_req) {
-                    Ok(cr) => cr,
-                    Err(e) => {
-                        last_error = format!("Translation error (Responses->Chat) for {}: {}", provider_name, e);
-                        continue;
-                    }
-                };
+                let mut chat_req =
+                    match ponyllm_protocol::translator::responses_to_chat_request(&target_req) {
+                        Ok(cr) => cr,
+                        Err(e) => {
+                            last_error = format!(
+                                "Translation error (Responses->Chat) for {}: {}",
+                                provider_name, e
+                            );
+                            continue;
+                        }
+                    };
                 if effective_thinking.is_active() {
                     chat_req.reasoning_effort = Some(effective_thinking);
                 } else {
@@ -355,17 +425,29 @@ pub async fn handle_responses(
                     chat_req.extra.remove("reasoning_effort");
                     chat_req.extra.remove("thinking");
                 }
-                let val = match chat_to_antigravity_request(&chat_req, &target.physical_model, &ag_project, thinking, &ag_salt) {
+                let val = match chat_to_antigravity_request(
+                    &chat_req,
+                    &target.physical_model,
+                    &ag_project,
+                    thinking,
+                    &ag_salt,
+                ) {
                     Ok(v) => v,
                     Err(e) => {
-                        last_error = format!("Translation error (Chat->Antigravity) for {}: {}", provider_name, e);
+                        last_error = format!(
+                            "Translation error (Chat->Antigravity) for {}: {}",
+                            provider_name, e
+                        );
                         continue;
                     }
                 };
                 (url, val)
             }
             ponyllm_core::pool::UpstreamProtocol::Systemone => {
-                last_error = format!("Systemone protocol cannot be served by responses endpoint for {}", provider_name);
+                last_error = format!(
+                    "Systemone protocol cannot be served by responses endpoint for {}",
+                    provider_name
+                );
                 continue;
             }
         };
@@ -434,7 +516,10 @@ pub async fn handle_responses(
         });
         // Handle streaming request: pass through upstream SSE unchanged
         if is_streaming {
-            match executor.execute_stream_request_with_timing_and_key(&target_url, &req_val).await {
+            match executor
+                .execute_stream_request_with_timing_and_key(&target_url, &req_val)
+                .await
+            {
                 Ok((upstream_resp, attempt_start, winning_key_id)) => {
                     if let Some(p) = prompt_ref {
                         state.hot_cache.record_dispatch(p, &provider_name);
@@ -447,7 +532,9 @@ pub async fn handle_responses(
                         },
                     );
 
-                    let est_prompt_tokens = serde_json::to_string(&req.input).map(|s| (s.len() as u64 / 4).max(1)).unwrap_or(1);
+                    let est_prompt_tokens = serde_json::to_string(&req.input)
+                        .map(|s| (s.len() as u64 / 4).max(1))
+                        .unwrap_or(1);
 
                     let failure_ctx = StreamFailureContext {
                         bus: state.event_bus.clone(),
@@ -481,7 +568,10 @@ pub async fn handle_responses(
                             axum::body::Body::from_stream(monitored)
                         }
                         ponyllm_core::pool::UpstreamProtocol::Responses => {
-                            let stream = passthrough_sse(stall_guard(upstream_resp.bytes_stream(), DEFAULT_TAIL_STALL_IDLE));
+                            let stream = passthrough_sse(stall_guard(
+                                upstream_resp.bytes_stream(),
+                                DEFAULT_TAIL_STALL_IDLE,
+                            ));
                             let monitored = wrap_telemetry_stream(stream, failure_ctx);
                             axum::body::Body::from_stream(monitored)
                         }
@@ -490,21 +580,21 @@ pub async fn handle_responses(
                                 stall_guard(upstream_resp.bytes_stream(), DEFAULT_TAIL_STALL_IDLE),
                                 &target.physical_model,
                             );
-                            let stream = chat_sse_to_responses_stream(
-                                chat_stream,
-                                &target.physical_model,
-                            );
+                            let stream =
+                                chat_sse_to_responses_stream(chat_stream, &target.physical_model);
                             let monitored = wrap_telemetry_stream(stream, failure_ctx);
                             axum::body::Body::from_stream(monitored)
                         }
-                         ponyllm_core::pool::UpstreamProtocol::Systemone => {
-                             return crate::extractors::render_openai_error(
-                                 StatusCode::BAD_REQUEST, "invalid_request_error",
-                                 "protocol_mismatch", "Use /v1/systemone for systemone models",
-                             );
-                         }
-                     };
-                     let mut resp = axum::response::Response::new(body);
+                        ponyllm_core::pool::UpstreamProtocol::Systemone => {
+                            return crate::extractors::render_openai_error(
+                                StatusCode::BAD_REQUEST,
+                                "invalid_request_error",
+                                "protocol_mismatch",
+                                "Use /v1/systemone for systemone models",
+                            );
+                        }
+                    };
+                    let mut resp = axum::response::Response::new(body);
 
                     resp.headers_mut().insert(
                         axum::http::header::CONTENT_TYPE,
@@ -515,12 +605,25 @@ pub async fn handle_responses(
                     return resp;
                 }
                 Err(err) => {
-                    tracing::warn!("Provider '{}' responses stream failed ({}). Attempting fallback...", provider_name, err);
+                    tracing::warn!(
+                        "Provider '{}' responses stream failed ({}). Attempting fallback...",
+                        provider_name,
+                        err
+                    );
                     last_kind = err.kind();
 
                     // Auto resilience: if model failed with ModelNotFound or 404/400 model error, trigger model circuit breaker & PonySentry report
-                    if parsed.is_auto && matches!(last_kind, ponyllm_core::error::GatewayErrorKind::ModelNotFound) {
-                        state.record_model_outage(&target.provider_name, &target.physical_model, std::time::Duration::from_secs(600));
+                    if parsed.is_auto
+                        && matches!(
+                            last_kind,
+                            ponyllm_core::error::GatewayErrorKind::ModelNotFound
+                        )
+                    {
+                        state.record_model_outage(
+                            &target.provider_name,
+                            &target.physical_model,
+                            std::time::Duration::from_secs(600),
+                        );
 
                         let mut tags = std::collections::HashMap::new();
                         tags.insert("event_type".to_string(), "auto_model_failover".to_string());
@@ -539,11 +642,17 @@ pub async fn handle_responses(
 
                     // H1: pool entirely cooled by quota exhaustion reads as a
                     // quota boundary, not a transient no-key error.
-                    if !quota_failover_enabled && crate::extractors::pool_quota_exhausted(&err, &pool) {
+                    if !quota_failover_enabled
+                        && crate::extractors::pool_quota_exhausted(&err, &pool)
+                    {
                         last_kind = ponyllm_core::error::GatewayErrorKind::QuotaExhausted;
                     }
-                    last_pool_exhausted = matches!(err, CoreError::NoAvailableKey(_)) && empty_stop_tried_keys.is_empty();
-                    last_retry_after = crate::extractors::retry_after_secs(&last_kind, retry_unlock_hint(&last_kind, &pool, rate_limits.as_ref()));
+                    last_pool_exhausted = matches!(err, CoreError::NoAvailableKey(_))
+                        && empty_stop_tried_keys.is_empty();
+                    last_retry_after = crate::extractors::retry_after_secs(
+                        &last_kind,
+                        retry_unlock_hint(&last_kind, &pool, rate_limits.as_ref()),
+                    );
                     last_error = err.to_string();
                     continue;
                 }
@@ -551,12 +660,16 @@ pub async fn handle_responses(
         }
 
         let mut collect_tried_keys: Vec<String> = Vec::new();
-        let (upstream_result, winning_key_id) = if target.upstream_protocol == ponyllm_core::pool::UpstreamProtocol::Antigravity {
+        let (upstream_result, winning_key_id) = if target.upstream_protocol
+            == ponyllm_core::pool::UpstreamProtocol::Antigravity
+        {
             // Unified attempt budget (contract `2026-10-07-empty-stop-budget-
             // contract` ruling 4): shared with chat / messages — also fixes the
             // previous formula missing the per-key multiplier.
-            let max_empty_stop_attempts =
-                crate::streaming::empty_stop_attempt_budget(pool.total_key_count(), executor.max_retries);
+            let max_empty_stop_attempts = crate::streaming::empty_stop_attempt_budget(
+                pool.total_key_count(),
+                executor.max_retries,
+            );
             // R2/R3: same policy as chat.rs (fresh key + fresh requestId,
             // deterministic early convergence).
             let mut collect_attempt = 0usize;
@@ -598,7 +711,10 @@ pub async fn handle_responses(
                 .with_excluded_keys(&collect_tried_keys)
                 .with_egress(egress_pool.clone(), egress_clients.clone())
                 .with_event_sink(sink_ctx.clone(), state.event_sink(sink_ctx.clone()));
-                match collect_executor.execute_stream_request_with_timing_and_key(&target_url, &collect_req_val).await {
+                match collect_executor
+                    .execute_stream_request_with_timing_and_key(&target_url, &collect_req_val)
+                    .await
+                {
                     Ok((resp, _instant, kid)) => {
                         if !collect_tried_keys.iter().any(|k| k == &kid) {
                             collect_tried_keys.push(kid.clone());
@@ -607,8 +723,16 @@ pub async fn handle_responses(
                         match collect_antigravity_sse_to_json(raw_stream).await {
                             Ok(v) => break (Ok(v), Some(kid)),
                             Err(e) if is_transient_empty_stop_error(&e) => {
-                                match crate::routes::chat::collect_empty_stop_policy(&e, collect_attempt, max_empty_stop_attempts, &mut collect_consecutive_first_frame, &target.physical_model) {
-                                    Some(crate::routes::chat::CollectRetryAction::Retry { delay }) => {
+                                match crate::routes::chat::collect_empty_stop_policy(
+                                    &e,
+                                    collect_attempt,
+                                    max_empty_stop_attempts,
+                                    &mut collect_consecutive_first_frame,
+                                    &target.physical_model,
+                                ) {
+                                    Some(crate::routes::chat::CollectRetryAction::Retry {
+                                        delay,
+                                    }) => {
                                         tracing::warn!(
                                             provider = %provider_name,
                                             key_id = %kid,
@@ -618,10 +742,17 @@ pub async fn handle_responses(
                                             backoff_ms = delay.as_millis() as u64,
                                             "Non-stream Antigravity collect hit transient empty STOP in Responses route; backing off and retrying"
                                         );
-                                        tokio::time::sleep(remaining_c.map_or(delay, |r| delay.min(r))).await;
+                                        tokio::time::sleep(
+                                            remaining_c.map_or(delay, |r| delay.min(r)),
+                                        )
+                                        .await;
                                         ponyllm_protocol::translator::refresh_antigravity_request_ids(&mut collect_req_val);
                                     }
-                                    Some(crate::routes::chat::CollectRetryAction::Deterministic { message }) => {
+                                    Some(
+                                        crate::routes::chat::CollectRetryAction::Deterministic {
+                                            message,
+                                        },
+                                    ) => {
                                         tracing::warn!(
                                             provider = %provider_name,
                                             collect_attempt,
@@ -630,7 +761,10 @@ pub async fn handle_responses(
                                         );
                                         last_kind = ponyllm_core::error::GatewayErrorKind::UpstreamUnavailable;
                                         last_error = message;
-                                        break (Err(CoreError::Internal(last_error.clone())), Some(kid));
+                                        break (
+                                            Err(CoreError::Internal(last_error.clone())),
+                                            Some(kid),
+                                        );
                                     }
                                     None => {
                                         tracing::warn!(
@@ -638,7 +772,13 @@ pub async fn handle_responses(
                                             error = %e,
                                             "Antigravity stream collection failed in Responses route"
                                         );
-                                        break (Err(CoreError::Internal(format!("Antigravity stream collect failed: {}", e))), Some(kid));
+                                        break (
+                                            Err(CoreError::Internal(format!(
+                                                "Antigravity stream collect failed: {}",
+                                                e
+                                            ))),
+                                            Some(kid),
+                                        );
                                     }
                                 }
                             }
@@ -648,7 +788,13 @@ pub async fn handle_responses(
                                     error = %e,
                                     "Antigravity stream collection failed in Responses route"
                                 );
-                                break (Err(CoreError::Internal(format!("Antigravity stream collect failed: {}", e))), Some(kid));
+                                break (
+                                    Err(CoreError::Internal(format!(
+                                        "Antigravity stream collect failed: {}",
+                                        e
+                                    ))),
+                                    Some(kid),
+                                );
                             }
                         }
                     }
@@ -663,7 +809,8 @@ pub async fn handle_responses(
                                 .map(|d| d.saturating_duration_since(tokio::time::Instant::now()));
                             if let Some(r) = remaining_now {
                                 if r.is_zero() {
-                                    last_kind = ponyllm_core::error::GatewayErrorKind::UpstreamUnavailable;
+                                    last_kind =
+                                        ponyllm_core::error::GatewayErrorKind::UpstreamUnavailable;
                                     last_error = format!(
                                         "Antigravity stream collect failed: empty-STOP retry wall-clock budget ({}s) exhausted after {} attempts",
                                         empty_stop_budget.map(|b| b.as_secs()).unwrap_or(0),
@@ -682,7 +829,9 @@ pub async fn handle_responses(
                             );
                             collect_tried_keys.clear();
                             tokio::time::sleep(remaining_now.map_or(delay, |r| delay.min(r))).await;
-                            ponyllm_protocol::translator::refresh_antigravity_request_ids(&mut collect_req_val);
+                            ponyllm_protocol::translator::refresh_antigravity_request_ids(
+                                &mut collect_req_val,
+                            );
                             continue;
                         }
                         break (Err(e), None);
@@ -695,7 +844,8 @@ pub async fn handle_responses(
             &target.physical_model,
         ) && matches!(
             target.upstream_protocol,
-            ponyllm_core::pool::UpstreamProtocol::Chat | ponyllm_core::pool::UpstreamProtocol::Responses
+            ponyllm_core::pool::UpstreamProtocol::Chat
+                | ponyllm_core::pool::UpstreamProtocol::Responses
         ) {
             // Zen free tier: the Console gate rejects non-stream upstream
             // bodies even with the tool gate satisfied. Force an upstream
@@ -709,7 +859,10 @@ pub async fn handle_responses(
                         .or_insert_with(|| serde_json::json!({"include_usage": true}));
                 }
             }
-            match executor.execute_stream_request_with_timing_and_key(&target_url, &streamed_val).await {
+            match executor
+                .execute_stream_request_with_timing_and_key(&target_url, &streamed_val)
+                .await
+            {
                 Ok((resp, _instant, kid)) => {
                     let raw_stream = resp.bytes_stream();
                     let collected = match target.upstream_protocol {
@@ -726,38 +879,53 @@ pub async fn handle_responses(
                                 error = %e,
                                 "Zen free-tier upstream stream collection failed"
                             );
-                            (Err(CoreError::Internal(format!("Zen stream collect failed: {}", e))), Some(kid))
+                            (
+                                Err(CoreError::Internal(format!(
+                                    "Zen stream collect failed: {}",
+                                    e
+                                ))),
+                                Some(kid),
+                            )
                         }
                     }
                 }
                 Err(e) => (Err(e), None),
             }
         } else {
-            match executor.execute_json_request_with_key(&target_url, &req_val).await {
+            match executor
+                .execute_json_request_with_key(&target_url, &req_val)
+                .await
+            {
                 Ok((val, kid)) => (Ok(val), Some(kid)),
                 Err(e) => (Err(e), None),
             }
         };
 
-            match (upstream_result, winning_key_id) {
-                (Ok(resp_val), winning_key_id) => {
+        match (upstream_result, winning_key_id) {
+            (Ok(resp_val), winning_key_id) => {
                 let mut resp_val = match target.upstream_protocol {
                     ponyllm_core::pool::UpstreamProtocol::Chat => {
                         let chat_resp: ponyllm_protocol::openai::chat::ChatCompletionResponse =
                             match serde_json::from_value(resp_val) {
                                 Ok(cr) => cr,
                                 Err(e) => {
-                                    last_error = format!("Invalid Chat response from {}: {}", provider_name, e);
+                                    last_error = format!(
+                                        "Invalid Chat response from {}: {}",
+                                        provider_name, e
+                                    );
                                     continue;
                                 }
                             };
-                        let resp_obj = match ponyllm_protocol::translator::chat_to_responses_response(&chat_resp) {
-                            Ok(ro) => ro,
-                            Err(e) => {
-                                last_error = format!("Translation error: {}", e);
-                                continue;
-                            }
-                        };
+                        let resp_obj =
+                            match ponyllm_protocol::translator::chat_to_responses_response(
+                                &chat_resp,
+                            ) {
+                                Ok(ro) => ro,
+                                Err(e) => {
+                                    last_error = format!("Translation error: {}", e);
+                                    continue;
+                                }
+                            };
                         match serde_json::to_value(&resp_obj) {
                             Ok(v) => v,
                             Err(e) => {
@@ -771,17 +939,23 @@ pub async fn handle_responses(
                             match serde_json::from_value(resp_val) {
                                 Ok(ar) => ar,
                                 Err(e) => {
-                                    last_error = format!("Invalid Anthropic response from {}: {}", provider_name, e);
+                                    last_error = format!(
+                                        "Invalid Anthropic response from {}: {}",
+                                        provider_name, e
+                                    );
                                     continue;
                                 }
                             };
-                        let resp_obj = match ponyllm_protocol::translator::anthropic_to_responses_response(&ant_resp) {
-                            Ok(ro) => ro,
-                            Err(e) => {
-                                last_error = format!("Translation error: {}", e);
-                                continue;
-                            }
-                        };
+                        let resp_obj =
+                            match ponyllm_protocol::translator::anthropic_to_responses_response(
+                                &ant_resp,
+                            ) {
+                                Ok(ro) => ro,
+                                Err(e) => {
+                                    last_error = format!("Translation error: {}", e);
+                                    continue;
+                                }
+                            };
                         match serde_json::to_value(&resp_obj) {
                             Ok(v) => v,
                             Err(e) => {
@@ -792,22 +966,32 @@ pub async fn handle_responses(
                     }
                     ponyllm_core::pool::UpstreamProtocol::Responses => resp_val,
                     ponyllm_core::pool::UpstreamProtocol::Antigravity => {
-                        let chat_resp_val = ponyllm_protocol::translator::antigravity_to_chat_response(&resp_val, &target.physical_model);
+                        let chat_resp_val =
+                            ponyllm_protocol::translator::antigravity_to_chat_response(
+                                &resp_val,
+                                &target.physical_model,
+                            );
                         let chat_resp: ponyllm_protocol::openai::chat::ChatCompletionResponse =
                             match serde_json::from_value(chat_resp_val) {
                                 Ok(cr) => cr,
                                 Err(e) => {
-                                    last_error = format!("Invalid Antigravity translated Chat response from {}: {}", provider_name, e);
+                                    last_error = format!(
+                                        "Invalid Antigravity translated Chat response from {}: {}",
+                                        provider_name, e
+                                    );
                                     continue;
                                 }
                             };
-                        let resp_obj = match ponyllm_protocol::translator::chat_to_responses_response(&chat_resp) {
-                            Ok(ro) => ro,
-                            Err(e) => {
-                                last_error = format!("Translation error: {}", e);
-                                continue;
-                            }
-                        };
+                        let resp_obj =
+                            match ponyllm_protocol::translator::chat_to_responses_response(
+                                &chat_resp,
+                            ) {
+                                Ok(ro) => ro,
+                                Err(e) => {
+                                    last_error = format!("Translation error: {}", e);
+                                    continue;
+                                }
+                            };
                         match serde_json::to_value(&resp_obj) {
                             Ok(v) => v,
                             Err(e) => {
@@ -819,13 +1003,31 @@ pub async fn handle_responses(
                     ponyllm_core::pool::UpstreamProtocol::Systemone => resp_val,
                 };
                 let latency = start_time.elapsed();
-                let (prompt_tokens, completion_tokens, cached_tokens) = extract_usage_tokens(&resp_val);
+                let (prompt_tokens, completion_tokens, cached_tokens) =
+                    extract_usage_tokens(&resp_val);
+                if let Some(uid) = caller_user_id.as_deref() {
+                    state
+                        .user_tracker
+                        .record_tokens(uid, prompt_tokens + completion_tokens);
+                }
+                // B002 double settlement: token-leg accounting.
+                crate::routes::gate::token_record_tokens(
+                    &state,
+                    &headers,
+                    prompt_tokens + completion_tokens,
+                );
                 if let Some(kid) = winning_key_id.as_deref() {
                     let wall_ms = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default()
                         .as_millis() as u64;
-                    pool.record_tokens(kid, wall_ms, prompt_tokens, completion_tokens, cached_tokens);
+                    pool.record_tokens(
+                        kid,
+                        wall_ms,
+                        prompt_tokens,
+                        completion_tokens,
+                        cached_tokens,
+                    );
                 }
                 let tps = if latency.as_secs_f64() > 0.05 && completion_tokens > 0 {
                     Some((completion_tokens as f64 / latency.as_secs_f64()).max(1.0))
@@ -861,12 +1063,25 @@ pub async fn handle_responses(
                 return response;
             }
             (Err(err), _) => {
-                tracing::warn!("Provider '{}' responses request failed ({}). Attempting fallback...", provider_name, err);
+                tracing::warn!(
+                    "Provider '{}' responses request failed ({}). Attempting fallback...",
+                    provider_name,
+                    err
+                );
                 last_kind = err.kind();
 
                 // Auto resilience: if model failed with ModelNotFound or 404/400 model error, trigger model circuit breaker & PonySentry report
-                if parsed.is_auto && matches!(last_kind, ponyllm_core::error::GatewayErrorKind::ModelNotFound) {
-                    state.record_model_outage(&target.provider_name, &target.physical_model, std::time::Duration::from_secs(600));
+                if parsed.is_auto
+                    && matches!(
+                        last_kind,
+                        ponyllm_core::error::GatewayErrorKind::ModelNotFound
+                    )
+                {
+                    state.record_model_outage(
+                        &target.provider_name,
+                        &target.physical_model,
+                        std::time::Duration::from_secs(600),
+                    );
 
                     let mut tags = std::collections::HashMap::new();
                     tags.insert("event_type".to_string(), "auto_model_failover".to_string());
@@ -888,8 +1103,12 @@ pub async fn handle_responses(
                 if !quota_failover_enabled && crate::extractors::pool_quota_exhausted(&err, &pool) {
                     last_kind = ponyllm_core::error::GatewayErrorKind::QuotaExhausted;
                 }
-                last_pool_exhausted = matches!(err, CoreError::NoAvailableKey(_)) && collect_tried_keys.is_empty();
-                last_retry_after = crate::extractors::retry_after_secs(&last_kind, retry_unlock_hint(&last_kind, &pool, rate_limits.as_ref()));
+                last_pool_exhausted =
+                    matches!(err, CoreError::NoAvailableKey(_)) && collect_tried_keys.is_empty();
+                last_retry_after = crate::extractors::retry_after_secs(
+                    &last_kind,
+                    retry_unlock_hint(&last_kind, &pool, rate_limits.as_ref()),
+                );
                 let err_text = err.to_string();
                 // Adversarial review FIX-3: empty-STOP collect breaks must
                 // carry Retry-After pacing even when the pool is healthy
@@ -905,7 +1124,13 @@ pub async fn handle_responses(
         }
     }
 
-    let msg = crate::extractors::format_exhausted_message(&requested_raw_model, &last_kind, &last_error, last_pool_exhausted, &request_id);
+    let msg = crate::extractors::format_exhausted_message(
+        &requested_raw_model,
+        &last_kind,
+        &last_error,
+        last_pool_exhausted,
+        &request_id,
+    );
 
     // PonySentry 埋点上报网关耗尽/失败事件
     {
@@ -915,7 +1140,10 @@ pub async fn handle_responses(
         tags.insert("error_kind".to_string(), format!("{:?}", last_kind));
         state.sentry.capture_error(
             "GatewayExhaustedError",
-            &format!("Responses request failed for model '{}': {}", requested_raw_model, last_error),
+            &format!(
+                "Responses request failed for model '{}': {}",
+                requested_raw_model, last_error
+            ),
             Some(tags),
             Some(serde_json::json!({
                 "request_id": request_id,
