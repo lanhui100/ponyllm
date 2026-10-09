@@ -104,6 +104,10 @@ pub struct GatewaySection {
     /// Only password hashes are persisted, never plaintext.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub gateway_keys: Vec<GatewayKeyEntry>,
+    /// Managed users (User management & quota governance).
+    /// Empty = no users configured.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub users: Vec<UserEntry>,
     /// Whether background auto-refresh & keepalive for Antigravity accounts is enabled.
     /// Defaults to `true` to keep standby accounts from expiring (Google 180-day rule).
     #[serde(default = "default_antigravity_auto_refresh")]
@@ -198,7 +202,37 @@ pub struct GatewayKeyEntry {
     /// this field deserialize to `"****"`.
     #[serde(default = "default_gateway_key_last4")]
     pub last4: String,
+    /// Associated user ID if this key is bound to a managed user.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<String>,
+    /// Self-service token display name (1-64 chars, user-facing label).
+    /// `None` = legacy machine key without a friendly name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Token-level model allowlist (intersected with the owning user's
+    /// `allowed_models` at inference). Supports exact names and `prefix/*`
+    /// wildcards; `None` = no token-level restriction (B001 contract).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_limits: Option<Vec<String>>,
+    /// Token-level usage cap in tokens (token quota gate).
+    /// `None` = unrestricted (B001 contract).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quota: Option<u64>,
+    /// `true` = self-service token created by a web user (forced
+    /// `scope = inference` + bound `user_id`); `false` = operator-issued key.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub user_owned: bool,
+    /// Creating user id (distinguishes admin proxy-management).
+    /// `None` = operator/CLI issued.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_by: Option<String>,
 }
+
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
+pub use ponyllm_core::user::{UserEntry, UserRole};
 
 /// Gateway key scope (P1; contract §3.2 frozen names).
 ///
@@ -339,6 +373,12 @@ pub fn generate_scoped_gateway_key(
             expires_at: None,
             revoked: false,
             last4,
+            user_id: None,
+            name: None,
+            model_limits: None,
+            quota: None,
+            user_owned: false,
+            created_by: None,
         },
     )
 }
@@ -553,6 +593,7 @@ impl Default for GatewaySection {
             telemetry_snapshot_path: None,
             auth_compat: default_auth_compat(),
             gateway_keys: Vec::new(),
+            users: Vec::new(),
             antigravity_auto_refresh: default_antigravity_auto_refresh(),
             antigravity_refresh_interval_secs: default_antigravity_refresh_interval_secs(),
             cross_provider_quota_failover: false,
@@ -1991,10 +2032,7 @@ fn check_egress_proxy_url(raw: &str) -> Result<(), String> {
 /// Host part of a parsed URL for error messages (domain verbatim, IPs in
 /// canonical form).
 fn host_display(parsed: &url::Url) -> String {
-    parsed
-        .host_str()
-        .unwrap_or("<missing-host>")
-        .to_string()
+    parsed.host_str().unwrap_or("<missing-host>").to_string()
 }
 
 /// Validate one egress-pool entry (contract C3):
@@ -2092,14 +2130,14 @@ mod egress_entry_tests {
     #[test]
     fn rejects_parser_mismatch_bypass_tricks() {
         for entry in [
-            "http://0xa000005:3128",           // hex-encoded 10.0.0.5
-            "http://0x0a000005:3128",          // hex-encoded 10.0.0.5 (padded)
-            "http://0252.0.0.1:3128",          // octal-encoded 170.0.0.1 (public) — legal
-            "http://10.0.0.5:8080#@127.0.0.1", // fragment trick: host is 10.0.0.5
+            "http://0xa000005:3128",             // hex-encoded 10.0.0.5
+            "http://0x0a000005:3128",            // hex-encoded 10.0.0.5 (padded)
+            "http://0252.0.0.1:3128",            // octal-encoded 170.0.0.1 (public) — legal
+            "http://10.0.0.5:8080#@127.0.0.1",   // fragment trick: host is 10.0.0.5
             "http://169.254.169.254#@127.0.0.1", // fragment trick: metadata host
-            "http:// 10.0.0.5:8080",           // blank-host trick
-            "http://:8080",                    // empty host
-            "http://10.0.0.5:8080 ",           // trailing space (trimmed before parse)
+            "http:// 10.0.0.5:8080",             // blank-host trick
+            "http://:8080",                      // empty host
+            "http://10.0.0.5:8080 ",             // trailing space (trimmed before parse)
         ] {
             let trimmed = entry.trim();
             if trimmed == "http://0252.0.0.1:3128" {

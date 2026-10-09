@@ -26,6 +26,11 @@ utoipa = { workspace = true }
 # Cross-replica refresh serialization seam (multi-node HA): async-trait keeps
 # the trait dyn-safe so ponyllm-server can inject its PG/in-memory gates.
 async-trait = { workspace = true }
+# B001 contract (web user JWT + token system, stub-frozen): HS256 JWT via
+# ring::hmac + base64 0.22 (both already in Cargo.lock — ring 0.17.14 via
+# rustls, base64 0.22.1 via workspace; zero new version resolution).
+ring = "0.17"
+base64 = { workspace = true }
 
 [dev-dependencies]
 axum = { workspace = true }
