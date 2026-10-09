@@ -133,7 +133,7 @@ spec:
     # 2. Web 控制台静态页面（挂载安全响应头，防点击劫持与 MIME 嗅探）
     #    精确匹配收敛：Path(`/x`)+PathPrefix(`/x/`) 组合，杜绝 PathPrefix(`/app`) 对
     #    /app-evil、/assets-evil 类路径的过匹配。
-    - match: Host(`tokens.ponyjob.top`) && (Path(`/`) || Path(`/app`) || PathPrefix(`/app/`) || Path(`/assets`) || PathPrefix(`/assets/`) || Path(`/connect`) || Path(`/dashboard`) || Path(`/recorder`) || Path(`/governance`) || Path(`/favicon.svg`) || Path(`/favicon.ico`))
+    - match: Host(`tokens.ponyjob.top`) && (Path(`/`) || Path(`/app`) || PathPrefix(`/app/`) || Path(`/assets`) || PathPrefix(`/assets/`) || Path(`/connect`) || Path(`/dashboard`) || Path(`/recorder`) || Path(`/governance`) || Path(`/tokens`) || Path(`/users`) || Path(`/favicon.svg`) || Path(`/favicon.ico`))
       kind: Rule
       middlewares:
         - name: ponyllm-security-headers
@@ -178,7 +178,7 @@ spec:
     #    精确匹配收敛：Path(`/x`)+PathPrefix(`/x/`) 组合，杜绝 PathPrefix(`/models`)
     #    对 /models-evil、/messages-evil、/responses-evil 类路径的过匹配。
     #    /api/admin/ 与 /v1/telemetry/ 已拆至独立单写者路由，不在此加权分发。
-    - match: Host(`tokens.ponyjob.top`) && (PathPrefix(`/v1/`) || Path(`/health`) || Path(`/models`) || PathPrefix(`/models/`) || Path(`/messages`) || PathPrefix(`/messages/`) || Path(`/responses`) || PathPrefix(`/responses/`))
+    - match: Host(`tokens.ponyjob.top`) && (PathPrefix(`/v1/`) || Path(`/health`) || Path(`/models`) || PathPrefix(`/models/`) || Path(`/messages`) || PathPrefix(`/messages/`) || Path(`/responses`) || PathPrefix(`/responses/`) || Path(`/api/user`) || PathPrefix(`/api/user/`))
       kind: Rule
       middlewares:
         - name: ponyllm-security-headers
