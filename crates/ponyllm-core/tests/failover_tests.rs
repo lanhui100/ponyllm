@@ -1,12 +1,12 @@
+use axum::response::IntoResponse;
+use axum::{routing::post, Json, Router};
+use ponyllm_core::error::CoreError;
+use ponyllm_core::executor::*;
+use ponyllm_core::pool::*;
+use serde_json::json;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use axum::{routing::post, Router, Json};
-use axum::response::IntoResponse;
-use serde_json::json;
-use ponyllm_core::error::CoreError;
-use ponyllm_core::pool::*;
-use ponyllm_core::executor::*;
 
 /// Antigravity/Google quota exhaustion arrives as HTTP 429 with
 /// RESOURCE_EXHAUSTED and the reset embedded in the message. The key must be
@@ -87,24 +87,30 @@ async fn test_executor_transparent_failover_on_429() {
     let cc = call_count.clone();
 
     // Start a mock upstream server
-    let app = Router::new().route("/v1/chat/completions", post(move |headers: axum::http::HeaderMap, _body: String| {
-        let cc = cc.clone();
-        async move {
-            let count = cc.fetch_add(1, Ordering::SeqCst);
-            let auth = headers
-                .get("authorization")
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or_default()
-                .to_string();
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(move |headers: axum::http::HeaderMap, _body: String| {
+            let cc = cc.clone();
+            async move {
+                let count = cc.fetch_add(1, Ordering::SeqCst);
+                let auth = headers
+                    .get("authorization")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or_default()
+                    .to_string();
 
-            if auth.contains("key-bad") || count == 0 {
-                // First call / bad key returns 429
-                (axum::http::StatusCode::TOO_MANY_REQUESTS, Json(json!({
-                    "error": {"message": "Rate limit exceeded"}
-                }))).into_response()
-            } else {
-                // Second call / good key returns 200
-                (axum::http::StatusCode::OK, Json(json!({
+                if auth.contains("key-bad") || count == 0 {
+                    // First call / bad key returns 429
+                    (
+                        axum::http::StatusCode::TOO_MANY_REQUESTS,
+                        Json(json!({
+                            "error": {"message": "Rate limit exceeded"}
+                        })),
+                    )
+                        .into_response()
+                } else {
+                    // Second call / good key returns 200
+                    (axum::http::StatusCode::OK, Json(json!({
                     "id": "chatcmpl-test",
                     "object": "chat.completion",
                     "created": 1710000000,
@@ -115,9 +121,10 @@ async fn test_executor_transparent_failover_on_429() {
                         "finish_reason": "stop"
                     }]
                 }))).into_response()
+                }
             }
-        }
-    }));
+        }),
+    );
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -138,12 +145,21 @@ async fn test_executor_transparent_failover_on_429() {
         "messages": [{"role": "user", "content": "hello"}]
     });
 
-    let response = executor.execute_json_request(&endpoint, &request_payload).await.unwrap();
-    assert_eq!(response["choices"][0]["message"]["content"], "Success after failover!");
+    let response = executor
+        .execute_json_request(&endpoint, &request_payload)
+        .await
+        .unwrap();
+    assert_eq!(
+        response["choices"][0]["message"]["content"],
+        "Success after failover!"
+    );
     assert_eq!(call_count.load(Ordering::SeqCst), 2);
 
     // Bad key should now be cooling down
-    assert_eq!(pool.get_key_status("bad-key").unwrap(), KeyState::CoolingDown);
+    assert_eq!(
+        pool.get_key_status("bad-key").unwrap(),
+        KeyState::CoolingDown
+    );
 }
 
 #[tokio::test]
@@ -151,22 +167,29 @@ async fn test_executor_fails_over_across_more_keys_than_max_retries() {
     let call_count = Arc::new(AtomicUsize::new(0));
     let cc = call_count.clone();
 
-    let app = Router::new().route("/v1/chat/completions", post(move |headers: axum::http::HeaderMap, _body: String| {
-        let cc = cc.clone();
-        async move {
-            cc.fetch_add(1, Ordering::SeqCst);
-            let auth = headers
-                .get("authorization")
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or_default()
-                .to_string();
+    let app =
+        Router::new().route(
+            "/v1/chat/completions",
+            post(move |headers: axum::http::HeaderMap, _body: String| {
+                let cc = cc.clone();
+                async move {
+                    cc.fetch_add(1, Ordering::SeqCst);
+                    let auth = headers
+                        .get("authorization")
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or_default()
+                        .to_string();
 
-            if auth.contains("bad") {
-                (axum::http::StatusCode::TOO_MANY_REQUESTS, Json(json!({
-                    "error": {"message": "Rate limit exceeded"}
-                }))).into_response()
-            } else {
-                (axum::http::StatusCode::OK, Json(json!({
+                    if auth.contains("bad") {
+                        (
+                            axum::http::StatusCode::TOO_MANY_REQUESTS,
+                            Json(json!({
+                                "error": {"message": "Rate limit exceeded"}
+                            })),
+                        )
+                            .into_response()
+                    } else {
+                        (axum::http::StatusCode::OK, Json(json!({
                     "id": "chatcmpl-test",
                     "object": "chat.completion",
                     "created": 1710000000,
@@ -177,9 +200,10 @@ async fn test_executor_fails_over_across_more_keys_than_max_retries() {
                         "finish_reason": "stop"
                     }]
                 }))).into_response()
-            }
-        }
-    }));
+                    }
+                }
+            }),
+        );
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -202,20 +226,33 @@ async fn test_executor_fails_over_across_more_keys_than_max_retries() {
         "messages": [{"role": "user", "content": "hello"}]
     });
 
-    let response = executor.execute_json_request(&endpoint, &request_payload).await.unwrap();
-    assert_eq!(response["choices"][0]["message"]["content"], "Success on 4th key!");
+    let response = executor
+        .execute_json_request(&endpoint, &request_payload)
+        .await
+        .unwrap();
+    assert_eq!(
+        response["choices"][0]["message"]["content"],
+        "Success on 4th key!"
+    );
     assert_eq!(call_count.load(Ordering::SeqCst), 4);
 }
 
 #[tokio::test]
 async fn test_all_keys_failed_reports_attempted_keys_trajectory() {
-    let app = Router::new().route("/v1/chat/completions", post(move |_headers: axum::http::HeaderMap, _body: String| {
-        async move {
-            (axum::http::StatusCode::TOO_MANY_REQUESTS, Json(json!({
-                "error": {"message": "Rate limit exceeded"}
-            }))).into_response()
-        }
-    }));
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(
+            move |_headers: axum::http::HeaderMap, _body: String| async move {
+                (
+                    axum::http::StatusCode::TOO_MANY_REQUESTS,
+                    Json(json!({
+                        "error": {"message": "Rate limit exceeded"}
+                    })),
+                )
+                    .into_response()
+            },
+        ),
+    );
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -236,12 +273,31 @@ async fn test_all_keys_failed_reports_attempted_keys_trajectory() {
         "messages": [{"role": "user", "content": "hello"}]
     });
 
-    let err = executor.execute_json_request(&endpoint, &request_payload).await.unwrap_err();
+    let err = executor
+        .execute_json_request(&endpoint, &request_payload)
+        .await
+        .unwrap_err();
     let err_msg = err.to_string();
-    assert!(err_msg.contains("key-alpha"), "Error message should mention key-alpha, got: {}", err_msg);
-    assert!(err_msg.contains("key-beta"), "Error message should mention key-beta, got: {}", err_msg);
-    assert!(err_msg.contains("key-gamma"), "Error message should mention key-gamma, got: {}", err_msg);
-    assert!(err_msg.contains("failures: 3 rate limited"), "Error message should summarize failures, got: {}", err_msg);
+    assert!(
+        err_msg.contains("key-alpha"),
+        "Error message should mention key-alpha, got: {}",
+        err_msg
+    );
+    assert!(
+        err_msg.contains("key-beta"),
+        "Error message should mention key-beta, got: {}",
+        err_msg
+    );
+    assert!(
+        err_msg.contains("key-gamma"),
+        "Error message should mention key-gamma, got: {}",
+        err_msg
+    );
+    assert!(
+        err_msg.contains("failures: 3 rate limited"),
+        "Error message should summarize failures, got: {}",
+        err_msg
+    );
 }
 
 #[test]
@@ -260,11 +316,15 @@ fn test_select_key_excluding_priority_and_exhaustion() {
     assert_eq!(key.id, "k2");
 
     // Excluding k1 and k2 yields k3
-    let key = pool.select_key_excluding(&["k1".to_string(), "k2".to_string()]).unwrap();
+    let key = pool
+        .select_key_excluding(&["k1".to_string(), "k2".to_string()])
+        .unwrap();
     assert_eq!(key.id, "k3");
 
     // Excluding all yields NoAvailableKey
-    let err = pool.select_key_excluding(&["k1".to_string(), "k2".to_string(), "k3".to_string()]).unwrap_err();
+    let err = pool
+        .select_key_excluding(&["k1".to_string(), "k2".to_string(), "k3".to_string()])
+        .unwrap_err();
     assert!(matches!(err, CoreError::NoAvailableKey(_)));
 }
 
@@ -325,19 +385,37 @@ async fn test_executor_fails_over_on_server_error_without_immediate_cooldown() {
 
     // Without select_key_excluding, bad-key-1 would be retried 3 times because it is still Active!
     // With select_key_excluding, bad-key-1 and bad-key-2 are excluded, reaching good-key-3!
-    let response = executor.execute_json_request(&endpoint, &request_payload).await.unwrap();
-    assert_eq!(response["choices"][0]["message"]["content"], "Success after non-cooldown error failover!");
+    let response = executor
+        .execute_json_request(&endpoint, &request_payload)
+        .await
+        .unwrap();
+    assert_eq!(
+        response["choices"][0]["message"]["content"],
+        "Success after non-cooldown error failover!"
+    );
     assert_eq!(call_count.load(Ordering::SeqCst), 3);
 }
 
 #[test]
 fn test_transient_geo_gate_signature() {
     // Genuine caller errors never match.
-    assert!(!is_transient_geo_gate(400, r#"{"error":{"message":"messages must not be empty"}}"#));
-    assert!(!is_transient_geo_gate(429, "User location is not supported for the API use."));
+    assert!(!is_transient_geo_gate(
+        400,
+        r#"{"error":{"message":"messages must not be empty"}}"#
+    ));
+    assert!(!is_transient_geo_gate(
+        429,
+        "User location is not supported for the API use."
+    ));
     // Google geo-gate shape matches (case-insensitive).
-    assert!(is_transient_geo_gate(400, r#"{"error":{"code":400,"message":"User location is not supported for the API use.","status":"FAILED_PRECONDITION"}}"#));
-    assert!(is_transient_geo_gate(400, "400 FAILED_PRECONDITION: UNSUPPORTED_LOCATION"));
+    assert!(is_transient_geo_gate(
+        400,
+        r#"{"error":{"code":400,"message":"User location is not supported for the API use.","status":"FAILED_PRECONDITION"}}"#
+    ));
+    assert!(is_transient_geo_gate(
+        400,
+        "400 FAILED_PRECONDITION: UNSUPPORTED_LOCATION"
+    ));
 }
 
 #[tokio::test]
@@ -387,8 +465,14 @@ async fn test_singleton_retries_transient_geo_gate_once() {
         "messages": [{"role": "user", "content": "hello"}]
     });
 
-    let response = executor.execute_json_request(&endpoint, &request_payload).await.unwrap();
-    assert_eq!(response["choices"][0]["message"]["content"], "Recovered after geo blip!");
+    let response = executor
+        .execute_json_request(&endpoint, &request_payload)
+        .await
+        .unwrap();
+    assert_eq!(
+        response["choices"][0]["message"]["content"],
+        "Recovered after geo blip!"
+    );
     assert_eq!(call_count.load(Ordering::SeqCst), 2);
     // Geo-gate records no pool state: the key stays healthy.
     assert_eq!(pool.get_key_status("only-key").unwrap(), KeyState::Active);
@@ -399,15 +483,18 @@ async fn test_genuine_400_stays_terminal_without_retry() {
     let call_count = Arc::new(AtomicUsize::new(0));
     let cc = call_count.clone();
 
-    let app = Router::new().route("/v1/chat/completions", post(move |_headers: axum::http::HeaderMap, _body: String| {
-        let cc = cc.clone();
-        async move {
-            cc.fetch_add(1, Ordering::SeqCst);
-            (axum::http::StatusCode::BAD_REQUEST, Json(json!({
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(move |_headers: axum::http::HeaderMap, _body: String| {
+            let cc = cc.clone();
+            async move {
+                cc.fetch_add(1, Ordering::SeqCst);
+                (axum::http::StatusCode::BAD_REQUEST, Json(json!({
                 "error": {"message": "messages must not be empty", "type": "invalid_request_error"}
             }))).into_response()
-        }
-    }));
+            }
+        }),
+    );
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -426,21 +513,27 @@ async fn test_genuine_400_stays_terminal_without_retry() {
         "messages": [{"role": "user", "content": "hello"}]
     });
 
-    let err = executor.execute_json_request(&endpoint, &request_payload).await.unwrap_err();
+    let err = executor
+        .execute_json_request(&endpoint, &request_payload)
+        .await
+        .unwrap_err();
     assert!(matches!(err, CoreError::UpstreamStatusError { .. }));
     assert_eq!(call_count.load(Ordering::SeqCst), 1);
 }
 
 #[test]
 fn test_create_upstream_http_client_options() {
-    use ponyllm_core::executor::{create_upstream_http_client, create_upstream_http_client_with_options};
+    use ponyllm_core::executor::{
+        create_upstream_http_client, create_upstream_http_client_with_options,
+    };
 
     // Default client builds successfully with no_proxy
     let default_client = create_upstream_http_client();
     let _ = default_client;
 
     // Explicit proxy configuration builds successfully
-    let proxy_client = create_upstream_http_client_with_options(Some("http://127.0.0.1:8899"), false);
+    let proxy_client =
+        create_upstream_http_client_with_options(Some("http://127.0.0.1:8899"), false);
     let _ = proxy_client;
 
     // System proxy enabled builds successfully
@@ -460,7 +553,8 @@ fn test_detect_system_proxy() {
         "ALL_PROXY",
         "all_proxy",
     ];
-    let saved: Vec<(&str, Option<String>)> = keys.iter().map(|&k| (k, std::env::var(k).ok())).collect();
+    let saved: Vec<(&str, Option<String>)> =
+        keys.iter().map(|&k| (k, std::env::var(k).ok())).collect();
 
     // Clear ambient env vars
     for &k in &keys {
@@ -527,8 +621,8 @@ async fn test_executor_ttfb_timeout_override_and_disabled() {
     let payload = json!({"messages": [{"role": "user", "content": "ping"}]});
 
     // 1. Tight TTFB timeout (50ms) must fail when server sleeps 200ms
-    let tight_exec = UpstreamExecutor::new(pool.clone(), 1)
-        .with_ttfb_timeout(Some(Duration::from_millis(50)));
+    let tight_exec =
+        UpstreamExecutor::new(pool.clone(), 1).with_ttfb_timeout(Some(Duration::from_millis(50)));
     let err = tight_exec
         .execute_json_request(&endpoint, &payload)
         .await
@@ -540,8 +634,8 @@ async fn test_executor_ttfb_timeout_override_and_disabled() {
     );
 
     // 2. Generous TTFB timeout (500ms) must succeed
-    let generous_exec = UpstreamExecutor::new(pool.clone(), 1)
-        .with_ttfb_timeout(Some(Duration::from_millis(500)));
+    let generous_exec =
+        UpstreamExecutor::new(pool.clone(), 1).with_ttfb_timeout(Some(Duration::from_millis(500)));
     let resp = generous_exec
         .execute_json_request(&endpoint, &payload)
         .await
@@ -549,8 +643,7 @@ async fn test_executor_ttfb_timeout_override_and_disabled() {
     assert_eq!(resp["choices"][0]["message"]["content"], "pong");
 
     // 3. Disabled TTFB timeout (None) must succeed
-    let disabled_exec = UpstreamExecutor::new(pool.clone(), 1)
-        .with_ttfb_timeout(None);
+    let disabled_exec = UpstreamExecutor::new(pool.clone(), 1).with_ttfb_timeout(None);
     let resp_disabled = disabled_exec
         .execute_json_request(&endpoint, &payload)
         .await
@@ -599,8 +692,8 @@ async fn test_executor_ttfb_timeout_multi_key_failover() {
     let payload = json!({"messages": [{"role": "user", "content": "ping"}]});
 
     // UpstreamExecutor with 2 attempts and 50ms TTFB timeout
-    let exec = UpstreamExecutor::new(pool.clone(), 2)
-        .with_ttfb_timeout(Some(Duration::from_millis(50)));
+    let exec =
+        UpstreamExecutor::new(pool.clone(), 2).with_ttfb_timeout(Some(Duration::from_millis(50)));
     let resp = exec
         .execute_json_request(&endpoint, &payload)
         .await
@@ -642,8 +735,8 @@ async fn test_executor_ttfb_timeout_stream_request() {
     let payload = json!({"stream": true, "messages": [{"role": "user", "content": "ping"}]});
 
     // 1. Tight TTFB (50ms) on stream request must timeout
-    let tight_exec = UpstreamExecutor::new(pool.clone(), 1)
-        .with_ttfb_timeout(Some(Duration::from_millis(50)));
+    let tight_exec =
+        UpstreamExecutor::new(pool.clone(), 1).with_ttfb_timeout(Some(Duration::from_millis(50)));
     let err = tight_exec
         .execute_stream_request(&endpoint, &payload)
         .await
@@ -655,8 +748,8 @@ async fn test_executor_ttfb_timeout_stream_request() {
     );
 
     // 2. Generous TTFB (500ms) on stream request must succeed
-    let generous_exec = UpstreamExecutor::new(pool.clone(), 1)
-        .with_ttfb_timeout(Some(Duration::from_millis(500)));
+    let generous_exec =
+        UpstreamExecutor::new(pool.clone(), 1).with_ttfb_timeout(Some(Duration::from_millis(500)));
     let resp = generous_exec
         .execute_stream_request(&endpoint, &payload)
         .await
@@ -680,7 +773,10 @@ async fn test_executor_ttfb_timeout_does_not_kill_slow_body_streaming() {
                         tokio::time::sleep(Duration::from_millis(50)).await;
                     }
                     let chunk = format!("data: chunk {}\n\n", count);
-                    Some((Ok::<Bytes, std::convert::Infallible>(Bytes::from(chunk)), count + 1))
+                    Some((
+                        Ok::<Bytes, std::convert::Infallible>(Bytes::from(chunk)),
+                        count + 1,
+                    ))
                 }
             });
             (
@@ -704,8 +800,8 @@ async fn test_executor_ttfb_timeout_does_not_kill_slow_body_streaming() {
 
     // TTFB timeout is 60ms. Total body streaming takes ~100ms.
     // Since headers arrive immediately (TTFB < 10ms), this must NOT timeout!
-    let exec = UpstreamExecutor::new(pool.clone(), 1)
-        .with_ttfb_timeout(Some(Duration::from_millis(60)));
+    let exec =
+        UpstreamExecutor::new(pool.clone(), 1).with_ttfb_timeout(Some(Duration::from_millis(60)));
     let resp = exec
         .execute_stream_request(&endpoint, &payload)
         .await
@@ -750,8 +846,8 @@ fn test_summarize_attempt_failures_distinguishes_lock_contention() {
 
 #[tokio::test]
 async fn test_refresh_skipped_produces_lock_contention_in_executor() {
-    use ponyllm_core::pool::refresh_gate::{RefreshGate, RefreshGateGuard, RefreshGateError};
     use ponyllm_core::error::GatewayErrorKind;
+    use ponyllm_core::pool::refresh_gate::{RefreshGate, RefreshGateError, RefreshGateGuard};
 
     #[derive(Debug, Default)]
     struct MockSkipGate;
@@ -762,7 +858,8 @@ async fn test_refresh_skipped_produces_lock_contention_in_executor() {
         async fn try_acquire(
             &self,
             _key_id: &str,
-        ) -> std::result::Result<Option<Box<dyn RefreshGateGuard + Send + Sync>>, RefreshGateError> {
+        ) -> std::result::Result<Option<Box<dyn RefreshGateGuard + Send + Sync>>, RefreshGateError>
+        {
             Ok(None) // Always simulate another replica holding the lock
         }
     }
@@ -782,7 +879,10 @@ async fn test_refresh_skipped_produces_lock_contention_in_executor() {
     ));
     mgr.set_refresh_gate(Some(Arc::new(MockSkipGate)));
 
-    let pool = Arc::new(KeyPool::new("antigravity-prov", RoutingStrategy::RoundRobin));
+    let pool = Arc::new(KeyPool::new(
+        "antigravity-prov",
+        RoutingStrategy::RoundRobin,
+    ));
     let key = ApiKeyEntry::new_antigravity("ag-lock-busy-key", mgr, 1, 10);
     pool.add_key(key);
 
@@ -810,13 +910,20 @@ async fn test_refresh_skipped_produces_lock_contention_in_executor() {
     );
 
     // 3. Healthy key encountering lock contention MUST remain Active (never cooled)
-    let key_entry = pool.snapshot_keys().into_iter().find(|k| k.id == "ag-lock-busy-key").unwrap();
-    assert_eq!(key_entry.current_state(), ponyllm_core::pool::KeyState::Active);
+    let key_entry = pool
+        .snapshot_keys()
+        .into_iter()
+        .find(|k| k.id == "ag-lock-busy-key")
+        .unwrap();
+    assert_eq!(
+        key_entry.current_state(),
+        ponyllm_core::pool::KeyState::Active
+    );
 }
 
 #[tokio::test]
 async fn test_singleflight_propagates_refresh_skipped_without_leaking_internal() {
-    use ponyllm_core::pool::refresh_gate::{RefreshGate, RefreshGateGuard, RefreshGateError};
+    use ponyllm_core::pool::refresh_gate::{RefreshGate, RefreshGateError, RefreshGateGuard};
 
     #[derive(Debug, Default)]
     struct DelayedSkipGate;
@@ -827,7 +934,8 @@ async fn test_singleflight_propagates_refresh_skipped_without_leaking_internal()
         async fn try_acquire(
             &self,
             _key_id: &str,
-        ) -> std::result::Result<Option<Box<dyn RefreshGateGuard + Send + Sync>>, RefreshGateError> {
+        ) -> std::result::Result<Option<Box<dyn RefreshGateGuard + Send + Sync>>, RefreshGateError>
+        {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             Ok(None)
         }
@@ -863,14 +971,22 @@ async fn test_singleflight_propagates_refresh_skipped_without_leaking_internal()
     let err2 = res2.unwrap().unwrap_err();
 
     // BOTH leader and follower MUST receive RefreshSkipped, NOT Internal!
-    assert!(matches!(err1, CoreError::RefreshSkipped { .. }), "leader got: {:?}", err1);
-    assert!(matches!(err2, CoreError::RefreshSkipped { .. }), "follower got: {:?}", err2);
+    assert!(
+        matches!(err1, CoreError::RefreshSkipped { .. }),
+        "leader got: {:?}",
+        err1
+    );
+    assert!(
+        matches!(err2, CoreError::RefreshSkipped { .. }),
+        "follower got: {:?}",
+        err2
+    );
 }
 
 #[tokio::test]
 async fn test_antigravity_401_recovery_lock_contention_does_not_burn_key() {
     use ponyllm_core::error::GatewayErrorKind;
-    use ponyllm_core::pool::refresh_gate::{RefreshGate, RefreshGateGuard, RefreshGateError};
+    use ponyllm_core::pool::refresh_gate::{RefreshGate, RefreshGateError, RefreshGateGuard};
     use ponyllm_core::pool::KeyState;
 
     // Upstream server returns 401
@@ -899,7 +1015,8 @@ async fn test_antigravity_401_recovery_lock_contention_does_not_burn_key() {
         async fn try_acquire(
             &self,
             _key_id: &str,
-        ) -> std::result::Result<Option<Box<dyn RefreshGateGuard + Send + Sync>>, RefreshGateError> {
+        ) -> std::result::Result<Option<Box<dyn RefreshGateGuard + Send + Sync>>, RefreshGateError>
+        {
             Ok(None)
         }
     }
@@ -919,7 +1036,10 @@ async fn test_antigravity_401_recovery_lock_contention_does_not_burn_key() {
     ));
     mgr.set_refresh_gate(Some(Arc::new(MockSkipGate)));
 
-    let pool = Arc::new(KeyPool::new("antigravity-prov", RoutingStrategy::RoundRobin));
+    let pool = Arc::new(KeyPool::new(
+        "antigravity-prov",
+        RoutingStrategy::RoundRobin,
+    ));
     let key = ApiKeyEntry::new_antigravity("ag-401-key", mgr.clone(), 1, 10);
     pool.add_key(key);
 
@@ -937,13 +1057,17 @@ async fn test_antigravity_401_recovery_lock_contention_does_not_burn_key() {
     assert!(mgr.credential_snapshot().access_token.is_none());
 
     // The key MUST NOT be cooling or burned (Active)!
-    let key_entry = pool.snapshot_keys().into_iter().find(|k| k.id == "ag-401-key").unwrap();
+    let key_entry = pool
+        .snapshot_keys()
+        .into_iter()
+        .find(|k| k.id == "ag-401-key")
+        .unwrap();
     assert_eq!(key_entry.current_state(), KeyState::Active);
 }
 
 #[tokio::test]
 async fn test_executor_mixed_lock_contention_and_network_timeout() {
-    use ponyllm_core::pool::refresh_gate::{RefreshGate, RefreshGateGuard, RefreshGateError};
+    use ponyllm_core::pool::refresh_gate::{RefreshGate, RefreshGateError, RefreshGateGuard};
     use ponyllm_core::pool::KeyState;
 
     #[derive(Debug, Default)]
@@ -955,7 +1079,8 @@ async fn test_executor_mixed_lock_contention_and_network_timeout() {
         async fn try_acquire(
             &self,
             _key_id: &str,
-        ) -> std::result::Result<Option<Box<dyn RefreshGateGuard + Send + Sync>>, RefreshGateError> {
+        ) -> std::result::Result<Option<Box<dyn RefreshGateGuard + Send + Sync>>, RefreshGateError>
+        {
             Ok(None)
         }
     }
@@ -980,7 +1105,9 @@ async fn test_executor_mixed_lock_contention_and_network_timeout() {
     let key1 = ApiKeyEntry::new_antigravity("key-1-lock", mgr, 1, 10);
     // Key 2: Regular key pointing to unreachable network target (which records transient failure on network disconnect)
     let key2 = ApiKeyEntry::new("key-2-net", "sk-test", 1, 10);
-    key2.stats.consecutive_failures.store(2, std::sync::atomic::Ordering::Relaxed);
+    key2.stats
+        .consecutive_failures
+        .store(2, std::sync::atomic::Ordering::Relaxed);
     pool.add_key(key1);
     pool.add_key(key2);
 
@@ -993,22 +1120,34 @@ async fn test_executor_mixed_lock_contention_and_network_timeout() {
         .unwrap_err();
 
     let err_msg = err.to_string();
-    assert!(err_msg.contains("1 lock busy/contention"), "got: {}", err_msg);
+    assert!(
+        err_msg.contains("1 lock busy/contention"),
+        "got: {}",
+        err_msg
+    );
     assert!(err_msg.contains("1 timeout/network"), "got: {}", err_msg);
 
     // Key 1 must be Active (not cooled)
-    let k1 = pool.snapshot_keys().into_iter().find(|k| k.id == "key-1-lock").unwrap();
+    let k1 = pool
+        .snapshot_keys()
+        .into_iter()
+        .find(|k| k.id == "key-1-lock")
+        .unwrap();
     assert_eq!(k1.current_state(), KeyState::Active);
 
     // Key 2 must remain Active because pure connection refused is network-level and must not poison the key into Cooldown
-    let k2 = pool.snapshot_keys().into_iter().find(|k| k.id == "key-2-net").unwrap();
+    let k2 = pool
+        .snapshot_keys()
+        .into_iter()
+        .find(|k| k.id == "key-2-net")
+        .unwrap();
     assert_eq!(k2.current_state(), KeyState::Active);
 }
 
 #[tokio::test]
 async fn test_streaming_refresh_skipped_produces_lock_contention() {
     use ponyllm_core::error::GatewayErrorKind;
-    use ponyllm_core::pool::refresh_gate::{RefreshGate, RefreshGateGuard, RefreshGateError};
+    use ponyllm_core::pool::refresh_gate::{RefreshGate, RefreshGateError, RefreshGateGuard};
     use ponyllm_core::pool::KeyState;
 
     #[derive(Debug, Default)]
@@ -1020,7 +1159,8 @@ async fn test_streaming_refresh_skipped_produces_lock_contention() {
         async fn try_acquire(
             &self,
             _key_id: &str,
-        ) -> std::result::Result<Option<Box<dyn RefreshGateGuard + Send + Sync>>, RefreshGateError> {
+        ) -> std::result::Result<Option<Box<dyn RefreshGateGuard + Send + Sync>>, RefreshGateError>
+        {
             Ok(None)
         }
     }
@@ -1040,25 +1180,35 @@ async fn test_streaming_refresh_skipped_produces_lock_contention() {
     ));
     mgr.set_refresh_gate(Some(Arc::new(MockSkipGate)));
 
-    let pool = Arc::new(KeyPool::new("antigravity-prov", RoutingStrategy::RoundRobin));
+    let pool = Arc::new(KeyPool::new(
+        "antigravity-prov",
+        RoutingStrategy::RoundRobin,
+    ));
     let key = ApiKeyEntry::new_antigravity("ag-stream-lock-key", mgr, 1, 10);
     pool.add_key(key);
 
     let exec = UpstreamExecutor::new(pool.clone(), 1);
     let payload = json!({"messages": [{"role": "user", "content": "ping"}], "stream": true});
     let err = exec
-        .execute_stream_request_with_timing_and_key("https://api.example.com/v1/chat/completions", &payload)
+        .execute_stream_request_with_timing_and_key(
+            "https://api.example.com/v1/chat/completions",
+            &payload,
+        )
         .await
         .unwrap_err();
 
     assert_eq!(err.kind(), GatewayErrorKind::LockContention);
-    let key_entry = pool.snapshot_keys().into_iter().find(|k| k.id == "ag-stream-lock-key").unwrap();
+    let key_entry = pool
+        .snapshot_keys()
+        .into_iter()
+        .find(|k| k.id == "ag-stream-lock-key")
+        .unwrap();
     assert_eq!(key_entry.current_state(), KeyState::Active);
 }
 
 #[tokio::test]
 async fn test_singleflight_post_gate_recheck_notifies_followers() {
-    use ponyllm_core::pool::refresh_gate::{RefreshGate, RefreshGateGuard, RefreshGateError};
+    use ponyllm_core::pool::refresh_gate::{RefreshGate, RefreshGateError, RefreshGateGuard};
     use ponyllm_core::pool::KeyState;
 
     #[derive(Debug, Default)]
@@ -1080,7 +1230,8 @@ async fn test_singleflight_post_gate_recheck_notifies_followers() {
         async fn try_acquire(
             &self,
             _key_id: &str,
-        ) -> std::result::Result<Option<Box<dyn RefreshGateGuard + Send + Sync>>, RefreshGateError> {
+        ) -> std::result::Result<Option<Box<dyn RefreshGateGuard + Send + Sync>>, RefreshGateError>
+        {
             // Wait so follower coroutine can subscribe to singleflight broadcast
             tokio::time::sleep(std::time::Duration::from_millis(40)).await;
             if let Some(m) = self.mgr.lock().as_ref() {
@@ -1125,15 +1276,29 @@ async fn test_singleflight_post_gate_recheck_notifies_followers() {
         }),
     );
 
-    let tok1 = res1.unwrap().expect("leader got valid token via post-gate recheck");
-    let tok2 = res2.unwrap().expect("follower got valid token via broadcast from leader");
+    let tok1 = res1
+        .unwrap()
+        .expect("leader got valid token via post-gate recheck");
+    let tok2 = res2
+        .unwrap()
+        .expect("follower got valid token via broadcast from leader");
 
     assert_eq!(tok1, "post-gate-valid-token-777");
     assert_eq!(tok2, "post-gate-valid-token-777");
 
-    let key_entry = pool.snapshot_keys().into_iter().find(|k| k.id == "ag-recheck-key").unwrap();
+    let key_entry = pool
+        .snapshot_keys()
+        .into_iter()
+        .find(|k| k.id == "ag-recheck-key")
+        .unwrap();
     assert_eq!(key_entry.current_state(), KeyState::Active);
-    assert_eq!(key_entry.stats.consecutive_failures.load(std::sync::atomic::Ordering::Relaxed), 0);
+    assert_eq!(
+        key_entry
+            .stats
+            .consecutive_failures
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0
+    );
 }
 
 #[tokio::test]
@@ -1157,7 +1322,10 @@ async fn test_antigravity_invalid_grant_fails_over_to_healthy_key() {
     tokio::spawn(async move {
         axum::serve(auth_listener, auth_server).await.unwrap();
     });
-    std::env::set_var("ANTIGRAVITY_OAUTH_TOKEN_URL_OVERRIDE", format!("http://{}/oauth2/token", auth_addr));
+    std::env::set_var(
+        "ANTIGRAVITY_OAUTH_TOKEN_URL_OVERRIDE",
+        format!("http://{}/oauth2/token", auth_addr),
+    );
 
     let app = axum::Router::new().route(
         "/v1/chat/completions",
@@ -1230,7 +1398,12 @@ async fn test_antigravity_invalid_grant_fails_over_to_healthy_key() {
 
     let pool = Arc::new(KeyPool::new("antigravity", RoutingStrategy::RoundRobin));
     pool.add_key(ApiKeyEntry::new_antigravity("ag-dead-key", dead_mgr, 1, 10));
-    pool.add_key(ApiKeyEntry::new_antigravity("ag-healthy-key", healthy_mgr, 2, 10));
+    pool.add_key(ApiKeyEntry::new_antigravity(
+        "ag-healthy-key",
+        healthy_mgr,
+        2,
+        10,
+    ));
 
     let exec = UpstreamExecutor::new(pool.clone(), 2);
     let payload = json!({"messages": [{"role": "user", "content": "ping"}]});
@@ -1242,10 +1415,7 @@ async fn test_antigravity_invalid_grant_fails_over_to_healthy_key() {
         .expect("should failover to healthy key");
 
     assert_eq!(winning_key, "ag-healthy-key");
-    assert_eq!(
-        resp_val["choices"][0]["message"]["content"],
-        "pong"
-    );
+    assert_eq!(resp_val["choices"][0]["message"]["content"], "pong");
 
     // Streaming failover verification:
     let (stream_resp, _instant, stream_winning_key) = exec
@@ -1256,8 +1426,3 @@ async fn test_antigravity_invalid_grant_fails_over_to_healthy_key() {
     assert_eq!(stream_winning_key, "ag-healthy-key");
     assert_eq!(stream_resp.status(), 200);
 }
-
-
-
-
-

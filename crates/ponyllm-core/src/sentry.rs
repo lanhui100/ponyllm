@@ -164,7 +164,11 @@ fn sanitize_event(mut event: RawEvent) -> RawEvent {
     if let Some(ref mut tags) = event.tags {
         for (k, v) in tags.iter_mut() {
             let lower_k = k.to_ascii_lowercase();
-            if lower_k.contains("key") || lower_k.contains("token") || lower_k.contains("auth") || lower_k.contains("secret") {
+            if lower_k.contains("key")
+                || lower_k.contains("token")
+                || lower_k.contains("auth")
+                || lower_k.contains("secret")
+            {
                 *v = "[REDACTED_API_KEY]".to_string();
             } else {
                 *v = sanitize_string(v);
@@ -183,7 +187,9 @@ fn sanitize_string(s: &str) -> String {
     while let Some(rel_pos) = sanitized[search_from..].find("sk-") {
         let pos = search_from + rel_pos;
         let end = sanitized[pos..]
-            .find(|c: char| c.is_whitespace() || c == '"' || c == '\'' || c == ',' || c == '\\' || c == '&')
+            .find(|c: char| {
+                c.is_whitespace() || c == '"' || c == '\'' || c == ',' || c == '\\' || c == '&'
+            })
             .map(|i| pos + i)
             .unwrap_or(sanitized.len());
         if end > pos + 3 {
@@ -195,11 +201,16 @@ fn sanitize_string(s: &str) -> String {
     }
     // Also redact Bearer tokens
     let mut search_bearer = 0;
-    while let Some(rel_pos) = sanitized[search_bearer..].to_ascii_lowercase().find("bearer ") {
+    while let Some(rel_pos) = sanitized[search_bearer..]
+        .to_ascii_lowercase()
+        .find("bearer ")
+    {
         let pos = search_bearer + rel_pos;
         let token_start = pos + 7;
         let end = sanitized[token_start..]
-            .find(|c: char| c.is_whitespace() || c == '"' || c == '\'' || c == ',' || c == '\\' || c == '&')
+            .find(|c: char| {
+                c.is_whitespace() || c == '"' || c == '\'' || c == ',' || c == '\\' || c == '&'
+            })
             .map(|i| token_start + i)
             .unwrap_or(sanitized.len());
         if end > token_start {
@@ -217,7 +228,11 @@ fn sanitize_json_value(v: &mut serde_json::Value) {
         serde_json::Value::Object(map) => {
             for (key, val) in map.iter_mut() {
                 let lower = key.to_ascii_lowercase();
-                if lower.contains("key") || lower.contains("token") || lower.contains("auth") || lower.contains("secret") {
+                if lower.contains("key")
+                    || lower.contains("token")
+                    || lower.contains("auth")
+                    || lower.contains("secret")
+                {
                     *val = serde_json::Value::String("[REDACTED]".to_string());
                 } else {
                     sanitize_json_value(val);

@@ -194,7 +194,6 @@ fn test_economy_routing_respects_model_level_pricing() {
     providers.insert("provider_b".to_string(), p_b);
 
     let gw_config = GatewayConfig {
-        default_strategy: GatewayRoutingStrategy::Economy,
         providers,
         ..Default::default()
     };
@@ -353,7 +352,6 @@ fn test_hot_cache_probe_guides_economy_routing() {
     providers.insert("p2".to_string(), p2);
 
     let gw_config = GatewayConfig {
-        default_strategy: GatewayRoutingStrategy::Economy,
         providers,
         ..Default::default()
     };
@@ -362,13 +360,17 @@ fn test_hot_cache_probe_guides_economy_routing() {
     let parsed = ParsedRequestModel::parse("chat");
 
     // Case 1: Cold cache (no hot cache recorded). p2 is cheaper without cache (0.80 < 1.00)
-    let cold_targets = state.resolve_routed_targets_with_prompt(&parsed, None, Some(prompt)).unwrap();
+    let cold_targets = state
+        .resolve_routed_targets_with_prompt(&parsed, Some(GatewayRoutingStrategy::Economy), Some(prompt))
+        .unwrap();
     assert_eq!(cold_targets[0].provider_name, "p2");
 
     // Case 2: Record that p1 dispatched this prompt earlier (now hot in p1)
     state.hot_cache.record_dispatch(prompt, "p1");
 
     // Now resolve with same prompt: p1's cached price ($0.10) beats p2's normal price ($0.80)!
-    let hot_targets = state.resolve_routed_targets_with_prompt(&parsed, None, Some(prompt)).unwrap();
+    let hot_targets = state
+        .resolve_routed_targets_with_prompt(&parsed, Some(GatewayRoutingStrategy::Economy), Some(prompt))
+        .unwrap();
     assert_eq!(hot_targets[0].provider_name, "p1");
 }

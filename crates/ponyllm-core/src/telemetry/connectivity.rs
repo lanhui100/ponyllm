@@ -1,7 +1,7 @@
-use std::collections::{HashMap, VecDeque};
-use std::sync::Arc;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, VecDeque};
+use std::sync::Arc;
 
 pub const DEFAULT_SLOT_COUNT: usize = 40;
 pub const DEFAULT_STEP_MS: u64 = 1500; // legacy compat; gateway default is 5s below
@@ -12,11 +12,11 @@ pub const PROVIDER_SLOT_COUNT: usize = 40; // 每柱一次调用，最近40次
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConnectivityStatus {
-    Ok,        // 网关 < 300ms 且成功；Provider TTFT < 5s 且成功
-    Degraded,  // 网关 300ms..1000ms 且成功；Provider TTFT 5s..10s 且成功
-    Slow,      // Provider TTFT 10s..60s 且成功
-    Down,      // 网关 >= 1000ms 或失败；Provider TTFT >= 60s 或失败
-    Empty,     // 无数据/初始化
+    Ok,       // 网关 < 300ms 且成功；Provider TTFT < 5s 且成功
+    Degraded, // 网关 300ms..1000ms 且成功；Provider TTFT 5s..10s 且成功
+    Slow,     // Provider TTFT 10s..60s 且成功
+    Down,     // 网关 >= 1000ms 或失败；Provider TTFT >= 60s 或失败
+    Empty,    // 无数据/初始化
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -217,7 +217,13 @@ impl ConnectivitySampler {
 
     /// Record a single connectivity probe or request result.
     /// gateway 按时间环聚合（5s/格，最近2分钟）；provider 按调用追加（每柱一次调用）。
-    pub fn record(&self, provider: &str, timestamp_ms: u64, latency_ms: Option<f64>, is_success: bool) {
+    pub fn record(
+        &self,
+        provider: &str,
+        timestamp_ms: u64,
+        latency_ms: Option<f64>,
+        is_success: bool,
+    ) {
         self.record_with_tps(provider, timestamp_ms, latency_ms, None, is_success);
     }
 
@@ -244,7 +250,9 @@ impl ConnectivitySampler {
 
         if provider == "gateway" {
             if state.ring.len() != self.gateway_slot_count {
-                state.ring.resize(self.gateway_slot_count.max(1), RingSlot::default());
+                state
+                    .ring
+                    .resize(self.gateway_slot_count.max(1), RingSlot::default());
             }
             let step = self.gateway_step_ms;
             let slot_start_ms = (timestamp_ms / step) * step;
@@ -298,8 +306,7 @@ impl ConnectivitySampler {
         let total_slots = self.gateway_slot_count as u64;
         let step = self.gateway_step_ms;
         let current_slot_start = (now_ms / step) * step;
-        let start_ms =
-            current_slot_start.saturating_sub((total_slots.saturating_sub(1)) * step);
+        let start_ms = current_slot_start.saturating_sub((total_slots.saturating_sub(1)) * step);
 
         let mut slots = Vec::with_capacity(self.gateway_slot_count);
         for i in 0..self.gateway_slot_count {
@@ -359,7 +366,10 @@ impl ConnectivitySampler {
         let (mut calls, latest) = match &state_arc {
             Some(arc) => {
                 let g = arc.read();
-                (g.calls.iter().cloned().collect::<Vec<_>>(), g.latest_latency_ms)
+                (
+                    g.calls.iter().cloned().collect::<Vec<_>>(),
+                    g.latest_latency_ms,
+                )
             }
             None => (Vec::new(), None),
         };
@@ -449,9 +459,12 @@ impl ConnectivitySampler {
 impl super::event::Projection for ConnectivitySampler {
     fn apply(&self, env: &super::event::EventEnvelope) {
         let (latency, tps, is_success) = match &env.event {
-            super::event::GatewayEvent::RequestCompleted { latency_ms, tps, status_code, .. } => {
-                (*latency_ms, *tps, (200..300).contains(status_code))
-            }
+            super::event::GatewayEvent::RequestCompleted {
+                latency_ms,
+                tps,
+                status_code,
+                ..
+            } => (*latency_ms, *tps, (200..300).contains(status_code)),
             super::event::GatewayEvent::StreamCompleted { flow, .. } => {
                 // Provider 与网关连通性优先采用首字延迟（TTFT），反映上游就绪度；无 TTFT 时优雅降级至整流耗时（TTLB）
                 let lat = flow.ttft_ms.unwrap_or(flow.ttlb_ms);

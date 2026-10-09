@@ -59,6 +59,47 @@ pub async fn handle_responses(
             .into_response();
     }
 
+    // User access & quota check
+    let caller_user_id = headers
+        .get("x-user-id")
+        .and_then(|h| h.to_str().ok())
+        .map(|s| s.trim().to_string());
+    if let Some(uid) = caller_user_id.as_deref() {
+        if let Err(err) = state.user_tracker.check_access(uid, &req.model) {
+            let (status, code) = match err {
+                ponyllm_core::UserCheckError::QuotaExhausted { .. } => {
+                    (StatusCode::TOO_MANY_REQUESTS, "user_quota_exhausted")
+                }
+                ponyllm_core::UserCheckError::ModelNotAllowed { .. } => {
+                    (StatusCode::FORBIDDEN, "model_forbidden_for_user")
+                }
+                ponyllm_core::UserCheckError::UserDisabled { .. } => {
+                    (StatusCode::FORBIDDEN, "user_disabled")
+                }
+                ponyllm_core::UserCheckError::UserNotFound { .. } => {
+                    (StatusCode::FORBIDDEN, "user_not_found")
+                }
+            };
+            return (
+                status,
+                Json(serde_json::json!({
+                    "error": {
+                        "message": err.to_string(),
+                        "type": "invalid_request_error",
+                        "code": code
+                    }
+                })),
+            )
+                .into_response();
+        }
+    }
+
+    // B002 token gate: per-key quota + model_limits intersection (second,
+    // multiplicative gate after the user gate).
+    if let Err(resp) = crate::routes::gate::token_gate(&state, &headers, &req.model) {
+        return resp;
+    }
+
     // Parse requested model (auto / [1m] / :strategy suffix) and resolve the
     // physical model + provider, mirroring chat/messages routing so virtual
     // model names are correctly mapped upstream.
@@ -820,6 +861,15 @@ pub async fn handle_responses(
                 };
                 let latency = start_time.elapsed();
                 let (prompt_tokens, completion_tokens, cached_tokens) = extract_usage_tokens(&resp_val);
+                if let Some(uid) = caller_user_id.as_deref() {
+                    state.user_tracker.record_tokens(uid, prompt_tokens + completion_tokens);
+                }
+                // B002 double settlement: token-leg accounting.
+                crate::routes::gate::token_record_tokens(
+                    &state,
+                    &headers,
+                    prompt_tokens + completion_tokens,
+                );
                 if let Some(kid) = winning_key_id.as_deref() {
                     let wall_ms = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)

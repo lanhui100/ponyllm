@@ -1,6 +1,6 @@
+use ponyllm_core::discovery::resolve_config_path_from;
 use std::fs;
 use std::path::Path;
-use ponyllm_core::discovery::resolve_config_path_from;
 
 #[test]
 fn test_explicit_path_takes_precedence() {

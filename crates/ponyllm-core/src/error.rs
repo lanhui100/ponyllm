@@ -38,7 +38,9 @@ pub enum CoreError {
     #[error("No available key for provider '{0}' (all keys cooling down, window-budget exhausted, or family-quota exhausted)")]
     NoAvailableKey(String),
 
-    #[error("Request failed after {retries} attempts across keys {attempted_keys:?}: {last_error}")]
+    #[error(
+        "Request failed after {retries} attempts across keys {attempted_keys:?}: {last_error}"
+    )]
     AllRetriesFailed {
         retries: usize,
         attempted_keys: Vec<String>,
@@ -63,7 +65,9 @@ pub enum CoreError {
     /// lock is held by another replica (or the lock backend is unavailable —
     /// we fail closed). The key is NOT dead; the caller should skip this
     /// round and let the lock holder's write-back propagate.
-    #[error("Antigravity refresh for '{key_id}' skipped: serialization lock held by another replica")]
+    #[error(
+        "Antigravity refresh for '{key_id}' skipped: serialization lock held by another replica"
+    )]
     RefreshSkipped { key_id: String },
 
     #[error("Capacity exhausted: required context '{required_context}', {message}")]
@@ -126,7 +130,9 @@ impl CoreError {
             CoreError::RefreshSkipped { .. } => GatewayErrorKind::LockContention,
             CoreError::CapacityExhausted { .. } => GatewayErrorKind::CapacityExhausted,
             CoreError::UnsupportedModality { .. } => GatewayErrorKind::ClientBadRequest,
-            CoreError::NoAvailableKey(_) => GatewayErrorKind::RateLimitExceeded { retry_after: None },
+            CoreError::NoAvailableKey(_) => {
+                GatewayErrorKind::RateLimitExceeded { retry_after: None }
+            }
             CoreError::UpstreamStatusError { status, body } => {
                 let code = status.as_u16();
                 if code == 429 {
@@ -136,7 +142,11 @@ impl CoreError {
                 } else if code == 402 {
                     GatewayErrorKind::QuotaExhausted
                 } else if code == 404
-                    || (code == 400 && (body.contains("model") || body.contains("not found") || body.contains("unsupported") || body.contains("does not exist")))
+                    || (code == 400
+                        && (body.contains("model")
+                            || body.contains("not found")
+                            || body.contains("unsupported")
+                            || body.contains("does not exist")))
                 {
                     GatewayErrorKind::ModelNotFound
                 } else if status.is_client_error() {
@@ -145,7 +155,9 @@ impl CoreError {
                     GatewayErrorKind::UpstreamUnavailable
                 }
             }
-            CoreError::Internal(msg) if msg.contains("No provider configured") || msg.contains("does not exist") => {
+            CoreError::Internal(msg)
+                if msg.contains("No provider configured") || msg.contains("does not exist") =>
+            {
                 GatewayErrorKind::ModelNotFound
             }
             // Mid-stream SSE collect failure after headers succeeded: the
@@ -166,8 +178,10 @@ impl CoreError {
             CoreError::Internal(msg) if msg.starts_with("Antigravity deterministic empty STOP") => {
                 GatewayErrorKind::UpstreamUnavailable
             }
-            CoreError::Internal(msg) if msg.contains("Antigravity OAuth refresh network error")
-                || msg.contains("Antigravity OAuth refresh returned non-success status") => {
+            CoreError::Internal(msg)
+                if msg.contains("Antigravity OAuth refresh network error")
+                    || msg.contains("Antigravity OAuth refresh returned non-success status") =>
+            {
                 GatewayErrorKind::UpstreamUnavailable
             }
             _ => GatewayErrorKind::Internal,
@@ -251,4 +265,3 @@ mod tests {
         assert_eq!(rate.kind(), GatewayErrorKind::UpstreamUnavailable);
     }
 }
-

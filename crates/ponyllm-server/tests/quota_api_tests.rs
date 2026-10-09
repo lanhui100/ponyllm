@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use ponyllm_config::{ConfigFile, KeySection, ModelConfig, ProviderSection};
 use ponyllm_core::pool::{
-    ApiKeyEntry, BillingMode, GatewayRoutingStrategy, KeyPool, ModelTier, PoolErrorType,
+    ApiKeyEntry, BillingMode, KeyPool, ModelTier, PoolErrorType,
     RoutingStrategy,
 };
 use ponyllm_server::admin_store::FileConfigStore;
@@ -97,7 +97,6 @@ impl QuotaHarness {
         let mut config_file = ConfigFile::default();
         config_file.gateway.bind = "127.0.0.1:8080".to_string();
         config_file.gateway.api_key = "quota-test-secret".to_string();
-        config_file.gateway.default_strategy = GatewayRoutingStrategy::Economy;
         config_file.gateway.web_enabled = false;
         config_file.gateway.admin_write_enabled = false;
         config_file.providers = providers;
@@ -107,7 +106,6 @@ impl QuotaHarness {
         let mut gw_config = GatewayConfig::default();
         gw_config.bind_addr = "127.0.0.1:8080".to_string();
         gw_config.api_key = "quota-test-secret".to_string();
-        gw_config.default_strategy = GatewayRoutingStrategy::Economy;
         gw_config.web_enabled = false;
         gw_config.admin_write_enabled = false;
         gw_config.providers.insert(

@@ -9,7 +9,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use ponyllm_config::{ConfigFile, GatewayKeyEntry, KeyScope};
-use ponyllm_core::pool::{BillingMode, GatewayRoutingStrategy};
+use ponyllm_core::pool::BillingMode;
 use ponyllm_server::admin_store::FileConfigStore;
 use ponyllm_server::{create_app, AppState, GatewayConfig};
 use reqwest::StatusCode;
@@ -48,7 +48,6 @@ impl Gh {
         gw.api_key = "legacy-gh-token-abcdef1234567890".to_string();
         gw.web_enabled = false;
         gw.admin_write_enabled = admin_write;
-        gw.default_strategy = GatewayRoutingStrategy::Economy;
         gw.providers = HashMap::new();
         let _ = BillingMode::Metered;
         gw.gateway_keys = vec![e_admin, e_infer, e_read];

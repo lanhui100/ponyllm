@@ -107,7 +107,6 @@ async fn test_model_echo_policy_and_auto_routing() {
 
     let mut config = GatewayConfig::default();
     config.auth_mode = ponyllm_config::AuthMode::Open; // F1 migration: default is now secured; these behavior tests opt into open mode
-    config.default_strategy = GatewayRoutingStrategy::Economy;
 
     config.providers.insert(
         "deepseek".to_string(),
@@ -465,7 +464,6 @@ fn test_native_protocol_wins_ties_for_passthrough_first() {
     // protocol differs. Same-native must rank first per inbound entry.
     let mut config = GatewayConfig::default();
     config.auth_mode = ponyllm_config::AuthMode::Open; // F1 migration: default is now secured; these behavior tests opt into open mode
-    config.default_strategy = GatewayRoutingStrategy::Reliable;
     for (name, proto) in [
         ("chat-p", UpstreamProtocol::Chat),
         ("ant-p", UpstreamProtocol::Anthropic),
@@ -499,17 +497,19 @@ fn test_native_protocol_wins_ties_for_passthrough_first() {
     let parsed = ParsedRequestModel::parse("duo");
 
     let chat_first = state
-        .resolve_routed_targets_with_prompt_and_protocol(&parsed, None, None, None, Some(UpstreamProtocol::Chat))
+        .resolve_routed_targets_with_prompt_and_protocol(&parsed, Some(GatewayRoutingStrategy::Reliable), None, None, Some(UpstreamProtocol::Chat))
         .unwrap();
     assert_eq!(chat_first[0].provider_name, "chat-p");
 
     let ant_first = state
-        .resolve_routed_targets_with_prompt_and_protocol(&parsed, None, None, None, Some(UpstreamProtocol::Anthropic))
+        .resolve_routed_targets_with_prompt_and_protocol(&parsed, Some(GatewayRoutingStrategy::Reliable), None, None, Some(UpstreamProtocol::Anthropic))
         .unwrap();
     assert_eq!(ant_first[0].provider_name, "ant-p");
 
     // No inbound preference: strategy order untouched (insertion order here).
-    let plain = state.resolve_routed_targets(&parsed, None).unwrap();
+    let plain = state
+        .resolve_routed_targets(&parsed, Some(GatewayRoutingStrategy::Reliable))
+        .unwrap();
     assert_eq!(plain.len(), 2);
 }
 
@@ -2458,7 +2458,6 @@ fn test_model_priority_dominates_strategy_scoring() {
     // lo-pp first; explicit priority must override the price score.
     let mut config = GatewayConfig::default();
     config.auth_mode = ponyllm_config::AuthMode::Open; // F1 migration: default is now secured; these behavior tests opt into open mode
-    config.default_strategy = GatewayRoutingStrategy::Economy;
     let (lo_name, lo_cfg) = priority_provider("lo-pp", Some(1), 0.1);
     config.providers.insert(lo_name, lo_cfg);
     let (hi_name, hi_cfg) = priority_provider("hi-pp", Some(10), 5.0);
@@ -2466,7 +2465,9 @@ fn test_model_priority_dominates_strategy_scoring() {
 
     let state = AppState::new(config);
     let parsed = ParsedRequestModel::parse("duo");
-    let targets = state.resolve_routed_targets(&parsed, None).unwrap();
+    let targets = state
+        .resolve_routed_targets(&parsed, Some(GatewayRoutingStrategy::Economy))
+        .unwrap();
     assert_eq!(targets.len(), 2);
     assert_eq!(targets[0].provider_name, "hi-pp", "higher priority must win over cheaper price");
     assert_eq!(targets[1].provider_name, "lo-pp");
@@ -2481,7 +2482,6 @@ fn test_model_priority_tie_keeps_strategy_scoring() {
     // exactly as before the priority feature existed.
     let mut config = GatewayConfig::default();
     config.auth_mode = ponyllm_config::AuthMode::Open; // F1 migration: default is now secured; these behavior tests opt into open mode
-    config.default_strategy = GatewayRoutingStrategy::Economy;
     let (ex_name, ex_cfg) = priority_provider("expensive", None, 5.0);
     config.providers.insert(ex_name, ex_cfg);
     let (ch_name, ch_cfg) = priority_provider("cheap", None, 0.1);
@@ -2489,7 +2489,9 @@ fn test_model_priority_tie_keeps_strategy_scoring() {
 
     let state = AppState::new(config);
     let parsed = ParsedRequestModel::parse("duo");
-    let targets = state.resolve_routed_targets(&parsed, None).unwrap();
+    let targets = state
+        .resolve_routed_targets(&parsed, Some(GatewayRoutingStrategy::Economy))
+        .unwrap();
     assert_eq!(targets.len(), 2);
     assert_eq!(targets[0].provider_name, "cheap", "no priority keeps strategy (price) ordering");
     assert_eq!(targets[1].provider_name, "expensive");
@@ -2503,7 +2505,6 @@ fn test_model_priority_equal_values_fall_back_to_strategy() {
     // Equal priorities behave like no priority: price decides.
     let mut config = GatewayConfig::default();
     config.auth_mode = ponyllm_config::AuthMode::Open; // F1 migration: default is now secured; these behavior tests opt into open mode
-    config.default_strategy = GatewayRoutingStrategy::Economy;
     let (ex_name, ex_cfg) = priority_provider("expensive", Some(7), 5.0);
     config.providers.insert(ex_name, ex_cfg);
     let (ch_name, ch_cfg) = priority_provider("cheap", Some(7), 0.1);
@@ -2511,7 +2512,9 @@ fn test_model_priority_equal_values_fall_back_to_strategy() {
 
     let state = AppState::new(config);
     let parsed = ParsedRequestModel::parse("duo");
-    let targets = state.resolve_routed_targets(&parsed, None).unwrap();
+    let targets = state
+        .resolve_routed_targets(&parsed, Some(GatewayRoutingStrategy::Economy))
+        .unwrap();
     assert_eq!(targets[0].provider_name, "cheap");
     assert_eq!(targets[1].provider_name, "expensive");
 }

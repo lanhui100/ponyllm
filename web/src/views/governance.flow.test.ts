@@ -12,7 +12,6 @@ import type {
   ProviderView,
   ModelView,
   KeyView,
-  StrategyView,
   CreateKeyResponse,
 } from '../types/admin';
 
@@ -28,7 +27,6 @@ describe('GovernanceView End-to-End User Flow (WEB-04)', () => {
     providers: 1,
     keys: 1,
     keys_active: 1,
-    strategy: 'economy',
     hot_reload_ms: 1000,
     admin_write_enabled: false,
     config_version: 10,
@@ -74,11 +72,6 @@ describe('GovernanceView End-to-End User Flow (WEB-04)', () => {
     },
   ];
 
-  const mockStrategy: StrategyView = {
-    strategy: 'economy',
-    config_version: 10,
-  };
-
   beforeEach(() => {
     window.sessionStorage?.clear();
     pinia = createPinia();
@@ -109,7 +102,6 @@ describe('GovernanceView End-to-End User Flow (WEB-04)', () => {
     vi.spyOn(adminApi, 'getProviders').mockReturnValue({ send: () => Promise.resolve(mockProviders) } as any);
     vi.spyOn(adminApi, 'getModels').mockReturnValue({ send: () => Promise.resolve(mockModels) } as any);
     vi.spyOn(adminApi, 'getKeys').mockReturnValue({ send: () => Promise.resolve(mockKeys) } as any);
-    vi.spyOn(adminApi, 'getStrategy').mockReturnValue({ send: () => Promise.resolve(mockStrategy) } as any);
 
     const app = createApp(GovernanceView);
     app.use(router);
@@ -150,7 +142,6 @@ describe('GovernanceView End-to-End User Flow (WEB-04)', () => {
     vi.spyOn(adminApi, 'getProviders').mockReturnValue({ send: () => Promise.resolve(mockProviders) } as any);
     vi.spyOn(adminApi, 'getModels').mockReturnValue({ send: () => Promise.resolve(mockModels) } as any);
     vi.spyOn(adminApi, 'getKeys').mockReturnValue({ send: () => Promise.resolve(mockKeys) } as any);
-    vi.spyOn(adminApi, 'getStrategy').mockReturnValue({ send: () => Promise.resolve(mockStrategy) } as any);
 
     const mockCreateKeyResp: CreateKeyResponse = {
       id: 'key-new',
@@ -217,7 +208,6 @@ describe('GovernanceView End-to-End User Flow (WEB-04)', () => {
     vi.spyOn(adminApi, 'getProviders').mockReturnValue({ send: () => Promise.resolve(mockProviders) } as any);
     vi.spyOn(adminApi, 'getModels').mockReturnValue({ send: () => Promise.resolve(mockModels) } as any);
     vi.spyOn(adminApi, 'getKeys').mockReturnValue({ send: () => Promise.resolve(mockKeys) } as any);
-    vi.spyOn(adminApi, 'getStrategy').mockReturnValue({ send: () => Promise.resolve(mockStrategy) } as any);
 
     vi.spyOn(adminApi, 'createProvider').mockReturnValue({
       send: () => Promise.reject(new PreconditionFailedError()),
@@ -274,9 +264,6 @@ describe('GovernanceView End-to-End User Flow (WEB-04)', () => {
     } as any);
     vi.spyOn(adminApi, 'getKeys').mockReturnValue({
       send: () => Promise.resolve(mockKeys),
-    } as any);
-    vi.spyOn(adminApi, 'getStrategy').mockReturnValue({
-      send: () => Promise.resolve(mockStrategy),
     } as any);
 
     const mockAuthUrl = {
@@ -361,9 +348,6 @@ describe('GovernanceView End-to-End User Flow (WEB-04)', () => {
     } as any);
     vi.spyOn(adminApi, 'getKeys').mockReturnValue({
       send: () => Promise.resolve(mockKeys),
-    } as any);
-    vi.spyOn(adminApi, 'getStrategy').mockReturnValue({
-      send: () => Promise.resolve(mockStrategy),
     } as any);
     vi.spyOn(adminApi, 'getProxyStatus').mockReturnValue({
       send: () => Promise.resolve({
@@ -495,9 +479,6 @@ describe('GovernanceView End-to-End User Flow (WEB-04)', () => {
     vi.spyOn(adminApi, 'getKeys').mockReturnValue({
       send: () => Promise.resolve(mockKeys),
     } as any);
-    vi.spyOn(adminApi, 'getStrategy').mockReturnValue({
-      send: () => Promise.resolve(mockStrategy),
-    } as any);
     vi.spyOn(adminApi, 'getProxyStatus').mockReturnValue({
       send: () => Promise.resolve({
         available: true,
@@ -617,9 +598,6 @@ describe('GovernanceView End-to-End User Flow (WEB-04)', () => {
     vi.spyOn(adminApi, 'getKeys').mockReturnValue({
       send: () => Promise.resolve([disabledKey]),
     } as any);
-    vi.spyOn(adminApi, 'getStrategy').mockReturnValue({
-      send: () => Promise.resolve(mockStrategy),
-    } as any);
     vi.spyOn(adminApi, 'getProxyStatus').mockReturnValue({
       send: () => Promise.resolve({
         available: true,
@@ -709,9 +687,6 @@ describe('GovernanceView End-to-End User Flow (WEB-04)', () => {
     vi.spyOn(adminApi, 'getKeys').mockReturnValue({
       send: () => Promise.resolve(mockKeys),
     } as any);
-    vi.spyOn(adminApi, 'getStrategy').mockReturnValue({
-      send: () => Promise.resolve(mockStrategy),
-    } as any);
 
     const app = createApp(GovernanceView);
     app.use(router);
@@ -756,7 +731,6 @@ describe('GovernanceView End-to-End User Flow (WEB-04)', () => {
     } as any);
     vi.spyOn(adminApi, 'getModels').mockReturnValue({ send: () => Promise.resolve([]) } as any);
     vi.spyOn(adminApi, 'getKeys').mockReturnValue({ send: () => Promise.resolve([coolingKey]) } as any);
-    vi.spyOn(adminApi, 'getStrategy').mockReturnValue({ send: () => Promise.resolve(mockStrategy) } as any);
 
     const app = createApp(GovernanceView);
     app.use(router);
@@ -813,7 +787,6 @@ describe('GovernanceView provider billing_mode regression', () => {
     providers: 0,
     keys: 0,
     keys_active: 0,
-    strategy: 'economy',
     hot_reload_ms: 500,
     admin_write_enabled: true,
     config_version: 12,
@@ -827,7 +800,6 @@ describe('GovernanceView provider billing_mode regression', () => {
     vi.spyOn(adminApi, 'getProviders').mockReturnValue({ send: () => Promise.resolve(noProviders) } as any);
     vi.spyOn(adminApi, 'getModels').mockReturnValue({ send: () => Promise.resolve([]) } as any);
     vi.spyOn(adminApi, 'getKeys').mockReturnValue({ send: () => Promise.resolve([]) } as any);
-    vi.spyOn(adminApi, 'getStrategy').mockReturnValue({ send: () => Promise.resolve({ strategy: 'economy', config_version: 12 }) } as any);
     const createSpy = vi.spyOn(adminApi, 'createProvider').mockReturnValue({
       send: () => Promise.resolve({ name: 'my-vendor' }),
     } as any);

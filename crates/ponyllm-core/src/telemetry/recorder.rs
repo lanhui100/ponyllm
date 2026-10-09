@@ -1,8 +1,8 @@
-use std::collections::VecDeque;
-use std::time::Duration;
 use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
+use std::time::Duration;
 
 pub const MAX_SNIPPET_CHARS: usize = 10 * 1024 * 1024;
 
@@ -44,11 +44,7 @@ pub fn scrub_secrets(text: &str) -> String {
 
 /// Redact known secret prefixes: `sk-`, `ya29.`, `1//`.
 fn scrub_prefixed_runs(text: &str) -> String {
-    const PREFIXES: &[(&[u8], &[u8])] = &[
-        (b"sk-", b"sk-"),
-        (b"ya29.", b"ya29."),
-        (b"1//", b"1//"),
-    ];
+    const PREFIXES: &[(&[u8], &[u8])] = &[(b"sk-", b"sk-"), (b"ya29.", b"ya29."), (b"1//", b"1//")];
     let bytes = text.as_bytes();
     let mut out = String::with_capacity(text.len());
     let mut i = 0;
@@ -406,12 +402,14 @@ impl FlightRecorder {
         // update it in-place rather than leaving the incomplete initial marker.
         // For distinct attempts or failed upstream attempts, never overwrite - preserve each attempt trace!
         let existing_pos = if recorded.attempt.is_some() {
-            buf.iter().position(|f| f.request_id == recorded.request_id && f.attempt == recorded.attempt)
+            buf.iter()
+                .position(|f| f.request_id == recorded.request_id && f.attempt == recorded.attempt)
         } else {
             // For top-level requests without attempt index:
             // Only update in-place if the previous frame was also a top-level in-flight marker (like StreamStarted)
             // and did NOT record an upstream attempt failure.
-            buf.iter().position(|f| f.request_id == recorded.request_id && f.attempt.is_none())
+            buf.iter()
+                .position(|f| f.request_id == recorded.request_id && f.attempt.is_none())
         };
 
         if let Some(pos) = existing_pos {
@@ -491,7 +489,9 @@ mod scrub_tests {
 
     #[test]
     fn bearer_and_oauth_json_values_scrubbed() {
-        let out = scrub_secrets(r#"Authorization: Bearer ya29.Ci6sh0rtt0k3nabcdef {"refresh_token": "1//0secretstuff", "client_secret": "GOCSPX-topsecret"}"#);
+        let out = scrub_secrets(
+            r#"Authorization: Bearer ya29.Ci6sh0rtt0k3nabcdef {"refresh_token": "1//0secretstuff", "client_secret": "GOCSPX-topsecret"}"#,
+        );
         assert!(!out.contains("ya29.Ci6sh0rtt0k3nabcdef"), "got {}", out);
         assert!(!out.contains("1//0secretstuff"), "got {}", out);
         assert!(!out.contains("GOCSPX-topsecret"), "got {}", out);
@@ -517,8 +517,12 @@ mod scrub_tests {
     #[test]
     fn looks_like_secret_covers_google_shapes() {
         assert!(looks_like_secret("sk-live-abcdef123456"));
-        assert!(looks_like_secret("ya29.a0AdMD6Einf3FwekkOnCpHNv8u3_j2qDn2ADGX5t"));
-        assert!(looks_like_secret("1//04mock_oauth_refresh_token_for_testing_00000000000000"));
+        assert!(looks_like_secret(
+            "ya29.a0AdMD6Einf3FwekkOnCpHNv8u3_j2qDn2ADGX5t"
+        ));
+        assert!(looks_like_secret(
+            "1//04mock_oauth_refresh_token_for_testing_00000000000000"
+        ));
         assert!(!looks_like_secret("my-key-id"));
     }
 
@@ -533,7 +537,7 @@ mod scrub_tests {
             request_id: "h4-test".to_string(),
             endpoint: "/v1/chat/completions".to_string(),
             provider: Some("openai".to_string()),
-                model: None,
+            model: None,
             key_id: "key-1".to_string(),
             raw_key: None,
             attempt: Some(0),
@@ -573,7 +577,7 @@ mod scrub_tests {
             request_id: "h4-trunc".to_string(),
             endpoint: "/v1/chat/completions".to_string(),
             provider: Some("openai".to_string()),
-                model: None,
+            model: None,
             key_id: "key-1".to_string(),
             raw_key: None,
             attempt: Some(0),
@@ -591,7 +595,11 @@ mod scrub_tests {
         });
         let frame = rec.get_frame("h4-trunc").expect("frame recorded");
         let err = frame.error.expect("error present");
-        assert!(err.ends_with("...[TRUNCATED]"), "error not truncated: len {}", err.len());
+        assert!(
+            err.ends_with("...[TRUNCATED]"),
+            "error not truncated: len {}",
+            err.len()
+        );
         assert!(err.chars().count() <= MAX_ERROR_CHARS + "...[TRUNCATED]".len());
     }
 }

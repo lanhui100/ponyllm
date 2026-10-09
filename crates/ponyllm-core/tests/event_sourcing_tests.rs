@@ -1,6 +1,6 @@
+use ponyllm_core::telemetry::*;
 use std::sync::Arc;
 use std::time::Instant;
-use ponyllm_core::telemetry::*;
 
 // Fixed script exercising every projection-relevant variant.
 fn script() -> Vec<(Option<String>, GatewayEvent)> {
@@ -30,7 +30,9 @@ fn script() -> Vec<(Option<String>, GatewayEvent)> {
         ),
         (
             Some("prov-a".to_string()),
-            GatewayEvent::StreamStarted { request_snippet: None },
+            GatewayEvent::StreamStarted {
+                request_snippet: None,
+            },
         ),
         (
             Some("prov-a".to_string()),
@@ -178,13 +180,19 @@ fn test_overflow_marker_on_full_segment_channel() {
     let (tx, _rx) = std::sync::mpsc::sync_channel::<EventEnvelope>(0);
     bus.attach_segment_sink(tx);
     let ctx = EventCtx::new("req-o", "/e", Instant::now());
-    bus.append(&ctx, None, GatewayEvent::StreamProgress { chunks: 1, bytes: 1 });
+    bus.append(
+        &ctx,
+        None,
+        GatewayEvent::StreamProgress {
+            chunks: 1,
+            bytes: 1,
+        },
+    );
     assert_eq!(bus.dropped_count(), 1);
     let recent = bus.recent(4);
-    assert!(recent.iter().any(|e| matches!(
-        e.event,
-        GatewayEvent::TelemetryOverflow { dropped: 1 }
-    )));
+    assert!(recent
+        .iter()
+        .any(|e| matches!(e.event, GatewayEvent::TelemetryOverflow { dropped: 1 })));
 }
 
 #[test]

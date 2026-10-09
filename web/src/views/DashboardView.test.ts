@@ -209,9 +209,6 @@ describe('DashboardView Full Feature Integration', () => {
       if (url.includes('/api/admin/keys')) {
         return Promise.resolve(new Response(JSON.stringify(mockKeys), { status: 200 }));
       }
-      if (url.includes('/api/admin/strategy')) {
-        return Promise.resolve(new Response(JSON.stringify({ strategy: 'economy', config_version: 1 }), { status: 200 }));
-      }
       if (url.includes('/health')) {
         return Promise.resolve(new Response(JSON.stringify({ status: 'ok' }), { status: 200 }));
       }
@@ -273,9 +270,6 @@ describe('DashboardView Full Feature Integration', () => {
       }
       if (url.includes('/api/admin/keys')) {
         return Promise.resolve(new Response(JSON.stringify(mockKeys), { status: 200 }));
-      }
-      if (url.includes('/api/admin/strategy')) {
-        return Promise.resolve(new Response(JSON.stringify({ strategy: 'economy', config_version: 1 }), { status: 200 }));
       }
       if (url.includes('/health')) {
         return Promise.resolve(new Response(JSON.stringify({ status: 'ok' }), { status: 200 }));

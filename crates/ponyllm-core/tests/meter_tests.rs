@@ -29,7 +29,10 @@ fn test_remaining_public_api() {
     // 无限额
     assert_eq!(m.remaining(None, None, 60, true), (None, None));
     // 零用量
-    assert_eq!(m.remaining(Some(10), Some(1000), 60, true), (Some(10), Some(1000)));
+    assert_eq!(
+        m.remaining(Some(10), Some(1000), 60, true),
+        (Some(10), Some(1000))
+    );
 
     m.record_attempt(250);
     m.record_attempt(0); // 只计请求
@@ -38,7 +41,10 @@ fn test_remaining_public_api() {
     assert_eq!(tok, Some(750));
 
     // 超出限额 → 饱和到 0
-    assert_eq!(m.remaining(Some(1), Some(100), 60, true), (Some(0), Some(0)));
+    assert_eq!(
+        m.remaining(Some(1), Some(100), 60, true),
+        (Some(0), Some(0))
+    );
 }
 
 #[test]
@@ -99,7 +105,10 @@ fn test_earliest_expiry_public_api() {
         .unwrap()
         .as_millis() as u64;
     // 过期点 = slot 起始 + 60s：在 (now, now+60s] 内（5s slot 粒度保守下界）。
-    assert!(expiry > now && expiry <= now + 60_000, "expiry={expiry}, now={now}");
+    assert!(
+        expiry > now && expiry <= now + 60_000,
+        "expiry={expiry}, now={now}"
+    );
 }
 
 /// 真实墙钟滚动：5s slot 粒度下，旧 slot 在 `remaining(window_secs=5)` 中过期。

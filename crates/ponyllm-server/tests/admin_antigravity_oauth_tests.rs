@@ -5,7 +5,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use ponyllm_config::ConfigFile;
-use ponyllm_core::pool::{GatewayRoutingStrategy, UpstreamProtocol};
+use ponyllm_core::pool::UpstreamProtocol;
 use ponyllm_server::admin_store::FileConfigStore;
 use ponyllm_server::{create_app, AppState, GatewayConfig};
 use reqwest::StatusCode;
@@ -28,7 +28,6 @@ impl OAuthHarness {
         let mut config_file = ConfigFile::default();
         config_file.gateway.bind = "127.0.0.1:8080".to_string();
         config_file.gateway.api_key = api_key.clone();
-        config_file.gateway.default_strategy = GatewayRoutingStrategy::Economy;
         config_file.gateway.web_enabled = true;
         config_file.gateway.admin_write_enabled = admin_write_enabled;
         config_file.config_version = 0;
@@ -38,7 +37,6 @@ impl OAuthHarness {
         let mut gw_config = GatewayConfig::default();
         gw_config.bind_addr = "127.0.0.1:8080".to_string();
         gw_config.api_key = api_key.clone();
-        gw_config.default_strategy = GatewayRoutingStrategy::Economy;
         gw_config.web_enabled = true;
         gw_config.admin_write_enabled = admin_write_enabled;
 

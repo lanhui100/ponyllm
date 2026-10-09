@@ -1,6 +1,6 @@
-use std::collections::{BTreeMap, HashMap};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, HashMap};
 
 use super::event::{EventEnvelope, GatewayEvent, Projection};
 
@@ -216,15 +216,24 @@ impl TimeseriesProjection {
                 let entry = bucket.tokens_by_provider.entry(p.to_string()).or_insert(0);
                 *entry = entry.saturating_add(total_tokens);
                 if prompt_tokens > 0 {
-                    let pe = bucket.prompt_tokens_by_provider.entry(p.to_string()).or_insert(0);
+                    let pe = bucket
+                        .prompt_tokens_by_provider
+                        .entry(p.to_string())
+                        .or_insert(0);
                     *pe = pe.saturating_add(prompt_tokens);
                 }
                 if completion_tokens > 0 {
-                    let ce = bucket.completion_tokens_by_provider.entry(p.to_string()).or_insert(0);
+                    let ce = bucket
+                        .completion_tokens_by_provider
+                        .entry(p.to_string())
+                        .or_insert(0);
                     *ce = ce.saturating_add(completion_tokens);
                 }
                 if cached_tokens > 0 {
-                    let cke = bucket.cached_tokens_by_provider.entry(p.to_string()).or_insert(0);
+                    let cke = bucket
+                        .cached_tokens_by_provider
+                        .entry(p.to_string())
+                        .or_insert(0);
                     *cke = cke.saturating_add(cached_tokens);
                 }
             }
@@ -259,7 +268,8 @@ impl TimeseriesProjection {
 
         let bucket_span_ms = bucket_hours * HOUR_MS;
         let current_bucket_start = (now_ms / bucket_span_ms) * bucket_span_ms;
-        let start_ms = current_bucket_start.saturating_sub((total_buckets as u64 - 1) * bucket_span_ms);
+        let start_ms =
+            current_bucket_start.saturating_sub((total_buckets as u64 - 1) * bucket_span_ms);
 
         let buckets = self.buckets.read();
 
@@ -333,7 +343,9 @@ impl TimeseriesProjection {
                     *tot_entry = (*tot_entry).saturating_add(*v);
                 }
                 // Fallback for historical snapshot buckets where prompt/completion/cached weren't segmented per provider
-                if h.prompt_tokens_by_provider.is_empty() && h.completion_tokens_by_provider.is_empty() {
+                if h.prompt_tokens_by_provider.is_empty()
+                    && h.completion_tokens_by_provider.is_empty()
+                {
                     for (k, v) in &h.tokens_by_provider {
                         let tot_entry = provider_completion_tokens.entry(k.clone()).or_insert(0);
                         *tot_entry = (*tot_entry).saturating_add(*v);
@@ -453,21 +465,33 @@ impl TimeseriesProjection {
 
         let overall_avg_latency = if total_latency_count > 0 && total_latency_sum.is_finite() {
             let v = total_latency_sum / total_latency_count as f64;
-            if v.is_finite() { (v * 10.0).round() / 10.0 } else { 0.0 }
+            if v.is_finite() {
+                (v * 10.0).round() / 10.0
+            } else {
+                0.0
+            }
         } else {
             0.0
         };
 
         let overall_avg_ttft = if total_ttft_count > 0 && total_ttft_sum.is_finite() {
             let v = total_ttft_sum / total_ttft_count as f64;
-            if v.is_finite() { (v * 10.0).round() / 10.0 } else { 0.0 }
+            if v.is_finite() {
+                (v * 10.0).round() / 10.0
+            } else {
+                0.0
+            }
         } else {
             0.0
         };
 
         let overall_avg_tps = if total_tps_count > 0 {
             let v = total_tps_sum_milli as f64 / 1000.0 / total_tps_count as f64;
-            if v.is_finite() { (v * 10.0).round() / 10.0 } else { 0.0 }
+            if v.is_finite() {
+                (v * 10.0).round() / 10.0
+            } else {
+                0.0
+            }
         } else {
             0.0
         };

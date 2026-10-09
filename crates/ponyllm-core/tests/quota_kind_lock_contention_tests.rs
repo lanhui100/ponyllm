@@ -165,7 +165,10 @@ async fn lock_contention_stream_must_not_promote_to_quota_exhausted() {
     stream_payload["stream"] = json!(true);
 
     let err = executor
-        .execute_stream_request("https://api.example.com/v1/chat/completions", &stream_payload)
+        .execute_stream_request(
+            "https://api.example.com/v1/chat/completions",
+            &stream_payload,
+        )
         .await
         .unwrap_err();
 

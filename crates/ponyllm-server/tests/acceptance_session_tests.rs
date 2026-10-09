@@ -297,7 +297,14 @@ async fn default_disabled_session_routes_absent() {
 async fn spawn_session_write_app() -> (std::net::SocketAddr, tempfile::TempDir) {
     let tmp = tempfile::tempdir().unwrap();
     let config_path = tmp.path().join("ponyllm.toml");
-    std::fs::write(&config_path, "[gateway]\nbind = \"127.0.0.1:0\"\n").unwrap();
+    // wave-2: /api/admin/strategy is retired, so the CSRF anchor uses a
+    // surviving real write path — POST /api/admin/keys against a seeded
+    // provider.
+    std::fs::write(
+        &config_path,
+        "[gateway]\nbind = \"127.0.0.1:0\"\n\n[providers.openai]\nbase_url = \"https://api.openai.com/v1\"\ndefault_model = \"gpt-4o\"\n",
+    )
+    .unwrap();
     let addr = {
         let app = {
             let _guard = env_lock().lock().unwrap();
@@ -331,10 +338,10 @@ async fn rs1_cookie_write_path_blocked_without_csrf_header() {
     let (addr, _store_tmp) = spawn_session_write_app().await;
     let (_sid, cookie) = create_session(&addr).await;
     let resp = reqwest::Client::new()
-        .put(format!("http://{}/api/admin/strategy", addr))
+        .post(format!("http://{}/api/admin/keys", addr))
         .header(reqwest::header::COOKIE, &cookie)
-        .header("If-Match", "\"0\"")
-        .json(&serde_json::json!({"strategy": "speed"}))
+        .header("If-Match", "*")
+        .json(&serde_json::json!({"provider": "openai", "id": "csrf-probe", "api_key": "sk-probe"}))
         .send()
         .await
         .unwrap();
@@ -347,25 +354,57 @@ async fn rs1_cookie_write_path_blocked_without_csrf_header() {
     assert_eq!(body["error"]["code"], "csrf_failed");
 }
 
-/// R-S1（回归锚点）：真实写路径携带 X-Pony-Session==sid → 200（写入成功）。
+/// R-S1（回归锚点）：真实写路径携带 X-Pony-Session==sid → 写入成功。
 #[tokio::test]
 async fn rs1_cookie_write_path_succeeds_with_csrf_header() {
     let (addr, _store_tmp) = spawn_session_write_app().await;
     let (sid, cookie) = create_session(&addr).await;
     let resp = reqwest::Client::new()
-        .put(format!("http://{}/api/admin/strategy", addr))
+        .post(format!("http://{}/api/admin/keys", addr))
         .header(reqwest::header::COOKIE, &cookie)
         .header("X-Pony-Session", &sid)
-        .header("If-Match", "\"0\"")
-        .json(&serde_json::json!({"strategy": "speed"}))
+        .header("If-Match", "*")
+        .json(&serde_json::json!({"provider": "openai", "id": "csrf-probe", "api_key": "sk-probe"}))
         .send()
         .await
         .unwrap();
     assert_eq!(
         resp.status(),
-        StatusCode::OK,
-        "R-S1: 携带 CSRF 头的真实写路径必须 200"
+        StatusCode::CREATED,
+        "R-S1: 携带 CSRF 头的真实写路径必须落库"
     );
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["id"], "csrf-probe");
+    assert_eq!(body["provider"], "openai");
+}
+
+/// wave-2（回归锚点）：已退役的全局策略端点在会话模式下同样不存在，
+/// 不得因为它退化成任何一种"仍可路由"的响应。
+#[tokio::test]
+async fn rs1_retired_strategy_endpoint_is_404_under_session() {
+    let (addr, _store_tmp) = spawn_session_write_app().await;
+    let (sid, cookie) = create_session(&addr).await;
+    for method in ["GET", "PUT"] {
+        let url = format!("http://{}/api/admin/strategy", addr);
+        let req = match method {
+            "GET" => reqwest::Client::new().get(&url),
+            _ => reqwest::Client::new()
+                .put(&url)
+                .json(&serde_json::json!({"strategy": "speed"})),
+        };
+        let resp = req
+            .header(reqwest::header::COOKIE, &cookie)
+            .header("X-Pony-Session", &sid)
+            .header("If-Match", "*")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "退役端点 {method} /api/admin/strategy 必须 404"
+        );
+    }
 }
 
 /// R-S2（红相）：会话换发端点纳入 auth_ratelimit —— 错误凭据连续达阈值后 429。

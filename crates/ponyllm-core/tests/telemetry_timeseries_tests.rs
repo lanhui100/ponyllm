@@ -1,9 +1,9 @@
-use std::sync::Arc;
-use std::time::Instant;
 use ponyllm_core::telemetry::{
     ConnectivitySampler, ConnectivityStatus, EventBus, EventCtx, GatewayEvent,
     TimeseriesProjection, GATEWAY_SLOT_COUNT, GATEWAY_STEP_MS,
 };
+use std::sync::Arc;
+use std::time::Instant;
 
 #[test]
 fn test_connectivity_sampler_thresholds_and_bar_count() {
@@ -108,7 +108,10 @@ fn test_timeseries_projection_aggregation_and_model_breakdown() {
     let active_point = resp.points.iter().find(|p| p.total_requests > 0).unwrap();
     assert_eq!(active_point.total_tokens, 450);
     assert_eq!(active_point.tokens_by_provider.get("deepseek"), Some(&150));
-    assert_eq!(active_point.tokens_by_model.get("deepseek-chat"), Some(&150));
+    assert_eq!(
+        active_point.tokens_by_model.get("deepseek-chat"),
+        Some(&150)
+    );
 }
 
 #[test]
@@ -135,7 +138,10 @@ fn test_connectivity_sampler_constant_ring_and_provider_isolation() {
     let empty_bars = sampler.get_series("non-existent", base_time + 59_000);
     assert_eq!(empty_bars.slots.len(), 40);
     assert_eq!(empty_bars.latest_latency_ms, None);
-    assert!(empty_bars.slots.iter().all(|s| s.status == ConnectivityStatus::Empty));
+    assert!(empty_bars
+        .slots
+        .iter()
+        .all(|s| s.status == ConnectivityStatus::Empty));
 }
 
 #[test]
@@ -149,7 +155,12 @@ fn test_timeseries_alignment_7d_and_30d() {
     assert_eq!(resp_7d.points.len(), 28);
     let six_hours_ms = 6 * 3600 * 1000;
     for (i, p) in resp_7d.points.iter().enumerate() {
-        assert_eq!(p.timestamp_ms % six_hours_ms, 0, "Bucket {} not aligned to 6h", i);
+        assert_eq!(
+            p.timestamp_ms % six_hours_ms,
+            0,
+            "Bucket {} not aligned to 6h",
+            i
+        );
     }
 
     // Test 30d query: 30 buckets of 24h = 720h
@@ -158,7 +169,12 @@ fn test_timeseries_alignment_7d_and_30d() {
     assert_eq!(resp_30d.points.len(), 30);
     let day_ms = 24 * 3600 * 1000;
     for (i, p) in resp_30d.points.iter().enumerate() {
-        assert_eq!(p.timestamp_ms % day_ms, 0, "Bucket {} not aligned to 24h", i);
+        assert_eq!(
+            p.timestamp_ms % day_ms,
+            0,
+            "Bucket {} not aligned to 24h",
+            i
+        );
     }
 }
 
@@ -191,7 +207,10 @@ fn test_timeseries_float_safety_and_serialization() {
     let resp = timeseries_proj.query_history("24h", now + 1000);
     // Must serialize to JSON without error (NaN/Inf causes serde_json error if not handled)
     let json_str = serde_json::to_string(&resp);
-    assert!(json_str.is_ok(), "Serialization failed due to non-finite float");
+    assert!(
+        json_str.is_ok(),
+        "Serialization failed due to non-finite float"
+    );
 }
 
 #[test]
@@ -200,15 +219,36 @@ fn test_timeseries_clock_skew_resilience() {
     let base_now = 1_700_000_000_000u64;
 
     // Record legitimate sample
-    timeseries_proj.record_metric(base_now, Some("prov"), Some("model"), 100, 50, 20, 150.0, true);
+    timeseries_proj.record_metric(
+        base_now,
+        Some("prov"),
+        Some("model"),
+        100,
+        50,
+        20,
+        150.0,
+        true,
+    );
 
     // Try to record extreme future sample (e.g. +10 years)
     let future_time = base_now + 10 * 365 * 24 * 3600 * 1000;
-    timeseries_proj.record_metric(future_time, Some("prov"), Some("model"), 500, 500, 100, 150.0, true);
+    timeseries_proj.record_metric(
+        future_time,
+        Some("prov"),
+        Some("model"),
+        500,
+        500,
+        100,
+        150.0,
+        true,
+    );
 
     // Past legitimate bucket must NOT be evicted
     let resp = timeseries_proj.query_history("24h", base_now + 1000);
-    assert_eq!(resp.total_requests, 1, "Legitimate sample should still be present");
+    assert_eq!(
+        resp.total_requests, 1,
+        "Legitimate sample should still be present"
+    );
     assert_eq!(resp.total_tokens, 150);
 }
 
@@ -302,9 +342,21 @@ fn test_legacy_snapshot_down_reclassified_under_new_thresholds() {
 
     let series = restored.get_series("prov-legacy", base + 3000);
     let tail = &series.slots[37..];
-    assert_eq!(tail[0].status, ConnectivityStatus::Degraded, "7s 慢成功应纠正为 Degraded（黄）");
-    assert_eq!(tail[1].status, ConnectivityStatus::Slow, "25s 慢成功应纠正为 Slow（橙）");
-    assert_eq!(tail[2].status, ConnectivityStatus::Down, "65s 仍为 Down（红）");
+    assert_eq!(
+        tail[0].status,
+        ConnectivityStatus::Degraded,
+        "7s 慢成功应纠正为 Degraded（黄）"
+    );
+    assert_eq!(
+        tail[1].status,
+        ConnectivityStatus::Slow,
+        "25s 慢成功应纠正为 Slow（橙）"
+    );
+    assert_eq!(
+        tail[2].status,
+        ConnectivityStatus::Down,
+        "65s 仍为 Down（红）"
+    );
 }
 
 #[test]
@@ -322,7 +374,14 @@ fn test_timeseries_and_metrics_snapshot_restore() {
     assert_eq!(resp.cached_tokens, 20);
 
     let m = MetricsCollector::new();
-    m.record_request("/v1/chat", std::time::Duration::from_millis(100), 10, 20, 5, true);
+    m.record_request(
+        "/v1/chat",
+        std::time::Duration::from_millis(100),
+        10,
+        20,
+        5,
+        true,
+    );
     let snap = m.snapshot_counters();
     let m2 = MetricsCollector::new();
     m2.restore_counters(&snap);
@@ -334,7 +393,7 @@ fn test_timeseries_and_metrics_snapshot_restore() {
 
 #[test]
 fn test_connectivity_sampler_records_stream_ttft_instead_of_ttlb() {
-    use ponyllm_core::telemetry::{EventEnvelope, Projection, StreamFlowSample, StageTimings};
+    use ponyllm_core::telemetry::{EventEnvelope, Projection, StageTimings, StreamFlowSample};
 
     let sampler = ConnectivitySampler::default();
     let now = 1_700_000_000_000u64;
@@ -377,10 +436,17 @@ fn test_connectivity_sampler_records_stream_ttft_instead_of_ttlb() {
     sampler.apply(&env);
 
     let series = sampler.get_series("deepseek", now);
-    assert_eq!(series.latest_latency_ms, Some(800.0), "最新延迟必须记录为 TTFT 800ms 而非 TTLB 15000ms");
+    assert_eq!(
+        series.latest_latency_ms,
+        Some(800.0),
+        "最新延迟必须记录为 TTFT 800ms 而非 TTLB 15000ms"
+    );
     let last_slot = series.slots.last().unwrap();
     assert_eq!(last_slot.latency_ms, Some(800.0));
-    assert_eq!(last_slot.status, ConnectivityStatus::Ok, "800ms TTFT 必须为 Ok (绿)");
+    assert_eq!(
+        last_slot.status,
+        ConnectivityStatus::Ok,
+        "800ms TTFT 必须为 Ok (绿)"
+    );
     assert_eq!(last_slot.tps, Some(60.0), "必须记录该次流式调用的 TPS");
 }
-

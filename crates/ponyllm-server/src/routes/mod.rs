@@ -8,6 +8,8 @@ pub mod models;
 pub mod admin;
 pub mod images;
 pub mod session;
+pub mod user;
+pub mod gate;
 
 pub use health::*;
 pub use chat::*;
@@ -18,3 +20,4 @@ pub use telemetry::*;
 pub use models::*;
 pub use admin::{admin_routes, handle_oauth2_callback, openapi_json};
 pub use images::*;
+pub use user::user_routes;

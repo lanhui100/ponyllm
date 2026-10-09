@@ -117,7 +117,6 @@ describe('Page Skeleton Placeholders', () => {
       providers: 1,
       keys: 0,
       keys_active: 0,
-      strategy: 'economy',
       hot_reload_ms: 1000,
       admin_write_enabled: true,
       config_version: 1,
@@ -141,9 +140,6 @@ describe('Page Skeleton Placeholders', () => {
     vi.spyOn(adminApi, 'getProviders').mockReturnValue({ send: () => gate.then(() => [provider]) } as never);
     vi.spyOn(adminApi, 'getModels').mockReturnValue({ send: () => gate.then(() => []) } as never);
     vi.spyOn(adminApi, 'getKeys').mockReturnValue({ send: () => gate.then(() => []) } as never);
-    vi.spyOn(adminApi, 'getStrategy').mockReturnValue({
-      send: () => gate.then(() => ({ strategy: 'economy', config_version: 1 })),
-    } as never);
 
     const { app } = await mountAt(GovernanceView, '/governance', container, pinia);
     await nextTick();

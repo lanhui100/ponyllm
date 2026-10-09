@@ -23,7 +23,6 @@ const mockOverviewWritable = {
   providers: 1,
   keys: 1,
   keys_active: 1,
-  strategy: 'economy',
   hot_reload_ms: 1000,
   admin_write_enabled: true,
   config_version: 10,
@@ -32,7 +31,6 @@ const mockOverviewWritable = {
 const mockProviders: unknown[] = [];
 const mockModels: unknown[] = [];
 const mockKeys: unknown[] = [];
-const mockStrategy = { strategy: 'economy', config_version: 10 };
 
 const mockAuthUrl = {
   auth_url: 'https://accounts.google.com/o/oauth2/v2/auth?client_id=dummy',
@@ -73,7 +71,6 @@ describe('F14 OAuth popup noopener + dead postMessage channel removed', () => {
     vi.spyOn(adminApi, 'getProviders').mockReturnValue({ send: () => Promise.resolve(mockProviders) } as any);
     vi.spyOn(adminApi, 'getModels').mockReturnValue({ send: () => Promise.resolve(mockModels) } as any);
     vi.spyOn(adminApi, 'getKeys').mockReturnValue({ send: () => Promise.resolve(mockKeys) } as any);
-    vi.spyOn(adminApi, 'getStrategy').mockReturnValue({ send: () => Promise.resolve(mockStrategy) } as any);
     vi.spyOn(adminApi, 'getAntigravityAuthUrl').mockReturnValue({
       send: () => Promise.resolve(mockAuthUrl),
     } as any);

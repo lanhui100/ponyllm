@@ -38,7 +38,6 @@ SAMPLE_TOML="$(cd "$ROOT_DIR" && cat <<'TOML'
 [gateway]
 bind = "127.0.0.1:8080"
 web_enabled = true
-default_strategy = "economy"
 TOML
 )"
 B64="$(printf '%s' "$SAMPLE_TOML" | base64 -w0)"

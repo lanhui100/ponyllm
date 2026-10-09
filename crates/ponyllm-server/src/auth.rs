@@ -31,6 +31,13 @@ pub enum Resource {
     TeleSummary,
     /// `GET /api/admin/quota`: agent scheduling snapshot, all scopes.
     Quota,
+    /// B002: self-service Web user plane (`/api/user/me`, `/api/user/tokens`,
+    /// `/api/user/admin/**`). Classified for the admin IP fence / audit only;
+    /// actual authorization is JWT-only and decided in `auth_middleware`
+    /// (claims.role), never via the gateway-key `scope_allows` matrix.
+    UserSelf,
+    /// B002: admin-only portion of the user plane (`/api/user/admin/**`).
+    UserAdmin,
 }
 
 /// Classify one request into a [`Resource`].
@@ -87,12 +94,23 @@ pub fn classify_resource(method: &str, path: &str, query: Option<&str>) -> Resou
         return Resource::AdminWrite;
     }
 
+    // B002 user plane: `/api/user/admin/**` → UserAdmin, everything else
+    // under `/api/user/` → UserSelf. Authorization is decided by JWT
+    // claims.role inside `auth_middleware` — these variants only feed the
+    // admin IP fence / audit / forbidden-name-resolution paths there.
+    if path.starts_with("/api/user/") {
+        if path.starts_with("/api/user/admin/") || path == "/api/user/admin" {
+            return Resource::UserAdmin;
+        }
+        return Resource::UserSelf;
+    }
+
     // Admin reads (GET only; anything else under /api/admin/ is a write).
     if path.starts_with("/api/admin/") {
         if is_get {
             match path {
                 "/api/admin/overview" | "/api/admin/providers" | "/api/admin/models"
-                | "/api/admin/keys" | "/api/admin/strategy" | "/api/admin/service/status"
+                | "/api/admin/keys" | "/api/admin/service/status"
                 | "/api/admin/proxy/status" | "/api/admin/oauth/antigravity/auth-url"
                 | "/api/admin/oauth/antigravity/pending"
                 // task-27: gateway credential list is a read (readonly may
@@ -158,6 +176,56 @@ pub struct CallerIdentity {
     pub key_id: Option<String>,
     pub user_id: Option<String>,
 }
+
+/// B002: resolved client IP attached to `/api/user/login` requests by
+/// `auth_middleware` so the login handler can rate-limit per client
+/// (check-before-hash) without re-resolving forwarding headers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClientIp(pub std::net::IpAddr);
+
+/// B002: why a presented JWT was rejected by [`verify_user_jwt`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JwtRejection {
+    /// `exp` in the past (or structural token validity failed after the HMAC
+    /// itself was not the cause). Maps to 401.
+    Expired,
+    /// HMAC mismatch / structural fault / unknown subject / disabled user /
+    /// `tv` mismatch — every non-expiry failure. Maps to 401.
+    Invalid,
+    /// Verified claims reference a user that no longer exists, is disabled,
+    /// or whose `token_version` differs (stateless revocation).
+    UserInvalid,
+}
+
+/// B002: verify a compact HS256 JWT and live-check the subject user.
+///
+/// Stateless revocation contract: short TTL + `tv` claim comparison against
+/// `UserEntry.token_version` + `enabled` real-time check (no jti denylist).
+/// The gateway-key family is NEVER consulted here — `None` means the caller
+/// answers 401, never falls back to `authenticate`.
+pub fn verify_user_jwt(
+    token: &str,
+    secret: &[u8],
+    issuer: &str,
+    tracker: &ponyllm_core::UserQuotaTracker,
+) -> Result<ponyllm_core::jwt::Claims, JwtRejection> {
+    use ponyllm_core::jwt::JwtError;
+    let claims = ponyllm_core::jwt::verify(token, secret, issuer).map_err(|e| match e {
+        JwtError::Expired => JwtRejection::Expired,
+        JwtError::InvalidSignature | JwtError::InvalidToken | JwtError::Other(_) => {
+            JwtRejection::Invalid
+        }
+    })?;
+    let user = tracker.get_user(&claims.sub).ok_or(JwtRejection::UserInvalid)?;
+    if !user.enabled {
+        return Err(JwtRejection::UserInvalid);
+    }
+    if user.token_version != claims.tv {
+        return Err(JwtRejection::UserInvalid);
+    }
+    Ok(claims)
+}
+
 pub enum AuthVerdict {
     /// Credential valid: act with `scope` (`key_id=None` = legacy token), plus optional bound user_id.
     Allowed {

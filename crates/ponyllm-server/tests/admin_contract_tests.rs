@@ -5,13 +5,14 @@
 //!   1. overview echoes auth_mode ("open" | "secured")
 //!   2. auth rotate answers Cache-Control: no-store and Pragma: no-cache
 //!   3. keys list masking with FlightRecorder::sanitize_key (no raw secrets)
-//!   4. strategy PUT bumps config_version strictly (+1)
+//!   4. (retired with the global strategy endpoint — see
+//!      `test_global_strategy_endpoint_is_removed`)
 //!   5. bind consistency between overview and service/status (0.0.0.0 echo)
 //!   6. openapi doc zero-hit for real key patterns and example placeholders only
 //!   7. open mode rotate answers 409 Conflict
 //! - Architect matrix:
-//!   - 8 endpoints in secured mode (401 on unauthorized, 200 on authorized)
-//!   - 8 endpoints in open mode (read endpoints 200, rotate 409)
+//!   - 6 endpoints in secured mode (401 on unauthorized, 200 on authorized)
+//!   - 5 read endpoints in open mode (200)
 //!   - SDK embedded path (config_store = None) -> 503 admin_store_unavailable
 //!   - hot_reload_ms == 500 and no absolute path leak
 //!   - config_version serde default compatibility
@@ -22,8 +23,7 @@ use std::sync::Arc;
 
 use ponyllm_config::{ConfigFile, KeySection, ModelConfig, ProviderSection};
 use ponyllm_core::pool::{
-    ApiKeyEntry, BillingMode, GatewayRoutingStrategy, KeyPool, ModelTier,
-    RoutingStrategy,
+    ApiKeyEntry, BillingMode, KeyPool, ModelTier, RoutingStrategy,
 };
 use ponyllm_server::admin_store::{ConfigStore, FileConfigStore};
 use ponyllm_server::{create_app, AppState, GatewayConfig, ModelSpec, ProviderConfig};
@@ -42,7 +42,7 @@ struct TestHarness {
 }
 
 impl TestHarness {
-    async fn new(bind_addr: &str, api_key: &str, strategy: GatewayRoutingStrategy) -> Self {
+    async fn new(bind_addr: &str, api_key: &str) -> Self {
         let temp_dir = tempfile::tempdir().unwrap();
         let config_path = temp_dir.path().join("ponyllm.toml");
 
@@ -128,7 +128,6 @@ impl TestHarness {
         let mut config_file = ConfigFile::default();
         config_file.gateway.bind = bind_addr.to_string();
         config_file.gateway.api_key = api_key.to_string();
-        config_file.gateway.default_strategy = strategy;
         config_file.gateway.web_enabled = true;
         config_file.gateway.web_dist_dir = "web/dist".to_string();
         // Match the explicit write-open memory config below.
@@ -149,7 +148,6 @@ impl TestHarness {
         } else {
             ponyllm_config::AuthMode::Secured
         };
-        gw_config.default_strategy = strategy;
         gw_config.web_enabled = true;
         gw_config.web_dist_dir = "web/dist".to_string();
         // Contract tests exercise the write-open behavior; fail-closed is the
@@ -278,7 +276,33 @@ fn test_openapi_no_real_secret_and_schema_committed() {
     assert!(schema_json["components"]["schemas"]["ProviderView"].is_object());
     assert!(schema_json["components"]["schemas"]["ModelView"].is_object());
     assert!(schema_json["components"]["schemas"]["KeyView"].is_object());
-    assert!(schema_json["components"]["schemas"]["StrategyView"].is_object());
+    // wave-2: the global strategy surface is gone from the contract. Both the
+    // view and the payload schema must be absent, not merely unused.
+    assert!(
+        schema_json["components"]["schemas"]
+            .get("StrategyView")
+            .is_none(),
+        "StrategyView schema must be removed from the OpenAPI document"
+    );
+    assert!(
+        schema_json["components"]["schemas"]
+            .get("PutStrategyPayload")
+            .is_none(),
+        "PutStrategyPayload schema must be removed from the OpenAPI document"
+    );
+    assert!(
+        schema_json["paths"].get("/api/admin/strategy").is_none(),
+        "/api/admin/strategy must no longer be registered in the OpenAPI document"
+    );
+    assert!(
+        !schema_json.to_string().contains("/api/admin/strategy"),
+        "no OpenAPI operation may reference /api/admin/strategy any more"
+    );
+    // Regression red line: the Auto routing contract is untouched by wave-2.
+    assert!(
+        schema_json["paths"].get("/api/admin/auto-models").is_some(),
+        "/api/admin/auto-models must survive the global-strategy removal"
+    );
     assert!(schema_json["components"]["schemas"]["ServiceStatusView"].is_object());
     assert!(schema_json["components"]["schemas"]["RotateView"].is_object());
 
@@ -324,7 +348,7 @@ fn dump_openapi_json() {
 // -----------------------------------------------------------------------------
 #[tokio::test]
 async fn test_keys_masking_comprehensive() {
-    let harness = TestHarness::new("127.0.0.1:8080", "secret-test-key", GatewayRoutingStrategy::Economy).await;
+    let harness = TestHarness::new("127.0.0.1:8080", "secret-test-key").await;
     let client = reqwest::Client::new();
 
     let resp = client
@@ -374,7 +398,7 @@ async fn test_keys_masking_comprehensive() {
 // -----------------------------------------------------------------------------
 #[tokio::test]
 async fn test_auth_rotate_no_store_headers_and_effect() {
-    let harness = TestHarness::new("127.0.0.1:8080", "old-secret-token", GatewayRoutingStrategy::Economy).await;
+    let harness = TestHarness::new("127.0.0.1:8080", "old-secret-token").await;
     let client = reqwest::Client::new();
 
     let resp = client
@@ -429,90 +453,82 @@ async fn test_auth_rotate_no_store_headers_and_effect() {
 }
 
 // -----------------------------------------------------------------------------
-// Test 4: strategy_put_bumps_config_version (Security condition 4)
+// Test 4 (wave-2): the global strategy endpoint no longer exists.
+// Auto routing owns global dispatch, so /api/admin/strategy is removed from the
+// router entirely — not "disabled", not "403": an unauthenticated, a keyed and
+// an open-mode caller must all observe the same 404.
 // -----------------------------------------------------------------------------
 #[tokio::test]
-async fn test_strategy_put_bumps_config_version() {
-    let harness = TestHarness::new("127.0.0.1:8080", "secret-key", GatewayRoutingStrategy::Economy).await;
+async fn test_global_strategy_endpoint_is_removed() {
+    let harness = TestHarness::new("127.0.0.1:8080", "secret-key").await;
     let client = reqwest::Client::new();
+    let url = format!("http://{}/api/admin/strategy", harness.addr);
 
-    // Check initial version
     let get_resp = client
-        .get(format!("http://{}/api/admin/strategy", harness.addr))
+        .get(&url)
         .header("Authorization", format!("Bearer {}", harness.api_key))
         .send()
         .await
         .unwrap();
-    assert_eq!(get_resp.status(), StatusCode::OK);
-    let initial: serde_json::Value = get_resp.json().await.unwrap();
-    assert_eq!(initial["config_version"], 0);
-    assert_eq!(initial["strategy"], "economy");
+    assert_eq!(
+        get_resp.status(),
+        StatusCode::NOT_FOUND,
+        "GET /api/admin/strategy must be gone (404), got {}",
+        get_resp.status()
+    );
 
-    // Put new valid strategy (strategy PUT requires If-Match, same as other CUD)
     let put_resp = client
-        .put(format!("http://{}/api/admin/strategy", harness.addr))
+        .put(&url)
         .header("Authorization", format!("Bearer {}", harness.api_key))
         .header("If-Match", "\"0\"")
         .json(&serde_json::json!({"strategy": "speed"}))
         .send()
         .await
         .unwrap();
-    assert_eq!(put_resp.status(), StatusCode::OK);
-    let updated: serde_json::Value = put_resp.json().await.unwrap();
-    assert_eq!(updated["strategy"], "speed");
-    assert_eq!(updated["config_version"], 1);
-
-    // Verify disk was bumped
-    let store = FileConfigStore::new(&harness.config_path);
-    let disk_cfg = store.load().await.unwrap().0;
-    assert_eq!(disk_cfg.config_version, 1);
     assert_eq!(
-        disk_cfg.gateway.default_strategy,
-        GatewayRoutingStrategy::Speed
+        put_resp.status(),
+        StatusCode::NOT_FOUND,
+        "PUT /api/admin/strategy must be gone (404), got {}",
+        put_resp.status()
     );
 
-    // Immediate memory reload verification
-    let get_again = client
-        .get(format!("http://{}/api/admin/strategy", harness.addr))
-        .header("Authorization", format!("Bearer {}", harness.api_key))
-        .send()
-        .await
-        .unwrap();
-    let reloaded: serde_json::Value = get_again.json().await.unwrap();
-    assert_eq!(reloaded["strategy"], "speed");
-    assert_eq!(reloaded["config_version"], 1);
+    // An unauthenticated caller must NOT be able to probe the retired endpoint:
+    // 401 would prove the route still exists behind the auth middleware.
+    let unauth = client.get(&url).send().await.unwrap();
+    assert_eq!(
+        unauth.status(),
+        StatusCode::NOT_FOUND,
+        "the retired route must not survive as an authenticated-only 401"
+    );
 
-    // Invalid strategy yields 400 and does NOT bump version
-    let bad_put = client
-        .put(format!("http://{}/api/admin/strategy", harness.addr))
+    // The removal must not mutate the rest of the admin surface or the disk.
+    let overview = client
+        .get(format!("http://{}/api/admin/overview", harness.addr))
         .header("Authorization", format!("Bearer {}", harness.api_key))
-        .header("If-Match", "\"1\"")
-        .json(&serde_json::json!({"strategy": "teleportation"}))
         .send()
         .await
         .unwrap();
-    assert_eq!(bad_put.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(overview.status(), StatusCode::OK);
+    let overview_body: serde_json::Value = overview.json().await.unwrap();
+    assert_eq!(overview_body["config_version"], 0);
+    assert!(
+        overview_body.get("strategy").is_none(),
+        "OverviewView.strategy is the public mirror of the retired global \
+         strategy and must be absent: {}",
+        overview_body
+    );
 
-    // Missing field yields 400
-    let missing_field_put = client
-        .put(format!("http://{}/api/admin/strategy", harness.addr))
-        .header("Authorization", format!("Bearer {}", harness.api_key))
-        .header("If-Match", "\"1\"")
-        .json(&serde_json::json!({"other": "field"}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(missing_field_put.status(), StatusCode::BAD_REQUEST);
-
-    // Missing If-Match yields 412 (strategy PUT enforces optimistic locking)
-    let no_match_put = client
-        .put(format!("http://{}/api/admin/strategy", harness.addr))
-        .header("Authorization", format!("Bearer {}", harness.api_key))
-        .json(&serde_json::json!({"strategy": "reliable"}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(no_match_put.status(), StatusCode::PRECONDITION_FAILED);
+    let store = FileConfigStore::new(&harness.config_path);
+    let disk_cfg = store.load().await.unwrap().0;
+    assert_eq!(
+        disk_cfg.config_version, 0,
+        "a request to the retired endpoint must not bump config_version"
+    );
+    let disk_str = serde_json::to_string(&disk_cfg.gateway).unwrap();
+    assert!(
+        !disk_str.contains("default_strategy"),
+        "GatewayConfig.default_strategy is removed: {disk_str}"
+    );
 }
 
 // -----------------------------------------------------------------------------
@@ -520,7 +536,7 @@ async fn test_strategy_put_bumps_config_version() {
 // -----------------------------------------------------------------------------
 #[tokio::test]
 async fn test_bind_consistency_and_zero_bind_echo() {
-    let harness = TestHarness::new("0.0.0.0:8888", "secret-key", GatewayRoutingStrategy::Economy).await;
+    let harness = TestHarness::new("0.0.0.0:8888", "secret-key").await;
     let client = reqwest::Client::new();
 
     let overview_resp = client
@@ -556,7 +572,7 @@ async fn test_bind_consistency_and_zero_bind_echo() {
 #[tokio::test]
 async fn test_open_mode_matrix() {
     // Empty api_key triggers open mode
-    let harness = TestHarness::new("127.0.0.1:8080", "", GatewayRoutingStrategy::Economy).await;
+    let harness = TestHarness::new("127.0.0.1:8080", "").await;
     let client = reqwest::Client::new();
 
     // 1. Overview reports auth_mode = "open"
@@ -569,13 +585,14 @@ async fn test_open_mode_matrix() {
     let overview_body: serde_json::Value = overview_resp.json().await.unwrap();
     assert_eq!(overview_body["auth_mode"], "open");
 
-    // 2. All read endpoints accessible without token
+    // 2. All remaining read endpoints accessible without token.
+    //    /api/admin/strategy was retired by wave-2 and is covered by
+    //    test_global_strategy_endpoint_is_removed.
     let endpoints = vec![
         "/api/admin/overview",
         "/api/admin/providers",
         "/api/admin/providers/openai/models",
         "/api/admin/keys",
-        "/api/admin/strategy",
         "/api/admin/service/status",
     ];
 
@@ -600,20 +617,18 @@ async fn test_open_mode_matrix() {
 }
 
 // -----------------------------------------------------------------------------
-// Test 7: secured_mode_matrix (All 8 endpoints 401 without auth, 200 with auth)
+// Test 7: secured_mode_matrix (6 endpoints 401 without auth, 200 with auth)
 // -----------------------------------------------------------------------------
 #[tokio::test]
 async fn test_secured_mode_matrix() {
-    let harness = TestHarness::new("127.0.0.1:8080", "strong-auth-secret", GatewayRoutingStrategy::Economy).await;
+    let harness = TestHarness::new("127.0.0.1:8080", "strong-auth-secret").await;
     let client = reqwest::Client::new();
 
-    let test_cases = vec![
+    let test_cases: Vec<(&str, &str, Option<serde_json::Value>)> = vec![
         ("GET", "/api/admin/overview", None),
         ("GET", "/api/admin/providers", None),
         ("GET", "/api/admin/providers/openai/models", None),
         ("GET", "/api/admin/keys", None),
-        ("GET", "/api/admin/strategy", None),
-        ("PUT", "/api/admin/strategy", Some(serde_json::json!({"strategy": "reliable"}))),
         ("GET", "/api/admin/service/status", None),
         ("POST", "/api/admin/auth/rotate", None),
     ];
@@ -656,7 +671,7 @@ async fn test_secured_mode_matrix() {
         );
     }
 
-    // Now test all 8 endpoints with valid token
+    // Now test all 6 surviving endpoints with valid token
     // 1. overview
     let r1 = client
         .get(format!("http://{}/api/admin/overview", harness.addr))
@@ -695,43 +710,23 @@ async fn test_secured_mode_matrix() {
         .unwrap();
     assert_eq!(r4.status(), StatusCode::OK);
 
-    // 5. strategy GET
+    // 5. service status
     let r5 = client
-        .get(format!("http://{}/api/admin/strategy", harness.addr))
+        .get(format!("http://{}/api/admin/service/status", harness.addr))
         .header("Authorization", format!("Bearer {}", harness.api_key))
         .send()
         .await
         .unwrap();
     assert_eq!(r5.status(), StatusCode::OK);
 
-    // 6. strategy PUT (requires If-Match like other CUD endpoints)
+    // 6. auth rotate
     let r6 = client
-        .put(format!("http://{}/api/admin/strategy", harness.addr))
-        .header("Authorization", format!("Bearer {}", harness.api_key))
-        .header("If-Match", "*")
-        .json(&serde_json::json!({"strategy": "reliable"}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(r6.status(), StatusCode::OK);
-
-    // 7. service status
-    let r7 = client
-        .get(format!("http://{}/api/admin/service/status", harness.addr))
-        .header("Authorization", format!("Bearer {}", harness.api_key))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(r7.status(), StatusCode::OK);
-
-    // 8. auth rotate
-    let r8 = client
         .post(format!("http://{}/api/admin/auth/rotate", harness.addr))
         .header("Authorization", format!("Bearer {}", harness.api_key))
         .send()
         .await
         .unwrap();
-    assert_eq!(r8.status(), StatusCode::OK);
+    assert_eq!(r6.status(), StatusCode::OK);
 }
 
 // -----------------------------------------------------------------------------
@@ -744,20 +739,19 @@ async fn test_sdk_none_store_unavailable() {
     let auth = "Bearer sdk-test-token";
 
     // Store-dependent endpoints must return 503 admin_store_unavailable
-    let store_endpoints = vec![
+    let store_endpoints: Vec<(&str, &str, Option<serde_json::Value>)> = vec![
         ("GET", "/api/admin/overview", None),
         ("GET", "/api/admin/keys", None),
-        ("GET", "/api/admin/strategy", None),
-        ("PUT", "/api/admin/strategy", Some(serde_json::json!({"strategy": "speed"}))),
         ("GET", "/api/admin/service/status", None),
         ("POST", "/api/admin/auth/rotate", None),
     ];
 
-    for (method, path, body) in store_endpoints {
+    for (method, path, _body) in store_endpoints {
         let req = match method {
             "GET" => client.get(format!("http://{}{}", addr, path)),
-            "PUT" => client.put(format!("http://{}{}", addr, path)).json(&body.unwrap()),
-            "POST" => client.post(format!("http://{}{}", addr, path)),
+            "POST" => client
+                .post(format!("http://{}{}", addr, path))
+                .json(&serde_json::json!({})),
             _ => unreachable!(),
         };
         let resp = req.header("Authorization", auth).send().await.unwrap();
@@ -790,7 +784,7 @@ async fn test_sdk_none_store_unavailable() {
 // -----------------------------------------------------------------------------
 #[tokio::test]
 async fn test_overview_hot_reload_ms_and_no_path_leak() {
-    let harness = TestHarness::new("127.0.0.1:8080", "secret-key", GatewayRoutingStrategy::Economy).await;
+    let harness = TestHarness::new("127.0.0.1:8080", "secret-key").await;
     let client = reqwest::Client::new();
 
     let overview_resp = client
@@ -838,7 +832,7 @@ async fn test_overview_hot_reload_ms_and_no_path_leak() {
 // -----------------------------------------------------------------------------
 #[tokio::test]
 async fn test_update_key_priority_and_weight_hot_reloads() {
-    let harness = TestHarness::new("127.0.0.1:8080", "secret-key", GatewayRoutingStrategy::Economy).await;
+    let harness = TestHarness::new("127.0.0.1:8080", "secret-key").await;
     let client = reqwest::Client::new();
 
     // 1. Get initial keys (openai provider has "k-sk-standard" with priority 1, weight 10 from TestHarness)
@@ -888,7 +882,6 @@ fn test_config_version_serde_default_compat() {
 bind = "127.0.0.1:8080"
 max_retries = 3
 api_key = "test-token"
-default_strategy = "economy"
 
 [providers.openai]
 base_url = "https://api.openai.com/v1"
@@ -901,4 +894,28 @@ default_model = "gpt-4o"
         "Old toml without config_version should default to 0"
     );
     assert_eq!(parsed.gateway.bind, "127.0.0.1:8080");
+}
+
+/// wave-2: the global strategy key is gone from the `[gateway]` contract.
+/// A config written before the removal must still deserialize (the field is
+/// tolerated, not required), and the parsed gateway must not carry it.
+#[test]
+fn test_legacy_toml_with_default_strategy_still_deserializes() {
+    let legacy_toml = r#"
+[gateway]
+bind = "127.0.0.1:8080"
+api_key = "test-token"
+default_strategy = "economy"
+
+[providers.openai]
+base_url = "https://api.openai.com/v1"
+default_model = "gpt-4o"
+"#;
+
+    let parsed: ConfigFile = toml::from_str(legacy_toml).unwrap();
+    let gateway_json = serde_json::to_value(&parsed.gateway).unwrap();
+    assert!(
+        gateway_json.get("default_strategy").is_none(),
+        "GatewayConfig must no longer expose default_strategy: {gateway_json}"
+    );
 }

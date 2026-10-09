@@ -157,12 +157,12 @@ fn c3_validate_egress_accepts_direct_none_and_empty() {
 #[test]
 fn c3_validate_egress_accepts_public_and_loopback_proxies() {
     for entry in [
-        "http://127.0.0.1:8899",           // local pproxy — documented shape
-        "http://localhost:7890",           // local pproxy hostname form
-        "http://1.2.3.4:8899",             // public literal IP
-        "http://egress-1.example.com:8899",// public hostname
+        "http://127.0.0.1:8899",            // local pproxy — documented shape
+        "http://localhost:7890",            // local pproxy hostname form
+        "http://1.2.3.4:8899",              // public literal IP
+        "http://egress-1.example.com:8899", // public hostname
         "https://egress-2.example.com:443",
-        "socks5://192.0.2.10:1080",        // documentation-test range, public
+        "socks5://192.0.2.10:1080", // documentation-test range, public
         "http://user:pass@egress.example.com:8899", // public hostname + userinfo (legal proxy credential)
     ] {
         assert!(
@@ -175,11 +175,11 @@ fn c3_validate_egress_accepts_public_and_loopback_proxies() {
 #[test]
 fn c3_validate_egress_rejects_bad_scheme_and_missing_host() {
     for entry in [
-        "ftp://example.com:21",            // unsupported scheme
-        "gopher://example.com/",           // unsupported scheme
-        "file:///etc/passwd",              // unsupported scheme
-        "no-scheme-here",                  // not scheme://host:port
-        "http://",                         // no host
+        "ftp://example.com:21",  // unsupported scheme
+        "gopher://example.com/", // unsupported scheme
+        "file:///etc/passwd",    // unsupported scheme
+        "no-scheme-here",        // not scheme://host:port
+        "http://",               // no host
     ] {
         assert!(
             validate_egress_entry(entry).is_err(),
@@ -191,14 +191,14 @@ fn c3_validate_egress_rejects_bad_scheme_and_missing_host() {
 #[test]
 fn c3_validate_egress_rejects_private_linklocal_and_metadata_targets() {
     for entry in [
-        "http://10.0.0.5:8080",                        // private 10/8
-        "http://172.16.9.9:3128",                      // private 172.16/12
-        "http://192.168.1.1:3128",                     // private 192.168/16
-        "http://169.254.169.254:80",                   // link-local / cloud metadata
-        "http://metadata.google.internal:80",          // metadata hostname
-        "http://x.svc.cluster.local:8080",             // k8s in-cluster name
-        "http://[::ffff:10.0.0.1]:8080",               // IPv4-mapped bypass
-        "http://[fe80::1]:8080",                       // IPv6 link-local
+        "http://10.0.0.5:8080",               // private 10/8
+        "http://172.16.9.9:3128",             // private 172.16/12
+        "http://192.168.1.1:3128",            // private 192.168/16
+        "http://169.254.169.254:80",          // link-local / cloud metadata
+        "http://metadata.google.internal:80", // metadata hostname
+        "http://x.svc.cluster.local:8080",    // k8s in-cluster name
+        "http://[::ffff:10.0.0.1]:8080",      // IPv4-mapped bypass
+        "http://[fe80::1]:8080",              // IPv6 link-local
     ] {
         assert!(
             validate_egress_entry(entry).is_err(),

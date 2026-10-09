@@ -1,7 +1,6 @@
 use ponyllm_core::pool::{
     default_cached_price, default_input_price, default_output_price, BillingMode,
-    GatewayRoutingStrategy, ModelThinkingSpec, ModelTier, PricingConfig, PricingMode,
-    PricingPeriod, UpstreamProtocol,
+    ModelThinkingSpec, ModelTier, PricingConfig, PricingMode, PricingPeriod, UpstreamProtocol,
 };
 use ponyllm_protocol::common::ReasoningEffort;
 use std::collections::HashMap;
@@ -65,8 +64,6 @@ pub struct GatewaySection {
     pub empty_stop_total_timeout_secs: Option<u64>,
     #[serde(default = "default_api_key")]
     pub api_key: String,
-    #[serde(default)]
-    pub default_strategy: GatewayRoutingStrategy,
     #[serde(default = "default_request_body_limit")]
     pub request_body_limit: usize,
     /// Optional default outbound HTTP proxy for upstream providers (e.g. "http://127.0.0.1:8899").
@@ -583,7 +580,6 @@ impl Default for GatewaySection {
             upstream_ttfb_timeout_secs: None,
             empty_stop_total_timeout_secs: None,
             api_key: default_api_key(),
-            default_strategy: GatewayRoutingStrategy::Economy,
             request_body_limit: default_request_body_limit(),
             proxy: None,
             use_system_proxy: false,

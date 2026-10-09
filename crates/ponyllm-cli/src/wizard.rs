@@ -45,23 +45,6 @@ pub fn run_interactive_init(output_path: &str) -> Result<(), Box<dyn std::error:
         .with_help_message("第三方客户端（如 Cursor、Claude Code、SDK）需使用该 Token 进行认证，留空或 none 为免鉴权")
         .prompt()?;
 
-    let strategy_options = vec![
-        "economy (省钱优先: 0元免费 > Plan套餐 > 缓存命中 > 按量低价，默认推荐)",
-        "speed (极速优先: 综合首字时延与生成速度选最快节点)",
-        "reliable (稳定优先: 高可用保障，429 智能避让)",
-        "balanced (综合平衡: 成本与生成速度综合最优)",
-    ];
-    let strat_sel = Select::new("选择网关全局默认调度策略:", strategy_options).prompt()?;
-    let default_strategy = if strat_sel.starts_with("speed") {
-        ponyllm_core::pool::GatewayRoutingStrategy::Speed
-    } else if strat_sel.starts_with("reliable") {
-        ponyllm_core::pool::GatewayRoutingStrategy::Reliable
-    } else if strat_sel.starts_with("balanced") {
-        ponyllm_core::pool::GatewayRoutingStrategy::Balanced
-    } else {
-        ponyllm_core::pool::GatewayRoutingStrategy::Economy
-    };
-
     let mut providers: HashMap<String, ProviderSection> = HashMap::new();
 
     loop {
@@ -263,7 +246,6 @@ pub fn run_interactive_init(output_path: &str) -> Result<(), Box<dyn std::error:
             upstream_timeout_secs: default_upstream_timeout_secs(),
             upstream_ttfb_timeout_secs: None,
             api_key: api_token,
-            default_strategy,
             request_body_limit: default_request_body_limit(),
             proxy: None,
             use_system_proxy: false,
@@ -290,7 +272,6 @@ pub fn run_interactive_init(output_path: &str) -> Result<(), Box<dyn std::error:
     println!("╠════════════════════════════════════════════════════════════════════════╣");
     println!("║  • 配置文件已写入: {:<50} ║", output_path);
     println!("║  • 监听模式与地址: {:<50} ║", config.gateway.bind);
-    println!("║  • 全局调度策略:   {:<50} ║", format!("{:?}", config.gateway.default_strategy));
     println!("║  • 网关访问凭证:   {:<50} ║", config.gateway.api_key);
     println!("╠════════════════════════════════════════════════════════════════════════╣");
     println!("║  💡 请妥善保管或复制上方 API Key，用于客户端鉴权访问。                 ║");
@@ -298,8 +279,6 @@ pub fn run_interactive_init(output_path: &str) -> Result<(), Box<dyn std::error:
     println!("║  快速启动与管理:                                                       ║");
     println!("║    ponyllm serve                    # 启动网关服务                     ║");
     println!("║    ponyllm restart                 # 重启网关服务（升级后必做）       ║");
-    println!("║    ponyllm strategy list            # 查看调度策略一览                 ║");
-    println!("║    ponyllm strategy set speed       # 切换为极速模式                   ║");
     println!("║    ponyllm auth                     # 重新生成/查看网关 API Key        ║");
     println!("║    ponyllm provider add agy         # 交互式授权接入 Google Antigravity║");
     println!("║    ponyllm provider list            # 查看已配置提供商                 ║");

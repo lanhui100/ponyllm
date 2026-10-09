@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue';
+import { ref, computed, onMounted, getCurrentInstance } from 'vue';
 import type { ModelView, CreateModelPayload, UpdateModelPayload, PricingMode, PricingPeriod } from '../../types/admin';
 import { adminApi } from '../../lib/adminApi';
 import Icons from '../ui/Icons.vue';
@@ -26,6 +26,10 @@ const props = defineProps<{
     ids: string[],
     onProgress: (done: number, total: number) => void,
   ) => Promise<{ added: number; skipped: number; failed: number }>;
+  /** 模型新增的可等待执行器（优先于 create 事件，供需要捕获失败的调用方注入）。 */
+  onCreateModel?: (payload: CreateModelPayload) => Promise<void>;
+  /** 模型更新的可等待执行器（优先于 update 事件，供需要捕获失败的调用方注入）。 */
+  onUpdateModel?: (name: string, payload: UpdateModelPayload) => Promise<void>;
 }>();
 
 const emit = defineEmits<{
@@ -34,6 +38,28 @@ const emit = defineEmits<{
   (e: 'delete', name: string): Promise<void>;
   (e: 'notice', message: string): void;
 }>();
+
+type CreateModelHandler = (payload: CreateModelPayload) => Promise<void> | void;
+type UpdateModelHandler = (name: string, payload: UpdateModelPayload) => Promise<void> | void;
+
+const instance = getCurrentInstance();
+
+/**
+ * 取出 vnode 上真实挂载的事件监听器。
+ *
+ * Vue 的 `emit()` 恒返回 void，`await emit('update', ...)` 等于没等：父层 async 处理函数
+ * （GovernanceView.editModel → runWithConflictCheck → PUT /api/admin/models/{name}）的
+ * Promise 无人 await，412/403/网络失败只会变成一个 rejected Promise —— save() 的
+ * try/catch 捕不到，cancelForm() 仍无条件执行，表单静默收起、错误不进 formError。
+ *
+ * 直接调用监听器并 await 其返回值，失败才能被同一个 try/catch 捕获。
+ * 仅支持单个函数监听器（数组形式 `v-on:update="[a, b]"` 等价于 emit 的多播语义，
+ * 无法汇总单个返回值，此时退回 emit 保持原行为）。
+ */
+function eventHandler(key: 'onCreate' | 'onUpdate'): ((...args: never[]) => unknown) | undefined {
+  const raw = instance?.vnode.props?.[key];
+  return typeof raw === 'function' ? (raw as (...args: never[]) => unknown) : undefined;
+}
 
 const isExpanded = ref(props.defaultExpanded ?? false);
 
@@ -564,14 +590,31 @@ async function handleSubmit() {
       ...(rateLimitsCleared.value ? { rate_limits: null } : rateLimits !== undefined ? { rate_limits: rateLimits } : {}),
     };
 
+    // 提交链路必须可等待：注入的 prop 回调优先，其次是 vnode 上的事件监听器
+    // （现有调用方 ProviderCard 仍只绑定 @update/@create，无需改动即生效），
+    // 最后才是 emit 降级（父层未绑定任何处理器时保持原行为）。
     if (editingModelName.value) {
-      await emit('update', editingModelName.value, payloadData);
+      const updateHandler = props.onUpdateModel ?? (eventHandler('onUpdate') as UpdateModelHandler | undefined);
+      if (updateHandler) {
+        await updateHandler(editingModelName.value, payloadData);
+      } else {
+        emit('update', editingModelName.value, payloadData);
+      }
     } else {
-      await emit('create', {
-        name,
-        ...payloadData,
-      });
+      const createHandler = props.onCreateModel ?? (eventHandler('onCreate') as CreateModelHandler | undefined);
+      if (createHandler) {
+        await createHandler({
+          name,
+          ...payloadData,
+        });
+      } else {
+        emit('create', {
+          name,
+          ...payloadData,
+        });
+      }
     }
+    // 仅在提交真正成功后收起表单：失败由下面的 catch 写入 formError，表单内容保留。
     cancelForm();
   } catch (err: unknown) {
     formError.value = err instanceof Error ? err.message : String(err);

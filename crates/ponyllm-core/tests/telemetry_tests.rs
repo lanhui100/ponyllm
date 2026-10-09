@@ -1,5 +1,5 @@
-use std::time::Duration;
 use ponyllm_core::telemetry::*;
+use std::time::Duration;
 
 #[test]
 fn test_flight_recorder_record_and_sanitize() {
@@ -31,7 +31,7 @@ fn test_flight_recorder_record_and_sanitize() {
     assert_eq!(frames.len(), 1);
     assert_eq!(frames[0].request_id, "req-123");
     assert_eq!(frames[0].status_code, Some(429));
-    
+
     // Key must be sanitized in output!
     assert_eq!(frames[0].sanitized_key, "sk-***cdef");
     // Requested model survives the record path for trace display.
@@ -100,7 +100,7 @@ fn test_flight_recorder_ring_buffer_capacity() {
             request_id: format!("req-{}", i),
             endpoint: "/v1/chat/completions".to_string(),
             provider: None,
-                model: None,
+            model: None,
             key_id: format!("key-{}", i),
             raw_key: None,
             attempt: None,
@@ -129,8 +129,22 @@ fn test_flight_recorder_ring_buffer_capacity() {
 fn test_metrics_collector() {
     let metrics = MetricsCollector::new();
 
-    metrics.record_request("/v1/chat/completions", Duration::from_millis(100), 50, 20, 10, true);
-    metrics.record_request("/v1/chat/completions", Duration::from_millis(200), 30, 10, 5, false);
+    metrics.record_request(
+        "/v1/chat/completions",
+        Duration::from_millis(100),
+        50,
+        20,
+        10,
+        true,
+    );
+    metrics.record_request(
+        "/v1/chat/completions",
+        Duration::from_millis(200),
+        30,
+        10,
+        5,
+        false,
+    );
 
     let summary = metrics.get_summary();
     assert_eq!(summary.total_requests, 2);
@@ -288,7 +302,11 @@ fn test_flight_recorder_preserves_distinct_attempt_failures() {
 
     let frames = recorder.get_recent_frames();
     // Both attempt 0 (failure) and attempt 1 (success) must be preserved in recorder!
-    assert_eq!(frames.len(), 2, "Both attempts should be recorded without being overwritten");
+    assert_eq!(
+        frames.len(),
+        2,
+        "Both attempts should be recorded without being overwritten"
+    );
     assert_eq!(frames[0].attempt, Some(0));
     assert_eq!(frames[0].error, Some("Upstream error 500".to_string()));
     assert_eq!(frames[1].attempt, Some(1));

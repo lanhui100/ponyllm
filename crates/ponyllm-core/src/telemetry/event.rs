@@ -1,9 +1,9 @@
+use parking_lot::RwLock;
+use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
-use parking_lot::RwLock;
-use serde::{Deserialize, Serialize};
 
 use super::metrics::StreamFlowSample;
 
@@ -136,11 +136,7 @@ pub struct EventCtx {
 }
 
 impl EventCtx {
-    pub fn new(
-        request_id: impl Into<String>,
-        endpoint: impl Into<String>,
-        start: Instant,
-    ) -> Self {
+    pub fn new(request_id: impl Into<String>, endpoint: impl Into<String>, start: Instant) -> Self {
         Self {
             request_id: request_id.into(),
             session_id: None,
@@ -205,12 +201,7 @@ impl EventBus {
         self.seg_dropped.load(Ordering::Relaxed)
     }
 
-    pub fn append(
-        &self,
-        ctx: &EventCtx,
-        provider: Option<String>,
-        event: GatewayEvent,
-    ) -> u64 {
+    pub fn append(&self, ctx: &EventCtx, provider: Option<String>, event: GatewayEvent) -> u64 {
         self.append_at(ctx, provider, event, wall_ms_now())
     }
 

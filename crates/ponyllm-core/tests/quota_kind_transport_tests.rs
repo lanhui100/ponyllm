@@ -18,8 +18,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::{routing::post, Json, Router};
 use axum::response::IntoResponse;
+use axum::{routing::post, Json, Router};
 use serde_json::json;
 
 use ponyllm_core::error::{CoreError, GatewayErrorKind};
@@ -72,7 +72,10 @@ async fn build_transport_scenario() -> (String, Arc<KeyPool>) {
     // inherit the unrelated quota signal from k3.
     pool.record_error("k3", quota_cooldown_error());
     assert_eq!(pool.get_key_status("k3"), Some(KeyState::CoolingDown));
-    assert!(pool.any_key_quota_cooldown(), "k3 must make the quota-cooldown visible");
+    assert!(
+        pool.any_key_quota_cooldown(),
+        "k3 must make the quota-cooldown visible"
+    );
 
     (endpoint, pool)
 }
@@ -84,8 +87,8 @@ async fn build_transport_scenario() -> (String, Arc<KeyPool>) {
 async fn all_transport_failures_with_unrelated_quota_cooldown_stay_upstream_unavailable_json() {
     let (endpoint, pool) = build_transport_scenario().await;
 
-    let executor = UpstreamExecutor::new(pool.clone(), 3)
-        .with_ttfb_timeout(Some(Duration::from_millis(50)));
+    let executor =
+        UpstreamExecutor::new(pool.clone(), 3).with_ttfb_timeout(Some(Duration::from_millis(50)));
     let err = executor
         .execute_json_request(&endpoint, &transport_payload())
         .await
@@ -124,8 +127,8 @@ async fn all_transport_failures_with_unrelated_quota_cooldown_stay_upstream_unav
 async fn all_transport_failures_with_unrelated_quota_cooldown_stay_upstream_unavailable_stream() {
     let (endpoint, pool) = build_transport_scenario().await;
 
-    let executor = UpstreamExecutor::new(pool.clone(), 3)
-        .with_ttfb_timeout(Some(Duration::from_millis(50)));
+    let executor =
+        UpstreamExecutor::new(pool.clone(), 3).with_ttfb_timeout(Some(Duration::from_millis(50)));
     let mut payload = transport_payload();
     payload["stream"] = json!(true);
 
@@ -171,8 +174,8 @@ async fn test_network_connection_failures_do_not_poison_keys_to_cooldown() {
 
     // Point to non-routable blackhole IP address (TEST-NET-1) to simulate network connect failure
     let dead_endpoint = "http://192.0.2.1:1/v1/chat/completions";
-    let executor = UpstreamExecutor::new(pool.clone(), 6)
-        .with_ttfb_timeout(Some(Duration::from_millis(50)));
+    let executor =
+        UpstreamExecutor::new(pool.clone(), 6).with_ttfb_timeout(Some(Duration::from_millis(50)));
 
     let mut payload = transport_payload();
     payload["stream"] = json!(true);
@@ -213,11 +216,14 @@ async fn test_network_connection_failures_do_not_poison_keys_to_cooldown() {
 
     // Verify circuit breaker: max attempts was 6, but network circuit breaker aborted after 3 consecutive failures
     match err {
-        CoreError::AllRetriesFailed { retries, attempted_keys, .. } => {
+        CoreError::AllRetriesFailed {
+            retries,
+            attempted_keys,
+            ..
+        } => {
             assert_eq!(retries, 3, "circuit breaker must trip after 3 consecutive network failures instead of wasting all 6 attempts");
             assert_eq!(attempted_keys.len(), 3);
         }
         other => panic!("expected AllRetriesFailed, got: {:?}", other),
     }
 }
-

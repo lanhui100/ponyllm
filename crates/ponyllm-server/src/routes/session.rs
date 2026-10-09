@@ -159,7 +159,7 @@ pub async fn handle_session_create(State(state): State<Arc<AppState>>, req: axum
 
     let verdict = crate::auth::authenticate(token.unwrap_or(""), &entries, &legacy, strict);
     match verdict {
-        crate::auth::AuthVerdict::Allowed { scope, key_id } => {
+        crate::auth::AuthVerdict::Allowed { scope, key_id, .. } => {
             // Success clears this pair's failure history.
             state.auth_ratelimiter.clear_failures(client_ip, prefix);
             let creator = key_id.unwrap_or_else(|| "legacy".to_string());

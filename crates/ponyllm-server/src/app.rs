@@ -114,6 +114,97 @@ async fn auth_middleware(
         return next.run(req).await;
     }
 
+    // B002: Web user plane (`/api/user/**`) is a JWT-ONLY namespace.
+    // - Disabled plane (`user_plane_enabled=false`): EVERYTHING under
+    //   `/api/user/` — including `/api/user/login` — is hidden (404). This
+    //   must be decided HERE, before the key-family authenticate below, so a
+    //   credential-less POST does not fall through to 401 (red anchor).
+    // - `/api/user/login`: self-authenticating handler (password + JWT issue).
+    // - Everything else: JWT-only. Verification failure is 401 with ZERO
+    //   fallback to the gateway-key family (an admin-scope machine key
+    //   presented against `/api/user/**` must still 401).
+    if path.starts_with("/api/user/") {
+        if !state.user_plane_enabled {
+            return global_fallback().await.into_response();
+        }
+        if path == "/api/user/login" {
+            // Resolve the client IP once (same F3 trust model as the rest of
+            // the middleware) and hand it to the login handler for
+            // check-before-hash rate limiting (ADR: 登录限流复用 AuthRateLimiter
+            // 加 "login" 前缀).
+            let remote_peer: IpAddr = req
+                .extensions()
+                .get::<axum::extract::ConnectInfo<SocketAddr>>()
+                .map(|c| c.0.ip())
+                .unwrap_or(IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
+            let trusted = state.trusted_proxies.read().clone();
+            let client_ip = crate::auth::resolve_client_ip(
+                req.headers()
+                    .get("x-forwarded-for")
+                    .and_then(|v| v.to_str().ok()),
+                req.headers().get("x-real-ip").and_then(|v| v.to_str().ok()),
+                remote_peer,
+                &trusted,
+            );
+            let mut req = req;
+            req.extensions_mut().insert(crate::auth::ClientIp(client_ip));
+            return next.run(req).await;
+        }
+        let headers = req.headers();
+        let provided: Option<&str> = headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.trim())
+            .filter(|s| {
+                let lower = s.to_ascii_lowercase();
+                lower.starts_with("bearer ")
+            })
+            .map(|s| s[7..].trim());
+        let Some(token) = provided.filter(|t| !t.is_empty()) else {
+            return crate::auth::unauthorized(
+                "Missing or invalid Authorization header: /api/user/** requires a JWT Bearer token",
+            );
+        };
+        let Some(secret) = state.jwt_secret.clone() else {
+            tracing::error!("B002: JWT secret unavailable while user plane enabled");
+            return crate::auth::unauthorized("JWT verification unavailable");
+        };
+        let verified = crate::auth::verify_user_jwt(
+            token,
+            &secret,
+            state.jwt_issuer,
+            &state.user_tracker,
+        );
+        let claims = match verified {
+            Ok(c) => c,
+            Err(kind) => {
+                let msg = match kind {
+                    crate::auth::JwtRejection::Expired => "token expired",
+                    crate::auth::JwtRejection::Invalid
+                    | crate::auth::JwtRejection::UserInvalid => "invalid token",
+                };
+                return crate::auth::unauthorized(msg);
+            }
+        };
+        // Role gating (independent of the gateway-key scope matrix):
+        // `/api/user/admin/**` requires claims.role == "admin".
+        let is_admin_route = path.starts_with("/api/user/admin/") || path == "/api/user/admin";
+        if is_admin_route && claims.role != "admin" {
+            return crate::auth::forbidden("user-admin");
+        }
+        let mut req = req;
+        if let Ok(val) = axum::http::HeaderValue::from_str(&claims.sub) {
+            req.headers_mut()
+                .insert(axum::http::HeaderName::from_static("x-user-id"), val);
+        }
+        req.extensions_mut().insert(crate::auth::CallerIdentity {
+            scope: ponyllm_config::KeyScope::Admin,
+            key_id: None,
+            user_id: Some(claims.sub.clone()),
+        });
+        return next.run(req).await;
+    }
+
     let (legacy_key, entries, compat, auth_mode) = {
         let cfg = state.config.read();
         (
@@ -276,6 +367,8 @@ async fn auth_middleware(
             Resource::TeleFull => "telemetry-full",
             Resource::TeleSummary => "telemetry-summary",
             Resource::Quota => "quota",
+            Resource::UserSelf => "user-self",
+            Resource::UserAdmin => "user-admin",
             Resource::Exempt => "exempt",
         };
         tracing::warn!(client_ip = %client_ip_str, user_agent, %method, %path, scope = scope.as_str(), resource = name, reason = "privilege_boundary_violation", "admin privilege boundary violation rejected (403, session cookie)");
@@ -367,12 +460,37 @@ async fn auth_middleware(
             );
             crate::auth::legacy_disabled()
         }
-        AuthVerdict::Allowed { scope, .. } => {
+        AuthVerdict::Allowed { scope, key_id, user_id } => {
             let resource = classify_resource(&method, &path, query.as_deref());
             if matches!(resource, Resource::Exempt) {
                 return next.run(req).await;
             }
             if scope_allows(scope, resource) {
+                let mut req = req;
+                if let Some(uid) = user_id.as_deref() {
+                    if let Ok(val) = axum::http::HeaderValue::from_str(uid) {
+                        req.headers_mut().insert(
+                            axum::http::HeaderName::from_static("x-user-id"),
+                            val,
+                        );
+                    }
+                }
+                // B002: surface the authenticated gateway key id to inference
+                // handlers so the token quota gate / settlement can key on it
+                // (same header-injection pattern as x-user-id).
+                if let Some(kid) = key_id.as_deref() {
+                    if let Ok(val) = axum::http::HeaderValue::from_str(kid) {
+                        req.headers_mut().insert(
+                            axum::http::HeaderName::from_static("x-key-id"),
+                            val,
+                        );
+                    }
+                }
+                req.extensions_mut().insert(crate::auth::CallerIdentity {
+                    scope,
+                    key_id,
+                    user_id,
+                });
                 next.run(req).await
             } else {
                 let name = match resource {
@@ -382,6 +500,8 @@ async fn auth_middleware(
                     Resource::TeleFull => "telemetry-full",
                     Resource::TeleSummary => "telemetry-summary",
                     Resource::Quota => "quota",
+                    Resource::UserSelf => "user-self",
+                    Resource::UserAdmin => "user-admin",
                     Resource::Exempt => "exempt",
                 };
                 if path.starts_with("/api/admin") {
@@ -510,6 +630,10 @@ pub fn create_app(state: Arc<AppState>) -> Router {
         .route("/telemetry/history", get(handle_get_history))
         .route("/v1/telemetry/history", get(handle_get_history))
         .merge(admin_routes())
+        // B002: Web user plane mounted under the SAME auth_middleware layer —
+        // the middleware owns `/api/user/**` (JWT-only / disabled-404), so the
+        // router itself needs no extra protection.
+        .merge(crate::routes::user::user_routes())
         .layer(from_fn_with_state(state.clone(), auth_middleware));
 
     // Phase-3 (VULN-05): session API mounted AFTER the auth layer — the

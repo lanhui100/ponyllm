@@ -16,7 +16,6 @@ import type {
   ProviderView,
   ModelView,
   KeyView,
-  StrategyView,
   CreateKeyResponse,
   KeyTestView,
 } from '../types/admin';
@@ -33,14 +32,13 @@ describe('useAdminConfig composable (WEB-04 Governance & Admin CUD)', () => {
     expect(config.providers.value).toEqual([]);
     expect(config.models.value).toEqual([]);
     expect(config.keys.value).toEqual([]);
-    expect(config.strategy.value).toBe('economy');
     expect(config.configVersion.value).toBe(0);
     expect(config.adminWriteEnabled.value).toBe(false);
     expect(config.conflictDetected.value).toBe(false);
     expect(config.createdKeyResult.value).toBeNull();
   });
 
-  it('fetchAll updates overview, resources, strategy and configVersion', async () => {
+  it('fetchAll updates overview, resources and configVersion', async () => {
     const mockOverview: OverviewView = {
       version: '0.2.26',
       bind: '127.0.0.1:8080',
@@ -48,7 +46,6 @@ describe('useAdminConfig composable (WEB-04 Governance & Admin CUD)', () => {
       providers: 1,
       keys: 2,
       keys_active: 2,
-      strategy: 'balanced',
       hot_reload_ms: 1000,
       admin_write_enabled: true,
       config_version: 42,
@@ -89,11 +86,6 @@ describe('useAdminConfig composable (WEB-04 Governance & Admin CUD)', () => {
       },
     ];
 
-    const mockStrategy: StrategyView = {
-      strategy: 'balanced',
-      config_version: 42,
-    };
-
     vi.spyOn(adminApi, 'getOverview').mockReturnValue({
       send: () => Promise.resolve(mockOverview),
     } as any);
@@ -106,9 +98,6 @@ describe('useAdminConfig composable (WEB-04 Governance & Admin CUD)', () => {
     vi.spyOn(adminApi, 'getKeys').mockReturnValue({
       send: () => Promise.resolve(mockKeys),
     } as any);
-    vi.spyOn(adminApi, 'getStrategy').mockReturnValue({
-      send: () => Promise.resolve(mockStrategy),
-    } as any);
 
     const config = useAdminConfig({ autoFetch: false });
     await config.fetchAll();
@@ -117,7 +106,6 @@ describe('useAdminConfig composable (WEB-04 Governance & Admin CUD)', () => {
     expect(config.providers.value).toEqual(mockProviders);
     expect(config.models.value).toEqual(mockModels);
     expect(config.keys.value).toEqual(mockKeys);
-    expect(config.strategy.value).toBe('balanced');
     expect(config.configVersion.value).toBe(42);
     expect(config.adminWriteEnabled.value).toBe(true);
   });
@@ -130,16 +118,10 @@ describe('useAdminConfig composable (WEB-04 Governance & Admin CUD)', () => {
       providers: 1,
       keys: 1,
       keys_active: 1,
-      strategy: 'performance',
       hot_reload_ms: 500,
       admin_write_enabled: true,
       config_version: 99,
     };
-    const mockStrategySilent: StrategyView = {
-      strategy: 'performance',
-      config_version: 99,
-    };
-
     vi.spyOn(adminApi, 'getOverview').mockReturnValue({
       send: () => Promise.resolve(mockOverviewSilent),
     } as any);
@@ -152,9 +134,6 @@ describe('useAdminConfig composable (WEB-04 Governance & Admin CUD)', () => {
     vi.spyOn(adminApi, 'getKeys').mockReturnValue({
       send: () => Promise.resolve([]),
     } as any);
-    vi.spyOn(adminApi, 'getStrategy').mockReturnValue({
-      send: () => Promise.resolve(mockStrategySilent),
-    } as any);
 
     const config = useAdminConfig({ autoFetch: false });
     expect(config.loading.value).toBe(false);
@@ -162,7 +141,6 @@ describe('useAdminConfig composable (WEB-04 Governance & Admin CUD)', () => {
     await config.refreshSilent();
 
     expect(config.loading.value).toBe(false);
-    expect(config.strategy.value).toBe('performance');
     expect(config.configVersion.value).toBe(99);
   });
 
@@ -200,7 +178,6 @@ describe('useAdminConfig composable (WEB-04 Governance & Admin CUD)', () => {
       providers: 0,
       keys: 0,
       keys_active: 0,
-      strategy: 'economy',
       hot_reload_ms: 500,
       admin_write_enabled: true,
       config_version: 11,
@@ -209,9 +186,6 @@ describe('useAdminConfig composable (WEB-04 Governance & Admin CUD)', () => {
     vi.spyOn(adminApi, 'getProviders').mockReturnValue({ send: () => Promise.resolve([]) } as any);
     vi.spyOn(adminApi, 'getModels').mockReturnValue({ send: () => Promise.resolve([]) } as any);
     vi.spyOn(adminApi, 'getKeys').mockReturnValue({ send: () => Promise.resolve([]) } as any);
-    vi.spyOn(adminApi, 'getStrategy').mockReturnValue({
-      send: () => Promise.resolve({ strategy: 'economy', config_version: 11 }),
-    } as any);
 
     const config = useAdminConfig({ autoFetch: false });
     config.configVersion.value = 10;
@@ -351,7 +325,6 @@ describe('useAdminConfig composable (WEB-04 Governance & Admin CUD)', () => {
     } as any);
     vi.spyOn(adminApi, 'getModels').mockReturnValue({ send: () => Promise.resolve([]) } as any);
     vi.spyOn(adminApi, 'getKeys').mockReturnValue({ send: () => Promise.resolve([]) } as any);
-    vi.spyOn(adminApi, 'getStrategy').mockReturnValue({ send: () => Promise.resolve({ strategy: 'round_robin' } as any) } as any);
 
     const config = useAdminConfig({ autoFetch: false });
 

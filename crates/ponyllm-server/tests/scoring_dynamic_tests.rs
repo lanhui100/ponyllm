@@ -77,7 +77,6 @@ fn test_node_latency_metrics_dynamic_update_and_speed_scoring() {
     providers.insert("slow_node".to_string(), p_slow);
 
     let gw_config = GatewayConfig {
-        default_strategy: GatewayRoutingStrategy::Speed,
         providers,
         ..Default::default()
     };

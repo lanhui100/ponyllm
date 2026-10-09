@@ -81,6 +81,37 @@ pub async fn handle_messages(
             .into_response();
     }
 
+    // User access & quota check
+    let caller_user_id = headers
+        .get("x-user-id")
+        .and_then(|h| h.to_str().ok())
+        .map(|s| s.trim().to_string());
+    if let Some(uid) = caller_user_id.as_deref() {
+        if let Err(err) = state.user_tracker.check_access(uid, &req.model) {
+            let status = match err {
+                ponyllm_core::UserCheckError::QuotaExhausted { .. } => StatusCode::TOO_MANY_REQUESTS,
+                _ => StatusCode::FORBIDDEN,
+            };
+            return (
+                status,
+                Json(serde_json::json!({
+                    "type": "error",
+                    "error": {
+                        "type": "invalid_request_error",
+                        "message": err.to_string(),
+                    }
+                })),
+            )
+                .into_response();
+        }
+    }
+
+    // B002 token gate: per-key quota + model_limits intersection (second,
+    // multiplicative gate after the user gate).
+    if let Err(resp) = crate::routes::gate::token_gate(&state, &headers, &req.model) {
+        return resp;
+    }
+
     // 1. Extract optional X-Pony-Strategy header
     let header_strategy = headers
         .get("x-pony-strategy")
@@ -1166,6 +1197,15 @@ pub async fn handle_messages(
                         .saturating_add(cached_create);
                     let cached_tokens = cached_read;
                     let completion_tokens = ant_resp.usage.output_tokens as u64;
+                    if let Some(uid) = caller_user_id.as_deref() {
+                        state.user_tracker.record_tokens(uid, prompt_tokens + completion_tokens);
+                    }
+                    // B002 double settlement: token-leg accounting.
+                    crate::routes::gate::token_record_tokens(
+                        &state,
+                        &headers,
+                        prompt_tokens + completion_tokens,
+                    );
                     if let Some(kid) = winning_key_id.as_deref() {
                         let wall_ms = std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)

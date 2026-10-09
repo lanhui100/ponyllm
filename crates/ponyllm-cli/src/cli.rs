@@ -68,10 +68,6 @@ pub enum Commands {
     #[command(subcommand)]
     Model(ModelCommands),
 
-    /// Manage global gateway routing strategy (economy, speed, reliable, balanced)
-    #[command(subcommand)]
-    Strategy(StrategyCommands),
-
     /// View, set or rotate gateway access API Token (Gateway API Key)
     Auth {
         /// Path to configuration file
@@ -94,6 +90,10 @@ pub enum Commands {
     /// Manage scoped gateway keys (P1: admin/inference/readonly; replaces sharing one token)
     #[command(subcommand)]
     Keys(KeysCommands),
+
+    /// Manage users and quota budgets
+    #[command(subcommand)]
+    User(UserCommands),
 
     /// Launch interactive full-screen TUI terminal dashboard
     #[command(alias = "dashboard", alias = "top")]
@@ -288,26 +288,6 @@ pub enum Commands {
 }
 
 #[derive(Debug, Subcommand)]
-pub enum StrategyCommands {
-    /// List all available routing strategies with human-friendly descriptions
-    List,
-    /// Get current default gateway strategy
-    Get {
-        /// Path to configuration file
-        #[arg(short, long)]
-        config: Option<String>,
-    },
-    /// Set default gateway strategy (economy, speed, reliable, balanced)
-    Set {
-        /// Strategy name (economy, speed, reliable, balanced, or shorthand e/s/r/b)
-        strategy: String,
-        /// Path to configuration file
-        #[arg(short, long)]
-        config: Option<String>,
-    },
-}
-
-#[derive(Debug, Subcommand)]
 pub enum KeysCommands {
     /// List scoped gateway keys (id/scope/prefix, never plaintext)
     List {
@@ -323,6 +303,9 @@ pub enum KeysCommands {
         /// Stable identifier (e.g. agent-ci-1)
         #[arg(short, long)]
         id: Option<String>,
+        /// Optional bound user ID
+        #[arg(short, long)]
+        user: Option<String>,
         /// Path to configuration file
         #[arg(short, long)]
         config: Option<String>,
@@ -332,6 +315,58 @@ pub enum KeysCommands {
         /// Key id to revoke
         #[arg(short, long)]
         id: String,
+        /// Path to configuration file
+        #[arg(short, long)]
+        config: Option<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum UserCommands {
+    /// List all configured users
+    List {
+        /// Path to configuration file
+        #[arg(short, long)]
+        config: Option<String>,
+    },
+    /// Add or update a managed user
+    Add {
+        /// Unique user identifier
+        id: String,
+        /// Optional human-readable name or email
+        #[arg(short, long)]
+        name: Option<String>,
+        /// Comma-separated list of allowed models (or wildcards like 'openai/*')
+        #[arg(short, long)]
+        models: Option<String>,
+        /// Maximum token budget (lifetime)
+        #[arg(long)]
+        max_tokens: Option<u64>,
+        /// Whether user is enabled (default true)
+        #[arg(long, default_value_t = true)]
+        enabled: bool,
+        /// Path to configuration file
+        #[arg(short, long)]
+        config: Option<String>,
+    },
+    /// Remove a user by identifier
+    Remove {
+        /// User id to remove
+        id: String,
+        /// Path to configuration file
+        #[arg(short, long)]
+        config: Option<String>,
+    },
+    /// Reset token usage counter for a user (via running gateway)
+    ResetUsage {
+        /// User id to reset
+        id: String,
+        /// Target gateway URL
+        #[arg(short, long, default_value = "http://127.0.0.1:8080")]
+        gateway_url: String,
+        /// Gateway access API key
+        #[arg(long)]
+        api_key: Option<String>,
         /// Path to configuration file
         #[arg(short, long)]
         config: Option<String>,
@@ -647,7 +682,11 @@ pub fn format_web_status_url(base_url: &str, web_enabled: bool, api_key: &str) -
     }
     let trimmed = base_url.trim_end_matches('/');
     if !api_key.is_empty() && !api_key.eq_ignore_ascii_case("none") {
-        format!("{}/#token={}", trimmed, percent_encode(api_key.as_bytes(), ENCODE_COMPONENT_SET))
+        format!(
+            "{}/#token={}",
+            trimmed,
+            percent_encode(api_key.as_bytes(), ENCODE_COMPONENT_SET)
+        )
     } else {
         format!("{}/", trimmed)
     }
@@ -695,7 +734,12 @@ mod tests {
     fn test_web_subcommand_defaults() {
         let cli = Cli::parse_from(["ponyllm", "web"]);
         match cli.command {
-            Commands::Web { port, address, no_open, .. } => {
+            Commands::Web {
+                port,
+                address,
+                no_open,
+                ..
+            } => {
                 assert_eq!(port, 18080);
                 assert_eq!(address, "127.0.0.1");
                 assert!(!no_open);

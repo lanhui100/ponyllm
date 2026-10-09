@@ -1,6 +1,6 @@
+use ponyllm_core::pool::*;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
-use ponyllm_core::pool::*;
 
 #[test]
 fn test_key_pool_round_robin() {
@@ -41,7 +41,12 @@ fn test_key_cooldown_on_429_and_automatic_failover() {
     assert_eq!(k1.id, "primary");
 
     // Primary hits 429 Rate Limit
-    pool.record_error("primary", PoolErrorType::RateLimit { retry_after: Some(Duration::from_millis(50)) });
+    pool.record_error(
+        "primary",
+        PoolErrorType::RateLimit {
+            retry_after: Some(Duration::from_millis(50)),
+        },
+    );
 
     // Next selection should automatically failover to backup!
     let k2 = pool.select_key().unwrap();
@@ -91,9 +96,7 @@ fn test_key_pool_priority_stickiness_failover_and_stick_back() {
     }
 
     // 4. In-request retry exclusion still routes around the primary.
-    let k = pool
-        .select_key_excluding(&["primary".to_string()])
-        .unwrap();
+    let k = pool.select_key_excluding(&["primary".to_string()]).unwrap();
     assert_eq!(k.id, "backup");
 }
 
@@ -104,7 +107,12 @@ fn test_key_cooling_on_quota_exhausted() {
     pool.add_key(ApiKeyEntry::new("k2", "sk-ds-2", 1, 10));
 
     // k1 hits quota exceeded -> cools down (never permanently disabled)
-    pool.record_error("k1", PoolErrorType::QuotaExhausted { retry_after: Some(Duration::from_secs(60)) });
+    pool.record_error(
+        "k1",
+        PoolErrorType::QuotaExhausted {
+            retry_after: Some(Duration::from_secs(60)),
+        },
+    );
     assert_eq!(pool.get_key_status("k1"), Some(KeyState::CoolingDown));
 
     // Only k2 should be returned while k1 cools
@@ -185,7 +193,16 @@ fn test_concurrent_cooldowns_keep_mirror_in_sync() {
     // one thread must never coexist with an older wall-clock mirror, or the
     // Web badge under-reports and hides the hint while the key still cools.
     let entry = Arc::new(ApiKeyEntry::new("ag-1", "sk-1", 1, 10));
-    let durations = [3600u64, 5400, 7200, 9000, 10800, 12600, 14400, 15 * 3600 + 21 * 60];
+    let durations = [
+        3600u64,
+        5400,
+        7200,
+        9000,
+        10800,
+        12600,
+        14400,
+        15 * 3600 + 21 * 60,
+    ];
     let mut handles = Vec::new();
     for secs in durations {
         let e = entry.clone();
@@ -253,7 +270,10 @@ fn test_breaker_allows_isolate_above_floor() {
     assert_eq!(pool.get_key_status("k1"), Some(KeyState::Disabled));
     assert_eq!(
         pool.key_disabled_reason("k1"),
-        Some("Account policy violation / Terms of Service suspension (permanent isolate)".to_string())
+        Some(
+            "Account policy violation / Terms of Service suspension (permanent isolate)"
+                .to_string()
+        )
     );
 
     // Isolating a second key would leave 1/3 alive: breaker trips.
@@ -281,7 +301,8 @@ fn test_rate_limit_default_cooldown_duration() {
     // Default cooldown should be ~3s (base) + jitter, cooperating with downstream retry curves
     let remaining = cd_until.saturating_duration_since(std::time::Instant::now());
     assert!(
-        remaining >= std::time::Duration::from_secs(2) && remaining <= std::time::Duration::from_secs(4),
+        remaining >= std::time::Duration::from_secs(2)
+            && remaining <= std::time::Duration::from_secs(4),
         "Expected cooldown ~3s for first 429 (cooperate with downstream 1.5-3s retry), got {:?}",
         remaining
     );
@@ -295,22 +316,31 @@ fn test_rate_limit_exponential_backoff_progression() {
     entry.record_failure(PoolErrorType::RateLimit { retry_after: None });
     let cd1 = entry.stats.cooldown_until.read().unwrap();
     let r1 = cd1.saturating_duration_since(std::time::Instant::now());
-    assert!(r1 >= Duration::from_secs(2) && r1 <= Duration::from_secs(4),
-        "1st 429: expected ~3s, got {:?}", r1);
+    assert!(
+        r1 >= Duration::from_secs(2) && r1 <= Duration::from_secs(4),
+        "1st 429: expected ~3s, got {:?}",
+        r1
+    );
 
     // Second 429: ~6s
     entry.record_failure(PoolErrorType::RateLimit { retry_after: None });
     let cd2 = entry.stats.cooldown_until.read().unwrap();
     let r2 = cd2.saturating_duration_since(std::time::Instant::now());
-    assert!(r2 >= Duration::from_secs(5) && r2 <= Duration::from_secs(7),
-        "2nd 429: expected ~6s, got {:?}", r2);
+    assert!(
+        r2 >= Duration::from_secs(5) && r2 <= Duration::from_secs(7),
+        "2nd 429: expected ~6s, got {:?}",
+        r2
+    );
 
     // Third 429: ~12s
     entry.record_failure(PoolErrorType::RateLimit { retry_after: None });
     let cd3 = entry.stats.cooldown_until.read().unwrap();
     let r3 = cd3.saturating_duration_since(std::time::Instant::now());
-    assert!(r3 >= Duration::from_secs(11) && r3 <= Duration::from_secs(13),
-        "3rd 429: expected ~12s, got {:?}", r3);
+    assert!(
+        r3 >= Duration::from_secs(11) && r3 <= Duration::from_secs(13),
+        "3rd 429: expected ~12s, got {:?}",
+        r3
+    );
 }
 
 #[test]
@@ -324,8 +354,11 @@ fn test_rate_limit_cooldown_capped_at_60s() {
 
     let cd = entry.stats.cooldown_until.read().unwrap();
     let remaining = cd.saturating_duration_since(std::time::Instant::now());
-    assert!(remaining <= Duration::from_secs(61),
-        "Cooldown should cap at 60s, got {:?}", remaining);
+    assert!(
+        remaining <= Duration::from_secs(61),
+        "Cooldown should cap at 60s, got {:?}",
+        remaining
+    );
 }
 
 #[test]
@@ -360,21 +393,36 @@ fn test_two_key_pool_tos_second_strike_permanent_isolation() {
     assert_eq!(pool.get_key_status("k1"), Some(KeyState::Disabled));
 }
 
-
 // --- Antigravity quota-group aware scheduling (ADR 2026-10-04) ---
 
 #[test]
 fn test_classify_quota_family() {
     use ponyllm_core::pool::entry::{classify_quota_family, QuotaFamily};
-    assert_eq!(classify_quota_family("gemini-3.8-flash-high"), Some(QuotaFamily::Gemini));
-    assert_eq!(classify_quota_family("gemini-2.5-pro"), Some(QuotaFamily::Gemini));
-    assert_eq!(classify_quota_family("claude-sonnet-4-6"), Some(QuotaFamily::ThirdParty));
-    assert_eq!(classify_quota_family("gpt-oss-120b-medium"), Some(QuotaFamily::ThirdParty));
+    assert_eq!(
+        classify_quota_family("gemini-3.8-flash-high"),
+        Some(QuotaFamily::Gemini)
+    );
+    assert_eq!(
+        classify_quota_family("gemini-2.5-pro"),
+        Some(QuotaFamily::Gemini)
+    );
+    assert_eq!(
+        classify_quota_family("claude-sonnet-4-6"),
+        Some(QuotaFamily::ThirdParty)
+    );
+    assert_eq!(
+        classify_quota_family("gpt-oss-120b-medium"),
+        Some(QuotaFamily::ThirdParty)
+    );
     assert_eq!(classify_quota_family("deepseek-v4-flash"), None);
     assert_eq!(classify_quota_family(""), None);
 }
 
-fn weekly_bucket(bucket_id: &str, remaining: f64, reset: chrono::DateTime<chrono::Utc>) -> ponyllm_core::pool::antigravity::QuotaSummaryBucket {
+fn weekly_bucket(
+    bucket_id: &str,
+    remaining: f64,
+    reset: chrono::DateTime<chrono::Utc>,
+) -> ponyllm_core::pool::antigravity::QuotaSummaryBucket {
     ponyllm_core::pool::antigravity::QuotaSummaryBucket {
         bucket_id: bucket_id.to_string(),
         window: "weekly".to_string(),
@@ -386,7 +434,10 @@ fn weekly_bucket(bucket_id: &str, remaining: f64, reset: chrono::DateTime<chrono
     }
 }
 
-fn gemini_groups(gemini_weekly: f64, reset: chrono::DateTime<chrono::Utc>) -> Vec<ponyllm_core::pool::antigravity::QuotaSummaryGroup> {
+fn gemini_groups(
+    gemini_weekly: f64,
+    reset: chrono::DateTime<chrono::Utc>,
+) -> Vec<ponyllm_core::pool::antigravity::QuotaSummaryGroup> {
     vec![
         ponyllm_core::pool::antigravity::QuotaSummaryGroup {
             display_name: "Gemini Models".to_string(),
@@ -424,39 +475,55 @@ fn test_apply_quota_groups_never_writes_family_ledger_and_only_decays() {
     let future = now + chrono::Duration::hours(24);
 
     entry.apply_quota_groups(Some(&gemini_groups(0.0, future)), now);
-    assert!(!entry.quota_group_exhausted_for(Some(ponyllm_core::pool::entry::QuotaFamily::Gemini), now));
-    assert!(!entry.quota_group_exhausted_for(Some(ponyllm_core::pool::entry::QuotaFamily::ThirdParty), now));
+    assert!(
+        !entry.quota_group_exhausted_for(Some(ponyllm_core::pool::entry::QuotaFamily::Gemini), now)
+    );
+    assert!(!entry.quota_group_exhausted_for(
+        Some(ponyllm_core::pool::entry::QuotaFamily::ThirdParty),
+        now
+    ));
     assert!(!entry.quota_group_exhausted_for(None, now));
 
     entry.apply_quota_groups(Some(&gemini_groups(1.0, future)), now);
-    assert!(!entry.quota_group_exhausted_for(Some(ponyllm_core::pool::entry::QuotaFamily::Gemini), now));
+    assert!(
+        !entry.quota_group_exhausted_for(Some(ponyllm_core::pool::entry::QuotaFamily::Gemini), now)
+    );
 
     let past = now - chrono::Duration::hours(1);
     entry.apply_quota_groups(Some(&gemini_groups(0.0, past)), now);
-    assert!(!entry.quota_group_exhausted_for(Some(ponyllm_core::pool::entry::QuotaFamily::Gemini), now));
+    assert!(
+        !entry.quota_group_exhausted_for(Some(ponyllm_core::pool::entry::QuotaFamily::Gemini), now)
+    );
 
     // Decay: a pre-existing (real 429) ledger entry whose reset has passed
     // is pruned; one still in the future survives.
     let past_ledger = std::collections::HashMap::from([
-        ("Gemini Models".to_string(), now - chrono::Duration::hours(1)),
+        (
+            "Gemini Models".to_string(),
+            now - chrono::Duration::hours(1),
+        ),
         ("Claude and GPT models".to_string(), future),
     ]);
     entry.restore_quota_group_exhaustions(past_ledger);
     entry.apply_quota_groups(None, now);
     let pruned = entry.quota_group_exhaustions();
-    assert!(!pruned.contains_key("Gemini Models"), "expired entry must be pruned");
-    assert!(pruned.contains_key("Claude and GPT models"), "live entry must survive");
+    assert!(
+        !pruned.contains_key("Gemini Models"),
+        "expired entry must be pruned"
+    );
+    assert!(
+        pruned.contains_key("Claude and GPT models"),
+        "live entry must survive"
+    );
 
     // Real 429 writeback is the only writer; snapshot/restore round-trips
     // it verbatim through the pool rebuild path (hot-reload survival).
-    entry.set_family_quota_exhausted(
-        ponyllm_core::pool::entry::QuotaFamily::Gemini,
-        future,
-    );
+    entry.set_family_quota_exhausted(ponyllm_core::pool::entry::QuotaFamily::Gemini, future);
     let ledger = entry.quota_group_exhaustions();
     let revived = ApiKeyEntry::new("ag-1", "sk-1", 1, 10);
     revived.restore_quota_group_exhaustions(ledger);
-    assert!(revived.quota_group_exhausted_for(Some(ponyllm_core::pool::entry::QuotaFamily::Gemini), now));
+    assert!(revived
+        .quota_group_exhausted_for(Some(ponyllm_core::pool::entry::QuotaFamily::Gemini), now));
 }
 
 #[test]
@@ -471,28 +538,41 @@ fn test_pool_family_selection_does_not_pre_reject_group_exhausted_key() {
     let key2 = ApiKeyEntry::new("ag-healthy", "sk-2", 2, 10);
     let now = chrono::Utc::now();
     let future = now + chrono::Duration::hours(24);
-    key1.set_family_quota_exhausted(
-        ponyllm_core::pool::entry::QuotaFamily::Gemini,
-        future,
-    );
+    key1.set_family_quota_exhausted(ponyllm_core::pool::entry::QuotaFamily::Gemini, future);
     pool.add_key(key1);
     pool.add_key(key2);
 
     // The verdict is recorded in the ledger (read path stays faithful)…
     let snapshot = pool.snapshot_keys();
-    let k1 = snapshot.iter().find(|k| k.id == "ag-gemini-exhausted").unwrap();
+    let k1 = snapshot
+        .iter()
+        .find(|k| k.id == "ag-gemini-exhausted")
+        .unwrap();
     assert!(k1.quota_group_exhausted_for(Some(ponyllm_core::pool::entry::QuotaFamily::Gemini), now));
-    assert!(!k1.quota_group_exhausted_for(Some(ponyllm_core::pool::entry::QuotaFamily::ThirdParty), now));
+    assert!(!k1.quota_group_exhausted_for(
+        Some(ponyllm_core::pool::entry::QuotaFamily::ThirdParty),
+        now
+    ));
 
     // …but selection is NOT driven by it: the higher-priority key is still picked.
     let gemini_key = pool
-        .select_key_with_affinity_for_family(None, &[], None, Some(ponyllm_core::pool::entry::QuotaFamily::Gemini))
+        .select_key_with_affinity_for_family(
+            None,
+            &[],
+            None,
+            Some(ponyllm_core::pool::entry::QuotaFamily::Gemini),
+        )
         .unwrap();
     assert_eq!(gemini_key.id, "ag-gemini-exhausted");
 
     // Third-party selection likewise.
     let third_party_key = pool
-        .select_key_with_affinity_for_family(None, &[], None, Some(ponyllm_core::pool::entry::QuotaFamily::ThirdParty))
+        .select_key_with_affinity_for_family(
+            None,
+            &[],
+            None,
+            Some(ponyllm_core::pool::entry::QuotaFamily::ThirdParty),
+        )
         .unwrap();
     assert_eq!(third_party_key.id, "ag-gemini-exhausted");
 
@@ -586,8 +666,13 @@ fn test_set_family_quota_exhausted_and_pool_helpers() {
         .set_family_quota_exhausted(QuotaFamily::Gemini, reset);
 
     assert!(pool.any_key_family_exhausted_any());
-    let earliest = pool.earliest_family_reset_any().expect("family reset hint present");
-    assert!(earliest > std::time::Duration::from_secs(3 * 3600) && earliest <= std::time::Duration::from_secs(4 * 3600 + 1));
+    let earliest = pool
+        .earliest_family_reset_any()
+        .expect("family reset hint present");
+    assert!(
+        earliest > std::time::Duration::from_secs(3 * 3600)
+            && earliest <= std::time::Duration::from_secs(4 * 3600 + 1)
+    );
 
     // A family-exhausted key is still Active (not cooled) — this is exactly
     // the H1 boundary case the route-level guard must catch via

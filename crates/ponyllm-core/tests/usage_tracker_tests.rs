@@ -1,6 +1,6 @@
 use ponyllm_core::pool::usage::{
-    aligned_period_observations, KeyUsageStateSnapshot, KeyUsageTracker,
-    PoolCycleBenchmark, CYCLE_KIND_5H, CYCLE_KIND_WEEKLY, FIVE_HOURS_MS, SEVEN_DAYS_MS,
+    aligned_period_observations, KeyUsageStateSnapshot, KeyUsageTracker, PoolCycleBenchmark,
+    CYCLE_KIND_5H, CYCLE_KIND_WEEKLY, FIVE_HOURS_MS, SEVEN_DAYS_MS,
 };
 use ponyllm_core::pool::{ApiKeyEntry, KeyPool, RoutingStrategy};
 use std::collections::BTreeMap;
@@ -57,7 +57,11 @@ fn test_capacity_estimation_and_tier_inference() {
     let est1 = tracker.estimate_capacity(t1, Some(0.80));
     assert!(est1.estimated_capacity_5h.is_some());
     let cap = est1.estimated_capacity_5h.unwrap();
-    assert!(cap >= 400_000 && cap <= 700_000, "inferred cap {} out of expected range", cap);
+    assert!(
+        cap >= 400_000 && cap <= 700_000,
+        "inferred cap {} out of expected range",
+        cap
+    );
     assert!(est1.estimated_tokens_remaining_5h.is_some());
     assert_eq!(est1.account_tier, "pro"); // >= 350k is pro tier
     assert!(est1.confidence >= 0.8);
@@ -163,7 +167,11 @@ fn test_completed_cycles_carry_monotonic_seq_across_snapshot_roundtrip() {
     assert_eq!(snap.completed_5h_records[0].seq, 1);
     assert_eq!(snap.completed_weekly_records[0].kind, CYCLE_KIND_WEEKLY);
     assert_eq!(snap.completed_weekly_records[0].seq, 2);
-    assert!(snap.next_cycle_seq >= 2, "counter advanced: {}", snap.next_cycle_seq);
+    assert!(
+        snap.next_cycle_seq >= 2,
+        "counter advanced: {}",
+        snap.next_cycle_seq
+    );
 
     // Roundtrip: restore into a fresh tracker preserves records + seq counter.
     let fresh = KeyUsageTracker::new();

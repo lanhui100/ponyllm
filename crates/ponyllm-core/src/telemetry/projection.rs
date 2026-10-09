@@ -1,7 +1,7 @@
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use parking_lot::RwLock;
 
 use super::event::{EventEnvelope, GatewayEvent, Projection};
 use super::metrics::MetricsCollector;
@@ -68,10 +68,13 @@ impl Projection for MetricsProjection {
                         false,
                     );
                 } else {
-                    self.inner.record_request(&env.endpoint, ms(0.0), 0, 0, 0, false);
+                    self.inner
+                        .record_request(&env.endpoint, ms(0.0), 0, 0, 0, false);
                 }
             }
-            GatewayEvent::StreamCancelled { chunks, ttlb_ms, .. } => {
+            GatewayEvent::StreamCancelled {
+                chunks, ttlb_ms, ..
+            } => {
                 self.inner
                     .record_request(&env.endpoint, ms(*ttlb_ms), 0, *chunks, 0, false);
             }
@@ -99,7 +102,9 @@ impl Projection for MetricsProjection {
             GatewayEvent::UpstreamAttemptFailed { failover: true, .. } => {
                 self.inner.record_failover();
             }
-            GatewayEvent::UpstreamAttemptFailed { failover: false, .. } => {}
+            GatewayEvent::UpstreamAttemptFailed {
+                failover: false, ..
+            } => {}
             _ => {}
         }
     }
@@ -135,9 +140,7 @@ impl StreamProjection {
     }
 
     /// 导出可持久化的节点指标快照。
-    pub fn snapshot_nodes(
-        &self,
-    ) -> HashMap<String, crate::pool::NodeLatencySnapshot> {
+    pub fn snapshot_nodes(&self) -> HashMap<String, crate::pool::NodeLatencySnapshot> {
         self.nodes
             .read()
             .iter()
@@ -146,10 +149,7 @@ impl StreamProjection {
     }
 
     /// 从快照恢复节点指标（仅启动时调用）。
-    pub fn restore_nodes(
-        &self,
-        snap: HashMap<String, crate::pool::NodeLatencySnapshot>,
-    ) {
+    pub fn restore_nodes(&self, snap: HashMap<String, crate::pool::NodeLatencySnapshot>) {
         let mut write = self.nodes.write();
         for (name, ns) in snap {
             let node = write
@@ -195,7 +195,9 @@ impl Projection for StreamProjection {
                     }
                 }
             }
-            GatewayEvent::RequestCompleted { tps, status_code, .. } => {
+            GatewayEvent::RequestCompleted {
+                tps, status_code, ..
+            } => {
                 let is_error = !(200..300).contains(status_code);
                 self.node_for(provider).update(None, *tps, is_error);
             }

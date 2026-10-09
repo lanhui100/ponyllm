@@ -100,14 +100,45 @@ fn gateway_config() -> GatewayConfig {
     cfg
 }
 
-async fn spawn_gateway_with_poll(fake: Arc<FakeSecretApi>, config_poll_ms: u64) -> (String, Arc<AppState>) {
+/// Live config seeded with the SAME `openai` provider the fake Secret serves,
+/// mirroring `generate_sample_config()` (`strategy = "priority"`).
+///
+/// Why this exists: `state.config.providers` is NEVER populated asynchronously
+/// in this harness. `run_config_poller` has exactly one caller in the whole
+/// workspace — `crates/ponyllm-cli/src/main.rs:527` — and nothing in
+/// `create_app` / `AppState::new` spawns it, so seeding the in-memory config
+/// from the store is impossible here and a bounded poll would never settle.
+/// `handle_admin_update_provider` only mutates the live config through
+/// `state.config.write().providers.get_mut(&name)`, i.e. a silent no-op on an
+/// empty map. Seeding the map up-front therefore is the only way to assert the
+/// live-config contract; it makes the write observable deterministically with no
+/// timing assumption at all.
+fn gateway_config_with_openai() -> GatewayConfig {
+    let mut cfg = gateway_config();
+    cfg.providers.insert(
+        "openai".to_string(),
+        ponyllm_server::ProviderConfig {
+            base_url: "https://api.openai.com".to_string(),
+            default_model: "gpt-4o".to_string(),
+            strategy: "priority".to_string(),
+            ..Default::default()
+        },
+    );
+    cfg
+}
+
+async fn spawn_gateway_with_config(
+    fake: Arc<FakeSecretApi>,
+    config_poll_ms: u64,
+    cfg: GatewayConfig,
+) -> (String, Arc<AppState>) {
     let store = Arc::new(KubernetesConfigStore::with_api(
         fake,
         "ponyllm-live-config",
         "ponyllm.toml",
     ));
     let state = Arc::new(
-        AppState::new(gateway_config())
+        AppState::new(cfg)
             .with_config_store(store)
             .with_config_poll_ms(config_poll_ms),
     );
@@ -118,6 +149,10 @@ async fn spawn_gateway_with_poll(fake: Arc<FakeSecretApi>, config_poll_ms: u64) 
         axum::serve(listener, app).await.unwrap();
     });
     (format!("http://{}", addr), state)
+}
+
+async fn spawn_gateway_with_poll(fake: Arc<FakeSecretApi>, config_poll_ms: u64) -> (String, Arc<AppState>) {
+    spawn_gateway_with_config(fake, config_poll_ms, gateway_config()).await
 }
 
 /// FakeSecretApi that answers GET with a fixed delay (simulating a hung /
@@ -219,14 +254,23 @@ async fn admin_store_hang_degrades_to_http_503_within_one_second() {
 async fn store_conflict_maps_to_http_412_and_counts_metric() {    let fake = FakeSecretApi::seed(ponyllm_config::generate_sample_config().to_string());
     fake.force_conflict
         .store(true, std::sync::atomic::Ordering::SeqCst);
-    let (base, state) = spawn_gateway_with_poll(fake, 500).await;
+    let (base, state) = spawn_gateway_with_config(fake, 500, gateway_config_with_openai()).await;
     let client = reqwest::Client::new();
 
+    // Premise guard: the live config MUST expose `openai`, otherwise the
+    // post-write assertion below would be vacuous (the handler's `get_mut`
+    // is a silent no-op on an empty map).
+    assert_eq!(
+        state.config.read().providers.get("openai").map(|p| p.strategy.clone()),
+        Some("priority".to_string()),
+        "live config must be seeded with openai/priority before the write"
+    );
+
     let resp = client
-        .put(format!("{}/api/admin/strategy", base))
+        .put(format!("{}/api/admin/providers/openai", base))
         .header("Authorization", "Bearer test-token")
         .header("If-Match", "\"0\"")
-        .json(&serde_json::json!({"strategy": "speed"}))
+        .json(&serde_json::json!({"strategy": "round_robin"}))
         .send()
         .await
         .unwrap();
@@ -254,10 +298,15 @@ async fn store_conflict_maps_to_http_412_and_counts_metric() {    let fake = Fak
     );
 
     // The in-memory gateway config must NOT have been replaced by the failed write.
-    let strategy = state.config.read().default_strategy;
+    let provider = state
+        .config
+        .read()
+        .providers
+        .get("openai")
+        .cloned()
+        .expect("live config must still carry the seeded openai provider");
     assert_eq!(
-        strategy,
-        ponyllm_core::pool::GatewayRoutingStrategy::Economy,
+        provider.strategy, "priority",
         "failed write must not mutate the live config"
     );
 }
@@ -267,21 +316,35 @@ async fn store_conflict_maps_to_http_412_and_counts_metric() {    let fake = Fak
 #[tokio::test]
 async fn store_success_path_answers_200_without_conflict_metric() {
     let fake = FakeSecretApi::seed(ponyllm_config::generate_sample_config().to_string());
-    let (base, state) = spawn_gateway_with_poll(fake, 500).await;
+    let (base, state) = spawn_gateway_with_config(fake, 500, gateway_config_with_openai()).await;
     let client = reqwest::Client::new();
 
+    // Premise guard — same reason as the conflict leg: without a seeded
+    // provider the handler's `get_mut` no-ops and the assertion is vacuous.
+    assert_eq!(
+        state.config.read().providers.get("openai").map(|p| p.strategy.clone()),
+        Some("priority".to_string()),
+        "live config must be seeded with openai/priority before the write"
+    );
+
     let resp = client
-        .put(format!("{}/api/admin/strategy", base))
+        .put(format!("{}/api/admin/providers/openai", base))
         .header("Authorization", "Bearer test-token")
         .header("If-Match", "\"0\"")
-        .json(&serde_json::json!({"strategy": "speed"}))
+        .json(&serde_json::json!({"strategy": "round_robin"}))
         .send()
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK, "clean write must succeed");
     assert_eq!(
-        state.config.read().default_strategy,
-        ponyllm_core::pool::GatewayRoutingStrategy::Speed,
+        state
+            .config
+            .read()
+            .providers
+            .get("openai")
+            .expect("live config must still carry the openai provider")
+            .strategy,
+        "round_robin",
         "successful write must update the live config"
     );
 

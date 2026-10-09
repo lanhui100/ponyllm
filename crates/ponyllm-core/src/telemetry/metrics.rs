@@ -1,6 +1,6 @@
+use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
-use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct StreamFlowSample {
@@ -156,10 +156,14 @@ impl MetricsCollector {
             self.failed_requests.fetch_add(1, Ordering::Relaxed);
         }
 
-        self.prompt_tokens.fetch_add(prompt_tokens, Ordering::Relaxed);
-        self.completion_tokens.fetch_add(completion_tokens, Ordering::Relaxed);
-        self.cached_tokens.fetch_add(cached_tokens, Ordering::Relaxed);
-        self.total_tokens.fetch_add(prompt_tokens + completion_tokens, Ordering::Relaxed);
+        self.prompt_tokens
+            .fetch_add(prompt_tokens, Ordering::Relaxed);
+        self.completion_tokens
+            .fetch_add(completion_tokens, Ordering::Relaxed);
+        self.cached_tokens
+            .fetch_add(cached_tokens, Ordering::Relaxed);
+        self.total_tokens
+            .fetch_add(prompt_tokens + completion_tokens, Ordering::Relaxed);
     }
 
     /// Record one failover event: an upstream attempt failed and the gateway
@@ -189,8 +193,7 @@ impl MetricsCollector {
     /// A successful refresh whose token write-back to the truth source failed
     /// after bounded retries.
     pub fn record_refresh_persist_failure(&self) {
-        self.refresh_persist_failure
-            .fetch_add(1, Ordering::Relaxed);
+        self.refresh_persist_failure.fetch_add(1, Ordering::Relaxed);
     }
 
     /// An admin config save was rejected by optimistic concurrency (412).
@@ -206,7 +209,8 @@ impl MetricsCollector {
     /// Record the last observed refresh-lock hold duration (seconds). Gauge
     /// semantics: overwrite with the latest hold.
     pub fn record_refresh_lock_hold_secs(&self, secs: u64) {
-        self.refresh_lock_hold_seconds.store(secs, Ordering::Relaxed);
+        self.refresh_lock_hold_seconds
+            .store(secs, Ordering::Relaxed);
     }
 
     /// Record one completed (or interrupted) SSE stream for future A/B reuse.
@@ -288,10 +292,18 @@ impl MetricsCollector {
                 total_stalls: self.stalls_sum.load(Ordering::Relaxed),
                 max_gap_ms: {
                     let v = self.max_gap_ms.load(Ordering::Relaxed);
-                    if v > 0 { Some(v as f64) } else { None }
+                    if v > 0 {
+                        Some(v as f64)
+                    } else {
+                        None
+                    }
                 },
                 avg_tps: if tps_samples > 0 {
-                    Some(self.tps_sum_milli.load(Ordering::Relaxed) as f64 / 1000.0 / tps_samples as f64)
+                    Some(
+                        self.tps_sum_milli.load(Ordering::Relaxed) as f64
+                            / 1000.0
+                            / tps_samples as f64,
+                    )
                 } else {
                     None
                 },
@@ -343,37 +355,55 @@ impl MetricsCollector {
 
     /// 从快照恢复（仅启动时调用；不做合并，直接覆盖）。
     pub fn restore_counters(&self, snap: &MetricsCounterSnapshot) {
-        self.total_requests.store(snap.total_requests, Ordering::Relaxed);
-        self.successful_requests.store(snap.successful_requests, Ordering::Relaxed);
-        self.failed_requests.store(snap.failed_requests, Ordering::Relaxed);
-        self.failover_count.store(snap.failover_count, Ordering::Relaxed);
-        self.prompt_tokens.store(snap.prompt_tokens, Ordering::Relaxed);
-        self.completion_tokens.store(snap.completion_tokens, Ordering::Relaxed);
-        self.cached_tokens.store(snap.cached_tokens, Ordering::Relaxed);
-        self.total_tokens.store(snap.total_tokens, Ordering::Relaxed);
-        self.stream_count.store(snap.stream_count, Ordering::Relaxed);
+        self.total_requests
+            .store(snap.total_requests, Ordering::Relaxed);
+        self.successful_requests
+            .store(snap.successful_requests, Ordering::Relaxed);
+        self.failed_requests
+            .store(snap.failed_requests, Ordering::Relaxed);
+        self.failover_count
+            .store(snap.failover_count, Ordering::Relaxed);
+        self.prompt_tokens
+            .store(snap.prompt_tokens, Ordering::Relaxed);
+        self.completion_tokens
+            .store(snap.completion_tokens, Ordering::Relaxed);
+        self.cached_tokens
+            .store(snap.cached_tokens, Ordering::Relaxed);
+        self.total_tokens
+            .store(snap.total_tokens, Ordering::Relaxed);
+        self.stream_count
+            .store(snap.stream_count, Ordering::Relaxed);
         self.ttft_sum_ms.store(snap.ttft_sum_ms, Ordering::Relaxed);
-        self.ttft_samples.store(snap.ttft_samples, Ordering::Relaxed);
+        self.ttft_samples
+            .store(snap.ttft_samples, Ordering::Relaxed);
         self.ttlb_sum_ms.store(snap.ttlb_sum_ms, Ordering::Relaxed);
         self.chunks_sum.store(snap.chunks_sum, Ordering::Relaxed);
         self.bytes_sum.store(snap.bytes_sum, Ordering::Relaxed);
         self.stalls_sum.store(snap.stalls_sum, Ordering::Relaxed);
         self.max_gap_ms.store(snap.max_gap_ms, Ordering::Relaxed);
         // Safeguard: clamp historical corrupted average TPS (> 800 tok/s) on restore
-        let (safe_tps_sum, safe_tps_samples) = if snap.tps_samples > 0 && (snap.tps_sum_milli / 1000 / snap.tps_samples) > 800 {
-            (40_000 * snap.tps_samples, snap.tps_samples)
-        } else {
-            (snap.tps_sum_milli, snap.tps_samples)
-        };
+        let (safe_tps_sum, safe_tps_samples) =
+            if snap.tps_samples > 0 && (snap.tps_sum_milli / 1000 / snap.tps_samples) > 800 {
+                (40_000 * snap.tps_samples, snap.tps_samples)
+            } else {
+                (snap.tps_sum_milli, snap.tps_samples)
+            };
         self.tps_sum_milli.store(safe_tps_sum, Ordering::Relaxed);
         self.tps_samples.store(safe_tps_samples, Ordering::Relaxed);
-        self.refresh_lock_acquired.store(snap.refresh_lock_acquired_total, Ordering::Relaxed);
-        self.refresh_lock_skipped.store(snap.refresh_lock_skipped_total, Ordering::Relaxed);
-        self.refresh_lock_error.store(snap.refresh_lock_error_total, Ordering::Relaxed);
-        self.refresh_persist_failure.store(snap.refresh_persist_failure_total, Ordering::Relaxed);
-        self.admin_save_conflicts.store(snap.admin_save_conflicts_total, Ordering::Relaxed);
-        self.config_reload.store(snap.config_reload_total, Ordering::Relaxed);
-        self.refresh_lock_hold_seconds.store(snap.refresh_lock_hold_seconds, Ordering::Relaxed);
+        self.refresh_lock_acquired
+            .store(snap.refresh_lock_acquired_total, Ordering::Relaxed);
+        self.refresh_lock_skipped
+            .store(snap.refresh_lock_skipped_total, Ordering::Relaxed);
+        self.refresh_lock_error
+            .store(snap.refresh_lock_error_total, Ordering::Relaxed);
+        self.refresh_persist_failure
+            .store(snap.refresh_persist_failure_total, Ordering::Relaxed);
+        self.admin_save_conflicts
+            .store(snap.admin_save_conflicts_total, Ordering::Relaxed);
+        self.config_reload
+            .store(snap.config_reload_total, Ordering::Relaxed);
+        self.refresh_lock_hold_seconds
+            .store(snap.refresh_lock_hold_seconds, Ordering::Relaxed);
     }
 }
 

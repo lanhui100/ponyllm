@@ -19,8 +19,8 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use axum::{routing::post, Json, Router};
 use axum::response::IntoResponse;
+use axum::{routing::post, Json, Router};
 use chrono::{Duration as ChronoDuration, Utc};
 use serde_json::json;
 
@@ -72,7 +72,8 @@ async fn spawn_upstream(app: Router) -> String {
 //    actually answers with 200.
 // ---------------------------------------------------------------------------
 #[tokio::test]
-async fn family_ledger_marking_gemini_exhausted_must_not_block_selection_when_upstream_serves_200() {
+async fn family_ledger_marking_gemini_exhausted_must_not_block_selection_when_upstream_serves_200()
+{
     let calls = Arc::new(AtomicUsize::new(0));
     let cc = calls.clone();
     let endpoint = spawn_upstream(Router::new().route(
@@ -81,7 +82,11 @@ async fn family_ledger_marking_gemini_exhausted_must_not_block_selection_when_up
             let cc = cc.clone();
             async move {
                 cc.fetch_add(1, Ordering::SeqCst);
-                (axum::http::StatusCode::OK, Json(ok_body("upstream says yes"))).into_response()
+                (
+                    axum::http::StatusCode::OK,
+                    Json(ok_body("upstream says yes")),
+                )
+                    .into_response()
             }
         }),
     ))
@@ -95,12 +100,8 @@ async fn family_ledger_marking_gemini_exhausted_must_not_block_selection_when_up
 
     // The selection layer itself must not treat the stale family verdict as a
     // hard exclusion — it must let the executor discover the real state.
-    let selected = pool.select_key_with_affinity_for_family(
-        None,
-        &[],
-        None,
-        Some(QuotaFamily::Gemini),
-    );
+    let selected =
+        pool.select_key_with_affinity_for_family(None, &[], None, Some(QuotaFamily::Gemini));
     assert!(
         selected.is_ok(),
         "selection-time filter must NOT pre-judge from the family ledger; upstream 200 should be reachable"
@@ -159,7 +160,10 @@ async fn real_quota_429_records_family_ledger_and_fails_over_to_next_key() {
                         .into_response()
                 } else {
                     k2c.fetch_add(1, Ordering::SeqCst);
-                    (axum::http::StatusCode::OK, Json(ok_body("hello from ag-k2")))
+                    (
+                        axum::http::StatusCode::OK,
+                        Json(ok_body("hello from ag-k2")),
+                    )
                         .into_response()
                 }
             }

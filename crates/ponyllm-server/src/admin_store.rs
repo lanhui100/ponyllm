@@ -616,7 +616,6 @@ impl crate::admin_store::ConfigStore for KubernetesConfigStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ponyllm_core::pool::GatewayRoutingStrategy;
 
     fn sample_config() -> ConfigFile {
         toml::from_str(ponyllm_config::generate_sample_config()).unwrap()
@@ -634,14 +633,11 @@ mod tests {
         assert_eq!(loaded.gateway.bind, "127.0.0.1:8080");
         assert_eq!(version, ConfigVersion::File(loaded.config_version));
         let mut modified = loaded.clone();
-        modified.gateway.default_strategy = GatewayRoutingStrategy::Speed;
+        modified.gateway.web_dist_dir = "web/dist-mutated".to_string();
         store.save(&modified, &version).await.unwrap();
 
         let (reloaded, _) = store.load().await.unwrap();
-        assert_eq!(
-            reloaded.gateway.default_strategy,
-            GatewayRoutingStrategy::Speed
-        );
+        assert_eq!(reloaded.gateway.web_dist_dir, "web/dist-mutated");
     }
 
     #[tokio::test]
@@ -748,14 +744,11 @@ mod tests {
         assert!(loaded.gateway.web_enabled);
 
         let mut modified = loaded.clone();
-        modified.gateway.default_strategy = GatewayRoutingStrategy::Speed;
+        modified.gateway.web_dist_dir = "web/dist-mutated".to_string();
         store.save(&modified, &version).await.unwrap();
 
         let (reloaded, version2) = store.load().await.unwrap();
-        assert_eq!(
-            reloaded.gateway.default_strategy,
-            GatewayRoutingStrategy::Speed
-        );
+        assert_eq!(reloaded.gateway.web_dist_dir, "web/dist-mutated");
         assert_eq!(version2, ConfigVersion::Kubernetes("101".to_string()));
         assert_eq!(reloaded.config_version, modified.config_version);
     }
@@ -773,7 +766,7 @@ mod tests {
         // Another writer bumps the Secret behind our back.
         fake.secret.lock().unwrap().rv = 200;
         let mut modified = loaded.clone();
-        modified.gateway.default_strategy = GatewayRoutingStrategy::Speed;
+        modified.gateway.web_dist_dir = "web/dist-mutated".to_string();
         let err = store.save(&modified, &version).await.unwrap_err();
         assert!(
             matches!(err, ConfigStoreError::Conflict { .. }),

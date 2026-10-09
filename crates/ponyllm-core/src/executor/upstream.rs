@@ -1,12 +1,12 @@
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
-use parking_lot::Mutex;
-use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE, USER_AGENT};
-use serde_json::{json, Value};
 use crate::error::{CoreError, GatewayErrorKind, Result};
 use crate::pool::{ApiKeyEntry, EgressEntry, EgressPool, KeyPool, KeyState, PoolErrorType};
 use crate::telemetry::{GatewayEvent, StageTimings};
+use parking_lot::Mutex;
+use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE, USER_AGENT};
+use serde_json::{json, Value};
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 /// One upstream attempt outcome inside an executor retry loop.
 ///
@@ -437,7 +437,10 @@ pub fn classify_forbidden(
 ) -> (GatewayErrorKind, PoolErrorType) {
     let lower = err_body.to_lowercase();
     if is_tos_account_death(&lower) {
-        (GatewayErrorKind::AuthInvalid, PoolErrorType::PolicyViolation)
+        (
+            GatewayErrorKind::AuthInvalid,
+            PoolErrorType::PolicyViolation,
+        )
     } else if is_account_eligibility_revoked(err_body) {
         // Account/product-eligibility 403 (observed: Gemini Code Assist
         // "Your current account is not eligible for ..." on Antigravity,
@@ -788,7 +791,11 @@ pub fn is_opencode_zen_target(provider_name: &str, target_url: &str) -> bool {
 /// upstream stream for these targets and aggregate the SSE downstream.
 /// Chat/Responses upstream protocols only: the aggregation collectors cover
 /// those two wire shapes.
-pub fn zen_free_tier_forces_upstream_stream(provider_name: &str, target_url: &str, physical_model: &str) -> bool {
+pub fn zen_free_tier_forces_upstream_stream(
+    provider_name: &str,
+    target_url: &str,
+    physical_model: &str,
+) -> bool {
     is_opencode_zen_target(provider_name, target_url) && physical_model.ends_with("-free")
 }
 
@@ -799,8 +806,18 @@ pub fn zen_free_tier_forces_upstream_stream(provider_name: &str, target_url: &st
 /// `/messages`; header/UA/TLS replication alone does not; a single-name
 /// subset does not; tool schemas are irrelevant (stub objects pass).
 pub const OPENCODE_ZEN_TOOL_NAMES: [&str; 12] = [
-    "bash", "edit", "glob", "google_search", "grep", "read", "skill", "task", "todowrite",
-    "webfetch", "websearch", "write",
+    "bash",
+    "edit",
+    "glob",
+    "google_search",
+    "grep",
+    "read",
+    "skill",
+    "task",
+    "todowrite",
+    "webfetch",
+    "websearch",
+    "write",
 ];
 
 /// Wire shapes the zen free-tier gate accepts for the tool list, selected by
@@ -934,7 +951,11 @@ pub fn try_create_upstream_http_client_with_options(
     proxy_url: Option<&str>,
     use_system_proxy: bool,
 ) -> std::result::Result<reqwest::Client, String> {
-    try_create_upstream_http_client_with_timeout(proxy_url, use_system_proxy, DEFAULT_UPSTREAM_TOTAL_TIMEOUT)
+    try_create_upstream_http_client_with_timeout(
+        proxy_url,
+        use_system_proxy,
+        DEFAULT_UPSTREAM_TOTAL_TIMEOUT,
+    )
 }
 
 /// Variant with an explicit total-budget override (per-gateway/provider/model).
@@ -963,21 +984,28 @@ pub fn try_create_upstream_http_client_with_timeout(
     if let Some(proxy_str) = proxy_url {
         let trimmed = proxy_str.trim();
         if !trimmed.is_empty() {
-            let proxy = reqwest::Proxy::all(trimmed)
-                .map_err(|e| format!("无法解析代理地址 '{}': {}", sanitize_proxy_url(trimmed), e))?;
+            let proxy = reqwest::Proxy::all(trimmed).map_err(|e| {
+                format!("无法解析代理地址 '{}': {}", sanitize_proxy_url(trimmed), e)
+            })?;
             let proxy = proxy.no_proxy(reqwest::NoProxy::from_string("localhost,127.0.0.1"));
             builder = builder.proxy(proxy);
         }
     }
 
-    builder.build().map_err(|e| format!("构建 HTTP Client 失败: {}", e))
+    builder
+        .build()
+        .map_err(|e| format!("构建 HTTP Client 失败: {}", e))
 }
 
 pub fn create_upstream_http_client_with_options(
     proxy_url: Option<&str>,
     use_system_proxy: bool,
 ) -> reqwest::Client {
-    create_upstream_http_client_with_timeout(proxy_url, use_system_proxy, DEFAULT_UPSTREAM_TOTAL_TIMEOUT)
+    create_upstream_http_client_with_timeout(
+        proxy_url,
+        use_system_proxy,
+        DEFAULT_UPSTREAM_TOTAL_TIMEOUT,
+    )
 }
 
 /// Non-fallible variant with an explicit total-budget override.
@@ -1016,8 +1044,7 @@ pub fn create_probe_http_client_with_options(proxy_url: Option<&str>) -> reqwest
     let builder = match proxy_url.map(str::trim).filter(|s| !s.is_empty()) {
         Some(trimmed) => match reqwest::Proxy::all(trimmed) {
             Ok(proxy) => {
-                let proxy =
-                    proxy.no_proxy(reqwest::NoProxy::from_string("localhost,127.0.0.1"));
+                let proxy = proxy.no_proxy(reqwest::NoProxy::from_string("localhost,127.0.0.1"));
                 builder.proxy(proxy)
             }
             Err(e) => {
@@ -1090,14 +1117,14 @@ pub fn detect_system_proxy() -> Option<String> {
     const COMMON_LOCAL_PORTS: &[u16] = &[8899, 7890, 10808, 10809, 7897, 1080];
     for &port in COMMON_LOCAL_PORTS {
         let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
-        if std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(30)).is_ok() {
+        if std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(30)).is_ok()
+        {
             return Some(format!("http://127.0.0.1:{}", port));
         }
     }
 
     None
 }
-
 
 fn normalize_proxy_url(url: &str) -> String {
     let trimmed = url.trim();
@@ -1110,7 +1137,6 @@ fn normalize_proxy_url(url: &str) -> String {
         format!("http://{}", trimmed)
     }
 }
-
 
 impl UpstreamExecutor {
     pub fn new(pool: Arc<KeyPool>, max_retries: usize) -> Self {
@@ -1335,7 +1361,9 @@ impl UpstreamExecutor {
         detail: Option<String>,
         latency: Duration,
     ) {
-        if let (Some(provider), Some(observer)) = (self.observer_provider.as_deref(), self.observer.as_ref()) {
+        if let (Some(provider), Some(observer)) =
+            (self.observer_provider.as_deref(), self.observer.as_ref())
+        {
             observer(AttemptEvent {
                 provider: provider.to_string(),
                 key_id: key_id.to_string(),
@@ -1379,7 +1407,15 @@ impl UpstreamExecutor {
             detail.clone(),
             latency,
         );
-        self.emit_failure(key_id, attempt, status_code, &kind, &summary, detail, latency);
+        self.emit_failure(
+            key_id,
+            attempt,
+            status_code,
+            &kind,
+            &summary,
+            detail,
+            latency,
+        );
     }
 
     /// Sink half of [`Self::emit_both`]: same established shape.
@@ -1470,7 +1506,12 @@ impl UpstreamExecutor {
             Err(CoreError::AuthInvalid { reason, .. }) => {
                 // refresh_token burned (invalid_grant): permanent isolate,
                 // still guarded by the pool mass-disable breaker.
-                self.pool.record_error(&key.id, PoolErrorType::AuthInvalid { reason: Some(reason.clone()) });
+                self.pool.record_error(
+                    &key.id,
+                    PoolErrorType::AuthInvalid {
+                        reason: Some(reason.clone()),
+                    },
+                );
                 tracing::warn!(key_id = %key.id, reason = %reason, "Antigravity refresh_token dead (invalid_grant)");
                 StaleTokenRecovery::Recorded(GatewayErrorKind::AuthInvalid)
             }
@@ -1483,11 +1524,16 @@ impl UpstreamExecutor {
         }
     }
 
-    pub fn prepare_effective_body<'a>(key: &ApiKeyEntry, body: &'a Value) -> std::borrow::Cow<'a, Value> {
+    pub fn prepare_effective_body<'a>(
+        key: &ApiKeyEntry,
+        body: &'a Value,
+    ) -> std::borrow::Cow<'a, Value> {
         if key.is_antigravity() {
             if let Some(target_proj) = key.antigravity_manager().map(|m| m.project_id()) {
                 if let Some(obj) = body.as_object() {
-                    if obj.contains_key("project") && obj.get("project").and_then(|v| v.as_str()) != Some(&target_proj) {
+                    if obj.contains_key("project")
+                        && obj.get("project").and_then(|v| v.as_str()) != Some(&target_proj)
+                    {
                         let mut patched = body.clone();
                         patched["project"] = Value::String(target_proj);
                         return std::borrow::Cow::Owned(patched);
@@ -1527,7 +1573,9 @@ impl UpstreamExecutor {
         let Some(obj) = patched.as_object_mut() else {
             return std::borrow::Cow::Owned(patched);
         };
-        let tools = obj.entry("tools".to_string()).or_insert_with(|| Value::Array(Vec::new()));
+        let tools = obj
+            .entry("tools".to_string())
+            .or_insert_with(|| Value::Array(Vec::new()));
         if let Some(arr) = tools.as_array_mut() {
             for name in missing {
                 arr.push(zen_stub_tool(name, wire));
@@ -1545,47 +1593,81 @@ impl UpstreamExecutor {
 
         if key.is_antigravity() {
             let token = key.resolve_token().await?;
-            headers.insert(USER_AGENT, HeaderValue::from_static(crate::pool::ANTIGRAVITY_USER_AGENT));
+            headers.insert(
+                USER_AGENT,
+                HeaderValue::from_static(crate::pool::ANTIGRAVITY_USER_AGENT),
+            );
             headers.insert("requestType", HeaderValue::from_static("agent"));
-            headers.insert("x-goog-api-client", HeaderValue::from_static("gl-node/22.14.0 gdcl/1.1.24"));
-            headers.insert(reqwest::header::ACCEPT, HeaderValue::from_static("text/event-stream, application/json"));
+            headers.insert(
+                "x-goog-api-client",
+                HeaderValue::from_static("gl-node/22.14.0 gdcl/1.1.24"),
+            );
+            headers.insert(
+                reqwest::header::ACCEPT,
+                HeaderValue::from_static("text/event-stream, application/json"),
+            );
             let req_id = body
                 .and_then(|b| b.get("requestId"))
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| {
-                    format!("agent/{}/{}/traj-default/1", uuid::Uuid::new_v4(), chrono::Utc::now().timestamp_millis())
+                    format!(
+                        "agent/{}/{}/traj-default/1",
+                        uuid::Uuid::new_v4(),
+                        chrono::Utc::now().timestamp_millis()
+                    )
                 });
             if let Ok(val) = HeaderValue::from_str(&req_id) {
                 headers.insert("requestId", val);
             }
-            let bearer_val = HeaderValue::from_str(&format!("Bearer {}", token.trim()))
-                .map_err(|e| CoreError::Internal(format!("Invalid Antigravity bearer token for '{}': {}", key.id, e)))?;
+            let bearer_val =
+                HeaderValue::from_str(&format!("Bearer {}", token.trim())).map_err(|e| {
+                    CoreError::Internal(format!(
+                        "Invalid Antigravity bearer token for '{}': {}",
+                        key.id, e
+                    ))
+                })?;
             headers.insert(AUTHORIZATION, bearer_val);
             return Ok(headers);
         }
 
         let clean_key = key.api_key.trim();
         if clean_key.is_empty() {
-            return Err(CoreError::Internal(format!("API key for '{}' is empty", key.id)));
+            return Err(CoreError::Internal(format!(
+                "API key for '{}' is empty",
+                key.id
+            )));
         }
 
         // systemone only needs Bearer + Zen client headers; do not send
         // Anthropic x-api-key or anthropic-version to a custom endpoint.
         if self.systemone {
-            let bearer_val = HeaderValue::from_str(&format!("Bearer {}", clean_key))
-                .map_err(|e| CoreError::Internal(format!("Invalid characters in API key for '{}': {}", key.id, e)))?;
+            let bearer_val =
+                HeaderValue::from_str(&format!("Bearer {}", clean_key)).map_err(|e| {
+                    CoreError::Internal(format!(
+                        "Invalid characters in API key for '{}': {}",
+                        key.id, e
+                    ))
+                })?;
             headers.insert(AUTHORIZATION, bearer_val);
         } else {
             headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
-            let bearer_val = HeaderValue::from_str(&format!("Bearer {}", clean_key))
-                .map_err(|e| CoreError::Internal(format!("Invalid characters in API key for '{}': {}", key.id, e)))?;
+            let bearer_val =
+                HeaderValue::from_str(&format!("Bearer {}", clean_key)).map_err(|e| {
+                    CoreError::Internal(format!(
+                        "Invalid characters in API key for '{}': {}",
+                        key.id, e
+                    ))
+                })?;
             headers.insert(AUTHORIZATION, bearer_val);
-            let x_api_val = HeaderValue::from_str(clean_key)
-                .map_err(|e| CoreError::Internal(format!("Invalid characters in API key for '{}': {}", key.id, e)))?;
+            let x_api_val = HeaderValue::from_str(clean_key).map_err(|e| {
+                CoreError::Internal(format!(
+                    "Invalid characters in API key for '{}': {}",
+                    key.id, e
+                ))
+            })?;
             headers.insert("x-api-key", x_api_val);
         }
-
 
         // OpenCode zen routing gate: `x-opencode-session` is mandatory
         // (MissingSessionID 400 otherwise). Aliases cover the native
@@ -1617,7 +1699,11 @@ impl UpstreamExecutor {
     }
 
     /// Execute a JSON request with transparent automatic failover and return (response_val, winning_key_id)
-    pub async fn execute_json_request_with_key(&self, url: &str, body: &Value) -> Result<(Value, String)> {
+    pub async fn execute_json_request_with_key(
+        &self,
+        url: &str,
+        body: &Value,
+    ) -> Result<(Value, String)> {
         let mut last_error = String::new();
         let mut last_kind = GatewayErrorKind::Internal;
         let mut attempted_keys = Vec::new();
@@ -1642,7 +1728,8 @@ impl UpstreamExecutor {
             let attempt_start = Instant::now();
             let attempt_idx = attempt as u32;
             let select_start = Instant::now();
-            let affinity_seed = body.get("messages")
+            let affinity_seed = body
+                .get("messages")
                 .and_then(|m| m.as_array())
                 .and_then(|arr| arr.first())
                 .and_then(|first| first.get("content").and_then(|c| c.as_str()))
@@ -1655,14 +1742,23 @@ impl UpstreamExecutor {
                 .get("model")
                 .and_then(|m| m.as_str())
                 .and_then(crate::pool::entry::classify_quota_family);
-            let key = match self.pool.select_key_with_affinity_for_family(affinity_seed, &attempted_keys, self.rate_limits.as_ref(), quota_family) {
+            let key = match self.pool.select_key_with_affinity_for_family(
+                affinity_seed,
+                &attempted_keys,
+                self.rate_limits.as_ref(),
+                quota_family,
+            ) {
                 Ok(k) => k,
                 Err(e) => {
                     // Full-pool exhaustion: when window-shaped (per-minute/quota,
                     // not balance/auth-disabled), transparently wait up to
                     // DEFAULT_POOL_WAIT_MAX then retry the pool once.
                     if self
-                        .maybe_window_wait(&mut pool_wait_done, &mut attempted_keys, balance_exhausted)
+                        .maybe_window_wait(
+                            &mut pool_wait_done,
+                            &mut attempted_keys,
+                            balance_exhausted,
+                        )
                         .await
                     {
                         continue;
@@ -1684,15 +1780,26 @@ impl UpstreamExecutor {
                         // unreachability/lock contention as 429 quota_exhausted and tripped
                         // dsh's isQuotaExceededError.
                         let pure_transient = !attempt_kinds.is_empty()
-                            && attempt_kinds
-                                .iter()
-                                .all(|k| matches!(k, GatewayErrorKind::UpstreamUnavailable | GatewayErrorKind::LockContention));
+                            && attempt_kinds.iter().all(|k| {
+                                matches!(
+                                    k,
+                                    GatewayErrorKind::UpstreamUnavailable
+                                        | GatewayErrorKind::LockContention
+                                )
+                            });
                         if !pure_transient {
-                            if self.pool.any_key_quota_cooldown() || self.pool.any_key_family_exhausted_any() {
+                            if self.pool.any_key_quota_cooldown()
+                                || self.pool.any_key_family_exhausted_any()
+                            {
                                 last_kind = GatewayErrorKind::QuotaExhausted;
-                            } else if self.pool.exhausted_by_window_with_limits(self.rate_limits.as_ref()) {
+                            } else if self
+                                .pool
+                                .exhausted_by_window_with_limits(self.rate_limits.as_ref())
+                            {
                                 last_kind = GatewayErrorKind::RateLimitExceeded {
-                                    retry_after: self.pool.window_refill_in_with_limits(self.rate_limits.as_ref()),
+                                    retry_after: self
+                                        .pool
+                                        .window_refill_in_with_limits(self.rate_limits.as_ref()),
                                 };
                             }
                         }
@@ -1700,11 +1807,35 @@ impl UpstreamExecutor {
                     // First-attempt pool exhaustion surfaces structurally so
                     // callers never string-match on the aggregated message.
                     if attempt == 0 {
-                        self.emit_both("", attempt_idx, None, e.kind(), e.to_string(), None, attempt_start.elapsed());
+                        self.emit_both(
+                            "",
+                            attempt_idx,
+                            None,
+                            e.kind(),
+                            e.to_string(),
+                            None,
+                            attempt_start.elapsed(),
+                        );
                         return Err(e);
                     }
-                    self.emit_both("", attempt_idx, None, last_kind.clone(), last_error.clone(), None, attempt_start.elapsed());
-                    let aggregated_error = format!("{}{}", summarize_attempt_failures(&attempt_kinds), if last_error.is_empty() { String::new() } else { format!(": {}", last_error) });
+                    self.emit_both(
+                        "",
+                        attempt_idx,
+                        None,
+                        last_kind.clone(),
+                        last_error.clone(),
+                        None,
+                        attempt_start.elapsed(),
+                    );
+                    let aggregated_error = format!(
+                        "{}{}",
+                        summarize_attempt_failures(&attempt_kinds),
+                        if last_error.is_empty() {
+                            String::new()
+                        } else {
+                            format!(": {}", last_error)
+                        }
+                    );
                     return Err(CoreError::AllRetriesFailed {
                         retries: attempt,
                         attempted_keys,
@@ -1725,8 +1856,12 @@ impl UpstreamExecutor {
             // of this iteration (success return / failover continue / error).
             let mut attempt_meter = AttemptMeterGuard::admit(key.meter());
 
-            let effective_body = self.inject_zen_free_tier_tools(url, Self::prepare_effective_body(&key, body));
-            let headers = match self.build_headers(&key, Some(effective_body.as_ref())).await {
+            let effective_body =
+                self.inject_zen_free_tier_tools(url, Self::prepare_effective_body(&key, body));
+            let headers = match self
+                .build_headers(&key, Some(effective_body.as_ref()))
+                .await
+            {
                 Ok(h) => h,
                 Err(e) => {
                     // Antigravity token-resolution failures carry their own
@@ -1736,7 +1871,9 @@ impl UpstreamExecutor {
                     // do NOT cool this key as the key credential is healthy and being updated.
                     if !matches!(&e, CoreError::RefreshSkipped { .. }) {
                         let pool_err = match &e {
-                            CoreError::AuthInvalid { reason, .. } => PoolErrorType::AuthInvalid { reason: Some(reason.clone()) },
+                            CoreError::AuthInvalid { reason, .. } => PoolErrorType::AuthInvalid {
+                                reason: Some(reason.clone()),
+                            },
                             _ if key.is_antigravity() => PoolErrorType::NetworkError,
                             _ => PoolErrorType::AuthInvalid { reason: None },
                         };
@@ -1745,14 +1882,26 @@ impl UpstreamExecutor {
                     last_error = e.to_string();
                     last_kind = e.kind();
                     attempt_kinds.push(last_kind.clone());
-                    self.emit_both(&key.id, attempt_idx, None, last_kind.clone(), last_error.clone(), None, attempt_start.elapsed());
+                    self.emit_both(
+                        &key.id,
+                        attempt_idx,
+                        None,
+                        last_kind.clone(),
+                        last_error.clone(),
+                        None,
+                        attempt_start.elapsed(),
+                    );
                     continue;
                 }
             };
 
             let mut egress_entry: Option<Arc<EgressEntry>> = None;
             let req = match &self.egress_pool {
-                None => self.client.post(url).headers(headers).json(effective_body.as_ref()),
+                None => self
+                    .client
+                    .post(url)
+                    .headers(headers)
+                    .json(effective_body.as_ref()),
                 Some(eg_pool) => match eg_pool.select_egress() {
                     Ok(entry) => {
                         // `direct` exits dial on the base client; proxy exits
@@ -1765,7 +1914,10 @@ impl UpstreamExecutor {
                             .and_then(|u| self.egress_clients.as_ref().and_then(|cs| cs.get(u)))
                             .unwrap_or(&self.client);
                         egress_entry = Some(entry);
-                        client.post(url).headers(headers).json(effective_body.as_ref())
+                        client
+                            .post(url)
+                            .headers(headers)
+                            .json(effective_body.as_ref())
                     }
                     Err(e) => {
                         // Every egress is cooling (quota-bound) or the pool is
@@ -1775,7 +1927,15 @@ impl UpstreamExecutor {
                         last_error = format!("No available egress for {}: {}", key.id, e);
                         last_kind = GatewayErrorKind::QuotaExhausted;
                         attempt_kinds.push(last_kind.clone());
-                        self.emit_both(&key.id, attempt_idx, None, last_kind.clone(), last_error.clone(), None, attempt_start.elapsed());
+                        self.emit_both(
+                            &key.id,
+                            attempt_idx,
+                            None,
+                            last_kind.clone(),
+                            last_error.clone(),
+                            None,
+                            attempt_start.elapsed(),
+                        );
                         return Err(CoreError::AllRetriesFailed {
                             retries: attempt,
                             attempted_keys,
@@ -1816,8 +1976,24 @@ impl UpstreamExecutor {
                             key_id = %key.id,
                             "Network connection circuit breaker tripped: aborting futile key failover"
                         );
-                        self.emit_both(&key.id, attempt_idx, None, last_kind.clone(), last_error.clone(), None, attempt_start.elapsed());
-                        let aggregated_error = format!("{}{}", summarize_attempt_failures(&attempt_kinds), if last_error.is_empty() { String::new() } else { format!(": {}", last_error) });
+                        self.emit_both(
+                            &key.id,
+                            attempt_idx,
+                            None,
+                            last_kind.clone(),
+                            last_error.clone(),
+                            None,
+                            attempt_start.elapsed(),
+                        );
+                        let aggregated_error = format!(
+                            "{}{}",
+                            summarize_attempt_failures(&attempt_kinds),
+                            if last_error.is_empty() {
+                                String::new()
+                            } else {
+                                format!(": {}", last_error)
+                            }
+                        );
                         return Err(CoreError::AllRetriesFailed {
                             retries: attempt + 1,
                             attempted_keys,
@@ -1826,207 +2002,297 @@ impl UpstreamExecutor {
                         });
                     }
 
-                    if let Some(delay) = transient_retry_delay(&self.pool, &key.id, attempt, max_attempts, None) {
+                    if let Some(delay) =
+                        transient_retry_delay(&self.pool, &key.id, attempt, max_attempts, None)
+                    {
                         attempted_keys.retain(|id| id != &key.id);
-                        self.emit_both(&key.id, attempt_idx, None, last_kind.clone(), last_error.clone(), None, attempt_start.elapsed());
+                        self.emit_both(
+                            &key.id,
+                            attempt_idx,
+                            None,
+                            last_kind.clone(),
+                            last_error.clone(),
+                            None,
+                            attempt_start.elapsed(),
+                        );
                         tokio::time::sleep(delay).await;
                         continue;
                     }
-                    self.emit_both(&key.id, attempt_idx, None, last_kind.clone(), last_error.clone(), None, attempt_start.elapsed());
+                    self.emit_both(
+                        &key.id,
+                        attempt_idx,
+                        None,
+                        last_kind.clone(),
+                        last_error.clone(),
+                        None,
+                        attempt_start.elapsed(),
+                    );
                     continue;
                 }
             };
             {
-                    let status = resp.status();
-                    if status.is_success() {
-                        self.pool.record_success(&key.id);
-                        self.emit_headers(&key.id, attempt_idx, attempt_start.elapsed());
-                        const MAX_UPSTREAM_JSON_BYTES: usize = 4 * 1024 * 1024;
-                        let bytes = resp.bytes().await?;
-                        if bytes.len() > MAX_UPSTREAM_JSON_BYTES {
-                            return Err(CoreError::Internal("upstream JSON response exceeds 4 MiB".to_string()));
-                        }
-                        let json_val: Value = serde_json::from_slice(&bytes)?;
-                        // Report usage into the short-window meter (TPM budget).
-                        attempt_meter.tokens = extract_response_tokens(&json_val);
-                        return Ok((json_val, key.id.clone()));
+                let status = resp.status();
+                if status.is_success() {
+                    self.pool.record_success(&key.id);
+                    self.emit_headers(&key.id, attempt_idx, attempt_start.elapsed());
+                    const MAX_UPSTREAM_JSON_BYTES: usize = 4 * 1024 * 1024;
+                    let bytes = resp.bytes().await?;
+                    if bytes.len() > MAX_UPSTREAM_JSON_BYTES {
+                        return Err(CoreError::Internal(
+                            "upstream JSON response exceeds 4 MiB".to_string(),
+                        ));
                     }
+                    let json_val: Value = serde_json::from_slice(&bytes)?;
+                    // Report usage into the short-window meter (TPM budget).
+                    attempt_meter.tokens = extract_response_tokens(&json_val);
+                    return Ok((json_val, key.id.clone()));
+                }
 
-                    // Handle failover status codes
-                    let status_code = status.as_u16();
-                    let retry_after = resp
-                        .headers()
-                        .get("retry-after")
-                        .and_then(|v| v.to_str().ok())
-                        .and_then(|s| s.parse::<u64>().ok())
-                        .map(Duration::from_secs);
+                // Handle failover status codes
+                let status_code = status.as_u16();
+                let retry_after = resp
+                    .headers()
+                    .get("retry-after")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .map(Duration::from_secs);
 
-                    // Error bodies are diagnostic only; cap before converting to
-                    // String so a hostile upstream cannot amplify memory/logs.
-                    const MAX_UPSTREAM_ERROR_BYTES: usize = 64 * 1024;
-                    let err_bytes = resp.bytes().await.unwrap_or_default();
-                    let err_body = String::from_utf8_lossy(
-                        &err_bytes[..err_bytes.len().min(MAX_UPSTREAM_ERROR_BYTES)],
-                    )
-                    .to_string();
-                    last_error = format!("HTTP {} from {}: {}", status_code, key.id, err_body);
+                // Error bodies are diagnostic only; cap before converting to
+                // String so a hostile upstream cannot amplify memory/logs.
+                const MAX_UPSTREAM_ERROR_BYTES: usize = 64 * 1024;
+                let err_bytes = resp.bytes().await.unwrap_or_default();
+                let err_body = String::from_utf8_lossy(
+                    &err_bytes[..err_bytes.len().min(MAX_UPSTREAM_ERROR_BYTES)],
+                )
+                .to_string();
+                last_error = format!("HTTP {} from {}: {}", status_code, key.id, err_body);
 
-                    if status_code == 429 {
-                        // Balance-wording 429 (billing, not window): sets the
-                        // fail-fast flag; the classification below is kept.
-                        let balance_wording = is_balance_exhausted_body(&err_body);
-                        if balance_wording {
-                            balance_exhausted = true;
-                        }
-                        let (kind, pool_err) = classify_too_many_requests(&err_body, retry_after);
-                        // Balance-wording 429 means the account balance is
-                        // gone, not a sliding window closing: classify as
-                        // quota so the boundary guard stops cross-provider
-                        // failover instead of draining a second provider
-                        // (bugfix 2026-10-02; mirrors the 403 balance path).
-                        let (kind, pool_err) = if balance_wording {
-                            (
-                                GatewayErrorKind::QuotaExhausted,
-                                PoolErrorType::QuotaExhausted { retry_after },
-                            )
-                        } else {
-                            (kind, pool_err)
-                        };
-                        last_kind = kind;
-                        attempt_kinds.push(last_kind.clone());
-                        let transient_retry_after = match &pool_err {
-                            PoolErrorType::RateLimit { retry_after } => *retry_after,
-                            _ => None,
-                        };
-                        let is_quota = matches!(&pool_err, PoolErrorType::QuotaExhausted { .. });
-                        let quota_reset = match &pool_err {
-                            PoolErrorType::QuotaExhausted { retry_after } => *retry_after,
-                            _ => None,
-                        };
-                        self.pool.record_error(&key.id, pool_err);
-                        // Egress-level quota cooldown (contract
-                        // 2026-10-07-egress-pool-contract): a quota-exhaustion
-                        // 429 cools ONLY the offending exit for the advertised
-                        // reset — body `Resets in` > `Retry-After` header >
-                        // 900s default (record_quota_exhausted's internal
-                        // fallback). Transient failures never cool an exit.
-                        if let (Some(eg_pool), Some(eg_entry)) = (&self.egress_pool, &egress_entry) {
-                            if is_quota {
-                                let body_reset = parse_reset_duration(&err_body);
-                                eg_pool.record_quota_exhausted(&eg_entry.id, body_reset.or(retry_after));
-                            }
-                        }
-                        // Family-scoped 429 writeback: an upstream quota reset
-                        // records the family group's exhaustion immediately and
-                        // is the ONLY source of family-ledger verdicts. The
-                        // ledger is used for later 429 semantics + honest
-                        // unlock hints, never for selection-time pre-rejection
-                        // (ADR 2026-10-04-antigravity-group-quota-aware-scheduling).
-                        if key.is_antigravity() {
-                            if let (Some(fam), Some(reset)) = (quota_family, quota_reset) {
-                                let reset_at = chrono::Utc::now()
-                                    + chrono::Duration::from_std(reset)
-                                        .unwrap_or(chrono::Duration::hours(6));
-                                key.set_family_quota_exhausted(fam, reset_at);
-                            }
-                        }
-                        // Quota exhaustion closes the window: never retry the
-                        // same key in-request, let the pool fail over / fail fast.
-                        if !is_quota {
-                            if let Some(delay) = transient_retry_delay(&self.pool, &key.id, attempt, max_attempts, transient_retry_after) {
-                                attempted_keys.retain(|id| id != &key.id);
-                                self.emit_both(&key.id, attempt_idx, Some(status_code), last_kind.clone(), last_error.clone(), Some(err_body), attempt_start.elapsed());
-                                tokio::time::sleep(delay).await;
-                                continue;
-                            }
-                        }
-                        // Pool-level failover backoff: multi-key pools pause
-                        // briefly before switching keys so a per-minute window
-                        // shared across the account's keys is not swept in
-                        // milliseconds (eliminates the observed 17-30× 429
-                        // amplification on sense/deepseek-v4-flash).
-                        if attempt + 1 < max_attempts {
-                            if let Some(delay) = pool_failover_backoff(&self.pool) {
-                                tokio::time::sleep(delay).await;
-                            }
-                        }
-                    } else if status_code == 401 {
-                        match self.recover_stale_antigravity_token(&key, &mut refreshed_keys).await {
-                            StaleTokenRecovery::RetrySameKey => {
-                                attempted_keys.retain(|id| id != &key.id);
-                                last_kind = GatewayErrorKind::AuthInvalid;
-                                attempt_kinds.push(last_kind.clone());
-                                self.emit_both(&key.id, attempt_idx, Some(status_code), last_kind.clone(), last_error.clone(), Some(err_body), attempt_start.elapsed());
-                                continue;
-                            }
-                            StaleTokenRecovery::Recorded(kind) => {
-                                last_kind = kind;
-                                attempt_kinds.push(last_kind.clone());
-                            }
-                            StaleTokenRecovery::Passthrough => {
-                                last_kind = GatewayErrorKind::AuthInvalid;
-                                attempt_kinds.push(last_kind.clone());
-                                self.pool.record_error(&key.id, PoolErrorType::AuthInvalid { reason: None });
-                            }
-                        }
-                    } else if status_code == 403 {
-                        // Balance-wording 403 (billing, not window): fail-fast
-                        // flag only; the classification below is kept.
-                        if is_balance_exhausted_body(&err_body) {
-                            balance_exhausted = true;
-                        }
-                        let (kind, pool_err) = classify_forbidden(&err_body, retry_after);
-                        last_kind = kind;
-                        attempt_kinds.push(last_kind.clone());
-                        self.pool.record_error(&key.id, pool_err);
-                    } else if status_code == 402 {
-                        // 402 Payment Required is balance exhaustion by
-                        // definition: never transparent-wait on it.
+                if status_code == 429 {
+                    // Balance-wording 429 (billing, not window): sets the
+                    // fail-fast flag; the classification below is kept.
+                    let balance_wording = is_balance_exhausted_body(&err_body);
+                    if balance_wording {
                         balance_exhausted = true;
-                        last_kind = GatewayErrorKind::QuotaExhausted;
-                        attempt_kinds.push(last_kind.clone());
-                        self.pool.record_error(&key.id, PoolErrorType::QuotaExhausted { retry_after });
-                        // 402 is balance exhaustion = quota boundary: cool the
-                        // exit that carried this attempt (contract egress
-                        // semantics — each exit keeps an independent ledger).
-                        if let (Some(eg_pool), Some(eg_entry)) = (&self.egress_pool, &egress_entry) {
+                    }
+                    let (kind, pool_err) = classify_too_many_requests(&err_body, retry_after);
+                    // Balance-wording 429 means the account balance is
+                    // gone, not a sliding window closing: classify as
+                    // quota so the boundary guard stops cross-provider
+                    // failover instead of draining a second provider
+                    // (bugfix 2026-10-02; mirrors the 403 balance path).
+                    let (kind, pool_err) = if balance_wording {
+                        (
+                            GatewayErrorKind::QuotaExhausted,
+                            PoolErrorType::QuotaExhausted { retry_after },
+                        )
+                    } else {
+                        (kind, pool_err)
+                    };
+                    last_kind = kind;
+                    attempt_kinds.push(last_kind.clone());
+                    let transient_retry_after = match &pool_err {
+                        PoolErrorType::RateLimit { retry_after } => *retry_after,
+                        _ => None,
+                    };
+                    let is_quota = matches!(&pool_err, PoolErrorType::QuotaExhausted { .. });
+                    let quota_reset = match &pool_err {
+                        PoolErrorType::QuotaExhausted { retry_after } => *retry_after,
+                        _ => None,
+                    };
+                    self.pool.record_error(&key.id, pool_err);
+                    // Egress-level quota cooldown (contract
+                    // 2026-10-07-egress-pool-contract): a quota-exhaustion
+                    // 429 cools ONLY the offending exit for the advertised
+                    // reset — body `Resets in` > `Retry-After` header >
+                    // 900s default (record_quota_exhausted's internal
+                    // fallback). Transient failures never cool an exit.
+                    if let (Some(eg_pool), Some(eg_entry)) = (&self.egress_pool, &egress_entry) {
+                        if is_quota {
                             let body_reset = parse_reset_duration(&err_body);
-                            eg_pool.record_quota_exhausted(&eg_entry.id, body_reset.or(retry_after));
+                            eg_pool
+                                .record_quota_exhausted(&eg_entry.id, body_reset.or(retry_after));
                         }
-                    } else if status.is_server_error() {
-                        last_kind = GatewayErrorKind::UpstreamUnavailable;
-                        attempt_kinds.push(last_kind.clone());
-                        self.pool.record_error(&key.id, PoolErrorType::ServerError);
-                        if let (Some(eg_pool), Some(eg_entry)) = (&self.egress_pool, &egress_entry) {
-                            eg_pool.record_transient_failure(&eg_entry.id);
+                    }
+                    // Family-scoped 429 writeback: an upstream quota reset
+                    // records the family group's exhaustion immediately and
+                    // is the ONLY source of family-ledger verdicts. The
+                    // ledger is used for later 429 semantics + honest
+                    // unlock hints, never for selection-time pre-rejection
+                    // (ADR 2026-10-04-antigravity-group-quota-aware-scheduling).
+                    if key.is_antigravity() {
+                        if let (Some(fam), Some(reset)) = (quota_family, quota_reset) {
+                            let reset_at = chrono::Utc::now()
+                                + chrono::Duration::from_std(reset)
+                                    .unwrap_or(chrono::Duration::hours(6));
+                            key.set_family_quota_exhausted(fam, reset_at);
                         }
-                        if let Some(delay) = transient_retry_delay(&self.pool, &key.id, attempt, max_attempts, None) {
+                    }
+                    // Quota exhaustion closes the window: never retry the
+                    // same key in-request, let the pool fail over / fail fast.
+                    if !is_quota {
+                        if let Some(delay) = transient_retry_delay(
+                            &self.pool,
+                            &key.id,
+                            attempt,
+                            max_attempts,
+                            transient_retry_after,
+                        ) {
                             attempted_keys.retain(|id| id != &key.id);
-                            self.emit_both(&key.id, attempt_idx, Some(status_code), last_kind.clone(), last_error.clone(), Some(err_body), attempt_start.elapsed());
+                            self.emit_both(
+                                &key.id,
+                                attempt_idx,
+                                Some(status_code),
+                                last_kind.clone(),
+                                last_error.clone(),
+                                Some(err_body),
+                                attempt_start.elapsed(),
+                            );
                             tokio::time::sleep(delay).await;
                             continue;
                         }
-                    } else {
-                        // Client error that is not retryable (e.g. 400 Bad Request)
-                        if is_transient_geo_gate(status_code, &err_body) {
-                            if let Some(delay) = geo_gate_retry_delay(attempt, &self.pool) {
-                                attempted_keys.retain(|id| id != &key.id);
-                                self.emit_both(&key.id, attempt_idx, Some(status_code), GatewayErrorKind::ClientBadRequest, last_error.clone(), Some(err_body), attempt_start.elapsed());
-                                tokio::time::sleep(delay).await;
-                                continue;
-                            }
-                        }
-                        self.emit_both(&key.id, attempt_idx, Some(status_code), GatewayErrorKind::ClientBadRequest, last_error.clone(), Some(err_body.clone()), attempt_start.elapsed());
-                        return Err(CoreError::UpstreamStatusError {
-                            status,
-                            body: err_body,
-                        });
                     }
-                    self.emit_both(&key.id, attempt_idx, Some(status_code), last_kind.clone(), last_error.clone(), Some(err_body), attempt_start.elapsed());
+                    // Pool-level failover backoff: multi-key pools pause
+                    // briefly before switching keys so a per-minute window
+                    // shared across the account's keys is not swept in
+                    // milliseconds (eliminates the observed 17-30× 429
+                    // amplification on sense/deepseek-v4-flash).
+                    if attempt + 1 < max_attempts {
+                        if let Some(delay) = pool_failover_backoff(&self.pool) {
+                            tokio::time::sleep(delay).await;
+                        }
+                    }
+                } else if status_code == 401 {
+                    match self
+                        .recover_stale_antigravity_token(&key, &mut refreshed_keys)
+                        .await
+                    {
+                        StaleTokenRecovery::RetrySameKey => {
+                            attempted_keys.retain(|id| id != &key.id);
+                            last_kind = GatewayErrorKind::AuthInvalid;
+                            attempt_kinds.push(last_kind.clone());
+                            self.emit_both(
+                                &key.id,
+                                attempt_idx,
+                                Some(status_code),
+                                last_kind.clone(),
+                                last_error.clone(),
+                                Some(err_body),
+                                attempt_start.elapsed(),
+                            );
+                            continue;
+                        }
+                        StaleTokenRecovery::Recorded(kind) => {
+                            last_kind = kind;
+                            attempt_kinds.push(last_kind.clone());
+                        }
+                        StaleTokenRecovery::Passthrough => {
+                            last_kind = GatewayErrorKind::AuthInvalid;
+                            attempt_kinds.push(last_kind.clone());
+                            self.pool
+                                .record_error(&key.id, PoolErrorType::AuthInvalid { reason: None });
+                        }
+                    }
+                } else if status_code == 403 {
+                    // Balance-wording 403 (billing, not window): fail-fast
+                    // flag only; the classification below is kept.
+                    if is_balance_exhausted_body(&err_body) {
+                        balance_exhausted = true;
+                    }
+                    let (kind, pool_err) = classify_forbidden(&err_body, retry_after);
+                    last_kind = kind;
+                    attempt_kinds.push(last_kind.clone());
+                    self.pool.record_error(&key.id, pool_err);
+                } else if status_code == 402 {
+                    // 402 Payment Required is balance exhaustion by
+                    // definition: never transparent-wait on it.
+                    balance_exhausted = true;
+                    last_kind = GatewayErrorKind::QuotaExhausted;
+                    attempt_kinds.push(last_kind.clone());
+                    self.pool
+                        .record_error(&key.id, PoolErrorType::QuotaExhausted { retry_after });
+                    // 402 is balance exhaustion = quota boundary: cool the
+                    // exit that carried this attempt (contract egress
+                    // semantics — each exit keeps an independent ledger).
+                    if let (Some(eg_pool), Some(eg_entry)) = (&self.egress_pool, &egress_entry) {
+                        let body_reset = parse_reset_duration(&err_body);
+                        eg_pool.record_quota_exhausted(&eg_entry.id, body_reset.or(retry_after));
+                    }
+                } else if status.is_server_error() {
+                    last_kind = GatewayErrorKind::UpstreamUnavailable;
+                    attempt_kinds.push(last_kind.clone());
+                    self.pool.record_error(&key.id, PoolErrorType::ServerError);
+                    if let (Some(eg_pool), Some(eg_entry)) = (&self.egress_pool, &egress_entry) {
+                        eg_pool.record_transient_failure(&eg_entry.id);
+                    }
+                    if let Some(delay) =
+                        transient_retry_delay(&self.pool, &key.id, attempt, max_attempts, None)
+                    {
+                        attempted_keys.retain(|id| id != &key.id);
+                        self.emit_both(
+                            &key.id,
+                            attempt_idx,
+                            Some(status_code),
+                            last_kind.clone(),
+                            last_error.clone(),
+                            Some(err_body),
+                            attempt_start.elapsed(),
+                        );
+                        tokio::time::sleep(delay).await;
+                        continue;
+                    }
+                } else {
+                    // Client error that is not retryable (e.g. 400 Bad Request)
+                    if is_transient_geo_gate(status_code, &err_body) {
+                        if let Some(delay) = geo_gate_retry_delay(attempt, &self.pool) {
+                            attempted_keys.retain(|id| id != &key.id);
+                            self.emit_both(
+                                &key.id,
+                                attempt_idx,
+                                Some(status_code),
+                                GatewayErrorKind::ClientBadRequest,
+                                last_error.clone(),
+                                Some(err_body),
+                                attempt_start.elapsed(),
+                            );
+                            tokio::time::sleep(delay).await;
+                            continue;
+                        }
+                    }
+                    self.emit_both(
+                        &key.id,
+                        attempt_idx,
+                        Some(status_code),
+                        GatewayErrorKind::ClientBadRequest,
+                        last_error.clone(),
+                        Some(err_body.clone()),
+                        attempt_start.elapsed(),
+                    );
+                    return Err(CoreError::UpstreamStatusError {
+                        status,
+                        body: err_body,
+                    });
                 }
+                self.emit_both(
+                    &key.id,
+                    attempt_idx,
+                    Some(status_code),
+                    last_kind.clone(),
+                    last_error.clone(),
+                    Some(err_body),
+                    attempt_start.elapsed(),
+                );
+            }
         }
 
-        let aggregated_error = format!("{}{}", summarize_attempt_failures(&attempt_kinds), if last_error.is_empty() { String::new() } else { format!(": {}", last_error) });
+        let aggregated_error = format!(
+            "{}{}",
+            summarize_attempt_failures(&attempt_kinds),
+            if last_error.is_empty() {
+                String::new()
+            } else {
+                format!(": {}", last_error)
+            }
+        );
         Err(CoreError::AllRetriesFailed {
             retries: max_attempts,
             attempted_keys,
@@ -2037,14 +2303,24 @@ impl UpstreamExecutor {
 
     /// Execute a streaming request with failover before the first SSE chunk is yielded.
     /// Returns the response and the exact Instant when the winning attempt started.
-    pub async fn execute_stream_request_with_timing(&self, url: &str, body: &Value) -> Result<(reqwest::Response, Instant)> {
-        let (resp, instant, _key_id) = self.execute_stream_request_with_timing_and_key(url, body).await?;
+    pub async fn execute_stream_request_with_timing(
+        &self,
+        url: &str,
+        body: &Value,
+    ) -> Result<(reqwest::Response, Instant)> {
+        let (resp, instant, _key_id) = self
+            .execute_stream_request_with_timing_and_key(url, body)
+            .await?;
         Ok((resp, instant))
     }
 
     /// Execute a streaming request with failover before the first SSE chunk is yielded.
     /// Returns (response, attempt_start_instant, winning_key_id).
-    pub async fn execute_stream_request_with_timing_and_key(&self, url: &str, body: &Value) -> Result<(reqwest::Response, Instant, String)> {
+    pub async fn execute_stream_request_with_timing_and_key(
+        &self,
+        url: &str,
+        body: &Value,
+    ) -> Result<(reqwest::Response, Instant, String)> {
         let mut last_error = String::new();
         let mut last_kind = GatewayErrorKind::Internal;
         // R2: pre-seed with the outer retry loop's already-tried keys so a
@@ -2071,7 +2347,8 @@ impl UpstreamExecutor {
             let attempt_start = Instant::now();
             let attempt_idx = attempt as u32;
             let select_start = Instant::now();
-            let affinity_seed = body.get("messages")
+            let affinity_seed = body
+                .get("messages")
                 .and_then(|m| m.as_array())
                 .and_then(|arr| arr.first())
                 .and_then(|first| first.get("content").and_then(|c| c.as_str()))
@@ -2099,14 +2376,23 @@ impl UpstreamExecutor {
             };
             let key = match pinned_candidate {
                 Some(pk) => pk,
-                None => match self.pool.select_key_with_affinity_for_family(affinity_seed, &attempted_keys, self.rate_limits.as_ref(), quota_family) {
+                None => match self.pool.select_key_with_affinity_for_family(
+                    affinity_seed,
+                    &attempted_keys,
+                    self.rate_limits.as_ref(),
+                    quota_family,
+                ) {
                     Ok(k) => k,
                     Err(e) => {
                         // Full-pool exhaustion: when window-shaped (per-minute/quota,
                         // not balance/auth-disabled), transparently wait up to
                         // DEFAULT_POOL_WAIT_MAX then retry the pool once.
                         if self
-                            .maybe_window_wait(&mut pool_wait_done, &mut attempted_keys, balance_exhausted)
+                            .maybe_window_wait(
+                                &mut pool_wait_done,
+                                &mut attempted_keys,
+                                balance_exhausted,
+                            )
                             .await
                         {
                             continue;
@@ -2128,15 +2414,26 @@ impl UpstreamExecutor {
                             // unreachability/lock contention as 429 quota_exhausted and tripped
                             // dsh's isQuotaExceededError.
                             let pure_transient = !attempt_kinds.is_empty()
-                                && attempt_kinds
-                                    .iter()
-                                    .all(|k| matches!(k, GatewayErrorKind::UpstreamUnavailable | GatewayErrorKind::LockContention));
+                                && attempt_kinds.iter().all(|k| {
+                                    matches!(
+                                        k,
+                                        GatewayErrorKind::UpstreamUnavailable
+                                            | GatewayErrorKind::LockContention
+                                    )
+                                });
                             if !pure_transient {
-                                if self.pool.any_key_quota_cooldown() || self.pool.any_key_family_exhausted_any() {
+                                if self.pool.any_key_quota_cooldown()
+                                    || self.pool.any_key_family_exhausted_any()
+                                {
                                     last_kind = GatewayErrorKind::QuotaExhausted;
-                                } else if self.pool.exhausted_by_window_with_limits(self.rate_limits.as_ref()) {
+                                } else if self
+                                    .pool
+                                    .exhausted_by_window_with_limits(self.rate_limits.as_ref())
+                                {
                                     last_kind = GatewayErrorKind::RateLimitExceeded {
-                                        retry_after: self.pool.window_refill_in_with_limits(self.rate_limits.as_ref()),
+                                        retry_after: self.pool.window_refill_in_with_limits(
+                                            self.rate_limits.as_ref(),
+                                        ),
                                     };
                                 }
                             }
@@ -2144,11 +2441,35 @@ impl UpstreamExecutor {
                         // First-attempt pool exhaustion surfaces structurally so
                         // callers never string-match on the aggregated message.
                         if attempt == 0 {
-                            self.emit_both("", attempt_idx, None, e.kind(), e.to_string(), None, attempt_start.elapsed());
+                            self.emit_both(
+                                "",
+                                attempt_idx,
+                                None,
+                                e.kind(),
+                                e.to_string(),
+                                None,
+                                attempt_start.elapsed(),
+                            );
                             return Err(e);
                         }
-                        self.emit_both("", attempt_idx, None, last_kind.clone(), last_error.clone(), None, attempt_start.elapsed());
-                        let aggregated_error = format!("{}{}", summarize_attempt_failures(&attempt_kinds), if last_error.is_empty() { String::new() } else { format!(": {}", last_error) });
+                        self.emit_both(
+                            "",
+                            attempt_idx,
+                            None,
+                            last_kind.clone(),
+                            last_error.clone(),
+                            None,
+                            attempt_start.elapsed(),
+                        );
+                        let aggregated_error = format!(
+                            "{}{}",
+                            summarize_attempt_failures(&attempt_kinds),
+                            if last_error.is_empty() {
+                                String::new()
+                            } else {
+                                format!(": {}", last_error)
+                            }
+                        );
                         return Err(CoreError::AllRetriesFailed {
                             retries: attempt,
                             attempted_keys,
@@ -2169,8 +2490,12 @@ impl UpstreamExecutor {
             // path has no usage here, so `tokens` stays 0 (known limitation).
             let _attempt_meter = AttemptMeterGuard::admit(key.meter());
 
-            let effective_body = self.inject_zen_free_tier_tools(url, Self::prepare_effective_body(&key, body));
-            let headers = match self.build_headers(&key, Some(effective_body.as_ref())).await {
+            let effective_body =
+                self.inject_zen_free_tier_tools(url, Self::prepare_effective_body(&key, body));
+            let headers = match self
+                .build_headers(&key, Some(effective_body.as_ref()))
+                .await
+            {
                 Ok(h) => h,
                 Err(e) => {
                     // Antigravity token-resolution failures carry their own
@@ -2180,7 +2505,9 @@ impl UpstreamExecutor {
                     // do NOT cool this key as the key credential is healthy and being updated.
                     if !matches!(&e, CoreError::RefreshSkipped { .. }) {
                         let pool_err = match &e {
-                            CoreError::AuthInvalid { reason, .. } => PoolErrorType::AuthInvalid { reason: Some(reason.clone()) },
+                            CoreError::AuthInvalid { reason, .. } => PoolErrorType::AuthInvalid {
+                                reason: Some(reason.clone()),
+                            },
                             _ if key.is_antigravity() => PoolErrorType::NetworkError,
                             _ => PoolErrorType::AuthInvalid { reason: None },
                         };
@@ -2189,14 +2516,26 @@ impl UpstreamExecutor {
                     last_error = e.to_string();
                     last_kind = e.kind();
                     attempt_kinds.push(last_kind.clone());
-                    self.emit_both(&key.id, attempt_idx, None, last_kind.clone(), last_error.clone(), None, attempt_start.elapsed());
+                    self.emit_both(
+                        &key.id,
+                        attempt_idx,
+                        None,
+                        last_kind.clone(),
+                        last_error.clone(),
+                        None,
+                        attempt_start.elapsed(),
+                    );
                     continue;
                 }
             };
 
             let mut egress_entry: Option<Arc<EgressEntry>> = None;
             let req = match &self.egress_pool {
-                None => self.client.post(url).headers(headers).json(effective_body.as_ref()),
+                None => self
+                    .client
+                    .post(url)
+                    .headers(headers)
+                    .json(effective_body.as_ref()),
                 Some(eg_pool) => match eg_pool.select_egress() {
                     Ok(entry) => {
                         // `direct` exits dial on the base client; proxy exits
@@ -2209,7 +2548,10 @@ impl UpstreamExecutor {
                             .and_then(|u| self.egress_clients.as_ref().and_then(|cs| cs.get(u)))
                             .unwrap_or(&self.client);
                         egress_entry = Some(entry);
-                        client.post(url).headers(headers).json(effective_body.as_ref())
+                        client
+                            .post(url)
+                            .headers(headers)
+                            .json(effective_body.as_ref())
                     }
                     Err(e) => {
                         // Every egress is cooling (quota-bound) or the pool is
@@ -2219,7 +2561,15 @@ impl UpstreamExecutor {
                         last_error = format!("No available egress for {}: {}", key.id, e);
                         last_kind = GatewayErrorKind::QuotaExhausted;
                         attempt_kinds.push(last_kind.clone());
-                        self.emit_both(&key.id, attempt_idx, None, last_kind.clone(), last_error.clone(), None, attempt_start.elapsed());
+                        self.emit_both(
+                            &key.id,
+                            attempt_idx,
+                            None,
+                            last_kind.clone(),
+                            last_error.clone(),
+                            None,
+                            attempt_start.elapsed(),
+                        );
                         return Err(CoreError::AllRetriesFailed {
                             retries: attempt,
                             attempted_keys,
@@ -2260,8 +2610,24 @@ impl UpstreamExecutor {
                             key_id = %key.id,
                             "Network connection circuit breaker tripped: aborting futile key failover"
                         );
-                        self.emit_both(&key.id, attempt_idx, None, last_kind.clone(), last_error.clone(), None, attempt_start.elapsed());
-                        let aggregated_error = format!("{}{}", summarize_attempt_failures(&attempt_kinds), if last_error.is_empty() { String::new() } else { format!(": {}", last_error) });
+                        self.emit_both(
+                            &key.id,
+                            attempt_idx,
+                            None,
+                            last_kind.clone(),
+                            last_error.clone(),
+                            None,
+                            attempt_start.elapsed(),
+                        );
+                        let aggregated_error = format!(
+                            "{}{}",
+                            summarize_attempt_failures(&attempt_kinds),
+                            if last_error.is_empty() {
+                                String::new()
+                            } else {
+                                format!(": {}", last_error)
+                            }
+                        );
                         return Err(CoreError::AllRetriesFailed {
                             retries: attempt + 1,
                             attempted_keys,
@@ -2270,199 +2636,287 @@ impl UpstreamExecutor {
                         });
                     }
 
-                    if let Some(delay) = transient_retry_delay(&self.pool, &key.id, attempt, max_attempts, None) {
+                    if let Some(delay) =
+                        transient_retry_delay(&self.pool, &key.id, attempt, max_attempts, None)
+                    {
                         attempted_keys.retain(|id| id != &key.id);
-                        self.emit_both(&key.id, attempt_idx, None, last_kind.clone(), last_error.clone(), None, attempt_start.elapsed());
+                        self.emit_both(
+                            &key.id,
+                            attempt_idx,
+                            None,
+                            last_kind.clone(),
+                            last_error.clone(),
+                            None,
+                            attempt_start.elapsed(),
+                        );
                         tokio::time::sleep(delay).await;
                         continue;
                     }
-                    self.emit_both(&key.id, attempt_idx, None, last_kind.clone(), last_error.clone(), None, attempt_start.elapsed());
+                    self.emit_both(
+                        &key.id,
+                        attempt_idx,
+                        None,
+                        last_kind.clone(),
+                        last_error.clone(),
+                        None,
+                        attempt_start.elapsed(),
+                    );
                     continue;
                 }
             };
             {
-                    let status = resp.status();
-                    if status.is_success() {
-                        self.pool.record_success(&key.id);
-                        self.emit_headers(&key.id, attempt_idx, attempt_start.elapsed());
-                        return Ok((resp, attempt_start, key.id.clone()));
-                    }
+                let status = resp.status();
+                if status.is_success() {
+                    self.pool.record_success(&key.id);
+                    self.emit_headers(&key.id, attempt_idx, attempt_start.elapsed());
+                    return Ok((resp, attempt_start, key.id.clone()));
+                }
 
-                    let status_code = status.as_u16();
-                    let retry_after = resp
-                        .headers()
-                        .get("retry-after")
-                        .and_then(|v| v.to_str().ok())
-                        .and_then(|s| s.parse::<u64>().ok())
-                        .map(Duration::from_secs);
+                let status_code = status.as_u16();
+                let retry_after = resp
+                    .headers()
+                    .get("retry-after")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .map(Duration::from_secs);
 
-                    // Error bodies are diagnostic only; cap before converting to
-                    // String so a hostile upstream cannot amplify memory/logs.
-                    const MAX_UPSTREAM_ERROR_BYTES: usize = 64 * 1024;
-                    let err_bytes = resp.bytes().await.unwrap_or_default();
-                    let err_body = String::from_utf8_lossy(
-                        &err_bytes[..err_bytes.len().min(MAX_UPSTREAM_ERROR_BYTES)],
-                    )
-                    .to_string();
-                    last_error = format!("HTTP {} from {}: {}", status_code, key.id, err_body);
+                // Error bodies are diagnostic only; cap before converting to
+                // String so a hostile upstream cannot amplify memory/logs.
+                const MAX_UPSTREAM_ERROR_BYTES: usize = 64 * 1024;
+                let err_bytes = resp.bytes().await.unwrap_or_default();
+                let err_body = String::from_utf8_lossy(
+                    &err_bytes[..err_bytes.len().min(MAX_UPSTREAM_ERROR_BYTES)],
+                )
+                .to_string();
+                last_error = format!("HTTP {} from {}: {}", status_code, key.id, err_body);
 
-                    if status_code == 429 {
-                        // Balance-wording 429 (billing, not window): sets the
-                        // fail-fast flag; the classification below is kept.
-                        let balance_wording = is_balance_exhausted_body(&err_body);
-                        if balance_wording {
-                            balance_exhausted = true;
-                        }
-                        let (kind, pool_err) = classify_too_many_requests(&err_body, retry_after);
-                        // Balance-wording 429 means the account balance is
-                        // gone, not a sliding window closing: classify as
-                        // quota so the boundary guard stops cross-provider
-                        // failover instead of draining a second provider
-                        // (bugfix 2026-10-02; mirrors the 403 balance path).
-                        let (kind, pool_err) = if balance_wording {
-                            (
-                                GatewayErrorKind::QuotaExhausted,
-                                PoolErrorType::QuotaExhausted { retry_after },
-                            )
-                        } else {
-                            (kind, pool_err)
-                        };
-                        last_kind = kind;
-                        attempt_kinds.push(last_kind.clone());
-                        let transient_retry_after = match &pool_err {
-                            PoolErrorType::RateLimit { retry_after } => *retry_after,
-                            _ => None,
-                        };
-                        let is_quota = matches!(&pool_err, PoolErrorType::QuotaExhausted { .. });
-                        let quota_reset = match &pool_err {
-                            PoolErrorType::QuotaExhausted { retry_after } => *retry_after,
-                            _ => None,
-                        };
-                        self.pool.record_error(&key.id, pool_err);
-                        // Egress-level quota cooldown (contract
-                        // 2026-10-07-egress-pool-contract): a quota-exhaustion
-                        // 429 cools ONLY the offending exit for the advertised
-                        // reset — body `Resets in` > `Retry-After` header >
-                        // 900s default (record_quota_exhausted's internal
-                        // fallback). Transient failures never cool an exit.
-                        if let (Some(eg_pool), Some(eg_entry)) = (&self.egress_pool, &egress_entry) {
-                            if is_quota {
-                                let body_reset = parse_reset_duration(&err_body);
-                                eg_pool.record_quota_exhausted(&eg_entry.id, body_reset.or(retry_after));
-                            }
-                        }
-                        // Family-scoped 429 writeback: an upstream quota reset
-                        // records the family group's exhaustion immediately and
-                        // is the ONLY source of family-ledger verdicts. The
-                        // ledger is used for later 429 semantics + honest
-                        // unlock hints, never for selection-time pre-rejection
-                        // (ADR 2026-10-04-antigravity-group-quota-aware-scheduling).
-                        if key.is_antigravity() {
-                            if let (Some(fam), Some(reset)) = (quota_family, quota_reset) {
-                                let reset_at = chrono::Utc::now()
-                                    + chrono::Duration::from_std(reset)
-                                        .unwrap_or(chrono::Duration::hours(6));
-                                key.set_family_quota_exhausted(fam, reset_at);
-                            }
-                        }
-                        // Quota exhaustion closes the window: never retry the
-                        // same key in-request, let the pool fail over / fail fast.
-                        if !is_quota {
-                            if let Some(delay) = transient_retry_delay(&self.pool, &key.id, attempt, max_attempts, transient_retry_after) {
-                                attempted_keys.retain(|id| id != &key.id);
-                                self.emit_both(&key.id, attempt_idx, Some(status_code), last_kind.clone(), last_error.clone(), Some(err_body), attempt_start.elapsed());
-                                tokio::time::sleep(delay).await;
-                                continue;
-                            }
-                        }
-                        // Pool-level failover backoff: multi-key pools pause
-                        // briefly before switching keys so a per-minute window
-                        // shared across the account's keys is not swept in
-                        // milliseconds (eliminates the observed 17-30× 429
-                        // amplification on sense/deepseek-v4-flash).
-                        if attempt + 1 < max_attempts {
-                            if let Some(delay) = pool_failover_backoff(&self.pool) {
-                                tokio::time::sleep(delay).await;
-                            }
-                        }
-                    } else if status_code == 401 {
-                        match self.recover_stale_antigravity_token(&key, &mut refreshed_keys).await {
-                            StaleTokenRecovery::RetrySameKey => {
-                                attempted_keys.retain(|id| id != &key.id);
-                                last_kind = GatewayErrorKind::AuthInvalid;
-                                attempt_kinds.push(last_kind.clone());
-                                self.emit_both(&key.id, attempt_idx, Some(status_code), last_kind.clone(), last_error.clone(), Some(err_body), attempt_start.elapsed());
-                                continue;
-                            }
-                            StaleTokenRecovery::Recorded(kind) => {
-                                last_kind = kind;
-                                attempt_kinds.push(last_kind.clone());
-                            }
-                            StaleTokenRecovery::Passthrough => {
-                                last_kind = GatewayErrorKind::AuthInvalid;
-                                attempt_kinds.push(last_kind.clone());
-                                self.pool.record_error(&key.id, PoolErrorType::AuthInvalid { reason: None });
-                            }
-                        }
-                    } else if status_code == 403 {
-                        // Balance-wording 403 (billing, not window): fail-fast
-                        // flag only; the classification below is kept.
-                        if is_balance_exhausted_body(&err_body) {
-                            balance_exhausted = true;
-                        }
-                        let (kind, pool_err) = classify_forbidden(&err_body, retry_after);
-                        last_kind = kind;
-                        attempt_kinds.push(last_kind.clone());
-                        self.pool.record_error(&key.id, pool_err);
-                    } else if status_code == 402 {
-                        // 402 Payment Required is balance exhaustion by
-                        // definition: never transparent-wait on it.
+                if status_code == 429 {
+                    // Balance-wording 429 (billing, not window): sets the
+                    // fail-fast flag; the classification below is kept.
+                    let balance_wording = is_balance_exhausted_body(&err_body);
+                    if balance_wording {
                         balance_exhausted = true;
-                        last_kind = GatewayErrorKind::QuotaExhausted;
-                        attempt_kinds.push(last_kind.clone());
-                        self.pool.record_error(&key.id, PoolErrorType::QuotaExhausted { retry_after });
-                        // 402 is balance exhaustion = quota boundary: cool the
-                        // exit that carried this attempt (contract egress
-                        // semantics — each exit keeps an independent ledger).
-                        if let (Some(eg_pool), Some(eg_entry)) = (&self.egress_pool, &egress_entry) {
+                    }
+                    let (kind, pool_err) = classify_too_many_requests(&err_body, retry_after);
+                    // Balance-wording 429 means the account balance is
+                    // gone, not a sliding window closing: classify as
+                    // quota so the boundary guard stops cross-provider
+                    // failover instead of draining a second provider
+                    // (bugfix 2026-10-02; mirrors the 403 balance path).
+                    let (kind, pool_err) = if balance_wording {
+                        (
+                            GatewayErrorKind::QuotaExhausted,
+                            PoolErrorType::QuotaExhausted { retry_after },
+                        )
+                    } else {
+                        (kind, pool_err)
+                    };
+                    last_kind = kind;
+                    attempt_kinds.push(last_kind.clone());
+                    let transient_retry_after = match &pool_err {
+                        PoolErrorType::RateLimit { retry_after } => *retry_after,
+                        _ => None,
+                    };
+                    let is_quota = matches!(&pool_err, PoolErrorType::QuotaExhausted { .. });
+                    let quota_reset = match &pool_err {
+                        PoolErrorType::QuotaExhausted { retry_after } => *retry_after,
+                        _ => None,
+                    };
+                    self.pool.record_error(&key.id, pool_err);
+                    // Egress-level quota cooldown (contract
+                    // 2026-10-07-egress-pool-contract): a quota-exhaustion
+                    // 429 cools ONLY the offending exit for the advertised
+                    // reset — body `Resets in` > `Retry-After` header >
+                    // 900s default (record_quota_exhausted's internal
+                    // fallback). Transient failures never cool an exit.
+                    if let (Some(eg_pool), Some(eg_entry)) = (&self.egress_pool, &egress_entry) {
+                        if is_quota {
                             let body_reset = parse_reset_duration(&err_body);
-                            eg_pool.record_quota_exhausted(&eg_entry.id, body_reset.or(retry_after));
+                            eg_pool
+                                .record_quota_exhausted(&eg_entry.id, body_reset.or(retry_after));
                         }
-                    } else if status.is_server_error() {
-                        last_kind = GatewayErrorKind::UpstreamUnavailable;
-                        attempt_kinds.push(last_kind.clone());
-                        self.pool.record_error(&key.id, PoolErrorType::ServerError);
-                        if let (Some(eg_pool), Some(eg_entry)) = (&self.egress_pool, &egress_entry) {
-                            eg_pool.record_transient_failure(&eg_entry.id);
+                    }
+                    // Family-scoped 429 writeback: an upstream quota reset
+                    // records the family group's exhaustion immediately and
+                    // is the ONLY source of family-ledger verdicts. The
+                    // ledger is used for later 429 semantics + honest
+                    // unlock hints, never for selection-time pre-rejection
+                    // (ADR 2026-10-04-antigravity-group-quota-aware-scheduling).
+                    if key.is_antigravity() {
+                        if let (Some(fam), Some(reset)) = (quota_family, quota_reset) {
+                            let reset_at = chrono::Utc::now()
+                                + chrono::Duration::from_std(reset)
+                                    .unwrap_or(chrono::Duration::hours(6));
+                            key.set_family_quota_exhausted(fam, reset_at);
                         }
-                        if let Some(delay) = transient_retry_delay(&self.pool, &key.id, attempt, max_attempts, None) {
+                    }
+                    // Quota exhaustion closes the window: never retry the
+                    // same key in-request, let the pool fail over / fail fast.
+                    if !is_quota {
+                        if let Some(delay) = transient_retry_delay(
+                            &self.pool,
+                            &key.id,
+                            attempt,
+                            max_attempts,
+                            transient_retry_after,
+                        ) {
                             attempted_keys.retain(|id| id != &key.id);
-                            self.emit_both(&key.id, attempt_idx, Some(status_code), last_kind.clone(), last_error.clone(), Some(err_body), attempt_start.elapsed());
+                            self.emit_both(
+                                &key.id,
+                                attempt_idx,
+                                Some(status_code),
+                                last_kind.clone(),
+                                last_error.clone(),
+                                Some(err_body),
+                                attempt_start.elapsed(),
+                            );
                             tokio::time::sleep(delay).await;
                             continue;
                         }
-                    } else {
-                        // Genuine 400s stay terminal; transient geo-gates earn
-                        // one bounded same-key retry (see json path).
-                        if is_transient_geo_gate(status_code, &err_body) {
-                            if let Some(delay) = geo_gate_retry_delay(attempt, &self.pool) {
-                                attempted_keys.retain(|id| id != &key.id);
-                                self.emit_both(&key.id, attempt_idx, Some(status_code), GatewayErrorKind::ClientBadRequest, last_error.clone(), Some(err_body), attempt_start.elapsed());
-                                tokio::time::sleep(delay).await;
-                                continue;
-                            }
-                        }
-                        self.emit_both(&key.id, attempt_idx, Some(status_code), GatewayErrorKind::ClientBadRequest, last_error.clone(), Some(err_body.clone()), attempt_start.elapsed());
-                        return Err(CoreError::UpstreamStatusError {
-                            status,
-                            body: err_body,
-                        });
                     }
-                    self.emit_both(&key.id, attempt_idx, Some(status_code), last_kind.clone(), last_error.clone(), Some(err_body), attempt_start.elapsed());
+                    // Pool-level failover backoff: multi-key pools pause
+                    // briefly before switching keys so a per-minute window
+                    // shared across the account's keys is not swept in
+                    // milliseconds (eliminates the observed 17-30× 429
+                    // amplification on sense/deepseek-v4-flash).
+                    if attempt + 1 < max_attempts {
+                        if let Some(delay) = pool_failover_backoff(&self.pool) {
+                            tokio::time::sleep(delay).await;
+                        }
+                    }
+                } else if status_code == 401 {
+                    match self
+                        .recover_stale_antigravity_token(&key, &mut refreshed_keys)
+                        .await
+                    {
+                        StaleTokenRecovery::RetrySameKey => {
+                            attempted_keys.retain(|id| id != &key.id);
+                            last_kind = GatewayErrorKind::AuthInvalid;
+                            attempt_kinds.push(last_kind.clone());
+                            self.emit_both(
+                                &key.id,
+                                attempt_idx,
+                                Some(status_code),
+                                last_kind.clone(),
+                                last_error.clone(),
+                                Some(err_body),
+                                attempt_start.elapsed(),
+                            );
+                            continue;
+                        }
+                        StaleTokenRecovery::Recorded(kind) => {
+                            last_kind = kind;
+                            attempt_kinds.push(last_kind.clone());
+                        }
+                        StaleTokenRecovery::Passthrough => {
+                            last_kind = GatewayErrorKind::AuthInvalid;
+                            attempt_kinds.push(last_kind.clone());
+                            self.pool
+                                .record_error(&key.id, PoolErrorType::AuthInvalid { reason: None });
+                        }
+                    }
+                } else if status_code == 403 {
+                    // Balance-wording 403 (billing, not window): fail-fast
+                    // flag only; the classification below is kept.
+                    if is_balance_exhausted_body(&err_body) {
+                        balance_exhausted = true;
+                    }
+                    let (kind, pool_err) = classify_forbidden(&err_body, retry_after);
+                    last_kind = kind;
+                    attempt_kinds.push(last_kind.clone());
+                    self.pool.record_error(&key.id, pool_err);
+                } else if status_code == 402 {
+                    // 402 Payment Required is balance exhaustion by
+                    // definition: never transparent-wait on it.
+                    balance_exhausted = true;
+                    last_kind = GatewayErrorKind::QuotaExhausted;
+                    attempt_kinds.push(last_kind.clone());
+                    self.pool
+                        .record_error(&key.id, PoolErrorType::QuotaExhausted { retry_after });
+                    // 402 is balance exhaustion = quota boundary: cool the
+                    // exit that carried this attempt (contract egress
+                    // semantics — each exit keeps an independent ledger).
+                    if let (Some(eg_pool), Some(eg_entry)) = (&self.egress_pool, &egress_entry) {
+                        let body_reset = parse_reset_duration(&err_body);
+                        eg_pool.record_quota_exhausted(&eg_entry.id, body_reset.or(retry_after));
+                    }
+                } else if status.is_server_error() {
+                    last_kind = GatewayErrorKind::UpstreamUnavailable;
+                    attempt_kinds.push(last_kind.clone());
+                    self.pool.record_error(&key.id, PoolErrorType::ServerError);
+                    if let (Some(eg_pool), Some(eg_entry)) = (&self.egress_pool, &egress_entry) {
+                        eg_pool.record_transient_failure(&eg_entry.id);
+                    }
+                    if let Some(delay) =
+                        transient_retry_delay(&self.pool, &key.id, attempt, max_attempts, None)
+                    {
+                        attempted_keys.retain(|id| id != &key.id);
+                        self.emit_both(
+                            &key.id,
+                            attempt_idx,
+                            Some(status_code),
+                            last_kind.clone(),
+                            last_error.clone(),
+                            Some(err_body),
+                            attempt_start.elapsed(),
+                        );
+                        tokio::time::sleep(delay).await;
+                        continue;
+                    }
+                } else {
+                    // Genuine 400s stay terminal; transient geo-gates earn
+                    // one bounded same-key retry (see json path).
+                    if is_transient_geo_gate(status_code, &err_body) {
+                        if let Some(delay) = geo_gate_retry_delay(attempt, &self.pool) {
+                            attempted_keys.retain(|id| id != &key.id);
+                            self.emit_both(
+                                &key.id,
+                                attempt_idx,
+                                Some(status_code),
+                                GatewayErrorKind::ClientBadRequest,
+                                last_error.clone(),
+                                Some(err_body),
+                                attempt_start.elapsed(),
+                            );
+                            tokio::time::sleep(delay).await;
+                            continue;
+                        }
+                    }
+                    self.emit_both(
+                        &key.id,
+                        attempt_idx,
+                        Some(status_code),
+                        GatewayErrorKind::ClientBadRequest,
+                        last_error.clone(),
+                        Some(err_body.clone()),
+                        attempt_start.elapsed(),
+                    );
+                    return Err(CoreError::UpstreamStatusError {
+                        status,
+                        body: err_body,
+                    });
+                }
+                self.emit_both(
+                    &key.id,
+                    attempt_idx,
+                    Some(status_code),
+                    last_kind.clone(),
+                    last_error.clone(),
+                    Some(err_body),
+                    attempt_start.elapsed(),
+                );
             }
         }
 
-        let aggregated_error = format!("{}{}", summarize_attempt_failures(&attempt_kinds), if last_error.is_empty() { String::new() } else { format!(": {}", last_error) });
+        let aggregated_error = format!(
+            "{}{}",
+            summarize_attempt_failures(&attempt_kinds),
+            if last_error.is_empty() {
+                String::new()
+            } else {
+                format!(": {}", last_error)
+            }
+        );
         Err(CoreError::AllRetriesFailed {
             retries: max_attempts,
             attempted_keys,
@@ -2472,8 +2926,14 @@ impl UpstreamExecutor {
     }
 
     /// Execute a streaming request with failover before the first SSE chunk is yielded
-    pub async fn execute_stream_request(&self, url: &str, body: &Value) -> Result<reqwest::Response> {
-        self.execute_stream_request_with_timing(url, body).await.map(|(resp, _)| resp)
+    pub async fn execute_stream_request(
+        &self,
+        url: &str,
+        body: &Value,
+    ) -> Result<reqwest::Response> {
+        self.execute_stream_request_with_timing(url, body)
+            .await
+            .map(|(resp, _)| resp)
     }
 }
 
@@ -2521,7 +2981,10 @@ mod session_header_tests {
         ] {
             let (kind, pool_err) = classify_forbidden(body, None);
             assert!(
-                !matches!(pool_err, PoolErrorType::PolicyViolation | PoolErrorType::AuthInvalid { .. }),
+                !matches!(
+                    pool_err,
+                    PoolErrorType::PolicyViolation | PoolErrorType::AuthInvalid { .. }
+                ),
                 "body: {}",
                 body
             );
@@ -2569,7 +3032,10 @@ mod session_header_tests {
               "status": "PERMISSION_DENIED"
             }
         }"#;
-        assert!(is_account_eligibility_revoked(body), "body must be detected: {body}");
+        assert!(
+            is_account_eligibility_revoked(body),
+            "body must be detected: {body}"
+        );
         let (kind, pool_err) = classify_forbidden(body, None);
         assert_eq!(kind, GatewayErrorKind::AuthInvalid, "body: {body}");
         match &pool_err {
@@ -2718,7 +3184,10 @@ mod session_header_tests {
             r#"{"type":"error","error":{"type":"FreeTierError","message":"OpenCode's free tier can only be used from within OpenCode"}}"#,
             r#"{"type":"error","error":{"type":"FreeTierError","message":"Error from provider (Console): OpenCode's free tier can only be used from within OpenCode"}}"#,
         ] {
-            assert!(is_zen_free_tier_gate_body(body), "body must be detected: {body}");
+            assert!(
+                is_zen_free_tier_gate_body(body),
+                "body must be detected: {body}"
+            );
             let (kind, pool_err) = classify_forbidden(body, None);
             assert_eq!(kind, GatewayErrorKind::QuotaExhausted, "body: {body}");
             match pool_err {
@@ -2755,7 +3224,10 @@ mod session_header_tests {
             r#"{"type":"error","error":{"type":"FreeUsageLimitError","message":"Rate limit exceeded. Please try again later."},"metadata":{}}"#,
             r#"{"type":"error","error":{"type":"FreeUsageLimitError","message":"Error from provider (Console): Rate limit exceeded. Please try again later."}}"#,
         ] {
-            assert!(is_zen_free_usage_limit_body(body), "body must be detected: {body}");
+            assert!(
+                is_zen_free_usage_limit_body(body),
+                "body must be detected: {body}"
+            );
             let (kind, pool_err) = classify_too_many_requests(body, None);
             assert_eq!(kind, GatewayErrorKind::QuotaExhausted, "body: {body}");
             assert!(
@@ -2877,13 +3349,13 @@ mod session_header_tests {
     #[test]
     fn plain_429_stays_rate_limit_not_quota() {
         let header = Some(Duration::from_secs(5));
-        let (kind, pool_err) = classify_too_many_requests(
-            r#"{"error": {"message": "Rate limit exceeded"}}"#,
-            header,
-        );
+        let (kind, pool_err) =
+            classify_too_many_requests(r#"{"error": {"message": "Rate limit exceeded"}}"#, header);
         assert_eq!(
             kind,
-            GatewayErrorKind::RateLimitExceeded { retry_after: header }
+            GatewayErrorKind::RateLimitExceeded {
+                retry_after: header
+            }
         );
         assert!(matches!(pool_err, PoolErrorType::RateLimit { .. }));
 
@@ -2903,7 +3375,8 @@ mod session_header_tests {
         // Sense (商汤) returns `type: "quota_exceeded_error"` even when only RPM is exhausted.
         // It must be classified as a RateLimitExceeded, allowing pool failover / retry,
         // rather than shutting down the key as QuotaExhausted.
-        let sense_rpm_body = r#"{"error":{"message":"rpm exhausted","type":"quota_exceeded_error","code":"8"}}"#;
+        let sense_rpm_body =
+            r#"{"error":{"message":"rpm exhausted","type":"quota_exceeded_error","code":"8"}}"#;
         let (kind, pool_err) = classify_too_many_requests(sense_rpm_body, None);
         assert!(
             matches!(kind, GatewayErrorKind::RateLimitExceeded { .. }),
@@ -2953,9 +3426,13 @@ mod session_header_tests {
     #[test]
     fn qps_and_concurrency_bodies_stay_rate_limit() {
         let qps = r#"{"error":{"message":"qps exceeded","type":"rate_limit_error"}}"#;
-        assert!(!is_quota_exhausted_body(qps), "qps body must be a rate limit");
+        assert!(
+            !is_quota_exhausted_body(qps),
+            "qps body must be a rate limit"
+        );
 
-        let concurrency = r#"{"error":{"message":"concurrency limit reached","type":"rate_limit_error"}}"#;
+        let concurrency =
+            r#"{"error":{"message":"concurrency limit reached","type":"rate_limit_error"}}"#;
         assert!(
             !is_quota_exhausted_body(concurrency),
             "concurrency body must be a rate limit"
@@ -3038,7 +3515,10 @@ mod session_header_tests {
         assert_eq!(parse_reset_duration("Resets in 5 requests"), None);
         // A garbled later group invalidates the whole hint rather than
         // yielding the valid prefix.
-        assert_eq!(parse_reset_duration("Resets in 1h999999999999999999999999s"), None);
+        assert_eq!(
+            parse_reset_duration("Resets in 1h999999999999999999999999s"),
+            None
+        );
     }
 
     #[test]
@@ -3121,11 +3601,7 @@ mod session_header_tests {
         let pool = Arc::new(KeyPool::new("test", RoutingStrategy::RoundRobin));
         let fallback = UpstreamExecutor::new(pool, 1).with_opencode_zen(true);
         let headers = futures::executor::block_on(fallback.build_headers(&key, None)).unwrap();
-        let session = headers
-            .get("x-opencode-session")
-            .unwrap()
-            .to_str()
-            .unwrap();
+        let session = headers.get("x-opencode-session").unwrap().to_str().unwrap();
         assert!(session.starts_with("ses_"), "got {}", session);
     }
 
@@ -3141,10 +3617,7 @@ mod session_header_tests {
         assert!(headers.get("x-session-affinity").is_none());
         assert!(headers.get("x-session-id").is_none());
         assert!(headers.get("x-opencode-client").is_none());
-        assert_eq!(
-            headers.get(USER_AGENT).map(|v| v.to_str().unwrap()),
-            None
-        );
+        assert_eq!(headers.get(USER_AGENT).map(|v| v.to_str().unwrap()), None);
         // Auth headers still present.
         assert!(headers.get(AUTHORIZATION).is_some());
         assert!(headers.get("x-api-key").is_some());
@@ -3161,7 +3634,11 @@ mod session_header_tests {
             project_id: "test-proj".to_string(),
             expiry: Some(chrono::Utc::now() + chrono::Duration::hours(1)),
         };
-        let tm = Arc::new(crate::pool::AntigravityTokenManager::new("ag-key-1", cred, reqwest::Client::new()));
+        let tm = Arc::new(crate::pool::AntigravityTokenManager::new(
+            "ag-key-1",
+            cred,
+            reqwest::Client::new(),
+        ));
         let key = ApiKeyEntry::new_antigravity("ag-key-1", tm, 1, 10);
 
         let executor = UpstreamExecutor::new(pool, 1);
@@ -3170,12 +3647,19 @@ mod session_header_tests {
             "requestId": expected_req_id,
             "project": "test-proj"
         });
-        let headers = futures::executor::block_on(executor.build_headers(&key, Some(&body))).unwrap();
+        let headers =
+            futures::executor::block_on(executor.build_headers(&key, Some(&body))).unwrap();
 
         assert_eq!(headers.get("requestId").unwrap(), expected_req_id);
         assert_eq!(headers.get("requestType").unwrap(), "agent");
-        assert_eq!(headers.get("x-goog-api-client").unwrap(), "gl-node/22.14.0 gdcl/1.1.24");
-        assert_eq!(headers.get(USER_AGENT).unwrap(), crate::pool::ANTIGRAVITY_USER_AGENT);
+        assert_eq!(
+            headers.get("x-goog-api-client").unwrap(),
+            "gl-node/22.14.0 gdcl/1.1.24"
+        );
+        assert_eq!(
+            headers.get(USER_AGENT).unwrap(),
+            crate::pool::ANTIGRAVITY_USER_AGENT
+        );
         assert!(headers.get(reqwest::header::ACCEPT).is_some());
     }
 
@@ -3189,7 +3673,11 @@ mod session_header_tests {
             project_id: "project-of-key-2".to_string(),
             expiry: Some(chrono::Utc::now() + chrono::Duration::hours(1)),
         };
-        let tm = Arc::new(crate::pool::AntigravityTokenManager::new("ag-k2", cred, reqwest::Client::new()));
+        let tm = Arc::new(crate::pool::AntigravityTokenManager::new(
+            "ag-k2",
+            cred,
+            reqwest::Client::new(),
+        ));
         let key2 = ApiKeyEntry::new_antigravity("ag-k2", tm, 1, 10);
 
         let pre_serialized_body = serde_json::json!({
@@ -3212,7 +3700,9 @@ mod pool_wait_tests {
     fn extract_response_tokens_across_wire_shapes() {
         // OpenAI chat / responses: usage.total_tokens wins.
         assert_eq!(
-            extract_response_tokens(&json!({"usage": {"prompt_tokens": 5, "completion_tokens": 7, "total_tokens": 12}})),
+            extract_response_tokens(
+                &json!({"usage": {"prompt_tokens": 5, "completion_tokens": 7, "total_tokens": 12}})
+            ),
             12
         );
         // Anthropic messages: input + output.
@@ -3222,7 +3712,9 @@ mod pool_wait_tests {
         );
         // prompt/completion split without total.
         assert_eq!(
-            extract_response_tokens(&json!({"usage": {"prompt_tokens": 10, "completion_tokens": 20}})),
+            extract_response_tokens(
+                &json!({"usage": {"prompt_tokens": 10, "completion_tokens": 20}})
+            ),
             30
         );
         // Missing/absent usage -> 0 (request-only accounting).
@@ -3343,7 +3835,11 @@ mod pool_wait_tests {
         let executor2 = UpstreamExecutor::new(pool2, 1);
         let mut done2 = false;
         let mut keys2 = vec!["k1".to_string(), "k2".to_string()];
-        assert!(!executor2.maybe_window_wait(&mut done2, &mut keys2, false).await);
+        assert!(
+            !executor2
+                .maybe_window_wait(&mut done2, &mut keys2, false)
+                .await
+        );
         assert!(!done2);
     }
 
@@ -3426,7 +3922,8 @@ mod pool_wait_tests {
         let k = ApiKeyEntry::new("k1", "sk-1", 1, 10);
         k.record_failure(PoolErrorType::AuthInvalid { reason: None });
         pool2.add_key(k);
-        let executor2 = UpstreamExecutor::new(pool2, 1).with_rate_limits(Some(RateLimits::default()));
+        let executor2 =
+            UpstreamExecutor::new(pool2, 1).with_rate_limits(Some(RateLimits::default()));
         let mut done2 = false;
         let mut keys2: Vec<String> = Vec::new();
         assert!(
@@ -3459,7 +3956,8 @@ mod zen_tools_tests {
     #[test]
     fn free_model_chat_body_gets_full_tool_set() {
         let ex = zen_executor();
-        let body = json!({"model": "mimo-v2.5-free", "messages": [{"role": "user", "content": "hi"}]});
+        let body =
+            json!({"model": "mimo-v2.5-free", "messages": [{"role": "user", "content": "hi"}]});
         let out = ex.inject_zen_free_tier_tools(CHAT_URL, std::borrow::Cow::Borrowed(&body));
         let names = tool_names(out.as_ref());
         assert_eq!(names.len(), OPENCODE_ZEN_TOOL_NAMES.len());
@@ -3575,15 +4073,17 @@ mod zen_tools_tests {
         assert_eq!(kid, "k1");
 
         // With k1 excluded, the same Priority pool must yield k2.
-        let excl = UpstreamExecutor::new(pool.clone(), 1)
-            .with_excluded_keys(&["k1".to_string()]);
+        let excl = UpstreamExecutor::new(pool.clone(), 1).with_excluded_keys(&["k1".to_string()]);
         let (_, _, kid2) = excl
             .execute_stream_request_with_timing_and_key(&endpoint, &body)
             .await
             .unwrap();
         assert_eq!(kid2, "k2");
         let auths = seen_auth.lock().unwrap();
-        assert!(auths.iter().any(|a| a.contains("sk-k2")), "upstream must see k2: {auths:?}");
+        assert!(
+            auths.iter().any(|a| a.contains("sk-k2")),
+            "upstream must see k2: {auths:?}"
+        );
     }
 
     #[test]
@@ -3596,9 +4096,6 @@ mod zen_tools_tests {
             sanitize_proxy_url("http://127.0.0.1:8899"),
             "http://127.0.0.1:8899/"
         );
-        assert_eq!(
-            sanitize_proxy_url("user:pass@host:8080"),
-            "***@host:8080"
-        );
+        assert_eq!(sanitize_proxy_url("user:pass@host:8080"), "***@host:8080");
     }
 }

@@ -26,9 +26,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ponyllm_config::{ConfigFile, KeySection, ModelConfig, ProviderSection};
-use ponyllm_core::pool::{
-    ApiKeyEntry, BillingMode, GatewayRoutingStrategy, KeyPool, ModelTier, RoutingStrategy,
-};
+use ponyllm_core::pool::{ApiKeyEntry, BillingMode, KeyPool, ModelTier, RoutingStrategy};
 use ponyllm_server::admin_store::{ConfigStore, FileConfigStore};
 use ponyllm_server::{create_app, AppState, GatewayConfig, ModelSpec, ProviderConfig};
 use reqwest::StatusCode;
@@ -116,7 +114,6 @@ impl WriteTestHarness {
         let mut config_file = ConfigFile::default();
         config_file.gateway.bind = "127.0.0.1:8080".to_string();
         config_file.gateway.api_key = api_key.clone();
-        config_file.gateway.default_strategy = GatewayRoutingStrategy::Economy;
         config_file.gateway.web_enabled = true;
         config_file.gateway.admin_write_enabled = admin_write_enabled;
         config_file.providers = providers;
@@ -127,7 +124,6 @@ impl WriteTestHarness {
         let mut gw_config = GatewayConfig::default();
         gw_config.bind_addr = "127.0.0.1:8080".to_string();
         gw_config.api_key = api_key.clone();
-        gw_config.default_strategy = GatewayRoutingStrategy::Economy;
         gw_config.web_enabled = true;
         gw_config.admin_write_enabled = admin_write_enabled;
 
@@ -229,8 +225,9 @@ async fn test_admin_write_disabled_gate() {
         ("POST", "/api/admin/keys", serde_json::json!({"provider": "openai", "id": "k2", "api_key": "sec"})),
         ("DELETE", "/api/admin/keys/key-1", serde_json::json!({})),
         ("POST", "/api/admin/keys/key-1/test", serde_json::json!({})),
-        // C1 regression: strategy PUT and auth rotate must also honor the gate
-        ("PUT", "/api/admin/strategy", serde_json::json!({"strategy": "speed"})),
+        // C1 regression: auth rotate must also honor the gate. The former
+        // strategy PUT leg was retired together with /api/admin/strategy
+        // (wave-2); the retired route is asserted 404 elsewhere.
         ("ROTATE", "/api/admin/auth/rotate", serde_json::json!({})),
     ];
 
@@ -260,29 +257,55 @@ async fn test_admin_write_disabled_gate() {
         let err: serde_json::Value = resp.json().await.unwrap();
         assert_eq!(err["error"]["code"], "admin_write_disabled");
     }
+
+    // wave-2: the retired global strategy endpoint must 404 even WITH a valid
+    // admin credential and the write gate open — and must NOT answer with the
+    // gate's `admin_write_disabled` envelope (that would prove the route lives).
+    for method in ["GET", "PUT", "POST", "DELETE"] {
+        let url = format!("http://{}/api/admin/strategy", harness.addr);
+        let req = match method {
+            "GET" => client.get(&url),
+            "PUT" => client
+                .put(&url)
+                .json(&serde_json::json!({"strategy": "speed"})),
+            "POST" => client.post(&url).json(&serde_json::json!({})),
+            _ => client.delete(&url),
+        };
+        let resp = req
+            .header("Authorization", &auth)
+            .header("If-Match", "*")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "expected 404 for {method} /api/admin/strategy with writes enabled"
+        );
+    }
 }
 
 // -----------------------------------------------------------------------------
 // Test 1b: auth runs before the write gate (401 precedes 404)
 // -----------------------------------------------------------------------------
 #[tokio::test]
-async fn test_auth_precedes_write_gate_on_strategy_and_rotate() {
+async fn test_auth_precedes_write_gate_on_provider_and_rotate() {
     // Gate open or closed, an unauthenticated caller must see 401, never the
     // gate's 404: auth_middleware wraps the whole api router.
     for admin_write_enabled in [true, false] {
         let harness = WriteTestHarness::new(admin_write_enabled).await;
         let client = reqwest::Client::new();
 
-        let unauth_strategy = client
-            .put(format!("http://{}/api/admin/strategy", harness.addr))
-            .json(&serde_json::json!({"strategy": "speed"}))
+        let unauth_provider = client
+            .put(format!("http://{}/api/admin/providers/openai", harness.addr))
+            .json(&serde_json::json!({"default_model": "gpt-4o-mini"}))
             .send()
             .await
             .unwrap();
         assert_eq!(
-            unauth_strategy.status(),
+            unauth_provider.status(),
             StatusCode::UNAUTHORIZED,
-            "expected 401 for unauthenticated PUT strategy (write={})",
+            "expected 401 for unauthenticated PUT provider (write={})",
             admin_write_enabled
         );
 

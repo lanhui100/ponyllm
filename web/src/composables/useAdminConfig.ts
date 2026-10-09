@@ -141,7 +141,6 @@ export function useAdminConfig(options: UseAdminConfigOptions = {}) {
   const providers = ref<ProviderView[]>([]);
   const models = ref<ModelView[]>([]);
   const keys = ref<KeyView[]>([]);
-  const strategy = ref<string>('economy');
   const autoModels = ref<string[]>([]);
   const activeModelsOrder = ref<string[]>([]);
   const configVersion = ref<number>(0);
@@ -185,12 +184,11 @@ export function useAdminConfig(options: UseAdminConfigOptions = {}) {
     loading.value = true;
     error.value = null;
     try {
-      const [ov, pv, mv, kv, st] = await Promise.all([
+      const [ov, pv, mv, kv] = await Promise.all([
         adminApi.getOverview().send(),
         adminApi.getProviders().send(),
         adminApi.getModels().send(),
         adminApi.getKeys().send(),
-        adminApi.getStrategy().send(),
       ]);
 
       void adminApi.getAutoModels().send().then((am) => {
@@ -204,7 +202,6 @@ export function useAdminConfig(options: UseAdminConfigOptions = {}) {
       providers.value = pv;
       models.value = mv;
       keys.value = kv;
-      strategy.value = st.strategy;
       configVersion.value = ov.config_version;
 
       // 池级持久化累计基准：独立只读端点，失败不阻塞主流程（降级为 null）。
@@ -243,12 +240,11 @@ export function useAdminConfig(options: UseAdminConfigOptions = {}) {
    */
   async function refreshSilent(): Promise<void> {
     try {
-      const [ov, pv, mv, kv, st] = await Promise.all([
+      const [ov, pv, mv, kv] = await Promise.all([
         adminApi.getOverview().send(),
         adminApi.getProviders().send(),
         adminApi.getModels().send(),
         adminApi.getKeys().send(),
-        adminApi.getStrategy().send(),
       ]);
 
       void adminApi.getAutoModels().send().then((am) => {
@@ -262,7 +258,6 @@ export function useAdminConfig(options: UseAdminConfigOptions = {}) {
       providers.value = pv;
       models.value = mv;
       keys.value = kv;
-      strategy.value = st.strategy;
       configVersion.value = ov.config_version;
       void adminApi.getQuotaBenchmark().send().then((b) => {
         cycleBenchmark.value = b;
@@ -420,14 +415,6 @@ export function useAdminConfig(options: UseAdminConfigOptions = {}) {
     }
   }
 
-  async function saveStrategy(newStrategy: string): Promise<void> {
-    return runWithConflictCheck(async () => {
-      const res = await adminApi.updateStrategy({ strategy: newStrategy }, configVersion.value).send();
-      strategy.value = res.strategy;
-      configVersion.value = res.config_version;
-    });
-  }
-
   function clearConflict(): void {
     conflictDetected.value = false;
   }
@@ -483,7 +470,6 @@ export function useAdminConfig(options: UseAdminConfigOptions = {}) {
     providers,
     models,
     keys,
-    strategy,
     configVersion,
     loading,
     error,
@@ -509,7 +495,6 @@ export function useAdminConfig(options: UseAdminConfigOptions = {}) {
     removeKey,
     testSingleKey,
     batchTestAllKeys,
-    saveStrategy,
     autoModels,
     activeModelsOrder,
     saveAutoModels,

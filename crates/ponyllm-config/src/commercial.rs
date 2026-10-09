@@ -321,10 +321,14 @@ impl CommercialConfig {
         // strictly matching `env:[A-Z0-9_]+` or `secret:[a-zA-Z0-9_/.-]+`.
         // Raw API keys or literal credentials (e.g. `sk-...`, `bearer ...`) are explicitly blocked.
         let is_valid_ref = (trimmed.starts_with("env:")
-            && trimmed[4..].chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+            && trimmed[4..]
+                .chars()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
             && !trimmed[4..].is_empty())
             || (trimmed.starts_with("secret:")
-                && trimmed[7..].chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '/' | '.' | '-'))
+                && trimmed[7..]
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '/' | '.' | '-'))
                 && !trimmed[7..].is_empty());
         if !is_valid_ref || lower.starts_with("sk-") || lower.starts_with("bearer ") {
             return Err(CommercialConfigError::AdminReferencePlaceholder {
@@ -339,11 +343,10 @@ impl CommercialConfig {
         if raw.is_empty() {
             return Err(CommercialConfigError::BindMissing);
         }
-        let (host, port) = parse_host_port(raw).ok_or_else(|| {
-            CommercialConfigError::BindUnparsable {
+        let (host, port) =
+            parse_host_port(raw).ok_or_else(|| CommercialConfigError::BindUnparsable {
                 found: raw.to_string(),
-            }
-        })?;
+            })?;
         if port == 0 {
             return Err(CommercialConfigError::BindUnsafe {
                 found: raw.to_string(),
@@ -359,14 +362,13 @@ impl CommercialConfig {
         if let Ok(ip) = host.parse::<IpAddr>() {
             let unsafe_ip = match ip {
                 IpAddr::V4(v4) => {
-                    v4.is_unspecified()
-                        || v4.is_multicast()
-                        || v4 == std::net::Ipv4Addr::BROADCAST
+                    v4.is_unspecified() || v4.is_multicast() || v4 == std::net::Ipv4Addr::BROADCAST
                 }
                 IpAddr::V6(v6) => {
                     v6.is_unspecified()
                         || v6.is_multicast()
-                        || v6.to_ipv4_mapped()
+                        || v6
+                            .to_ipv4_mapped()
                             .map(|m| {
                                 m.is_unspecified()
                                     || m.is_multicast()
@@ -486,7 +488,10 @@ keys = [
 "#;
         let cfg: crate::ConfigFile = toml::from_str(old_toml).unwrap();
         let commercial = &cfg.commercial;
-        assert!(!commercial.enabled, "absent section must default to disabled");
+        assert!(
+            !commercial.enabled,
+            "absent section must default to disabled"
+        );
         assert_eq!(commercial.currency, "USD");
         assert_eq!(commercial.lease_seconds, 30);
         assert_eq!(commercial.heartbeat_seconds, 10);
@@ -567,7 +572,14 @@ keys = [
 
     #[test]
     fn validate_rejects_placeholder_admin_reference() {
-        for placeholder in ["none", "NONE", "None ", "default", "changeme", "placeholder"] {
+        for placeholder in [
+            "none",
+            "NONE",
+            "None ",
+            "default",
+            "changeme",
+            "placeholder",
+        ] {
             let mut profile = enabled_profile();
             profile.commercial_admin_ref = placeholder.to_string();
             match profile.validate() {
@@ -834,8 +846,10 @@ keys = [
     // -- no persisted secret ----------------------------------------------
     #[test]
     fn commercial_section_serializes_exactly_the_documented_keys() {
-        let mut expected: Vec<String> =
-            COMMERCIAL_CONFIG_KEYS.iter().map(|k| k.to_string()).collect();
+        let mut expected: Vec<String> = COMMERCIAL_CONFIG_KEYS
+            .iter()
+            .map(|k| k.to_string())
+            .collect();
         expected.sort();
 
         // Both the disabled default and a fully populated profile must emit

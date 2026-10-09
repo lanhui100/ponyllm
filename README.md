@@ -115,7 +115,7 @@ ponyllm tui
 ```
 提供四大面板：
 - **📊 实时大盘**：监控网关 UP/DOWN 状态、实时 QPS、成功/429 倒换/5xx 统计指标；
-- **🏢 提供商 & 模型**：可视化查看提供商列表与调度策略；
+- **🏢 提供商 & 模型**：可视化查看提供商列表；
 - **🔑 Key 账户池治理**：查看所有 Key 的脱敏指纹与实时就绪状态；按 `a` 添加 Key（provider ←/→ 切换、填 Key ID/API Key/优先级/权重，Enter 保存，重复 ID 即覆盖更新），按 `d` 删除选中 Key（二次确认）；
 - **📼 黑匣子故障录波**：上下翻页审查最近请求与异常帧快照详情。
 
@@ -150,6 +150,31 @@ ponyllm keys issue --scope inference --id agent-ci-1   # 签发 agent key（明�
 ponyllm keys list                                      # 列表（id/scope/前缀，永不明文）
 ponyllm keys revoke --id agent-ci-1                    # 删除（硬删除：无残留记录，立即 fail-closed）
 ```
+
+### 6.1 用户管理与配额控制 (User Management & Quotas)
+
+针对单个用户或团队提供专属服务、限制模型权限与 Token 用量：
+```bash
+# 列出所有配置用户
+ponyllm user list
+
+# 创建/更新用户（支持限制模型白名单与最大 Token 用量）
+ponyllm user add user_alice --name "Alice" --models "gpt-4o-mini,deepseek/*" --max-tokens 100000
+
+# 签发绑定到该用户的专属 Gateway Key
+ponyllm keys issue --scope inference --id alice-key --user user_alice
+
+# 重置用户的已用 Token 计数（连接运行中的网关）
+ponyllm user reset-usage user_alice
+
+# 移除用户
+ponyllm user remove user_alice
+```
+
+- **模型白名单拦截**：若配置了 `allowed_models`，请求不在白名单内的模型直接返回 `403 model_forbidden_for_user`。
+- **Token 额度熔断**：当用户累计消耗的 Token 超过 `max_tokens` 时，后续推理请求直接返回 `429 user_quota_exhausted`。
+- **状态停用控制**：停用用户（`enabled=false`）的所有请求返回 `403 user_disabled`。
+
 
 兼容三态（`[gateway] auth_compat`，默认 `dual`）：`legacy-only`（旧行为）→ `dual`（旧单 token 全权 + `deprecated-auth` 打标）→ `strict`（旧单 token 一律 401，需重领分级 key；裸 token 无 `Bearer ` 前缀拒绝；`?token=` URL 直达禁用，Web 走表单登录）。
 

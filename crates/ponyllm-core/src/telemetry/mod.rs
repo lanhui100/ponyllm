@@ -1,13 +1,13 @@
-pub mod recorder;
-pub mod metrics;
-pub mod event;
-pub mod projection;
 pub mod connectivity;
+pub mod event;
+pub mod metrics;
+pub mod projection;
+pub mod recorder;
 pub mod timeseries;
 
-pub use recorder::*;
-pub use metrics::*;
-pub use event::*;
-pub use projection::*;
 pub use connectivity::*;
+pub use event::*;
+pub use metrics::*;
+pub use projection::*;
+pub use recorder::*;
 pub use timeseries::*;
