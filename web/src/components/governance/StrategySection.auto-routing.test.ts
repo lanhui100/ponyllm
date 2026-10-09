@@ -71,12 +71,31 @@ function need<T>(value: T | null | undefined, what: string): T {
   return value as T;
 }
 
-/** HTML5 drag sequence: source row dragged onto the target row. */
-function dragOnto(source: HTMLElement, target: HTMLElement): void {
+/** HTML5 drag sequence: source row dragged onto the target row with position ('before' | 'after'). */
+function dragOnto(
+  source: HTMLElement,
+  target: HTMLElement,
+  position: 'before' | 'after' = 'before',
+): void {
   const dt = new Event('dragstart') as Event & { dataTransfer?: DataTransfer };
-  const over = new Event('dragover') as Event & { dataTransfer?: DataTransfer };
-  const drop = new Event('drop') as Event & { dataTransfer?: DataTransfer };
-  const end = new Event('dragend');
+  const over = new Event('dragover', { bubbles: true, cancelable: true }) as Event & {
+    dataTransfer?: DataTransfer;
+    clientY?: number;
+  };
+  // Mock bounding rect if not present or zero
+  const rect = target.getBoundingClientRect();
+  const top = rect.top || 100;
+  const height = rect.height || 40;
+  // If 'before', clientY is in the upper half; if 'after', in the lower half
+  over.clientY = position === 'before' ? top + height * 0.25 : top + height * 0.75;
+
+  const drop = new Event('drop', { bubbles: true, cancelable: true }) as Event & {
+    dataTransfer?: DataTransfer;
+    clientY?: number;
+  };
+  drop.clientY = over.clientY;
+
+  const end = new Event('dragend', { bubbles: true });
   source.dispatchEvent(dt);
   target.dispatchEvent(over);
   target.dispatchEvent(drop);
@@ -373,6 +392,130 @@ describe('StrategySection — wave-2 Auto 智能路由', () => {
     expect(
       qa(container, '[data-testid="auto-model-row"]').map((r) => r.getAttribute('data-model')),
     ).toEqual(['gemini-3.8-flash', 'deepseek-v4-flash']);
+    app.unmount();
+  });
+
+  it('renders precision cursor line indicator when dragging over top or bottom half of a row', async () => {
+    const { app, container } = mountSection({
+      adminWriteEnabled: true,
+      autoModels: ['model-a', 'model-b', 'model-c'],
+      allModels: ALL_MODELS,
+    });
+    await flush();
+
+    const rows = qa(container, '[data-testid="auto-model-row"]');
+    // Start drag from first row
+    rows[0].dispatchEvent(new Event('dragstart', { bubbles: true }));
+
+    // Mock getBoundingClientRect on target row
+    rows[1].getBoundingClientRect = () => ({
+      top: 100,
+      bottom: 140,
+      height: 40,
+      left: 0,
+      right: 200,
+      width: 200,
+      x: 0,
+      y: 100,
+      toJSON: () => {},
+    });
+
+    // Drag over top half (before)
+    const overBefore = new MouseEvent('dragover', { bubbles: true, cancelable: true, clientY: 110 });
+    rows[1].dispatchEvent(overBefore);
+    await flush();
+
+    // Must NOT have the whole-box activation outline
+    expect(rows[1].className).not.toContain('ring-2 ring-indigo-400');
+    // Must render insertion indicator line
+    const indicatorTop = container.querySelector('[data-testid="drag-insertion-indicator"]');
+    expect(indicatorTop, 'must render cursor indicator line').not.toBeNull();
+    expect(indicatorTop?.getAttribute('data-position')).toBe('before');
+    expect(indicatorTop?.getAttribute('data-target-index')).toBe('1');
+
+    // Drag over bottom half (after)
+    const overAfter = new MouseEvent('dragover', { bubbles: true, cancelable: true, clientY: 130 });
+    rows[1].dispatchEvent(overAfter);
+    await flush();
+
+    const indicatorBottom = container.querySelector('[data-testid="drag-insertion-indicator"]');
+    expect(indicatorBottom, 'must render cursor indicator line').not.toBeNull();
+    expect(indicatorBottom?.getAttribute('data-position')).toBe('after');
+    expect(indicatorBottom?.getAttribute('data-target-index')).toBe('1');
+
+    // Dragend clears the indicator
+    rows[0].dispatchEvent(new Event('dragend', { bubbles: true }));
+    await flush();
+    expect(container.querySelector('[data-testid="drag-insertion-indicator"]')).toBeNull();
+
+    app.unmount();
+  });
+
+  it('supports precise insertion before or after a specific model item', async () => {
+    const onUpdateAutoModels = vi.fn();
+    const { app, container } = mountSection(
+      {
+        adminWriteEnabled: true,
+        autoModels: ['model-a', 'model-b', 'model-c', 'model-d'],
+        allModels: ALL_MODELS,
+      },
+      { onUpdateAutoModels },
+    );
+    await flush();
+
+    let rows = qa(container, '[data-testid="auto-model-row"]');
+    // Setup boundingClientRect mocks for rows
+    rows.forEach((r, idx) => {
+      r.getBoundingClientRect = () => ({
+        top: 100 + idx * 40,
+        bottom: 140 + idx * 40,
+        height: 40,
+        left: 0,
+        right: 200,
+        width: 200,
+        x: 0,
+        y: 100 + idx * 40,
+        toJSON: () => {},
+      });
+    });
+
+    // Test 1: Drag model-d (index 3) to BEFORE model-b (index 1) -> [model-a, model-d, model-b, model-c]
+    dragOnto(rows[3], rows[1], 'before');
+    await flush();
+
+    rows = qa(container, '[data-testid="auto-model-row"]');
+    expect(rows.map((r) => r.getAttribute('data-model'))).toEqual([
+      'model-a',
+      'model-d',
+      'model-b',
+      'model-c',
+    ]);
+
+    // Test 2: Drag model-a (index 0) to AFTER model-b (now index 2) -> [model-d, model-b, model-a, model-c]
+    rows.forEach((r, idx) => {
+      r.getBoundingClientRect = () => ({
+        top: 100 + idx * 40,
+        bottom: 140 + idx * 40,
+        height: 40,
+        left: 0,
+        right: 200,
+        width: 200,
+        x: 0,
+        y: 100 + idx * 40,
+        toJSON: () => {},
+      });
+    });
+    dragOnto(rows[0], rows[2], 'after');
+    await flush();
+
+    rows = qa(container, '[data-testid="auto-model-row"]');
+    expect(rows.map((r) => r.getAttribute('data-model'))).toEqual([
+      'model-d',
+      'model-b',
+      'model-a',
+      'model-c',
+    ]);
+
     app.unmount();
   });
 });

@@ -32,6 +32,7 @@ const checkedModelIds = ref<string[]>([]);
 /** 拖拽状态：null 表示当前没有进行中的拖拽（浏览器在行外发起的 dragstart 会保持 null）。 */
 const dragFromIndex = ref<number | null>(null);
 const dragOverIndex = ref<number | null>(null);
+const dragPosition = ref<'before' | 'after'>('before');
 
 watch(
   () => props.autoModels,
@@ -86,23 +87,50 @@ function removeModel(index: number) {
   localAutoModels.value = list;
 }
 
-function onDragStart(index: number) {
+function onDragStart(index: number, event?: DragEvent) {
   if (!props.adminWriteEnabled) return;
   dragFromIndex.value = index;
+  if (event?.dataTransfer) {
+    event.dataTransfer.effectAllowed = 'move';
+    event.dataTransfer.setData('text/plain', String(index));
+  }
 }
 
-function onDragOver(index: number) {
+function onDragOver(index: number, event?: DragEvent) {
   if (dragFromIndex.value === null) return;
+  const target = event?.currentTarget as HTMLElement | null;
+  if (target && typeof target.getBoundingClientRect === 'function') {
+    const rect = target.getBoundingClientRect();
+    const midY = (rect.top || 0) + (rect.height || 0) / 2;
+    // 如果没有 clientY（如默认合成事件），根据 relative index 降级推断，否则根据鼠标位置比较
+    if (event && typeof event.clientY === 'number' && rect.height > 0) {
+      dragPosition.value = event.clientY < midY ? 'before' : 'after';
+    } else {
+      dragPosition.value = dragFromIndex.value > index ? 'before' : 'after';
+    }
+  } else {
+    dragPosition.value = dragFromIndex.value > index ? 'before' : 'after';
+  }
   dragOverIndex.value = index;
 }
 
-function onDrop(index: number) {
+function onDrop(index: number, event?: DragEvent) {
   const from = dragFromIndex.value;
+  const pos = dragPosition.value;
   resetDrag();
-  if (from === null || !props.adminWriteEnabled || from === index) return;
+  if (from === null || !props.adminWriteEnabled) return;
+
+  // 计算目标插入索引
+  let targetIndex = pos === 'before' ? index : index + 1;
+  // 如果从前面移到后面，移除源项后，原本 targetIndex 需向前缩减 1
+  if (from < targetIndex) {
+    targetIndex -= 1;
+  }
+  if (from === targetIndex) return;
+
   const list = [...localAutoModels.value];
-  const item = list.splice(from, 1)[0];
-  list.splice(index, 0, item);
+  const [item] = list.splice(from, 1);
+  list.splice(targetIndex, 0, item);
   localAutoModels.value = list;
 }
 
@@ -113,6 +141,7 @@ function onDragEnd() {
 function resetDrag() {
   dragFromIndex.value = null;
   dragOverIndex.value = null;
+  dragPosition.value = 'before';
 }
 
 /** 打开弹窗：每次打开都重置勾选状态，绝不残留上一次的选择。 */
@@ -217,68 +246,98 @@ async function handleSaveAutoModels() {
         <div
           v-for="(model, index) in localAutoModels"
           :key="model"
-          data-testid="auto-model-row"
-          :data-model="model"
-          :data-draggable-disabled="canReorder ? 'false' : 'true'"
-          :draggable="canReorder ? 'true' : 'false'"
-          class="flex items-center justify-between p-1.5 bg-white/70 border border-slate-200/80 rounded-lg hover:bg-white transition-all shadow-2xs"
-          :class="[
-            canReorder ? 'cursor-grab active:cursor-grabbing' : 'cursor-default opacity-60',
-            dragOverIndex === index ? 'ring-2 ring-indigo-400 border-indigo-300' : '',
-          ]"
-          @dragstart="onDragStart(index)"
-          @dragover.prevent="onDragOver(index)"
-          @drop.prevent="onDrop(index)"
-          @dragend="onDragEnd"
+          class="relative"
         >
-          <div class="flex items-center gap-2 min-w-0">
-            <span aria-hidden="true" class="text-slate-300 text-[11px] leading-none select-none">⋮⋮</span>
-            <span class="w-5 h-5 rounded-full bg-slate-100 flex items-center justify-center text-[10px] font-bold text-slate-600 shrink-0">
-              {{ index + 1 }}
-            </span>
-            <span class="font-mono text-xs font-medium text-slate-900 truncate">{{ model }}</span>
-            <UiBadge v-if="index === 0" variant="default" class="text-[10px] scale-90" data-testid="auto-model-top-badge">
-              最高优
-            </UiBadge>
+          <!-- 顶部插入指示光标（横线 + 定位圆点） -->
+          <div
+            v-if="dragOverIndex === index && dragPosition === 'before'"
+            data-testid="drag-insertion-indicator"
+            data-position="before"
+            :data-target-index="index"
+            class="absolute -top-1 left-0 right-0 z-10 flex items-center pointer-events-none"
+          >
+            <div class="w-2 h-2 rounded-full bg-indigo-600 -ml-1 ring-2 ring-white"></div>
+            <div class="h-0.5 w-full bg-indigo-600 rounded-full shadow-xs"></div>
+            <div class="w-2 h-2 rounded-full bg-indigo-600 -mr-1 ring-2 ring-white"></div>
           </div>
 
-          <div class="flex items-center gap-1">
-            <UiButton
-              variant="ghost"
-              size="sm"
-              class="h-7 w-7 p-0"
-              data-testid="auto-model-up"
-              :disabled="index === 0 || !adminWriteEnabled"
-              title="上移"
-              :aria-label="`上移 ${model}`"
-              @click="moveUp(index)"
-            >
-              <span class="text-xs font-bold">↑</span>
-            </UiButton>
-            <UiButton
-              variant="ghost"
-              size="sm"
-              class="h-7 w-7 p-0"
-              data-testid="auto-model-down"
-              :disabled="index === localAutoModels.length - 1 || !adminWriteEnabled"
-              title="下移"
-              :aria-label="`下移 ${model}`"
-              @click="moveDown(index)"
-            >
-              <span class="text-xs font-bold">↓</span>
-            </UiButton>
-            <UiButton
-              variant="ghost"
-              size="sm"
-              class="h-7 w-7 p-0 text-red-500 hover:text-red-700 hover:bg-red-50"
-              :data-testid="`auto-model-remove-${index}`"
-              :disabled="!adminWriteEnabled"
-              title="移除"
-              :aria-label="`移除 ${model}`"
-              @click="removeModel(index)"
-            >
-              <Icons name="trash" size="14" />
-            </UiButton>
+          <div
+            data-testid="auto-model-row"
+            :data-model="model"
+            :data-draggable-disabled="canReorder ? 'false' : 'true'"
+            :draggable="canReorder ? 'true' : 'false'"
+            class="flex items-center justify-between p-1.5 bg-white/70 border border-slate-200/80 rounded-lg hover:bg-white transition-all shadow-2xs"
+            :class="[
+              canReorder ? 'cursor-grab active:cursor-grabbing' : 'cursor-default opacity-60',
+              dragFromIndex === index ? 'opacity-40 bg-slate-50 border-dashed border-slate-300' : '',
+            ]"
+            @dragstart="onDragStart(index, $event)"
+            @dragover.prevent="onDragOver(index, $event)"
+            @drop.prevent="onDrop(index, $event)"
+            @dragend="onDragEnd"
+          >
+            <div class="flex items-center gap-2 min-w-0">
+              <span aria-hidden="true" class="text-slate-300 text-[11px] leading-none select-none">⋮⋮</span>
+              <span class="w-5 h-5 rounded-full bg-slate-100 flex items-center justify-center text-[10px] font-bold text-slate-600 shrink-0">
+                {{ index + 1 }}
+              </span>
+              <span class="font-mono text-xs font-medium text-slate-900 truncate">{{ model }}</span>
+              <UiBadge v-if="index === 0" variant="default" class="text-[10px] scale-90" data-testid="auto-model-top-badge">
+                最高优
+              </UiBadge>
+            </div>
+
+            <div class="flex items-center gap-1">
+              <UiButton
+                variant="ghost"
+                size="sm"
+                class="h-7 w-7 p-0"
+                data-testid="auto-model-up"
+                :disabled="index === 0 || !adminWriteEnabled"
+                title="上移"
+                :aria-label="`上移 ${model}`"
+                @click="moveUp(index)"
+              >
+                <span class="text-xs font-bold">↑</span>
+              </UiButton>
+              <UiButton
+                variant="ghost"
+                size="sm"
+                class="h-7 w-7 p-0"
+                data-testid="auto-model-down"
+                :disabled="index === localAutoModels.length - 1 || !adminWriteEnabled"
+                title="下移"
+                :aria-label="`下移 ${model}`"
+                @click="moveDown(index)"
+              >
+                <span class="text-xs font-bold">↓</span>
+              </UiButton>
+              <UiButton
+                variant="ghost"
+                size="sm"
+                class="h-7 w-7 p-0 text-red-500 hover:text-red-700 hover:bg-red-50"
+                :data-testid="`auto-model-remove-${index}`"
+                :disabled="!adminWriteEnabled"
+                title="移除"
+                :aria-label="`移除 ${model}`"
+                @click="removeModel(index)"
+              >
+                <Icons name="trash" size="14" />
+              </UiButton>
+            </div>
+          </div>
+
+          <!-- 底部插入指示光标（横线 + 定位圆点） -->
+          <div
+            v-if="dragOverIndex === index && dragPosition === 'after'"
+            data-testid="drag-insertion-indicator"
+            data-position="after"
+            :data-target-index="index"
+            class="absolute -bottom-1 left-0 right-0 z-10 flex items-center pointer-events-none"
+          >
+            <div class="w-2 h-2 rounded-full bg-indigo-600 -ml-1 ring-2 ring-white"></div>
+            <div class="h-0.5 w-full bg-indigo-600 rounded-full shadow-xs"></div>
+            <div class="w-2 h-2 rounded-full bg-indigo-600 -mr-1 ring-2 ring-white"></div>
           </div>
         </div>
 
