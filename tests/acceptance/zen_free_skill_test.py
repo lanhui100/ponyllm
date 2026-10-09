@@ -1418,6 +1418,10 @@ def test_a7_flag_key_option_is_supported(sandbox, home):
         f"\n[--key 在子命令前] rc={before.returncode} stderr={before.stderr[:400]}"
         f"\n[--key 在子命令后] rc={after.returncode} stderr={after.stderr[:400]}"
     )
+    # 反例防回归：--key 这条路径同样不得把 key 原文/前缀打进 stdout 或 stderr
+    for tag, cp in (("子命令前", before), ("子命令后", after)):
+        hits = key_leak_hits(cp.stdout + cp.stderr)
+        assert not hits, f"--key 挂点在{tag}时泄漏了 {'/'.join(hits)}\nSTDOUT:\n{cp.stdout}\nSTDERR:\n{cp.stderr}"
 
 
 def test_a7_key_from_opencode_config_file(sandbox, home):
