@@ -42,9 +42,9 @@
           <div>
             <div class="flex items-center justify-between mb-1.5">
               <label for="token-input" class="block text-xs font-medium text-slate-700">
-                访问凭证 (Token)
+                网关访问凭证 (Token)
               </label>
-              <span class="text-[11px] text-slate-400">sk-pony-...</span>
+              <span class="text-[11px] text-slate-400">sk-pony-...（可选）</span>
             </div>
             <div class="relative">
               <input
@@ -60,6 +60,42 @@
                 :disabled="loading"
               />
             </div>
+          </div>
+
+          <div class="flex items-center justify-between mb-1.5">
+            <label for="username-input" class="block text-xs font-medium text-slate-700">
+              或使用用户名登录
+            </label>
+            <span class="text-[11px] text-slate-400">Web 用户</span>
+          </div>
+          <div class="relative">
+            <input
+              id="username-input"
+              v-model="usernameInput"
+              type="text"
+              autocomplete="username"
+              autocapitalize="none"
+              autocorrect="off"
+              spellcheck="false"
+              placeholder="请输入用户名"
+              class="w-full h-10 px-3 py-2 text-sm bg-slate-50/50 border border-slate-200 rounded-lg focus:outline-none focus:bg-white focus:border-slate-400 focus:ring-2 focus:ring-slate-400/20 text-slate-900 placeholder:text-slate-400 transition-all tracking-wide"
+              :disabled="loading"
+            />
+          </div>
+
+          <div class="relative">
+            <input
+              id="password-input"
+              v-model="passwordInput"
+              type="password"
+              autocomplete="current-password"
+              autocapitalize="none"
+              autocorrect="off"
+              spellcheck="false"
+              placeholder="请输入密码"
+              class="w-full h-10 px-3 py-2 text-sm bg-slate-50/50 border border-slate-200 rounded-lg focus:outline-none focus:bg-white focus:border-slate-400 focus:ring-2 focus:ring-slate-400/20 text-slate-900 placeholder:text-slate-400 transition-all tracking-wide"
+              :disabled="loading"
+            />
           </div>
 
           <div v-if="upgradedNotice" class="p-2.5 rounded-lg bg-amber-50 border border-amber-200/60 text-xs text-amber-700 flex items-start gap-2 animate-in fade-in duration-200">
@@ -111,6 +147,8 @@ import Icons from '../components/ui/Icons.vue';
 import PonyLogo from '../components/ui/PonyLogo.vue';
 
 const input = ref('');
+const usernameInput = ref('');
+const passwordInput = ref('');
 const error = ref('');
 const loading = ref(false);
 const openMode = ref(false);
@@ -173,8 +211,48 @@ async function submit(): Promise<void> {
   if (loading.value) return;
   error.value = '';
   const candidate = input.value.trim();
+  const username = usernameInput.value.trim();
+  const password = passwordInput.value;
+
+  // B003: username+password 双字段登录（/api/user/login → JWT 内存会话）。
+  if (username !== '' || password !== '') {
+    if (username === '' || password === '') {
+      error.value = '请输入用户名与密码';
+      return;
+    }
+    loading.value = true;
+    try {
+      const { loginWithPassword } = await import('../lib/userApi');
+      const resp = await loginWithPassword(username, password);
+      session.loginWithJwt(resp.access_token, resp.user.role);
+      await enterDashboard();
+      return;
+    } catch (loginErr) {
+      const code = (loginErr as Error & { code?: unknown }).code;
+      if (code === 'invalid_credentials') {
+        error.value = '用户名或密码错误（401）。';
+        return;
+      }
+      if (code === 'not_found' || (loginErr as Error & { status?: unknown }).status === 404) {
+        // user_tokens_enabled=off：登录端点未启用 → 清错误并回退旧 token 流程。
+        error.value = '';
+      } else if (code === 'rate_limit_exceeded') {
+        error.value = '登录尝试过于频繁，请稍后重试。';
+        return;
+      } else {
+        error.value = `登录失败：${(loginErr as Error).message ?? '未知错误'}`;
+        return;
+      }
+    } finally {
+      loading.value = false;
+    }
+  }
+
+  if (candidate === '' && error.value === '') {
+    error.value = '请输入用户名/密码或网关 Token';
+    return;
+  }
   if (candidate === '') {
-    error.value = '请输入 Token';
     return;
   }
   loading.value = true;

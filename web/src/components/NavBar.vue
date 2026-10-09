@@ -46,6 +46,24 @@ function handleLogout() {
         >
           轨迹
         </router-link>
+        <!-- B003: user self-service token panel (any authenticated session) -->
+        <router-link
+          v-if="session.hasSession()"
+          to="/tokens"
+          class="px-3.5 py-1.5 rounded-lg transition-colors text-slate-700 hover:text-slate-950 hover:bg-slate-900/5"
+          :class="{ '!text-slate-950 !bg-slate-900/10 font-semibold shadow-2xs': route.path === '/tokens' }"
+        >
+          我的 Token
+        </router-link>
+        <!-- B003: admin user governance (admin role only) -->
+        <router-link
+          v-if="session.role === 'admin'"
+          to="/users"
+          class="px-3.5 py-1.5 rounded-lg transition-colors text-slate-700 hover:text-slate-950 hover:bg-slate-900/5"
+          :class="{ '!text-slate-950 !bg-slate-900/10 font-semibold shadow-2xs': route.path === '/users' }"
+        >
+          用户管理
+        </router-link>
       </nav>
     </div>
 

@@ -34,13 +34,17 @@ function writeStoredGatewayVersion(version: string): void {
 // Session store（VULN-05 重构）：
 // - cookie 模式（会话端点启用）：凭据由 HttpOnly cookie 接管，token 恒空，
 //   `loggedIn` 为内存"已登录"态；
+// - jwt 模式（B003：/api/user/login 换发 HS256 JWT）：JWT 仅存内存 ref，
+//   绝不落任何 storage（VULN-05 纪律）；role 随登录写入内存供路由守卫判定；
 // - legacy 模式（会话端点未启用，404 回退）：token 仅存内存 ref（旧部署
 //   向后兼容，见 negotiateSessionMode）。
-// 无论哪种模式，会话端点启用时 XSS 可读存储不再承载凭据。
+// 无论哪种模式，XSS 可读存储不再承载凭据。
 export const useSessionStore = defineStore('session', () => {
   const token = ref<string>('');
   const loggedIn = ref<boolean>(false);
-  const sessionMode = ref<'unknown' | 'cookie' | 'legacy'>('unknown');
+  const sessionMode = ref<'unknown' | 'cookie' | 'legacy' | 'jwt'>('unknown');
+  // B003: 当前登录用户角色（wire "admin" | "user"），仅内存。
+  const role = ref<string>('');
   // R-S4 (Phase-3b): CSRF 双提交通道 —— cookie 会话 sid 仅存内存（来自换发/探活
   // 响应体 body.sid，后端 R-S8），用于写请求 X-Pony-Session 头；不落任何 storage。
   const sid = ref<string | null>(null);
@@ -50,7 +54,19 @@ export const useSessionStore = defineStore('session', () => {
 
   /// 统一会话判定（router 守卫 / alova / telemetry 共用；替代旧 `token !== ''`）。
   function hasSession(): boolean {
-    return sessionMode.value === 'cookie' ? loggedIn.value : token.value !== '';
+    return sessionMode.value === 'cookie' || sessionMode.value === 'jwt'
+      ? loggedIn.value
+      : token.value !== '';
+  }
+
+  /// B003: JWT 登录（/api/user/login 换发）。JWT 仅存内存 ref，绝不落
+  /// localStorage/sessionStorage（VULN-05）；role 随登录写入供路由守卫判定。
+  function loginWithJwt(jwtToken: string, userRole?: string): void {
+    token.value = jwtToken.trim();
+    loggedIn.value = true;
+    sessionMode.value = 'jwt';
+    role.value = userRole?.trim() ?? '';
+    unauthorizedHandled.value = false;
   }
 
   /// legacy 模式登录：内存 token。
@@ -67,6 +83,7 @@ export const useSessionStore = defineStore('session', () => {
     loggedIn.value = true;
     sessionMode.value = 'cookie';
     sid.value = typeof sessionSid === 'string' && sessionSid.trim() !== '' ? sessionSid.trim() : null;
+    role.value = '';
     unauthorizedHandled.value = false;
   }
 
@@ -85,6 +102,7 @@ export const useSessionStore = defineStore('session', () => {
     token.value = '';
     loggedIn.value = false;
     sid.value = null;
+    role.value = '';
     unauthorizedHandled.value = false;
   }
 
@@ -109,6 +127,7 @@ export const useSessionStore = defineStore('session', () => {
     token.value = '';
     loggedIn.value = false;
     sid.value = null;
+    role.value = '';
   }
 
   function markUnauthorizedHandled(): boolean {
@@ -124,7 +143,7 @@ export const useSessionStore = defineStore('session', () => {
   /// - 401（含 session_expired 信封）→ cookie 模式 + 未登录
   /// - 404（端点未启用）→ legacy 回退（向后兼容旧部署）
   /// - 其它/网络错误 → 保持 unknown（401 统一路径兜底）
-  async function negotiateSessionMode(): Promise<'unknown' | 'cookie' | 'legacy'> {
+  async function negotiateSessionMode(): Promise<'unknown' | 'cookie' | 'legacy' | 'jwt'> {
     if (sessionMode.value !== 'unknown') {
       return sessionMode.value;
     }
@@ -157,8 +176,10 @@ export const useSessionStore = defineStore('session', () => {
     token,
     loggedIn,
     sessionMode,
+    role,
     sid,
     hasSession,
+    loginWithJwt,
     login,
     loginCookieMode,
     logout,

@@ -1,8 +1,8 @@
 // @vitest-environment happy-dom
-// B003 红相契约测试：Connect.vue 登录表单改 username/password 双字段 + 提交走
+// B003 契约测试：Connect.vue 登录表单改 username/password 双字段 + 提交走
 // /api/user/login（JWT 会话）。
-// 红相：当前 Connect.vue 是单 token 输入（#token-input）→ 断言 #username-input /
-// #password-input 存在、提交 POST /api/user/login → 预期 FAIL。
+// 防 Flaky 律（test-expert）：挂载/提交结算一律用"显式条件轮询（有界超时）"等待，
+// 禁止硬编码 sleep —— 全量并行下 setTimeout(N) 不可靠（曾偶发时序竞态）。
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { createApp, nextTick } from 'vue';
@@ -12,6 +12,17 @@ import ConnectView from './Connect.vue';
 
 const DASHBOARD = { template: '<div>dashboard</div>' };
 let mountedApp: ReturnType<typeof createApp> | null = null;
+
+/// 有界条件轮询（防 Flaky）：每 20ms 复查，条件满足即返回；超时抛错（非盲目 sleep）。
+async function waitFor(cond: () => boolean, what: string, timeoutMs = 2000): Promise<void> {
+  const start = Date.now();
+  while (!cond()) {
+    if (Date.now() - start > timeoutMs) {
+      throw new Error(`waitFor 超时（${timeoutMs}ms）：${what}`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+}
 
 function stubFetch(calls: { url: string; init?: RequestInit }[]) {
   vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -82,10 +93,10 @@ async function submitUsernamePassword(
   await nextTick();
   const form = container.querySelector('form') as HTMLFormElement;
   form.dispatchEvent(new Event('submit'));
-  await new Promise((r) => setTimeout(r, 40));
+  // 结算等待由调用方用有界条件轮询完成（本函数不做盲目 sleep）
 }
 
-describe('Connect.vue: username/password login form (B003 red)', () => {
+describe('Connect.vue: username/password login form (B003 contract)', () => {
   beforeEach(() => {
     window.sessionStorage?.clear();
   });
@@ -101,32 +112,43 @@ describe('Connect.vue: username/password login form (B003 red)', () => {
     document.body.innerHTML = '';
   });
 
-  it('表单渲染 username + password 双字段输入（红相主锚：当前仅 #token-input → FAIL）', async () => {
+  it('表单渲染 username + password 双字段输入', async () => {
     const calls: { url: string; init?: RequestInit }[] = [];
     stubFetch(calls);
     const { container } = mountConnect(calls);
-    await new Promise((r) => setTimeout(r, 20));
+    // 挂载就绪：条件轮询直到表单渲染（确定性，替代硬编码 sleep）
+    await waitFor(() => container.querySelector('form') !== null, '登录表单渲染');
 
     const userInput = container.querySelector('#username-input');
     const passInput = container.querySelector('#password-input');
-    expect(userInput, '登录表单必须含 #username-input（B003 red）').not.toBeNull();
-    expect(passInput, '登录表单必须含 #password-input（B003 red）').not.toBeNull();
+    expect(userInput, '登录表单必须含 #username-input').not.toBeNull();
+    expect(passInput, '登录表单必须含 #password-input').not.toBeNull();
   });
 
-  it('提交 username/password → POST /api/user/login（红相：当前提交走 /api/admin/session / probe → FAIL）', async () => {
+  it('提交 username/password → POST /api/user/login', async () => {
     const calls: { url: string; init?: RequestInit }[] = [];
     stubFetch(calls);
     const { container } = mountConnect(calls);
-    await new Promise((r) => setTimeout(r, 20));
+    // 挂载就绪：等待 onMounted 探针已执行（/v1/models）且表单渲染完成
+    await waitFor(() => calls.some((c) => c.url === '/v1/models'), 'onMounted 探针完成');
+    await waitFor(() => container.querySelector('form') !== null, '登录表单渲染');
 
     await submitUsernamePassword(container, 'alice', 'alice-pass-1234');
+
+    // 提交结算：条件轮询直到 /api/user/login 调用出现，或错误信封渲染（红相回退路径）
+    await waitFor(
+      () =>
+        calls.some((c) => c.url === '/api/user/login') ||
+        container.querySelector('.error') !== null,
+      '提交结算（login 调用或错误渲染）',
+    );
 
     const loginCall = calls.find((c) => c.url === '/api/user/login');
     expect(
       loginCall,
       `登录必须 POST /api/user/login；实际调用: ${calls
         .map((c) => `${c.init?.method ?? 'GET'} ${c.url}`)
-        .join(', ')}（B003 red）`,
+        .join(', ')}`,
     ).toBeDefined();
     expect(loginCall!.init?.method ?? 'GET').toBe('POST');
     expect(JSON.parse(String(loginCall!.init?.body))).toEqual({

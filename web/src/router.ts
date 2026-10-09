@@ -12,11 +12,17 @@ const routes: RouteRecordRaw[] = [
   { path: '/dashboard', component: () => import('./views/DashboardView.vue'), meta: { requiresAuth: true } },
   { path: '/recorder', component: () => import('./views/RecorderView.vue'), meta: { requiresAuth: true } },
   { path: '/governance', component: () => import('./views/GovernanceView.vue'), meta: { requiresAuth: true } },
+  // B003: user self-service token panel (JWT plane).
+  { path: '/tokens', component: () => import('./views/TokensView.vue'), meta: { requiresAuth: true } },
+  // B003: admin user governance (JWT admin only).
+  { path: '/users', component: () => import('./views/UsersView.vue'), meta: { requiresAuth: true, requiresAdmin: true } },
   // Backward compatibility routes for legacy /app/* prefix
   { path: '/app', redirect: '/dashboard' },
   { path: '/app/dashboard', redirect: '/dashboard' },
   { path: '/app/recorder', redirect: '/recorder' },
   { path: '/app/governance', redirect: '/governance' },
+  { path: '/app/tokens', redirect: '/tokens' },
+  { path: '/app/users', redirect: '/users' },
   { path: '/app/connect', redirect: '/connect' },
   { path: '/:pathMatch(.*)*', component: NotFound },
 ];
@@ -170,17 +176,59 @@ router.beforeEach(async (to) => {
   // `meta: { requiresAuth: true }` is automatically guarded; forgetting the
   // meta is the only way to bypass, and it is visible in the route table.
   const requiresAuth = to.matched.some((record) => record.meta.requiresAuth === true);
-  return decideRoute(to.path, to.fullPath, requiresAuth, session.hasSession(), probeOpenMode);
+  const requiresAdmin = to.matched.some((record) => record.meta.requiresAdmin === true);
+  return decideRoute(
+    to.path,
+    to.fullPath,
+    requiresAuth,
+    session.hasSession(),
+    session.role,
+    requiresAdmin,
+    probeOpenMode,
+  );
 });
 
 // Pure guard decision (unit-testable without router singleton state).
+// B003 extended signature: `role` + `requiresAdmin` gate — a non-admin role may
+// not enter `/users` (redirects to /connect). Overloads keep BOTH legacy 5-arg
+// callers (red suite `router.guard.test.ts`: probe fn as 5th arg) and the new
+// 7-arg form (B003 red suite `router.admin-guard.test.ts`:
+// role as 5th, requiresAdmin as 6th, probe as 7th) type-checking and behaving
+// correctly at runtime.
 export async function decideRoute(
   path: string,
   fullPath: string,
   requiresAuth: boolean,
   hasToken: boolean,
   doProbeOpenMode: () => Promise<boolean>,
+): Promise<true | { path: string; query: Record<string, string> }>;
+export async function decideRoute(
+  path: string,
+  fullPath: string,
+  requiresAuth: boolean,
+  hasToken: boolean,
+  role: string,
+  requiresAdmin: boolean,
+  doProbeOpenMode: () => Promise<boolean>,
+): Promise<true | { path: string; query: Record<string, string> }>;
+export async function decideRoute(
+  path: string,
+  fullPath: string,
+  requiresAuth: boolean,
+  hasToken: boolean,
+  roleOrProbe: string | (() => Promise<boolean>),
+  requiresAdminOrProbe?: boolean | (() => Promise<boolean>),
+  doProbeOpenMode?: () => Promise<boolean>,
 ): Promise<true | { path: string; query: Record<string, string> }> {
+  // Runtime disambiguation: 5-arg legacy form passes a probe function as arg5.
+  const role = typeof roleOrProbe === 'string' ? roleOrProbe : '';
+  const requiresAdmin =
+    typeof requiresAdminOrProbe === 'boolean' ? requiresAdminOrProbe : false;
+  const probe =
+    typeof roleOrProbe === 'function'
+      ? roleOrProbe
+      : (doProbeOpenMode ?? (async () => false));
+
   if (path === '/connect') {
     return true;
   }
@@ -188,9 +236,13 @@ export async function decideRoute(
     return true;
   }
   if (hasToken) {
+    // B003: admin-only pages additionally require the jwt/admin role.
+    if (requiresAdmin && role !== 'admin') {
+      return { path: '/connect', query: { redirect: fullPath } };
+    }
     return true;
   }
-  if (await doProbeOpenMode()) {
+  if (await probe()) {
     return true;
   }
   return { path: '/connect', query: { redirect: fullPath } };
