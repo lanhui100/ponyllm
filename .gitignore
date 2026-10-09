@@ -37,3 +37,6 @@ __pycache__/
 *.swp
 *.swo
 
+
+# 并发会话在飞的 Python 虚拟环境（构建产物，等价于 target/ 与 node_modules/）
+.venv-test/
