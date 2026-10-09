@@ -73,7 +73,9 @@ fn p0_open_mode_non_loopback_refused() {
         assert!(validate_bind_auth_combo("127.0.0.1:8080", "", mode).is_ok());
         assert!(validate_bind_auth_combo("127.0.0.1:8080", "none", mode).is_ok());
         // Secured key on any bind is fine.
-        assert!(validate_bind_auth_combo("0.0.0.0:8080", "sk-pony-secret-16chars-ok", mode).is_ok());
+        assert!(
+            validate_bind_auth_combo("0.0.0.0:8080", "sk-pony-secret-16chars-ok", mode).is_ok()
+        );
     }
 }
 
@@ -109,15 +111,24 @@ fn p0_openapi_declares_bearer_security() {
     assert_eq!(scheme["scheme"], "bearer");
     // Rotate documents 401/404 (order: auth before gate).
     let rotate_resps = &doc["paths"]["/api/admin/auth/rotate"]["post"]["responses"];
-    assert!(rotate_resps.get("401").is_some(), "rotate must document 401");
-    assert!(rotate_resps.get("404").is_some(), "rotate must document 404");
+    assert!(
+        rotate_resps.get("401").is_some(),
+        "rotate must document 401"
+    );
+    assert!(
+        rotate_resps.get("404").is_some(),
+        "rotate must document 404"
+    );
 }
 
 // ---------------------------------------------------------------------------
 // Live-gateway behavior: strict rejects bare tokens, dual accepts them.
 // ---------------------------------------------------------------------------
 
-async fn spawn_gateway(auth_compat: AuthCompat, api_key: &str) -> (String, tokio::task::JoinHandle<()>) {
+async fn spawn_gateway(
+    auth_compat: AuthCompat,
+    api_key: &str,
+) -> (String, tokio::task::JoinHandle<()>) {
     use ponyllm_core::pool::GatewayRoutingStrategy;
     use ponyllm_server::{AppState, GatewayConfig};
     use std::sync::Arc;
@@ -163,7 +174,10 @@ async fn p0_strict_rejects_bare_token_dual_accepts() {
             assert_eq!(bearer.status(), 401, "legacy bearer must 401 in {:?}", mode);
             let body: serde_json::Value = bearer.json().await.unwrap();
             assert_eq!(body["error"]["code"], "invalid_api_key");
-            assert!(body["error"]["message"].as_str().unwrap().contains("scoped key"));
+            assert!(body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("scoped key"));
         }
 
         // Bare token (no `Bearer ` scheme): dual accepts, strict 401.
@@ -192,7 +206,12 @@ async fn p0_strict_rejects_bare_token_dual_accepts() {
         if legacy_ok {
             assert_eq!(xkey.status(), 200, "x-api-key must pass in {:?}", mode);
         } else {
-            assert_eq!(xkey.status(), 401, "legacy x-api-key must 401 in {:?}", mode);
+            assert_eq!(
+                xkey.status(),
+                401,
+                "legacy x-api-key must 401 in {:?}",
+                mode
+            );
         }
 
         handle.abort();

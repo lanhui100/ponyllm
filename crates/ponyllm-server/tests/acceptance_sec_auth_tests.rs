@@ -53,9 +53,12 @@ async fn spawn_app(cfg_build: impl FnOnce(&mut GatewayConfig)) -> SocketAddr {
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
         // ConnectInfo 注入真实 TCP peer（127.0.0.1）：R1 peer-校验需要真实对端。
-        axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>())
-            .await
-            .unwrap();
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
     });
     addr
 }
@@ -231,7 +234,10 @@ async fn f4_admin_fence_404_for_outside_ip() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
-            axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>())
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
             .await
             .unwrap();
         });
@@ -272,7 +278,10 @@ async fn f4_admin_fence_allows_inside_ip() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
-            axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>())
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
             .await
             .unwrap();
         });
@@ -335,11 +344,20 @@ async fn f5_same_state_second_code_does_not_overwrite() {
     seed_oauth_state(&addr, "st-f5a-1").await;
 
     for code in ["CODE_A", "CODE_B"] {
-        let resp = get(&addr, &format!("/oauth2callback?code={}&state=st-f5a-1", code)).await;
+        let resp = get(
+            &addr,
+            &format!("/oauth2callback?code={}&state=st-f5a-1", code),
+        )
+        .await;
         assert_eq!(resp.status(), StatusCode::OK);
     }
 
-    let resp = authed_get(&addr, "/api/admin/oauth/antigravity/pending?state=st-f5a-1", "test-token").await;
+    let resp = authed_get(
+        &addr,
+        "/api/admin/oauth/antigravity/pending?state=st-f5a-1",
+        "test-token",
+    )
+    .await;
     if resp.status() == StatusCode::NOT_FOUND {
         // state 已被消费（一次性语义的更强实现）→ 同样满足契约
         return;
@@ -357,19 +375,29 @@ async fn f5_same_state_second_code_does_not_overwrite() {
 /// HEAD 上 pending 视图向 readonly（AdminRead 允许）原样暴露 code（红相）。
 #[tokio::test]
 async fn f5_code_hidden_from_readonly_scope() {
-    let (readonly_plain, readonly_entry) = generate_scoped_gateway_key("ro-acc-1", KeyScope::Readonly);
+    let (readonly_plain, readonly_entry) =
+        generate_scoped_gateway_key("ro-acc-1", KeyScope::Readonly);
     let addr = spawn_oauth_admin_app_async(Some((readonly_plain.clone(), readonly_entry))).await;
     seed_oauth_state(&addr, "st-f5b-1").await;
 
     let resp = get(&addr, "/oauth2callback?code=CODE_RO&state=st-f5b-1").await;
     assert_eq!(resp.status(), StatusCode::OK);
 
-    let resp = authed_get(&addr, "/api/admin/oauth/antigravity/pending?state=st-f5b-1", &readonly_plain).await;
+    let resp = authed_get(
+        &addr,
+        "/api/admin/oauth/antigravity/pending?state=st-f5b-1",
+        &readonly_plain,
+    )
+    .await;
     if resp.status() == StatusCode::FORBIDDEN {
         // 更强的实现（pending 收归 admin-only）亦满足契约
         return;
     }
-    assert_eq!(resp.status(), StatusCode::OK, "readonly 应仍可查询 pending（仅 code 隐藏）");
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "readonly 应仍可查询 pending（仅 code 隐藏）"
+    );
     let body: serde_json::Value = resp.json().await.unwrap();
     let code = body.get("code");
     assert!(
@@ -388,7 +416,12 @@ async fn f5_admin_scope_sees_code() {
     let resp = get(&addr, "/oauth2callback?code=CODE_ADMIN&state=st-f5c-1").await;
     assert_eq!(resp.status(), StatusCode::OK);
 
-    let resp = authed_get(&addr, "/api/admin/oauth/antigravity/pending?state=st-f5c-1", "test-token").await;
+    let resp = authed_get(
+        &addr,
+        "/api/admin/oauth/antigravity/pending?state=st-f5c-1",
+        "test-token",
+    )
+    .await;
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["code"].as_str(), Some("CODE_ADMIN"));
 }
@@ -414,9 +447,12 @@ async fn r1_forged_xff_cannot_bypass_admin_fence() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
-            axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>())
-                .await
-                .unwrap();
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await
+            .unwrap();
         });
         addr
     };
@@ -447,7 +483,10 @@ async fn r4_allowlist_all_invalid_env_fail_closed() {
     let addr = {
         let _guard = env_lock().lock().unwrap();
         std::env::remove_var("PONYLLM_CORS_ALLOWLIST");
-        std::env::set_var("PONYLLM_ADMIN_IP_ALLOWLIST", "not-a-cidr,!!!garbage,999.999.1.1"); // 非空、全非法
+        std::env::set_var(
+            "PONYLLM_ADMIN_IP_ALLOWLIST",
+            "not-a-cidr,!!!garbage,999.999.1.1",
+        ); // 非空、全非法
         let mut config = GatewayConfig::default();
         config.api_key = "test-token".to_string();
         let state = Arc::new(AppState::new(config));
@@ -456,9 +495,12 @@ async fn r4_allowlist_all_invalid_env_fail_closed() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
-            axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>())
-                .await
-                .unwrap();
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await
+            .unwrap();
         });
         addr
     };
@@ -526,9 +568,12 @@ async fn spawn_overview_app(
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>())
-            .await
-            .unwrap();
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
     });
     (addr, tmp)
 }

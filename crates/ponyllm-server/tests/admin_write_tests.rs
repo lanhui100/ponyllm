@@ -26,9 +26,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ponyllm_config::{ConfigFile, KeySection, ModelConfig, ProviderSection};
-use ponyllm_core::pool::{
-    ApiKeyEntry, BillingMode, GatewayRoutingStrategy, KeyPool, ModelTier, RoutingStrategy,
-};
+use ponyllm_core::pool::{ApiKeyEntry, BillingMode, KeyPool, ModelTier, RoutingStrategy};
 use ponyllm_server::admin_store::{ConfigStore, FileConfigStore};
 use ponyllm_server::{create_app, AppState, GatewayConfig, ModelSpec, ProviderConfig};
 use reqwest::StatusCode;
@@ -62,10 +60,10 @@ impl WriteTestHarness {
         )];
 
         let provider_sec = ProviderSection {
-    egress_pool: vec![],
-    egress_strategy: "round_robin".to_string(),
+            egress_pool: vec![],
+            egress_strategy: "round_robin".to_string(),
 
-    rate_limits: None,
+            rate_limits: None,
             base_url: "https://api.openai.com/v1".to_string(),
             default_model: "gpt-4o".to_string(),
             strategy: "round_robin".to_string(),
@@ -75,7 +73,7 @@ impl WriteTestHarness {
             output_price: 10.0,
             models: vec!["gpt-4o".to_string()],
             model_configs: vec![ModelConfig {
-    rate_limits: None,
+                rate_limits: None,
                 priority: None,
                 name: "gpt-4o".to_string(),
                 tier: ModelTier::Standard,
@@ -116,23 +114,23 @@ impl WriteTestHarness {
         let mut config_file = ConfigFile::default();
         config_file.gateway.bind = "127.0.0.1:8080".to_string();
         config_file.gateway.api_key = api_key.clone();
-        config_file.gateway.default_strategy = GatewayRoutingStrategy::Economy;
         config_file.gateway.web_enabled = true;
         config_file.gateway.admin_write_enabled = admin_write_enabled;
         config_file.providers = providers;
         config_file.config_version = 0;
 
-        config_file.save_to_path(config_path.to_str().unwrap()).unwrap();
+        config_file
+            .save_to_path(config_path.to_str().unwrap())
+            .unwrap();
 
         let mut gw_config = GatewayConfig::default();
         gw_config.bind_addr = "127.0.0.1:8080".to_string();
         gw_config.api_key = api_key.clone();
-        gw_config.default_strategy = GatewayRoutingStrategy::Economy;
         gw_config.web_enabled = true;
         gw_config.admin_write_enabled = admin_write_enabled;
 
         let model_spec = ModelSpec {
-    rate_limits: None,
+            rate_limits: None,
             priority: None,
             name: "gpt-4o".to_string(),
             tier: ModelTier::Standard,
@@ -161,10 +159,10 @@ impl WriteTestHarness {
         gw_config.providers.insert(
             "openai".to_string(),
             ProviderConfig {
-    egress_pool: vec![],
-    egress_strategy: "round_robin".to_string(),
+                egress_pool: vec![],
+                egress_strategy: "round_robin".to_string(),
 
-    rate_limits: None,
+                rate_limits: None,
                 base_url: "https://api.openai.com/v1".to_string(),
                 default_model: "gpt-4o".to_string(),
                 strategy: "round_robin".to_string(),
@@ -220,17 +218,42 @@ async fn test_admin_write_disabled_gate() {
     let auth = format!("Bearer {}", harness.api_key);
 
     let endpoints = vec![
-        ("POST", "/api/admin/providers", serde_json::json!({"name": "test", "base_url": "http://example.com"})),
-        ("PUT", "/api/admin/providers/openai", serde_json::json!({"strategy": "speed"})),
-        ("DELETE", "/api/admin/providers/openai", serde_json::json!({})),
-        ("POST", "/api/admin/models", serde_json::json!({"provider": "openai", "name": "m1"})),
-        ("PUT", "/api/admin/models/gpt-4o", serde_json::json!({"context_window": "256K"})),
+        (
+            "POST",
+            "/api/admin/providers",
+            serde_json::json!({"name": "test", "base_url": "http://example.com"}),
+        ),
+        (
+            "PUT",
+            "/api/admin/providers/openai",
+            serde_json::json!({"strategy": "speed"}),
+        ),
+        (
+            "DELETE",
+            "/api/admin/providers/openai",
+            serde_json::json!({}),
+        ),
+        (
+            "POST",
+            "/api/admin/models",
+            serde_json::json!({"provider": "openai", "name": "m1"}),
+        ),
+        (
+            "PUT",
+            "/api/admin/models/gpt-4o",
+            serde_json::json!({"context_window": "256K"}),
+        ),
         ("DELETE", "/api/admin/models/gpt-4o", serde_json::json!({})),
-        ("POST", "/api/admin/keys", serde_json::json!({"provider": "openai", "id": "k2", "api_key": "sec"})),
+        (
+            "POST",
+            "/api/admin/keys",
+            serde_json::json!({"provider": "openai", "id": "k2", "api_key": "sec"}),
+        ),
         ("DELETE", "/api/admin/keys/key-1", serde_json::json!({})),
         ("POST", "/api/admin/keys/key-1/test", serde_json::json!({})),
-        // C1 regression: strategy PUT and auth rotate must also honor the gate
-        ("PUT", "/api/admin/strategy", serde_json::json!({"strategy": "speed"})),
+        // C1 regression: auth rotate must also honor the gate. The former
+        // strategy PUT leg was retired together with /api/admin/strategy
+        // (wave-2); the retired route is asserted 404 elsewhere.
         ("ROTATE", "/api/admin/auth/rotate", serde_json::json!({})),
     ];
 
@@ -260,29 +283,58 @@ async fn test_admin_write_disabled_gate() {
         let err: serde_json::Value = resp.json().await.unwrap();
         assert_eq!(err["error"]["code"], "admin_write_disabled");
     }
+
+    // wave-2: the retired global strategy endpoint must 404 even WITH a valid
+    // admin credential and the write gate open — and must NOT answer with the
+    // gate's `admin_write_disabled` envelope (that would prove the route lives).
+    for method in ["GET", "PUT", "POST", "DELETE"] {
+        let url = format!("http://{}/api/admin/strategy", harness.addr);
+        let req = match method {
+            "GET" => client.get(&url),
+            "PUT" => client
+                .put(&url)
+                .json(&serde_json::json!({"strategy": "speed"})),
+            "POST" => client.post(&url).json(&serde_json::json!({})),
+            _ => client.delete(&url),
+        };
+        let resp = req
+            .header("Authorization", &auth)
+            .header("If-Match", "*")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "expected 404 for {method} /api/admin/strategy with writes enabled"
+        );
+    }
 }
 
 // -----------------------------------------------------------------------------
 // Test 1b: auth runs before the write gate (401 precedes 404)
 // -----------------------------------------------------------------------------
 #[tokio::test]
-async fn test_auth_precedes_write_gate_on_strategy_and_rotate() {
+async fn test_auth_precedes_write_gate_on_provider_and_rotate() {
     // Gate open or closed, an unauthenticated caller must see 401, never the
     // gate's 404: auth_middleware wraps the whole api router.
     for admin_write_enabled in [true, false] {
         let harness = WriteTestHarness::new(admin_write_enabled).await;
         let client = reqwest::Client::new();
 
-        let unauth_strategy = client
-            .put(format!("http://{}/api/admin/strategy", harness.addr))
-            .json(&serde_json::json!({"strategy": "speed"}))
+        let unauth_provider = client
+            .put(format!(
+                "http://{}/api/admin/providers/openai",
+                harness.addr
+            ))
+            .json(&serde_json::json!({"default_model": "gpt-4o-mini"}))
             .send()
             .await
             .unwrap();
         assert_eq!(
-            unauth_strategy.status(),
+            unauth_provider.status(),
             StatusCode::UNAUTHORIZED,
-            "expected 401 for unauthenticated PUT strategy (write={})",
+            "expected 401 for unauthenticated PUT provider (write={})",
             admin_write_enabled
         );
 
@@ -426,7 +478,10 @@ async fn test_provider_cud() {
 
     // 2.1 Update Provider protocol and endpoints
     let update_resp = client
-        .put(format!("http://{}/api/admin/providers/google", harness.addr))
+        .put(format!(
+            "http://{}/api/admin/providers/google",
+            harness.addr
+        ))
         .header("Authorization", &auth)
         .header("If-Match", "\"1\"")
         .json(&serde_json::json!({
@@ -445,7 +500,10 @@ async fn test_provider_cud() {
 
     // 2.2 Clear endpoint by sending empty string
     let clear_resp = client
-        .put(format!("http://{}/api/admin/providers/google", harness.addr))
+        .put(format!(
+            "http://{}/api/admin/providers/google",
+            harness.addr
+        ))
         .header("Authorization", &auth)
         .header("If-Match", "\"2\"")
         .json(&serde_json::json!({
@@ -460,7 +518,10 @@ async fn test_provider_cud() {
 
     // 2.3 If-Match precondition failure
     let conflict_resp = client
-        .put(format!("http://{}/api/admin/providers/google", harness.addr))
+        .put(format!(
+            "http://{}/api/admin/providers/google",
+            harness.addr
+        ))
         .header("Authorization", &auth)
         .header("If-Match", "\"1\"")
         .json(&serde_json::json!({
@@ -473,7 +534,10 @@ async fn test_provider_cud() {
 
     // 3. Delete Provider
     let del_resp = client
-        .delete(format!("http://{}/api/admin/providers/google", harness.addr))
+        .delete(format!(
+            "http://{}/api/admin/providers/google",
+            harness.addr
+        ))
         .header("Authorization", &auth)
         .header("If-Match", "\"3\"")
         .send()
@@ -497,7 +561,10 @@ async fn test_provider_cud() {
 
     // 4. Delete non-existent provider returns 404
     let not_found_resp = client
-        .delete(format!("http://{}/api/admin/providers/non_existent", harness.addr))
+        .delete(format!(
+            "http://{}/api/admin/providers/non_existent",
+            harness.addr
+        ))
         .header("Authorization", &auth)
         .header("If-Match", "\"4\"")
         .send()
@@ -561,7 +628,10 @@ async fn test_model_cud() {
 
     // 3. Update Model
     let update_resp = client
-        .put(format!("http://{}/api/admin/models/gpt-4o-mini", harness.addr))
+        .put(format!(
+            "http://{}/api/admin/models/gpt-4o-mini",
+            harness.addr
+        ))
         .header("Authorization", &auth)
         .header("If-Match", "\"1\"")
         .json(&serde_json::json!({
@@ -578,14 +648,23 @@ async fn test_model_cud() {
     assert_eq!(update_resp.status(), StatusCode::OK);
     let updated: serde_json::Value = update_resp.json().await.unwrap();
     assert_eq!(updated["context_window"], "256K");
-    assert_eq!(updated["input_types"], serde_json::json!(["text", "image", "audio"]));
-    assert_eq!(updated["output_types"], serde_json::json!(["text", "audio"]));
+    assert_eq!(
+        updated["input_types"],
+        serde_json::json!(["text", "image", "audio"])
+    );
+    assert_eq!(
+        updated["output_types"],
+        serde_json::json!(["text", "audio"])
+    );
     assert!(updated["base_url"].is_null());
     assert_eq!(updated["priority"], 9);
 
     // 4. Delete Model
     let del_resp = client
-        .delete(format!("http://{}/api/admin/models/gpt-4o-mini?provider=openai", harness.addr))
+        .delete(format!(
+            "http://{}/api/admin/models/gpt-4o-mini?provider=openai",
+            harness.addr
+        ))
         .header("Authorization", &auth)
         .header("If-Match", "\"2\"")
         .send()
@@ -595,7 +674,10 @@ async fn test_model_cud() {
 
     // 5. Delete default model clears/reassigns default_model
     let del_default_resp = client
-        .delete(format!("http://{}/api/admin/models/gpt-4o?provider=openai", harness.addr))
+        .delete(format!(
+            "http://{}/api/admin/models/gpt-4o?provider=openai",
+            harness.addr
+        ))
         .header("Authorization", &auth)
         .header("If-Match", "\"3\"")
         .send()
@@ -605,7 +687,10 @@ async fn test_model_cud() {
 
     // Verify provider models list is now empty and gpt-4o is gone
     let list_models_resp = client
-        .get(format!("http://{}/api/admin/providers/openai/models", harness.addr))
+        .get(format!(
+            "http://{}/api/admin/providers/openai/models",
+            harness.addr
+        ))
         .header("Authorization", &auth)
         .send()
         .await
@@ -650,7 +735,10 @@ async fn test_key_cud_one_time_plaintext_and_masking() {
 
     let created: serde_json::Value = create_resp.json().await.unwrap();
     assert_eq!(created["id"], "key-brand-new");
-    assert_eq!(created["api_key"], raw_secret, "Plaintext must be echoed once upon creation");
+    assert_eq!(
+        created["api_key"], raw_secret,
+        "Plaintext must be echoed once upon creation"
+    );
 
     // 2. Subsequent GET /api/admin/keys returns desensitized masked_key
     let list_resp = client
@@ -670,7 +758,10 @@ async fn test_key_cud_one_time_plaintext_and_masking() {
 
     // 3. Delete Key
     let del_resp = client
-        .delete(format!("http://{}/api/admin/keys/key-brand-new?provider=openai", harness.addr))
+        .delete(format!(
+            "http://{}/api/admin/keys/key-brand-new?provider=openai",
+            harness.addr
+        ))
         .header("Authorization", &auth)
         .header("If-Match", "\"1\"")
         .send()
@@ -695,7 +786,10 @@ async fn test_key_cud_one_time_plaintext_and_masking() {
 async fn spawn_mock_upstream() -> (SocketAddr, tokio::task::JoinHandle<()>) {
     use axum::routing::get;
     let app = axum::Router::new()
-        .route("/ok/models", get(|| async { (StatusCode::OK, "models ok") }))
+        .route(
+            "/ok/models",
+            get(|| async { (StatusCode::OK, "models ok") }),
+        )
         .route(
             "/auth_fail/models",
             get(|| async { (StatusCode::UNAUTHORIZED, "auth fail") }),
@@ -729,8 +823,16 @@ async fn test_key_dial_test_matrix() {
     // Setup providers pointing to mock upstream
     let test_cases = vec![
         ("prov-ok", format!("http://{}/ok", mock_addr), "k-ok"),
-        ("prov-auth", format!("http://{}/auth_fail", mock_addr), "k-auth"),
-        ("prov-rate", format!("http://{}/rate_limited", mock_addr), "k-rate"),
+        (
+            "prov-auth",
+            format!("http://{}/auth_fail", mock_addr),
+            "k-auth",
+        ),
+        (
+            "prov-rate",
+            format!("http://{}/rate_limited", mock_addr),
+            "k-rate",
+        ),
         ("prov-slow", format!("http://{}/slow", mock_addr), "k-slow"),
     ];
 
@@ -778,7 +880,10 @@ async fn test_key_dial_test_matrix() {
 
     // 2. Auth fail probe
     let resp = client
-        .post(format!("http://{}/api/admin/keys/k-auth/test", harness.addr))
+        .post(format!(
+            "http://{}/api/admin/keys/k-auth/test",
+            harness.addr
+        ))
         .header("Authorization", &auth)
         .send()
         .await
@@ -791,7 +896,10 @@ async fn test_key_dial_test_matrix() {
 
     // 3. Rate limited probe
     let resp = client
-        .post(format!("http://{}/api/admin/keys/k-rate/test", harness.addr))
+        .post(format!(
+            "http://{}/api/admin/keys/k-rate/test",
+            harness.addr
+        ))
         .header("Authorization", &auth)
         .send()
         .await
@@ -804,7 +912,10 @@ async fn test_key_dial_test_matrix() {
 
     // 4. Timeout probe (>=3s)
     let resp = client
-        .post(format!("http://{}/api/admin/keys/k-slow/test", harness.addr))
+        .post(format!(
+            "http://{}/api/admin/keys/k-slow/test",
+            harness.addr
+        ))
         .header("Authorization", &auth)
         .send()
         .await
@@ -817,7 +928,10 @@ async fn test_key_dial_test_matrix() {
 
     // 5. Non-existent key probe returns 404
     let resp = client
-        .post(format!("http://{}/api/admin/keys/ghost-key/test", harness.addr))
+        .post(format!(
+            "http://{}/api/admin/keys/ghost-key/test",
+            harness.addr
+        ))
         .header("Authorization", &auth)
         .send()
         .await
@@ -902,7 +1016,10 @@ async fn test_model_sampling_and_pricing_overrides() {
 
     // 2. Update overrides partially; untouched fields keep prior values
     let update_resp = client
-        .put(format!("http://{}/api/admin/models/gpt-4o-mini", harness.addr))
+        .put(format!(
+            "http://{}/api/admin/models/gpt-4o-mini",
+            harness.addr
+        ))
         .header("Authorization", &auth)
         .header("If-Match", "\"1\"")
         .json(&serde_json::json!({
@@ -935,7 +1052,10 @@ async fn test_model_sampling_and_pricing_overrides() {
 
     // 4. Negative price rejected
     let bad_price = client
-        .put(format!("http://{}/api/admin/models/gpt-4o-mini", harness.addr))
+        .put(format!(
+            "http://{}/api/admin/models/gpt-4o-mini",
+            harness.addr
+        ))
         .header("Authorization", &auth)
         .header("If-Match", "\"2\"")
         .json(&serde_json::json!({
@@ -977,11 +1097,7 @@ async fn test_provider_upstream_models() {
     let mut providers = HashMap::new();
     for (pname, base, proto) in [
         ("openai", format!("{}/v1", mock_base), None),
-        (
-            "weird",
-            format!("{}/other", mock_base),
-            None,
-        ),
+        ("weird", format!("{}/other", mock_base), None),
         (
             "claude",
             "https://api.anthropic.com".to_string(),
@@ -991,10 +1107,10 @@ async fn test_provider_upstream_models() {
         providers.insert(
             pname.to_string(),
             ProviderSection {
-    egress_pool: vec![],
-    egress_strategy: "round_robin".to_string(),
+                egress_pool: vec![],
+                egress_strategy: "round_robin".to_string(),
 
-    rate_limits: None,
+                rate_limits: None,
                 base_url: base,
                 default_model: "m-a".to_string(),
                 strategy: "round_robin".to_string(),
@@ -1020,7 +1136,9 @@ async fn test_provider_upstream_models() {
     config_file.gateway.api_key = api_key.clone();
     config_file.gateway.admin_write_enabled = true;
     config_file.providers = providers;
-    config_file.save_to_path(config_path.to_str().unwrap()).unwrap();
+    config_file
+        .save_to_path(config_path.to_str().unwrap())
+        .unwrap();
 
     let mut gw_config = GatewayConfig::default();
     gw_config.bind_addr = "127.0.0.1:8080".to_string();
@@ -1030,10 +1148,10 @@ async fn test_provider_upstream_models() {
         gw_config.providers.insert(
             pname.clone(),
             ProviderConfig {
-    egress_pool: vec![],
-    egress_strategy: "round_robin".to_string(),
+                egress_pool: vec![],
+                egress_strategy: "round_robin".to_string(),
 
-    rate_limits: None,
+                rate_limits: None,
                 base_url: psec.base_url.clone(),
                 default_model: psec.default_model.clone(),
                 strategy: psec.strategy.clone(),
@@ -1068,7 +1186,10 @@ async fn test_provider_upstream_models() {
 
     // 1. OpenAI-style list: sorted, deduped ids
     let ok = client
-        .get(format!("http://{}/api/admin/providers/openai/upstream-models", addr))
+        .get(format!(
+            "http://{}/api/admin/providers/openai/upstream-models",
+            addr
+        ))
         .header("Authorization", &auth)
         .send()
         .await
@@ -1083,7 +1204,10 @@ async fn test_provider_upstream_models() {
 
     // 2. Base without a listable path -> 502, console falls back to manual entry
     let missing = client
-        .get(format!("http://{}/api/admin/providers/weird/upstream-models", addr))
+        .get(format!(
+            "http://{}/api/admin/providers/weird/upstream-models",
+            addr
+        ))
         .header("Authorization", &auth)
         .send()
         .await
@@ -1092,7 +1216,10 @@ async fn test_provider_upstream_models() {
 
     // 3. Anthropic-native protocol -> 404 unsupported
     let unsupported = client
-        .get(format!("http://{}/api/admin/providers/claude/upstream-models", addr))
+        .get(format!(
+            "http://{}/api/admin/providers/claude/upstream-models",
+            addr
+        ))
         .header("Authorization", &auth)
         .send()
         .await
@@ -1101,7 +1228,10 @@ async fn test_provider_upstream_models() {
 
     // 4. Unknown provider -> 404
     let gone = client
-        .get(format!("http://{}/api/admin/providers/nope/upstream-models", addr))
+        .get(format!(
+            "http://{}/api/admin/providers/nope/upstream-models",
+            addr
+        ))
         .header("Authorization", &auth)
         .send()
         .await
@@ -1196,10 +1326,10 @@ async fn test_dial_test_blocked_target_refused() {
     let api_key = "admin-secret-token".to_string();
 
     let provider_sec = ProviderSection {
-    egress_pool: vec![],
-    egress_strategy: "round_robin".to_string(),
+        egress_pool: vec![],
+        egress_strategy: "round_robin".to_string(),
 
-    rate_limits: None,
+        rate_limits: None,
         base_url: "http://169.254.169.254/".to_string(),
         default_model: "m".to_string(),
         strategy: "round_robin".to_string(),
@@ -1226,7 +1356,9 @@ async fn test_dial_test_blocked_target_refused() {
     config_file.gateway.api_key = api_key.clone();
     config_file.gateway.admin_write_enabled = true;
     config_file.providers = providers;
-    config_file.save_to_path(config_path.to_str().unwrap()).unwrap();
+    config_file
+        .save_to_path(config_path.to_str().unwrap())
+        .unwrap();
 
     let mut gw_config = GatewayConfig::default();
     gw_config.bind_addr = "127.0.0.1:8080".to_string();
@@ -1235,10 +1367,10 @@ async fn test_dial_test_blocked_target_refused() {
     gw_config.providers.insert(
         "meta".to_string(),
         ProviderConfig {
-    egress_pool: vec![],
-    egress_strategy: "round_robin".to_string(),
+            egress_pool: vec![],
+            egress_strategy: "round_robin".to_string(),
 
-    rate_limits: None,
+            rate_limits: None,
             base_url: "http://169.254.169.254/".to_string(),
             default_model: "m".to_string(),
             strategy: "round_robin".to_string(),
@@ -1284,7 +1416,10 @@ async fn test_dial_test_blocked_target_refused() {
 
     // upstream-models on the same seeded provider must also refuse.
     let um = client
-        .get(format!("http://{}/api/admin/providers/meta/upstream-models", addr))
+        .get(format!(
+            "http://{}/api/admin/providers/meta/upstream-models",
+            addr
+        ))
         .header("Authorization", format!("Bearer {}", api_key))
         .send()
         .await
@@ -1313,7 +1448,10 @@ async fn test_admin_rate_limits_write_read_and_persist() {
     assert_eq!(list.status(), StatusCode::OK);
     let models: Vec<serde_json::Value> = list.json().await.unwrap();
     assert_eq!(models.len(), 1);
-    assert!(models[0].get("rate_limits").is_none(), "baseline must omit rate_limits");
+    assert!(
+        models[0].get("rate_limits").is_none(),
+        "baseline must omit rate_limits"
+    );
 
     // 1. PUT model rate_limits (If-Match against config_version=0 -> save to 1).
     let put = client
@@ -1355,7 +1493,10 @@ async fn test_admin_rate_limits_write_read_and_persist() {
 
     // 3. GET provider/{name}/models also reflects it.
     let pm = client
-        .get(format!("http://{}/api/admin/providers/openai/models", harness.addr))
+        .get(format!(
+            "http://{}/api/admin/providers/openai/models",
+            harness.addr
+        ))
         .header("Authorization", &auth)
         .send()
         .await
@@ -1373,7 +1514,10 @@ async fn test_admin_rate_limits_write_read_and_persist() {
 
     // 5. Provider-level default: PUT /api/admin/providers/{name} (ver 1 -> 2).
     let pp = client
-        .put(format!("http://{}/api/admin/providers/openai", harness.addr))
+        .put(format!(
+            "http://{}/api/admin/providers/openai",
+            harness.addr
+        ))
         .header("Authorization", &auth)
         .header("If-Match", "\"1\"")
         .json(&serde_json::json!({

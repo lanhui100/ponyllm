@@ -23,14 +23,21 @@ where
 {
     type Rejection = Response;
 
-    async fn from_request(req: Request<axum::body::Body>, state: &S) -> Result<Self, Self::Rejection> {
+    async fn from_request(
+        req: Request<axum::body::Body>,
+        state: &S,
+    ) -> Result<Self, Self::Rejection> {
         let uri_path = req.uri().path().to_string();
         match Json::<T>::from_request(req, state).await {
             Ok(Json(val)) => Ok(AppJson(val)),
             Err(rejection) => {
                 let err_msg = match &rejection {
-                    JsonRejection::JsonDataError(e) => format!("Invalid request payload: {}", e.body_text()),
-                    JsonRejection::JsonSyntaxError(e) => format!("Invalid JSON syntax: {}", e.body_text()),
+                    JsonRejection::JsonDataError(e) => {
+                        format!("Invalid request payload: {}", e.body_text())
+                    }
+                    JsonRejection::JsonSyntaxError(e) => {
+                        format!("Invalid JSON syntax: {}", e.body_text())
+                    }
                     JsonRejection::MissingJsonContentType(_) => {
                         "Missing or invalid 'content-type: application/json' header".to_string()
                     }
@@ -49,16 +56,19 @@ where
                     }
                 };
 
-                let is_too_large = err_msg.to_ascii_lowercase().contains("length limit exceeded")
+                let is_too_large = err_msg
+                    .to_ascii_lowercase()
+                    .contains("length limit exceeded")
                     || err_msg.to_ascii_lowercase().contains("payload too large");
-                let is_anthropic = uri_path.ends_with("/messages") || uri_path.contains("/messages/");
-                let status = if is_too_large { StatusCode::PAYLOAD_TOO_LARGE } else { StatusCode::BAD_REQUEST };
+                let is_anthropic =
+                    uri_path.ends_with("/messages") || uri_path.contains("/messages/");
+                let status = if is_too_large {
+                    StatusCode::PAYLOAD_TOO_LARGE
+                } else {
+                    StatusCode::BAD_REQUEST
+                };
                 let resp = if is_anthropic {
-                    render_anthropic_error(
-                        status,
-                        "invalid_request_error",
-                        &err_msg,
-                    )
+                    render_anthropic_error(status, "invalid_request_error", &err_msg)
                 } else {
                     render_openai_error(
                         status,
@@ -95,11 +105,7 @@ pub fn render_openai_error(
 }
 
 /// Render a standardized Anthropic error JSON response envelope.
-pub fn render_anthropic_error(
-    status: StatusCode,
-    err_type: &str,
-    message: &str,
-) -> Response {
+pub fn render_anthropic_error(status: StatusCode, err_type: &str, message: &str) -> Response {
     (
         status,
         Json(json!({
@@ -117,7 +123,9 @@ pub fn render_anthropic_error(
 /// [`UpstreamProtocol`](ponyllm_core::pool::UpstreamProtocol) override.
 /// Invalid values are silently ignored (fallback to configured resolution),
 /// mirroring the existing `x-pony-strategy` header behavior.
-pub fn parse_protocol_header(headers: &axum::http::HeaderMap) -> Option<ponyllm_core::pool::UpstreamProtocol> {
+pub fn parse_protocol_header(
+    headers: &axum::http::HeaderMap,
+) -> Option<ponyllm_core::pool::UpstreamProtocol> {
     use std::str::FromStr;
     headers
         .get("x-pony-protocol")
@@ -126,7 +134,9 @@ pub fn parse_protocol_header(headers: &axum::http::HeaderMap) -> Option<ponyllm_
 }
 
 /// Extract optional thinking effort from `X-Pony-Thinking` or `X-Thinking-Effort` header.
-pub fn parse_thinking_header(headers: &axum::http::HeaderMap) -> Option<ponyllm_protocol::common::ReasoningEffort> {
+pub fn parse_thinking_header(
+    headers: &axum::http::HeaderMap,
+) -> Option<ponyllm_protocol::common::ReasoningEffort> {
     headers
         .get("x-pony-thinking")
         .or_else(|| headers.get("x-thinking-effort"))
@@ -134,27 +144,36 @@ pub fn parse_thinking_header(headers: &axum::http::HeaderMap) -> Option<ponyllm_
         .and_then(ponyllm_protocol::common::ReasoningEffort::from_str_loose)
 }
 
-
 #[cfg(test)]
 mod security_tests {
     #[test]
     fn exhaustion_messages_redact_key_lists_and_emails() {
-        assert_eq!(super::redact_internal_identifiers("failed keys [\"key-5105\"]"), "failed keys [redacted]");
+        assert_eq!(
+            super::redact_internal_identifiers("failed keys [\"key-5105\"]"),
+            "failed keys [redacted]"
+        );
         assert_eq!(
             super::redact_internal_identifiers("failed keys [\"k1\"] then keys [\"k2\"]"),
             "failed keys [redacted] then keys [redacted]"
         );
-        assert_eq!(super::redact_internal_identifiers("upstream timeout"), "upstream timeout");
+        assert_eq!(
+            super::redact_internal_identifiers("upstream timeout"),
+            "upstream timeout"
+        );
         assert_eq!(
             super::redact_internal_identifiers("Antigravity refresh for 'engineer@company.com' skipped: serialization lock held by another replica"),
             "Antigravity refresh for '[redacted]' skipped: serialization lock held by another replica"
         );
         assert_eq!(
-            super::redact_internal_identifiers("Antigravity credential 'dev-ops@internal.net' rejected by OAuth"),
+            super::redact_internal_identifiers(
+                "Antigravity credential 'dev-ops@internal.net' rejected by OAuth"
+            ),
             "Antigravity credential '[redacted]' rejected by OAuth"
         );
         assert_eq!(
-            super::redact_internal_identifiers("Network error with account@domain.org: connect timeout"),
+            super::redact_internal_identifiers(
+                "Network error with account@domain.org: connect timeout"
+            ),
             "Network error with [redacted]: connect timeout"
         );
     }
@@ -276,11 +295,20 @@ const CLIENT_QUOTA_WORDING_NEUTRALIZATIONS: &[(&str, &str)] = &[
     ("out of credits", "rate limited"),
     ("out_of_budget", "rate_limited"),
     ("out of budget", "rate limited"),
-    ("exceeded your current quota", "exceeded the current rate limit"),
+    (
+        "exceeded your current quota",
+        "exceeded the current rate limit",
+    ),
     ("exceeded your quota", "exceeded the rate limit"),
     ("exceeded current quota", "exceeded current rate limit"),
-    ("exceeded the current quota", "exceeded the current rate limit"),
-    ("exceeds your current quota", "exceeds the current rate limit"),
+    (
+        "exceeded the current quota",
+        "exceeded the current rate limit",
+    ),
+    (
+        "exceeds your current quota",
+        "exceeds the current rate limit",
+    ),
     ("exceeds your quota", "exceeds the rate limit"),
 ];
 
@@ -401,7 +429,10 @@ pub fn retry_after_secs(
     pool_unlock: Option<std::time::Duration>,
 ) -> Option<u64> {
     use ponyllm_core::error::GatewayErrorKind;
-    if let GatewayErrorKind::RateLimitExceeded { retry_after: Some(d) } = kind {
+    if let GatewayErrorKind::RateLimitExceeded {
+        retry_after: Some(d),
+    } = kind
+    {
         let s = d.as_secs().max(1).min(60);
         return Some(s);
     }
@@ -455,11 +486,9 @@ pub fn project_openai_error(
             "invalid_request_error",
             "model_not_found",
         ),
-        GatewayErrorKind::Internal => (
-            StatusCode::BAD_GATEWAY,
-            "bad_gateway",
-            "upstream_exhausted",
-        ),
+        GatewayErrorKind::Internal => {
+            (StatusCode::BAD_GATEWAY, "bad_gateway", "upstream_exhausted")
+        }
     };
     render_openai_error(status, err_type, code, message)
 }
@@ -471,38 +500,18 @@ pub fn project_anthropic_error(
 ) -> Response {
     use ponyllm_core::error::GatewayErrorKind;
     let (status, err_type) = match kind {
-        GatewayErrorKind::RateLimitExceeded { .. } | GatewayErrorKind::QuotaExhausted => (
-            StatusCode::TOO_MANY_REQUESTS,
-            "rate_limit_error",
-        ),
-        GatewayErrorKind::UpstreamUnavailable => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "overloaded_error",
-        ),
-        GatewayErrorKind::LockContention => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "overloaded_error",
-        ),
-        GatewayErrorKind::AuthInvalid => (
-            StatusCode::BAD_GATEWAY,
-            "api_error",
-        ),
-        GatewayErrorKind::ClientBadRequest => (
-            StatusCode::BAD_REQUEST,
-            "invalid_request_error",
-        ),
-        GatewayErrorKind::CapacityExhausted => (
-            StatusCode::TOO_MANY_REQUESTS,
-            "overloaded_error",
-        ),
-        GatewayErrorKind::ModelNotFound => (
-            StatusCode::NOT_FOUND,
-            "not_found_error",
-        ),
-        GatewayErrorKind::Internal => (
-            StatusCode::BAD_GATEWAY,
-            "api_error",
-        ),
+        GatewayErrorKind::RateLimitExceeded { .. } | GatewayErrorKind::QuotaExhausted => {
+            (StatusCode::TOO_MANY_REQUESTS, "rate_limit_error")
+        }
+        GatewayErrorKind::UpstreamUnavailable => {
+            (StatusCode::SERVICE_UNAVAILABLE, "overloaded_error")
+        }
+        GatewayErrorKind::LockContention => (StatusCode::SERVICE_UNAVAILABLE, "overloaded_error"),
+        GatewayErrorKind::AuthInvalid => (StatusCode::BAD_GATEWAY, "api_error"),
+        GatewayErrorKind::ClientBadRequest => (StatusCode::BAD_REQUEST, "invalid_request_error"),
+        GatewayErrorKind::CapacityExhausted => (StatusCode::TOO_MANY_REQUESTS, "overloaded_error"),
+        GatewayErrorKind::ModelNotFound => (StatusCode::NOT_FOUND, "not_found_error"),
+        GatewayErrorKind::Internal => (StatusCode::BAD_GATEWAY, "api_error"),
     };
     render_anthropic_error(status, err_type, message)
 }
@@ -557,13 +566,24 @@ fn sanitize_multimodal_value(val: &serde_json::Value) -> serde_json::Value {
             let mut new_map = serde_json::Map::with_capacity(map.len());
             for (k, v) in map {
                 if (k == "data" || k == "url" || k == "image_url" || k == "file_url")
-                    && v.as_str().map(|s| s.starts_with("data:") && s.len() > 100).unwrap_or(false)
+                    && v.as_str()
+                        .map(|s| s.starts_with("data:") && s.len() > 100)
+                        .unwrap_or(false)
                 {
                     let s = v.as_str().unwrap();
                     let prefix = s.split_once(',').map(|(p, _)| p).unwrap_or("data:media");
-                    new_map.insert(k.clone(), serde_json::Value::String(format!("[{}... {} bytes]", prefix, s.len())));
+                    new_map.insert(
+                        k.clone(),
+                        serde_json::Value::String(format!("[{}... {} bytes]", prefix, s.len())),
+                    );
                 } else if k == "data" && v.as_str().map(|s| s.len() > 200).unwrap_or(false) {
-                    new_map.insert(k.clone(), serde_json::Value::String(format!("[base64 data... {} bytes]", v.as_str().unwrap().len())));
+                    new_map.insert(
+                        k.clone(),
+                        serde_json::Value::String(format!(
+                            "[base64 data... {} bytes]",
+                            v.as_str().unwrap().len()
+                        )),
+                    );
                 } else {
                     new_map.insert(k.clone(), sanitize_multimodal_value(v));
                 }
@@ -616,7 +636,8 @@ mod tests {
         use ponyllm_core::error::GatewayErrorKind;
 
         // 1. OpenAI projection: 503 and "lock_contention"
-        let resp = project_openai_error(&GatewayErrorKind::LockContention, "serialization lock busy");
+        let resp =
+            project_openai_error(&GatewayErrorKind::LockContention, "serialization lock busy");
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
         let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
         let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
@@ -624,7 +645,8 @@ mod tests {
         assert_eq!(body["error"]["type"], "api_error");
 
         // 2. Anthropic projection: 503 and "overloaded_error"
-        let resp_anth = project_anthropic_error(&GatewayErrorKind::LockContention, "serialization lock busy");
+        let resp_anth =
+            project_anthropic_error(&GatewayErrorKind::LockContention, "serialization lock busy");
         assert_eq!(resp_anth.status(), StatusCode::SERVICE_UNAVAILABLE);
         let bytes_anth = to_bytes(resp_anth.into_body(), usize::MAX).await.unwrap();
         let body_anth: serde_json::Value = serde_json::from_slice(&bytes_anth).unwrap();
@@ -641,7 +663,9 @@ mod tests {
         let scrubbed = super::scrub_upstream_quota_wording(raw);
         // The client-heuristic triggers are gone…
         assert!(!scrubbed.to_ascii_lowercase().contains("insufficient_quota"));
-        assert!(!scrubbed.to_ascii_lowercase().contains("quota_exceeded_error"));
+        assert!(!scrubbed
+            .to_ascii_lowercase()
+            .contains("quota_exceeded_error"));
         // …and the message stays readable with the failure class intact.
         assert!(scrubbed.contains("6 rate limited"));
         assert!(scrubbed.contains("HTTP 429 from key-9478"));
@@ -655,7 +679,9 @@ mod tests {
         let raw = "2 rate limited, 1 quota exhausted: HTTP 403 from key-1005: {\"error\":{\"message\":\"rpm exhausted\",\"type\":\"quota_exceeded_error\",\"code\":\"8\"}}";
         let scrubbed = super::scrub_upstream_quota_wording(raw);
         assert!(!scrubbed.to_ascii_lowercase().contains("quota exhausted"));
-        assert!(!scrubbed.to_ascii_lowercase().contains("quota_exceeded_error"));
+        assert!(!scrubbed
+            .to_ascii_lowercase()
+            .contains("quota_exceeded_error"));
         assert!(scrubbed.contains("rpm exhausted"));
     }
 
@@ -685,7 +711,12 @@ mod tests {
             false,
             "req-scrub-1",
         );
-        assert!(!rate_limited.to_ascii_lowercase().contains("insufficient_quota"), "msg: {rate_limited}");
+        assert!(
+            !rate_limited
+                .to_ascii_lowercase()
+                .contains("insufficient_quota"),
+            "msg: {rate_limited}"
+        );
         assert!(rate_limited.contains("6 rate limited"));
 
         // QuotaExhausted: honest message preserved — the client SHOULD see quota wording.
@@ -696,7 +727,10 @@ mod tests {
             false,
             "req-scrub-2",
         );
-        assert!(quota.to_ascii_lowercase().contains("insufficient_quota"), "msg: {quota}");
+        assert!(
+            quota.to_ascii_lowercase().contains("insufficient_quota"),
+            "msg: {quota}"
+        );
     }
 
     #[test]
@@ -729,4 +763,3 @@ mod tests {
         assert!(msg.contains("keys [redacted]"), "msg: {msg}");
     }
 }
-

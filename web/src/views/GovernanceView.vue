@@ -20,7 +20,6 @@ const {
   providers,
   models,
   keys,
-  strategy,
   configVersion,
   loading,
   error,
@@ -46,9 +45,7 @@ const {
   removeKey,
   testSingleKey,
   batchTestAllKeys,
-  saveStrategy,
   autoModels,
-  activeModelsOrder,
   saveAutoModels,
   clearConflict,
   clearCreatedKeyResult,
@@ -526,7 +523,7 @@ onUnmounted(() => {
             </UiBadge>
           </h1>
           <p class="text-sm text-slate-500 mt-1.5">
-            统一管理模型提供商、挂载模型字典、密钥池与全局分流策略
+            统一管理模型提供商、挂载模型字典、密钥池与 Auto 智能路由顺序
           </p>
         </div>
 
@@ -1009,8 +1006,8 @@ onUnmounted(() => {
             :testing-key-ids="testingKeyIds"
             @delete-provider="removeProvider"
             @update-provider="editProvider"
-            @create-model="saveModel"
-            @update-model="editModel"
+            @create-model="async (payload) => { await saveModel(payload); }"
+            @update-model="async (name, payload) => { await editModel(name, payload); }"
             @delete-model="removeModel"
             @create-key="addKey"
             @update-key="editKey"
@@ -1024,14 +1021,12 @@ onUnmounted(() => {
       </div>
 
 
-      <!-- Strategy Tab：全局调度策略 -->
+      <!-- Strategy Tab：Auto 智能路由候选模型优先级 -->
       <div v-else-if="currentTab === 'strategy'">
         <StrategySection
-          :current-strategy="strategy"
           :admin-write-enabled="adminWriteEnabled"
           :auto-models="autoModels"
-          :active-models-order="activeModelsOrder"
-          @update="saveStrategy"
+          :all-models="models"
           @update-auto-models="saveAutoModels"
         />
       </div>

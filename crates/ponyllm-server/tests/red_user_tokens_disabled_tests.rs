@@ -35,7 +35,10 @@ struct Gh {
 impl Gh {
     async fn new() -> Self {
         // 注意：不设置 PONYLLM_USER_TOKENS_ENABLED —— 保持 B002 默认 off
-        std::env::set_var("PONYLLM_JWT_SECRET", "pony-llm-red-test-jwt-secret-0123456789abcdef-0123456789abcdef");
+        std::env::set_var(
+            "PONYLLM_JWT_SECRET",
+            "pony-llm-red-test-jwt-secret-0123456789abcdef-0123456789abcdef",
+        );
         let temp_dir = tempfile::tempdir().unwrap();
         let config_path = temp_dir.path().join("ponyllm.toml");
 
@@ -60,7 +63,9 @@ impl Gh {
         cfg_file.gateway.gateway_keys = vec![e_admin.clone()];
         cfg_file.gateway.users = vec![admin.clone()];
         cfg_file.providers = HashMap::new();
-        cfg_file.save_to_path(config_path.to_str().unwrap()).unwrap();
+        cfg_file
+            .save_to_path(config_path.to_str().unwrap())
+            .unwrap();
 
         let mut gw = GatewayConfig::default();
         gw.bind_addr = "127.0.0.1:8080".into();
@@ -114,7 +119,10 @@ async fn user_plane_all_404_when_disabled() {
     // POST 面
     for (path, body) in [
         ("/api/user/tokens", json!({ "name": "x" })),
-        ("/api/user/admin/users", json!({ "username": "x", "password": "y" })),
+        (
+            "/api/user/admin/users",
+            json!({ "username": "x", "password": "y" }),
+        ),
     ] {
         let resp = c
             .post(h.url(path))

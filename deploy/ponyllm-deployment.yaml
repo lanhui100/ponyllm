@@ -204,7 +204,7 @@ spec:
             - name: PONYLLM_LOCK_SSLMODE
               value: "require"
             - name: PONYLLM_PROBE_ALLOWLIST
-              value: "pproxy-host.ponyllm.svc,pproxy-host.ponyllm.svc.cluster.local"
+              value: "pproxy-host,pproxy-host.ponyllm,pproxy-host.ponyllm.svc,pproxy-host.ponyllm.svc.cluster.local"
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -367,7 +367,7 @@ spec:
             - name: PONYLLM_LOCK_SSLMODE
               value: "require"
             - name: PONYLLM_PROBE_ALLOWLIST
-              value: "pproxy-host.ponyllm.svc,pproxy-host.ponyllm.svc.cluster.local"
+              value: "pproxy-host,pproxy-host.ponyllm,pproxy-host.ponyllm.svc,pproxy-host.ponyllm.svc.cluster.local"
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -514,7 +514,7 @@ spec:
             - name: PONYLLM_LOCK_SSLMODE
               value: "require"
             - name: PONYLLM_PROBE_ALLOWLIST
-              value: "pproxy-host.ponyllm.svc,pproxy-host.ponyllm.svc.cluster.local"
+              value: "pproxy-host,pproxy-host.ponyllm,pproxy-host.ponyllm.svc,pproxy-host.ponyllm.svc.cluster.local"
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -662,7 +662,7 @@ spec:
             - name: PONYLLM_LOCK_SSLMODE
               value: "require"
             - name: PONYLLM_PROBE_ALLOWLIST
-              value: "pproxy-host.ponyllm.svc,pproxy-host.ponyllm.svc.cluster.local"
+              value: "pproxy-host,pproxy-host.ponyllm,pproxy-host.ponyllm.svc,pproxy-host.ponyllm.svc.cluster.local"
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true

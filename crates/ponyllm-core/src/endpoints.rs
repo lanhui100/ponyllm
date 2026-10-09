@@ -133,8 +133,14 @@ mod tests {
 
     #[test]
     fn test_deepseek_v41_flash_alias_canonicalizes() {
-        assert_eq!(canonicalize_model_name("deepseek-v4.1-flash"), "deepseek-flash");
-        assert_eq!(canonicalize_model_name("DeepSeek-V4.1-Flash"), "deepseek-flash");
+        assert_eq!(
+            canonicalize_model_name("deepseek-v4.1-flash"),
+            "deepseek-flash"
+        );
+        assert_eq!(
+            canonicalize_model_name("DeepSeek-V4.1-Flash"),
+            "deepseek-flash"
+        );
         assert_eq!(canonicalize_model_name("deepseek-flash"), "deepseek-flash");
         assert_eq!(canonicalize_model_name("deepseek-chat"), "deepseek-chat");
         assert!(model_aliases("deepseek-flash").contains(&"deepseek-v4.1-flash"));

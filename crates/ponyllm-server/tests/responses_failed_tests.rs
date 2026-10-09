@@ -11,19 +11,19 @@
 //! - `/v1/messages` mirrors `/v1/chat/completions`: a failed Responses
 //!   upstream fails over instead of returning an empty success message.
 
-use std::sync::Arc;
 use axum::routing::post;
 use axum::{Json, Router};
 use futures_util::StreamExt;
-use serde_json::json;
 use ponyllm_core::pool::*;
 use ponyllm_server::{create_app, AppState, GatewayConfig, ProviderConfig};
+use serde_json::json;
+use std::sync::Arc;
 
 fn provider(base_url: String, model: &str, proto: UpstreamProtocol, price: f64) -> ProviderConfig {
-        ProviderConfig {
-    egress_pool: vec![],
-    egress_strategy: "round_robin".to_string(),
-    rate_limits: None,
+    ProviderConfig {
+        egress_pool: vec![],
+        egress_strategy: "round_robin".to_string(),
+        rate_limits: None,
         base_url,
         default_model: model.to_string(),
         strategy: "priority".to_string(),
@@ -253,7 +253,11 @@ async fn test_chat_non_streaming_responses_failed_fails_over() {
         .unwrap();
     assert_eq!(resp.status(), 200);
     assert_eq!(
-        resp.headers().get("x-ponyllm-provider").unwrap().to_str().unwrap(),
+        resp.headers()
+            .get("x-ponyllm-provider")
+            .unwrap()
+            .to_str()
+            .unwrap(),
         "fail_backup",
         "failed Responses upstream must fail over to the backup provider"
     );
@@ -310,7 +314,11 @@ async fn test_chat_non_streaming_responses_failed_single_candidate_is_503_with_u
         .await
         .unwrap();
     // UpstreamUnavailable projects to 503 (service unavailable, retryable).
-    assert_eq!(resp.status(), 503, "failed upstream must map to a retryable 5xx");
+    assert_eq!(
+        resp.status(),
+        503,
+        "failed upstream must map to a retryable 5xx"
+    );
     let body: serde_json::Value = resp.json().await.unwrap();
     let msg = body["error"]["message"].as_str().unwrap_or_default();
     assert!(
@@ -411,7 +419,11 @@ async fn test_messages_non_streaming_responses_failed_fails_over() {
         .unwrap();
     assert_eq!(resp.status(), 200);
     assert_eq!(
-        resp.headers().get("x-ponyllm-provider").unwrap().to_str().unwrap(),
+        resp.headers()
+            .get("x-ponyllm-provider")
+            .unwrap()
+            .to_str()
+            .unwrap(),
         "msg_fail_backup",
         "failed Responses upstream must fail over to the backup provider"
     );
@@ -468,7 +480,11 @@ async fn test_messages_non_streaming_responses_failed_single_candidate_is_503() 
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 503, "failed upstream must map to a retryable 5xx");
+    assert_eq!(
+        resp.status(),
+        503,
+        "failed upstream must map to a retryable 5xx"
+    );
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["type"], "error");
     let msg = body["error"]["message"].as_str().unwrap_or_default();

@@ -12,7 +12,6 @@ import type {
   ProviderView,
   ModelView,
   KeyView,
-  StrategyView,
 } from '../types/admin';
 
 describe('Modern Minimalist UI/UX System-Wide E2E Verification Suite (WEB-07)', () => {
@@ -27,7 +26,6 @@ describe('Modern Minimalist UI/UX System-Wide E2E Verification Suite (WEB-07)', 
     providers: 2,
     keys: 2,
     keys_active: 2,
-    strategy: 'economy',
     hot_reload_ms: 1000,
     admin_write_enabled: true,
     config_version: 20,
@@ -101,11 +99,6 @@ describe('Modern Minimalist UI/UX System-Wide E2E Verification Suite (WEB-07)', 
     },
   ];
 
-  const mockStrategy: StrategyView = {
-    strategy: 'economy',
-    config_version: 20,
-  };
-
   beforeEach(() => {
     window.sessionStorage?.clear();
     pinia = createPinia();
@@ -136,7 +129,6 @@ describe('Modern Minimalist UI/UX System-Wide E2E Verification Suite (WEB-07)', 
     vi.spyOn(adminApi, 'getProviders').mockReturnValue({ send: () => Promise.resolve(mockProviders) } as any);
     vi.spyOn(adminApi, 'getModels').mockReturnValue({ send: () => Promise.resolve(mockModels) } as any);
     vi.spyOn(adminApi, 'getKeys').mockReturnValue({ send: () => Promise.resolve(mockKeys) } as any);
-    vi.spyOn(adminApi, 'getStrategy').mockReturnValue({ send: () => Promise.resolve(mockStrategy) } as any);
 
     const app = createApp(GovernanceView);
     app.use(router);
@@ -180,7 +172,6 @@ describe('Modern Minimalist UI/UX System-Wide E2E Verification Suite (WEB-07)', 
     vi.spyOn(adminApi, 'getProviders').mockReturnValue({ send: () => Promise.resolve(mockProviders) } as any);
     vi.spyOn(adminApi, 'getModels').mockReturnValue({ send: () => Promise.resolve(mockModels) } as any);
     vi.spyOn(adminApi, 'getKeys').mockReturnValue({ send: () => Promise.resolve(mockKeys) } as any);
-    vi.spyOn(adminApi, 'getStrategy').mockReturnValue({ send: () => Promise.resolve(mockStrategy) } as any);
 
     const updateModelSpy = vi.spyOn(adminApi, 'updateModel').mockReturnValue({
       send: () => Promise.resolve(mockModels[0]),
@@ -288,7 +279,6 @@ describe('Modern Minimalist UI/UX System-Wide E2E Verification Suite (WEB-07)', 
     vi.spyOn(adminApi, 'getProviders').mockReturnValue({ send: () => Promise.resolve(mockProviders) } as any);
     vi.spyOn(adminApi, 'getModels').mockReturnValue({ send: () => Promise.resolve(mockModels) } as any);
     vi.spyOn(adminApi, 'getKeys').mockReturnValue({ send: () => Promise.resolve(mockKeys) } as any);
-    vi.spyOn(adminApi, 'getStrategy').mockReturnValue({ send: () => Promise.resolve(mockStrategy) } as any);
 
     const app = createApp(GovernanceView);
     app.use(router);
@@ -365,7 +355,6 @@ describe('Modern Minimalist UI/UX System-Wide E2E Verification Suite (WEB-07)', 
     vi.spyOn(adminApi, 'getProviders').mockReturnValue({ send: () => Promise.resolve(mockProviders) } as any);
     vi.spyOn(adminApi, 'getModels').mockReturnValue({ send: () => Promise.resolve(mockModels) } as any);
     vi.spyOn(adminApi, 'getKeys').mockReturnValue({ send: () => Promise.resolve(mockKeys) } as any);
-    vi.spyOn(adminApi, 'getStrategy').mockReturnValue({ send: () => Promise.resolve(mockStrategy) } as any);
 
     const app = createApp(GovernanceView);
     app.use(router);
@@ -394,7 +383,6 @@ describe('Modern Minimalist UI/UX System-Wide E2E Verification Suite (WEB-07)', 
     vi.spyOn(adminApi, 'getProviders').mockReturnValue({ send: () => Promise.resolve(mockProviders) } as any);
     vi.spyOn(adminApi, 'getModels').mockReturnValue({ send: () => Promise.resolve(mockModels) } as any);
     vi.spyOn(adminApi, 'getKeys').mockReturnValue({ send: () => Promise.resolve(mockKeys) } as any);
-    vi.spyOn(adminApi, 'getStrategy').mockReturnValue({ send: () => Promise.resolve(mockStrategy) } as any);
 
     const createModelSpy = vi.spyOn(adminApi, 'createModel').mockReturnValue({
       send: () => Promise.resolve({ ...mockModels[0], name: 'qwen-max-2.5' }),

@@ -20,10 +20,7 @@ use ponyllm_config::{generate_scoped_gateway_key, GatewayKeyEntry, KeyScope};
 fn full_token_entry() -> GatewayKeyEntry {
     let (_, mut entry) = generate_scoped_gateway_key("tk-001", KeyScope::Inference);
     entry.name = Some("my-swe-token".to_string());
-    entry.model_limits = Some(vec![
-        "gpt-4o-mini".to_string(),
-        "deepseek/*".to_string(),
-    ]);
+    entry.model_limits = Some(vec!["gpt-4o-mini".to_string(), "deepseek/*".to_string()]);
     entry.quota = Some(1_000_000);
     entry.user_owned = true;
     entry.created_by = Some("usr-007".to_string());
@@ -80,7 +77,10 @@ fn legacy_json_without_new_fields_deserializes_zero_migration() {
     assert_eq!(entry.user_id, None);
     // Assert —— 新字段默认值生效（零迁移）
     assert_eq!(entry.name, None, "name must default to None");
-    assert_eq!(entry.model_limits, None, "model_limits must default to None");
+    assert_eq!(
+        entry.model_limits, None,
+        "model_limits must default to None"
+    );
     assert_eq!(entry.quota, None, "quota must default to None");
     assert!(!entry.user_owned, "user_owned must default to false");
     assert_eq!(entry.created_by, None, "created_by must default to None");
@@ -115,9 +115,15 @@ fn default_new_fields_are_omitted_from_json() {
 
     // Assert
     assert!(value.get("name").is_none(), "None name must be omitted");
-    assert!(value.get("model_limits").is_none(), "None model_limits must be omitted");
+    assert!(
+        value.get("model_limits").is_none(),
+        "None model_limits must be omitted"
+    );
     assert!(value.get("quota").is_none(), "None quota must be omitted");
-    assert!(value.get("created_by").is_none(), "None created_by must be omitted");
+    assert!(
+        value.get("created_by").is_none(),
+        "None created_by must be omitted"
+    );
     assert!(
         value.get("user_owned").is_none(),
         "user_owned=false must be omitted (is_false skip)"
@@ -143,5 +149,8 @@ fn key_scope_serializes_to_lowercase_wire() {
     // Act & Assert
     let entry = full_token_entry(); // scope = inference
     let value = serde_json::to_value(&entry).expect("GatewayKeyEntry serialize");
-    assert_eq!(value.get("scope").and_then(|v| v.as_str()), Some("inference"));
+    assert_eq!(
+        value.get("scope").and_then(|v| v.as_str()),
+        Some("inference")
+    );
 }

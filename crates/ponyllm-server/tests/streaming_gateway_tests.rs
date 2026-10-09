@@ -1,4 +1,3 @@
-use std::sync::Arc;
 use axum::body::Body;
 use axum::http::HeaderValue;
 use axum::response::Response;
@@ -7,12 +6,13 @@ use axum::{Json, Router};
 use ponyllm_core::pool::*;
 use ponyllm_server::{create_app, AppState, GatewayConfig, ProviderConfig};
 use serde_json::json;
+use std::sync::Arc;
 
 fn make_provider(base_url: &str, default_model: &str) -> ProviderConfig {
-        ProviderConfig {
-    egress_pool: vec![],
-    egress_strategy: "round_robin".to_string(),
-    rate_limits: None,
+    ProviderConfig {
+        egress_pool: vec![],
+        egress_strategy: "round_robin".to_string(),
+        rate_limits: None,
         base_url: base_url.to_string(),
         default_model: default_model.to_string(),
         strategy: "round_robin".to_string(),
@@ -34,8 +34,10 @@ fn make_provider(base_url: &str, default_model: &str) -> ProviderConfig {
 
 fn sse_response(text: &'static str) -> Response {
     let mut resp = Response::new(Body::from(text));
-    resp.headers_mut()
-        .insert("content-type", HeaderValue::from_static("text/event-stream"));
+    resp.headers_mut().insert(
+        "content-type",
+        HeaderValue::from_static("text/event-stream"),
+    );
     resp
 }
 
@@ -127,15 +129,25 @@ async fn test_chat_streaming_no_double_data_prefix() {
         .unwrap();
     assert_eq!(resp.status(), 200);
     assert_eq!(
-        resp.headers().get("content-type").unwrap().to_str().unwrap(),
+        resp.headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap(),
         "text/event-stream"
     );
     let body = resp.text().await.unwrap();
 
     // No double prefix (regression for `data: data: {...}`)
     assert!(!body.contains("data: data:"), "double data prefix: {body}");
-    assert!(body.contains("data: {\"id\":\"1\""), "missing chunk: {body}");
-    assert!(body.ends_with("data: [DONE]\n\n"), "missing [DONE] terminator: {body}");
+    assert!(
+        body.contains("data: {\"id\":\"1\""),
+        "missing chunk: {body}"
+    );
+    assert!(
+        body.ends_with("data: [DONE]\n\n"),
+        "missing [DONE] terminator: {body}"
+    );
 }
 
 #[tokio::test]
@@ -167,11 +179,23 @@ async fn test_messages_streaming_translated_to_anthropic_events() {
     let body = resp.text().await.unwrap();
 
     // Must be Anthropic SSE events: `event: message_start` / content_block_delta / message_stop
-    assert!(body.contains("event: message_start"), "missing message_start: {body}");
-    assert!(body.contains("event: content_block_delta"), "missing content_block_delta: {body}");
-    assert!(body.contains("event: message_stop"), "missing message_stop: {body}");
+    assert!(
+        body.contains("event: message_start"),
+        "missing message_start: {body}"
+    );
+    assert!(
+        body.contains("event: content_block_delta"),
+        "missing content_block_delta: {body}"
+    );
+    assert!(
+        body.contains("event: message_stop"),
+        "missing message_stop: {body}"
+    );
     // Never leak raw OpenAI framing
-    assert!(!body.contains("chat.completion.chunk"), "leaked openai chunk: {body}");
+    assert!(
+        !body.contains("chat.completion.chunk"),
+        "leaked openai chunk: {body}"
+    );
 }
 
 #[tokio::test]
@@ -205,14 +229,31 @@ async fn test_responses_virtual_model_mapped_to_physical() {
         .unwrap();
     assert_eq!(resp.status(), 200);
     // Routing headers present (regression: responses used to omit them)
-    assert_eq!(resp.headers().get("x-ponyllm-routed-model").unwrap().to_str().unwrap(), "deepseek-v4-flash");
-    assert_eq!(resp.headers().get("x-ponyllm-provider").unwrap().to_str().unwrap(), "deepseek");
+    assert_eq!(
+        resp.headers()
+            .get("x-ponyllm-routed-model")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "deepseek-v4-flash"
+    );
+    assert_eq!(
+        resp.headers()
+            .get("x-ponyllm-provider")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "deepseek"
+    );
     let body: serde_json::Value = resp.json().await.unwrap();
     // Model echo rule: response body echoes requested name
     assert_eq!(body["model"], "auto");
 
     let sent = received.lock().unwrap().clone();
-    assert_eq!(sent, "deepseek-v4-flash", "upstream must receive physical model, got: {sent}");
+    assert_eq!(
+        sent, "deepseek-v4-flash",
+        "upstream must receive physical model, got: {sent}"
+    );
 }
 
 #[tokio::test]
@@ -320,7 +361,12 @@ async fn test_malformed_json_returns_standard_json_error() {
         .unwrap();
     assert_eq!(resp_chat.status(), 400);
     assert_eq!(
-        resp_chat.headers().get("content-type").unwrap().to_str().unwrap(),
+        resp_chat
+            .headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap(),
         "application/json"
     );
     let chat_err: serde_json::Value = resp_chat.json().await.unwrap();
@@ -336,7 +382,12 @@ async fn test_malformed_json_returns_standard_json_error() {
         .unwrap();
     assert_eq!(resp_msg.status(), 400);
     assert_eq!(
-        resp_msg.headers().get("content-type").unwrap().to_str().unwrap(),
+        resp_msg
+            .headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap(),
         "application/json"
     );
     let msg_err: serde_json::Value = resp_msg.json().await.unwrap();
@@ -347,17 +398,16 @@ async fn test_malformed_json_returns_standard_json_error() {
 #[tokio::test]
 async fn test_upstream_429_projected_to_client_rate_limit() {
     // Upstream always returns 429 Too Many Requests
-    let mock = Router::new()
-        .route(
-            "/v1/chat/completions",
-            post(|_: Json<serde_json::Value>| async {
-                (
-                    axum::http::StatusCode::TOO_MANY_REQUESTS,
-                    [("retry-after", "10")],
-                    Json(json!({"error": {"message": "TPM quota exceeded"}})),
-                )
-            }),
-        );
+    let mock = Router::new().route(
+        "/v1/chat/completions",
+        post(|_: Json<serde_json::Value>| async {
+            (
+                axum::http::StatusCode::TOO_MANY_REQUESTS,
+                [("retry-after", "10")],
+                Json(json!({"error": {"message": "TPM quota exceeded"}})),
+            )
+        }),
+    );
     let base = spawn_gateway_with_upstream(mock).await;
     let client = reqwest::Client::new();
 
@@ -392,4 +442,3 @@ async fn test_upstream_429_projected_to_client_rate_limit() {
     assert_eq!(msg_err["type"], "error");
     assert_eq!(msg_err["error"]["type"], "rate_limit_error");
 }
-

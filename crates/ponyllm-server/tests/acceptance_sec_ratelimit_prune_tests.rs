@@ -62,7 +62,11 @@ fn r2_pruned_budget_is_reusable() {
     rl.prune_expired();
 
     // 清理后：同 (ip,prefix) 重新获得完整预算
-    assert_eq!(rl.check(ip, PREFIX), Ok(()), "R2: 回收后的条目应回到可用预算");
+    assert_eq!(
+        rl.check(ip, PREFIX),
+        Ok(()),
+        "R2: 回收后的条目应回到可用预算"
+    );
 }
 
 #[test]

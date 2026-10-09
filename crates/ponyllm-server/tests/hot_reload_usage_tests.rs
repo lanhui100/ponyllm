@@ -4,9 +4,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use ponyllm_core::pool::{
-    ApiKeyEntry, BillingMode, KeyPool, RoutingStrategy,
-};
+use ponyllm_core::pool::{ApiKeyEntry, BillingMode, KeyPool, RoutingStrategy};
 use ponyllm_server::config::ProviderConfig;
 use ponyllm_server::{AppState, GatewayConfig};
 
@@ -57,14 +55,26 @@ async fn hot_reload_preserves_usage_history_by_key_id_and_restores_from_snapshot
     // <caption>1. 初始池 acc-1 + acc-3，均产生用量；acc-1 完成一个 5h 周期。</caption>
     let pool = build_pool("prov_x", &["acc-1", "acc-3"]);
     {
-        let key1 = pool.snapshot_keys().into_iter().find(|k| k.id == "acc-1").unwrap();
+        let key1 = pool
+            .snapshot_keys()
+            .into_iter()
+            .find(|k| k.id == "acc-1")
+            .unwrap();
         // 5h 完整周期：1.0 → 消耗 → 0.8 → 再消耗 → 跳回 1.0（打满重置）。
-        key1.usage_tracker.observe_upstream_probe(now_ms - 3600 * 1000, 1.0);
-        key1.usage_tracker.record_tokens(now_ms, 10_000, 5_000, 1_000);
+        key1.usage_tracker
+            .observe_upstream_probe(now_ms - 3600 * 1000, 1.0);
+        key1.usage_tracker
+            .record_tokens(now_ms, 10_000, 5_000, 1_000);
         key1.usage_tracker.observe_upstream_probe(now_ms, 0.8);
-        key1.usage_tracker.record_tokens(now_ms + 1800 * 1000, 2_000, 1_000, 0);
-        key1.usage_tracker.observe_upstream_probe(now_ms + 3600 * 1000, 1.0);
-        let key3 = pool.snapshot_keys().into_iter().find(|k| k.id == "acc-3").unwrap();
+        key1.usage_tracker
+            .record_tokens(now_ms + 1800 * 1000, 2_000, 1_000, 0);
+        key1.usage_tracker
+            .observe_upstream_probe(now_ms + 3600 * 1000, 1.0);
+        let key3 = pool
+            .snapshot_keys()
+            .into_iter()
+            .find(|k| k.id == "acc-3")
+            .unwrap();
         key3.usage_tracker.record_tokens(now_ms, 3_000, 1_000, 0);
     }
     state.register_pool("prov_x", pool.clone());
@@ -73,7 +83,8 @@ async fn hot_reload_preserves_usage_history_by_key_id_and_restores_from_snapshot
 
     let mut cfg1 = GatewayConfig::default();
     cfg1.bind_addr = "127.0.0.1:0".to_string();
-    cfg1.providers.insert("prov_x".to_string(), provider("127.0.0.1:9", "m1"));
+    cfg1.providers
+        .insert("prov_x".to_string(), provider("127.0.0.1:9", "m1"));
 
     // <caption>2. 热重载 A：acc-3 被移除，只剩 acc-1（同 id 重建 → 移植 tracker）。</caption>
     let new_pool_a = build_pool("prov_x", &["acc-1"]);
@@ -87,7 +98,9 @@ async fn hot_reload_preserves_usage_history_by_key_id_and_restores_from_snapshot
         .into_iter()
         .find(|k| k.id == "acc-1")
         .unwrap();
-    let usage = k1.usage_tracker.query_window(now_ms, ponyllm_core::pool::usage::FIVE_HOURS_MS);
+    let usage = k1
+        .usage_tracker
+        .query_window(now_ms, ponyllm_core::pool::usage::FIVE_HOURS_MS);
     assert_eq!(
         usage.total_tokens, 15_000,
         "acc-1 窗口用量在热重载后保留（tracker 已移植）"
@@ -110,7 +123,9 @@ async fn hot_reload_preserves_usage_history_by_key_id_and_restores_from_snapshot
         .into_iter()
         .find(|k| k.id == "acc-3")
         .unwrap();
-    let usage3 = k3.usage_tracker.query_window(now_ms, ponyllm_core::pool::usage::FIVE_HOURS_MS);
+    let usage3 = k3
+        .usage_tracker
+        .query_window(now_ms, ponyllm_core::pool::usage::FIVE_HOURS_MS);
     assert_eq!(
         usage3.total_tokens, 4_000,
         "acc-3 重新加入后从快照恢复用量历史（不归零）"

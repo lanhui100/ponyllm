@@ -46,8 +46,7 @@ impl Gh {
         let temp_dir = tempfile::tempdir().unwrap();
         let config_path = temp_dir.path().join("ponyllm.toml");
 
-        let (admin_gateway, e_admin) =
-            generate_scoped_gateway_key("boot-admin", KeyScope::Admin);
+        let (admin_gateway, e_admin) = generate_scoped_gateway_key("boot-admin", KeyScope::Admin);
         let admin_user = UserEntry {
             id: "usr-admin".into(),
             name: "Root Admin".into(),
@@ -80,7 +79,9 @@ impl Gh {
         cfg_file.gateway.gateway_keys = vec![e_admin.clone()];
         cfg_file.gateway.users = vec![admin_user.clone(), alice.clone()];
         cfg_file.providers = HashMap::new();
-        cfg_file.save_to_path(config_path.to_str().unwrap()).unwrap();
+        cfg_file
+            .save_to_path(config_path.to_str().unwrap())
+            .unwrap();
 
         let mut gw = GatewayConfig::default();
         gw.bind_addr = "127.0.0.1:8080".into();
@@ -118,12 +119,7 @@ fn bearer(t: &str) -> String {
 }
 
 /// POST /api/user/login 原始响应。
-async fn login(
-    h: &Gh,
-    c: &reqwest::Client,
-    user: &str,
-    pass: &str,
-) -> reqwest::Response {
+async fn login(h: &Gh, c: &reqwest::Client, user: &str, pass: &str) -> reqwest::Response {
     c.post(h.url("/api/user/login"))
         .json(&json!({ "username": user, "password": pass }))
         .send()
@@ -132,12 +128,7 @@ async fn login(
 }
 
 /// 断言登录成功并剥出 access_token（红相 B002 未实现 → 此处 404/401，test 红失败）。
-async fn login_token(
-    h: &Gh,
-    c: &reqwest::Client,
-    user: &str,
-    pass: &str,
-) -> String {
+async fn login_token(h: &Gh, c: &reqwest::Client, user: &str, pass: &str) -> String {
     let resp = login(h, c, user, pass).await;
     assert_eq!(
         resp.status(),
@@ -166,7 +157,10 @@ async fn login_success_returns_token_and_public_user() {
     );
     let v: serde_json::Value = resp.json().await.expect("login body");
     assert!(
-        v["access_token"].as_str().map(|s| !s.is_empty()).unwrap_or(false),
+        v["access_token"]
+            .as_str()
+            .map(|s| !s.is_empty())
+            .unwrap_or(false),
         "access_token must be present & non-empty"
     );
     let u = &v["user"];
@@ -237,9 +231,16 @@ async fn login_repeated_wrong_password_eventually_429() {
             saw_429 = true;
             break;
         }
-        assert!(resp.status().is_client_error(), "expected 4xx transient: {}", resp.status());
+        assert!(
+            resp.status().is_client_error(),
+            "expected 4xx transient: {}",
+            resp.status()
+        );
     }
-    assert!(saw_429, "repeated login failures must eventually be rate-limited (429)");
+    assert!(
+        saw_429,
+        "repeated login failures must eventually be rate-limited (429)"
+    );
 }
 
 /// 契约#2：GET /api/user/me（带 JWT）→ 200 当前用户 + used_tokens。
@@ -268,7 +269,11 @@ async fn me_unauthenticated_401() {
     let h = Gh::new().await;
     let c = reqwest::Client::new();
     let resp = c.get(h.url("/api/user/me")).send().await.unwrap();
-    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "unauthenticated me must 401");
+    assert_eq!(
+        resp.status(),
+        StatusCode::UNAUTHORIZED,
+        "unauthenticated me must 401"
+    );
 }
 
 /// 契约#3：改密旧口令错 → 400 {code:invalid_old_password}。
@@ -308,7 +313,11 @@ async fn change_password_ok_then_old_jwt_invalidated() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK, "successful password change must be 200");
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "successful password change must be 200"
+    );
 
     let me = c
         .get(h.url("/api/user/me"))

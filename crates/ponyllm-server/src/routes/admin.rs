@@ -45,7 +45,6 @@ pub struct OverviewView {
     pub providers: usize,
     pub keys: usize,
     pub keys_active: usize,
-    pub strategy: String,
     pub hot_reload_ms: u64,
     pub admin_write_enabled: bool,
     pub config_version: u64,
@@ -282,17 +281,6 @@ pub struct KeyView {
 }
 
 #[derive(Debug, Serialize, ToSchema)]
-pub struct StrategyView {
-    pub strategy: String,
-    pub config_version: u64,
-}
-
-#[derive(Debug, Deserialize, ToSchema)]
-pub struct PutStrategyPayload {
-    pub strategy: String,
-}
-
-#[derive(Debug, Serialize, ToSchema)]
 pub struct ServiceStatusView {
     pub uptime_seconds: u64,
     pub bind: String,
@@ -332,6 +320,47 @@ pub struct IssueGatewayKeyPayload {
     pub scope: String,
     #[serde(default)]
     pub expires_at: Option<i64>,
+    #[serde(default)]
+    pub user_id: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct UserView {
+    pub id: String,
+    pub name: String,
+    pub enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allowed_models: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u64>,
+    pub used_tokens: u64,
+    pub created_at: i64,
+    pub config_version: u64,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct CreateUserPayload {
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default = "default_true_bool")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub allowed_models: Option<Vec<String>>,
+    #[serde(default)]
+    pub max_tokens: Option<u64>,
+}
+
+fn default_true_bool() -> bool {
+    true
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct UpdateUserPayload {
+    pub name: Option<String>,
+    pub enabled: Option<bool>,
+    pub allowed_models: Option<Vec<String>>,
+    pub max_tokens: Option<u64>,
 }
 
 /// One-time issuance response: `api_key` is plaintext ONLY here (plus
@@ -1555,7 +1584,6 @@ pub async fn handle_admin_overview(State(state): State<Arc<AppState>>) -> impl I
         providers: cfg.providers.len(),
         keys: keys_total,
         keys_active,
-        strategy: cfg.default_strategy.to_string(),
         hot_reload_ms: state.config_poll_ms,
         admin_write_enabled: cfg.admin_write_enabled,
         config_version: file.config_version,
@@ -3968,72 +3996,6 @@ pub async fn handle_admin_put_auto_models(
     .into_response()
 }
 
-#[utoipa::path(get, path = "/api/admin/strategy", responses((status = 200, body = StrategyView)))]
-pub async fn handle_admin_get_strategy(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    // Snapshot the strategy before any await so the parking_lot config guard
-    // is not held across the (now async) store load.
-    let strategy = state.config.read().default_strategy.to_string();
-    let (file, _store_version) = match load_store_config(&state).await {
-        Ok((f, ver)) => (f, ver),
-        Err(resp) => return resp.into_response(),
-    };
-    Json(StrategyView {
-        strategy,
-        config_version: file.config_version,
-    })
-    .into_response()
-}
-
-#[utoipa::path(put, path = "/api/admin/strategy", request_body = PutStrategyPayload, responses((status = 200, body = StrategyView)))]
-pub async fn handle_admin_put_strategy(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    Json(body): Json<serde_json::Value>,
-) -> impl IntoResponse {
-    if let Err(resp) = check_admin_write_enabled(&state) {
-        return resp;
-    }
-    let _lock = state.admin_write_lock.lock().await;
-    let Some(strategy_str) = body.get("strategy").and_then(|v| v.as_str()) else {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": {"message": "missing 'strategy' field", "code": "invalid_strategy"}})),
-        )
-            .into_response();
-    };
-    let Ok(new_strategy) = strategy_str.parse::<ponyllm_core::pool::GatewayRoutingStrategy>()
-    else {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": {"message": format!("unknown strategy '{strategy_str}'"), "code": "invalid_strategy"}})),
-        )
-            .into_response();
-    };
-    let (mut file, store_version) = match load_store_config(&state).await {
-        Ok((f, ver)) => (f, ver),
-        Err(resp) => return resp,
-    };
-
-    // Strategy is a shared global mutation: always require an explicit
-    // If-Match version (same contract as the other CUD endpoints) so two
-    // concurrent writers cannot silently lost-update each other.
-    if let Err(resp) = check_if_match(&headers, file.config_version) {
-        return resp;
-    }
-
-    file.gateway.default_strategy = new_strategy;
-    let new_version = match save_store_config(&state, &mut file, &store_version).await {
-        Ok(v) => v,
-        Err(resp) => return resp,
-    };
-    state.config.write().default_strategy = new_strategy;
-    Json(StrategyView {
-        strategy: new_strategy.to_string(),
-        config_version: new_version,
-    })
-    .into_response()
-}
-
 #[utoipa::path(get, path = "/api/admin/service/status", responses((status = 200, body = ServiceStatusView)))]
 pub async fn handle_admin_service_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let (file, _store_version) = match load_store_config(&state).await {
@@ -4062,6 +4024,19 @@ fn gateway_key_view(e: &ponyllm_config::GatewayKeyEntry, config_version: u64) ->
         last4: e.last4.clone(),
         revoked: e.revoked,
         expires_at: e.expires_at,
+        config_version,
+    }
+}
+
+fn user_view(e: &ponyllm_config::UserEntry, used_tokens: u64, config_version: u64) -> UserView {
+    UserView {
+        id: e.id.clone(),
+        name: e.name.clone(),
+        enabled: e.enabled,
+        allowed_models: e.allowed_models.clone(),
+        max_tokens: e.max_tokens,
+        used_tokens,
+        created_at: e.created_at,
         config_version,
     }
 }
@@ -4173,6 +4148,7 @@ pub async fn handle_gateway_keys_issue(
 
     let (plaintext, mut entry) = ponyllm_config::generate_scoped_gateway_key(&id, scope);
     entry.expires_at = payload.expires_at;
+    entry.user_id = payload.user_id;
     file.gateway.gateway_keys.push(entry);
 
     let new_ver = match save_store_config(&state, &mut file, &store_version).await {
@@ -4276,6 +4252,285 @@ pub async fn handle_gateway_keys_revoke(
 
     tracing::info!(key_id = %id, scope = %removed.scope.as_str(), config_version = new_ver, "admin deleted gateway key");
     (StatusCode::OK, Json(gateway_key_view(&removed, new_ver))).into_response()
+}
+
+// ===========================================================================
+// Users CUD and Quota Administration
+// ===========================================================================
+
+#[utoipa::path(
+    get,
+    path = "/api/admin/users",
+    responses((status = 200, body = [UserView]))
+)]
+pub async fn handle_users_list(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    if let Err(resp) = check_admin_write_enabled(&state) {
+        return resp;
+    }
+    let (file, _) = match load_store_config(&state).await {
+        Ok((f, ver)) => (f, ver),
+        Err(resp) => return resp,
+    };
+    let mut views: Vec<UserView> = file
+        .gateway
+        .users
+        .iter()
+        .map(|u| {
+            let used = state.user_tracker.get_used_tokens(&u.id);
+            user_view(u, used, file.config_version)
+        })
+        .collect();
+    views.sort_by(|a, b| a.id.cmp(&b.id));
+    Json(views).into_response()
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/admin/users",
+    request_body = CreateUserPayload,
+    responses((status = 201, body = UserView))
+)]
+pub async fn handle_users_create(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(payload): Json<CreateUserPayload>,
+) -> impl IntoResponse {
+    if let Err(resp) = check_admin_write_enabled(&state) {
+        return resp;
+    }
+    let _lock = state.admin_write_lock.lock().await;
+    let (mut file, store_version) = match load_store_config(&state).await {
+        Ok((f, ver)) => (f, ver),
+        Err(resp) => return resp,
+    };
+    if let Err(resp) = check_if_match(&headers, file.config_version) {
+        return resp;
+    }
+
+    let id = payload.id.trim().to_string();
+    if id.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(
+                json!({"error": {"message": "user id cannot be empty", "code": "invalid_user_id"}}),
+            ),
+        )
+            .into_response();
+    }
+    if file.gateway.users.iter().any(|u| u.id == id) {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({"error": {"message": format!("user '{id}' already exists"), "code": "user_already_exists"}})),
+        )
+            .into_response();
+    }
+
+    let user_entry = ponyllm_config::UserEntry {
+        id: id.clone(),
+        name: payload.name.trim().to_string(),
+        enabled: payload.enabled,
+        allowed_models: payload.allowed_models,
+        max_tokens: payload.max_tokens,
+        created_at: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0),
+        username: None,
+        password_hash: None,
+        role: ponyllm_config::UserRole::User,
+        token_version: 0,
+    };
+
+    file.gateway.users.push(user_entry.clone());
+    let new_ver = match save_store_config(&state, &mut file, &store_version).await {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
+
+    // Mirror to memory
+    state.user_tracker.upsert_user(user_entry.clone());
+
+    tracing::info!(user_id = %id, config_version = new_ver, "admin created user");
+    (
+        StatusCode::CREATED,
+        Json(user_view(&user_entry, 0, new_ver)),
+    )
+        .into_response()
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/admin/users/{id}",
+    params(("id" = String, Path)),
+    responses((status = 200, body = UserView))
+)]
+pub async fn handle_users_get(
+    State(state): State<Arc<AppState>>,
+    Path(user_id): Path<String>,
+) -> impl IntoResponse {
+    if let Err(resp) = check_admin_write_enabled(&state) {
+        return resp;
+    }
+    let (file, _) = match load_store_config(&state).await {
+        Ok((f, ver)) => (f, ver),
+        Err(resp) => return resp,
+    };
+    let Some(user) = file.gateway.users.iter().find(|u| u.id == user_id) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": {"message": format!("user '{user_id}' not found"), "code": "user_not_found"}})),
+        )
+            .into_response();
+    };
+    let used = state.user_tracker.get_used_tokens(&user_id);
+    (
+        StatusCode::OK,
+        Json(user_view(user, used, file.config_version)),
+    )
+        .into_response()
+}
+
+#[utoipa::path(
+    put,
+    path = "/api/admin/users/{id}",
+    params(("id" = String, Path)),
+    request_body = UpdateUserPayload,
+    responses((status = 200, body = UserView))
+)]
+pub async fn handle_users_update(
+    State(state): State<Arc<AppState>>,
+    Path(user_id): Path<String>,
+    headers: HeaderMap,
+    Json(payload): Json<UpdateUserPayload>,
+) -> impl IntoResponse {
+    if let Err(resp) = check_admin_write_enabled(&state) {
+        return resp;
+    }
+    let _lock = state.admin_write_lock.lock().await;
+    let (mut file, store_version) = match load_store_config(&state).await {
+        Ok((f, ver)) => (f, ver),
+        Err(resp) => return resp,
+    };
+    if let Err(resp) = check_if_match(&headers, file.config_version) {
+        return resp;
+    }
+
+    let pos = file.gateway.users.iter().position(|u| u.id == user_id);
+    let Some(idx) = pos else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": {"message": format!("user '{user_id}' not found"), "code": "user_not_found"}})),
+        )
+            .into_response();
+    };
+
+    if let Some(n) = payload.name {
+        file.gateway.users[idx].name = n.trim().to_string();
+    }
+    if let Some(e) = payload.enabled {
+        file.gateway.users[idx].enabled = e;
+    }
+    if let Some(am) = payload.allowed_models {
+        file.gateway.users[idx].allowed_models = Some(am);
+    }
+    if let Some(mt) = payload.max_tokens {
+        file.gateway.users[idx].max_tokens = Some(mt);
+    }
+
+    let updated = file.gateway.users[idx].clone();
+    let new_ver = match save_store_config(&state, &mut file, &store_version).await {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
+
+    // Mirror to memory
+    state.user_tracker.upsert_user(updated.clone());
+
+    let used = state.user_tracker.get_used_tokens(&user_id);
+    (StatusCode::OK, Json(user_view(&updated, used, new_ver))).into_response()
+}
+
+#[utoipa::path(
+    delete,
+    path = "/api/admin/users/{id}",
+    params(("id" = String, Path)),
+    responses((status = 200, body = UserView))
+)]
+pub async fn handle_users_delete(
+    State(state): State<Arc<AppState>>,
+    Path(user_id): Path<String>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(resp) = check_admin_write_enabled(&state) {
+        return resp;
+    }
+    let _lock = state.admin_write_lock.lock().await;
+    let (mut file, store_version) = match load_store_config(&state).await {
+        Ok((f, ver)) => (f, ver),
+        Err(resp) => return resp,
+    };
+    if let Err(resp) = check_if_match(&headers, file.config_version) {
+        return resp;
+    }
+
+    let pos = file.gateway.users.iter().position(|u| u.id == user_id);
+    let Some(idx) = pos else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": {"message": format!("user '{user_id}' not found"), "code": "user_not_found"}})),
+        )
+            .into_response();
+    };
+    let removed = file.gateway.users.remove(idx);
+
+    let new_ver = match save_store_config(&state, &mut file, &store_version).await {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
+
+    // Mirror to memory
+    state.user_tracker.remove_user(&user_id);
+
+    tracing::info!(user_id = %user_id, config_version = new_ver, "admin deleted user");
+    (StatusCode::OK, Json(user_view(&removed, 0, new_ver))).into_response()
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/admin/users/{id}/reset-usage",
+    params(("id" = String, Path)),
+    responses((status = 200, body = serde_json::Value))
+)]
+pub async fn handle_users_reset_usage(
+    State(state): State<Arc<AppState>>,
+    Path(user_id): Path<String>,
+) -> impl IntoResponse {
+    if let Err(resp) = check_admin_write_enabled(&state) {
+        return resp;
+    }
+    let (file, _) = match load_store_config(&state).await {
+        Ok((f, ver)) => (f, ver),
+        Err(resp) => return resp,
+    };
+    let Some(_user) = file.gateway.users.iter().find(|u| u.id == user_id) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": {"message": format!("user '{user_id}' not found"), "code": "user_not_found"}})),
+        )
+            .into_response();
+    };
+
+    state.user_tracker.reset_usage(&user_id);
+    tracing::info!(user_id = %user_id, "admin reset user usage");
+    (
+        StatusCode::OK,
+        Json(json!({
+            "message": "usage reset successfully",
+            "user_id": user_id,
+            "used_tokens": 0
+        })),
+    )
+        .into_response()
 }
 
 #[utoipa::path(
@@ -5531,8 +5786,12 @@ pub async fn handle_admin_provider_upstream_models(
         handle_gateway_keys_list,
         handle_gateway_keys_issue,
         handle_gateway_keys_revoke,
-        handle_admin_get_strategy,
-        handle_admin_put_strategy,
+        handle_users_list,
+        handle_users_create,
+        handle_users_get,
+        handle_users_update,
+        handle_users_delete,
+        handle_users_reset_usage,
         handle_admin_get_auto_models,
         handle_admin_put_auto_models,
         handle_admin_service_status,
@@ -5564,8 +5823,9 @@ pub async fn handle_admin_provider_upstream_models(
         GatewayKeyView,
         IssueGatewayKeyPayload,
         IssueGatewayKeyResponse,
-        StrategyView,
-        PutStrategyPayload,
+        UserView,
+        CreateUserPayload,
+        UpdateUserPayload,
         AutoModelsView,
         PutAutoModelsPayload,
         ServiceStatusView,
@@ -5649,10 +5909,6 @@ pub fn admin_routes() -> axum::Router<Arc<AppState>> {
             get(handle_admin_quota_benchmark),
         )
         .route(
-            "/api/admin/strategy",
-            get(handle_admin_get_strategy).put(handle_admin_put_strategy),
-        )
-        .route(
             "/api/admin/auto-models",
             get(handle_admin_get_auto_models).put(handle_admin_put_auto_models),
         )
@@ -5668,6 +5924,20 @@ pub fn admin_routes() -> axum::Router<Arc<AppState>> {
         .route(
             "/api/admin/gateway-keys/{id}/revoke",
             post(handle_gateway_keys_revoke),
+        )
+        .route(
+            "/api/admin/users",
+            get(handle_users_list).post(handle_users_create),
+        )
+        .route(
+            "/api/admin/users/{user_id}",
+            get(handle_users_get)
+                .put(handle_users_update)
+                .delete(handle_users_delete),
+        )
+        .route(
+            "/api/admin/users/{user_id}/reset-usage",
+            post(handle_users_reset_usage),
         )
         .route("/api/admin/proxy/status", get(handle_admin_proxy_status))
         .route(

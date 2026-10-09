@@ -10,8 +10,7 @@ use std::time::Duration;
 
 use ponyllm_config::{ConfigFile, KeySection, ModelConfig, ProviderSection};
 use ponyllm_core::pool::{
-    ApiKeyEntry, BillingMode, GatewayRoutingStrategy, KeyPool, ModelTier, PoolErrorType,
-    RoutingStrategy,
+    ApiKeyEntry, BillingMode, KeyPool, ModelTier, PoolErrorType, RoutingStrategy,
 };
 use ponyllm_server::admin_store::FileConfigStore;
 use ponyllm_server::{create_app, AppState, GatewayConfig, ModelSpec, ProviderConfig};
@@ -28,25 +27,15 @@ impl QuotaHarness {
         let config_path = temp_dir.path().join("ponyllm.toml");
 
         let raw_keys = vec![
-            KeySection::new(
-                "q-active",
-                "sk-probe-active-token-abcdef1234567890",
-                1,
-                10,
-            ),
-            KeySection::new(
-                "q-cool",
-                "sk-probe-cooling-token-xyz9876543210",
-                2,
-                10,
-            ),
+            KeySection::new("q-active", "sk-probe-active-token-abcdef1234567890", 1, 10),
+            KeySection::new("q-cool", "sk-probe-cooling-token-xyz9876543210", 2, 10),
         ];
 
         let provider_sec = ProviderSection {
-    egress_pool: vec![],
-    egress_strategy: "round_robin".to_string(),
+            egress_pool: vec![],
+            egress_strategy: "round_robin".to_string(),
 
-    rate_limits: None,
+            rate_limits: None,
             base_url: "https://api.example.com/v1".to_string(),
             default_model: "probe-model".to_string(),
             strategy: "round_robin".to_string(),
@@ -56,7 +45,7 @@ impl QuotaHarness {
             output_price: 2.0,
             models: vec!["probe-model".to_string()],
             model_configs: vec![ModelConfig {
-    rate_limits: None,
+                rate_limits: None,
                 priority: None,
                 name: "probe-model".to_string(),
                 tier: ModelTier::Standard,
@@ -97,26 +86,26 @@ impl QuotaHarness {
         let mut config_file = ConfigFile::default();
         config_file.gateway.bind = "127.0.0.1:8080".to_string();
         config_file.gateway.api_key = "quota-test-secret".to_string();
-        config_file.gateway.default_strategy = GatewayRoutingStrategy::Economy;
         config_file.gateway.web_enabled = false;
         config_file.gateway.admin_write_enabled = false;
         config_file.providers = providers;
         config_file.config_version = 0;
-        config_file.save_to_path(config_path.to_str().unwrap()).unwrap();
+        config_file
+            .save_to_path(config_path.to_str().unwrap())
+            .unwrap();
 
         let mut gw_config = GatewayConfig::default();
         gw_config.bind_addr = "127.0.0.1:8080".to_string();
         gw_config.api_key = "quota-test-secret".to_string();
-        gw_config.default_strategy = GatewayRoutingStrategy::Economy;
         gw_config.web_enabled = false;
         gw_config.admin_write_enabled = false;
         gw_config.providers.insert(
             "prober".to_string(),
             ProviderConfig {
-    egress_pool: vec![],
-    egress_strategy: "round_robin".to_string(),
+                egress_pool: vec![],
+                egress_strategy: "round_robin".to_string(),
 
-    rate_limits: None,
+                rate_limits: None,
                 base_url: "https://api.example.com/v1".to_string(),
                 default_model: "probe-model".to_string(),
                 strategy: "round_robin".to_string(),
@@ -126,7 +115,7 @@ impl QuotaHarness {
                 output_price: 2.0,
                 models: vec!["probe-model".to_string()],
                 model_specs: vec![ModelSpec {
-    rate_limits: None,
+                    rate_limits: None,
                     priority: None,
                     name: "probe-model".to_string(),
                     tier: ModelTier::Standard,
@@ -248,9 +237,7 @@ async fn quota_filters_and_unknown_is_empty() {
     let client = reqwest::Client::new();
     // provider filter hit
     let hit: serde_json::Value = h
-        .auth(
-            client.get(format!("http://{}/api/admin/quota?provider=prober", h.addr)),
-        )
+        .auth(client.get(format!("http://{}/api/admin/quota?provider=prober", h.addr)))
         .send()
         .await
         .unwrap()
@@ -260,9 +247,7 @@ async fn quota_filters_and_unknown_is_empty() {
     assert_eq!(hit.as_array().unwrap().len(), 3);
     // unknown provider -> empty list, not 404
     let miss = h
-        .auth(
-            client.get(format!("http://{}/api/admin/quota?provider=nope", h.addr)),
-        )
+        .auth(client.get(format!("http://{}/api/admin/quota?provider=nope", h.addr)))
         .send()
         .await
         .unwrap();
@@ -271,9 +256,7 @@ async fn quota_filters_and_unknown_is_empty() {
     assert_eq!(miss_body.as_array().unwrap().len(), 0);
     // key filter hit
     let one: serde_json::Value = h
-        .auth(
-            client.get(format!("http://{}/api/admin/quota?key_id=q-cool", h.addr)),
-        )
+        .auth(client.get(format!("http://{}/api/admin/quota?key_id=q-cool", h.addr)))
         .send()
         .await
         .unwrap()
@@ -305,9 +288,15 @@ async fn quota_requires_auth_and_refresh_false_is_upstream_free() {
         .await
         .unwrap();
     for v in body.as_array().unwrap() {
-        assert!(v.get("quota").is_none(), "refresh=false must not probe: {v}");
+        assert!(
+            v.get("quota").is_none(),
+            "refresh=false must not probe: {v}"
+        );
         assert_eq!(v["stale"], false);
-        assert!(v.get("usage").is_some(), "usage metrics must be present: {v}");
+        assert!(
+            v.get("usage").is_some(),
+            "usage metrics must be present: {v}"
+        );
         assert!(v["usage"]["window_5h"].is_object());
         assert!(v["usage"]["window_weekly"].is_object());
     }

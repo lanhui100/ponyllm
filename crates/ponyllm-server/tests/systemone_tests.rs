@@ -33,10 +33,10 @@ async fn systemone_passthrough_preserves_body_and_records_usage() {
     config.providers.insert(
         "chat-only".to_string(),
         ProviderConfig {
-    egress_pool: vec![],
-    egress_strategy: "round_robin".to_string(),
+            egress_pool: vec![],
+            egress_strategy: "round_robin".to_string(),
 
-    rate_limits: None,
+            rate_limits: None,
             base_url: format!("http://{}", addr),
             default_model: "chat-only-model".to_string(),
             strategy: "round_robin".to_string(),
@@ -58,10 +58,10 @@ async fn systemone_passthrough_preserves_body_and_records_usage() {
     config.providers.insert(
         "zen-jev".to_string(),
         ProviderConfig {
-    egress_pool: vec![],
-    egress_strategy: "round_robin".to_string(),
+            egress_pool: vec![],
+            egress_strategy: "round_robin".to_string(),
 
-    rate_limits: None,
+            rate_limits: None,
             base_url: format!("http://{}", addr),
             default_model: "jev-1.13-free".to_string(),
             strategy: "round_robin".to_string(),
@@ -145,19 +145,31 @@ async fn spawn_systemone_test_gateway() -> (SocketAddr, Arc<AppState>) {
     let mut config = GatewayConfig::default();
     config.auth_mode = ponyllm_config::AuthMode::Open; // F1 migration: default is now secured; these behavior tests opt into open mode
     config.api_key = "none".to_string();
-    config.providers.insert("zen-jev".to_string(), ProviderConfig {
-    egress_pool: vec![],
-    egress_strategy: "round_robin".to_string(),
+    config.providers.insert(
+        "zen-jev".to_string(),
+        ProviderConfig {
+            egress_pool: vec![],
+            egress_strategy: "round_robin".to_string(),
 
-    rate_limits: None,
-        base_url: format!("http://{upstream_addr}"), default_model: "jev-1.13-free".to_string(),
-        strategy: "round_robin".to_string(), billing_mode: BillingMode::Free,
-        input_price: 0.0, cached_price: 0.0, output_price: 0.0,
-        models: vec!["jev-1.13-free".to_string()], model_specs: vec![],
-        default_protocol: Some(UpstreamProtocol::Systemone), chat_url: None,
-        responses_url: None, messages_url: None, proxy: None, timeout_secs: None,
-        ttfb_timeout_secs: None,
-    });
+            rate_limits: None,
+            base_url: format!("http://{upstream_addr}"),
+            default_model: "jev-1.13-free".to_string(),
+            strategy: "round_robin".to_string(),
+            billing_mode: BillingMode::Free,
+            input_price: 0.0,
+            cached_price: 0.0,
+            output_price: 0.0,
+            models: vec!["jev-1.13-free".to_string()],
+            model_specs: vec![],
+            default_protocol: Some(UpstreamProtocol::Systemone),
+            chat_url: None,
+            responses_url: None,
+            messages_url: None,
+            proxy: None,
+            timeout_secs: None,
+            ttfb_timeout_secs: None,
+        },
+    );
     let state = Arc::new(AppState::new(config));
     let pool = Arc::new(KeyPool::new("zen-jev", RoutingStrategy::RoundRobin));
     pool.add_key(ApiKeyEntry::new("jev-test", "test-key", 1, 10));
@@ -174,19 +186,26 @@ async fn systemone_accepts_unicode_empty_state_and_200_questions() {
     let (addr, _state) = spawn_systemone_test_gateway().await;
     let mut questions = serde_json::Map::new();
     for i in 0..200 {
-        questions.insert(format!("q{i}"), json!({"type":"noul","instructions":"判断🚀🙂"}));
+        questions.insert(
+            format!("q{i}"),
+            json!({"type":"noul","instructions":"判断🚀🙂"}),
+        );
     }
     let state = "中文简历：🚀🙂\n\n".repeat(200);
     let response = reqwest::Client::new()
         .post(format!("http://{addr}/v1/systemone"))
         .json(&json!({"model":"jev-1.13-free","state":state,"questions":questions}))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
 
     let empty_state = reqwest::Client::new()
         .post(format!("http://{addr}/v1/systemone"))
         .json(&json!({"model":"jev-1.13-free","state":"","questions":{}}))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(empty_state.status(), StatusCode::OK);
 }
 
@@ -196,6 +215,8 @@ async fn systemone_rejects_body_over_512_kib() {
     let response = reqwest::Client::new()
         .post(format!("http://{addr}/v1/systemone"))
         .json(&json!({"model":"jev-1.13-free","state":"x".repeat(600 * 1024),"questions":{}}))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
 }

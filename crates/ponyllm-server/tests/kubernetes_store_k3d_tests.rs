@@ -15,8 +15,7 @@
 use std::sync::Arc;
 
 use ponyllm_server::admin_store::{
-    ConfigStore, ConfigStoreError, KubernetesConfigStore, KubeSecretApi,
-    SecretApi,
+    ConfigStore, ConfigStoreError, KubeSecretApi, KubernetesConfigStore, SecretApi,
 };
 
 /// The k3d tests share one Secret on a real cluster: serialize them so
@@ -66,8 +65,7 @@ async fn real_apiserver_patch_cas_semantics() {
     // 4) a fresh load yields the bumped version (truth-source round trip).
     let (_cfg2, version2) = store.load().await.expect("reload");
     assert_ne!(
-        version2,
-        version,
+        version2, version,
         "resourceVersion must advance after a successful save"
     );
 }
@@ -117,7 +115,10 @@ async fn real_apiserver_rotated_at_clock_and_cas() {
     }
     assert!(patched, "rotated_at patch must eventually succeed");
     // Read back from the real Secret data.
-    assert_eq!(store.load_rotated_at().await.expect("read marker"), Some(epoch));
+    assert_eq!(
+        store.load_rotated_at().await.expect("read marker"),
+        Some(epoch)
+    );
     // A stale-rv marker write must be rejected by the apiserver (CAS).
     let snap = {
         // Reuse the internal api to read the CURRENT resourceVersion...

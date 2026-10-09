@@ -28,8 +28,8 @@
 //! 本文件 peer-not-trusted 三用例返回 XFF/x_real_ip 而非 remote → 断言失败（红相）；
 //! 修复后按上述契约返回 remote，用例转绿。
 
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use ponyllm_server::auth::resolve_client_ip;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 fn v4(o: [u8; 4]) -> IpAddr {
     IpAddr::V4(Ipv4Addr::from(o))
@@ -72,7 +72,12 @@ fn r1_peer_not_trusted_ignores_headers_even_if_xff_hops_trusted() {
     // XFF 全部为 trusted 段、x_real_ip 亦提供 → 仍须返回 peer（guard 在解析任何头之前）
     let trusted = [TRUSTED_PROXY];
     assert_eq!(
-        resolve_client_ip(Some("192.0.2.1"), Some("203.0.113.8"), DIRECT_PEER, &trusted),
+        resolve_client_ip(
+            Some("192.0.2.1"),
+            Some("203.0.113.8"),
+            DIRECT_PEER,
+            &trusted
+        ),
         DIRECT_PEER,
         "R1: peer 非 trusted 时不得消费任何转发头（红相成立）"
     );
@@ -95,7 +100,12 @@ fn f3_peer_trusted_single_hop() {
 fn f3_peer_trusted_multi_hop_skips_trusted_rightmost() {
     let trusted = [TRUSTED_PROXY];
     assert_eq!(
-        resolve_client_ip(Some("203.0.113.7, 192.0.2.1"), None, TRUSTED_PROXY, &trusted),
+        resolve_client_ip(
+            Some("203.0.113.7, 192.0.2.1"),
+            None,
+            TRUSTED_PROXY,
+            &trusted
+        ),
         v4([203, 0, 113, 7])
     );
 }
@@ -104,7 +114,12 @@ fn f3_peer_trusted_multi_hop_skips_trusted_rightmost() {
 fn f3_peer_trusted_invalid_segments_dropped() {
     let trusted = [TRUSTED_PROXY];
     assert_eq!(
-        resolve_client_ip(Some("not-an-ip, 203.0.113.7"), None, TRUSTED_PROXY, &trusted),
+        resolve_client_ip(
+            Some("not-an-ip, 203.0.113.7"),
+            None,
+            TRUSTED_PROXY,
+            &trusted
+        ),
         v4([203, 0, 113, 7])
     );
     assert_eq!(
@@ -143,7 +158,12 @@ fn f3_peer_trusted_ipv6_literal() {
 fn f3_peer_trusted_all_hops_trusted_falls_to_x_real_ip() {
     let trusted = [TRUSTED_PROXY];
     assert_eq!(
-        resolve_client_ip(Some("192.0.2.1"), Some("203.0.113.8"), TRUSTED_PROXY, &trusted),
+        resolve_client_ip(
+            Some("192.0.2.1"),
+            Some("203.0.113.8"),
+            TRUSTED_PROXY,
+            &trusted
+        ),
         v4([203, 0, 113, 8])
     );
 }
@@ -162,5 +182,8 @@ fn f3_peer_trusted_fallback_chain() {
         TRUSTED_PROXY
     );
     // 双缺失 → remote
-    assert_eq!(resolve_client_ip(None, None, TRUSTED_PROXY, &trusted), TRUSTED_PROXY);
+    assert_eq!(
+        resolve_client_ip(None, None, TRUSTED_PROXY, &trusted),
+        TRUSTED_PROXY
+    );
 }

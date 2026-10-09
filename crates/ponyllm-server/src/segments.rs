@@ -1,10 +1,10 @@
+use ponyllm_core::telemetry::{EventBus, EventEnvelope};
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use ponyllm_core::telemetry::{EventBus, EventEnvelope};
 
 /// Hourly JSONL segment writer: the lossy disk drain behind [`EventBus`].
 ///
@@ -126,7 +126,8 @@ impl SegmentWriter {
     fn enforce_retention(&mut self) {
         // Measure reality: flush first, then account purely from disk.
         self.flush();
-        let cutoff = Self::now_ms().saturating_sub(self.retention_days.saturating_mul(86400) * 1000);
+        let cutoff =
+            Self::now_ms().saturating_sub(self.retention_days.saturating_mul(86400) * 1000);
         let mut entries: Vec<(u64, PathBuf, u64)> = Vec::new();
         if let Ok(rd) = std::fs::read_dir(&self.dir) {
             for entry in rd.flatten() {
@@ -134,7 +135,9 @@ impl SegmentWriter {
                 // NOTE: never `entry.metadata()` here — on Windows it returns the
                 // enumeration snapshot, stale for files with open write handles.
                 if let Some(bucket) = parse_bucket(&name) {
-                    let size = std::fs::metadata(entry.path()).map(|m| m.len()).unwrap_or(0);
+                    let size = std::fs::metadata(entry.path())
+                        .map(|m| m.len())
+                        .unwrap_or(0);
                     entries.push((bucket, entry.path(), size));
                 }
             }
@@ -191,12 +194,7 @@ impl Drop for SegmentWriter {
 
 /// Spawn the background drain: bounded channel, hot path never blocks.
 /// Overflow is counted on the bus with an explicit marker event.
-pub fn spawn_segment_drain(
-    bus: &Arc<EventBus>,
-    dir: String,
-    retention_days: u64,
-    max_bytes: u64,
-) {
+pub fn spawn_segment_drain(bus: &Arc<EventBus>, dir: String, retention_days: u64, max_bytes: u64) {
     let (tx, rx) = std::sync::mpsc::sync_channel::<EventEnvelope>(1024);
     bus.attach_segment_sink(tx);
     std::thread::Builder::new()
@@ -246,7 +244,10 @@ mod tests {
             endpoint: "/v1/chat/completions".to_string(),
             wall_ms,
             elapsed_ms: 1.0,
-            event: GatewayEvent::StreamProgress { chunks: 1, bytes: 10 },
+            event: GatewayEvent::StreamProgress {
+                chunks: 1,
+                bytes: 10,
+            },
         }
     }
 
@@ -266,7 +267,12 @@ mod tests {
         w.write(&envelope_at(cur_bucket + 2000, "req-new-2"));
         w.flush();
         let files = w.segment_files();
-        assert_eq!(files.len(), 1, "old segment must be rotated away: {:?}", files);
+        assert_eq!(
+            files.len(),
+            1,
+            "old segment must be rotated away: {:?}",
+            files
+        );
         assert!(files[0]
             .file_name()
             .unwrap()
@@ -300,7 +306,9 @@ mod tests {
             .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
             .collect();
         assert!(
-            !names.iter().any(|n| n.contains(&(cur - 2 * hour).to_string())),
+            !names
+                .iter()
+                .any(|n| n.contains(&(cur - 2 * hour).to_string())),
             "oldest must go first: {:?}",
             names
         );

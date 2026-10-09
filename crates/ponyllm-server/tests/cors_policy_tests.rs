@@ -5,10 +5,10 @@
 //! - `PONYLLM_CORS_ALLOWLIST` opts named origins back in.
 //! - Allowed methods/headers are a fixed minimal set (no `*`).
 
-use std::sync::{Arc, Mutex, OnceLock};
 use ponyllm_server::app::create_app;
 use ponyllm_server::state::AppState;
 use ponyllm_server::GatewayConfig;
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// Process env is global to the test binary: serialize every app build so
 /// an allowlist set/remove in one test can never interleave with another
@@ -122,10 +122,7 @@ async fn test_x_api_key_preflight_allowed_for_listed_origin() {
 
     // ...while an unlisted origin on the same app instance stays denied.
     let evil = preflight(&addr, "https://evil.example").await;
-    assert!(evil
-        .headers()
-        .get("access-control-allow-origin")
-        .is_none());
+    assert!(evil.headers().get("access-control-allow-origin").is_none());
 }
 
 #[tokio::test]

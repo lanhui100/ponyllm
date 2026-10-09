@@ -34,7 +34,10 @@ async fn pg_advisory_lock_mutual_exclusion_and_fail_closed() {
     // B (separate connection/session) must be skipped while A holds the lock
     // — even for a different key (global single-lock semantics).
     assert!(
-        b.try_acquire("k-2").await.expect("gate B query ok").is_none(),
+        b.try_acquire("k-2")
+            .await
+            .expect("gate B query ok")
+            .is_none(),
         "replica B must skip while A holds the lock"
     );
 
@@ -42,13 +45,20 @@ async fn pg_advisory_lock_mutual_exclusion_and_fail_closed() {
     drop(a_guard);
     let mut acquired = false;
     for _ in 0..50 {
-        if b.try_acquire("k-1").await.expect("gate B query ok").is_some() {
+        if b.try_acquire("k-1")
+            .await
+            .expect("gate B query ok")
+            .is_some()
+        {
             acquired = true;
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
-    assert!(acquired, "replica B must acquire after A releases the PG advisory lock");
+    assert!(
+        acquired,
+        "replica B must acquire after A releases the PG advisory lock"
+    );
 
     // Fail-closed leg: point at an unreachable address; the gate must Err
     // with no DSN/credential leak.

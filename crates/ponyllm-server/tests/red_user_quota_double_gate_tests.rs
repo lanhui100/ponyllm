@@ -9,9 +9,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use ponyllm_config::{
-    generate_scoped_gateway_key, ConfigFile, KeyScope, UserEntry, UserRole,
-};
+use ponyllm_config::{generate_scoped_gateway_key, ConfigFile, KeyScope, UserEntry, UserRole};
 use ponyllm_server::admin_store::FileConfigStore;
 use ponyllm_server::{create_app, AppState, GatewayConfig};
 use reqwest::StatusCode;
@@ -45,10 +43,7 @@ impl Gh {
         key_model_limits: Option<Vec<String>>,
         key_quota: Option<u64>,
     ) -> Self {
-        std::env::set_var(
-            "PONYLLM_USER_TOKENS_ENABLED",
-            "1",
-        );
+        std::env::set_var("PONYLLM_USER_TOKENS_ENABLED", "1");
         std::env::set_var(
             "PONYLLM_JWT_SECRET",
             "pony-llm-red-test-jwt-secret-0123456789abcdef-0123456789abcdef",
@@ -71,7 +66,9 @@ impl Gh {
         cfg_file.gateway.gateway_keys = vec![e_key.clone()];
         cfg_file.gateway.users = vec![alice.clone()];
         cfg_file.providers = HashMap::new();
-        cfg_file.save_to_path(config_path.to_str().unwrap()).unwrap();
+        cfg_file
+            .save_to_path(config_path.to_str().unwrap())
+            .unwrap();
 
         let mut gw = GatewayConfig::default();
         gw.bind_addr = "127.0.0.1:8080".into();
@@ -156,7 +153,11 @@ async fn user_quota_exhausted_429_anchor() {
     let c = reqwest::Client::new();
 
     let (status, body) = chat(&c, &h, "gpt-4o-mini").await;
-    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "user zero-budget must 429");
+    assert_eq!(
+        status,
+        StatusCode::TOO_MANY_REQUESTS,
+        "user zero-budget must 429"
+    );
     assert_eq!(body["error"]["code"], "user_quota_exhausted");
 }
 
@@ -167,6 +168,10 @@ async fn user_model_forbidden_403_anchor() {
     let c = reqwest::Client::new();
 
     let (status, body) = chat(&c, &h, "claude-3-5-sonnet").await;
-    assert_eq!(status, StatusCode::FORBIDDEN, "user-forbidden model must 403");
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "user-forbidden model must 403"
+    );
     assert_eq!(body["error"]["code"], "model_forbidden_for_user");
 }

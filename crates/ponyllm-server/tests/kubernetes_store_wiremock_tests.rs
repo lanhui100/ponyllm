@@ -16,8 +16,7 @@
 use std::sync::Arc;
 
 use ponyllm_server::admin_store::{
-    ConfigStore, ConfigStoreError, ConfigVersion, KubernetesConfigStore, KubeSecretApi,
-    SecretApi,
+    ConfigStore, ConfigStoreError, ConfigVersion, KubeSecretApi, KubernetesConfigStore, SecretApi,
 };
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -30,8 +29,10 @@ fn sample_toml() -> &'static str {
 
 fn secret_json(toml: &str, rv: &str) -> serde_json::Value {
     use base64::Engine;
-    const BASE64_STANDARD: base64::engine::GeneralPurpose =
-        base64::engine::GeneralPurpose::new(&base64::alphabet::STANDARD, base64::engine::general_purpose::PAD);
+    const BASE64_STANDARD: base64::engine::GeneralPurpose = base64::engine::GeneralPurpose::new(
+        &base64::alphabet::STANDARD,
+        base64::engine::general_purpose::PAD,
+    );
     serde_json::json!({
         "apiVersion": "v1",
         "kind": "Secret",
@@ -98,7 +99,10 @@ async fn k8s_patch_body_carries_resource_version() {
     let store = store_over(&server).await;
     let (cfg, version) = store.load().await.expect("load");
     assert_eq!(version, ConfigVersion::Kubernetes("100".to_string()));
-    store.save(&cfg, &version).await.expect("save with current rv");
+    store
+        .save(&cfg, &version)
+        .await
+        .expect("save with current rv");
 
     // Empirical check: the PATCH body kube-rs actually sent carries the loaded
     // resourceVersion (the optimistic-concurrency precondition) and the data
@@ -116,14 +120,21 @@ async fn k8s_patch_body_carries_resource_version() {
         Some("100"),
         "kube-rs must transmit the loaded resourceVersion inside the merge patch"
     );
-    let data_key = body["data"]["ponyllm.toml"].as_str().expect("data key present");
+    let data_key = body["data"]["ponyllm.toml"]
+        .as_str()
+        .expect("data key present");
     // Wire format: standard padded base64 that decodes back to the TOML.
     use base64::Engine;
-    const BASE64_STANDARD: base64::engine::GeneralPurpose =
-        base64::engine::GeneralPurpose::new(&base64::alphabet::STANDARD, base64::engine::general_purpose::PAD);
+    const BASE64_STANDARD: base64::engine::GeneralPurpose = base64::engine::GeneralPurpose::new(
+        &base64::alphabet::STANDARD,
+        base64::engine::general_purpose::PAD,
+    );
     let decoded = BASE64_STANDARD.decode(data_key).expect("valid base64");
     let decoded_str = String::from_utf8(decoded).unwrap();
-    assert!(decoded_str.contains("[gateway]"), "patch carries the config TOML");
+    assert!(
+        decoded_str.contains("[gateway]"),
+        "patch carries the config TOML"
+    );
 }
 
 /// A server-side 409 (stale resourceVersion) maps to [`ConfigStoreError::Conflict`].
@@ -225,7 +236,10 @@ async fn k8s_secret_without_resource_version_is_invalid_data() {
     let server = MockServer::start().await;
 
     let mut no_rv = secret_json(sample_toml(), "100");
-    no_rv["metadata"].as_object_mut().unwrap().remove("resourceVersion");
+    no_rv["metadata"]
+        .as_object_mut()
+        .unwrap()
+        .remove("resourceVersion");
     Mock::given(method("GET"))
         .and(path(SECRET_PATH))
         .respond_with(ResponseTemplate::new(200).set_body_json(no_rv))
@@ -260,7 +274,10 @@ async fn k8s_rotated_at_roundtrip() {
 
     let store = store_over(&server).await;
     assert_eq!(store.load_rotated_at().await.unwrap(), None);
-    store.patch_rotated_at(1_700_000_000).await.expect("patch marker");
+    store
+        .patch_rotated_at(1_700_000_000)
+        .await
+        .expect("patch marker");
     // Note: load_rotated_at re-reads from the wiremock GET (rv=100, no marker)
     // — the PATCH response is what the store returns; the marker read reflects
     // the NEXT GET. The trait-level fake test covers the read-back.
@@ -274,7 +291,10 @@ async fn k8s_rotated_at_roundtrip() {
         .collect();
     assert_eq!(patches.len(), 1, "one marker patch expected");
     let body: serde_json::Value = serde_json::from_slice(&patches[0].body).unwrap();
-    assert!(body["data"]["rotated_at"].is_string(), "patch must carry rotated_at data key");
+    assert!(
+        body["data"]["rotated_at"].is_string(),
+        "patch must carry rotated_at data key"
+    );
     // The patch must still carry the resourceVersion CAS precondition.
     assert_eq!(
         body["metadata"]["resourceVersion"].as_str(),
@@ -338,7 +358,13 @@ async fn k8s_store_load_times_out_when_apiserver_hangs() {
     let elapsed = start.elapsed();
 
     assert!(
-        matches!(err, ConfigStoreError::Timeout { operation: "get", .. }),
+        matches!(
+            err,
+            ConfigStoreError::Timeout {
+                operation: "get",
+                ..
+            }
+        ),
         "expected Timeout error, got {:?}",
         err
     );
@@ -374,11 +400,20 @@ async fn k8s_store_raw_hash_times_out_when_apiserver_hangs() {
     let store = KubernetesConfigStore::with_api(api, "ponyllm-live-config", "ponyllm.toml");
 
     let start = std::time::Instant::now();
-    let err = store.load_raw_hash().await.expect_err("load_raw_hash must time out");
+    let err = store
+        .load_raw_hash()
+        .await
+        .expect_err("load_raw_hash must time out");
     let elapsed = start.elapsed();
 
     assert!(
-        matches!(err, ConfigStoreError::Timeout { operation: "get", .. }),
+        matches!(
+            err,
+            ConfigStoreError::Timeout {
+                operation: "get",
+                ..
+            }
+        ),
         "expected Timeout error, got {:?}",
         err
     );
@@ -417,11 +452,20 @@ async fn k8s_store_patch_times_out_when_apiserver_hangs() {
     let version = ConfigVersion::Kubernetes("100".to_string());
 
     let start = std::time::Instant::now();
-    let err = store.save(&mut cfg, &version).await.expect_err("save must time out");
+    let err = store
+        .save(&mut cfg, &version)
+        .await
+        .expect_err("save must time out");
     let elapsed = start.elapsed();
 
     assert!(
-        matches!(err, ConfigStoreError::Timeout { operation: "patch", .. }),
+        matches!(
+            err,
+            ConfigStoreError::Timeout {
+                operation: "patch",
+                ..
+            }
+        ),
         "expected Timeout error, got {:?}",
         err
     );
@@ -472,12 +516,18 @@ async fn k8s_store_read_and_write_timeouts_are_independent() {
     let store = KubernetesConfigStore::with_api(api, "ponyllm-live-config", "ponyllm.toml");
 
     // Read succeeds within 150ms
-    let (_cfg, version) = store.load().await.expect("load should succeed within read_timeout");
+    let (_cfg, version) = store
+        .load()
+        .await
+        .expect("load should succeed within read_timeout");
     assert_eq!(version, ConfigVersion::Kubernetes("100".to_string()));
 
     // Write times out at 100ms because PATCH delayed 300ms
     let mut cfg = ponyllm_config::ConfigFile::load_or_default(None).expect("default config");
-    let err = store.save(&mut cfg, &version).await.expect_err("save should time out at write_timeout");
+    let err = store
+        .save(&mut cfg, &version)
+        .await
+        .expect_err("save should time out at write_timeout");
     assert!(
         matches!(err, ConfigStoreError::Timeout { operation: "patch", duration } if duration == std::time::Duration::from_millis(100)),
         "expected Timeout(patch, 100ms), got {:?}",
@@ -499,7 +549,10 @@ async fn k8s_store_timeout_on_tcp_blackhole() {
     let store = KubernetesConfigStore::with_api(api, "ponyllm-live-config", "ponyllm.toml");
 
     let start = std::time::Instant::now();
-    let err = store.load().await.expect_err("load must time out or fail on black hole");
+    let err = store
+        .load()
+        .await
+        .expect_err("load must time out or fail on black hole");
     let elapsed = start.elapsed();
 
     assert!(
@@ -508,7 +561,13 @@ async fn k8s_store_timeout_on_tcp_blackhole() {
         elapsed
     );
     assert!(
-        matches!(err, ConfigStoreError::Timeout { operation: "get", .. } | ConfigStoreError::Io(_)),
+        matches!(
+            err,
+            ConfigStoreError::Timeout {
+                operation: "get",
+                ..
+            } | ConfigStoreError::Io(_)
+        ),
         "expected Timeout or immediate network Io error, got {:?}",
         err
     );

@@ -7,14 +7,14 @@
 //!   gateway routes (`/health`, `/v1/models`-shape) unaffected.
 //! - `--no-web`     → `/app` + `/app/*` 404 JSON (`web_disabled`), gateway unaffected.
 
-use std::sync::Arc;
 use ponyllm_server::{create_app, AppState, GatewayConfig};
+use std::sync::Arc;
 
 fn test_config_with_web(web_enabled: bool, web_dist_dir: &str) -> GatewayConfig {
     let mut config = GatewayConfig::default();
     config.auth_mode = ponyllm_config::AuthMode::Open; // F1 migration: default is now secured; these behavior tests opt into open mode
-    // F1 (VULN-17): open mode is now explicit — empty api_key no longer opens;
-    // these web-hosting behavior tests opt into open mode so API probes need no token.
+                                                       // F1 (VULN-17): open mode is now explicit — empty api_key no longer opens;
+                                                       // these web-hosting behavior tests opt into open mode so API probes need no token.
     config.api_key = String::new();
     config.web_enabled = web_enabled;
     config.web_dist_dir = web_dist_dir.to_string();
@@ -64,7 +64,11 @@ fn write_favicon_dist(dir: &std::path::Path, with_ico: bool) {
 
 fn assert_cache_control(resp: &reqwest::Response) {
     assert_eq!(
-        resp.headers().get("cache-control").unwrap().to_str().unwrap(),
+        resp.headers()
+            .get("cache-control")
+            .unwrap()
+            .to_str()
+            .unwrap(),
         "public, max-age=86400"
     );
 }
@@ -73,11 +77,7 @@ fn assert_cache_control(resp: &reqwest::Response) {
 async fn web_hosting_serves_spa_and_keeps_api_priority() {
     let tmp = tempfile::tempdir().unwrap();
     write_fake_dist(tmp.path());
-    let addr = spawn_gateway(test_config_with_web(
-        true,
-        tmp.path().to_str().unwrap(),
-    ))
-    .await;
+    let addr = spawn_gateway(test_config_with_web(true, tmp.path().to_str().unwrap())).await;
     let client = reqwest::Client::new();
 
     // Deep-link refresh serves index.html.
@@ -105,7 +105,12 @@ async fn web_hosting_serves_spa_and_keeps_api_priority() {
             .send()
             .await
             .unwrap();
-        assert_eq!(resp.status(), 200, "Path {} failed to return 200", root_path);
+        assert_eq!(
+            resp.status(),
+            200,
+            "Path {} failed to return 200",
+            root_path
+        );
         let r_body = resp.text().await.unwrap();
         assert!(r_body.contains("pony console"));
     }
@@ -165,11 +170,7 @@ async fn web_hosting_serves_spa_and_keeps_api_priority() {
 async fn web_hosting_missing_dist_is_deterministic_503() {
     let missing = std::env::temp_dir().join("ponyllm-web-dist-definitely-missing");
     let _ = std::fs::remove_dir_all(&missing);
-    let addr = spawn_gateway(test_config_with_web(
-        true,
-        missing.to_str().unwrap(),
-    ))
-    .await;
+    let addr = spawn_gateway(test_config_with_web(true, missing.to_str().unwrap())).await;
     let client = reqwest::Client::new();
 
     for path in ["/app", "/app/", "/app/dashboard"] {
@@ -205,8 +206,17 @@ async fn test_404_fallback_carries_complete_security_headers() {
     let addr = spawn_gateway(test_config_with_web(true, tmp.path().to_str().unwrap())).await;
     let client = reqwest::Client::new();
 
-    for path in ["/robots.txt", "/random-404-path", "/nonexistent.php", "/api/nonexistent"] {
-        let resp = client.get(format!("http://{addr}{path}")).send().await.unwrap();
+    for path in [
+        "/robots.txt",
+        "/random-404-path",
+        "/nonexistent.php",
+        "/api/nonexistent",
+    ] {
+        let resp = client
+            .get(format!("http://{addr}{path}"))
+            .send()
+            .await
+            .unwrap();
         assert_eq!(resp.status(), 404, "path: {path} should 404");
 
         let headers = resp.headers();
@@ -217,7 +227,11 @@ async fn test_404_fallback_carries_complete_security_headers() {
         assert!(headers.contains_key("content-security-policy"));
         assert!(headers.contains_key("strict-transport-security"));
 
-        let csp = headers.get("content-security-policy").unwrap().to_str().unwrap();
+        let csp = headers
+            .get("content-security-policy")
+            .unwrap()
+            .to_str()
+            .unwrap();
         assert!(!csp.contains("script-src 'unsafe-inline'"));
         assert!(csp.contains("default-src 'self'"));
         assert!(csp.contains("form-action 'self'"));
@@ -360,7 +374,11 @@ async fn web_hosting_favicon_real_ico_and_cache_headers() {
         .contains("image/x-icon"));
     assert_cache_control(&ico);
     let body = ico.bytes().await.unwrap();
-    assert_eq!(&body[..4], b"\x00\x00\x01\x00", "/favicon.ico must be a real ICO");
+    assert_eq!(
+        &body[..4],
+        b"\x00\x00\x01\x00",
+        "/favicon.ico must be a real ICO"
+    );
     assert_eq!(body.as_ref(), FAKE_ICO);
 
     // Versioned .ico URL too.
@@ -451,7 +469,12 @@ async fn r8_app_legacy_routes_no_cache_and_assets_immutable() {
 
     // /app/* 深链（SPA fallback → index.html）必须 no-cache
     // （HEAD 上 html_no_cache 层不覆盖 nest_service("/app") → 无 Cache-Control，红相成立）
-    for path in ["/app/dashboard", "/app/connect", "/app/governance", "/app/recorder"] {
+    for path in [
+        "/app/dashboard",
+        "/app/connect",
+        "/app/governance",
+        "/app/recorder",
+    ] {
         let resp = client
             .get(format!("http://{}{}", addr, path))
             .send()
@@ -473,7 +496,10 @@ async fn r8_app_legacy_routes_no_cache_and_assets_immutable() {
         .send()
         .await
         .unwrap();
-    assert!(cache_control(&resp).contains("no-cache"), "顶层 HTML 入口须 no-cache");
+    assert!(
+        cache_control(&resp).contains("no-cache"),
+        "顶层 HTML 入口须 no-cache"
+    );
 
     // 哈希资产保持 immutable（F11 回归）
     let resp = client

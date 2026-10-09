@@ -1,5 +1,3 @@
-use std::sync::Arc;
-use std::time::Instant;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use ponyllm_core::telemetry::{EventCtx, GatewayEvent};
@@ -7,6 +5,8 @@ use ponyllm_server::app::create_app;
 use ponyllm_server::state::AppState;
 use ponyllm_server::GatewayConfig;
 use serde_json::Value;
+use std::sync::Arc;
+use std::time::Instant;
 
 #[tokio::test]
 async fn test_telemetry_history_and_stream_uptime_bars() {
@@ -52,7 +52,9 @@ async fn test_telemetry_history_and_stream_uptime_bars() {
 
     let resp = tower::ServiceExt::oneshot(app.clone(), req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let json: Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(json["range"], "24h");
     assert!(json["points"].is_array());
@@ -69,13 +71,30 @@ async fn test_telemetry_history_and_stream_uptime_bars() {
 
     let resp2 = tower::ServiceExt::oneshot(app.clone(), req2).await.unwrap();
     assert_eq!(resp2.status(), StatusCode::OK);
-    let bytes2 = axum::body::to_bytes(resp2.into_body(), usize::MAX).await.unwrap();
+    let bytes2 = axum::body::to_bytes(resp2.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let json2: Value = serde_json::from_slice(&bytes2).unwrap();
     assert!(json2["gateway_uptime_bars"]["slots"].is_array());
-    assert_eq!(json2["gateway_uptime_bars"]["slots"].as_array().unwrap().len(), 24);
+    assert_eq!(
+        json2["gateway_uptime_bars"]["slots"]
+            .as_array()
+            .unwrap()
+            .len(),
+        24
+    );
     // Non-streaming provider deepseek should appear in providers map
-    assert!(json2["providers"]["deepseek"].is_object(), "deepseek provider should be in stream snapshot");
-    assert_eq!(json2["providers"]["deepseek"]["uptime_bars"]["slots"].as_array().unwrap().len(), 40);
+    assert!(
+        json2["providers"]["deepseek"].is_object(),
+        "deepseek provider should be in stream snapshot"
+    );
+    assert_eq!(
+        json2["providers"]["deepseek"]["uptime_bars"]["slots"]
+            .as_array()
+            .unwrap()
+            .len(),
+        40
+    );
 
     // 3. Test GET /v1/telemetry/history with invalid range returns 400
     let req3 = Request::builder()
@@ -96,10 +115,17 @@ async fn test_telemetry_history_and_stream_uptime_bars() {
     let resp4 = tower::ServiceExt::oneshot(app, req4).await.unwrap();
     assert_eq!(resp4.status(), StatusCode::OK);
     assert_eq!(
-        resp4.headers().get("content-type").unwrap().to_str().unwrap(),
+        resp4
+            .headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap(),
         "text/plain; version=0.0.4; charset=utf-8"
     );
-    let bytes4 = axum::body::to_bytes(resp4.into_body(), usize::MAX).await.unwrap();
+    let bytes4 = axum::body::to_bytes(resp4.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let text = String::from_utf8(bytes4.to_vec()).unwrap();
     assert!(text.contains("# HELP ponyllm_requests_total"));
     assert!(text.contains("ponyllm_requests_total 1"));

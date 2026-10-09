@@ -63,7 +63,11 @@ impl SecretApi for FakeSecretApi {
             self.toml.lock().unwrap().clone().into_bytes(),
         );
         Ok(SecretSnapshot {
-            resource_version: Some(self.rv.load(std::sync::atomic::Ordering::SeqCst).to_string()),
+            resource_version: Some(
+                self.rv
+                    .load(std::sync::atomic::Ordering::SeqCst)
+                    .to_string(),
+            ),
             data,
         })
     }
@@ -74,13 +78,21 @@ impl SecretApi for FakeSecretApi {
         resource_version: &str,
         _data: &BTreeMap<String, Vec<u8>>,
     ) -> Result<(), ConfigStoreError> {
-        if self.force_conflict.load(std::sync::atomic::Ordering::SeqCst)
-            || self.rv.load(std::sync::atomic::Ordering::SeqCst).to_string() != resource_version
+        if self
+            .force_conflict
+            .load(std::sync::atomic::Ordering::SeqCst)
+            || self
+                .rv
+                .load(std::sync::atomic::Ordering::SeqCst)
+                .to_string()
+                != resource_version
         {
             return Err(ConfigStoreError::Conflict {
                 expected: Some(ConfigVersion::Kubernetes(resource_version.to_string())),
                 current: Some(ConfigVersion::Kubernetes(
-                    self.rv.load(std::sync::atomic::Ordering::SeqCst).to_string(),
+                    self.rv
+                        .load(std::sync::atomic::Ordering::SeqCst)
+                        .to_string(),
                 )),
             });
         }
@@ -100,7 +112,10 @@ fn gateway_config() -> GatewayConfig {
     cfg
 }
 
-async fn spawn_gateway_with_poll(fake: Arc<FakeSecretApi>, config_poll_ms: u64) -> (String, Arc<AppState>) {
+async fn spawn_gateway_with_poll(
+    fake: Arc<FakeSecretApi>,
+    config_poll_ms: u64,
+) -> (String, Arc<AppState>) {
     let store = Arc::new(KubernetesConfigStore::with_api(
         fake,
         "ponyllm-live-config",
@@ -216,25 +231,29 @@ async fn admin_store_hang_degrades_to_http_503_within_one_second() {
 /// A valid `If-Match` write that then hits a STORE conflict must answer 412
 /// with `precondition_failed` and count `admin_save_conflicts_total`.
 #[tokio::test]
-async fn store_conflict_maps_to_http_412_and_counts_metric() {    let fake = FakeSecretApi::seed(ponyllm_config::generate_sample_config().to_string());
+async fn store_conflict_maps_to_http_412_and_counts_metric() {
+    let fake = FakeSecretApi::seed(ponyllm_config::generate_sample_config().to_string());
     fake.force_conflict
         .store(true, std::sync::atomic::Ordering::SeqCst);
     let (base, state) = spawn_gateway_with_poll(fake, 500).await;
     let client = reqwest::Client::new();
 
     let resp = client
-        .put(format!("{}/api/admin/strategy", base))
+        .put(format!("{}/api/admin/providers/openai", base))
         .header("Authorization", "Bearer test-token")
         .header("If-Match", "\"0\"")
-        .json(&serde_json::json!({"strategy": "speed"}))
+        .json(&serde_json::json!({"strategy": "round_robin"}))
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::PRECONDITION_FAILED, "store Conflict must map to 412");
+    assert_eq!(
+        resp.status(),
+        StatusCode::PRECONDITION_FAILED,
+        "store Conflict must map to 412"
+    );
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(
-        body["error"]["code"],
-        "precondition_failed",
+        body["error"]["code"], "precondition_failed",
         "412 body must carry the web contract code: {body}"
     );
 
@@ -254,10 +273,15 @@ async fn store_conflict_maps_to_http_412_and_counts_metric() {    let fake = Fak
     );
 
     // The in-memory gateway config must NOT have been replaced by the failed write.
-    let strategy = state.config.read().default_strategy;
+    let provider = state
+        .config
+        .read()
+        .providers
+        .get("openai")
+        .cloned()
+        .unwrap();
     assert_eq!(
-        strategy,
-        ponyllm_core::pool::GatewayRoutingStrategy::Economy,
+        provider.strategy, "priority",
         "failed write must not mutate the live config"
     );
 }
@@ -271,17 +295,23 @@ async fn store_success_path_answers_200_without_conflict_metric() {
     let client = reqwest::Client::new();
 
     let resp = client
-        .put(format!("{}/api/admin/strategy", base))
+        .put(format!("{}/api/admin/providers/openai", base))
         .header("Authorization", "Bearer test-token")
         .header("If-Match", "\"0\"")
-        .json(&serde_json::json!({"strategy": "speed"}))
+        .json(&serde_json::json!({"strategy": "round_robin"}))
         .send()
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK, "clean write must succeed");
     assert_eq!(
-        state.config.read().default_strategy,
-        ponyllm_core::pool::GatewayRoutingStrategy::Speed,
+        state
+            .config
+            .read()
+            .providers
+            .get("openai")
+            .unwrap()
+            .strategy,
+        "round_robin",
         "successful write must update the live config"
     );
 

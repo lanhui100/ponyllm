@@ -123,7 +123,10 @@ impl EgressAdminHarness {
         let egress_pool = Arc::new(EgressPool::new("zen", EgressStrategy::RoundRobin));
         egress_pool.add_egress(EgressEntry::direct("direct"));
         egress_pool.add_egress(EgressEntry::proxy("vps", "http://127.0.0.1:8899"));
-        state.egress_pools.write().insert("zen".to_string(), egress_pool.clone());
+        state
+            .egress_pools
+            .write()
+            .insert("zen".to_string(), egress_pool.clone());
 
         let app = create_app(state.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -164,7 +167,9 @@ async fn c7_quota_view_exposes_egress_state_and_cooldown() {
     let rows = body.as_array().unwrap();
     assert_eq!(rows.len(), 1, "one zen key row expected: {body}");
     let row = &rows[0];
-    let egress = row["egress"].as_array().expect("quota row must expose egress view: {row}");
+    let egress = row["egress"]
+        .as_array()
+        .expect("quota row must expose egress view: {row}");
     assert_eq!(egress.len(), 2, "two egresses expected: {egress:?}");
     // Executor-frozen shape: index (pool position) + entry ("direct" or the
     // raw proxy URL) + state ("active" | "cooling") + cooldown_reset_at.
@@ -193,7 +198,9 @@ async fn c7_quota_view_exposes_egress_state_and_cooldown() {
         .json()
         .await
         .unwrap();
-    let egress2 = body2[0]["egress"].as_array().expect("egress view must persist");
+    let egress2 = body2[0]["egress"]
+        .as_array()
+        .expect("egress view must persist");
     let vps2 = egress2
         .iter()
         .find(|e| e["entry"] == "http://127.0.0.1:8899")
@@ -204,7 +211,10 @@ async fn c7_quota_view_exposes_egress_state_and_cooldown() {
         .iter()
         .find(|e| e["entry"] == "direct")
         .expect("direct egress row");
-    assert_eq!(direct2["state"], "active", "direct must stay independent of vps's cooldown");
+    assert_eq!(
+        direct2["state"], "active",
+        "direct must stay independent of vps's cooldown"
+    );
 
     // No key material anywhere in the response.
     let raw = serde_json::to_string(&body2).unwrap();
@@ -253,7 +263,12 @@ async fn c7_put_provider_writes_egress_pool_and_strategy() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK, "PUT must succeed: {:?}", resp.text().await.unwrap());
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "PUT must succeed: {:?}",
+        resp.text().await.unwrap()
+    );
     let view: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(
         view["egress_pool"],
@@ -271,7 +286,12 @@ async fn c7_put_provider_writes_egress_pool_and_strategy() {
         .json()
         .await
         .unwrap();
-    let zen = list.as_array().unwrap().iter().find(|v| v["name"] == "zen").unwrap();
+    let zen = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["name"] == "zen")
+        .unwrap();
     assert_eq!(
         zen["egress_pool"],
         serde_json::json!(["direct", "http://egress-a.example.com:8899"]),
@@ -294,9 +314,17 @@ async fn c7_put_provider_empty_egress_pool_clears_and_falls_back_to_proxy() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK, "PUT must succeed: {:?}", resp.text().await.unwrap());
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "PUT must succeed: {:?}",
+        resp.text().await.unwrap()
+    );
     let view: serde_json::Value = resp.json().await.unwrap();
-    let cleared = view.get("egress_pool").and_then(|p| p.as_array()).map(|a| a.is_empty());
+    let cleared = view
+        .get("egress_pool")
+        .and_then(|p| p.as_array())
+        .map(|a| a.is_empty());
     assert!(
         cleared.unwrap_or(true),
         "clearing must leave an empty (or omitted) egress_pool: {view}"
@@ -366,7 +394,11 @@ async fn c7_admin_write_gate_still_guards_egress_writes() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND, "writes must be gated when admin_write_enabled=false");
+    assert_eq!(
+        resp.status(),
+        StatusCode::NOT_FOUND,
+        "writes must be gated when admin_write_enabled=false"
+    );
 }
 
 /// C7 credential hygiene (adversarial review): userinfo in a pool entry is a
@@ -390,7 +422,12 @@ async fn c7_egress_views_redact_userinfo_credentials() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK, "userinfo entry is a legal proxy: {:?}", resp.text().await.unwrap());
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "userinfo entry is a legal proxy: {:?}",
+        resp.text().await.unwrap()
+    );
     let put_body: serde_json::Value = resp.json().await.unwrap();
     let raw_put = serde_json::to_string(&put_body).unwrap();
     assert!(

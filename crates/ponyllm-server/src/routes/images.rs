@@ -149,7 +149,10 @@ where
             let req: ImageEditRequest = match serde_json::from_slice(&bytes) {
                 Ok(r) => r,
                 Err(e) => {
-                    return Err(bad_request(&format!("invalid JSON body: {}", e), "invalid_input"));
+                    return Err(bad_request(
+                        &format!("invalid JSON body: {}", e),
+                        "invalid_input",
+                    ));
                 }
             };
             Ok(ImageEditInput {
@@ -171,7 +174,11 @@ fn image_target_error(target: &RoutedTarget) -> Option<(&'static str, &'static s
             "protocol_mismatch",
         ));
     }
-    if !target.output_types.iter().any(|t| t.eq_ignore_ascii_case("image")) {
+    if !target
+        .output_types
+        .iter()
+        .any(|t| t.eq_ignore_ascii_case("image"))
+    {
         return Some((
             "Model does not declare image output; images endpoints require output_types = [\"image\"]",
             "unsupported_output_type",
@@ -259,7 +266,14 @@ async fn run_images_request(
     let requested_raw_model = parsed.raw_requested_model.clone();
 
     let routing_start = Instant::now();
-    let targets = match state.resolve_routed_targets_full(&parsed, None, Some(prompt), None, None, &["text"]) {
+    let targets = match state.resolve_routed_targets_full(
+        &parsed,
+        None,
+        Some(prompt),
+        None,
+        None,
+        &["text"],
+    ) {
         Ok(ts) if !ts.is_empty() => ts,
         Ok(_) => {
             return (
@@ -276,8 +290,12 @@ async fn run_images_request(
         }
         Err(err) => {
             let (status, code) = match err {
-                CoreError::UnsupportedModality { .. } => (StatusCode::BAD_REQUEST, "unsupported_modality"),
-                CoreError::CapacityExhausted { .. } => (StatusCode::TOO_MANY_REQUESTS, "capacity_exhausted"),
+                CoreError::UnsupportedModality { .. } => {
+                    (StatusCode::BAD_REQUEST, "unsupported_modality")
+                }
+                CoreError::CapacityExhausted { .. } => {
+                    (StatusCode::TOO_MANY_REQUESTS, "capacity_exhausted")
+                }
                 CoreError::Internal(ref msg) if msg.contains("No provider configured") => {
                     (StatusCode::NOT_FOUND, "model_not_found")
                 }
@@ -404,10 +422,16 @@ async fn run_images_request(
             .with_egress(egress_pool, egress_clients)
             .with_event_sink(sink_ctx.clone(), state.event_sink(sink_ctx.clone()));
 
-        match executor.execute_json_request_with_key(&target_url, &req_val).await {
+        match executor
+            .execute_json_request_with_key(&target_url, &req_val)
+            .await
+        {
             Ok((resp_val, winning_key_id)) => {
                 let latency = start_time.elapsed();
-                let final_val = match antigravity_to_images_response(&resp_val, &requested_raw_model) {
+                let final_val = match antigravity_to_images_response(
+                    &resp_val,
+                    &requested_raw_model,
+                ) {
                     Some(v) => v,
                     None => {
                         last_error = format!(
@@ -416,7 +440,10 @@ async fn run_images_request(
                         );
                         last_kind = ponyllm_core::error::GatewayErrorKind::UpstreamUnavailable;
                         tracing::warn!(provider = %provider_name, model = %target.physical_model, "images request: upstream response had no image part");
-                        pool.record_error(&winning_key_id, ponyllm_core::pool::PoolErrorType::ServerError);
+                        pool.record_error(
+                            &winning_key_id,
+                            ponyllm_core::pool::PoolErrorType::ServerError,
+                        );
                         continue;
                     }
                 };
@@ -427,16 +454,31 @@ async fn run_images_request(
                         .get("response")
                         .and_then(|r| r.get("usageMetadata"))
                         .or_else(|| resp_val.get("usageMetadata"));
-                    let p = usage.and_then(|u| u.get("promptTokenCount")).and_then(|t| t.as_u64()).unwrap_or(0);
-                    let c = usage.and_then(|u| u.get("candidatesTokenCount")).and_then(|t| t.as_u64()).unwrap_or(0);
-                    let ca = usage.and_then(|u| u.get("cachedContentTokenCount")).and_then(|t| t.as_u64()).unwrap_or(0);
+                    let p = usage
+                        .and_then(|u| u.get("promptTokenCount"))
+                        .and_then(|t| t.as_u64())
+                        .unwrap_or(0);
+                    let c = usage
+                        .and_then(|u| u.get("candidatesTokenCount"))
+                        .and_then(|t| t.as_u64())
+                        .unwrap_or(0);
+                    let ca = usage
+                        .and_then(|u| u.get("cachedContentTokenCount"))
+                        .and_then(|t| t.as_u64())
+                        .unwrap_or(0);
                     (p, c, ca)
                 };
                 let wall_ms = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_millis() as u64;
-                pool.record_tokens(&winning_key_id, wall_ms, prompt_tokens, completion_tokens, cached_tokens);
+                pool.record_tokens(
+                    &winning_key_id,
+                    wall_ms,
+                    prompt_tokens,
+                    completion_tokens,
+                    cached_tokens,
+                );
                 state.emit(
                     &ctx,
                     Some(provider_name.clone()),
@@ -487,7 +529,10 @@ async fn run_images_request(
         tags.insert("error_kind".to_string(), format!("{:?}", last_kind));
         state.sentry.capture_error(
             "GatewayExhaustedError",
-            &format!("Images request failed for model '{}': {}", requested_raw_model, last_error),
+            &format!(
+                "Images request failed for model '{}': {}",
+                requested_raw_model, last_error
+            ),
             Some(tags),
             Some(serde_json::json!({
                 "request_id": request_id,

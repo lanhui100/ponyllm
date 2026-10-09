@@ -845,17 +845,74 @@
         }
       }
     },
-    "/api/admin/strategy": {
+    "/api/admin/users": {
       "get": {
         "tags": [],
-        "operationId": "handle_admin_get_strategy",
+        "operationId": "handle_users_list",
         "responses": {
           "200": {
             "description": "",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/StrategyView"
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/UserView"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [],
+        "operationId": "handle_users_create",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateUserPayload"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserView"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/users/{id}": {
+      "get": {
+        "tags": [],
+        "operationId": "handle_users_get",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserView"
                 }
               }
             }
@@ -864,12 +921,22 @@
       },
       "put": {
         "tags": [],
-        "operationId": "handle_admin_put_strategy",
+        "operationId": "handle_users_update",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/PutStrategyPayload"
+                "$ref": "#/components/schemas/UpdateUserPayload"
               }
             }
           },
@@ -881,8 +948,60 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/StrategyView"
+                  "$ref": "#/components/schemas/UserView"
                 }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [],
+        "operationId": "handle_users_delete",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserView"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/users/{id}/reset-usage": {
+      "post": {
+        "tags": [],
+        "operationId": "handle_users_reset_usage",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {}
               }
             }
           }
@@ -1634,6 +1753,40 @@
           }
         }
       },
+      "CreateUserPayload": {
+        "type": "object",
+        "required": [
+          "id"
+        ],
+        "properties": {
+          "allowed_models": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "id": {
+            "type": "string"
+          },
+          "max_tokens": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
       "CycleStats": {
         "type": "object",
         "required": [
@@ -1739,6 +1892,12 @@
           },
           "scope": {
             "type": "string"
+          },
+          "user_id": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
@@ -2157,7 +2316,6 @@
           "providers",
           "keys",
           "keys_active",
-          "strategy",
           "hot_reload_ms",
           "admin_write_enabled",
           "config_version",
@@ -2198,9 +2356,6 @@
           "providers": {
             "type": "integer",
             "minimum": 0
-          },
-          "strategy": {
-            "type": "string"
           },
           "version": {
             "type": "string"
@@ -2361,17 +2516,6 @@
             "items": {
               "type": "string"
             }
-          }
-        }
-      },
-      "PutStrategyPayload": {
-        "type": "object",
-        "required": [
-          "strategy"
-        ],
-        "properties": {
-          "strategy": {
-            "type": "string"
           }
         }
       },
@@ -2703,23 +2847,6 @@
           }
         }
       },
-      "StrategyView": {
-        "type": "object",
-        "required": [
-          "strategy",
-          "config_version"
-        ],
-        "properties": {
-          "config_version": {
-            "type": "integer",
-            "format": "int64",
-            "minimum": 0
-          },
-          "strategy": {
-            "type": "string"
-          }
-        }
-      },
       "UpdateKeyPayload": {
         "type": "object",
         "properties": {
@@ -3021,6 +3148,40 @@
           }
         }
       },
+      "UpdateUserPayload": {
+        "type": "object",
+        "properties": {
+          "allowed_models": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
+          "enabled": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "max_tokens": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
       "UpstreamModelItem": {
         "type": "object",
         "required": [
@@ -3051,6 +3212,59 @@
           },
           "source": {
             "type": "string"
+          }
+        }
+      },
+      "UserView": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "enabled",
+          "used_tokens",
+          "created_at",
+          "config_version"
+        ],
+        "properties": {
+          "allowed_models": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
+          "config_version": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "created_at": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "id": {
+            "type": "string"
+          },
+          "max_tokens": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "name": {
+            "type": "string"
+          },
+          "used_tokens": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
           }
         }
       },

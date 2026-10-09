@@ -5,7 +5,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use ponyllm_config::ConfigFile;
-use ponyllm_core::pool::{GatewayRoutingStrategy, UpstreamProtocol};
+use ponyllm_core::pool::UpstreamProtocol;
 use ponyllm_server::admin_store::FileConfigStore;
 use ponyllm_server::{create_app, AppState, GatewayConfig};
 use reqwest::StatusCode;
@@ -28,17 +28,17 @@ impl OAuthHarness {
         let mut config_file = ConfigFile::default();
         config_file.gateway.bind = "127.0.0.1:8080".to_string();
         config_file.gateway.api_key = api_key.clone();
-        config_file.gateway.default_strategy = GatewayRoutingStrategy::Economy;
         config_file.gateway.web_enabled = true;
         config_file.gateway.admin_write_enabled = admin_write_enabled;
         config_file.config_version = 0;
 
-        config_file.save_to_path(config_path.to_str().unwrap()).unwrap();
+        config_file
+            .save_to_path(config_path.to_str().unwrap())
+            .unwrap();
 
         let mut gw_config = GatewayConfig::default();
         gw_config.bind_addr = "127.0.0.1:8080".to_string();
         gw_config.api_key = api_key.clone();
-        gw_config.default_strategy = GatewayRoutingStrategy::Economy;
         gw_config.web_enabled = true;
         gw_config.admin_write_enabled = admin_write_enabled;
 
@@ -68,7 +68,10 @@ async fn test_antigravity_auth_url_endpoint() {
     let client = reqwest::Client::new();
 
     let resp = client
-        .get(format!("http://{}/api/admin/oauth/antigravity/auth-url", harness.addr))
+        .get(format!(
+            "http://{}/api/admin/oauth/antigravity/auth-url",
+            harness.addr
+        ))
         .header("Authorization", format!("Bearer {}", harness.api_key))
         .send()
         .await
@@ -96,7 +99,10 @@ async fn test_antigravity_auth_url_respects_write_gate() {
     let client = reqwest::Client::new();
 
     let resp = client
-        .get(format!("http://{}/api/admin/oauth/antigravity/auth-url", harness.addr))
+        .get(format!(
+            "http://{}/api/admin/oauth/antigravity/auth-url",
+            harness.addr
+        ))
         .header("Authorization", format!("Bearer {}", harness.api_key))
         .send()
         .await
@@ -128,7 +134,10 @@ async fn test_antigravity_auth_url_rejects_public_redirect_uri() {
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     let err: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(err["error"]["code"], "invalid_redirect_uri");
-    assert!(err["error"]["message"].as_str().unwrap().contains("localhost"));
+    assert!(err["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("localhost"));
 }
 
 #[tokio::test]
@@ -140,7 +149,10 @@ async fn test_antigravity_authorize_rejects_public_redirect_uri() {
     let client = reqwest::Client::new();
 
     let resp = client
-        .post(format!("http://{}/api/admin/oauth/antigravity/authorize", harness.addr))
+        .post(format!(
+            "http://{}/api/admin/oauth/antigravity/authorize",
+            harness.addr
+        ))
         .header("Authorization", format!("Bearer {}", harness.api_key))
         .json(&serde_json::json!({
             "code_or_url": "4/0A-mock-code",
@@ -196,7 +208,10 @@ async fn test_antigravity_authorize_invalid_input() {
 
     // 1. Missing / empty code
     let resp = client
-        .post(format!("http://{}/api/admin/oauth/antigravity/authorize", harness.addr))
+        .post(format!(
+            "http://{}/api/admin/oauth/antigravity/authorize",
+            harness.addr
+        ))
         .header("Authorization", format!("Bearer {}", harness.api_key))
         .json(&serde_json::json!({
             "code_or_url": "   "
@@ -210,7 +225,10 @@ async fn test_antigravity_authorize_invalid_input() {
     // 2. Readonly mode gate
     let ro_harness = OAuthHarness::new(false).await;
     let ro_resp = client
-        .post(format!("http://{}/api/admin/oauth/antigravity/authorize", ro_harness.addr))
+        .post(format!(
+            "http://{}/api/admin/oauth/antigravity/authorize",
+            ro_harness.addr
+        ))
         .header("Authorization", format!("Bearer {}", ro_harness.api_key))
         .json(&serde_json::json!({
             "code_or_url": "mock-code"
@@ -284,9 +302,19 @@ async fn test_antigravity_authorize_success_and_hot_load() {
 
     // 3. Verify on disk config
     let reloaded = ConfigFile::load_or_default(Some(&harness.config_path)).unwrap();
-    let agy_provider = reloaded.providers.get("antigravity").expect("antigravity provider created");
-    assert_eq!(agy_provider.default_protocol, Some(UpstreamProtocol::Antigravity));
-    let key = agy_provider.keys.iter().find(|k| k.id == "ag-antigravity-user@example.com").expect("key exists");
+    let agy_provider = reloaded
+        .providers
+        .get("antigravity")
+        .expect("antigravity provider created");
+    assert_eq!(
+        agy_provider.default_protocol,
+        Some(UpstreamProtocol::Antigravity)
+    );
+    let key = agy_provider
+        .keys
+        .iter()
+        .find(|k| k.id == "ag-antigravity-user@example.com")
+        .expect("key exists");
     assert_eq!(key.api_key, "1//0mock-refresh-token-xyz987");
     assert_eq!(key.priority, 1);
     assert_eq!(key.weight, 20);
@@ -304,7 +332,10 @@ async fn test_oauth2_callback_exempt_and_pending_flow() {
 
     // 1. First get auth-url to generate and register a pending state
     let auth_url_resp = client
-        .get(format!("http://{}/api/admin/oauth/antigravity/auth-url", harness.addr))
+        .get(format!(
+            "http://{}/api/admin/oauth/antigravity/auth-url",
+            harness.addr
+        ))
         .header("Authorization", format!("Bearer {}", harness.api_key))
         .send()
         .await
@@ -315,7 +346,10 @@ async fn test_oauth2_callback_exempt_and_pending_flow() {
 
     // 2. Poll pending before callback -> ready: false
     let poll_resp = client
-        .get(format!("http://{}/api/admin/oauth/antigravity/pending?state={}", harness.addr, state_key))
+        .get(format!(
+            "http://{}/api/admin/oauth/antigravity/pending?state={}",
+            harness.addr, state_key
+        ))
         .header("Authorization", format!("Bearer {}", harness.api_key))
         .send()
         .await
@@ -336,7 +370,12 @@ async fn test_oauth2_callback_exempt_and_pending_flow() {
         .unwrap();
 
     assert_eq!(callback_resp.status(), StatusCode::OK);
-    let content_type = callback_resp.headers().get("content-type").unwrap().to_str().unwrap();
+    let content_type = callback_resp
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap();
     assert!(content_type.contains("text/html"));
     let html_body = callback_resp.text().await.unwrap();
     assert!(html_body.contains("Google 授权成功"));
@@ -345,7 +384,10 @@ async fn test_oauth2_callback_exempt_and_pending_flow() {
 
     // 4. Poll pending after callback -> ready: true, code received!
     let poll_resp2 = client
-        .get(format!("http://{}/api/admin/oauth/antigravity/pending?state={}", harness.addr, state_key))
+        .get(format!(
+            "http://{}/api/admin/oauth/antigravity/pending?state={}",
+            harness.addr, state_key
+        ))
         .header("Authorization", format!("Bearer {}", harness.api_key))
         .send()
         .await
@@ -394,7 +436,10 @@ async fn test_oauth2_callback_google_error_propagation() {
 
     // Poll pending
     let poll_resp = client
-        .get(format!("http://{}/api/admin/oauth/antigravity/pending?state={}", harness.addr, state_key))
+        .get(format!(
+            "http://{}/api/admin/oauth/antigravity/pending?state={}",
+            harness.addr, state_key
+        ))
         .header("Authorization", format!("Bearer {}", harness.api_key))
         .send()
         .await
@@ -460,14 +505,26 @@ async fn test_oauth2_callback_xss_prevention_and_security_headers() {
 
     // 1. Verify Security Headers
     let headers = resp.headers();
-    let csp = headers.get("content-security-policy").expect("CSP header present").to_str().unwrap();
+    let csp = headers
+        .get("content-security-policy")
+        .expect("CSP header present")
+        .to_str()
+        .unwrap();
     assert!(csp.contains("default-src 'none'"));
     assert!(csp.contains("frame-ancestors 'none'"));
 
-    let x_frame = headers.get("x-frame-options").expect("X-Frame-Options present").to_str().unwrap();
+    let x_frame = headers
+        .get("x-frame-options")
+        .expect("X-Frame-Options present")
+        .to_str()
+        .unwrap();
     assert_eq!(x_frame, "DENY");
 
-    let x_content = headers.get("x-content-type-options").expect("X-Content-Type-Options present").to_str().unwrap();
+    let x_content = headers
+        .get("x-content-type-options")
+        .expect("X-Content-Type-Options present")
+        .to_str()
+        .unwrap();
     assert_eq!(x_content, "nosniff");
 
     // 2. Verify HTML escaping (No raw unescaped script tag in DOM)
@@ -484,13 +541,13 @@ async fn test_oauth2_callback_xss_prevention_and_security_headers() {
 #[tokio::test]
 async fn test_antigravity_keepalive_cycle_execution() {
     let harness = OAuthHarness::new(true).await;
-    
+
     // Add an Antigravity key pool (with custom provider name to verify P1 fix)
     let pool = Arc::new(ponyllm_core::pool::KeyPool::new(
         "custom-code-assist",
         ponyllm_core::pool::RoutingStrategy::RoundRobin,
     ));
-    
+
     let cred = ponyllm_core::pool::AntigravityCredential {
         access_token: Some("mock-access-token".to_string()),
         refresh_token: "1//mock-refresh-token-keepalive".to_string(),
@@ -516,19 +573,22 @@ async fn test_antigravity_keepalive_cycle_execution() {
     harness.state.perform_antigravity_keepalive_cycle().await;
 
     // Verify key remains in pool and is not corrupted
-    let ag_pool = harness.state.get_pool("custom-code-assist").expect("custom pool exists");
+    let ag_pool = harness
+        .state
+        .get_pool("custom-code-assist")
+        .expect("custom pool exists");
     assert_eq!(ag_pool.total_key_count(), 1);
 }
 
 #[tokio::test]
 async fn test_antigravity_keepalive_invalid_grant_circuit_breaker() {
     let harness = OAuthHarness::new(true).await;
-    
+
     let pool = Arc::new(ponyllm_core::pool::KeyPool::new(
         "antigravity",
         ponyllm_core::pool::RoutingStrategy::RoundRobin,
     ));
-    
+
     let cred = ponyllm_core::pool::AntigravityCredential {
         access_token: None,
         refresh_token: "1//burned-refresh-token".to_string(),
@@ -613,10 +673,10 @@ async fn test_admin_test_key_lock_busy_returns_429() {
     if let Some(store) = &harness.state.config_store {
         let (mut file, ver) = store.load().await.unwrap();
         let p_sec = ponyllm_config::ProviderSection {
-    egress_pool: vec![],
-    egress_strategy: "round_robin".to_string(),
+            egress_pool: vec![],
+            egress_strategy: "round_robin".to_string(),
 
-    rate_limits: None,
+            rate_limits: None,
             base_url: "https://daily-cloudcode-pa.googleapis.com".to_string(),
             default_model: "claude-sonnet-4-6".to_string(),
             strategy: "round_robin".to_string(),
@@ -655,13 +715,14 @@ async fn test_admin_test_key_lock_busy_returns_429() {
     let resp = tower::ServiceExt::oneshot(app, req).await.unwrap();
     assert_eq!(resp.status(), axum::http::StatusCode::OK);
 
-    let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+    let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
     let val: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(val.get("success").and_then(|v| v.as_bool()), Some(false));
     assert_eq!(val.get("http_status").and_then(|v| v.as_u64()), Some(429));
-    assert_eq!(val.get("error_code").and_then(|v| v.as_str()), Some("lock_busy"));
+    assert_eq!(
+        val.get("error_code").and_then(|v| v.as_str()),
+        Some("lock_busy")
+    );
 }
-
-
-
-

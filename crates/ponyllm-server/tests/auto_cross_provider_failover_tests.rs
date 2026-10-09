@@ -1,13 +1,13 @@
+use ponyllm_core::pool::{ApiKeyEntry, KeyPool, ModelTier, RoutingStrategy};
+use ponyllm_server::routes::models::ParsedRequestModel;
+use ponyllm_server::{AppState, GatewayConfig, ModelSpec, ProviderConfig};
 use std::sync::Arc;
 use std::time::Duration;
-use ponyllm_core::pool::{ApiKeyEntry, KeyPool, ModelTier, RoutingStrategy};
-use ponyllm_server::{AppState, GatewayConfig, ModelSpec, ProviderConfig};
-use ponyllm_server::routes::models::ParsedRequestModel;
 
 #[test]
 fn test_auto_cross_provider_failover_when_primary_cooled() {
     let mut config = GatewayConfig::default();
-    
+
     // Provider A: Primary DeepSeek, standard tier
     let p_a = ProviderConfig {
         egress_pool: vec![],
@@ -58,7 +58,9 @@ fn test_auto_cross_provider_failover_when_primary_cooled() {
     let parsed = ParsedRequestModel::parse("auto");
 
     // 1. Initially, both healthy: provider_a wins due to priority
-    let targets = state.resolve_routed_targets(&parsed, None).expect("routing should succeed");
+    let targets = state
+        .resolve_routed_targets(&parsed, None)
+        .expect("routing should succeed");
     assert!(!targets.is_empty());
     assert_eq!(targets[0].provider_name, "provider_a");
 
@@ -67,7 +69,9 @@ fn test_auto_cross_provider_failover_when_primary_cooled() {
 
     // After provider_a's keys are cooled, auto routing must automatically deprioritize cooled provider_a
     // and route to healthy provider_b first!
-    let targets_after_cd = state.resolve_routed_targets(&parsed, None).expect("routing should succeed");
+    let targets_after_cd = state
+        .resolve_routed_targets(&parsed, None)
+        .expect("routing should succeed");
     assert!(!targets_after_cd.is_empty());
     assert_eq!(
         targets_after_cd[0].provider_name, "provider_b",
@@ -76,7 +80,9 @@ fn test_auto_cross_provider_failover_when_primary_cooled() {
 
     // 3. Clear cooldown on provider_a (recovering)
     pool_a.clear_key_cooldown("sk-a1");
-    let targets_recovered = state.resolve_routed_targets(&parsed, None).expect("routing should succeed");
+    let targets_recovered = state
+        .resolve_routed_targets(&parsed, None)
+        .expect("routing should succeed");
     assert_eq!(
         targets_recovered[0].provider_name, "provider_a",
         "When provider_a cooldown expires, it should recover as the primary target"

@@ -81,9 +81,7 @@ fn resolve_client_ip(req: &axum::http::Request<axum::body::Body>, state: &AppSta
         req.headers()
             .get("x-forwarded-for")
             .and_then(|v| v.to_str().ok()),
-        req.headers()
-            .get("x-real-ip")
-            .and_then(|v| v.to_str().ok()),
+        req.headers().get("x-real-ip").and_then(|v| v.to_str().ok()),
         remote,
         &trusted,
     )
@@ -95,7 +93,11 @@ fn resolve_client_ip(req: &axum::http::Request<axum::body::Body>, state: &AppSta
 fn fence_denies(req: &axum::http::Request<axum::body::Body>, state: &AppState) -> bool {
     let fence = state.admin_ip_allowlist.read();
     if let Some(ref nets) = *fence {
-        if !nets.is_empty() && !nets.iter().any(|n| n.contains(&resolve_client_ip(req, state))) {
+        if !nets.is_empty()
+            && !nets
+                .iter()
+                .any(|n| n.contains(&resolve_client_ip(req, state)))
+        {
             return true;
         }
     }
@@ -111,7 +113,10 @@ fn session_disabled() -> Response {
 }
 
 /// `POST /api/admin/session` — Bearer/x-api-key credential → HttpOnly cookie.
-pub async fn handle_session_create(State(state): State<Arc<AppState>>, req: axum::http::Request<axum::body::Body>) -> Response {
+pub async fn handle_session_create(
+    State(state): State<Arc<AppState>>,
+    req: axum::http::Request<axum::body::Body>,
+) -> Response {
     let Some(store) = store(&state) else {
         return session_disabled();
     };
@@ -146,7 +151,9 @@ pub async fn handle_session_create(State(state): State<Arc<AppState>>, req: axum
     let legacy = cfg.api_key.clone();
     drop(cfg);
     if strict && is_bare {
-        return crate::auth::unauthorized("Bare token rejected in strict mode; send `Authorization: Bearer <token>`.");
+        return crate::auth::unauthorized(
+            "Bare token rejected in strict mode; send `Authorization: Bearer <token>`.",
+        );
     }
     let token = provided.filter(|t| !t.is_empty());
     let client_ip = resolve_client_ip(&req, &state);
@@ -159,7 +166,7 @@ pub async fn handle_session_create(State(state): State<Arc<AppState>>, req: axum
 
     let verdict = crate::auth::authenticate(token.unwrap_or(""), &entries, &legacy, strict);
     match verdict {
-        crate::auth::AuthVerdict::Allowed { scope, key_id } => {
+        crate::auth::AuthVerdict::Allowed { scope, key_id, .. } => {
             // Success clears this pair's failure history.
             state.auth_ratelimiter.clear_failures(client_ip, prefix);
             let creator = key_id.unwrap_or_else(|| "legacy".to_string());
@@ -203,7 +210,10 @@ pub async fn handle_session_create(State(state): State<Arc<AppState>>, req: axum
 
 /// `GET /api/admin/session` — public probe (routes are only mounted when
 /// sessions are enabled; the probe itself needs no credential).
-pub async fn handle_session_probe(State(state): State<Arc<AppState>>, req: axum::http::Request<axum::body::Body>) -> Response {
+pub async fn handle_session_probe(
+    State(state): State<Arc<AppState>>,
+    req: axum::http::Request<axum::body::Body>,
+) -> Response {
     let Some(store) = store(&state) else {
         return session_disabled();
     };
@@ -225,8 +235,10 @@ pub async fn handle_session_probe(State(state): State<Arc<AppState>>, req: axum:
                 .into_response();
             // R-S5: slide the browser-side expiry in lockstep with the
             // server-side TTL.
-            resp.headers_mut()
-                .append(header::SET_COOKIE, build_renewal_cookie(&sid, store.ttl_secs()));
+            resp.headers_mut().append(
+                header::SET_COOKIE,
+                build_renewal_cookie(&sid, store.ttl_secs()),
+            );
             resp.headers_mut()
                 .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
             resp
@@ -238,7 +250,10 @@ pub async fn handle_session_probe(State(state): State<Arc<AppState>>, req: axum:
 /// `POST /api/admin/session/revoke` — destroy the session → 204.
 /// CSRF double-submit: `X-Pony-Session` must equal the cookie sid
 /// (constant-time compare, R-S6b).
-pub async fn handle_session_revoke(State(state): State<Arc<AppState>>, req: axum::http::Request<axum::body::Body>) -> Response {
+pub async fn handle_session_revoke(
+    State(state): State<Arc<AppState>>,
+    req: axum::http::Request<axum::body::Body>,
+) -> Response {
     let Some(store) = store(&state) else {
         return session_disabled();
     };

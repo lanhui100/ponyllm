@@ -9,9 +9,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use ponyllm_core::pool::usage::KeyUsageStateSnapshot;
-use ponyllm_server::telemetry_snapshot::{
-    save_snapshot_with_live_cycles, TelemetrySnapshot,
-};
+use ponyllm_server::telemetry_snapshot::{save_snapshot_with_live_cycles, TelemetrySnapshot};
 use ponyllm_server::{create_app, AppState, GatewayConfig};
 use reqwest::StatusCode;
 
@@ -75,12 +73,7 @@ async fn benchmark_endpoint_requires_auth() {
 async fn benchmark_endpoint_returns_zero_view_without_snapshot() {
     let h = BenchmarkHarness::new().await;
     let resp = h
-        .auth(
-            reqwest::Client::new().get(format!(
-                "http://{}/api/admin/quota/benchmark",
-                h.addr
-            )),
-        )
+        .auth(reqwest::Client::new().get(format!("http://{}/api/admin/quota/benchmark", h.addr)))
         .send()
         .await
         .unwrap();
@@ -115,12 +108,7 @@ async fn benchmark_endpoint_serves_persisted_archive() {
     h.write_snapshot(usages);
 
     let resp = h
-        .auth(
-            reqwest::Client::new().get(format!(
-                "http://{}/api/admin/quota/benchmark",
-                h.addr
-            )),
-        )
+        .auth(reqwest::Client::new().get(format!("http://{}/api/admin/quota/benchmark", h.addr)))
         .send()
         .await
         .unwrap();

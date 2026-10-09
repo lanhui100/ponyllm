@@ -61,7 +61,10 @@ impl std::fmt::Debug for PostgresRefreshLock {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PostgresRefreshLock")
             .field("metrics", &self.metrics.as_ref().map(|_| "set"))
-            .field("draining", &self.draining.load(std::sync::atomic::Ordering::Relaxed))
+            .field(
+                "draining",
+                &self.draining.load(std::sync::atomic::Ordering::Relaxed),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -106,32 +109,34 @@ impl PostgresRefreshLock {
                 tracing::warn!(
                     "PONYLLM_LOCK_SSLMODE=disable: advisory-lock PG credentials travel without TLS (dev only; production requires 'require')"
                 );
-                tokio_postgres::connect(&dsn, NoTls).await
+                tokio_postgres::connect(&dsn, NoTls)
+                    .await
                     .map(|(client, connection)| spawn_pg_connection(client, connection))
                     .map_err(|e| {
-            // Diagnostic detail is safe: tokio-postgres CONNECT errors carry
-            // io/TLS text, never the DSN (which is parsed into Config before
-            // the attempt). The returned error stays fully sanitized.
-            tracing::warn!(error = %e, "refresh lock PG connect failed (detail)");
-            sanitize_connect_error(&e)
-        })?
+                        // Diagnostic detail is safe: tokio-postgres CONNECT errors carry
+                        // io/TLS text, never the DSN (which is parsed into Config before
+                        // the attempt). The returned error stays fully sanitized.
+                        tracing::warn!(error = %e, "refresh lock PG connect failed (detail)");
+                        sanitize_connect_error(&e)
+                    })?
             }
             _ => {
                 let config = rustls::ClientConfig::builder()
                     .with_root_certificates(self::load_lock_roots())
                     .with_no_client_auth();
-                let tls = postgres_rustls::MakeTlsConnector::new(
-                    tokio_rustls::TlsConnector::from(std::sync::Arc::new(config)),
-                );
-                tokio_postgres::connect(&dsn, tls).await
+                let tls = postgres_rustls::MakeTlsConnector::new(tokio_rustls::TlsConnector::from(
+                    std::sync::Arc::new(config),
+                ));
+                tokio_postgres::connect(&dsn, tls)
+                    .await
                     .map(|(client, connection)| spawn_pg_connection(client, connection))
                     .map_err(|e| {
-            // Diagnostic detail is safe: tokio-postgres CONNECT errors carry
-            // io/TLS text, never the DSN (which is parsed into Config before
-            // the attempt). The returned error stays fully sanitized.
-            tracing::warn!(error = %e, "refresh lock PG connect failed (detail)");
-            sanitize_connect_error(&e)
-        })?
+                        // Diagnostic detail is safe: tokio-postgres CONNECT errors carry
+                        // io/TLS text, never the DSN (which is parsed into Config before
+                        // the attempt). The returned error stays fully sanitized.
+                        tracing::warn!(error = %e, "refresh lock PG connect failed (detail)");
+                        sanitize_connect_error(&e)
+                    })?
             }
         };
         Ok(client)
@@ -169,7 +174,8 @@ fn spawn_pg_connection<S>(
     connection: tokio_postgres::Connection<tokio_postgres::Socket, S>,
 ) -> tokio_postgres::Client
 where
-    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static, {
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
     tokio::spawn(async move {
         if let Err(e) = connection.await {
             tracing::warn!("refresh lock PG connection error: {}", e);
@@ -251,25 +257,31 @@ fn spawn_idle_warmup(state: Arc<Mutex<PgConnectionState>>) {
             .unwrap_or_else(|_| "require".to_string())
             .to_ascii_lowercase();
         let client = if sslmode == "disable" {
-            tokio_postgres::connect(&dsn, NoTls).await.ok().map(|(c, conn)| {
-                tokio::spawn(async move {
-                    let _ = conn.await;
-                });
-                c
-            })
+            tokio_postgres::connect(&dsn, NoTls)
+                .await
+                .ok()
+                .map(|(c, conn)| {
+                    tokio::spawn(async move {
+                        let _ = conn.await;
+                    });
+                    c
+                })
         } else {
             let config = rustls::ClientConfig::builder()
                 .with_root_certificates(load_lock_roots())
                 .with_no_client_auth();
-            let tls = postgres_rustls::MakeTlsConnector::new(
-                tokio_rustls::TlsConnector::from(std::sync::Arc::new(config)),
-            );
-            tokio_postgres::connect(&dsn, tls).await.ok().map(|(c, conn)| {
-                tokio::spawn(async move {
-                    let _ = conn.await;
-                });
-                c
-            })
+            let tls = postgres_rustls::MakeTlsConnector::new(tokio_rustls::TlsConnector::from(
+                std::sync::Arc::new(config),
+            ));
+            tokio_postgres::connect(&dsn, tls)
+                .await
+                .ok()
+                .map(|(c, conn)| {
+                    tokio::spawn(async move {
+                        let _ = conn.await;
+                    });
+                    c
+                })
         };
         if client.is_none() {
             // Loud-but-sanitized: a silent warmup failure would hide why the
@@ -336,16 +348,12 @@ impl RefreshGate for PostgresRefreshLock {
             guard.idle.take()
         };
         if client.is_none() {
-            client = Some(
-                self.connect()
-                    .await
-                    .map_err(|e| {
-                        if let Some(m) = &self.metrics {
-                            m.record_refresh_lock_error();
-                        }
-                        RefreshGateError::Unavailable(e)
-                    })?,
-            );
+            client = Some(self.connect().await.map_err(|e| {
+                if let Some(m) = &self.metrics {
+                    m.record_refresh_lock_error();
+                }
+                RefreshGateError::Unavailable(e)
+            })?);
         }
         let client = client.expect("client established above");
 
@@ -429,10 +437,7 @@ pub struct InMemoryRefreshLock {
 }
 
 impl InMemoryRefreshLock {
-    pub fn new(
-        shared: Arc<Mutex<bool>>,
-        metrics: Option<Arc<MetricsCollector>>,
-    ) -> Self {
+    pub fn new(shared: Arc<Mutex<bool>>, metrics: Option<Arc<MetricsCollector>>) -> Self {
         Self {
             shared,
             metrics,
@@ -580,7 +585,10 @@ mod tests {
         // The sanitizer must never echo the raw error Display (which may
         // carry host/user or even credentials); only a fixed generic message.
         let out = sanitized_connect_message();
-        assert_eq!(out, "refresh lock PG connect failed (lock database unreachable)");
+        assert_eq!(
+            out,
+            "refresh lock PG connect failed (lock database unreachable)"
+        );
         assert!(!out.contains("secret"));
         assert!(!out.contains("postgres://"));
         assert!(!out.contains("host"));

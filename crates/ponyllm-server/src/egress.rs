@@ -26,7 +26,9 @@
 //!   connection still times out fast on the probe path);
 //! - `.svc`, `.svc.cluster.local`, `localhost`, and cloud metadata hosts
 //!   (`169.254.169.254`, `metadata.google.internal`, …) are rejected by
-//!   name as well, so they stay blocked even if DNS is unavailable;
+//!   name as well, so they stay blocked even if DNS is unavailable; on the
+//!   data plane an `*.svc` name is only unlocked by an allowlist entry that
+//!   is itself a `.svc`-suffixed name, and cloud metadata is never unlockable;
 //! - the operator allowlist (`PONYLLM_PROBE_ALLOWLIST`) exempts exact hosts
 //!   AND literal IPs (LAN model servers / on-prem proxies) BEFORE the
 //!   name/IP policy runs (B7).
@@ -410,23 +412,118 @@ pub async fn check_probe_url(raw: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Allowlist matching primitive shared by the `*.svc` exemption below.
+///
+/// Mirrors the semantics of [`probe_allowlisted`] (`host == entry ||
+/// host.ends_with("." + entry)`, i.e. an entry covers itself and its
+/// subdomains) without the per-entry `format!` allocation. `lower` must
+/// already be trimmed / trailing-dot-stripped / lowercased; `entry` is
+/// normalized here.
+fn matches_allowlist_entry(lower: &str, entry: &str) -> bool {
+    let e = entry.trim().trim_end_matches('.').to_ascii_lowercase();
+    if e.is_empty() {
+        return false;
+    }
+    lower == e
+        || lower
+            .strip_suffix(e.as_str())
+            .is_some_and(|head| head.ends_with('.'))
+}
+
+/// First entry of `entries` that matches `lower` (already normalized),
+/// returned in normalized (lowercased, trailing-dot-free) form.
+fn first_matching_allowlist_entry(lower: &str, entries: &[&str]) -> Option<String> {
+    entries
+        .iter()
+        .find(|entry| matches_allowlist_entry(lower, entry))
+        .map(|entry| entry.trim().trim_end_matches('.').to_ascii_lowercase())
+}
+
+/// Whether an allowlist entry is specific enough to unlock an in-cluster
+/// `*.svc` data-plane upstream.
+///
+/// The entry must itself be a MULTI-LABEL in-cluster service name, i.e. it
+/// ends with `.svc` or `.svc.cluster.local`. This suffix requirement is a
+/// deliberate anti-footgun guard: a bare TLD-ish entry (`svc`,
+/// `svc.cluster.local`, `cluster.local`) is a plausible operator typo, and
+/// because entries also match subdomains such a typo would unlock EVERY
+/// `*.svc` host in the cluster. Requiring the `.svc` suffix confines an
+/// over-broad operator mistake to the one service tree it was written for.
+fn allowlist_entry_is_svc_name(entry: &str) -> bool {
+    entry.ends_with(".svc") || entry.ends_with(".svc.cluster.local")
+}
+
+/// Whether the operator allowlist explicitly unlocks `host` as an in-cluster
+/// data-plane upstream (the only sanctioned exemption from the `*.svc` block).
+///
+/// All three conditions must hold, and they are expressed fail-closed:
+/// 1. [`probe_allowlisted`] hits `host` — the very same sources and matching
+///    semantics the rest of the data-plane policy uses, so the exemption can
+///    never be wider than "this host is on the allowlist". Checking the
+///    aggregate predicate (rather than only this helper) keeps the exemption
+///    closed if `probe_allowlisted` ever gains a source this helper does not
+///    know about.
+/// 2. The entry that actually matched is itself a `.svc` / `.svc.cluster.local`
+///    suffixed name — see [`allowlist_entry_is_svc_name`].
+/// 3. `host` is not a cloud-metadata host. That is guaranteed by ORDER, not
+///    by this function: [`data_plane_blocked_name`] evaluates the metadata
+///    blocklist before it ever considers the `*.svc` branch, so metadata hosts
+///    return a refusal no matter what the allowlist says.
+fn svc_allowlist_unlocks(host: &str) -> bool {
+    if !probe_allowlisted(host) {
+        return false;
+    }
+    let lower = host.trim().trim_end_matches('.').to_ascii_lowercase();
+    let env_list = std::env::var("PONYLLM_PROBE_ALLOWLIST").unwrap_or_default();
+    let env_entries: Vec<&str> = env_list.split(',').collect();
+    let matched = first_matching_allowlist_entry(&lower, BUILTIN_MODEL_ALLOWLIST)
+        .or_else(|| first_matching_allowlist_entry(&lower, &env_entries));
+    // No entry matched even though probe_allowlisted() says otherwise (divergent
+    // sources): fail closed.
+    match matched {
+        Some(entry) => allowlist_entry_is_svc_name(&entry),
+        None => false,
+    }
+}
+
 /// Name-based rejections for the data plane (VULN-07/F6): k8s in-cluster
 /// names and cloud-metadata hosts stay blocked by name even if DNS is
 /// unavailable. Loopback hostnames are deliberately ALLOWED here — the
 /// documented data-plane shape includes local model servers (Ollama on
 /// 127.0.0.1); `PONYLLM_PROBE_ALLOWLIST` still lifts LAN model-server names.
+///
+/// 为什么这里要与 admin 写入闸门对齐 / why align with the admin write gate:
+/// `is_blocked_name` (admin writes) consults `PONYLLM_PROBE_ALLOWLIST` BEFORE
+/// its `*.svc` block, so an operator can legitimately save an in-cluster
+/// upstream (the shipped `pproxy-host.ponyllm.svc` reverse-route shape). The
+/// data plane used to block the very same name unconditionally, which meant a
+/// config the admin API accepted was refused at dial time with HTTP 503 —
+/// "能写进去、不能用" 的策略不一致。The only sanctioned way to re-use an
+/// in-cluster name as a data-plane upstream is now an EXPLICIT, service-scoped
+/// allowlist entry (see [`svc_allowlist_unlocks`]); everything else keeps the
+/// VULN-07/F6 block.
+///
+/// 云元数据仍然硬拒 / cloud metadata stays hard-blocked: the metadata check
+/// runs FIRST and returns before any allowlist reasoning, so no allowlist entry
+/// (including a `.svc`-suffixed one) can ever unlock `169.254.169.254` /
+/// `metadata.google.internal`. 允许的豁免只针对 in-cluster 名称，封禁元数据端点不是本次变更的目标，也不是它的副作用.
 fn data_plane_blocked_name(host: &str) -> Option<&'static str> {
     let lower = host.trim().trim_end_matches('.').to_ascii_lowercase();
-    if lower == "svc" || lower.ends_with(".svc") || lower.ends_with(".svc.cluster.local") {
-        return Some(
-            "kubernetes in-cluster names (*.svc) are not allowed for data-plane upstreams",
-        );
-    }
+    // (1) Cloud metadata FIRST — never allowlist-exemptible, by construction.
     if METADATA_HOSTS
         .iter()
         .any(|m| lower == *m || lower.ends_with(&format!(".{}", m)))
     {
         return Some("cloud metadata endpoints are not allowed for data-plane upstreams");
+    }
+    // (2) k8s in-cluster names — blocked unless explicitly unlocked above.
+    if lower == "svc" || lower.ends_with(".svc") || lower.ends_with(".svc.cluster.local") {
+        if svc_allowlist_unlocks(host) {
+            return None;
+        }
+        return Some(
+            "kubernetes in-cluster names (*.svc) are not allowed for data-plane upstreams",
+        );
     }
     None
 }

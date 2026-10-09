@@ -29,7 +29,11 @@ Kubernetes `NetworkPolicy` 只对 Pod 流量生效，不能对 selector-less Ser
 
 除 antigravity 的 CONNECT 代理模式外，opencode-zen 历史与现状形态：
 
-- **现状 Pod 配置形态（2026-09-28 切换）**：`base_url = "http://100.95.193.103:8899/pony_31abcbd448a003be0ea27524d60973d8/opencode/zen/v1"`，不带 `proxy=` 字段，直接经 devserver 隧道转发至可用 VPS。
+- **现状 Pod 配置形态（2026-10-09 更新）**：`base_url = "http://pproxy-host:8899/pony_31abcbd448a003be0ea27524d60973d8/opencode/zen/v1"`，不带 `proxy=` 字段。
+  - 主机名用 **k8s 裸短名** `pproxy-host`（经 resolv.conf search 域解析到 ClusterIP），并已加入 `PONYLLM_PROBE_ALLOWLIST`。原因：数据面出口守卫会硬拒 `*.svc` 与私网/CGNAT IP，短名 + 运维白名单是当前无需改代码即可放行的唯一形态（`deploy/ponyllm-deployment.yaml` 已同步回写该白名单）。
+  - 该形态仅对**被 Cloudflare/zen 按出口地域拦截**的模型启用（当前为 `muse-spark-1.3-contributor-free`）。同 provider 下未被地域拦截的 zen 免费模型（`mimo-v2.6-flash-free`、`space-bunny-free`）走 provider 级 `base_url` 直连，不带模型级 `base_url`/`proxy`。
+- **旧形态（2026-09-28 切换，已停用）**：`base_url = "http://100.95.193.103:8899/pony_31abcbd448a003be0ea27524d60973d8/opencode/zen/v1"`。写的是 devserver 的 Tailscale CGNAT IP，被 `blocked_v4` 的 `100.64/10` 规则判定为私网，数据面 fail-closed，等同不可用。
+- **正向 CONNECT 形态（当前故障）**：模型级 `proxy = "http://user:<TOKEN>@pproxy-host.ponyllm.svc:8899"` + 直连 `base_url`。`pproxy doctor` 显示 7 条反向路由全通但 `CONNECT tunnel probe` fail（VPS 侧 `wss://rn.ponygo.fun/ws` 持续 401/429），请求期表现为 `502 tunnel_failed` → 网关 503 `timeout/network`。隧道恢复属 `cluster-infra` 仓职责。
 - **历史腾讯节点形态（备忘）**：`base_url = "http://pproxy-host.ponyllm.svc:8899/opencode/zen/v1"` + `proxy = "http://user:<PPROXY_CLIENT_TOKEN>@pproxy-host.ponyllm.svc:8899"`。
 - **持久卷（PVC）同步与轮转机制（2026-09-28 更新）**：线上 Pod 挂载了持久卷 `/var/lib/ponyllm`（PVC `ponyllm-data`）。为避免 Secret 轮转死锁，现 Deployment 已升级：可通过注入环境变量 `FORCE_CONFIG_SYNC=1` 触发从只读 Secret 强制原子同步到 PVC；若未配置该变量，则保持仅在文件不存在时做初始播种。
 - **安全审计加固闭环（2026-09-28）**：已完成 4 路红队全面加固，包含代理凭据日志/状态脱敏、NetworkPolicy 严密阻断多云 IMDS、Keel 最小权限收敛、探针主动调用 Bearer 强鉴权与 Ingress 精确匹配。完整报告见 `.agents/notes/implemented/architecture/2026-09-28-k3s-multi-dimensional-adversarial-security-hardening.md`。

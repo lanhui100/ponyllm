@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use crate::state::AppState;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
@@ -7,7 +7,7 @@ use ponyllm_core::pool::{GatewayRoutingStrategy, ModelTier};
 use ponyllm_protocol::common::ReasoningEffort;
 use serde_json::json;
 use std::str::FromStr;
-use crate::state::AppState;
+use std::sync::Arc;
 
 /// Parsed request model structure with stripped tags and extracted strategy / tier overrides
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,7 +86,6 @@ impl ParsedRequestModel {
     }
 }
 
-
 /// Robust case-insensitive and whitespace-tolerant [1m] tag stripper (Unicode-safe)
 pub fn strip_1m_tag(s: &str) -> (String, bool) {
     let mut has_1m = false;
@@ -126,7 +125,12 @@ pub fn strip_1m_tag(s: &str) -> (String, bool) {
     (clean.trim().to_string(), has_1m)
 }
 
-pub fn format_model_json(model_id: &str, provider_name: &str, display_name: Option<&str>, protocol: &str) -> serde_json::Value {
+pub fn format_model_json(
+    model_id: &str,
+    provider_name: &str,
+    display_name: Option<&str>,
+    protocol: &str,
+) -> serde_json::Value {
     let display = display_name
         .map(|d| d.to_string())
         .unwrap_or_else(|| format!("{} ({})", model_id, provider_name));
@@ -147,19 +151,28 @@ pub fn format_model_json(model_id: &str, provider_name: &str, display_name: Opti
 }
 
 /// Handler for `GET /v1/models` and `GET /models`
-pub async fn handle_list_models(
-    State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
+pub async fn handle_list_models(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let models = state.list_all_models();
     let data: Vec<serde_json::Value> = models
         .into_iter()
         .map(|(model_id, provider_name, display_name, protocol)| {
-            format_model_json(&model_id, &provider_name, display_name.as_deref(), &protocol)
+            format_model_json(
+                &model_id,
+                &provider_name,
+                display_name.as_deref(),
+                &protocol,
+            )
         })
         .collect();
 
-    let first_id = data.first().and_then(|d| d.get("id")).and_then(|v| v.as_str());
-    let last_id = data.last().and_then(|d| d.get("id")).and_then(|v| v.as_str());
+    let first_id = data
+        .first()
+        .and_then(|d| d.get("id"))
+        .and_then(|v| v.as_str());
+    let last_id = data
+        .last()
+        .and_then(|d| d.get("id"))
+        .and_then(|v| v.as_str());
 
     Json(json!({
         "object": "list",
@@ -193,9 +206,13 @@ pub async fn handle_get_model_provider_model(
 async fn get_model_by_id(state: Arc<AppState>, model_id: &str) -> impl IntoResponse {
     let models = state.list_all_models();
     // Match exact model_id, or if model_id is bare name, match entry with `/<model_id>`
-    if let Some((m_id, provider_name, display_name, protocol)) = models.into_iter().find(|(m, _, _, _)| {
-        m == model_id || m.strip_suffix(&format!("/{}", model_id)).is_some() || m.ends_with(&format!("/{}", model_id))
-    }) {
+    if let Some((m_id, provider_name, display_name, protocol)) =
+        models.into_iter().find(|(m, _, _, _)| {
+            m == model_id
+                || m.strip_suffix(&format!("/{}", model_id)).is_some()
+                || m.ends_with(&format!("/{}", model_id))
+        })
+    {
         let resp_id = if m_id != model_id && (m_id.ends_with(&format!("/{}", model_id))) {
             model_id
         } else {
@@ -203,7 +220,12 @@ async fn get_model_by_id(state: Arc<AppState>, model_id: &str) -> impl IntoRespo
         };
         (
             StatusCode::OK,
-            Json(format_model_json(resp_id, &provider_name, display_name.as_deref(), &protocol)),
+            Json(format_model_json(
+                resp_id,
+                &provider_name,
+                display_name.as_deref(),
+                &protocol,
+            )),
         )
             .into_response()
     } else {

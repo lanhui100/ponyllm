@@ -1,15 +1,15 @@
 use ponyllm_core::pool::*;
-use ponyllm_server::{AppState, GatewayConfig, ProviderConfig, ModelSpec};
 use ponyllm_server::routes::models::ParsedRequestModel;
+use ponyllm_server::{AppState, GatewayConfig, ModelSpec, ProviderConfig};
 use std::collections::HashMap;
 
 #[test]
 fn test_model_spec_pricing_inheritance_and_override() {
     let provider = ProviderConfig {
-    egress_pool: vec![],
-    egress_strategy: "round_robin".to_string(),
+        egress_pool: vec![],
+        egress_strategy: "round_robin".to_string(),
 
-    rate_limits: None,
+        rate_limits: None,
         base_url: "https://api.deepseek.com".to_string(),
         default_model: "deepseek-chat".to_string(),
         strategy: "round_robin".to_string(),
@@ -21,7 +21,7 @@ fn test_model_spec_pricing_inheritance_and_override() {
         model_specs: vec![
             // deepseek-chat inherits provider default pricing
             ModelSpec {
-    rate_limits: None,
+                rate_limits: None,
                 priority: None,
                 name: "deepseek-chat".to_string(),
                 tier: ModelTier::Standard,
@@ -33,7 +33,7 @@ fn test_model_spec_pricing_inheritance_and_override() {
             },
             // deepseek-reasoner has higher custom pricing with special cached price
             ModelSpec {
-    rate_limits: None,
+                rate_limits: None,
                 priority: None,
                 name: "deepseek-reasoner".to_string(),
                 tier: ModelTier::Flagship,
@@ -70,24 +70,22 @@ fn test_model_spec_pricing_inheritance_and_override() {
 
     // 3. Peak valley pricing model test: default baseline is valley, peak period can exclude/include weekends
     let pv_model = ModelSpec {
-    rate_limits: None,
+        rate_limits: None,
         priority: None,
         name: "deepseek-pv".to_string(),
         input_price: Some(0.05), // 谷价输入
         cached_price: Some(0.01),
         output_price: Some(0.10),
         pricing_mode: Some(PricingMode::PeakValley),
-        pricing_periods: vec![
-            PricingPeriod {
-                name: "".to_string(),
-                start_time: "08:00".to_string(),
-                end_time: "24:00".to_string(),
-                input_price: 0.20, // 峰价输入
-                cached_price: 0.05,
-                output_price: 0.40,
-                include_weekends: false, // 周末依然走谷价
-            },
-        ],
+        pricing_periods: vec![PricingPeriod {
+            name: "".to_string(),
+            start_time: "08:00".to_string(),
+            end_time: "24:00".to_string(),
+            input_price: 0.20, // 峰价输入
+            cached_price: 0.05,
+            output_price: 0.40,
+            include_weekends: false, // 周末依然走谷价
+        }],
         ..Default::default()
     };
     let mut pv_provider = provider.clone();
@@ -114,10 +112,10 @@ fn test_economy_routing_respects_model_level_pricing() {
 
     // Provider A: default is cheap (0.1), but special-model is expensive (2.0)
     let p_a = ProviderConfig {
-    egress_pool: vec![],
-    egress_strategy: "round_robin".to_string(),
+        egress_pool: vec![],
+        egress_strategy: "round_robin".to_string(),
 
-    rate_limits: None,
+        rate_limits: None,
         base_url: "https://api.a.com".to_string(),
         default_model: "special-model".to_string(),
         strategy: "round_robin".to_string(),
@@ -126,22 +124,20 @@ fn test_economy_routing_respects_model_level_pricing() {
         cached_price: 0.05,
         output_price: 0.20,
         models: vec!["special-model".to_string()],
-        model_specs: vec![
-            ModelSpec {
-    rate_limits: None,
-                priority: None,
-                name: "special-model".to_string(),
-                tier: ModelTier::Standard,
-                context_window: "128K".to_string(),
-                max_output: "8K".to_string(),
-                input_types: vec!["text".to_string()],
-                output_types: vec!["text".to_string()],
-                input_price: Some(2.0),
-                cached_price: Some(1.0),
-                output_price: Some(4.0),
-                ..Default::default()
-            }
-        ],
+        model_specs: vec![ModelSpec {
+            rate_limits: None,
+            priority: None,
+            name: "special-model".to_string(),
+            tier: ModelTier::Standard,
+            context_window: "128K".to_string(),
+            max_output: "8K".to_string(),
+            input_types: vec!["text".to_string()],
+            output_types: vec!["text".to_string()],
+            input_price: Some(2.0),
+            cached_price: Some(1.0),
+            output_price: Some(4.0),
+            ..Default::default()
+        }],
         default_protocol: None,
         chat_url: None,
         responses_url: None,
@@ -153,10 +149,10 @@ fn test_economy_routing_respects_model_level_pricing() {
 
     // Provider B: default is expensive (1.0), but special-model is discounted (0.3)
     let p_b = ProviderConfig {
-    egress_pool: vec![],
-    egress_strategy: "round_robin".to_string(),
+        egress_pool: vec![],
+        egress_strategy: "round_robin".to_string(),
 
-    rate_limits: None,
+        rate_limits: None,
         base_url: "https://api.b.com".to_string(),
         default_model: "special-model".to_string(),
         strategy: "round_robin".to_string(),
@@ -165,22 +161,20 @@ fn test_economy_routing_respects_model_level_pricing() {
         cached_price: 0.5,
         output_price: 2.0,
         models: vec!["special-model".to_string()],
-        model_specs: vec![
-            ModelSpec {
-    rate_limits: None,
-                priority: None,
-                name: "special-model".to_string(),
-                tier: ModelTier::Standard,
-                context_window: "128K".to_string(),
-                max_output: "8K".to_string(),
-                input_types: vec!["text".to_string()],
-                output_types: vec!["text".to_string()],
-                input_price: Some(0.3),
-                cached_price: Some(0.05),
-                output_price: Some(0.6),
-                ..Default::default()
-            }
-        ],
+        model_specs: vec![ModelSpec {
+            rate_limits: None,
+            priority: None,
+            name: "special-model".to_string(),
+            tier: ModelTier::Standard,
+            context_window: "128K".to_string(),
+            max_output: "8K".to_string(),
+            input_types: vec!["text".to_string()],
+            output_types: vec!["text".to_string()],
+            input_price: Some(0.3),
+            cached_price: Some(0.05),
+            output_price: Some(0.6),
+            ..Default::default()
+        }],
         default_protocol: None,
         chat_url: None,
         responses_url: None,
@@ -194,14 +188,15 @@ fn test_economy_routing_respects_model_level_pricing() {
     providers.insert("provider_b".to_string(), p_b);
 
     let gw_config = GatewayConfig {
-        default_strategy: GatewayRoutingStrategy::Economy,
         providers,
         ..Default::default()
     };
 
     let state = AppState::new(gw_config);
     let parsed = ParsedRequestModel::parse("special-model");
-    let targets = state.resolve_routed_targets(&parsed, Some(GatewayRoutingStrategy::Economy)).unwrap();
+    let targets = state
+        .resolve_routed_targets(&parsed, Some(GatewayRoutingStrategy::Economy))
+        .unwrap();
 
     assert_eq!(targets.len(), 2);
     // Because Provider B offers special-model at 0.3 vs Provider A at 2.0,
@@ -213,10 +208,10 @@ fn test_economy_routing_respects_model_level_pricing() {
 #[test]
 fn test_pricing_anti_inversion_and_free_model_preservation() {
     let p = ProviderConfig {
-    egress_pool: vec![],
-    egress_strategy: "round_robin".to_string(),
+        egress_pool: vec![],
+        egress_strategy: "round_robin".to_string(),
 
-    rate_limits: None,
+        rate_limits: None,
         base_url: "https://api.example.com".to_string(),
         default_model: "base".to_string(),
         strategy: "round_robin".to_string(),
@@ -228,7 +223,7 @@ fn test_pricing_anti_inversion_and_free_model_preservation() {
         model_specs: vec![
             // mini only specifies input_price = 0.15; cached_price should scale down to 0.075, not 1.25!
             ModelSpec {
-    rate_limits: None,
+                rate_limits: None,
                 priority: None,
                 name: "mini".to_string(),
                 tier: ModelTier::Light,
@@ -241,7 +236,7 @@ fn test_pricing_anti_inversion_and_free_model_preservation() {
             },
             // free-trial has input_price = 0.0; cached_price must be 0.0, output inherits or is 0
             ModelSpec {
-    rate_limits: None,
+                rate_limits: None,
                 priority: None,
                 name: "free-trial".to_string(),
                 tier: ModelTier::Light,
@@ -298,15 +293,16 @@ fn test_anthropic_usage_extraction_includes_cached_tokens() {
 #[test]
 fn test_hot_cache_probe_guides_economy_routing() {
     let mut providers = HashMap::new();
-    let prompt_str = "System: Long code repository prompt context for testing prefix cache hit. ".repeat(20);
+    let prompt_str =
+        "System: Long code repository prompt context for testing prefix cache hit. ".repeat(20);
     let prompt = prompt_str.as_str();
 
     // Provider 1: Standard price $1.00, cached $0.10
     let p1 = ProviderConfig {
-    egress_pool: vec![],
-    egress_strategy: "round_robin".to_string(),
+        egress_pool: vec![],
+        egress_strategy: "round_robin".to_string(),
 
-    rate_limits: None,
+        rate_limits: None,
         base_url: "https://api.p1.com".to_string(),
         default_model: "chat".to_string(),
         strategy: "round_robin".to_string(),
@@ -327,10 +323,10 @@ fn test_hot_cache_probe_guides_economy_routing() {
 
     // Provider 2: Standard price $0.80, cached $0.40
     let p2 = ProviderConfig {
-    egress_pool: vec![],
-    egress_strategy: "round_robin".to_string(),
+        egress_pool: vec![],
+        egress_strategy: "round_robin".to_string(),
 
-    rate_limits: None,
+        rate_limits: None,
         base_url: "https://api.p2.com".to_string(),
         default_model: "chat".to_string(),
         strategy: "round_robin".to_string(),
@@ -353,7 +349,6 @@ fn test_hot_cache_probe_guides_economy_routing() {
     providers.insert("p2".to_string(), p2);
 
     let gw_config = GatewayConfig {
-        default_strategy: GatewayRoutingStrategy::Economy,
         providers,
         ..Default::default()
     };
@@ -362,13 +357,25 @@ fn test_hot_cache_probe_guides_economy_routing() {
     let parsed = ParsedRequestModel::parse("chat");
 
     // Case 1: Cold cache (no hot cache recorded). p2 is cheaper without cache (0.80 < 1.00)
-    let cold_targets = state.resolve_routed_targets_with_prompt(&parsed, None, Some(prompt)).unwrap();
+    let cold_targets = state
+        .resolve_routed_targets_with_prompt(
+            &parsed,
+            Some(GatewayRoutingStrategy::Economy),
+            Some(prompt),
+        )
+        .unwrap();
     assert_eq!(cold_targets[0].provider_name, "p2");
 
     // Case 2: Record that p1 dispatched this prompt earlier (now hot in p1)
     state.hot_cache.record_dispatch(prompt, "p1");
 
     // Now resolve with same prompt: p1's cached price ($0.10) beats p2's normal price ($0.80)!
-    let hot_targets = state.resolve_routed_targets_with_prompt(&parsed, None, Some(prompt)).unwrap();
+    let hot_targets = state
+        .resolve_routed_targets_with_prompt(
+            &parsed,
+            Some(GatewayRoutingStrategy::Economy),
+            Some(prompt),
+        )
+        .unwrap();
     assert_eq!(hot_targets[0].provider_name, "p1");
 }

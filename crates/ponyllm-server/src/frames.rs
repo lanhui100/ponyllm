@@ -1,8 +1,8 @@
-use std::sync::Arc;
-use std::time::Duration;
 use ponyllm_core::telemetry::{
     EventEnvelope, FlightFrame, FlightRecorder, GatewayEvent, Projection, StreamFlowDetail,
 };
+use std::sync::Arc;
+use std::time::Duration;
 
 fn latency_of(env: &EventEnvelope) -> Duration {
     Duration::from_secs_f64((env.elapsed_ms / 1000.0).max(0.0))

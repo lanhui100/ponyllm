@@ -1,17 +1,21 @@
 #![allow(clippy::field_reassign_with_default)]
 
-use std::sync::Arc;
 use axum::routing::post;
 use axum::{Json, Router};
-use serde_json::json;
 use ponyllm_core::pool::*;
 use ponyllm_server::{create_app, AppState, GatewayConfig, ProviderConfig};
+use serde_json::json;
+use std::sync::Arc;
 
-fn make_mock_provider_config(base_url: &str, default_model: &str, models: Vec<&str>) -> ProviderConfig {
-        ProviderConfig {
-    egress_pool: vec![],
-    egress_strategy: "round_robin".to_string(),
-    rate_limits: None,
+fn make_mock_provider_config(
+    base_url: &str,
+    default_model: &str,
+    models: Vec<&str>,
+) -> ProviderConfig {
+    ProviderConfig {
+        egress_pool: vec![],
+        egress_strategy: "round_robin".to_string(),
+        rate_limits: None,
         base_url: base_url.to_string(),
         default_model: default_model.to_string(),
         strategy: "round_robin".to_string(),
@@ -110,7 +114,10 @@ async fn test_gateway_chat_and_messages_endpoints() {
         .unwrap();
     assert_eq!(chat_resp.status(), 200);
     let chat_body: serde_json::Value = chat_resp.json().await.unwrap();
-    assert_eq!(chat_body["choices"][0]["message"]["content"], "Echo: Hello from Chat");
+    assert_eq!(
+        chat_body["choices"][0]["message"]["content"],
+        "Echo: Hello from Chat"
+    );
 
     // 5. Test Anthropic Messages endpoint (/v1/messages) translated to OpenAI upstream!
     let ant_resp = client
@@ -176,7 +183,11 @@ async fn test_multi_provider_dynamic_model_routing() {
     );
     config.providers.insert(
         "deepseek-anthropic".to_string(),
-        make_mock_provider_config("https://api.deepseek.com/anthropic", "deepseek-v4-flash", vec![]),
+        make_mock_provider_config(
+            "https://api.deepseek.com/anthropic",
+            "deepseek-v4-flash",
+            vec![],
+        ),
     );
     config.providers.insert(
         "openai".to_string(),
@@ -184,7 +195,11 @@ async fn test_multi_provider_dynamic_model_routing() {
     );
     config.providers.insert(
         "anthropic".to_string(),
-        make_mock_provider_config("https://api.anthropic.com", "claude-3-7-sonnet-20250219", vec![]),
+        make_mock_provider_config(
+            "https://api.anthropic.com",
+            "claude-3-7-sonnet-20250219",
+            vec![],
+        ),
     );
 
     let state = AppState::new(config);
@@ -193,14 +208,18 @@ async fn test_multi_provider_dynamic_model_routing() {
     let (prov_ds, _) = state.resolve_provider("deepseek-v4-flash").unwrap();
     assert!(prov_ds.starts_with("deepseek"));
 
-    let (prov_ant, _) = state.resolve_provider("claude-3-7-sonnet-20250219").unwrap();
+    let (prov_ant, _) = state
+        .resolve_provider("claude-3-7-sonnet-20250219")
+        .unwrap();
     assert_eq!(prov_ant, "anthropic");
 
     // 2. Prefix slash match
     let (prov_pref, _) = state.resolve_provider("openai/gpt-3.5-turbo").unwrap();
     assert_eq!(prov_pref, "openai");
 
-    let (prov_ds_ant, _) = state.resolve_provider("deepseek-anthropic/deepseek-v4-flash").unwrap();
+    let (prov_ds_ant, _) = state
+        .resolve_provider("deepseek-anthropic/deepseek-v4-flash")
+        .unwrap();
     assert_eq!(prov_ds_ant, "deepseek-anthropic");
 
     // 3. Keyword heuristic match
@@ -240,18 +259,27 @@ async fn test_anthropic_upstream_direct_and_cross_routing() {
     let upstream_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let upstream_addr = upstream_listener.local_addr().unwrap();
     tokio::spawn(async move {
-        axum::serve(upstream_listener, mock_anthropic_upstream).await.unwrap();
+        axum::serve(upstream_listener, mock_anthropic_upstream)
+            .await
+            .unwrap();
     });
 
     // 2. Setup gateway pointing to deepseek-anthropic base_url (ends with /anthropic)
-    let pool = Arc::new(KeyPool::new("deepseek-anthropic", RoutingStrategy::Priority));
+    let pool = Arc::new(KeyPool::new(
+        "deepseek-anthropic",
+        RoutingStrategy::Priority,
+    ));
     pool.add_key(ApiKeyEntry::new("ds-key-1", "sk-ds-secret-123456", 1, 10));
 
     let mut config = GatewayConfig::default();
     config.auth_mode = ponyllm_config::AuthMode::Open; // F1 migration: default is now secured; these behavior tests opt into open mode
     config.providers.insert(
         "deepseek-anthropic".to_string(),
-        make_mock_provider_config(&format!("http://{}/anthropic", upstream_addr), "deepseek-v4-flash", vec![]),
+        make_mock_provider_config(
+            &format!("http://{}/anthropic", upstream_addr),
+            "deepseek-v4-flash",
+            vec![],
+        ),
     );
 
     let state = Arc::new(AppState::new(config));
@@ -280,7 +308,10 @@ async fn test_anthropic_upstream_direct_and_cross_routing() {
     assert_eq!(ant_resp.status(), 200);
     let ant_body: serde_json::Value = ant_resp.json().await.unwrap();
     assert_eq!(ant_body["type"], "message");
-    assert_eq!(ant_body["content"][0]["text"], "Anthropic Echo: Direct Anthropic Test");
+    assert_eq!(
+        ant_body["content"][0]["text"],
+        "Anthropic Echo: Direct Anthropic Test"
+    );
 
     // 4. Test OpenAI Chat client requesting /v1/chat/completions -> translated to Anthropic upstream and back!
     let chat_resp = client
@@ -294,7 +325,10 @@ async fn test_anthropic_upstream_direct_and_cross_routing() {
         .unwrap();
     assert_eq!(chat_resp.status(), 200);
     let chat_body: serde_json::Value = chat_resp.json().await.unwrap();
-    assert_eq!(chat_body["choices"][0]["message"]["content"], "Anthropic Echo: Cross Chat Test");
+    assert_eq!(
+        chat_body["choices"][0]["message"]["content"],
+        "Anthropic Echo: Cross Chat Test"
+    );
 }
 
 #[tokio::test]
@@ -303,7 +337,11 @@ async fn test_gateway_models_endpoints() {
     config.auth_mode = ponyllm_config::AuthMode::Open; // F1 migration: default is now secured; these behavior tests opt into open mode
     config.providers.insert(
         "deepseek".to_string(),
-        make_mock_provider_config("https://api.deepseek.com", "deepseek-v4-flash", vec!["deepseek-chat", "deepseek-reasoner"]),
+        make_mock_provider_config(
+            "https://api.deepseek.com",
+            "deepseek-v4-flash",
+            vec!["deepseek-chat", "deepseek-reasoner"],
+        ),
     );
     config.providers.insert(
         "openai".to_string(),
@@ -365,7 +403,10 @@ async fn test_gateway_models_endpoints() {
 
     // 4. Test GET /v1/models/:model_id for non-existent model (404)
     let not_found_resp = client
-        .get(format!("http://{}/v1/models/non-existent-model", gateway_addr))
+        .get(format!(
+            "http://{}/v1/models/non-existent-model",
+            gateway_addr
+        ))
         .send()
         .await
         .unwrap();
@@ -491,9 +532,13 @@ async fn test_model_default_sampling_applied() {
 
     let mut config = GatewayConfig::default();
     config.auth_mode = ponyllm_config::AuthMode::Open; // F1 migration: default is now secured; these behavior tests opt into open mode
-    let mut prov = make_mock_provider_config(&format!("http://{}", upstream_addr), "gpt-4o", vec!["gpt-4o"]);
+    let mut prov = make_mock_provider_config(
+        &format!("http://{}", upstream_addr),
+        "gpt-4o",
+        vec!["gpt-4o"],
+    );
     prov.model_specs.push(ponyllm_server::ModelSpec {
-    rate_limits: None,
+        rate_limits: None,
         priority: None,
         name: "gpt-4o".to_string(),
         temperature: Some(0.7),
@@ -524,7 +569,10 @@ async fn test_model_default_sampling_applied() {
         .unwrap();
     assert_eq!(resp.status(), 200);
     let body: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(body["choices"][0]["message"]["content"], "t=0.700000 p=0.900000");
+    assert_eq!(
+        body["choices"][0]["message"]["content"],
+        "t=0.700000 p=0.900000"
+    );
 
     // 2. Explicit request values win over model defaults
     let resp2 = client
@@ -540,7 +588,10 @@ async fn test_model_default_sampling_applied() {
         .unwrap();
     assert_eq!(resp2.status(), 200);
     let body2: serde_json::Value = resp2.json().await.unwrap();
-    assert_eq!(body2["choices"][0]["message"]["content"], "t=0.100000 p=0.200000");
+    assert_eq!(
+        body2["choices"][0]["message"]["content"],
+        "t=0.100000 p=0.200000"
+    );
 }
 
 #[tokio::test]
@@ -576,14 +627,24 @@ async fn test_gateway_ttfb_timeout_returns_503_and_provider_override() {
     config.max_retries = 1;
 
     // Provider 1: tight TTFB timeout of 1 second
-    let mut p_slow = make_mock_provider_config(&format!("http://{}", mock_addr), "test-model", vec!["slow-model"]);
+    let mut p_slow = make_mock_provider_config(
+        &format!("http://{}", mock_addr),
+        "test-model",
+        vec!["slow-model"],
+    );
     p_slow.ttfb_timeout_secs = Some(1);
     config.providers.insert("slow_prov".to_string(), p_slow);
 
     // Provider 2: TTFB timeout disabled (0)
-    let mut p_disabled = make_mock_provider_config(&format!("http://{}", mock_addr), "test-model", vec!["disabled-model"]);
+    let mut p_disabled = make_mock_provider_config(
+        &format!("http://{}", mock_addr),
+        "test-model",
+        vec!["disabled-model"],
+    );
     p_disabled.ttfb_timeout_secs = Some(0);
-    config.providers.insert("disabled_prov".to_string(), p_disabled);
+    config
+        .providers
+        .insert("disabled_prov".to_string(), p_disabled);
 
     let state = Arc::new(AppState::new(config));
     let pool_slow = Arc::new(KeyPool::new("slow_prov", RoutingStrategy::RoundRobin));
@@ -616,7 +677,10 @@ async fn test_gateway_ttfb_timeout_returns_503_and_provider_override() {
     let body_slow: serde_json::Value = resp_slow.json().await.unwrap();
     assert_eq!(body_slow["error"]["code"], "upstream_unavailable");
     assert!(
-        body_slow["error"]["message"].as_str().unwrap().contains("TTFB timeout"),
+        body_slow["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("TTFB timeout"),
         "expected TTFB timeout in error message, got: {:?}",
         body_slow
     );

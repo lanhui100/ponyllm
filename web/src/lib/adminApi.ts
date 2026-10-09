@@ -6,7 +6,6 @@ import type {
   ModelView,
   KeyView,
   KeyTestView,
-  StrategyView,
   AutoModelsView,
   PutAutoModelsPayload,
   CreateProviderPayload,
@@ -16,7 +15,6 @@ import type {
   CreateKeyPayload,
   UpdateKeyPayload,
   CreateKeyResponse,
-  PutStrategyPayload,
   AntigravityAuthUrlView,
   AntigravityPendingView,
   AuthorizeAntigravityPayload,
@@ -66,10 +64,6 @@ export const adminApi = {
 
   getKeys() {
     return alova.Get<KeyView[]>('/api/admin/keys');
-  },
-
-  getStrategy() {
-    return alova.Get<StrategyView>('/api/admin/strategy');
   },
 
   getAutoModels() {
@@ -162,12 +156,6 @@ export const adminApi = {
 
   testKey(id: string) {
     return alova.Post<KeyTestView>(`/api/admin/keys/${encodeURIComponent(id)}/test`);
-  },
-
-  updateStrategy(payload: PutStrategyPayload, ifMatchVersion?: number | string) {
-    return alova.Put<StrategyView>('/api/admin/strategy', payload, {
-      headers: ifMatchHeaders(ifMatchVersion),
-    });
   },
 
   /** Issue a scoped gateway key: plaintext returned ONCE (no-store server side). */

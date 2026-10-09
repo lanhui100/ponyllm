@@ -40,9 +40,15 @@ async fn r3_positive_egress_verdict_ttl_short() {
     let state = Arc::new(AppState::new(GatewayConfig::default()));
     let url = "http://203.0.113.88/"; // TEST-NET-3 字面量：放行且无需 DNS
 
-    assert!(state.data_plane_egress_guard(url).await.is_ok(), "正向判定应放行");
+    assert!(
+        state.data_plane_egress_guard(url).await.is_ok(),
+        "正向判定应放行"
+    );
 
-    let cache = state.egress_guard_cache.lock().unwrap_or_else(|p| p.into_inner());
+    let cache = state
+        .egress_guard_cache
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     let entry = cache
         .get(&(false, "203.0.113.88".to_string())) // direct 模式（直连内核）
         .cloned()
@@ -63,9 +69,15 @@ async fn r3_negative_egress_verdict_ttl_bounded() {
     let state = Arc::new(AppState::new(GatewayConfig::default()));
     let url = "http://10.0.0.9/"; // 私有段：阻断
 
-    assert!(state.data_plane_egress_guard(url).await.is_err(), "负向判定应阻断");
+    assert!(
+        state.data_plane_egress_guard(url).await.is_err(),
+        "负向判定应阻断"
+    );
 
-    let cache = state.egress_guard_cache.lock().unwrap_or_else(|p| p.into_inner());
+    let cache = state
+        .egress_guard_cache
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     let entry = cache
         .get(&(false, "10.0.0.9".to_string())) // direct 模式（直连内核）
         .cloned()

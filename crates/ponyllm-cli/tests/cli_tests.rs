@@ -1112,10 +1112,11 @@ fn test_gateway_keys_commands_parse() {
     }
     let issue = Cli::try_parse_from(["ponyllm", "keys", "issue", "--scope", "inference", "--id", "agent-ci-1"]).unwrap();
     match issue.command {
-        Commands::Keys(KeysCommands::Issue { scope, id, config }) => {
+        Commands::Keys(KeysCommands::Issue { scope, id, config, user }) => {
             assert_eq!(scope, "inference");
             assert_eq!(id, Some("agent-ci-1".to_string()));
             assert_eq!(config, None);
+            assert_eq!(user, None);
         }
         _ => panic!("Expected Keys::Issue"),
     }

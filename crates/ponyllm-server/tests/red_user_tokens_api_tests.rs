@@ -64,7 +64,9 @@ impl Gh {
         cfg_file.gateway.gateway_keys = vec![e_admin.clone()];
         cfg_file.gateway.users = vec![alice.clone(), bob.clone()];
         cfg_file.providers = HashMap::new();
-        cfg_file.save_to_path(config_path.to_str().unwrap()).unwrap();
+        cfg_file
+            .save_to_path(config_path.to_str().unwrap())
+            .unwrap();
 
         let mut gw = GatewayConfig::default();
         gw.bind_addr = "127.0.0.1:8080".into();
@@ -99,7 +101,11 @@ async fn login_token(c: &reqwest::Client, h: &Gh, user: &str, pass: &str) -> Str
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK, "login {user} must 200 (red fails here)");
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "login {user} must 200 (red fails here)"
+    );
     let v: Value = resp.json().await.unwrap();
     v["access_token"].as_str().unwrap().to_string()
 }
@@ -122,12 +128,24 @@ async fn create_token_returns_201_with_one_time_plaintext() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::CREATED, "token creation must be 201 (red fails)");
+    assert_eq!(
+        resp.status(),
+        StatusCode::CREATED,
+        "token creation must be 201 (red fails)"
+    );
     let v: Value = resp.json().await.unwrap();
     let key_id = v["key_id"].as_str().expect("key_id present");
-    let api_key = v["api_key"].as_str().expect("one-time plaintext api_key present");
-    assert!(api_key.starts_with("sk-pony-"), "self-service token must be sk-pony-*: {api_key}");
-    assert!(!key_id.is_empty(), "key_id must be a non-empty value given by B002");
+    let api_key = v["api_key"]
+        .as_str()
+        .expect("one-time plaintext api_key present");
+    assert!(
+        api_key.starts_with("sk-pony-"),
+        "self-service token must be sk-pony-*: {api_key}"
+    );
+    assert!(
+        !key_id.is_empty(),
+        "key_id must be a non-empty value given by B002"
+    );
     assert!(v["created_by"].is_null() || v["created_by"].as_str().is_some());
     let list: Value = c
         .get(h.url("/api/user/tokens"))
@@ -171,7 +189,10 @@ async fn list_own_tokens_includes_used_tokens() {
     let arr = v.as_array().expect("tokens list is a JSON array");
     assert!(!arr.is_empty(), "alice must see her created token");
     for row in arr {
-        assert!(row.get("used_tokens").is_some(), "each token row must expose used_tokens");
+        assert!(
+            row.get("used_tokens").is_some(),
+            "each token row must expose used_tokens"
+        );
         assert!(row.get("name").is_some());
     }
 }
@@ -202,7 +223,11 @@ async fn update_own_token_returns_200() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK, "update own token must be 200 (red fails)");
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "update own token must be 200 (red fails)"
+    );
 }
 
 /// 契约#7：删除自己的 token → 200。
@@ -230,7 +255,11 @@ async fn delete_own_token_returns_200() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK, "delete own token must be 200 (red fails)");
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "delete own token must be 200 (red fails)"
+    );
 }
 
 /// 契约#8：rotate → 200 {api_key 新明文}（旧 key 立即失效由 B002 保证，这里断言新明文）。
@@ -259,7 +288,11 @@ async fn rotate_token_returns_new_plaintext() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK, "rotate must be 200 (red fails)");
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "rotate must be 200 (red fails)"
+    );
     let v: Value = resp.json().await.unwrap();
     let new_plain = v["api_key"].as_str().expect("new plaintext api_key");
     assert_ne!(new_plain, old_plain, "rotation must issue a NEW plaintext");
@@ -322,5 +355,8 @@ async fn cannot_touch_other_users_token_404() {
         .await
         .unwrap();
     let raw = serde_json::to_string(&bob_list).unwrap();
-    assert!(!raw.contains(key_id), "token ownership must be strictly per-user");
+    assert!(
+        !raw.contains(key_id),
+        "token ownership must be strictly per-user"
+    );
 }

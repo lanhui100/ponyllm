@@ -58,7 +58,11 @@ impl SessionStore {
 
     /// The effective TTL in whole seconds (used for the cookie Max-Age).
     pub fn ttl_secs(&self) -> i64 {
-        self.inner.lock().unwrap_or_else(|p| p.into_inner()).ttl.as_secs() as i64
+        self.inner
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .ttl
+            .as_secs() as i64
     }
 
     fn lock_inner(&self) -> std::sync::MutexGuard<'_, Inner> {

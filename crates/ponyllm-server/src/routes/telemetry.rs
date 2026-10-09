@@ -1,16 +1,16 @@
-use std::collections::BTreeMap;
-use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use crate::state::AppState;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
-use serde::{Deserialize, Serialize};
 use ponyllm_core::pool::ProviderFlowSnapshot;
 use ponyllm_core::telemetry::{
     ConnectivityBarSeries, StreamFlowSummary, TimeseriesHistoryResponse,
 };
-use crate::state::AppState;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// H3: full request/response/error text is only served when the deployment
 /// opted into admin writes. A read-only gateway (`admin_write_enabled=false`,
@@ -60,14 +60,19 @@ pub async fn handle_get_recorder_frame(
         return resp;
     }
     match state.flight_recorder.get_frame(&request_id) {
-        Some(frame) => (axum::http::StatusCode::OK, Json(serde_json::to_value(frame).unwrap())).into_response(),
+        Some(frame) => (
+            axum::http::StatusCode::OK,
+            Json(serde_json::to_value(frame).unwrap()),
+        )
+            .into_response(),
         None => (
             axum::http::StatusCode::NOT_FOUND,
             Json(serde_json::json!({
                 "error": "frame_not_found",
                 "message": format!("Frame with request_id '{}' not found", request_id)
             })),
-        ).into_response(),
+        )
+            .into_response(),
     }
 }
 
@@ -79,13 +84,18 @@ pub async fn handle_get_metrics(State(state): State<Arc<AppState>>) -> impl Into
         // 1. 本地增量由后台任务异步定期（15s）刷盘，读请求路径上不再同步执行阻塞的 flush_deltas。
         //    只在 tracker 中记录本地快照（纯内存操作），确保增量被暂存待后台 flush。
         let buckets = state.timeseries_proj.snapshot_buckets();
-        state.cluster_telemetry_tracker.record_local_snapshot(&buckets);
+        state
+            .cluster_telemetry_tracker
+            .record_local_snapshot(&buckets);
 
         // 2. 查询 PG 施加短超时快速降级（200ms），一旦遇到 PG 锁争用或连接排队立即降级返回本地内存快照
         match tokio::time::timeout(CLUSTER_QUERY_TIMEOUT, store.query_cluster_metrics()).await {
             Ok(Ok(cluster_summary)) => return Json(cluster_summary).into_response(),
             Ok(Err(e)) => {
-                tracing::warn!("failed to query cluster metrics from PG: {}, falling back to local snapshot", e);
+                tracing::warn!(
+                    "failed to query cluster metrics from PG: {}, falling back to local snapshot",
+                    e
+                );
             }
             Err(_) => {
                 tracing::warn!("querying cluster metrics from PG timed out ({:?}), falling back to local snapshot", CLUSTER_QUERY_TIMEOUT);
@@ -96,7 +106,9 @@ pub async fn handle_get_metrics(State(state): State<Arc<AppState>>) -> impl Into
     Json(summary).into_response()
 }
 
-pub async fn handle_get_prometheus_metrics(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn handle_get_prometheus_metrics(
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
     let summary = state.metrics.get_summary();
 
     let mut body = String::with_capacity(2048);
@@ -104,73 +116,141 @@ pub async fn handle_get_prometheus_metrics(State(state): State<Arc<AppState>>) -
     // Requests
     body.push_str("# HELP ponyllm_requests_total Total number of API requests handled.\n");
     body.push_str("# TYPE ponyllm_requests_total counter\n");
-    body.push_str(&format!("ponyllm_requests_total {}\n", summary.total_requests));
+    body.push_str(&format!(
+        "ponyllm_requests_total {}\n",
+        summary.total_requests
+    ));
 
     body.push_str("# HELP ponyllm_requests_successful_total Total number of successful API requests handled.\n");
     body.push_str("# TYPE ponyllm_requests_successful_total counter\n");
-    body.push_str(&format!("ponyllm_requests_successful_total {}\n", summary.successful_requests));
+    body.push_str(&format!(
+        "ponyllm_requests_successful_total {}\n",
+        summary.successful_requests
+    ));
 
-    body.push_str("# HELP ponyllm_requests_failed_total Total number of failed API requests handled.\n");
+    body.push_str(
+        "# HELP ponyllm_requests_failed_total Total number of failed API requests handled.\n",
+    );
     body.push_str("# TYPE ponyllm_requests_failed_total counter\n");
-    body.push_str(&format!("ponyllm_requests_failed_total {}\n", summary.failed_requests));
+    body.push_str(&format!(
+        "ponyllm_requests_failed_total {}\n",
+        summary.failed_requests
+    ));
 
-    body.push_str("# HELP ponyllm_failover_events_total Total number of upstream failover/retry events.\n");
+    body.push_str(
+        "# HELP ponyllm_failover_events_total Total number of upstream failover/retry events.\n",
+    );
     body.push_str("# TYPE ponyllm_failover_events_total counter\n");
-    body.push_str(&format!("ponyllm_failover_events_total {}\n", summary.total_failover));
+    body.push_str(&format!(
+        "ponyllm_failover_events_total {}\n",
+        summary.total_failover
+    ));
 
     // Tokens
     body.push_str("# HELP ponyllm_tokens_total Total tokens processed by type.\n");
     body.push_str("# TYPE ponyllm_tokens_total counter\n");
-    body.push_str(&format!("ponyllm_tokens_total{{type=\"prompt\"}} {}\n", summary.prompt_tokens));
-    body.push_str(&format!("ponyllm_tokens_total{{type=\"completion\"}} {}\n", summary.completion_tokens));
-    body.push_str(&format!("ponyllm_tokens_total{{type=\"cached\"}} {}\n", summary.cached_tokens));
-    body.push_str(&format!("ponyllm_tokens_total{{type=\"total\"}} {}\n", summary.total_tokens));
+    body.push_str(&format!(
+        "ponyllm_tokens_total{{type=\"prompt\"}} {}\n",
+        summary.prompt_tokens
+    ));
+    body.push_str(&format!(
+        "ponyllm_tokens_total{{type=\"completion\"}} {}\n",
+        summary.completion_tokens
+    ));
+    body.push_str(&format!(
+        "ponyllm_tokens_total{{type=\"cached\"}} {}\n",
+        summary.cached_tokens
+    ));
+    body.push_str(&format!(
+        "ponyllm_tokens_total{{type=\"total\"}} {}\n",
+        summary.total_tokens
+    ));
 
     // Streaming & Latency
     body.push_str("# HELP ponyllm_streams_total Total number of streaming requests.\n");
     body.push_str("# TYPE ponyllm_streams_total counter\n");
-    body.push_str(&format!("ponyllm_streams_total {}\n", summary.stream.stream_count));
+    body.push_str(&format!(
+        "ponyllm_streams_total {}\n",
+        summary.stream.stream_count
+    ));
 
     if let Some(ttft) = summary.stream.avg_ttft_ms {
-        body.push_str("# HELP ponyllm_stream_ttft_ms_avg Average time to first token in milliseconds.\n");
+        body.push_str(
+            "# HELP ponyllm_stream_ttft_ms_avg Average time to first token in milliseconds.\n",
+        );
         body.push_str("# TYPE ponyllm_stream_ttft_ms_avg gauge\n");
         body.push_str(&format!("ponyllm_stream_ttft_ms_avg {:.2}\n", ttft));
     }
 
     if let Some(tps) = summary.stream.avg_tps {
-        body.push_str("# HELP ponyllm_stream_tps_avg Average streaming generation tokens per second.\n");
+        body.push_str(
+            "# HELP ponyllm_stream_tps_avg Average streaming generation tokens per second.\n",
+        );
         body.push_str("# TYPE ponyllm_stream_tps_avg gauge\n");
         body.push_str(&format!("ponyllm_stream_tps_avg {:.2}\n", tps));
     }
 
     body.push_str("# HELP ponyllm_stream_stalls_total Total number of streaming stall events.\n");
     body.push_str("# TYPE ponyllm_stream_stalls_total counter\n");
-    body.push_str(&format!("ponyllm_stream_stalls_total {}\n", summary.stream.total_stalls));
+    body.push_str(&format!(
+        "ponyllm_stream_stalls_total {}\n",
+        summary.stream.total_stalls
+    ));
 
     // HA Operational Counters
-    body.push_str("# HELP ponyllm_ha_refresh_lock_acquired_total Total number of refresh locks acquired.\n");
+    body.push_str(
+        "# HELP ponyllm_ha_refresh_lock_acquired_total Total number of refresh locks acquired.\n",
+    );
     body.push_str("# TYPE ponyllm_ha_refresh_lock_acquired_total counter\n");
-    body.push_str(&format!("ponyllm_ha_refresh_lock_acquired_total {}\n", summary.ha_ops.refresh_lock_acquired_total));
+    body.push_str(&format!(
+        "ponyllm_ha_refresh_lock_acquired_total {}\n",
+        summary.ha_ops.refresh_lock_acquired_total
+    ));
 
-    body.push_str("# HELP ponyllm_ha_refresh_lock_skipped_total Total number of refresh locks skipped.\n");
+    body.push_str(
+        "# HELP ponyllm_ha_refresh_lock_skipped_total Total number of refresh locks skipped.\n",
+    );
     body.push_str("# TYPE ponyllm_ha_refresh_lock_skipped_total counter\n");
-    body.push_str(&format!("ponyllm_ha_refresh_lock_skipped_total {}\n", summary.ha_ops.refresh_lock_skipped_total));
+    body.push_str(&format!(
+        "ponyllm_ha_refresh_lock_skipped_total {}\n",
+        summary.ha_ops.refresh_lock_skipped_total
+    ));
 
-    body.push_str("# HELP ponyllm_ha_refresh_lock_error_total Total number of refresh lock errors.\n");
+    body.push_str(
+        "# HELP ponyllm_ha_refresh_lock_error_total Total number of refresh lock errors.\n",
+    );
     body.push_str("# TYPE ponyllm_ha_refresh_lock_error_total counter\n");
-    body.push_str(&format!("ponyllm_ha_refresh_lock_error_total {}\n", summary.ha_ops.refresh_lock_error_total));
+    body.push_str(&format!(
+        "ponyllm_ha_refresh_lock_error_total {}\n",
+        summary.ha_ops.refresh_lock_error_total
+    ));
 
-    body.push_str("# HELP ponyllm_ha_refresh_persist_failure_total Total token write-back failures.\n");
+    body.push_str(
+        "# HELP ponyllm_ha_refresh_persist_failure_total Total token write-back failures.\n",
+    );
     body.push_str("# TYPE ponyllm_ha_refresh_persist_failure_total counter\n");
-    body.push_str(&format!("ponyllm_ha_refresh_persist_failure_total {}\n", summary.ha_ops.refresh_persist_failure_total));
+    body.push_str(&format!(
+        "ponyllm_ha_refresh_persist_failure_total {}\n",
+        summary.ha_ops.refresh_persist_failure_total
+    ));
 
-    body.push_str("# HELP ponyllm_ha_config_reload_total Total number of runtime config atomic reloads.\n");
+    body.push_str(
+        "# HELP ponyllm_ha_config_reload_total Total number of runtime config atomic reloads.\n",
+    );
     body.push_str("# TYPE ponyllm_ha_config_reload_total counter\n");
-    body.push_str(&format!("ponyllm_ha_config_reload_total {}\n", summary.ha_ops.config_reload_total));
+    body.push_str(&format!(
+        "ponyllm_ha_config_reload_total {}\n",
+        summary.ha_ops.config_reload_total
+    ));
 
-    body.push_str("# HELP ponyllm_ha_refresh_lock_hold_seconds Last observed refresh-lock hold duration.\n");
+    body.push_str(
+        "# HELP ponyllm_ha_refresh_lock_hold_seconds Last observed refresh-lock hold duration.\n",
+    );
     body.push_str("# TYPE ponyllm_ha_refresh_lock_hold_seconds gauge\n");
-    body.push_str(&format!("ponyllm_ha_refresh_lock_hold_seconds {}\n", summary.ha_ops.refresh_lock_hold_seconds));
+    body.push_str(&format!(
+        "ponyllm_ha_refresh_lock_hold_seconds {}\n",
+        summary.ha_ops.refresh_lock_hold_seconds
+    ));
 
     // Active Provider Uptime & Latencies
     body.push_str("# HELP ponyllm_provider_latency_ms Estimated total latency per provider.\n");
@@ -181,14 +261,23 @@ pub async fn handle_get_prometheus_metrics(State(state): State<Arc<AppState>>) -
     };
     for provider_name in provider_names {
         // Sanitize provider name to ensure label value safety (escape backslash and quote)
-        let safe_name = provider_name.replace('\\', "\\\\").replace('\"', "\\\"").replace('\n', "");
+        let safe_name = provider_name
+            .replace('\\', "\\\\")
+            .replace('\"', "\\\"")
+            .replace('\n', "");
         let node_metric = state.get_or_create_node_metrics(&provider_name);
         let est_latency = ponyllm_core::SpeedScorer::estimate_total_latency_ms(&node_metric, 512);
-        body.push_str(&format!("ponyllm_provider_latency_ms{{provider=\"{}\"}} {}\n", safe_name, est_latency));
+        body.push_str(&format!(
+            "ponyllm_provider_latency_ms{{provider=\"{}\"}} {}\n",
+            safe_name, est_latency
+        ));
     }
 
     (
-        [(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
         body,
     )
 }
@@ -232,7 +321,8 @@ pub async fn handle_get_stream(State(state): State<Arc<AppState>>) -> impl IntoR
     // Providers explicitly configured, pooled, or recorded are included, but any provider
     // that has been deleted (and thus removed from config, pools, stream_proj, and connectivity_sampler)
     // will naturally not be present.
-    let mut all_provider_names: std::collections::HashSet<String> = base_providers.keys().cloned().collect();
+    let mut all_provider_names: std::collections::HashSet<String> =
+        base_providers.keys().cloned().collect();
     {
         let cfg = state.config.read();
         for k in cfg.providers.keys() {
@@ -255,11 +345,7 @@ pub async fn handle_get_stream(State(state): State<Arc<AppState>>) -> impl IntoR
     for name in all_provider_names {
         let snap = base_providers.remove(&name).unwrap_or_default();
         let uptime_bars = state.connectivity_sampler.get_series(&name, now_ms);
-        let total_tokens = history_24h
-            .provider_tokens
-            .get(&name)
-            .copied()
-            .unwrap_or(0);
+        let total_tokens = history_24h.provider_tokens.get(&name).copied().unwrap_or(0);
         let prompt_tokens = history_24h
             .provider_prompt_tokens
             .get(&name)
@@ -333,13 +419,19 @@ pub async fn handle_get_history(
         // 1. 本地增量由后台任务异步定期（15s）刷盘，读请求路径上不再同步执行阻塞的 flush_deltas。
         //    只在 tracker 中记录本地快照（纯内存操作），确保增量被暂存待后台 flush。
         let buckets = state.timeseries_proj.snapshot_buckets();
-        state.cluster_telemetry_tracker.record_local_snapshot(&buckets);
+        state
+            .cluster_telemetry_tracker
+            .record_local_snapshot(&buckets);
 
         // 2. 查询 PG 施加短超时快速降级（200ms），一旦遇到 PG 锁争用或连接排队立即降级返回本地内存快照
-        match tokio::time::timeout(CLUSTER_QUERY_TIMEOUT, store.query_history(range, now_ms)).await {
+        match tokio::time::timeout(CLUSTER_QUERY_TIMEOUT, store.query_history(range, now_ms)).await
+        {
             Ok(Ok(cluster_history)) => return Json(cluster_history).into_response(),
             Ok(Err(e)) => {
-                tracing::warn!("failed to query cluster history from PG: {}, falling back to local snapshot", e);
+                tracing::warn!(
+                    "failed to query cluster history from PG: {}, falling back to local snapshot",
+                    e
+                );
             }
             Err(_) => {
                 tracing::warn!("querying cluster history from PG timed out ({:?}), falling back to local snapshot", CLUSTER_QUERY_TIMEOUT);

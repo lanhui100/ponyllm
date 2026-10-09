@@ -34,10 +34,9 @@ async fn test_model_fallbacks_routing() {
     let state = AppState::new(config);
 
     let parsed = ParsedRequestModel::parse("gemini-3.8-flash-high");
-    let targets = state.resolve_routed_targets(
-        &parsed,
-        Some(GatewayRoutingStrategy::Speed),
-    ).unwrap();
+    let targets = state
+        .resolve_routed_targets(&parsed, Some(GatewayRoutingStrategy::Speed))
+        .unwrap();
 
     assert_eq!(targets.len(), 2, "Expected 2 targets (primary + fallback)");
     assert_eq!(targets[0].physical_model, "gemini-3.8-flash-high");
@@ -82,10 +81,9 @@ async fn test_model_fallbacks_chain_and_cycle_prevention() {
     let state = AppState::new(config);
 
     let parsed = ParsedRequestModel::parse("model-a");
-    let targets = state.resolve_routed_targets(
-        &parsed,
-        Some(GatewayRoutingStrategy::Speed),
-    ).unwrap();
+    let targets = state
+        .resolve_routed_targets(&parsed, Some(GatewayRoutingStrategy::Speed))
+        .unwrap();
 
     // Resolves model-a -> model-b -> model-c cleanly without duplicate or infinite loop
     assert_eq!(targets.len(), 3);
@@ -105,16 +103,14 @@ async fn test_gemini_38_flash_multiprovider_deepseek_fallbacks() {
         default_model: "gemini-3.8-flash".to_string(),
         strategy: "latency".to_string(),
         models: vec!["gemini-3.8-flash".to_string()],
-        model_specs: vec![
-            ModelSpec {
-                name: "gemini-3.8-flash".to_string(),
-                fallbacks: vec![
-                    "deepseek-v4-flash".to_string(),
-                    "deepseek-flash".to_string(),
-                ],
-                ..ModelSpec::default()
-            },
-        ],
+        model_specs: vec![ModelSpec {
+            name: "gemini-3.8-flash".to_string(),
+            fallbacks: vec![
+                "deepseek-v4-flash".to_string(),
+                "deepseek-flash".to_string(),
+            ],
+            ..ModelSpec::default()
+        }],
         ..ProviderConfig::default()
     };
 
@@ -141,8 +137,12 @@ async fn test_gemini_38_flash_multiprovider_deepseek_fallbacks() {
         ..ProviderConfig::default()
     };
 
-    config.providers.insert("antigravity".to_string(), antigravity_prov);
-    config.providers.insert("deepseek".to_string(), deepseek_prov);
+    config
+        .providers
+        .insert("antigravity".to_string(), antigravity_prov);
+    config
+        .providers
+        .insert("deepseek".to_string(), deepseek_prov);
 
     let state = AppState::new(config);
 
@@ -151,7 +151,11 @@ async fn test_gemini_38_flash_multiprovider_deepseek_fallbacks() {
         .resolve_routed_targets(&parsed, Some(GatewayRoutingStrategy::Speed))
         .unwrap();
 
-    assert_eq!(targets.len(), 3, "Expected 3 targets: primary + 2 fallbacks");
+    assert_eq!(
+        targets.len(),
+        3,
+        "Expected 3 targets: primary + 2 fallbacks"
+    );
 
     assert_eq!(targets[0].provider_name, "antigravity");
     assert_eq!(targets[0].physical_model, "gemini-3.8-flash");
@@ -162,4 +166,3 @@ async fn test_gemini_38_flash_multiprovider_deepseek_fallbacks() {
     assert_eq!(targets[2].provider_name, "deepseek");
     assert_eq!(targets[2].physical_model, "deepseek-flash");
 }
-

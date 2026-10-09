@@ -1,6 +1,8 @@
 use axum::routing::post;
 use axum::{Json, Router};
-use ponyllm_core::pool::{ApiKeyEntry, BillingMode, KeyPool, ModelTier, RoutingStrategy, UpstreamProtocol};
+use ponyllm_core::pool::{
+    ApiKeyEntry, BillingMode, KeyPool, ModelTier, RoutingStrategy, UpstreamProtocol,
+};
 use ponyllm_protocol::openai::chat::ChatCompletionResponse;
 use ponyllm_server::app::create_app;
 use ponyllm_server::config::{GatewayConfig, ModelSpec, ProviderConfig};
@@ -16,10 +18,10 @@ fn make_multimodal_provider(
     input_types: Vec<String>,
     tier: ModelTier,
 ) -> ProviderConfig {
-        ProviderConfig {
-    egress_pool: vec![],
-    egress_strategy: "round_robin".to_string(),
-    rate_limits: None,
+    ProviderConfig {
+        egress_pool: vec![],
+        egress_strategy: "round_robin".to_string(),
+        rate_limits: None,
         base_url,
         default_model: model.to_string(),
         strategy: "round_robin".to_string(),
@@ -29,7 +31,7 @@ fn make_multimodal_provider(
         output_price: 0.2,
         models: vec![model.to_string()],
         model_specs: vec![ModelSpec {
-    rate_limits: None,
+            rate_limits: None,
             priority: None,
             name: model.to_string(),
             tier,
@@ -141,16 +143,28 @@ async fn test_chat_multimodal_to_responses_upstream_preserves_images() {
     );
 
     // Verify upstream received the image part intact, NOT dropped!
-    let upstream_req = captured_input.lock().clone().expect("Upstream must receive request");
-    let input_items = upstream_req["input"].as_array().expect("Input must be array of items");
+    let upstream_req = captured_input
+        .lock()
+        .clone()
+        .expect("Upstream must receive request");
+    let input_items = upstream_req["input"]
+        .as_array()
+        .expect("Input must be array of items");
     let user_msg = &input_items[0];
-    let content_parts = user_msg["content"].as_array().expect("Content must be array of parts");
-    
+    let content_parts = user_msg["content"]
+        .as_array()
+        .expect("Content must be array of parts");
+
     let has_image_part = content_parts.iter().any(|part| {
         part.get("type").and_then(|t| t.as_str()) == Some("input_image")
-            && part.get("image_url").and_then(|u| u.as_str()) == Some("https://example.com/test.png")
+            && part.get("image_url").and_then(|u| u.as_str())
+                == Some("https://example.com/test.png")
     });
-    assert!(has_image_part, "Upstream request must preserve input_image part! Got: {}", upstream_req);
+    assert!(
+        has_image_part,
+        "Upstream request must preserve input_image part! Got: {}",
+        upstream_req
+    );
 }
 
 #[tokio::test]
@@ -217,7 +231,10 @@ async fn test_chat_multimodal_to_text_only_model_rejected_with_400() {
     assert_eq!(resp.status(), 400);
     let err_body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(err_body["error"]["code"], "unsupported_modality");
-    assert!(err_body["error"]["message"].as_str().unwrap().contains("does not support modality 'image'"));
+    assert!(err_body["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("does not support modality 'image'"));
     // Verify upstream was NOT hit at all
     assert_eq!(call_count.load(Ordering::SeqCst), 0);
 }
@@ -267,7 +284,10 @@ async fn test_responses_multimodal_to_text_only_model_rejected_with_400() {
     assert_eq!(resp.status(), 400);
     let err_body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(err_body["error"]["code"], "unsupported_modality");
-    assert!(err_body["error"]["message"].as_str().unwrap().contains("does not support modality 'image'"));
+    assert!(err_body["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("does not support modality 'image'"));
 }
 
 #[tokio::test]
@@ -345,41 +365,58 @@ async fn test_messages_multimodal_to_responses_upstream_preserves_images() {
     assert_eq!(resp.status(), 200);
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["role"], "assistant");
-    assert_eq!(body["content"][0]["text"], "Anthropic image transformed to responses cleanly");
+    assert_eq!(
+        body["content"][0]["text"],
+        "Anthropic image transformed to responses cleanly"
+    );
 
-    let upstream_req = captured_input.lock().clone().expect("Upstream must receive request");
-    let input_items = upstream_req["input"].as_array().expect("Input must be array of items");
+    let upstream_req = captured_input
+        .lock()
+        .clone()
+        .expect("Upstream must receive request");
+    let input_items = upstream_req["input"]
+        .as_array()
+        .expect("Input must be array of items");
     let user_msg = &input_items[0];
-    let content_parts = user_msg["content"].as_array().expect("Content must be array of parts");
+    let content_parts = user_msg["content"]
+        .as_array()
+        .expect("Content must be array of parts");
 
     let has_image_part = content_parts.iter().any(|part| {
         part.get("type").and_then(|t| t.as_str()) == Some("input_image")
-            && part.get("image_url").and_then(|u| u.as_str()).map(|s| s.starts_with("data:image/jpeg;base64,")).unwrap_or(false)
+            && part
+                .get("image_url")
+                .and_then(|u| u.as_str())
+                .map(|s| s.starts_with("data:image/jpeg;base64,"))
+                .unwrap_or(false)
     });
-    assert!(has_image_part, "Upstream request must preserve translated data URL image! Got: {}", upstream_req);
+    assert!(
+        has_image_part,
+        "Upstream request must preserve translated data URL image! Got: {}",
+        upstream_req
+    );
 }
 
 #[tokio::test]
 async fn test_auto_routing_modality_awareness_and_tier_elevation() {
-    let mock = Router::new()
-        .route(
-            "/v1/chat/completions",
-            post(|Json(req): Json<serde_json::Value>| async move {
-                let model = req["model"].as_str().unwrap_or("unknown");
-                axum::Json(json!({
-                    "id": "chat-mock",
-                    "object": "chat.completion",
-                    "created": 1234567,
-                    "model": model,
-                    "choices": [{
-                        "index": 0,
-                        "message": {"role": "assistant", "content": format!("Answered by {}", model)},
-                        "finish_reason": "stop"
-                    }],
-                    "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
-                }))
-            }),
-        );
+    let mock = Router::new().route(
+        "/v1/chat/completions",
+        post(|Json(req): Json<serde_json::Value>| async move {
+            let model = req["model"].as_str().unwrap_or("unknown");
+            axum::Json(json!({
+                "id": "chat-mock",
+                "object": "chat.completion",
+                "created": 1234567,
+                "model": model,
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": format!("Answered by {}", model)},
+                    "finish_reason": "stop"
+                }],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+            }))
+        }),
+    );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -394,7 +431,7 @@ async fn test_auto_routing_modality_awareness_and_tier_elevation() {
 
     let mut config = GatewayConfig::default();
     config.auth_mode = ponyllm_config::AuthMode::Open; // F1 migration: default is now secured; these behavior tests opt into open mode
-    // Standard tier has ONLY text support
+                                                       // Standard tier has ONLY text support
     config.providers.insert(
         "prov_std".to_string(),
         make_multimodal_provider(
@@ -442,7 +479,12 @@ async fn test_auto_routing_modality_awareness_and_tier_elevation() {
 
     assert_eq!(resp_text.status(), 200);
     assert_eq!(
-        resp_text.headers().get("x-ponyllm-routed-model").unwrap().to_str().unwrap(),
+        resp_text
+            .headers()
+            .get("x-ponyllm-routed-model")
+            .unwrap()
+            .to_str()
+            .unwrap(),
         "model-text-std"
     );
 
@@ -465,7 +507,12 @@ async fn test_auto_routing_modality_awareness_and_tier_elevation() {
 
     assert_eq!(resp_img.status(), 200);
     assert_eq!(
-        resp_img.headers().get("x-ponyllm-routed-model").unwrap().to_str().unwrap(),
+        resp_img
+            .headers()
+            .get("x-ponyllm-routed-model")
+            .unwrap()
+            .to_str()
+            .unwrap(),
         "model-vision-flag"
     );
 

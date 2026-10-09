@@ -43,7 +43,10 @@ pub fn resolve_config_path_from(explicit: Option<&Path>, cwd: Option<&Path>) -> 
 
     // 4. Global user configuration directory
     if let Some(user_home) = home_dir() {
-        let xdg = user_home.join(".config").join("ponyllm").join("ponyllm.toml");
+        let xdg = user_home
+            .join(".config")
+            .join("ponyllm")
+            .join("ponyllm.toml");
         if xdg.is_file() {
             return xdg;
         }

@@ -36,13 +36,18 @@ const props = defineProps<{
     ids: string[],
     onProgress: (done: number, total: number) => void,
   ) => Promise<{ added: number; skipped: number; failed: number }>;
+  /**
+   * 模型新增/更新的可等待执行器（由 GovernanceView 以 `@create-model` / `@update-model`
+   * 绑定的 async 处理函数直接传入）。必须以**裸 prop 引用**原样透传给 ModelSubSection：
+   * 经箭头/emit 转发会把返回的 Promise void 掉，子组件的 try/catch 便再也捕不到失败。
+   */
+  onCreateModel?: (payload: CreateModelPayload) => Promise<void>;
+  onUpdateModel?: (name: string, payload: UpdateModelPayload) => Promise<void>;
 }>();
 
 const emit = defineEmits<{
   (e: 'delete-provider', name: string): Promise<void>;
   (e: 'update-provider', name: string, payload: UpdateProviderPayload): Promise<void>;
-  (e: 'create-model', payload: CreateModelPayload): Promise<void>;
-  (e: 'update-model', name: string, payload: UpdateModelPayload): Promise<void>;
   (e: 'delete-model', name: string): Promise<void>;
   (e: 'notice', message: string): void;
   (e: 'create-key', payload: CreateKeyPayload): Promise<void>;
@@ -456,8 +461,8 @@ async function handleDeleteProvider() {
             :on-delete-model="onDeleteModel"
             :on-batch-create="onBatchCreate"
             :admin-write-enabled="adminWriteEnabled"
-            @create="(payload) => emit('create-model', payload)"
-            @update="(name, payload) => emit('update-model', name, payload)"
+            :on-create-model="onCreateModel"
+            :on-update-model="onUpdateModel"
             @delete="(name) => emit('delete-model', name)"
             @notice="(message) => emit('notice', message)"
           />

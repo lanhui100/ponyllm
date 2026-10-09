@@ -72,7 +72,9 @@ impl Gh {
         cfg_file.gateway.gateway_keys = vec![e_admin.clone(), e_infer.clone(), e_read.clone()];
         cfg_file.gateway.users = vec![admin.clone(), alice.clone()];
         cfg_file.providers = HashMap::new();
-        cfg_file.save_to_path(config_path.to_str().unwrap()).unwrap();
+        cfg_file
+            .save_to_path(config_path.to_str().unwrap())
+            .unwrap();
 
         let mut gw = GatewayConfig::default();
         gw.bind_addr = "127.0.0.1:8080".into();
@@ -241,6 +243,10 @@ async fn valid_jwt_enters_user_plane() {
             .send()
             .await
             .unwrap();
-        assert_eq!(me.status(), StatusCode::OK, "/api/user/me with valid JWT must 200");
+        assert_eq!(
+            me.status(),
+            StatusCode::OK,
+            "/api/user/me with valid JWT must 200"
+        );
     }
 }

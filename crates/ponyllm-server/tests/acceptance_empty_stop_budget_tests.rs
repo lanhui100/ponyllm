@@ -125,7 +125,10 @@ async fn spawn_empty_stop_harness(
     config.empty_stop_total_timeout_secs = budget_secs;
     config.providers.insert(
         "agy_prov".to_string(),
-        antigravity_provider(&format!("http://{}", upstream_addr), "gemini-3.8-flash-high"),
+        antigravity_provider(
+            &format!("http://{}", upstream_addr),
+            "gemini-3.8-flash-high",
+        ),
     );
 
     let state = Arc::new(AppState::new(config));
@@ -306,9 +309,16 @@ async fn test_c5_deterministic_early_convergence() {
         .await
         .unwrap();
 
-    assert_eq!(resp.status(), 503, "C5: deterministic 早收敛必须 503（UpstreamUnavailable）");
+    assert_eq!(
+        resp.status(),
+        503,
+        "C5: deterministic 早收敛必须 503（UpstreamUnavailable）"
+    );
     let body: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(body["error"]["code"], "upstream_unavailable", "C5: body={body}");
+    assert_eq!(
+        body["error"]["code"], "upstream_unavailable",
+        "C5: body={body}"
+    );
 
     // 早收敛：命中数须 ≤10（旧代码 per-key=5 需 ~15 次=红）。
     let hits = harness.hits.load(Ordering::SeqCst);

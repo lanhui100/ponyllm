@@ -1,6 +1,6 @@
 use ponyllm_core::pool::*;
-use ponyllm_server::{AppState, GatewayConfig, ProviderConfig, ModelSpec};
 use ponyllm_server::routes::models::ParsedRequestModel;
+use ponyllm_server::{AppState, GatewayConfig, ModelSpec, ProviderConfig};
 use std::collections::HashMap;
 
 #[test]
@@ -8,10 +8,10 @@ fn test_node_latency_metrics_dynamic_update_and_speed_scoring() {
     let mut providers = HashMap::new();
 
     let p_fast = ProviderConfig {
-    egress_pool: vec![],
-    egress_strategy: "round_robin".to_string(),
+        egress_pool: vec![],
+        egress_strategy: "round_robin".to_string(),
 
-    rate_limits: None,
+        rate_limits: None,
         base_url: "https://fast.example.com".to_string(),
         default_model: "test-model".to_string(),
         strategy: "round_robin".to_string(),
@@ -21,7 +21,7 @@ fn test_node_latency_metrics_dynamic_update_and_speed_scoring() {
         output_price: 2.0,
         models: vec!["test-model".to_string()],
         model_specs: vec![ModelSpec {
-    rate_limits: None,
+            rate_limits: None,
             priority: None,
             name: "test-model".to_string(),
             tier: ModelTier::Standard,
@@ -41,10 +41,10 @@ fn test_node_latency_metrics_dynamic_update_and_speed_scoring() {
     };
 
     let p_slow = ProviderConfig {
-    egress_pool: vec![],
-    egress_strategy: "round_robin".to_string(),
+        egress_pool: vec![],
+        egress_strategy: "round_robin".to_string(),
 
-    rate_limits: None,
+        rate_limits: None,
         base_url: "https://slow.example.com".to_string(),
         default_model: "test-model".to_string(),
         strategy: "round_robin".to_string(),
@@ -54,7 +54,7 @@ fn test_node_latency_metrics_dynamic_update_and_speed_scoring() {
         output_price: 2.0,
         models: vec!["test-model".to_string()],
         model_specs: vec![ModelSpec {
-    rate_limits: None,
+            rate_limits: None,
             priority: None,
             name: "test-model".to_string(),
             tier: ModelTier::Standard,
@@ -77,7 +77,6 @@ fn test_node_latency_metrics_dynamic_update_and_speed_scoring() {
     providers.insert("slow_node".to_string(), p_slow);
 
     let gw_config = GatewayConfig {
-        default_strategy: GatewayRoutingStrategy::Speed,
         providers,
         ..Default::default()
     };
@@ -107,7 +106,9 @@ fn test_node_latency_metrics_dynamic_update_and_speed_scoring() {
 
     // Resolve with Speed strategy: fast_node MUST be ranked first!
     let parsed = ParsedRequestModel::parse("test-model");
-    let targets = state.resolve_routed_targets(&parsed, Some(GatewayRoutingStrategy::Speed)).unwrap();
+    let targets = state
+        .resolve_routed_targets(&parsed, Some(GatewayRoutingStrategy::Speed))
+        .unwrap();
 
     assert_eq!(targets.len(), 2);
     assert_eq!(targets[0].provider_name, "fast_node");

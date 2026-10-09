@@ -1,35 +1,37 @@
 <script setup lang="ts">
-import { ref, watch } from 'vue';
+import { computed, ref, watch } from 'vue';
 import Icons from '../ui/Icons.vue';
 import { toast } from '../../composables/useToast';
 import UiBadge from '../ui/UiBadge.vue';
 import UiButton from '../ui/UiButton.vue';
+import type { ModelView } from '../../types/admin';
 
 const props = defineProps<{
-  currentStrategy: string;
   adminWriteEnabled: boolean;
   autoModels?: string[];
-  activeModelsOrder?: string[];
+  /** 全量模型目录（来自 useAdminConfig.models），用于「添加候选」弹窗的复选列表。 */
+  allModels?: ModelView[];
 }>();
 
 const emit = defineEmits<{
-  (e: 'update', strategy: string): Promise<void>;
   (e: 'updateAutoModels', models: string[]): Promise<void>;
 }>();
 
-const selected = ref(props.currentStrategy || 'economy');
-const saving = ref(false);
-
 const localAutoModels = ref<string[]>([...(props.autoModels || [])]);
-const newModelInput = ref('');
 const savingAutoModels = ref(false);
 
-watch(
-  () => props.currentStrategy,
-  (val) => {
-    if (val) selected.value = val;
-  }
-);
+/** 拖拽/上移下移的写权限闸门：只读控制台一律冻结。 */
+const canReorder = computed(() => props.adminWriteEnabled);
+
+/** 「添加候选」弹窗开关。 */
+const pickerOpen = ref(false);
+/** 勾选次序（`${provider}/${name}` 标识数组）：每次勾选 push 到末尾，取消勾选按值移除。
+    不用 Set —— 渲染时需要稳定的数组顺序语义，且每次勾选的「次序」就是这里的下标。 */
+const checkedModelIds = ref<string[]>([]);
+
+/** 拖拽状态：null 表示当前没有进行中的拖拽（浏览器在行外发起的 dragstart 会保持 null）。 */
+const dragFromIndex = ref<number | null>(null);
+const dragOverIndex = ref<number | null>(null);
 
 watch(
   () => props.autoModels,
@@ -39,50 +41,30 @@ watch(
   { deep: true }
 );
 
-const strategies = [
-  {
-    id: 'economy',
-    title: 'Economy 经济优先',
-    desc: '优先选择单价最低的 Provider 与模型，按输入/输出价格自动排序，适合离线批处理与成本敏感场景。',
-    tag: '成本最优',
-  },
-  {
-    id: 'speed',
-    title: 'Speed 速度优先',
-    desc: '基于历史滑动窗口 TTFT (首字延迟) 与 TPS 动态选路，优先调度响应最快的实例。',
-    tag: '极致响应',
-  },
-  {
-    id: 'reliable',
-    title: 'Reliable 稳定优先',
-    desc: '以失败率最低与成功率最高为第一准则，发生限流/报错时以最短冷却重试备用节点。',
-    tag: '高可用保障',
-  },
-  {
-    id: 'balanced',
-    title: 'Balanced 综合均衡',
-    desc: '综合考虑价格、延迟与成功率三个维度的加权评分，兼顾成本与体验，适合通用业务流量。',
-    tag: '推荐生产',
-  },
-];
-
-async function handleSelect(id: string) {
-  if (!props.adminWriteEnabled || saving.value || selected.value === id) return;
-  selected.value = id;
-  saving.value = true;
-  try {
-    await emit('update', id);
-    toast.success('全局调度策略已生效');
-  } catch (err: unknown) {
-    toast.error(`切换策略失败: ${err instanceof Error ? err.message : String(err)}`);
-    selected.value = props.currentStrategy;
-  } finally {
-    saving.value = false;
-  }
+/** 目录项主键：`${provider}/${name}`；provider 缺省时留空前缀，保证标识唯一且可解析。 */
+function modelKey(m: { provider?: string; name: string }): string {
+  return `${m.provider ?? ''}/${m.name}`;
 }
 
+/** 弹窗候选项：按目录原始顺序呈现（不排序，勾选次序由 checkedModelIds 决定）。 */
+const pickerOptions = computed(() =>
+  (props.allModels || []).map((m) => ({
+    id: modelKey(m),
+    name: m.name,
+    provider: m.provider || '',
+    alreadyConfigured: localAutoModels.value.includes(m.name),
+  })),
+);
+
+/** 主键 -> 模型名，用于「确认添加」时把勾选次序还原成模型名（不靠字符串切割，避免模型名含 '/'）。 */
+const modelNameByKey = computed(() => {
+  const map = new Map<string, string>();
+  for (const m of props.allModels || []) map.set(modelKey(m), m.name);
+  return map;
+});
+
 function moveUp(index: number) {
-  if (index <= 0) return;
+  if (!props.adminWriteEnabled || index <= 0) return;
   const list = [...localAutoModels.value];
   const item = list.splice(index, 1)[0];
   list.splice(index - 1, 0, item);
@@ -90,7 +72,7 @@ function moveUp(index: number) {
 }
 
 function moveDown(index: number) {
-  if (index >= localAutoModels.value.length - 1) return;
+  if (!props.adminWriteEnabled || index >= localAutoModels.value.length - 1) return;
   const list = [...localAutoModels.value];
   const item = list.splice(index, 1)[0];
   list.splice(index + 1, 0, item);
@@ -98,18 +80,84 @@ function moveDown(index: number) {
 }
 
 function removeModel(index: number) {
+  if (!props.adminWriteEnabled) return;
   const list = [...localAutoModels.value];
   list.splice(index, 1);
   localAutoModels.value = list;
 }
 
-function addModel() {
-  const trimmed = newModelInput.value.trim();
-  if (!trimmed) return;
-  if (!localAutoModels.value.includes(trimmed)) {
-    localAutoModels.value.push(trimmed);
+function onDragStart(index: number) {
+  if (!props.adminWriteEnabled) return;
+  dragFromIndex.value = index;
+}
+
+function onDragOver(index: number) {
+  if (dragFromIndex.value === null) return;
+  dragOverIndex.value = index;
+}
+
+function onDrop(index: number) {
+  const from = dragFromIndex.value;
+  resetDrag();
+  if (from === null || !props.adminWriteEnabled || from === index) return;
+  const list = [...localAutoModels.value];
+  const item = list.splice(from, 1)[0];
+  list.splice(index, 0, item);
+  localAutoModels.value = list;
+}
+
+function onDragEnd() {
+  resetDrag();
+}
+
+function resetDrag() {
+  dragFromIndex.value = null;
+  dragOverIndex.value = null;
+}
+
+/** 打开弹窗：每次打开都重置勾选状态，绝不残留上一次的选择。 */
+function openPicker() {
+  if (!props.adminWriteEnabled) return;
+  checkedModelIds.value = [];
+  pickerOpen.value = true;
+}
+
+function cancelPicker() {
+  pickerOpen.value = false;
+  checkedModelIds.value = [];
+}
+
+/** 勾选切换：勾选记录「次序」，取消勾选按值移除（重复勾选不重复记录）。 */
+function toggleChecked(id: string, checked: boolean) {
+  if (checked) {
+    if (!checkedModelIds.value.includes(id)) checkedModelIds.value.push(id);
+    return;
   }
-  newModelInput.value = '';
+  checkedModelIds.value = checkedModelIds.value.filter((x) => x !== id);
+}
+
+function isChecked(id: string): boolean {
+  return checkedModelIds.value.includes(id);
+}
+
+/** 确认添加：按**勾选次序**追加到末尾，跳过已存在的项；不触发自动保存。 */
+function confirmPicker() {
+  const list = [...localAutoModels.value];
+  const seen = new Set(list);
+  let appended = 0;
+  for (const id of checkedModelIds.value) {
+    const name = modelNameByKey.value.get(id);
+    if (!name || seen.has(name)) continue;
+    seen.add(name);
+    list.push(name);
+    appended += 1;
+  }
+  localAutoModels.value = list;
+  pickerOpen.value = false;
+  checkedModelIds.value = [];
+  if (appended > 0) {
+    toast.success(`已添加 ${appended} 个候选模型，记得保存优先级配置`);
+  }
 }
 
 async function handleSaveAutoModels() {
@@ -128,70 +176,13 @@ async function handleSaveAutoModels() {
 
 <template>
   <div class="space-y-6">
-    <!-- 全局调度策略卡片 -->
-    <div class="swiss-card p-6">
-      <div class="flex items-center justify-between mb-5">
-        <div>
-          <h2 class="text-base font-bold text-slate-900 flex items-center gap-2">
-            <Icons name="activity" size="18" class="text-indigo-600" />
-            全局分流调度策略
-          </h2>
-          <p class="text-xs text-slate-500 mt-1">
-            决定网关向模型与服务商路由请求时的全局偏好算法
-          </p>
-        </div>
-        <div v-if="saving" class="text-xs font-semibold text-indigo-600 animate-pulse">
-          保存生效中...
-        </div>
-      </div>
-
-      <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
-        <div
-          v-for="s in strategies"
-          :key="s.id"
-          class="p-4.5 rounded-xl transition-all duration-200 cursor-pointer select-none flex flex-col justify-between border"
-          :class="[
-            selected === s.id
-              ? 'bg-indigo-50/80 border-indigo-400 ring-2 ring-indigo-500/50 shadow-xs'
-              : 'bg-white/40 border-white/50 backdrop-blur-xs hover:bg-white/60 hover:shadow-xs',
-            { 'opacity-60 cursor-not-allowed': !adminWriteEnabled },
-          ]"
-          data-testid="strategy-card"
-          @click="handleSelect(s.id)"
-        >
-          <div>
-            <div class="flex items-center justify-between mb-2">
-              <span class="font-bold text-sm text-slate-900">{{ s.title }}</span>
-              <UiBadge :variant="selected === s.id ? 'default' : 'secondary'">
-                {{ s.tag }}
-              </UiBadge>
-            </div>
-            <p class="text-xs text-slate-500 leading-relaxed">
-              {{ s.desc }}
-            </p>
-          </div>
-
-          <div class="mt-4 flex items-center justify-between text-xs pt-2 border-t border-slate-200/50">
-            <span class="text-slate-500">状态</span>
-            <span
-              class="font-semibold flex items-center gap-1"
-              :class="selected === s.id ? 'text-indigo-600' : 'text-slate-500'"
-            >
-              <Icons v-if="selected === s.id" name="check" size="14" />
-              {{ selected === s.id ? '当前生效' : '未激活' }}
-            </span>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <!-- 纯 Auto 候选模型与优先级排序卡片 -->
+    <!-- Auto 智能路由：候选模型优先级排序（Auto 已接管全局调度，此处即唯一配置面） -->
     <div class="swiss-card p-6">
       <div class="flex items-center justify-between mb-4">
         <div>
           <h2 class="text-base font-bold text-slate-900 flex items-center gap-2">
             <Icons name="sparkles" size="18" class="text-emerald-600" />
-            Auto 智能路由优先级与高可用候选
+            Auto智能路由
           </h2>
           <p class="text-xs text-slate-500 mt-1">
             下游 Agent 调用纯 <code class="px-1 py-0.5 bg-slate-100 rounded text-slate-800 font-mono">auto</code> 时的选型规则：首选免费主力，次选收费主力；顺序从上到下逐级备选与故障熔断
@@ -201,6 +192,7 @@ async function handleSaveAutoModels() {
           <UiButton
             variant="default"
             size="sm"
+            data-testid="auto-model-save"
             :disabled="!adminWriteEnabled || savingAutoModels"
             @click="handleSaveAutoModels"
           >
@@ -211,30 +203,10 @@ async function handleSaveAutoModels() {
         </div>
       </div>
 
-      <!-- 当前实时生效的解析顺序预览 -->
-      <div v-if="activeModelsOrder && activeModelsOrder.length > 0" class="mb-5 p-3.5 bg-slate-50/80 rounded-xl border border-slate-200/70">
-        <div class="text-xs font-semibold text-slate-700 mb-2 flex items-center gap-1.5">
-          <Icons name="check" size="14" class="text-emerald-500" />
-          当前网关实时动态首选执行链路 (首选 -> 次选 -> 备用):
-        </div>
-        <div class="flex flex-wrap items-center gap-2">
-          <div
-            v-for="(target, idx) in activeModelsOrder"
-            :key="target"
-            class="flex items-center gap-1 text-xs px-2.5 py-1 bg-white border rounded-lg shadow-2xs font-mono"
-            :class="idx === 0 ? 'border-emerald-300 text-emerald-800 font-bold bg-emerald-50/50' : 'border-slate-200 text-slate-700'"
-          >
-            <span class="text-[10px] text-slate-400 font-sans">#{{ idx + 1 }}</span>
-            <span>{{ target }}</span>
-            <Icons v-if="idx < activeModelsOrder.length - 1" name="chevron-right" size="12" class="text-slate-400 ml-1" />
-          </div>
-        </div>
-      </div>
-
-      <!-- 用户自定义模型顺序编辑列表 -->
+      <!-- 候选模型顺序编辑列表 -->
       <div class="space-y-2">
         <div class="flex items-center justify-between text-xs font-medium text-slate-600 px-1">
-          <span>自定义优先配置序列表 (上移下移调整优先级)</span>
+          <span>Auto路由模型顺序</span>
           <span>共 {{ localAutoModels.length }} 个配置项</span>
         </div>
 
@@ -245,14 +217,27 @@ async function handleSaveAutoModels() {
         <div
           v-for="(model, index) in localAutoModels"
           :key="model"
-          class="flex items-center justify-between p-3 bg-white/70 border border-slate-200/80 rounded-xl hover:bg-white transition-all shadow-2xs"
+          data-testid="auto-model-row"
+          :data-model="model"
+          :data-draggable-disabled="canReorder ? 'false' : 'true'"
+          :draggable="canReorder ? 'true' : 'false'"
+          class="flex items-center justify-between p-1.5 bg-white/70 border border-slate-200/80 rounded-lg hover:bg-white transition-all shadow-2xs"
+          :class="[
+            canReorder ? 'cursor-grab active:cursor-grabbing' : 'cursor-default opacity-60',
+            dragOverIndex === index ? 'ring-2 ring-indigo-400 border-indigo-300' : '',
+          ]"
+          @dragstart="onDragStart(index)"
+          @dragover.prevent="onDragOver(index)"
+          @drop.prevent="onDrop(index)"
+          @dragend="onDragEnd"
         >
-          <div class="flex items-center gap-3">
-            <span class="w-6 h-6 rounded-full bg-slate-100 flex items-center justify-center text-xs font-bold text-slate-600">
+          <div class="flex items-center gap-2 min-w-0">
+            <span aria-hidden="true" class="text-slate-300 text-[11px] leading-none select-none">⋮⋮</span>
+            <span class="w-5 h-5 rounded-full bg-slate-100 flex items-center justify-center text-[10px] font-bold text-slate-600 shrink-0">
               {{ index + 1 }}
             </span>
-            <span class="font-mono text-xs font-medium text-slate-900">{{ model }}</span>
-            <UiBadge v-if="index === 0" variant="default" class="text-[10px] scale-90">
+            <span class="font-mono text-xs font-medium text-slate-900 truncate">{{ model }}</span>
+            <UiBadge v-if="index === 0" variant="default" class="text-[10px] scale-90" data-testid="auto-model-top-badge">
               最高优
             </UiBadge>
           </div>
@@ -262,8 +247,10 @@ async function handleSaveAutoModels() {
               variant="ghost"
               size="sm"
               class="h-7 w-7 p-0"
+              data-testid="auto-model-up"
               :disabled="index === 0 || !adminWriteEnabled"
               title="上移"
+              :aria-label="`上移 ${model}`"
               @click="moveUp(index)"
             >
               <span class="text-xs font-bold">↑</span>
@@ -272,8 +259,10 @@ async function handleSaveAutoModels() {
               variant="ghost"
               size="sm"
               class="h-7 w-7 p-0"
+              data-testid="auto-model-down"
               :disabled="index === localAutoModels.length - 1 || !adminWriteEnabled"
               title="下移"
+              :aria-label="`下移 ${model}`"
               @click="moveDown(index)"
             >
               <span class="text-xs font-bold">↓</span>
@@ -282,8 +271,10 @@ async function handleSaveAutoModels() {
               variant="ghost"
               size="sm"
               class="h-7 w-7 p-0 text-red-500 hover:text-red-700 hover:bg-red-50"
+              :data-testid="`auto-model-remove-${index}`"
               :disabled="!adminWriteEnabled"
               title="移除"
+              :aria-label="`移除 ${model}`"
               @click="removeModel(index)"
             >
               <Icons name="trash" size="14" />
@@ -291,19 +282,83 @@ async function handleSaveAutoModels() {
           </div>
         </div>
 
-        <!-- 添加新模型 -->
+        <!-- 添加候选：弹窗勾选全量模型，按勾选次序追加（无输入框） -->
         <div v-if="adminWriteEnabled" class="flex gap-2 pt-2">
-          <input
-            v-model="newModelInput"
-            type="text"
-            placeholder="输入主力模型名称 (如 gemini-3.8-flash 或 claude-3-5-sonnet)"
-            class="flex-1 text-xs px-3 py-2 border border-slate-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-indigo-500 bg-white"
-            @keyup.enter="addModel"
-          />
-          <UiButton variant="secondary" size="sm" @click="addModel">
+          <UiButton
+            variant="secondary"
+            size="sm"
+            data-testid="auto-model-add-open"
+            @click="openPicker"
+          >
             <Icons name="plus" size="14" class="mr-1" />
             添加候选
           </UiButton>
+        </div>
+      </div>
+    </div>
+
+    <!-- 添加候选弹窗：全模型复选列表，勾选次序即加入次序 -->
+    <div
+      v-if="pickerOpen"
+      class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-md"
+      data-testid="auto-model-picker"
+      @click.self="cancelPicker"
+    >
+      <div class="bg-white/95 backdrop-blur-xl rounded-2xl shadow-2xl w-full max-w-lg overflow-hidden border border-slate-200/80">
+        <div class="p-5 border-b border-slate-100 flex items-center justify-between">
+          <h3 class="text-sm font-bold text-slate-900 flex items-center gap-2">
+            <Icons name="plus" size="16" class="text-emerald-600" />
+            添加候选模型
+          </h3>
+          <span class="text-xs text-slate-500">按勾选次序追加到列表末尾</span>
+        </div>
+
+        <div class="p-4 max-h-96 overflow-y-auto space-y-1">
+          <div
+            v-for="opt in pickerOptions"
+            :key="opt.id"
+            data-testid="auto-model-option"
+            :data-model-id="opt.id"
+            class="flex items-center gap-2.5 p-2 rounded-lg border border-transparent hover:bg-slate-50 cursor-pointer"
+            :class="isChecked(opt.id) ? 'bg-slate-50 border-slate-200' : ''"
+          >
+            <input
+              type="checkbox"
+              class="rounded border-slate-300 text-slate-900 focus:ring-0 cursor-pointer shrink-0"
+              :checked="isChecked(opt.id)"
+              @change="toggleChecked(opt.id, ($event.target as HTMLInputElement).checked)"
+            />
+            <span class="font-mono text-xs font-medium text-slate-900 truncate">{{ opt.name }}</span>
+            <span class="text-[10px] text-slate-400 shrink-0">{{ opt.provider }}</span>
+            <UiBadge v-if="opt.alreadyConfigured" variant="secondary" class="text-[10px] scale-90 ml-auto shrink-0">
+              已配置
+            </UiBadge>
+          </div>
+
+          <div v-if="pickerOptions.length === 0" class="text-center py-6 border border-dashed rounded-xl text-slate-400 text-xs">
+            模型目录为空，请先在「服务商」中挂载模型
+          </div>
+        </div>
+
+        <div class="p-4 bg-slate-50 border-t border-slate-100 flex items-center justify-between gap-2">
+          <span class="text-xs text-slate-500">已勾选 {{ checkedModelIds.length }} 个</span>
+          <div class="flex items-center gap-2">
+            <UiButton
+              variant="ghost"
+              size="sm"
+              data-testid="auto-model-picker-cancel"
+              @click="cancelPicker"
+            >
+              取消
+            </UiButton>
+            <UiButton
+              size="sm"
+              data-testid="auto-model-picker-confirm"
+              @click="confirmPicker"
+            >
+              确认添加
+            </UiButton>
+          </div>
         </div>
       </div>
     </div>

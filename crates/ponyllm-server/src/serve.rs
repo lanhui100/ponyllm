@@ -158,7 +158,9 @@ mod tests {
         let app = Router::new().route(
             "/hang",
             get(|| async {
-                let (tx, rx) = tokio::sync::mpsc::channel::<Result<axum::body::Bytes, std::convert::Infallible>>(1);
+                let (tx, rx) = tokio::sync::mpsc::channel::<
+                    Result<axum::body::Bytes, std::convert::Infallible>,
+                >(1);
                 let _ = tx; // never send → body never completes
                 let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
                 axum::response::Response::builder()

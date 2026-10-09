@@ -23,9 +23,7 @@ use std::path::Path;
 
 use ponyllm_core::pool::usage::{CycleStats, KeyUsageStateSnapshot, PoolCycleBenchmark};
 use ponyllm_core::pool::NodeLatencySnapshot;
-use ponyllm_core::telemetry::{
-    HourlyBucket, MetricsCounterSnapshot, ProviderConnectivitySnapshot,
-};
+use ponyllm_core::telemetry::{HourlyBucket, MetricsCounterSnapshot, ProviderConnectivitySnapshot};
 // 为 `serde_json::Error::custom` 提供 `serde::de::Error` trait 方法（匿名导入，无命名冲突）。
 use serde::de::Error as _;
 
@@ -110,7 +108,10 @@ impl TelemetrySnapshotFile {
         let obj = value
             .as_object_mut()
             .ok_or_else(|| serde_json::Error::custom("snapshot must serialize to an object"))?;
-        obj.insert("schema_version".to_string(), serde_json::json!(self.schema_version));
+        obj.insert(
+            "schema_version".to_string(),
+            serde_json::json!(self.schema_version),
+        );
         obj.insert(
             "key_usage_cycles".to_string(),
             serde_json::to_value(&self.key_usage_cycles)?,
@@ -237,9 +238,7 @@ fn write_snapshot_file(path: &Path, file: &TelemetrySnapshotFile) -> std::io::Re
 /// the window's request count as the observation count; `avg_tokens` is
 /// total / requests (0 when no requests). Source of the live 5h/周/月
 /// per-key cycle archive (数据源为既有 `CycleStats` 结构).
-pub fn window_usage_to_cycle_stats(
-    usage: &ponyllm_core::pool::usage::WindowUsage,
-) -> CycleStats {
+pub fn window_usage_to_cycle_stats(usage: &ponyllm_core::pool::usage::WindowUsage) -> CycleStats {
     let requests = usage.requests;
     CycleStats {
         count: requests,
@@ -288,7 +287,10 @@ pub fn load_snapshot(path: &Path) -> Option<TelemetrySnapshot> {
             }
             Err(e) => {
                 // 备份失败则不覆盖原文件，保留旧数据（下次启动可再试迁移）。
-                tracing::warn!("telemetry snapshot migration backup failed, original kept: {}", e);
+                tracing::warn!(
+                    "telemetry snapshot migration backup failed, original kept: {}",
+                    e
+                );
             }
         }
     }
@@ -371,10 +373,7 @@ mod tests {
 
     #[test]
     fn test_snapshot_save_load_roundtrip() {
-        let dir = std::env::temp_dir().join(format!(
-            "ponyllm-snap-test-{}",
-            now_ms()
-        ));
+        let dir = std::env::temp_dir().join(format!("ponyllm-snap-test-{}", now_ms()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("telemetry-snapshot.json");
         let mut snap = TelemetrySnapshot::default();
@@ -495,7 +494,10 @@ mod tests {
 
         let reloaded = load_snapshot_file(&path).unwrap();
         assert_eq!(reloaded.schema_version, SCHEMA_VERSION);
-        let kept = reloaded.key_usage_cycles.get("key-1").expect("archive preserved");
+        let kept = reloaded
+            .key_usage_cycles
+            .get("key-1")
+            .expect("archive preserved");
         assert_eq!(kept.window_5h.total_tokens, 150);
         assert_eq!(kept.window_5h.prompt_tokens, 100);
         assert_eq!(kept.window_5h.cached_tokens, 20);
@@ -531,10 +533,9 @@ mod tests {
 
         // 下一次保存仅含 acc-2（模拟账号被移除/热重载后池内只剩新账号）。
         let mut snap2 = TelemetrySnapshot::default();
-        snap2.key_usages.insert(
-            "acc-2".to_string(),
-            KeyUsageStateSnapshot::default(),
-        );
+        snap2
+            .key_usages
+            .insert("acc-2".to_string(), KeyUsageStateSnapshot::default());
         save_snapshot_with_live_cycles(&path, &snap2, HashMap::new()).unwrap();
 
         let reloaded = load_snapshot_file(&path).unwrap();
@@ -591,7 +592,10 @@ mod tests {
 
         let first = load_snapshot_file(&path).unwrap();
         assert_eq!(first.snapshot.pool_cycle_benchmark.kind_5h.observations, 1);
-        assert_eq!(first.snapshot.pool_cycle_benchmark.kind_5h.total_tokens, 10_000);
+        assert_eq!(
+            first.snapshot.pool_cycle_benchmark.kind_5h.total_tokens,
+            10_000
+        );
         assert_eq!(
             first.snapshot.pool_cycle_benchmark.kind_5h.avg_tokens(),
             10_000
@@ -601,7 +605,10 @@ mod tests {
         save_snapshot_with_live_cycles(&path, &snap, HashMap::new()).unwrap();
         let again = load_snapshot_file(&path).unwrap();
         assert_eq!(again.snapshot.pool_cycle_benchmark.kind_5h.observations, 1);
-        assert_eq!(again.snapshot.pool_cycle_benchmark.kind_5h.total_tokens, 10_000);
+        assert_eq!(
+            again.snapshot.pool_cycle_benchmark.kind_5h.total_tokens,
+            10_000
+        );
 
         // 新的闭合周期 → 恰好 +1 观测。
         let mut snap3 = TelemetrySnapshot::default();

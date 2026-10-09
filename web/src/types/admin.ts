@@ -7,7 +7,6 @@ export interface OverviewView {
   providers: number;
   keys: number;
   keys_active: number;
-  strategy: string;
   hot_reload_ms: number;
   admin_write_enabled: boolean;
   config_version: number;
@@ -233,11 +232,6 @@ export interface KeyTestView {
   usage?: KeyCapacityEstimate | null;
 }
 
-export interface StrategyView {
-  strategy: string;
-  config_version: number;
-}
-
 export interface ServiceStatusView {
   uptime_seconds: number;
   bind: string;
@@ -362,10 +356,6 @@ export interface CreateKeyResponse {
   weight: number;
   state: string;
   config_version: number;
-}
-
-export interface PutStrategyPayload {
-  strategy: string;
 }
 
 /**

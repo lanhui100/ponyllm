@@ -8,13 +8,12 @@
 //! 2. `query_cluster_history`：查询全集群聚合的 24h / 7d / 30d 时序历史。
 //! 3. `query_cluster_metrics_summary`：查询全集群聚合的 MetricsSummary（总请求、总 Token、成功/失败数等）。
 
-use std::collections::{BTreeMap, HashMap};
 use parking_lot::RwLock;
-use tokio_postgres::NoTls;
 use ponyllm_core::telemetry::{
-    HourlyBucket, MetricBucket, MetricsSummary,
-    StreamFlowSummary, TimeseriesHistoryResponse,
+    HourlyBucket, MetricBucket, MetricsSummary, StreamFlowSummary, TimeseriesHistoryResponse,
 };
+use std::collections::{BTreeMap, HashMap};
+use tokio_postgres::NoTls;
 
 const HOUR_MS: u64 = 3_600_000;
 
@@ -54,17 +53,37 @@ impl ClusterTelemetryTracker {
         for (&hour_ms, curr) in current_buckets {
             let prev = last_guard.get(&hour_ms);
 
-            let d_reqs = curr.total_requests.saturating_sub(prev.map(|p| p.total_requests).unwrap_or(0));
-            let d_fails = curr.failed_requests.saturating_sub(prev.map(|p| p.failed_requests).unwrap_or(0));
-            let d_prompt = curr.prompt_tokens.saturating_sub(prev.map(|p| p.prompt_tokens).unwrap_or(0));
-            let d_comp = curr.completion_tokens.saturating_sub(prev.map(|p| p.completion_tokens).unwrap_or(0));
-            let d_cached = curr.cached_tokens.saturating_sub(prev.map(|p| p.cached_tokens).unwrap_or(0));
-            let d_lat_sum = (curr.latency_sum_ms - prev.map(|p| p.latency_sum_ms).unwrap_or(0.0)).max(0.0);
-            let d_lat_count = curr.latency_count.saturating_sub(prev.map(|p| p.latency_count).unwrap_or(0));
-            let d_ttft_sum = (curr.ttft_sum_ms - prev.map(|p| p.ttft_sum_ms).unwrap_or(0.0)).max(0.0);
-            let d_ttft_count = curr.ttft_count.saturating_sub(prev.map(|p| p.ttft_count).unwrap_or(0));
-            let d_tps_sum = curr.tps_sum_milli.saturating_sub(prev.map(|p| p.tps_sum_milli).unwrap_or(0));
-            let d_tps_count = curr.tps_count.saturating_sub(prev.map(|p| p.tps_count).unwrap_or(0));
+            let d_reqs = curr
+                .total_requests
+                .saturating_sub(prev.map(|p| p.total_requests).unwrap_or(0));
+            let d_fails = curr
+                .failed_requests
+                .saturating_sub(prev.map(|p| p.failed_requests).unwrap_or(0));
+            let d_prompt = curr
+                .prompt_tokens
+                .saturating_sub(prev.map(|p| p.prompt_tokens).unwrap_or(0));
+            let d_comp = curr
+                .completion_tokens
+                .saturating_sub(prev.map(|p| p.completion_tokens).unwrap_or(0));
+            let d_cached = curr
+                .cached_tokens
+                .saturating_sub(prev.map(|p| p.cached_tokens).unwrap_or(0));
+            let d_lat_sum =
+                (curr.latency_sum_ms - prev.map(|p| p.latency_sum_ms).unwrap_or(0.0)).max(0.0);
+            let d_lat_count = curr
+                .latency_count
+                .saturating_sub(prev.map(|p| p.latency_count).unwrap_or(0));
+            let d_ttft_sum =
+                (curr.ttft_sum_ms - prev.map(|p| p.ttft_sum_ms).unwrap_or(0.0)).max(0.0);
+            let d_ttft_count = curr
+                .ttft_count
+                .saturating_sub(prev.map(|p| p.ttft_count).unwrap_or(0));
+            let d_tps_sum = curr
+                .tps_sum_milli
+                .saturating_sub(prev.map(|p| p.tps_sum_milli).unwrap_or(0));
+            let d_tps_count = curr
+                .tps_count
+                .saturating_sub(prev.map(|p| p.tps_count).unwrap_or(0));
 
             // 按 provider 提取增量细分
             let mut provider_keys = std::collections::HashSet::new();
@@ -75,20 +94,35 @@ impl ClusterTelemetryTracker {
 
             let mut provider_deltas_sum = 0u64;
             for p in provider_keys {
-                let prev_prompt = prev.and_then(|pr| pr.prompt_tokens_by_provider.get(&p)).copied().unwrap_or(0);
+                let prev_prompt = prev
+                    .and_then(|pr| pr.prompt_tokens_by_provider.get(&p))
+                    .copied()
+                    .unwrap_or(0);
                 let curr_prompt = curr.prompt_tokens_by_provider.get(&p).copied().unwrap_or(0);
                 let p_prompt = curr_prompt.saturating_sub(prev_prompt);
 
-                let prev_comp = prev.and_then(|pr| pr.completion_tokens_by_provider.get(&p)).copied().unwrap_or(0);
-                let curr_comp = curr.completion_tokens_by_provider.get(&p).copied().unwrap_or(0);
+                let prev_comp = prev
+                    .and_then(|pr| pr.completion_tokens_by_provider.get(&p))
+                    .copied()
+                    .unwrap_or(0);
+                let curr_comp = curr
+                    .completion_tokens_by_provider
+                    .get(&p)
+                    .copied()
+                    .unwrap_or(0);
                 let p_comp = curr_comp.saturating_sub(prev_comp);
 
-                let prev_cached = prev.and_then(|pr| pr.cached_tokens_by_provider.get(&p)).copied().unwrap_or(0);
+                let prev_cached = prev
+                    .and_then(|pr| pr.cached_tokens_by_provider.get(&p))
+                    .copied()
+                    .unwrap_or(0);
                 let curr_cached = curr.cached_tokens_by_provider.get(&p).copied().unwrap_or(0);
                 let p_cached = curr_cached.saturating_sub(prev_cached);
 
                 if p_prompt > 0 || p_comp > 0 || p_cached > 0 {
-                    let entry = deltas_guard.entry((hour_ms, p.clone(), String::new())).or_default();
+                    let entry = deltas_guard
+                        .entry((hour_ms, p.clone(), String::new()))
+                        .or_default();
                     entry.prompt_tokens += p_prompt;
                     entry.completion_tokens += p_comp;
                     entry.cached_tokens += p_cached;
@@ -98,7 +132,9 @@ impl ClusterTelemetryTracker {
 
             if d_reqs > 0 || d_fails > 0 || d_prompt > 0 || d_comp > 0 || d_cached > 0 {
                 // 如果未细分或有总体指标，存入 ("", "")
-                let entry = deltas_guard.entry((hour_ms, String::new(), String::new())).or_default();
+                let entry = deltas_guard
+                    .entry((hour_ms, String::new(), String::new()))
+                    .or_default();
                 entry.total_requests += d_reqs;
                 entry.failed_requests += d_fails;
                 let residual_prompt = d_prompt.saturating_sub(provider_deltas_sum);
@@ -160,9 +196,9 @@ impl ClusterTelemetryStore {
                 let config = rustls::ClientConfig::builder()
                     .with_root_certificates(crate::refresh_lock::load_lock_roots())
                     .with_no_client_auth();
-                let tls = postgres_rustls::MakeTlsConnector::new(
-                    tokio_rustls::TlsConnector::from(std::sync::Arc::new(config)),
-                );
+                let tls = postgres_rustls::MakeTlsConnector::new(tokio_rustls::TlsConnector::from(
+                    std::sync::Arc::new(config),
+                ));
                 let (client, connection) = tokio_postgres::connect(&self.dsn, tls)
                     .await
                     .map_err(|e| format!("PG TLS connect failed: {}", e))?;
@@ -273,7 +309,8 @@ impl ClusterTelemetryStore {
 
         let bucket_span_ms = bucket_hours * HOUR_MS;
         let current_bucket_start = (now_ms / bucket_span_ms) * bucket_span_ms;
-        let start_ms = current_bucket_start.saturating_sub((total_buckets as u64 - 1) * bucket_span_ms);
+        let start_ms =
+            current_bucket_start.saturating_sub((total_buckets as u64 - 1) * bucket_span_ms);
 
         let client = self.connect().await?;
         let query_sql = "
@@ -340,8 +377,14 @@ impl ClusterTelemetryStore {
 
             if !prov.is_empty() {
                 *bucket.tokens_by_provider.entry(prov.clone()).or_default() += prompt + comp;
-                *bucket.prompt_tokens_by_provider.entry(prov.clone()).or_default() += prompt;
-                *bucket.completion_tokens_by_provider.entry(prov.clone()).or_default() += comp;
+                *bucket
+                    .prompt_tokens_by_provider
+                    .entry(prov.clone())
+                    .or_default() += prompt;
+                *bucket
+                    .completion_tokens_by_provider
+                    .entry(prov.clone())
+                    .or_default() += comp;
                 *bucket.cached_tokens_by_provider.entry(prov).or_default() += cached;
             }
             if !mdl.is_empty() {
@@ -401,28 +444,43 @@ impl ClusterTelemetryStore {
                 total_tps_count = total_tps_count.saturating_add(h.tps_count);
 
                 for (p, c) in &h.tokens_by_provider {
-                    *b_prov_tokens.entry(p.clone()).or_default() =
-                        b_prov_tokens.entry(p.clone()).or_default().saturating_add(*c);
-                    *provider_tokens.entry(p.clone()).or_default() =
-                        provider_tokens.entry(p.clone()).or_default().saturating_add(*c);
+                    *b_prov_tokens.entry(p.clone()).or_default() = b_prov_tokens
+                        .entry(p.clone())
+                        .or_default()
+                        .saturating_add(*c);
+                    *provider_tokens.entry(p.clone()).or_default() = provider_tokens
+                        .entry(p.clone())
+                        .or_default()
+                        .saturating_add(*c);
                 }
                 for (p, c) in &h.prompt_tokens_by_provider {
-                    *provider_prompt_tokens.entry(p.clone()).or_default() =
-                        provider_prompt_tokens.entry(p.clone()).or_default().saturating_add(*c);
+                    *provider_prompt_tokens.entry(p.clone()).or_default() = provider_prompt_tokens
+                        .entry(p.clone())
+                        .or_default()
+                        .saturating_add(*c);
                 }
                 for (p, c) in &h.completion_tokens_by_provider {
                     *provider_completion_tokens.entry(p.clone()).or_default() =
-                        provider_completion_tokens.entry(p.clone()).or_default().saturating_add(*c);
+                        provider_completion_tokens
+                            .entry(p.clone())
+                            .or_default()
+                            .saturating_add(*c);
                 }
                 for (p, c) in &h.cached_tokens_by_provider {
-                    *provider_cached_tokens.entry(p.clone()).or_default() =
-                        provider_cached_tokens.entry(p.clone()).or_default().saturating_add(*c);
+                    *provider_cached_tokens.entry(p.clone()).or_default() = provider_cached_tokens
+                        .entry(p.clone())
+                        .or_default()
+                        .saturating_add(*c);
                 }
                 for (m, c) in &h.tokens_by_model {
-                    *b_mod_tokens.entry(m.clone()).or_default() =
-                        b_mod_tokens.entry(m.clone()).or_default().saturating_add(*c);
-                    *model_tokens.entry(m.clone()).or_default() =
-                        model_tokens.entry(m.clone()).or_default().saturating_add(*c);
+                    *b_mod_tokens.entry(m.clone()).or_default() = b_mod_tokens
+                        .entry(m.clone())
+                        .or_default()
+                        .saturating_add(*c);
+                    *model_tokens.entry(m.clone()).or_default() = model_tokens
+                        .entry(m.clone())
+                        .or_default()
+                        .saturating_add(*c);
                 }
             }
 

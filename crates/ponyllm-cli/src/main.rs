@@ -1,25 +1,24 @@
 #![allow(clippy::field_reassign_with_default)]
 #![allow(clippy::format_in_format_args)]
 
-use std::collections::HashMap;
-use std::fs;
-use std::str::FromStr;
-use std::sync::Arc;
 use clap::Parser;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
-use ponyllm_core::pool::{ApiKeyEntry, GatewayRoutingStrategy, KeyPool, RoutingStrategy};
-use ponyllm_server::config_poller::ConfigSource;
-use ponyllm_server::{create_app, AppState, GatewayConfig, ProviderConfig};
 use ponyllm_cli::cli::{
     format_web_status_url, Cli, Commands, KeyCommands, KeysCommands, ModelCommands,
-    ProviderCommands, StrategyCommands,
+    ProviderCommands, UserCommands,
 };
 use ponyllm_cli::config::{
     generate_sample_config, generate_secure_api_key, parse_gateway_auth_action, ConfigFile,
     GatewayAuthAction,
 };
-use ponyllm_cli::wizard::run_interactive_init;
 use ponyllm_cli::tui::run_tui;
+use ponyllm_cli::wizard::run_interactive_init;
+use ponyllm_core::pool::{ApiKeyEntry, KeyPool, RoutingStrategy};
+use ponyllm_server::config_poller::ConfigSource;
+use ponyllm_server::{create_app, AppState, GatewayConfig, ProviderConfig};
+use std::collections::HashMap;
+use std::fs;
+use std::sync::Arc;
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 fn resolve_path(custom: Option<&str>) -> std::path::PathBuf {
     ConfigFile::resolve_path(custom)
@@ -57,15 +56,14 @@ fn build_gateway_config_and_pools(
     web_dist_dir_override: Option<String>,
 ) -> (GatewayConfig, HashMap<String, Arc<KeyPool>>) {
     let mut gw_config = GatewayConfig::default();
-    gw_config.default_strategy = config_file.gateway.default_strategy;
     gw_config.bind_addr = bind_override.unwrap_or_else(|| config_file.gateway.bind.clone());
     gw_config.max_retries = retries_override.unwrap_or(config_file.gateway.max_retries);
     gw_config.flight_recorder_capacity = config_file.gateway.flight_recorder_capacity;
     gw_config.request_body_limit = config_file.gateway.request_body_limit;
     gw_config.api_key = api_key_override.unwrap_or_else(|| config_file.gateway.api_key.clone());
     gw_config.web_enabled = web_enabled_override.unwrap_or(config_file.gateway.web_enabled);
-    gw_config.web_dist_dir = web_dist_dir_override
-        .unwrap_or_else(|| config_file.gateway.web_dist_dir.clone());
+    gw_config.web_dist_dir =
+        web_dist_dir_override.unwrap_or_else(|| config_file.gateway.web_dist_dir.clone());
     gw_config.proxy = config_file.gateway.proxy.clone();
     gw_config.use_system_proxy = config_file.gateway.use_system_proxy;
     gw_config.upstream_timeout_secs = config_file.gateway.upstream_timeout_secs;
@@ -77,8 +75,10 @@ fn build_gateway_config_and_pools(
     gw_config.auth_compat = config_file.gateway.auth_compat;
     // P1 scoped gateway keys passthrough (disk format -> runtime config).
     gw_config.gateway_keys = config_file.gateway.gateway_keys.clone();
+    gw_config.users = config_file.gateway.users.clone();
     gw_config.antigravity_auto_refresh = config_file.gateway.antigravity_auto_refresh;
-    gw_config.antigravity_refresh_interval_secs = config_file.gateway.antigravity_refresh_interval_secs;
+    gw_config.antigravity_refresh_interval_secs =
+        config_file.gateway.antigravity_refresh_interval_secs;
     gw_config.cross_provider_quota_failover = config_file.gateway.cross_provider_quota_failover;
     // Phase-2 auth hardening passthrough (F1/F2/F4/F3): auth mode, failure
     // budget, admin IP fence and trusted proxies (disk format -> runtime).
@@ -185,17 +185,23 @@ fn build_gateway_config_and_pools(
         for k in &p_sec.keys {
             if k.is_antigravity(p_sec.default_protocol, p_name) {
                 if let Ok(cred) = k.to_antigravity_credential() {
-                    let effective_proxy = p_sec.proxy.as_deref().or(config_file.gateway.proxy.as_deref());
-                    let http_client = ponyllm_core::executor::create_upstream_http_client_with_options(
-                        effective_proxy,
-                        config_file.gateway.use_system_proxy,
-                    );
+                    let effective_proxy = p_sec
+                        .proxy
+                        .as_deref()
+                        .or(config_file.gateway.proxy.as_deref());
+                    let http_client =
+                        ponyllm_core::executor::create_upstream_http_client_with_options(
+                            effective_proxy,
+                            config_file.gateway.use_system_proxy,
+                        );
                     let mgr = Arc::new(ponyllm_core::pool::AntigravityTokenManager::new(
                         &k.id,
                         cred,
                         http_client,
                     ));
-                    pool.add_key(ApiKeyEntry::new_antigravity(&k.id, mgr, k.priority, k.weight));
+                    pool.add_key(ApiKeyEntry::new_antigravity(
+                        &k.id, mgr, k.priority, k.weight,
+                    ));
                     continue;
                 }
             }
@@ -255,7 +261,9 @@ fn open_in_browser(url: &str) {
     }
     #[cfg(target_os = "windows")]
     {
-        let _ = std::process::Command::new("cmd").args(["/C", "start", url]).spawn();
+        let _ = std::process::Command::new("cmd")
+            .args(["/C", "start", url])
+            .spawn();
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     {
@@ -301,32 +309,33 @@ async fn run_server(opts: ServerOptions) -> Result<(), Box<dyn std::error::Error
     // which seeds the poller's change-detection baseline (P1-arch S3-1: a
     // Secret change between startup and the first poll must still fire).
     let mut poller_initial_identity: Option<String> = None;
-    let mut kube_source: Option<std::sync::Arc<ponyllm_server::admin_store::KubernetesConfigStore>> =
-        None;
-    let store: std::sync::Arc<dyn ponyllm_server::admin_store::ConfigStore> =
-        match config_backend.as_str() {
-            "file" => std::sync::Arc::new(ponyllm_server::admin_store::FileConfigStore::new(
-                resolved_config.to_str().unwrap_or("ponyllm.toml"),
-            )),
-            "kubernetes" => {
-                let k = ponyllm_server::admin_store::KubernetesConfigStore::from_env(
-                    "ponyllm-live-config",
-                )
-                .await
-                .map_err(|e| -> Box<dyn std::error::Error> {
-                    format!("kubernetes config backend init failed: {}", e).into()
-                })?;
-                let kube_arc = std::sync::Arc::new(k);
-                kube_source = Some(kube_arc.clone());
-                // The store handed to AppState IS the Kubernetes store; the
-                // poller additionally wraps it in KubeStoreSource for the
-                // raw-bytes-hash identity.
-                kube_arc.clone() as std::sync::Arc<dyn ponyllm_server::admin_store::ConfigStore>
-            }
-            other => {
-                return Err(format!("unknown --config-backend '{}' (file|kubernetes)", other).into())
-            }
-        };
+    let mut kube_source: Option<
+        std::sync::Arc<ponyllm_server::admin_store::KubernetesConfigStore>,
+    > = None;
+    let store: std::sync::Arc<dyn ponyllm_server::admin_store::ConfigStore> = match config_backend
+        .as_str()
+    {
+        "file" => std::sync::Arc::new(ponyllm_server::admin_store::FileConfigStore::new(
+            resolved_config.to_str().unwrap_or("ponyllm.toml"),
+        )),
+        "kubernetes" => {
+            let k =
+                ponyllm_server::admin_store::KubernetesConfigStore::from_env("ponyllm-live-config")
+                    .await
+                    .map_err(|e| -> Box<dyn std::error::Error> {
+                        format!("kubernetes config backend init failed: {}", e).into()
+                    })?;
+            let kube_arc = std::sync::Arc::new(k);
+            kube_source = Some(kube_arc.clone());
+            // The store handed to AppState IS the Kubernetes store; the
+            // poller additionally wraps it in KubeStoreSource for the
+            // raw-bytes-hash identity.
+            kube_arc.clone() as std::sync::Arc<dyn ponyllm_server::admin_store::ConfigStore>
+        }
+        other => {
+            return Err(format!("unknown --config-backend '{}' (file|kubernetes)", other).into())
+        }
+    };
 
     let mut config_file = if config_backend == "kubernetes" {
         let src = KubeStoreSource::new(
@@ -334,9 +343,12 @@ async fn run_server(opts: ServerOptions) -> Result<(), Box<dyn std::error::Error
                 .clone()
                 .expect("kube source set for kubernetes backend"),
         );
-        let (hash, cfg) = src.snapshot().await.map_err(|e| -> Box<dyn std::error::Error> {
-            format!("kubernetes config backend load failed: {}", e).into()
-        })?;
+        let (hash, cfg) = src
+            .snapshot()
+            .await
+            .map_err(|e| -> Box<dyn std::error::Error> {
+                format!("kubernetes config backend load failed: {}", e).into()
+            })?;
         poller_initial_identity = Some(hash);
         cfg
     } else {
@@ -393,7 +405,10 @@ async fn run_server(opts: ServerOptions) -> Result<(), Box<dyn std::error::Error
     // refused too — an open gateway must never face the public network,
     // even when a (now-ignored) key is present.
     if config_file.gateway.auth_mode == ponyllm_config::AuthMode::Open {
-        let host = final_bind.split_once(':').map(|(h, _)| h.trim()).unwrap_or(final_bind.trim());
+        let host = final_bind
+            .split_once(':')
+            .map(|(h, _)| h.trim())
+            .unwrap_or(final_bind.trim());
         let loopback = host.eq_ignore_ascii_case("127.0.0.1")
             || host.eq_ignore_ascii_case("localhost")
             || host == "::1"
@@ -433,9 +448,13 @@ async fn run_server(opts: ServerOptions) -> Result<(), Box<dyn std::error::Error
     let draining = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     // Cross-replica antigravity refresh serialization: enabled only when the
     // operator provides the lock DB (multi-node deployments; Phase 2+).
-    if std::env::var("PONYLLM_LOCK_DATABASE_URL").map(|v| !v.trim().is_empty()).unwrap_or(false) {
-        let lock = ponyllm_server::refresh_lock::PostgresRefreshLock::new(Some(state.metrics.clone()))
-            .with_draining(draining.clone());
+    if std::env::var("PONYLLM_LOCK_DATABASE_URL")
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false)
+    {
+        let lock =
+            ponyllm_server::refresh_lock::PostgresRefreshLock::new(Some(state.metrics.clone()))
+                .with_draining(draining.clone());
         let gate: std::sync::Arc<dyn ponyllm_core::pool::refresh_gate::RefreshGate> =
             std::sync::Arc::new(lock);
         state = state.with_refresh_gate(Some(gate));
@@ -502,15 +521,15 @@ async fn run_server(opts: ServerOptions) -> Result<(), Box<dyn std::error::Error
                     tracing::info!(
                         "kubernetes config change applied (hot reload) — config_reload_total incremented"
                     );
-                    println!(
-                        "\n🔄 [配置热更新] Secret 内容变更，网关已完成零停机平滑热重载！"
-                    );
+                    println!("\n🔄 [配置热更新] Secret 内容变更，网关已完成零停机平滑热重载！");
                 });
             };
             let stop_flag = st_poll.clone();
             ponyllm_server::config_poller::run_config_poller(
                 &source,
-                std::time::Duration::from_millis(ponyllm_server::config_poller::KUBERNETES_POLL_INTERVAL_MS),
+                std::time::Duration::from_millis(
+                    ponyllm_server::config_poller::KUBERNETES_POLL_INTERVAL_MS,
+                ),
                 initial_identity,
                 on_change,
                 move || *stop_flag.shutdown_rx.borrow(),
@@ -577,7 +596,8 @@ async fn run_server(opts: ServerOptions) -> Result<(), Box<dyn std::error::Error
 
     let is_all_interfaces = host == "0.0.0.0";
     let probe_host = if is_all_interfaces { "127.0.0.1" } else { host };
-    let has_token = !gw_config.api_key.is_empty() && !gw_config.api_key.eq_ignore_ascii_case("none");
+    let has_token =
+        !gw_config.api_key.is_empty() && !gw_config.api_key.eq_ignore_ascii_case("none");
     let web_base_url = format!("http://{}:{}/", probe_host, p_str);
     let web_direct_url = if has_token {
         // R9: 复用 format_web_status_url —— encodeURIComponent 等价编码 + fragment
@@ -597,15 +617,11 @@ async fn run_server(opts: ServerOptions) -> Result<(), Box<dyn std::error::Error
     };
 
     if let Some(gen_k) = &newly_generated_key {
-        println!("\n💡 [自动生成访问凭证] 检测到未配置 API Key，已自动生成并保存高熵秘钥: {}", gen_k);
+        println!(
+            "\n💡 [自动生成访问凭证] 检测到未配置 API Key，已自动生成并保存高熵秘钥: {}",
+            gen_k
+        );
     }
-
-    let strat_name = match gw_config.default_strategy {
-        GatewayRoutingStrategy::Economy => "省钱优先 (0元免费 > Plan套餐 > 缓存命中 > 按量低价)",
-        GatewayRoutingStrategy::Speed => "极速优先 (实测 TTFT + t/s 最优)",
-        GatewayRoutingStrategy::Reliable => "稳定优先 (高可用保障与429避让)",
-        GatewayRoutingStrategy::Balanced => "综合平衡 (成本与响应速度均衡)",
-    };
 
     // WEB-01 P1-3: web mount state is ops-visible (absolute dist path +
     // enabled/dist-hit status) so a CWD-dependent miss is diagnosable.
@@ -632,10 +648,20 @@ async fn run_server(opts: ServerOptions) -> Result<(), Box<dyn std::error::Error
         println!("║  • 控制台根路径:      {:<48} ║", web_base_url);
         println!("║  • 访问凭证 (Token):  {:<48} ║", auth_display);
         println!("║  • 监听地址:          {:<48} ║", gw_config.bind_addr);
-        println!("║  • API 接入点:        {:<48} ║", format!("http://{}:{}/v1", probe_host, p_str));
-        println!("║  • 全局调度策略:      {:<48} ║", strat_name);
-        println!("║  • 配置文件路径:      {:<48} ║", resolved_config.display());
-        println!("║  • Web 托管状态:      {:<48} ║", web_state.chars().take(44).collect::<String>());
+        println!(
+            "║  • API 接入点:        {:<48} ║",
+            format!("http://{}:{}/v1", probe_host, p_str)
+        );
+        // 全局调度策略配置已移除（wave-2）；排序由 Auto 智能路由接管，此行不再由配置驱动。
+        println!("║  • 路由模式:          {:<48} ║", "Auto 智能路由");
+        println!(
+            "║  • 配置文件路径:      {:<48} ║",
+            resolved_config.display()
+        );
+        println!(
+            "║  • Web 托管状态:      {:<48} ║",
+            web_state.chars().take(44).collect::<String>()
+        );
         println!("╠════════════════════════════════════════════════════════════════════════╣");
         println!("║  • 已挂载模型提供商 (Providers & Pricing):                             ║");
         for (p_name, p_sec) in &config_file.providers {
@@ -644,17 +670,28 @@ async fn run_server(opts: ServerOptions) -> Result<(), Box<dyn std::error::Error
             } else if p_sec.billing_mode == ponyllm_core::pool::BillingMode::Plan {
                 "Plan套餐".to_string()
             } else {
-                format!("入${:.2}/缓${:.3}/出${:.2}", p_sec.input_price, p_sec.cached_price, p_sec.output_price)
+                format!(
+                    "入${:.2}/缓${:.3}/出${:.2}",
+                    p_sec.input_price, p_sec.cached_price, p_sec.output_price
+                )
             };
             let all_models = p_sec.list_all_models();
-            let m_names: Vec<String> = all_models.into_iter().map(|m| {
-                if m.name == p_sec.default_model {
-                    format!("{} (★默认,{})", m.name, m.tier.shorthand())
-                } else {
-                    format!("{}({})", m.name, m.tier.shorthand())
-                }
-            }).collect();
-            println!("║    - {:<10} [{:<8}]: {}", p_name, pricing_tag, m_names.join(", "));
+            let m_names: Vec<String> = all_models
+                .into_iter()
+                .map(|m| {
+                    if m.name == p_sec.default_model {
+                        format!("{} (★默认,{})", m.name, m.tier.shorthand())
+                    } else {
+                        format!("{}({})", m.name, m.tier.shorthand())
+                    }
+                })
+                .collect();
+            println!(
+                "║    - {:<10} [{:<8}]: {}",
+                p_name,
+                pricing_tag,
+                m_names.join(", ")
+            );
         }
         println!("╚════════════════════════════════════════════════════════════════════════╝");
         if has_token {
@@ -668,21 +705,52 @@ async fn run_server(opts: ServerOptions) -> Result<(), Box<dyn std::error::Error
         println!("\n╔════════════════════════════════════════════════════════════════════════╗");
         println!("║              🚀 ponyllm AI Gateway 服务已就绪                          ║");
         println!("╠════════════════════════════════════════════════════════════════════════╣");
-        println!("║  • 配置文件路径:      {:<48} ║", resolved_config.display());
+        println!(
+            "║  • 配置文件路径:      {:<48} ║",
+            resolved_config.display()
+        );
         println!("║  • 本地接入 Base URL:                                                  ║");
         if is_all_interfaces {
-            println!("║    - OpenAI 客户端:   http://127.0.0.1:{}/v1 (局域网: http://0.0.0.0:{}/v1)║", p_str, p_str);
-            println!("║    - Anthropic 客户端: http://127.0.0.1:{}    (局域网: http://0.0.0.0:{})   ║", p_str, p_str);
+            println!(
+                "║    - OpenAI 客户端:   http://127.0.0.1:{}/v1 (局域网: http://0.0.0.0:{}/v1)║",
+                p_str, p_str
+            );
+            println!(
+                "║    - Anthropic 客户端: http://127.0.0.1:{}    (局域网: http://0.0.0.0:{})   ║",
+                p_str, p_str
+            );
         } else {
-            println!("║    - OpenAI 客户端:   http://{}:{}/v1                             ║", host, p_str);
-            println!("║    - Anthropic 客户端: http://{}:{}                                ║", host, p_str);
+            println!(
+                "║    - OpenAI 客户端:   http://{}:{}/v1                             ║",
+                host, p_str
+            );
+            println!(
+                "║    - Anthropic 客户端: http://{}:{}                                ║",
+                host, p_str
+            );
         }
-        println!("║    - 监听全地址:      http://{}                                     ║", gw_config.bind_addr);
-        println!("║  • 全局调度策略:      {:<48} ║", strat_name);
-        println!("║  • 请求体缓冲上限:    {:<48} ║", format!("{} MB (支持1M长上下文/多模态)", gw_config.request_body_limit / (1024 * 1024)));
-        println!("║  • 访问凭证 (Token):  {}                                   ║", format!("{:<30}", auth_display));
+        println!(
+            "║    - 监听全地址:      http://{}                                     ║",
+            gw_config.bind_addr
+        );
+        // 全局调度策略配置已移除（wave-2）；排序由 Auto 智能路由接管，此行不再由配置驱动。
+        println!("║  • 路由模式:          {:<48} ║", "Auto 智能路由");
+        println!(
+            "║  • 请求体缓冲上限:    {:<48} ║",
+            format!(
+                "{} MB (支持1M长上下文/多模态)",
+                gw_config.request_body_limit / (1024 * 1024)
+            )
+        );
+        println!(
+            "║  • 访问凭证 (Token):  {}                                   ║",
+            format!("{:<30}", auth_display)
+        );
         println!("║  • 虚拟总代模型:      auto, auto:flagship, auto:economy, auto[1m]     ║");
-        println!("║  • Web 控制台:        {:<48} ║", web_state.chars().take(44).collect::<String>());
+        println!(
+            "║  • Web 控制台:        {:<48} ║",
+            web_state.chars().take(44).collect::<String>()
+        );
         println!("╠════════════════════════════════════════════════════════════════════════╣");
         println!("║  • 已挂载模型提供商 (Providers & Pricing):                             ║");
         for (p_name, p_sec) in &config_file.providers {
@@ -691,23 +759,37 @@ async fn run_server(opts: ServerOptions) -> Result<(), Box<dyn std::error::Error
             } else if p_sec.billing_mode == ponyllm_core::pool::BillingMode::Plan {
                 "Plan套餐".to_string()
             } else {
-                format!("入${:.2}/缓${:.3}/出${:.2}", p_sec.input_price, p_sec.cached_price, p_sec.output_price)
+                format!(
+                    "入${:.2}/缓${:.3}/出${:.2}",
+                    p_sec.input_price, p_sec.cached_price, p_sec.output_price
+                )
             };
             let all_models = p_sec.list_all_models();
-            let m_names: Vec<String> = all_models.into_iter().map(|m| {
-                if m.name == p_sec.default_model {
-                    format!("{} (★默认,{})", m.name, m.tier.shorthand())
-                } else {
-                    format!("{}({})", m.name, m.tier.shorthand())
-                }
-            }).collect();
-            println!("║    - {:<10} [{:<8}]: {}", p_name, pricing_tag, m_names.join(", "));
+            let m_names: Vec<String> = all_models
+                .into_iter()
+                .map(|m| {
+                    if m.name == p_sec.default_model {
+                        format!("{} (★默认,{})", m.name, m.tier.shorthand())
+                    } else {
+                        format!("{}({})", m.name, m.tier.shorthand())
+                    }
+                })
+                .collect();
+            println!(
+                "║    - {:<10} [{:<8}]: {}",
+                p_name,
+                pricing_tag,
+                m_names.join(", ")
+            );
         }
         println!("╚════════════════════════════════════════════════════════════════════════╝\n");
     }
 
     if opts.open_browser {
-        println!("🚀 正在自动在默认浏览器中打开 Web 控制台: {}", web_direct_url);
+        println!(
+            "🚀 正在自动在默认浏览器中打开 Web 控制台: {}",
+            web_direct_url
+        );
         open_in_browser(&web_direct_url);
     }
 
@@ -790,10 +872,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Init { output, non_interactive } => {
+        Commands::Init {
+            output,
+            non_interactive,
+        } => {
             if non_interactive {
                 if std::path::Path::new(&output).exists() {
-                    return Err(format!("目标配置文件 '{}' 已存在，非交互模式禁止静默覆写", output).into());
+                    return Err(format!(
+                        "目标配置文件 '{}' 已存在，非交互模式禁止静默覆写",
+                        output
+                    )
+                    .into());
                 }
                 fs::write(&output, generate_sample_config())?;
                 println!("✅ 已成功以静默模式写入默认配置至 '{}'", output);
@@ -806,7 +895,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let resolved = resolve_path(config.as_deref());
                 let cfg = ConfigFile::load_or_default(resolved.to_str())?;
                 println!("=== 已配置的模型提供商 (共 {} 个) ===", cfg.providers.len());
-                println!("{:<14} {:<28} {:<22} {:<8} {:<10} {:<10} {:<22} {:<18} {:<6}", "提供商", "Base URL", "默认模型", "模式", "策略", "原生协议", "基准资费($/1M:入/缓/出)", "代理(Proxy)", "Keys");
+                println!(
+                    "{:<14} {:<28} {:<22} {:<8} {:<10} {:<10} {:<22} {:<18} {:<6}",
+                    "提供商",
+                    "Base URL",
+                    "默认模型",
+                    "模式",
+                    "策略",
+                    "原生协议",
+                    "基准资费($/1M:入/缓/出)",
+                    "代理(Proxy)",
+                    "Keys"
+                );
                 println!("{}", "-".repeat(145));
                 for (name, p) in &cfg.providers {
                     let mode_str = match p.billing_mode {
@@ -814,12 +914,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         ponyllm_core::pool::BillingMode::Metered => "metered",
                         ponyllm_core::pool::BillingMode::Free => "free(免费)",
                     };
-                    let proto_str = p.default_protocol.map(|v| v.to_string()).unwrap_or_else(|| "auto(启发式)".to_string());
-                    let pricing_str = format!("{:.2}/{:.3}/{:.2}", p.input_price, p.cached_price, p.output_price);
+                    let proto_str = p
+                        .default_protocol
+                        .map(|v| v.to_string())
+                        .unwrap_or_else(|| "auto(启发式)".to_string());
+                    let pricing_str = format!(
+                        "{:.2}/{:.3}/{:.2}",
+                        p.input_price, p.cached_price, p.output_price
+                    );
                     let proxy_str = p.proxy.as_deref().unwrap_or("-");
                     println!(
                         "{:<14} {:<28} {:<22} {:<8} {:<10} {:<10} {:<22} {:<18} {:<6}",
-                        name, p.base_url, p.default_model, mode_str, p.strategy, proto_str, pricing_str, proxy_str, p.keys.len()
+                        name,
+                        p.base_url,
+                        p.default_model,
+                        mode_str,
+                        p.strategy,
+                        proto_str,
+                        pricing_str,
+                        proxy_str,
+                        p.keys.len()
                     );
                 }
             }
@@ -874,13 +988,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
 
                 if input_price < 0.0 || input_price.is_nan() || input_price.is_infinite() {
-                    return Err(format!("常规输入单价 --input-price 必须为大于等于 0 的合法数值，输入: {}", input_price).into());
+                    return Err(format!(
+                        "常规输入单价 --input-price 必须为大于等于 0 的合法数值，输入: {}",
+                        input_price
+                    )
+                    .into());
                 }
                 if cached_price < 0.0 || cached_price.is_nan() || cached_price.is_infinite() {
-                    return Err(format!("缓存命中单价 --cached-price 必须为大于等于 0 的合法数值，输入: {}", cached_price).into());
+                    return Err(format!(
+                        "缓存命中单价 --cached-price 必须为大于等于 0 的合法数值，输入: {}",
+                        cached_price
+                    )
+                    .into());
                 }
                 if output_price < 0.0 || output_price.is_nan() || output_price.is_infinite() {
-                    return Err(format!("输出生成单价 --output-price 必须为大于等于 0 的合法数值，输入: {}", output_price).into());
+                    return Err(format!(
+                        "输出生成单价 --output-price 必须为大于等于 0 的合法数值，输入: {}",
+                        output_price
+                    )
+                    .into());
                 }
                 ponyllm_cli::config::validate_provider_fields(
                     &base_url,
@@ -934,7 +1060,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     cached_price,
                     output_price,
                 );
-                if default_protocol.is_some() || chat_url.is_some() || responses_url.is_some() || messages_url.is_some() || resolved_proxy.is_some() {
+                if default_protocol.is_some()
+                    || chat_url.is_some()
+                    || responses_url.is_some()
+                    || messages_url.is_some()
+                    || resolved_proxy.is_some()
+                {
                     if let Some(p) = cfg.providers.get_mut(&name) {
                         p.default_protocol = default_protocol;
                         if chat_url.is_some() {
@@ -952,8 +1083,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
                 cfg.save_to_path(path)?;
-                let proxy_info = resolved_proxy.map(|p| format!(", 代理: {}", p)).unwrap_or_default();
-                println!("✅ 成功添加/更新提供商 '{}' (Base URL: {}, Model: {}, 资费: {}/{}/{}{})", name, base_url, model, input_price, cached_price, output_price, proxy_info);
+                let proxy_info = resolved_proxy
+                    .map(|p| format!(", 代理: {}", p))
+                    .unwrap_or_default();
+                println!(
+                    "✅ 成功添加/更新提供商 '{}' (Base URL: {}, Model: {}, 资费: {}/{}/{}{})",
+                    name, base_url, model, input_price, cached_price, output_price, proxy_info
+                );
                 println!("   • 配置文件: {}", resolved.display());
             }
             ProviderCommands::Remove { name, config } => {
@@ -974,7 +1110,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let resolved = resolve_path(config.as_deref());
                 let cfg = ConfigFile::load_or_default(resolved.to_str())?;
                 println!("=== API Key 账户池 ===");
-                println!("{:<15} {:<20} {:<25} {:<8} {:<8}", "所属提供商", "Key ID", "API Key (已脱敏)", "优先级", "权重");
+                println!(
+                    "{:<15} {:<20} {:<25} {:<8} {:<8}",
+                    "所属提供商", "Key ID", "API Key (已脱敏)", "优先级", "权重"
+                );
                 println!("{}", "-".repeat(80));
                 for (p_name, p) in &cfg.providers {
                     if let Some(target_p) = &provider {
@@ -985,13 +1124,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     for k in &p.keys {
                         println!(
                             "{:<15} {:<20} {:<25} {:<8} {:<8}",
-                            p_name, k.id, k.masked_display_key(), k.priority, k.weight
+                            p_name,
+                            k.id,
+                            k.masked_display_key(),
+                            k.priority,
+                            k.weight
                         );
                     }
                 }
             }
-            KeyCommands::Add { provider, id, key, priority, weight, config } => {
-                if (provider.eq_ignore_ascii_case("agy") || provider.eq_ignore_ascii_case("antigravity"))
+            KeyCommands::Add {
+                provider,
+                id,
+                key,
+                priority,
+                weight,
+                config,
+            } => {
+                if (provider.eq_ignore_ascii_case("agy")
+                    || provider.eq_ignore_ascii_case("antigravity"))
                     && !key.starts_with("1//")
                     && !key.trim().starts_with('{')
                 {
@@ -1004,10 +1155,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 cfg.add_key(&provider, &id, &key, priority, weight)
                     .map_err(|e| std::io::Error::new(std::io::ErrorKind::NotFound, e))?;
                 cfg.save_to_path(path)?;
-                println!("✅ 成功向提供商 '{}' 账户池添加/更新 Key '{}' (优先级: {}, 权重: {})", provider, id, priority, weight);
+                println!(
+                    "✅ 成功向提供商 '{}' 账户池添加/更新 Key '{}' (优先级: {}, 权重: {})",
+                    provider, id, priority, weight
+                );
                 println!("   • 配置文件: {}", resolved.display());
             }
-            KeyCommands::Remove { provider, id, config } => {
+            KeyCommands::Remove {
+                provider,
+                id,
+                config,
+            } => {
                 let resolved = resolve_path(config.as_deref());
                 let path = resolved.to_str().unwrap_or("ponyllm.toml");
                 let mut cfg = ConfigFile::load_or_default(Some(path))?;
@@ -1028,7 +1186,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             KeyCommands::Test { provider, config } => {
                 handle_test_keys(provider, config).await?;
             }
-            KeyCommands::Gateway { config, key, rotate, show } => {
+            KeyCommands::Gateway {
+                config,
+                key,
+                rotate,
+                show,
+            } => {
                 handle_manage_gateway_auth(config.as_deref(), key, rotate, show)?;
             }
             KeyCommands::Auth {
@@ -1054,256 +1217,341 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .map_err(|e| -> Box<dyn std::error::Error> { e })?;
             }
         },
-        Commands::Model(cmd) => match cmd {
-            ModelCommands::List { config } => {
-                let resolved = resolve_path(config.as_deref());
-                let cfg = ConfigFile::load_or_default(resolved.to_str())?;
-                println!("=== 已配置的模型目录 ===");
-                println!("{:<12} {:<24} {:<6} {:<10} {:<8} {:<10} {:<10} {:<24} {:<20}", "提供商", "模型标识", "梯队", "模式", "上下文", "最大输出", "原生协议", "资费($/1M:入/缓/出)", "网络代理(Proxy)");
-                println!("{}", "-".repeat(138));
-                for (p_name, p) in &cfg.providers {
-                    for m in p.list_all_models() {
-                        let is_def = if m.name == p.default_model { " (★默认)" } else { "" };
-                        let proto_str = m.protocol.or(p.default_protocol).map(|v| v.to_string()).unwrap_or_else(|| "auto".to_string());
-                        let mode_desc = match p.get_model_billing_mode(&m.name) {
-                            ponyllm_core::pool::BillingMode::Plan => "Plan(套餐)",
-                            ponyllm_core::pool::BillingMode::Free => "0元免费",
-                            ponyllm_core::pool::BillingMode::Metered => "按量计费",
-                        };
-                        let pricing_info = if m.input_price.is_some() || m.cached_price.is_some() || m.output_price.is_some() {
-                            let pr = p.get_model_pricing(&m.name);
-                            format!("★ {:.2}/{:.3}/{:.2}", pr.input_price, pr.cached_price, pr.output_price)
-                        } else {
-                            let pr = p.pricing();
-                            format!("{:.2}/{:.3}/{:.2}(继承)", pr.input_price, pr.cached_price, pr.output_price)
-                        };
-                        let proxy_desc = if let Some(ref pxy) = m.proxy {
-                            if pxy.eq_ignore_ascii_case("direct") || pxy.eq_ignore_ascii_case("none") {
-                                "★ 强制直连".to_string()
+        Commands::Model(cmd) => {
+            match cmd {
+                ModelCommands::List { config } => {
+                    let resolved = resolve_path(config.as_deref());
+                    let cfg = ConfigFile::load_or_default(resolved.to_str())?;
+                    println!("=== 已配置的模型目录 ===");
+                    println!(
+                        "{:<12} {:<24} {:<6} {:<10} {:<8} {:<10} {:<10} {:<24} {:<20}",
+                        "提供商",
+                        "模型标识",
+                        "梯队",
+                        "模式",
+                        "上下文",
+                        "最大输出",
+                        "原生协议",
+                        "资费($/1M:入/缓/出)",
+                        "网络代理(Proxy)"
+                    );
+                    println!("{}", "-".repeat(138));
+                    for (p_name, p) in &cfg.providers {
+                        for m in p.list_all_models() {
+                            let is_def = if m.name == p.default_model {
+                                " (★默认)"
                             } else {
-                                format!("★ {}", pxy)
-                            }
-                        } else if let Some(ref pxy) = p.proxy {
-                            format!("{}(继承)", pxy)
-                        } else {
-                            "- (直连)".to_string()
-                        };
-                        println!(
-                            "{:<12} {:<24} {:<6} {:<10} {:<8} {:<10} {:<10} {:<24} {:<20}",
-                            p_name,
-                            format!("{}{}", m.name, is_def),
-                            m.tier.shorthand(),
-                            mode_desc,
-                            m.context_window,
-                            m.max_output,
-                            proto_str,
-                            pricing_info,
-                            proxy_desc,
-                        );
-                    }
-                }
-            }
-            ModelCommands::Add {
-                provider,
-                model,
-                context,
-                max_output,
-                inputs,
-                outputs,
-                tier,
-                input_price,
-                cached_price,
-                output_price,
-                billing_mode,
-                protocol,
-                proxy,
-                thinking_default,
-                thinking_max,
-                config,
-            } => {
-                let resolved = resolve_path(config.as_deref());
-                let path = resolved.to_str().unwrap_or("ponyllm.toml");
-                let mut cfg = ConfigFile::load_or_default(Some(path))?;
-                let input_types: Vec<String> = inputs.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
-                let output_types: Vec<String> = outputs.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
-                let tier_val = <ponyllm_core::pool::ModelTier as std::str::FromStr>::from_str(&tier)
-                    .map_err(|e| format!("无效的能力梯队 --tier '{}': {}。仅支持 Flagship (F), Standard (S), Light (L)", tier, e))?;
-
-                let mode_val = match billing_mode.as_deref() {
-                    Some("plan") | Some("coding_plan") | Some("coding-plan") => Some(ponyllm_core::pool::BillingMode::Plan),
-                    Some("metered") | Some("payg") => Some(ponyllm_core::pool::BillingMode::Metered),
-                    Some("free") => Some(ponyllm_core::pool::BillingMode::Free),
-                    Some(other) => {
-                        return Err(format!("无效的计费模式 --billing-mode '{}'。仅支持 metered, plan, free", other).into());
-                    }
-                    None => None,
-                };
-
-                let model_proxy = match proxy.as_deref() {
-                    Some("auto") => {
-                        let detected = ponyllm_core::detect_system_proxy();
-                        if let Some(ref d) = detected {
-                            println!("🔍 已自动探测到系统代理: {}", d);
-                        } else {
-                            println!("⚠️ 未探测到系统活动代理，保持继承/直连");
-                        }
-                        detected
-                    }
-                    Some("direct") | Some("none") => Some("direct".to_string()),
-                    Some(u) => {
-                        let trimmed = u.trim();
-                        if trimmed.is_empty() {
-                            None
-                        } else {
-                            Some(trimmed.to_string())
+                                ""
+                            };
+                            let proto_str = m
+                                .protocol
+                                .or(p.default_protocol)
+                                .map(|v| v.to_string())
+                                .unwrap_or_else(|| "auto".to_string());
+                            let mode_desc = match p.get_model_billing_mode(&m.name) {
+                                ponyllm_core::pool::BillingMode::Plan => "Plan(套餐)",
+                                ponyllm_core::pool::BillingMode::Free => "0元免费",
+                                ponyllm_core::pool::BillingMode::Metered => "按量计费",
+                            };
+                            let pricing_info = if m.input_price.is_some()
+                                || m.cached_price.is_some()
+                                || m.output_price.is_some()
+                            {
+                                let pr = p.get_model_pricing(&m.name);
+                                format!(
+                                    "★ {:.2}/{:.3}/{:.2}",
+                                    pr.input_price, pr.cached_price, pr.output_price
+                                )
+                            } else {
+                                let pr = p.pricing();
+                                format!(
+                                    "{:.2}/{:.3}/{:.2}(继承)",
+                                    pr.input_price, pr.cached_price, pr.output_price
+                                )
+                            };
+                            let proxy_desc = if let Some(ref pxy) = m.proxy {
+                                if pxy.eq_ignore_ascii_case("direct")
+                                    || pxy.eq_ignore_ascii_case("none")
+                                {
+                                    "★ 强制直连".to_string()
+                                } else {
+                                    format!("★ {}", pxy)
+                                }
+                            } else if let Some(ref pxy) = p.proxy {
+                                format!("{}(继承)", pxy)
+                            } else {
+                                "- (直连)".to_string()
+                            };
+                            println!(
+                                "{:<12} {:<24} {:<6} {:<10} {:<8} {:<10} {:<10} {:<24} {:<20}",
+                                p_name,
+                                format!("{}{}", m.name, is_def),
+                                m.tier.shorthand(),
+                                mode_desc,
+                                m.context_window,
+                                m.max_output,
+                                proto_str,
+                                pricing_info,
+                                proxy_desc,
+                            );
                         }
                     }
-                    None => None,
-                };
-
-                if let Some(p) = input_price {
-                    if p < 0.0 || p.is_nan() || p.is_infinite() {
-                        return Err(format!("常规输入单价 --input-price 必须为大于等于 0 的合法数值，输入: {}", p).into());
-                    }
                 }
-                if let Some(p) = cached_price {
-                    if p < 0.0 || p.is_nan() || p.is_infinite() {
-                        return Err(format!("缓存命中单价 --cached-price 必须为大于等于 0 的合法数值，输入: {}", p).into());
-                    }
-                }
-                if let Some(p) = output_price {
-                    if p < 0.0 || p.is_nan() || p.is_infinite() {
-                        return Err(format!("输出生成单价 --output-price 必须为大于等于 0 的合法数值，输入: {}", p).into());
-                    }
-                }
-
-                let thinking_default_effort = thinking_default.as_deref().map(|s| ponyllm_core::pool::ModelThinkingSpec::match_4tier_effort(Some(s)));
-                let thinking_max_effort = thinking_max.as_deref().map(|s| ponyllm_core::pool::ModelThinkingSpec::match_4tier_effort(Some(s)));
-
-                let model_cfg = ponyllm_cli::config::ModelConfig {
-                    name: model.clone(),
-                    tier: tier_val,
-                    priority: None,
-                    billing_mode: mode_val,
-                    context_window: context.clone(),
-                    max_output: max_output.clone(),
-                    input_types,
-                    output_types,
+                ModelCommands::Add {
+                    provider,
+                    model,
+                    context,
+                    max_output,
+                    inputs,
+                    outputs,
+                    tier,
                     input_price,
                     cached_price,
                     output_price,
-                    pricing_mode: None,
-                    pricing_periods: Vec::new(),
-                    display_name: None,
-                    temperature: None,
-                    top_p: None,
+                    billing_mode,
                     protocol,
-                    base_url: None,
-                    thinking_default: thinking_default_effort,
-                    thinking_max: thinking_max_effort,
-                    proxy: model_proxy.clone(),
-                    timeout_secs: None,
-                    rate_limits: None,
-                    fallbacks: Vec::new(),
-                };
+                    proxy,
+                    thinking_default,
+                    thinking_max,
+                    config,
+                } => {
+                    let resolved = resolve_path(config.as_deref());
+                    let path = resolved.to_str().unwrap_or("ponyllm.toml");
+                    let mut cfg = ConfigFile::load_or_default(Some(path))?;
+                    let input_types: Vec<String> = inputs
+                        .split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                    let output_types: Vec<String> = outputs
+                        .split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                    let tier_val = <ponyllm_core::pool::ModelTier as std::str::FromStr>::from_str(&tier)
+                    .map_err(|e| format!("无效的能力梯队 --tier '{}': {}。仅支持 Flagship (F), Standard (S), Light (L)", tier, e))?;
 
-                cfg.upsert_model_config(&provider, model_cfg)
-                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::NotFound, e))?;
-                cfg.save_to_path(path)?;
-                let mode_label = mode_val.map(|m| format!("模式: {:?}", m)).unwrap_or_else(|| "模式: 继承提供商".to_string());
-                let proxy_label = match model_proxy.as_deref() {
-                    Some("direct") | Some("none") => ", 代理: 强制直连".to_string(),
-                    Some(p) => format!(", 代理: {}", p),
-                    None => "".to_string(),
-                };
-                println!(
+                    let mode_val = match billing_mode.as_deref() {
+                        Some("plan") | Some("coding_plan") | Some("coding-plan") => {
+                            Some(ponyllm_core::pool::BillingMode::Plan)
+                        }
+                        Some("metered") | Some("payg") => {
+                            Some(ponyllm_core::pool::BillingMode::Metered)
+                        }
+                        Some("free") => Some(ponyllm_core::pool::BillingMode::Free),
+                        Some(other) => {
+                            return Err(format!(
+                                "无效的计费模式 --billing-mode '{}'。仅支持 metered, plan, free",
+                                other
+                            )
+                            .into());
+                        }
+                        None => None,
+                    };
+
+                    let model_proxy = match proxy.as_deref() {
+                        Some("auto") => {
+                            let detected = ponyllm_core::detect_system_proxy();
+                            if let Some(ref d) = detected {
+                                println!("🔍 已自动探测到系统代理: {}", d);
+                            } else {
+                                println!("⚠️ 未探测到系统活动代理，保持继承/直连");
+                            }
+                            detected
+                        }
+                        Some("direct") | Some("none") => Some("direct".to_string()),
+                        Some(u) => {
+                            let trimmed = u.trim();
+                            if trimmed.is_empty() {
+                                None
+                            } else {
+                                Some(trimmed.to_string())
+                            }
+                        }
+                        None => None,
+                    };
+
+                    if let Some(p) = input_price {
+                        if p < 0.0 || p.is_nan() || p.is_infinite() {
+                            return Err(format!(
+                                "常规输入单价 --input-price 必须为大于等于 0 的合法数值，输入: {}",
+                                p
+                            )
+                            .into());
+                        }
+                    }
+                    if let Some(p) = cached_price {
+                        if p < 0.0 || p.is_nan() || p.is_infinite() {
+                            return Err(format!(
+                                "缓存命中单价 --cached-price 必须为大于等于 0 的合法数值，输入: {}",
+                                p
+                            )
+                            .into());
+                        }
+                    }
+                    if let Some(p) = output_price {
+                        if p < 0.0 || p.is_nan() || p.is_infinite() {
+                            return Err(format!(
+                                "输出生成单价 --output-price 必须为大于等于 0 的合法数值，输入: {}",
+                                p
+                            )
+                            .into());
+                        }
+                    }
+
+                    let thinking_default_effort = thinking_default.as_deref().map(|s| {
+                        ponyllm_core::pool::ModelThinkingSpec::match_4tier_effort(Some(s))
+                    });
+                    let thinking_max_effort = thinking_max.as_deref().map(|s| {
+                        ponyllm_core::pool::ModelThinkingSpec::match_4tier_effort(Some(s))
+                    });
+
+                    let model_cfg = ponyllm_cli::config::ModelConfig {
+                        name: model.clone(),
+                        tier: tier_val,
+                        priority: None,
+                        billing_mode: mode_val,
+                        context_window: context.clone(),
+                        max_output: max_output.clone(),
+                        input_types,
+                        output_types,
+                        input_price,
+                        cached_price,
+                        output_price,
+                        pricing_mode: None,
+                        pricing_periods: Vec::new(),
+                        display_name: None,
+                        temperature: None,
+                        top_p: None,
+                        protocol,
+                        base_url: None,
+                        thinking_default: thinking_default_effort,
+                        thinking_max: thinking_max_effort,
+                        proxy: model_proxy.clone(),
+                        timeout_secs: None,
+                        rate_limits: None,
+                        fallbacks: Vec::new(),
+                    };
+
+                    cfg.upsert_model_config(&provider, model_cfg)
+                        .map_err(|e| std::io::Error::new(std::io::ErrorKind::NotFound, e))?;
+                    cfg.save_to_path(path)?;
+                    let mode_label = mode_val
+                        .map(|m| format!("模式: {:?}", m))
+                        .unwrap_or_else(|| "模式: 继承提供商".to_string());
+                    let proxy_label = match model_proxy.as_deref() {
+                        Some("direct") | Some("none") => ", 代理: 强制直连".to_string(),
+                        Some(p) => format!(", 代理: {}", p),
+                        None => "".to_string(),
+                    };
+                    println!(
                     "✅ 成功向提供商 '{}' 添加模型 '{}' [梯队: {}, {}] (上下文: {}, 输出: {}{})",
                     provider, model, tier_val.shorthand(), mode_label, context, max_output, proxy_label
                 );
-                println!("   • 配置文件: {}", resolved.display());
-            }
-            ModelCommands::Remove { provider, model, config } => {
-                let resolved = resolve_path(config.as_deref());
-                let path = resolved.to_str().unwrap_or("ponyllm.toml");
-                let mut cfg = ConfigFile::load_or_default(Some(path))?;
-                if cfg.remove_model(&provider, &model).unwrap_or(false) {
-                    cfg.save_to_path(path)?;
-                    println!("✅ 成功从提供商 '{}' 删除模型 '{}'", provider, model);
                     println!("   • 配置文件: {}", resolved.display());
-                } else {
-                    println!("⚠️ 未找到该模型配置");
+                }
+                ModelCommands::Remove {
+                    provider,
+                    model,
+                    config,
+                } => {
+                    let resolved = resolve_path(config.as_deref());
+                    let path = resolved.to_str().unwrap_or("ponyllm.toml");
+                    let mut cfg = ConfigFile::load_or_default(Some(path))?;
+                    if cfg.remove_model(&provider, &model).unwrap_or(false) {
+                        cfg.save_to_path(path)?;
+                        println!("✅ 成功从提供商 '{}' 删除模型 '{}'", provider, model);
+                        println!("   • 配置文件: {}", resolved.display());
+                    } else {
+                        println!("⚠️ 未找到该模型配置");
+                    }
+                }
+                ModelCommands::Set {
+                    provider,
+                    model,
+                    config,
+                } => {
+                    let resolved = resolve_path(config.as_deref());
+                    let path = resolved.to_str().unwrap_or("ponyllm.toml");
+                    let mut cfg = ConfigFile::load_or_default(Some(path))?;
+                    if let Some(p) = cfg.providers.get_mut(&provider) {
+                        p.default_model = model.clone();
+                        cfg.save_to_path(path)?;
+                        println!("✅ 成功将提供商 '{}' 默认模型设为 '{}'", provider, model);
+                        println!("   • 配置文件: {}", resolved.display());
+                    } else {
+                        println!("⚠️ 未找到提供商 '{}'", provider);
+                    }
                 }
             }
-            ModelCommands::Set { provider, model, config } => {
-                let resolved = resolve_path(config.as_deref());
-                let path = resolved.to_str().unwrap_or("ponyllm.toml");
-                let mut cfg = ConfigFile::load_or_default(Some(path))?;
-                if let Some(p) = cfg.providers.get_mut(&provider) {
-                    p.default_model = model.clone();
-                    cfg.save_to_path(path)?;
-                    println!("✅ 成功将提供商 '{}' 默认模型设为 '{}'", provider, model);
-                    println!("   • 配置文件: {}", resolved.display());
-                } else {
-                    println!("⚠️ 未找到提供商 '{}'", provider);
-                }
-            }
-        },
-        Commands::Strategy(cmd) => match cmd {
-            StrategyCommands::List => {
-                println!("\n╔══════════════════════════════════════════════════════════════════════════════╗");
-                println!("║                     🎯 ponyllm 智能调度策略一览                              ║");
-                println!("╠══════════════════════════════════════════════════════════════════════════════╣");
-                println!("║ {:<14} {:<12} {:<42} ║", "策略标识", "别名/简写", "人话规则与核心优势");
-                println!("╠──────────────────────────────────────────────────────────────────────────────╣");
-                println!("║ {:<14} {:<12} {:<42} ║", "economy (默认)", "cheap, e", "省钱优先: 0元免费 > Plan套餐 > 缓存命中 > 按量低价");
-                println!("║ {:<14} {:<12} {:<42} ║", "speed", "fastest, s", "极速优先: 实测首字时延 TTFT 与吐字速率 t/s 选最快");
-                println!("║ {:<14} {:<12} {:<42} ║", "reliable", "ha, r", "稳定优先: 高可用 SLA 保障，遇 429 自动毫秒级避让");
-                println!("║ {:<14} {:<12} {:<42} ║", "balanced", "auto, b", "综合平衡: 成本与生成速度帕累托最优平衡");
-                println!("╚══════════════════════════════════════════════════════════════════════════════╝\n");
-            }
-            StrategyCommands::Get { config } => {
-                let resolved = resolve_path(config.as_deref());
-                let cfg = ConfigFile::load_or_default(resolved.to_str())?;
-                let desc = match cfg.gateway.default_strategy {
-                    GatewayRoutingStrategy::Economy => "省钱优先（免费/套餐/缓存/低价）",
-                    GatewayRoutingStrategy::Speed => "极速优先（综合TTFT与t/s）",
-                    GatewayRoutingStrategy::Reliable => "稳定优先（高可用与429避让）",
-                    GatewayRoutingStrategy::Balanced => "综合平衡（成本与速度兼顾）",
-                };
-                println!("当前全局默认调度策略: {} [{}]", cfg.gateway.default_strategy, desc);
-            }
-            StrategyCommands::Set { strategy, config } => {
-                let strat = GatewayRoutingStrategy::from_str(&strategy)
-                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
-                let resolved = resolve_path(config.as_deref());
-                let path = resolved.to_str().unwrap_or("ponyllm.toml");
-                let mut cfg = ConfigFile::load_or_default(Some(path))?;
-                cfg.gateway.default_strategy = strat;
-                cfg.save_to_path(path)?;
-                let desc = match strat {
-                    GatewayRoutingStrategy::Economy => "省钱优先",
-                    GatewayRoutingStrategy::Speed => "极速优先",
-                    GatewayRoutingStrategy::Reliable => "稳定优先",
-                    GatewayRoutingStrategy::Balanced => "综合平衡",
-                };
-                println!("✅ 成功将全局默认调度策略切换为 '{}' ({}) 并已保存至 '{}'", strat, desc, resolved.display());
-            }
-        },
-        Commands::Auth { config, key, rotate, show } => {
+        }
+        Commands::Auth {
+            config,
+            key,
+            rotate,
+            show,
+        } => {
             handle_manage_gateway_auth(config.as_deref(), key, rotate, show)?;
         }
         Commands::Keys(cmd) => match cmd {
             KeysCommands::List { config } => {
                 handle_gateway_keys_list(config.as_deref())?;
             }
-            KeysCommands::Issue { scope, id, config } => {
-                handle_gateway_keys_issue(config.as_deref(), &scope, id.as_deref())?;
+            KeysCommands::Issue {
+                scope,
+                id,
+                user,
+                config,
+            } => {
+                handle_gateway_keys_issue(
+                    config.as_deref(),
+                    &scope,
+                    id.as_deref(),
+                    user.as_deref(),
+                )?;
             }
             KeysCommands::Revoke { id, config } => {
                 handle_gateway_keys_revoke(config.as_deref(), &id)?;
             }
         },
-        Commands::Tui { config, gateway_url } => {
+        Commands::User(cmd) => match cmd {
+            UserCommands::List { config } => {
+                handle_users_list(config.as_deref())?;
+            }
+            UserCommands::Add {
+                id,
+                name,
+                models,
+                max_tokens,
+                enabled,
+                config,
+            } => {
+                handle_users_add(
+                    config.as_deref(),
+                    &id,
+                    name.as_deref(),
+                    models.as_deref(),
+                    max_tokens,
+                    enabled,
+                )?;
+            }
+            UserCommands::Remove { id, config } => {
+                handle_users_remove(config.as_deref(), &id)?;
+            }
+            UserCommands::ResetUsage {
+                id,
+                gateway_url,
+                api_key,
+                config,
+            } => {
+                handle_users_reset_usage(config.as_deref(), &id, &gateway_url, api_key.as_deref())
+                    .await?;
+            }
+        },
+        Commands::Tui {
+            config,
+            gateway_url,
+        } => {
             let resolved = resolve_path(config.as_deref());
             let path = resolved.to_str().unwrap_or("ponyllm.toml");
             let cfg = ConfigFile::load_or_default(Some(path))?;
@@ -1374,7 +1622,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
-        Commands::Restart { config, config_backend, bind, address, port, api_key, retries, no_web, web_dist_dir } => {
+        Commands::Restart {
+            config,
+            config_backend,
+            bind,
+            address,
+            port,
+            api_key,
+            retries,
+            no_web,
+            web_dist_dir,
+        } => {
             match ponyllm_cli::lifecycle::restart_serve(
                 config.as_deref(),
                 config_backend,
@@ -1406,7 +1664,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let client = reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(3))
                 .build()?;
-            let rec_url = format!("{}/v1/telemetry/recorder", gateway_url.trim_end_matches('/'));
+            let rec_url = format!(
+                "{}/v1/telemetry/recorder",
+                gateway_url.trim_end_matches('/')
+            );
 
             match client.get(&rec_url).send().await {
                 Ok(resp) if resp.status().is_success() => {
@@ -1424,7 +1685,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
-        Commands::Upgrade { check, force, dry_run, version } => {
+        Commands::Upgrade {
+            check,
+            force,
+            dry_run,
+            version,
+        } => {
             ponyllm_cli::upgrade::run_upgrade(check, force, dry_run, version).await?;
             if !check && !dry_run {
                 println!("💡 二进制已更新，正在运行的服务仍是旧代码：配置热更新管不到二进制，请执行 `ponyllm restart` 重启服务生效。");
@@ -1443,20 +1709,26 @@ fn handle_manage_gateway_auth(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let resolved = resolve_path(config_path);
     let path = resolved.to_str().unwrap_or("ponyllm.toml");
-    let mut cfg = ConfigFile::load_or_default(Some(path).filter(|_| resolved.exists()))
-        .unwrap_or_default();
+    let mut cfg =
+        ConfigFile::load_or_default(Some(path).filter(|_| resolved.exists())).unwrap_or_default();
 
     let action = parse_gateway_auth_action(custom_key.as_deref(), rotate);
 
     match action {
         GatewayAuthAction::MisdirectedList => {
-            println!("\n╔════════════════════════════════════════════════════════════════════════╗");
+            println!(
+                "\n╔════════════════════════════════════════════════════════════════════════╗"
+            );
             println!("║              💡 PonyLLM 访问凭证与 Key 管理指引                         ║");
             println!("╠════════════════════════════════════════════════════════════════════════╣");
             println!("║  • 'ponyllm auth' 用于查看或管理【网关自身的对外访问凭证 (Token)】     ║");
             println!("║  • 若要查看网关访问 Token:     ponyllm auth  或  ponyllm status         ║");
-            println!("║  • 若要查看【上游模型厂商】Key: ponyllm key list                         ║");
-            println!("╚════════════════════════════════════════════════════════════════════════╝\n");
+            println!(
+                "║  • 若要查看【上游模型厂商】Key: ponyllm key list                         ║"
+            );
+            println!(
+                "╚════════════════════════════════════════════════════════════════════════╝\n"
+            );
             return Ok(());
         }
         GatewayAuthAction::MisdirectedAgy => {
@@ -1467,8 +1739,8 @@ fn handle_manage_gateway_auth(
             // P0: default masked display; `--show` reveals plaintext (contract §4).
             // C2 (Phase-2b): display follows the EXPLICIT `auth_mode`, not key
             // emptiness — secured+empty-key is NOT open (fail-closed default).
-            let key_empty = cfg.gateway.api_key.is_empty()
-                || cfg.gateway.api_key.eq_ignore_ascii_case("none");
+            let key_empty =
+                cfg.gateway.api_key.is_empty() || cfg.gateway.api_key.eq_ignore_ascii_case("none");
             let current_key = if cfg.gateway.auth_mode == ponyllm_config::AuthMode::Open {
                 "免鉴权 (显式开放模式)".to_string()
             } else if key_empty {
@@ -1500,7 +1772,9 @@ fn handle_manage_gateway_auth(
             } else {
                 &current_key
             };
-            println!("\n╔════════════════════════════════════════════════════════════════════════╗");
+            println!(
+                "\n╔════════════════════════════════════════════════════════════════════════╗"
+            );
             println!("║              🔑 ponyllm 网关访问 API Key (Token) 状态                  ║");
             println!("╠════════════════════════════════════════════════════════════════════════╣");
             println!("║                                                                        ║");
@@ -1518,7 +1792,9 @@ fn handle_manage_gateway_auth(
             println!("║  • 轮转重置为新随机 Key:  ponyllm auth --rotate                        ║");
             println!("║  • 手动指定并保存自定义 Key: ponyllm auth <YOUR_SECRET_KEY>            ║");
             println!("║  • 查看完整服务与密钥池状态: ponyllm status                            ║");
-            println!("╚════════════════════════════════════════════════════════════════════════╝\n");
+            println!(
+                "╚════════════════════════════════════════════════════════════════════════╝\n"
+            );
             return Ok(());
         }
         GatewayAuthAction::Rotate => {
@@ -1526,7 +1802,9 @@ fn handle_manage_gateway_auth(
             cfg.gateway.api_key = final_key.clone();
             cfg.save_to_path(path)?;
 
-            println!("\n╔════════════════════════════════════════════════════════════════════════╗");
+            println!(
+                "\n╔════════════════════════════════════════════════════════════════════════╗"
+            );
             println!("║              🔑 网关访问 API Key (Token) 已轮转就绪                   ║");
             println!("╠════════════════════════════════════════════════════════════════════════╣");
             println!("║                                                                        ║");
@@ -1535,7 +1813,9 @@ fn handle_manage_gateway_auth(
             println!("╠════════════════════════════════════════════════════════════════════════╣");
             println!("║  • 已同步持久化保存至: {:<46} ║", resolved.display());
             println!("║  • 请复制上方 API Key，用于 Cursor / Claude Code / SDK 鉴权连接。      ║");
-            println!("╚════════════════════════════════════════════════════════════════════════╝\n");
+            println!(
+                "╚════════════════════════════════════════════════════════════════════════╝\n"
+            );
         }
         GatewayAuthAction::Set(new_key) => {
             // P0 weak-key guard: refuse to persist `123456`-class secrets.
@@ -1546,7 +1826,9 @@ fn handle_manage_gateway_auth(
             cfg.gateway.api_key = new_key.clone();
             cfg.save_to_path(path)?;
 
-            println!("\n╔════════════════════════════════════════════════════════════════════════╗");
+            println!(
+                "\n╔════════════════════════════════════════════════════════════════════════╗"
+            );
             println!("║              🔑 网关访问 API Key (Token) 已更新就绪                   ║");
             println!("╠════════════════════════════════════════════════════════════════════════╣");
             println!("║                                                                        ║");
@@ -1555,7 +1837,9 @@ fn handle_manage_gateway_auth(
             println!("╠════════════════════════════════════════════════════════════════════════╣");
             println!("║  • 已同步持久化保存至: {:<46} ║", resolved.display());
             println!("║  • 请复制上方 API Key，用于 Cursor / Claude Code / SDK 鉴权连接。      ║");
-            println!("╚════════════════════════════════════════════════════════════════════════╝\n");
+            println!(
+                "╚════════════════════════════════════════════════════════════════════════╝\n"
+            );
         }
     }
 
@@ -1568,10 +1852,13 @@ fn handle_gateway_keys_list(config_path: Option<&str>) -> Result<(), Box<dyn std
     use ponyllm_cli::config::KeyScope;
     let resolved = resolve_path(config_path);
     let path = resolved.to_str().unwrap_or("ponyllm.toml");
-    let cfg = ConfigFile::load_or_default(Some(path).filter(|_| resolved.exists()))
-        .unwrap_or_default();
+    let cfg =
+        ConfigFile::load_or_default(Some(path).filter(|_| resolved.exists())).unwrap_or_default();
     println!("=== 网关分级 Key（仅哈希存储，明文只在签发时显示一次） ===");
-    println!("{:<24} {:<10} {:<20} {:<10}", "ID", "SCOPE", "PREFIX", "STATUS");
+    println!(
+        "{:<24} {:<10} {:<20} {:<10}",
+        "ID", "SCOPE", "PREFIX", "STATUS"
+    );
     println!("{}", "-".repeat(70));
     let open = cfg.gateway.api_key.is_empty() || cfg.gateway.api_key.eq_ignore_ascii_case("none");
     if !open {
@@ -1625,12 +1912,13 @@ fn handle_gateway_keys_issue(
     config_path: Option<&str>,
     scope_raw: &str,
     id_opt: Option<&str>,
+    user_opt: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use ponyllm_cli::config::{generate_scoped_gateway_key, KeyScope};
     let resolved = resolve_path(config_path);
     let path = resolved.to_str().unwrap_or("ponyllm.toml");
-    let mut cfg = ConfigFile::load_or_default(Some(path).filter(|_| resolved.exists()))
-        .unwrap_or_default();
+    let mut cfg =
+        ConfigFile::load_or_default(Some(path).filter(|_| resolved.exists())).unwrap_or_default();
     let scope = match scope_raw.trim().to_ascii_lowercase().as_str() {
         "admin" => KeyScope::Admin,
         "inference" | "infer" => KeyScope::Inference,
@@ -1647,7 +1935,13 @@ fn handle_gateway_keys_issue(
     let id = id_opt
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| format!("{}-{}", scope.as_str(), &uuid::Uuid::new_v4().simple().to_string()[..8]));
+        .unwrap_or_else(|| {
+            format!(
+                "{}-{}",
+                scope.as_str(),
+                &uuid::Uuid::new_v4().simple().to_string()[..8]
+            )
+        });
     if cfg.gateway.gateway_keys.iter().any(|k| k.id == id) {
         let msg = format!("Key id '{}' 已存在（先删除再重发，不做原地加权）", id);
         eprintln!("❌ {}", msg);
@@ -1655,10 +1949,14 @@ fn handle_gateway_keys_issue(
     }
     let (plaintext, mut entry) = generate_scoped_gateway_key(&id, scope);
     entry.id = id.clone();
+    entry.user_id = user_opt.map(|s| s.trim().to_string());
     cfg.gateway.gateway_keys.push(entry);
     cfg.save_to_path(path)?;
     println!("\n⚠️  明文仅显示一次，请立即复制保存；服务端只存哈希，丢失不可找回。");
     println!("scope={} id={}", scope.as_str(), id);
+    if let Some(uid) = user_opt {
+        println!("bound_user: {}", uid);
+    }
     println!("key: {}", plaintext);
     Ok(())
 }
@@ -1672,8 +1970,8 @@ fn handle_gateway_keys_revoke(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let resolved = resolve_path(config_path);
     let path = resolved.to_str().unwrap_or("ponyllm.toml");
-    let mut cfg = ConfigFile::load_or_default(Some(path).filter(|_| resolved.exists()))
-        .unwrap_or_default();
+    let mut cfg =
+        ConfigFile::load_or_default(Some(path).filter(|_| resolved.exists())).unwrap_or_default();
     let before = cfg.gateway.gateway_keys.len();
     cfg.gateway.gateway_keys.retain(|k| k.id != id);
     if cfg.gateway.gateway_keys.len() == before {
@@ -1682,7 +1980,151 @@ fn handle_gateway_keys_revoke(
         return Err(msg.into());
     }
     cfg.save_to_path(path)?;
-    println!("✅ Key id '{}' 已删除（无残留记录，热加载约 500ms 内全网生效）。", id);
+    println!(
+        "✅ Key id '{}' 已删除（无残留记录，热加载约 500ms 内全网生效）。",
+        id
+    );
+    Ok(())
+}
+
+fn handle_users_list(config_path: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+    let resolved = resolve_path(config_path);
+    let path = resolved.to_str().unwrap_or("ponyllm.toml");
+    let cfg =
+        ConfigFile::load_or_default(Some(path).filter(|_| resolved.exists())).unwrap_or_default();
+    println!("=== PonyLLM 用户列表 ===");
+    println!(
+        "{:<20} {:<15} {:<8} {:<15} {:<25}",
+        "ID", "NAME", "ENABLED", "MAX_TOKENS", "ALLOWED_MODELS"
+    );
+    println!("{}", "-".repeat(85));
+    if cfg.gateway.users.is_empty() {
+        println!("(暂无配置用户)");
+    } else {
+        for u in &cfg.gateway.users {
+            let max_t = u
+                .max_tokens
+                .map(|t| t.to_string())
+                .unwrap_or_else(|| "unlimited".to_string());
+            let models = u
+                .allowed_models
+                .as_ref()
+                .map(|m| m.join(","))
+                .unwrap_or_else(|| "* (all)".to_string());
+            println!(
+                "{:<20} {:<15} {:<8} {:<15} {:<25}",
+                u.id,
+                if u.name.is_empty() { "-" } else { &u.name },
+                u.enabled,
+                max_t,
+                models
+            );
+        }
+    }
+    Ok(())
+}
+
+fn handle_users_add(
+    config_path: Option<&str>,
+    id: &str,
+    name: Option<&str>,
+    models: Option<&str>,
+    max_tokens: Option<u64>,
+    enabled: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let resolved = resolve_path(config_path);
+    let path = resolved.to_str().unwrap_or("ponyllm.toml");
+    let mut cfg =
+        ConfigFile::load_or_default(Some(path).filter(|_| resolved.exists())).unwrap_or_default();
+    let allowed_models = models.map(|m| {
+        m.split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+    });
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+
+    let user_entry = ponyllm_config::UserEntry {
+        id: id.trim().to_string(),
+        name: name.unwrap_or_default().trim().to_string(),
+        enabled,
+        allowed_models,
+        max_tokens,
+        created_at: now,
+        username: None,
+        password_hash: None,
+        role: ponyllm_config::UserRole::User,
+        token_version: 0,
+    };
+
+    if let Some(existing) = cfg.gateway.users.iter_mut().find(|u| u.id == id) {
+        *existing = user_entry;
+        println!("✅ 用户 '{}' 配置已更新。", id);
+    } else {
+        cfg.gateway.users.push(user_entry);
+        println!("✅ 用户 '{}' 已创建。", id);
+    }
+    cfg.save_to_path(path)?;
+    Ok(())
+}
+
+fn handle_users_remove(
+    config_path: Option<&str>,
+    id: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let resolved = resolve_path(config_path);
+    let path = resolved.to_str().unwrap_or("ponyllm.toml");
+    let mut cfg =
+        ConfigFile::load_or_default(Some(path).filter(|_| resolved.exists())).unwrap_or_default();
+    let before = cfg.gateway.users.len();
+    cfg.gateway.users.retain(|u| u.id != id);
+    if cfg.gateway.users.len() == before {
+        let msg = format!("用户 '{}' 不存在", id);
+        eprintln!("❌ {}", msg);
+        return Err(msg.into());
+    }
+    cfg.save_to_path(path)?;
+    println!("✅ 用户 '{}' 已移除。", id);
+    Ok(())
+}
+
+async fn handle_users_reset_usage(
+    config_path: Option<&str>,
+    id: &str,
+    gateway_url: &str,
+    api_key_override: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let resolved = resolve_path(config_path);
+    let path = resolved.to_str().unwrap_or("ponyllm.toml");
+    let cfg =
+        ConfigFile::load_or_default(Some(path).filter(|_| resolved.exists())).unwrap_or_default();
+    let token = api_key_override.map(|s| s.to_string()).or_else(|| {
+        if !cfg.gateway.api_key.is_empty() {
+            Some(cfg.gateway.api_key.clone())
+        } else {
+            None
+        }
+    });
+    let client = reqwest::Client::new();
+    let url = format!(
+        "{}/api/admin/users/{}/reset-usage",
+        gateway_url.trim_end_matches('/'),
+        id
+    );
+    let mut req = client.post(&url);
+    if let Some(t) = token {
+        req = req.header("authorization", format!("Bearer {}", t));
+    }
+    let resp = req.send().await?;
+    if resp.status().is_success() {
+        println!("✅ 用户 '{}' 的 Token 消耗用量已成功重置为 0。", id);
+    } else {
+        let err_text = resp.text().await?;
+        eprintln!("❌ 重置失败: {}", err_text);
+    }
     Ok(())
 }
 
@@ -1693,13 +2135,17 @@ async fn handle_gateway_status(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let resolved = resolve_path(config_path);
     let path = resolved.to_str().unwrap_or("ponyllm.toml");
-    let cfg = ConfigFile::load_or_default(Some(path).filter(|_| resolved.exists()))
-        .unwrap_or_default();
+    let cfg =
+        ConfigFile::load_or_default(Some(path).filter(|_| resolved.exists())).unwrap_or_default();
 
     let base_url = if let Some(u) = cli_gateway_url {
         u.trim_end_matches('/').to_string()
     } else {
-        let (host, port) = cfg.gateway.bind.split_once(':').unwrap_or(("127.0.0.1", "8080"));
+        let (host, port) = cfg
+            .gateway
+            .bind
+            .split_once(':')
+            .unwrap_or(("127.0.0.1", "8080"));
         let probe_host = if host == "0.0.0.0" { "127.0.0.1" } else { host };
         format!("http://{}:{}", probe_host, port)
     };
@@ -1752,13 +2198,6 @@ async fn handle_gateway_status(
         }
     };
 
-    let strat_name = match cfg.gateway.default_strategy {
-        GatewayRoutingStrategy::Economy => "省钱优先",
-        GatewayRoutingStrategy::Speed => "速度优先",
-        GatewayRoutingStrategy::Reliable => "稳定优先",
-        GatewayRoutingStrategy::Balanced => "均衡",
-    };
-
     let divider = paint("90", "──────────────────────────────────────────────────");
 
     println!("{}", divider);
@@ -1777,7 +2216,8 @@ async fn handle_gateway_status(
 
     println!("地址：{}", base_url);
     println!("配置：{}", resolved.display());
-    println!("策略：{}", strat_name);
+    // 全局调度策略配置已移除（wave-2）；排序由 Auto 智能路由接管，此行不再由配置驱动。
+    println!("策略：Auto 智能路由");
 
     println!();
     println!("{}", divider);
@@ -1834,12 +2274,18 @@ async fn handle_gateway_status(
     }
 
     if let Some(m) = metrics_json {
-        let total_req = m.get("total_requests").and_then(|v| v.as_u64()).unwrap_or(0);
+        let total_req = m
+            .get("total_requests")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
         let succ_req = m
             .get("successful_requests")
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
-        let fail_req = m.get("failed_requests").and_then(|v| v.as_u64()).unwrap_or(0);
+        let fail_req = m
+            .get("failed_requests")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
         let total_tokens = m.get("total_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
 
         println!();
@@ -1912,11 +2358,13 @@ async fn handle_test_keys(
             if k.is_antigravity(p.default_protocol, p_name) {
                 match k.to_antigravity_credential() {
                     Ok(cred) => {
-                        let client = ponyllm_core::executor::create_upstream_http_client_with_options(
-                            effective_proxy,
-                            cfg.gateway.use_system_proxy,
-                        );
-                        let mgr = ponyllm_core::pool::AntigravityTokenManager::new(&k.id, cred, client);
+                        let client =
+                            ponyllm_core::executor::create_upstream_http_client_with_options(
+                                effective_proxy,
+                                cfg.gateway.use_system_proxy,
+                            );
+                        let mgr =
+                            ponyllm_core::pool::AntigravityTokenManager::new(&k.id, cred, client);
                         let start = std::time::Instant::now();
                         match mgr.get_valid_token().await {
                             Ok(_) => {
@@ -1928,14 +2376,22 @@ async fn handle_test_keys(
                                 std::io::Write::flush(&mut std::io::stdout())?;
                                 match mgr.fetch_quota(Some(&p.base_url)).await {
                                     Ok(snapshot) => {
-                                        println!("✅ 成功 (获取到 {} 个模型)", snapshot.models.len());
-                                        println!("      {:<28} {:<12} {:<24} {:<16}", "模型", "剩余额度", "恢复时间(北京时间)", "距离恢复");
+                                        println!(
+                                            "✅ 成功 (获取到 {} 个模型)",
+                                            snapshot.models.len()
+                                        );
+                                        println!(
+                                            "      {:<28} {:<12} {:<24} {:<16}",
+                                            "模型", "剩余额度", "恢复时间(北京时间)", "距离恢复"
+                                        );
                                         println!("      {}", "-".repeat(82));
                                         let mut models: Vec<_> = snapshot.models.values().collect();
                                         models.sort_by_key(|m| &m.model_id);
                                         for m in models {
-                                            let pct = format!("{:.1}%", m.remaining_fraction * 100.0);
-                                            let (beijing_time, remaining_desc) = match m.reset_time {
+                                            let pct =
+                                                format!("{:.1}%", m.remaining_fraction * 100.0);
+                                            let (beijing_time, remaining_desc) = match m.reset_time
+                                            {
                                                 Some(utc_dt) => {
                                                     let bj_dt = utc_dt + chrono::Duration::hours(8);
                                                     let now = chrono::Utc::now();
@@ -1947,11 +2403,19 @@ async fn handle_test_keys(
                                                     } else {
                                                         "已就绪".to_string()
                                                     };
-                                                    (bj_dt.format("%Y-%m-%d %H:%M:%S").to_string(), diff)
+                                                    (
+                                                        bj_dt
+                                                            .format("%Y-%m-%d %H:%M:%S")
+                                                            .to_string(),
+                                                        diff,
+                                                    )
                                                 }
                                                 None => ("N/A".to_string(), "N/A".to_string()),
                                             };
-                                            println!("      {:<28} {:<12} {:<24} {:<16}", m.model_id, pct, beijing_time, remaining_desc);
+                                            println!(
+                                                "      {:<28} {:<12} {:<24} {:<16}",
+                                                m.model_id, pct, beijing_time, remaining_desc
+                                            );
                                         }
                                     }
                                     Err(e) => {
@@ -1985,7 +2449,10 @@ async fn handle_test_keys(
                     .timeout(std::time::Duration::from_secs(5))
                     .header(reqwest::header::USER_AGENT, "ponyllm-cli/dialtest");
 
-                let is_anthropic = p.default_protocol.map(|p| p.is_anthropic()).unwrap_or(false)
+                let is_anthropic = p
+                    .default_protocol
+                    .map(|p| p.is_anthropic())
+                    .unwrap_or(false)
                     || p.base_url.contains("anthropic");
 
                 if is_anthropic {
@@ -2075,6 +2542,9 @@ mod pool_strategy_tests {
             parse_pool_strategy("round-robin", "p"),
             RoutingStrategy::Priority
         );
-        assert_eq!(parse_pool_strategy("random", "p"), RoutingStrategy::Priority);
+        assert_eq!(
+            parse_pool_strategy("random", "p"),
+            RoutingStrategy::Priority
+        );
     }
 }

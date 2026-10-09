@@ -64,7 +64,11 @@ async fn test_sentry_serialization_and_transmission() {
 
     // MockServer's drop will verify expectations or we can explicitly verify received requests
     let received = mock_server.received_requests().await.unwrap();
-    assert_eq!(received.len(), 1, "Should have received exactly 1 sentry event");
+    assert_eq!(
+        received.len(),
+        1,
+        "Should have received exactly 1 sentry event"
+    );
 
     let req_body: Value = serde_json::from_slice(&received[0].body).expect("Valid JSON");
     assert_eq!(req_body["message"], "UpstreamStatusError: 502 Bad Gateway");
@@ -146,7 +150,10 @@ async fn test_sentry_sensitive_data_sanitization() {
     let client = SentryClient::new(config);
 
     let mut tags = HashMap::new();
-    tags.insert("api_key".to_string(), "sk-ant-api03-secretkey123456789".to_string());
+    tags.insert(
+        "api_key".to_string(),
+        "sk-ant-api03-secretkey123456789".to_string(),
+    );
     tags.insert("normal_tag".to_string(), "safe_value".to_string());
 
     let extra = serde_json::json!({

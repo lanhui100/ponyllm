@@ -70,10 +70,7 @@ fn bearer(token: &str) -> String {
 async fn t1_legacy_token_dual_full_but_strict_dead() {
     let client = reqwest::Client::new();
     for (compat, expect_ok) in [
-        (
-            ponyllm_config::AuthCompat::LegacyOnly,
-            true,
-        ),
+        (ponyllm_config::AuthCompat::LegacyOnly, true),
         (ponyllm_config::AuthCompat::Dual, true),
         (ponyllm_config::AuthCompat::Strict, false),
     ] {
@@ -88,12 +85,27 @@ async fn t1_legacy_token_dual_full_but_strict_dead() {
                 .await
                 .unwrap();
             if expect_ok {
-                assert_eq!(resp.status(), StatusCode::OK, "{:?} {} must pass", compat, path);
+                assert_eq!(
+                    resp.status(),
+                    StatusCode::OK,
+                    "{:?} {} must pass",
+                    compat,
+                    path
+                );
             } else {
-                assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "{:?} {} must 401", compat, path);
+                assert_eq!(
+                    resp.status(),
+                    StatusCode::UNAUTHORIZED,
+                    "{:?} {} must 401",
+                    compat,
+                    path
+                );
                 let body: serde_json::Value = resp.json().await.unwrap();
                 assert_eq!(body["error"]["code"], "invalid_api_key");
-                assert!(body["error"]["message"].as_str().unwrap().contains("scoped key"));
+                assert!(body["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("scoped key"));
             }
         }
     }
@@ -243,7 +255,10 @@ async fn t6_no_echo_and_revoked_closed() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     let raw = resp.text().await.unwrap();
-    assert!(!raw.contains("echo-probe-secret"), "credential echoed: {raw}");
+    assert!(
+        !raw.contains("echo-probe-secret"),
+        "credential echoed: {raw}"
+    );
 
     // revoked entry: build a second harness via hash round-trip
     let (plain, mut entry): (String, GatewayKeyEntry) =

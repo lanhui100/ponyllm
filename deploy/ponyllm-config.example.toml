@@ -16,19 +16,31 @@
 base_url = "http://192.0.2.1:8899/<PATH_TOKEN>/opencode/zen/v1"
 default_model = "muse-spark-1.3-contributor-free"
 strategy = "round_robin"
-# 出口池轮询（2026-10-07 egress-pool 契约）：zen 免费档按客户端出口 IP 记账
-# （Redis ratelimit:ip:<ip>:<YYYYMMDD>，与 key 无关），把调度维度从 key 轮询
-# 改为出口池轮询可拆分额度桶。每出口独立记账独立冷却；429 FreeUsageLimitError
-# 只冷却该出口。条目：`direct`/`none`/空 = 网关本机直连出口；http(s):// 或
-# socks5:// = 经该代理出网（每个代理一个独立 IP）。显式配置后替代下方 proxy
-# 字段语义；不配置（或为空）则维持单 proxy 零迁移。
-# egress_pool = [
-#     "direct",                              # 本机出口（如 IPv6 2408:… 直连）
-#     "http://127.0.0.1:8899",               # 本地 pproxy → VPS 出口 192.210.231.8
-#     "http://<tencent-pproxy>:8899",        # 腾讯云出口
-#     "http://<aliyun-pproxy>:8899",         # 阿里云出口
-# ]
-# egress_strategy = "round_robin"   # round_robin（默认）| priority（取首个可用）
+# 出口池轮询（2026-10-07 egress-pool 契约；2026-10-09 五出口核实后回写）：
+# zen 免费档按客户端出口 IP 记账（Redis ratelimit:ip:<ip>:<YYYYMMDD>，与 key 无关），
+# 调度维度从 key 轮询改为出口池轮询以拆分额度桶。每出口独立记账独立冷却；
+# 429 FreeUsageLimitError 只冷却该出口。条目：`direct`/`none`/空 = 网关本机直连出口；
+# http(s):// 或 socks5:// = 经该代理出网（每个代理一个独立 IP）。显式配置后替代
+# provider/model 的 proxy 字段语义；不配置（或为空）则维持单 proxy 零迁移。
+# ⚠️ 2026-10-09 实测校准（机器收据 .dev-team/notes/wave-3-config-a-receipts.md）：
+#   1) 条目校验（validate_egress_entry / check_egress_pool_entry）拒绝 100.64/10 CGNAT
+#      字面 IP 与 *.svc —— 下方真实节点 IP 条目必须先加入 PONYLLM_PROBE_ALLOWLIST
+#      （deploy/ponyllm-deployment.yaml 的 env，部署层变更），否则 Admin PUT 直接
+#      400 egress_blocked（实测：100.97.143.121 被拒）。
+#   2) preprod/tencent 的 LAN 模式 pproxy 出口当前经 VPS gate（实测 192.210.231.8），
+#      与 vps 条目同 IP；独立 IP 需各节点 pproxy 配本地直连 upstream（cluster-infra 职责）。
+#   3) egress_pool 只控制客户端拨号出口：base_url 若仍指向 path-token pproxy 隧道，
+#      所有条目最终同一出口。拆分 IP 桶的前提是 base_url 为直连上游（如 https://opencode.ai/zen/v1）。
+# 凭据形态：需要客户端凭据的 pproxy 用 user:pass@ userinfo（参考 deploy/pproxy-service.md L37）；
+# 真实 token 只进 live secret（视图侧脱敏为 scheme://host:port，执行器持 raw URL）。
+egress_pool = [
+    "direct",                                                             # 网关本机直连出口（devserver 宿主实测 115.63.111.139，CN 郑州联通）
+    "http://user:<PPROXY_CLIENT_TOKEN>@100.97.143.121:8899",              # 备灾节点1 preprod 的 pproxy（HA forwarder 需节点侧配 PPROXY_CLIENT_TOKEN 后才可远程拨号；2026-10-09 实测无令牌拒连 407）
+    "http://user:<PPROXY_CLIENT_TOKEN>@100.105.241.39:8899",              # 备灾节点2 tencent 的 pproxy（k8s pproxy-host Endpoints 曾指向；带凭据实测 200，但当前出口经 VPS gate = 192.210.231.8，与 vps 条目同 IP，仅作 VPS 隧道冗余腿）
+    "http://100.109.160.11:8899",                                         # 阿里云节点（2026-10-09 实测未部署 pproxy，启用前需先部署；节点直连出口实测 101.37.23.94，CN 杭州）
+    "http://100.95.193.103:8899",                                         # dev 节点 pproxy（opencode 路由 → upstreams.vps = rn.ponygo.fun = 海外 RackNerd VPS 出口 192.210.231.8，US；CONNECT 隧道 2026-10-09 实测 502/超时抖动中）
+]
+egress_strategy = "round_robin"   # round_robin（默认）| priority（取首个可用）
 billing_mode = "metered"
 input_price = 0.0
 cached_price = 0.0

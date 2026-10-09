@@ -64,7 +64,9 @@ impl Gh {
         cfg_file.gateway.gateway_keys = vec![e_admin.clone()];
         cfg_file.gateway.users = vec![admin.clone(), alice.clone()];
         cfg_file.providers = HashMap::new();
-        cfg_file.save_to_path(config_path.to_str().unwrap()).unwrap();
+        cfg_file
+            .save_to_path(config_path.to_str().unwrap())
+            .unwrap();
 
         let mut gw = GatewayConfig::default();
         gw.bind_addr = "127.0.0.1:8080".into();
@@ -98,8 +100,15 @@ async fn login_token(c: &reqwest::Client, h: &Gh, user: &str, pass: &str) -> Str
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK, "login {user} 200 (red fails here)");
-    resp.json::<Value>().await.unwrap()["access_token"].as_str().unwrap().to_string()
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "login {user} 200 (red fails here)"
+    );
+    resp.json::<Value>().await.unwrap()["access_token"]
+        .as_str()
+        .unwrap()
+        .to_string()
 }
 
 fn bearer(t: &str) -> String {
@@ -129,12 +138,18 @@ async fn admin_create_user_returns_201() {
     let admin_tok = login_token(&c, &h, "admin", "admin-pass-1234").await;
 
     let resp = create_user(
-        &c, &h, &admin_tok,
+        &c,
+        &h,
+        &admin_tok,
         json!({ "username": "carol", "password": "carol-pass", "role": "user",
                 "allowed_models": ["gpt-4o-mini"], "max_tokens": 5000 }),
     )
     .await;
-    assert_eq!(resp.status(), StatusCode::CREATED, "admin create user must be 201 (red fails)");
+    assert_eq!(
+        resp.status(),
+        StatusCode::CREATED,
+        "admin create user must be 201 (red fails)"
+    );
     let v: Value = resp.json().await.unwrap();
     assert_eq!(v["username"], "carol");
     assert!(v["id"].as_str().map(|s| !s.is_empty()).unwrap_or(false));
@@ -148,16 +163,24 @@ async fn admin_create_duplicate_username_409() {
     let admin_tok = login_token(&c, &h, "admin", "admin-pass-1234").await;
 
     let _first = create_user(
-        &c, &h, &admin_tok,
+        &c,
+        &h,
+        &admin_tok,
         json!({ "username": "dup-user", "password": "p1" }),
     )
     .await;
     let dup = create_user(
-        &c, &h, &admin_tok,
+        &c,
+        &h,
+        &admin_tok,
         json!({ "username": "dup-user", "password": "p2" }),
     )
     .await;
-    assert_eq!(dup.status(), StatusCode::CONFLICT, "duplicate username must be 409 (red fails)");
+    assert_eq!(
+        dup.status(),
+        StatusCode::CONFLICT,
+        "duplicate username must be 409 (red fails)"
+    );
     let v: Value = dup.json().await.unwrap();
     assert_eq!(v["error"]["code"], "username_taken");
 }
@@ -175,9 +198,16 @@ async fn admin_list_users_returns_200() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK, "admin list users must be 200 (red fails)");
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "admin list users must be 200 (red fails)"
+    );
     let raw = resp.text().await.unwrap();
-    assert!(!raw.contains("password_hash"), "admin list must never leak password_hash");
+    assert!(
+        !raw.contains("password_hash"),
+        "admin list must never leak password_hash"
+    );
     let v: Value = serde_json::from_str(&raw).unwrap();
     assert!(v.is_array() && !v.as_array().unwrap().is_empty());
 }
@@ -196,7 +226,11 @@ async fn admin_update_user_returns_200() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK, "admin update user must be 200 (red fails)");
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "admin update user must be 200 (red fails)"
+    );
 }
 
 /// 契约#12：admin 删除用户 → 200。
@@ -206,11 +240,16 @@ async fn admin_delete_user_returns_200() {
     let c = reqwest::Client::new();
     let admin_t = login_token(&c, &h, "admin", "admin-pass-1234").await;
 
-    let created: Value = create_user(&c, &h, &admin_t, json!({ "username": "temp-user", "password": "x" }))
-        .await
-        .json()
-        .await
-        .unwrap();
+    let created: Value = create_user(
+        &c,
+        &h,
+        &admin_t,
+        json!({ "username": "temp-user", "password": "x" }),
+    )
+    .await
+    .json()
+    .await
+    .unwrap();
     let uid = created["id"].as_str().unwrap();
 
     let resp = c
@@ -219,7 +258,11 @@ async fn admin_delete_user_returns_200() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK, "admin delete user must be 200 (red fails)");
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "admin delete user must be 200 (red fails)"
+    );
 }
 
 /// 契约#13/#14：reset-password / reset-usage → 200。
@@ -236,7 +279,11 @@ async fn admin_reset_password_and_usage_returns_200() {
         .send()
         .await
         .unwrap();
-    assert_eq!(rp.status(), StatusCode::OK, "reset-password must 200 (red fails)");
+    assert_eq!(
+        rp.status(),
+        StatusCode::OK,
+        "reset-password must 200 (red fails)"
+    );
 
     let ru = c
         .post(h.url("/api/user/admin/users/usr-alice/reset-usage"))
@@ -244,7 +291,11 @@ async fn admin_reset_password_and_usage_returns_200() {
         .send()
         .await
         .unwrap();
-    assert_eq!(ru.status(), StatusCode::OK, "reset-usage must 200 (red fails)");
+    assert_eq!(
+        ru.status(),
+        StatusCode::OK,
+        "reset-usage must 200 (red fails)"
+    );
 }
 
 /// 权限矩阵主锚：普通 user JWT × 全部 /api/user/admin/* 端点 → 403（不回落、不 404 假装不存在）。
@@ -309,5 +360,9 @@ async fn admin_jwt_accesses_admin_endpoints() {
         .send()
         .await
         .unwrap();
-    assert_eq!(list.status(), StatusCode::OK, "admin list must 200 (red fails)");
+    assert_eq!(
+        list.status(),
+        StatusCode::OK,
+        "admin list must 200 (red fails)"
+    );
 }

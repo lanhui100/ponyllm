@@ -7,14 +7,14 @@
 //!   stay available under the normal gateway token in both modes.
 //! - With writes ON, `?full=true` and single-frame reads keep working.
 
-use std::sync::Arc;
-use std::time::Duration;
 use axum::http::StatusCode;
 use ponyllm_core::telemetry::{FlightFrame, FlightRecorder};
 use ponyllm_server::app::create_app;
 use ponyllm_server::state::AppState;
 use ponyllm_server::GatewayConfig;
 use serde_json::Value;
+use std::sync::Arc;
+use std::time::Duration;
 
 fn test_frame(id: &str) -> FlightFrame {
     FlightFrame {
@@ -93,7 +93,11 @@ async fn test_full_frames_require_admin_writes() {
     let (base, token) = spawn_with_write(true).await;
     let (st, body) = get(&base, &token, "/v1/telemetry/recorder?full=true").await;
     assert_eq!(st, StatusCode::OK);
-    assert!(body.as_array().unwrap().iter().any(|f| f["request_id"] == "req-h3-1"));
+    assert!(body
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|f| f["request_id"] == "req-h3-1"));
 
     let (st, body) = get(&base, &token, "/v1/telemetry/recorder/req-h3-1").await;
     assert_eq!(st, StatusCode::OK);

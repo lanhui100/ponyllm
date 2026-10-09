@@ -10,8 +10,10 @@
 use serde::Deserialize;
 use serde_yaml::Value;
 
-const INGRESS_ROUTES_YAML: &str =
-    concat!(env!("CARGO_MANIFEST_DIR"), "/../../deploy/ponyllm-ingress-routes.yaml");
+const INGRESS_ROUTES_YAML: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../deploy/ponyllm-ingress-routes.yaml"
+);
 
 fn load_ingress_routes() -> Vec<Value> {
     let raw = std::fs::read_to_string(INGRESS_ROUTES_YAML)
@@ -112,7 +114,10 @@ fn acme_challenge_services_have_health_check() {
                 .into_iter()
         })
         .collect();
-    assert!(!acme_services.is_empty(), "must have ACME challenge services");
+    assert!(
+        !acme_services.is_empty(),
+        "must have ACME challenge services"
+    );
     for svc in acme_services {
         assert_eq!(
             svc["healthCheck"]["path"].as_str(),

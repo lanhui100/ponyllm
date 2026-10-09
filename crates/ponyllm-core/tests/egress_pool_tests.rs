@@ -104,8 +104,14 @@ fn c4_round_robin_skips_cooling_egress_and_fails_over() {
     }
     // Recovery: clear the cooldown and rotation resumes (both entries usable).
     pool.clear_egress_cooldown("direct");
-    let ids: Vec<String> = (0..4).map(|_| pool.select_egress().unwrap().id.clone()).collect();
-    assert_eq!(ids, vec!["vps", "direct", "vps", "direct"], "rotation resumes after recovery: {ids:?}");
+    let ids: Vec<String> = (0..4)
+        .map(|_| pool.select_egress().unwrap().id.clone())
+        .collect();
+    assert_eq!(
+        ids,
+        vec!["vps", "direct", "vps", "direct"],
+        "rotation resumes after recovery: {ids:?}"
+    );
 }
 
 #[test]
@@ -148,7 +154,10 @@ fn c5_quota_exhausted_cools_only_the_offending_egress() {
         rem >= Duration::from_secs(1790),
         "vps cooldown must follow the advertised reset, got {rem:?}"
     );
-    assert!(reset_at.is_some(), "wall-clock cooldown_reset_at must be set");
+    assert!(
+        reset_at.is_some(),
+        "wall-clock cooldown_reset_at must be set"
+    );
 
     // The OTHER egress is untouched and keeps serving.
     assert_eq!(
@@ -185,8 +194,14 @@ fn c5_transient_failure_never_cools_an_egress() {
         None,
         "transient failures must never cool an egress"
     );
-    let ids: Vec<String> = (0..4).map(|_| pool.select_egress().unwrap().id.clone()).collect();
-    assert_eq!(ids, vec!["direct", "vps", "direct", "vps"], "rotation must continue: {ids:?}");
+    let ids: Vec<String> = (0..4)
+        .map(|_| pool.select_egress().unwrap().id.clone())
+        .collect();
+    assert_eq!(
+        ids,
+        vec!["direct", "vps", "direct", "vps"],
+        "rotation must continue: {ids:?}"
+    );
 }
 
 /// The retry-after precedence chain (`Resets in` body > `Retry-After` header >
@@ -223,7 +238,10 @@ fn c6_all_egress_cooling_yields_no_available_egress() {
     pool.record_quota_exhausted("direct", Some(Duration::from_secs(3600)));
     pool.record_quota_exhausted("vps", Some(Duration::from_secs(3600)));
 
-    assert!(pool.all_cooling(), "both egresses cooling ⇒ pool reports all_cooling");
+    assert!(
+        pool.all_cooling(),
+        "both egresses cooling ⇒ pool reports all_cooling"
+    );
     match pool.select_egress() {
         Err(CoreError::NoAvailableKey(provider)) => {
             assert_eq!(provider, "opencode-zen");

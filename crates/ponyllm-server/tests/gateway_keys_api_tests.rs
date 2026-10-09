@@ -9,7 +9,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use ponyllm_config::{ConfigFile, GatewayKeyEntry, KeyScope};
-use ponyllm_core::pool::{BillingMode, GatewayRoutingStrategy};
+use ponyllm_core::pool::BillingMode;
 use ponyllm_server::admin_store::FileConfigStore;
 use ponyllm_server::{create_app, AppState, GatewayConfig};
 use reqwest::StatusCode;
@@ -38,17 +38,17 @@ impl Gh {
         config_file.gateway.bind = "127.0.0.1:8080".to_string();
         config_file.gateway.api_key = "legacy-gh-token-abcdef1234567890".to_string();
         config_file.gateway.admin_write_enabled = admin_write;
-        config_file.gateway.gateway_keys =
-            vec![e_admin.clone(), e_infer.clone(), e_read.clone()];
+        config_file.gateway.gateway_keys = vec![e_admin.clone(), e_infer.clone(), e_read.clone()];
         config_file.providers = HashMap::new();
-        config_file.save_to_path(config_path.to_str().unwrap()).unwrap();
+        config_file
+            .save_to_path(config_path.to_str().unwrap())
+            .unwrap();
 
         let mut gw = GatewayConfig::default();
         gw.bind_addr = "127.0.0.1:8080".to_string();
         gw.api_key = "legacy-gh-token-abcdef1234567890".to_string();
         gw.web_enabled = false;
         gw.admin_write_enabled = admin_write;
-        gw.default_strategy = GatewayRoutingStrategy::Economy;
         gw.providers = HashMap::new();
         let _ = BillingMode::Metered;
         gw.gateway_keys = vec![e_admin, e_infer, e_read];
@@ -111,8 +111,16 @@ async fn gateway_keys_issue_list_revoke_roundtrip() {
         let keys: Vec<&str> = obj.keys().map(|s| s.as_str()).collect();
         for k in &keys {
             assert!(
-                ["id", "scope", "prefix", "last4", "revoked", "expires_at", "config_version"]
-                    .contains(k),
+                [
+                    "id",
+                    "scope",
+                    "prefix",
+                    "last4",
+                    "revoked",
+                    "expires_at",
+                    "config_version"
+                ]
+                .contains(k),
                 "unexpected field '{k}' in credential list row"
             );
         }
@@ -132,7 +140,9 @@ async fn gateway_keys_issue_list_revoke_roundtrip() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::CREATED);
     assert_eq!(
-        resp.headers().get("cache-control").map(|v| v.to_str().unwrap()),
+        resp.headers()
+            .get("cache-control")
+            .map(|v| v.to_str().unwrap()),
         Some("no-store")
     );
     let issued: serde_json::Value = resp.json().await.unwrap();
@@ -194,7 +204,11 @@ async fn gateway_keys_issue_list_revoke_roundtrip() {
         .await
         .unwrap();
     assert!(
-        list3.as_array().unwrap().iter().all(|v| v["id"] != "ci-agent-1"),
+        list3
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|v| v["id"] != "ci-agent-1"),
         "deleted key must vanish from the list: {list3}"
     );
 
@@ -204,7 +218,11 @@ async fn gateway_keys_issue_list_revoke_roundtrip() {
         .send()
         .await
         .unwrap();
-    assert_eq!(dead.status(), StatusCode::UNAUTHORIZED, "deleted key fail-closed");
+    assert_eq!(
+        dead.status(),
+        StatusCode::UNAUTHORIZED,
+        "deleted key fail-closed"
+    );
 
     // Deleting twice is 404 (nothing left to be idempotent over).
     let again = c
@@ -293,7 +311,11 @@ async fn gateway_keys_scope_matrix() {
     assert_eq!(rev.status(), StatusCode::FORBIDDEN);
 
     // unauthenticated: 401.
-    let anon = c.get(h.url("/api/admin/gateway-keys")).send().await.unwrap();
+    let anon = c
+        .get(h.url("/api/admin/gateway-keys"))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(anon.status(), StatusCode::UNAUTHORIZED);
 }
 
@@ -321,17 +343,23 @@ async fn gateway_keys_validation_and_if_match() {
     assert_eq!(no_match.status(), StatusCode::PRECONDITION_FAILED);
 
     // unknown scope -> 400 invalid_scope
-    let bad_scope = post(serde_json::json!({"id": "a", "scope": "superuser"}), Some("*"))
-        .await
-        .unwrap();
+    let bad_scope = post(
+        serde_json::json!({"id": "a", "scope": "superuser"}),
+        Some("*"),
+    )
+    .await
+    .unwrap();
     assert_eq!(bad_scope.status(), StatusCode::BAD_REQUEST);
     let bs: serde_json::Value = bad_scope.json().await.unwrap();
     assert_eq!(bs["error"]["code"], "invalid_scope");
 
     // empty id -> 400 invalid_key_id
-    let bad_id = post(serde_json::json!({"id": "   ", "scope": "admin"}), Some("*"))
-        .await
-        .unwrap();
+    let bad_id = post(
+        serde_json::json!({"id": "   ", "scope": "admin"}),
+        Some("*"),
+    )
+    .await
+    .unwrap();
     assert_eq!(bad_id.status(), StatusCode::BAD_REQUEST);
 
     // past expiry -> 400 invalid_expiry
@@ -346,17 +374,23 @@ async fn gateway_keys_validation_and_if_match() {
     assert_eq!(pb["error"]["code"], "invalid_expiry");
 
     // duplicate id (boot-admin exists) -> 409
-    let dup = post(serde_json::json!({"id": "boot-admin", "scope": "admin"}), Some("*"))
-        .await
-        .unwrap();
+    let dup = post(
+        serde_json::json!({"id": "boot-admin", "scope": "admin"}),
+        Some("*"),
+    )
+    .await
+    .unwrap();
     assert_eq!(dup.status(), StatusCode::CONFLICT);
     let db: serde_json::Value = dup.json().await.unwrap();
     assert_eq!(db["error"]["code"], "gateway_key_already_exists");
 
     // wrong If-Match -> 412
-    let stale = post(serde_json::json!({"id": "fresh-1", "scope": "readonly"}), Some("9999"))
-        .await
-        .unwrap();
+    let stale = post(
+        serde_json::json!({"id": "fresh-1", "scope": "readonly"}),
+        Some("9999"),
+    )
+    .await
+    .unwrap();
     assert_eq!(stale.status(), StatusCode::PRECONDITION_FAILED);
 }
 
@@ -385,7 +419,11 @@ async fn gateway_keys_gated_when_admin_write_disabled() {
             .send()
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{method} {path} gated");
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "{method} {path} gated"
+        );
         let b: serde_json::Value = resp.json().await.unwrap();
         assert_eq!(b["error"]["code"], "admin_write_disabled");
     }
@@ -446,7 +484,11 @@ async fn expired_gateway_key_fails_closed() {
         .send()
         .await
         .unwrap();
-    assert_eq!(dead.status(), StatusCode::UNAUTHORIZED, "expired key must 401");
+    assert_eq!(
+        dead.status(),
+        StatusCode::UNAUTHORIZED,
+        "expired key must 401"
+    );
 
     let alive = c
         .get(format!("http://{}/api/admin/quota", addr))

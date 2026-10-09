@@ -18,23 +18,59 @@ fn test_billing_mode_default_and_serde() {
 #[test]
 fn test_gateway_routing_strategy_default_and_parsing() {
     // Default must be Economy
-    assert_eq!(GatewayRoutingStrategy::default(), GatewayRoutingStrategy::Economy);
+    assert_eq!(
+        GatewayRoutingStrategy::default(),
+        GatewayRoutingStrategy::Economy
+    );
 
     // Parsing various forms
-    assert_eq!(GatewayRoutingStrategy::from_str("economy").unwrap(), GatewayRoutingStrategy::Economy);
-    assert_eq!(GatewayRoutingStrategy::from_str("cheap").unwrap(), GatewayRoutingStrategy::Economy);
-    assert_eq!(GatewayRoutingStrategy::from_str("e").unwrap(), GatewayRoutingStrategy::Economy);
+    assert_eq!(
+        GatewayRoutingStrategy::from_str("economy").unwrap(),
+        GatewayRoutingStrategy::Economy
+    );
+    assert_eq!(
+        GatewayRoutingStrategy::from_str("cheap").unwrap(),
+        GatewayRoutingStrategy::Economy
+    );
+    assert_eq!(
+        GatewayRoutingStrategy::from_str("e").unwrap(),
+        GatewayRoutingStrategy::Economy
+    );
 
-    assert_eq!(GatewayRoutingStrategy::from_str("speed").unwrap(), GatewayRoutingStrategy::Speed);
-    assert_eq!(GatewayRoutingStrategy::from_str("fastest").unwrap(), GatewayRoutingStrategy::Speed);
-    assert_eq!(GatewayRoutingStrategy::from_str("s").unwrap(), GatewayRoutingStrategy::Speed);
+    assert_eq!(
+        GatewayRoutingStrategy::from_str("speed").unwrap(),
+        GatewayRoutingStrategy::Speed
+    );
+    assert_eq!(
+        GatewayRoutingStrategy::from_str("fastest").unwrap(),
+        GatewayRoutingStrategy::Speed
+    );
+    assert_eq!(
+        GatewayRoutingStrategy::from_str("s").unwrap(),
+        GatewayRoutingStrategy::Speed
+    );
 
-    assert_eq!(GatewayRoutingStrategy::from_str("reliable").unwrap(), GatewayRoutingStrategy::Reliable);
-    assert_eq!(GatewayRoutingStrategy::from_str("ha").unwrap(), GatewayRoutingStrategy::Reliable);
-    assert_eq!(GatewayRoutingStrategy::from_str("r").unwrap(), GatewayRoutingStrategy::Reliable);
+    assert_eq!(
+        GatewayRoutingStrategy::from_str("reliable").unwrap(),
+        GatewayRoutingStrategy::Reliable
+    );
+    assert_eq!(
+        GatewayRoutingStrategy::from_str("ha").unwrap(),
+        GatewayRoutingStrategy::Reliable
+    );
+    assert_eq!(
+        GatewayRoutingStrategy::from_str("r").unwrap(),
+        GatewayRoutingStrategy::Reliable
+    );
 
-    assert_eq!(GatewayRoutingStrategy::from_str("balanced").unwrap(), GatewayRoutingStrategy::Balanced);
-    assert_eq!(GatewayRoutingStrategy::from_str("b").unwrap(), GatewayRoutingStrategy::Balanced);
+    assert_eq!(
+        GatewayRoutingStrategy::from_str("balanced").unwrap(),
+        GatewayRoutingStrategy::Balanced
+    );
+    assert_eq!(
+        GatewayRoutingStrategy::from_str("b").unwrap(),
+        GatewayRoutingStrategy::Balanced
+    );
 
     assert!(GatewayRoutingStrategy::from_str("unknown").is_err());
 }
@@ -46,11 +82,17 @@ fn test_model_tier_shorthand_and_parsing() {
 
     // Shorthand and full names
     assert_eq!(ModelTier::from_str("F").unwrap(), ModelTier::Flagship);
-    assert_eq!(ModelTier::from_str("flagship").unwrap(), ModelTier::Flagship);
+    assert_eq!(
+        ModelTier::from_str("flagship").unwrap(),
+        ModelTier::Flagship
+    );
     assert_eq!(ModelTier::Flagship.shorthand(), "F");
 
     assert_eq!(ModelTier::from_str("S").unwrap(), ModelTier::Standard);
-    assert_eq!(ModelTier::from_str("standard").unwrap(), ModelTier::Standard);
+    assert_eq!(
+        ModelTier::from_str("standard").unwrap(),
+        ModelTier::Standard
+    );
     assert_eq!(ModelTier::Standard.shorthand(), "S");
 
     assert_eq!(ModelTier::from_str("L").unwrap(), ModelTier::Light);

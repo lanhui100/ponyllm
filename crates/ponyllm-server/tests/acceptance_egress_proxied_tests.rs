@@ -45,11 +45,11 @@ fn state_with_proxy(proxy: Option<&str>) -> Arc<AppState> {
     Arc::new(AppState::new(cfg))
 }
 
-fn cache_lookup(
-    state: &AppState,
-    key: (bool, &str),
-) -> Option<(bool, bool, std::time::Instant)> {
-    let cache = state.egress_guard_cache.lock().unwrap_or_else(|p| p.into_inner());
+fn cache_lookup(state: &AppState, key: (bool, &str)) -> Option<(bool, bool, std::time::Instant)> {
+    let cache = state
+        .egress_guard_cache
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     cache
         .get(&(key.0, key.1.to_string()))
         .map(|v| (v.ok, v.transient, v.expires_at))
@@ -93,7 +93,10 @@ async fn c2_direct_unresolvable_is_transient_refusal() {
     let (ok, transient, expires_at) = cache_lookup(&state, (false, "nope.invalid"))
         .expect("直连瞬时失败必须写入缓存 (false, nope.invalid)");
     assert!(!ok, "负向判定 ok=false");
-    assert!(transient, "DNS 失败是瞬时失败（transient=true），不得落入 10s 确定性负缓存");
+    assert!(
+        transient,
+        "DNS 失败是瞬时失败（transient=true），不得落入 10s 确定性负缓存"
+    );
     let ttl = expires_at.saturating_duration_since(std::time::Instant::now());
     assert!(
         ttl <= Duration::from_secs(2),
@@ -140,11 +143,10 @@ async fn c5_deterministic_refusals_cached_under_proxied_mode() {
         ("http://api.svc:8080/", "api.svc"),
         ("http://192.168.1.5/", "192.168.1.5"),
     ] {
-        let res = state.data_plane_egress_guard_for_target("px", "", url).await;
-        assert!(
-            res.is_err(),
-            "确定性拒绝目标 {url} 必须被拒（不依赖 DNS）"
-        );
+        let res = state
+            .data_plane_egress_guard_for_target("px", "", url)
+            .await;
+        assert!(res.is_err(), "确定性拒绝目标 {url} 必须被拒（不依赖 DNS）");
 
         let (ok, transient, expires_at) = cache_lookup(&state, (true, host))
             .unwrap_or_else(|| panic!("确定性拒绝必须写入缓存 (true, {host})"));
@@ -185,8 +187,8 @@ async fn c6_mode_isolation_proxied_ok_never_poisons_direct() {
         .expect("direct 拒绝必须写入 (false, nope.invalid)");
     assert!(!direct_ok, "(false, host) 不得为 ok=true");
 
-    let (proxied_ok, _, _) = cache_lookup(&state, (true, "nope.invalid"))
-        .expect("proxied Ok 判定仍应在 (true, host)");
+    let (proxied_ok, _, _) =
+        cache_lookup(&state, (true, "nope.invalid")).expect("proxied Ok 判定仍应在 (true, host)");
     assert!(proxied_ok, "(true, host) 保持 ok=true");
 }
 
@@ -205,7 +207,11 @@ async fn c7_classification_with_injected_resolver() {
     .await;
     let err = res.expect_err("解析出私网 IP 必须拒绝");
     assert!(!err.transient, "私网解析是确定性拒绝（transient=false）");
-    assert!(err.reason.contains("10.0.0.5"), "reason 应点名解析出的 IP，实际: {}", err.reason);
+    assert!(
+        err.reason.contains("10.0.0.5"),
+        "reason 应点名解析出的 IP，实际: {}",
+        err.reason
+    );
 
     // 解析出公共 TEST-NET-3 字面 ⇒ Ok
     assert!(
@@ -226,7 +232,10 @@ async fn c7_classification_with_injected_resolver() {
         |_h: &str| -> Result<Vec<IpAddr>, DnsLookupError> { Err(DnsLookupError::Timeout) },
     )
     .await;
-    assert!(res.expect_err("DNS 超时必须拒绝").transient, "Timeout ⇒ transient=true");
+    assert!(
+        res.expect_err("DNS 超时必须拒绝").transient,
+        "Timeout ⇒ transient=true"
+    );
 
     // 解析器失败 ⇒ transient
     let res = check_data_plane_url_with_resolver(
@@ -247,7 +256,10 @@ async fn c7_classification_with_injected_resolver() {
         |_h: &str| -> Result<Vec<IpAddr>, DnsLookupError> { Ok(vec![]) },
     )
     .await;
-    assert!(res.expect_err("空解析结果必须拒绝").transient, "Ok([]) ⇒ transient=true");
+    assert!(
+        res.expect_err("空解析结果必须拒绝").transient,
+        "Ok([]) ⇒ transient=true"
+    );
 
     // 契约：DataPlaneRefusal → String（供 1 参 guard / 路由层用）
     let refusal = DataPlaneRefusal {
@@ -266,8 +278,12 @@ async fn c7b_proxied_fast_only_and_direct_core_signatures() {
         .await
         .expect_err(".svc 名必须被 fast path 拒绝");
     assert!(!err.transient, "名黑名单拒绝是确定性拒绝");
-    assert!(check_data_plane_url_proxied("http://192.168.1.5/").await.is_err());
-    assert!(check_data_plane_url_proxied("http://203.0.113.88/").await.is_ok());
+    assert!(check_data_plane_url_proxied("http://192.168.1.5/")
+        .await
+        .is_err());
+    assert!(check_data_plane_url_proxied("http://203.0.113.88/")
+        .await
+        .is_ok());
 
     // direct 内核：字面 IP 判定零 DNS
     let err = check_data_plane_url("http://10.0.0.5/")
@@ -322,7 +338,9 @@ async fn spawn_fake_proxy() -> (String, Arc<Mutex<Vec<String>>>) {
     let recs = records.clone();
     tokio::spawn(async move {
         loop {
-            let Ok((mut sock, _)) = listener.accept().await else { break };
+            let Ok((mut sock, _)) = listener.accept().await else {
+                break;
+            };
             let recs = recs.clone();
             tokio::spawn(async move {
                 let mut line = String::new();
@@ -406,8 +424,8 @@ async fn reg1_gateway_default_proxy_inherit_shape_fast_path() {
         "InheritGateway→gateway.proxy 必须走快路径放行（零 DNS），实际 Err: {:?}",
         res.err()
     );
-    let (ok, _, _) = cache_lookup(&state, (true, "nope.invalid"))
-        .expect("必须写入 (true, nope.invalid) 缓存");
+    let (ok, _, _) =
+        cache_lookup(&state, (true, "nope.invalid")).expect("必须写入 (true, nope.invalid) 缓存");
     assert!(ok, "缓存条目必须 ok=true");
 }
 
@@ -485,9 +503,8 @@ async fn reg4_localhost_subdomain_no_proxy_exempt_full_check() {
         cache_lookup(&state, (true, "evil.localhost")).is_none(),
         "*.localhost 属 no_proxy 豁免：不得出现 (true, evil.localhost) 快路径判定缓存"
     );
-    let _ = cache_lookup(&state, (false, "evil.localhost")).expect(
-        "判定必须走 direct 完整检查（DNS 照跑）并写入 (false, evil.localhost)",
-    );
+    let _ = cache_lookup(&state, (false, "evil.localhost"))
+        .expect("判定必须走 direct 完整检查（DNS 照跑）并写入 (false, evil.localhost)");
 
     // 结果必须与 1 参直连内核一致：快路径被误用（本环境应 Err 时）此处对不齐。
     let direct_state = Arc::new(AppState::new(GatewayConfig::default()));
@@ -505,10 +522,18 @@ async fn c8_builtin_model_allowlist_bypasses_dns() {
     // 未设置代理、未设置 PONYLLM_PROBE_ALLOWLIST 环境变量的情况下，
     // sensenova.cn 及其子域名应走白名单放行（无需真实 DNS 解析），防止公网模型域名受限于递归 DNS 抖动
     let res = check_data_plane_url("https://token.sensenova.cn/v1/chat/completions").await;
-    assert!(res.is_ok(), "内置白名单域名必须直接放行，实际: {:?}", res.err());
+    assert!(
+        res.is_ok(),
+        "内置白名单域名必须直接放行，实际: {:?}",
+        res.err()
+    );
 
     let res_ds = check_data_plane_url("https://api.deepseek.com/v1").await;
-    assert!(res_ds.is_ok(), "deepseek.com 必须直接放行，实际: {:?}", res_ds.err());
+    assert!(
+        res_ds.is_ok(),
+        "deepseek.com 必须直接放行，实际: {:?}",
+        res_ds.err()
+    );
 }
 
 /// 用例 9：DNS 超时瞬态重试机制（方案 A：第一次超时，第二次成功时能够成功自愈）
@@ -528,7 +553,11 @@ async fn c9_dns_timeout_retry_recovery() {
     )
     .await;
 
-    assert!(res.is_ok(), "第 1 次超时但第 2 次成功时应自愈放行，实际: {:?}", res.err());
+    assert!(
+        res.is_ok(),
+        "第 1 次超时但第 2 次成功时应自愈放行，实际: {:?}",
+        res.err()
+    );
 }
 
 /// 用例 10：持续超时坚决 fail-closed（对抗防御：不能无限重试或在持续超时时放行）
@@ -544,5 +573,8 @@ async fn c10_dns_persistent_timeout_fail_closed() {
 
     let err = res.expect_err("持续超时的非白名单域名必须严格 fail-closed 拒绝");
     assert!(err.transient, "超时错误必须标记为 transient");
-    assert!(err.reason.contains("blocked fail-closed"), "reason 必须包含 fail-closed 描述");
+    assert!(
+        err.reason.contains("blocked fail-closed"),
+        "reason 必须包含 fail-closed 描述"
+    );
 }

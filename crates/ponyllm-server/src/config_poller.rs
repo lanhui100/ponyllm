@@ -202,15 +202,20 @@ mod tests {
         }
     }
 
-    fn cfg_with_strategy(economy: bool) -> ConfigFile {
+    /// Build two distinguishable-but-deterministic `ConfigFile` variants.
+    ///
+    /// The global routing strategy is no longer a config field (wave-2), so the
+    /// stable `gateway.api_key` carries the variant identity here: same variant
+    /// => identical serialization (deterministic content hash), different
+    /// variant => different hash.
+    fn cfg_with_identity(variant: bool) -> ConfigFile {
         let mut cfg = ConfigFile::default();
         // `ConfigFile::default()` randomizes the api_key: pin it so two
-        // instances serialize identically (deterministic content hash).
-        cfg.gateway.api_key = "sk-test-deterministic".to_string();
-        cfg.gateway.default_strategy = if economy {
-            ponyllm_core::pool::GatewayRoutingStrategy::Economy
+        // instances of the same variant serialize identically.
+        cfg.gateway.api_key = if variant {
+            "sk-test-identity-a".to_string()
         } else {
-            ponyllm_core::pool::GatewayRoutingStrategy::Speed
+            "sk-test-identity-b".to_string()
         };
         cfg
     }
@@ -225,9 +230,9 @@ mod tests {
         // State 2: identical identity → no callback.
         // State 3: identity change → exactly one callback.
         let states = vec![
-            (identity_a.clone(), cfg_with_strategy(true)),
-            (identity_a.clone(), cfg_with_strategy(true)),
-            ("identity-b".to_string(), cfg_with_strategy(false)),
+            (identity_a.clone(), cfg_with_identity(true)),
+            (identity_a.clone(), cfg_with_identity(true)),
+            ("identity-b".to_string(), cfg_with_identity(false)),
         ];
         let src = FakeSource {
             state: Arc::new(tokio::sync::Mutex::new(states)),
@@ -254,8 +259,8 @@ mod tests {
         let collected = changes.lock().unwrap();
         assert_eq!(collected.len(), 1);
         assert_eq!(
-            collected[0].gateway.default_strategy,
-            ponyllm_core::pool::GatewayRoutingStrategy::Speed
+            collected[0].gateway.api_key,
+            "sk-test-identity-b".to_string()
         );
     }
 
@@ -284,7 +289,7 @@ mod tests {
         let src = FakeSource {
             state: Arc::new(tokio::sync::Mutex::new(vec![(
                 "identity".to_string(),
-                cfg_with_strategy(true),
+                cfg_with_identity(true),
             )])),
         };
         let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -322,9 +327,9 @@ mod tests {
         let c = calls.clone();
         let src = FakeSource {
             state: Arc::new(tokio::sync::Mutex::new(vec![
-                ("same-raw-hash".to_string(), cfg_with_strategy(true)),
-                ("same-raw-hash".to_string(), cfg_with_strategy(true)),
-                ("changed-raw-hash".to_string(), cfg_with_strategy(false)),
+                ("same-raw-hash".to_string(), cfg_with_identity(true)),
+                ("same-raw-hash".to_string(), cfg_with_identity(true)),
+                ("changed-raw-hash".to_string(), cfg_with_identity(false)),
             ])),
         };
         let handle = tokio::spawn(async move {
@@ -350,10 +355,10 @@ mod tests {
             state: Arc::new(tokio::sync::Mutex::new(vec![
                 // First poll returns the SAME content the process started with:
                 // seeded baseline -> no callback.
-                ("startup-hash".to_string(), cfg_with_strategy(true)),
+                ("startup-hash".to_string(), cfg_with_identity(true)),
                 // Content changed since startup -> callback fires even though
                 // this is the poller's first observable snapshot.
-                ("new-hash".to_string(), cfg_with_strategy(false)),
+                ("new-hash".to_string(), cfg_with_identity(false)),
             ])),
         };
         let handle = tokio::spawn(async move {
@@ -424,9 +429,9 @@ mod tests {
                 self.timestamps.lock().await.push(std::time::Instant::now());
                 let cur = self.step.fetch_add(1, Ordering::SeqCst);
                 match cur {
-                    0 => Ok(("v1".to_string(), cfg_with_strategy(true))),
+                    0 => Ok(("v1".to_string(), cfg_with_identity(true))),
                     1 | 2 | 3 => Err("control plane offline (simulated 504)".to_string()),
-                    _ => Ok(("v2".to_string(), cfg_with_strategy(false))),
+                    _ => Ok(("v2".to_string(), cfg_with_identity(false))),
                 }
             }
         }
@@ -468,10 +473,7 @@ mod tests {
         let applied = changes.lock().unwrap();
         // v1 establishes baseline (0), then 3 failures fall back quietly, then v2 triggers exactly 1 change
         assert_eq!(applied.len(), 1, "only genuine change should fire callback");
-        assert_eq!(
-            applied[0].gateway.default_strategy,
-            ponyllm_core::pool::GatewayRoutingStrategy::Speed
-        );
+        assert_eq!(applied[0].gateway.api_key, "sk-test-identity-b".to_string());
 
         let ts = timestamps.lock().await;
         assert!(ts.len() >= 5, "must have at least 5 poll attempts, got {}", ts.len());

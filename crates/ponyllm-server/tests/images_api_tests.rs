@@ -77,10 +77,12 @@ async fn test_images_generations_openai_protocol() {
             assert_eq!(req["model"], "gemini-3.1-flash-image");
             assert_eq!(req["project"], "aicode-consumers");
             assert_eq!(req["requestType"], "agent");
-            assert_eq!(req["request"]["contents"][0]["parts"][0]["text"], "a red apple");
             assert_eq!(
-                req["request"]["generationConfig"]["imageConfig"]["aspectRatio"],
-                "1:1",
+                req["request"]["contents"][0]["parts"][0]["text"],
+                "a red apple"
+            );
+            assert_eq!(
+                req["request"]["generationConfig"]["imageConfig"]["aspectRatio"], "1:1",
                 "size=1024x1024 should map to aspectRatio 1:1, got: {}",
                 req
             );
@@ -122,7 +124,12 @@ async fn test_images_generations_openai_protocol() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 200, "body: {}", resp.text().await.unwrap_or_default());
+    assert_eq!(
+        resp.status(),
+        200,
+        "body: {}",
+        resp.text().await.unwrap_or_default()
+    );
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["object"], serde_json::Value::Null); // OpenAI images has no object field
     assert_eq!(body["model"], "gemini-3.1-flash-image");
@@ -138,7 +145,10 @@ async fn test_images_edits_json_wire() {
             let parts = &req["request"]["contents"][0]["parts"];
             assert_eq!(parts[0]["inlineData"]["mimeType"], "image/png");
             assert_eq!(parts[0]["inlineData"]["data"], "QUFB");
-            assert_eq!(parts[1]["text"], "Based on the input image, modify it according to: make it purple");
+            assert_eq!(
+                parts[1]["text"],
+                "Based on the input image, modify it according to: make it purple"
+            );
             Json(antigravity_image_response("RURJVEVE="))
         }),
     );
@@ -176,7 +186,12 @@ async fn test_images_edits_json_wire() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 200, "body: {}", resp.text().await.unwrap_or_default());
+    assert_eq!(
+        resp.status(),
+        200,
+        "body: {}",
+        resp.text().await.unwrap_or_default()
+    );
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["data"][0]["b64_json"], "RURJVEVE=");
     assert_eq!(body["model"], "gemini-3.1-flash-image");
@@ -226,7 +241,10 @@ async fn test_images_edits_multipart_wire() {
             assert_eq!(parts[0]["inlineData"]["mimeType"], "image/jpeg");
             // base64 of "multipart-bytes"
             assert_eq!(parts[0]["inlineData"]["data"], "bXVsdGlwYXJ0LWJ5dGVz");
-            assert_eq!(parts[1]["text"], "Based on the input image, modify it according to: add a halo");
+            assert_eq!(
+                parts[1]["text"],
+                "Based on the input image, modify it according to: add a halo"
+            );
             Json(antigravity_image_response("TVVMVElQQVJU"))
         }),
     );
@@ -266,12 +284,20 @@ async fn test_images_edits_multipart_wire() {
     let client = reqwest::Client::new();
     let resp = client
         .post(format!("http://{}/v1/images/edits", gw_addr))
-        .header("content-type", format!("multipart/form-data; boundary={}", boundary))
+        .header(
+            "content-type",
+            format!("multipart/form-data; boundary={}", boundary),
+        )
         .body(body)
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 200, "body: {}", resp.text().await.unwrap_or_default());
+    assert_eq!(
+        resp.status(),
+        200,
+        "body: {}",
+        resp.text().await.unwrap_or_default()
+    );
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["data"][0]["b64_json"], "TVVMVElQQVJU");
 }
@@ -375,7 +401,12 @@ async fn test_images_generations_unknown_model_404() {
 async fn test_images_generations_upstream_error_projection() {
     let mock = Router::new().route(
         "/v1internal:generateContent",
-        post(|| async { (axum::http::StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error": {"code": 503, "message": "The model is overloaded"}}))) }),
+        post(|| async {
+            (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"error": {"code": 503, "message": "The model is overloaded"}})),
+            )
+        }),
     );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -407,15 +438,23 @@ async fn test_images_generations_upstream_error_projection() {
         .send()
         .await
         .unwrap();
-    assert!(resp.status().is_server_error(), "got status {}", resp.status());
+    assert!(
+        resp.status().is_server_error(),
+        "got status {}",
+        resp.status()
+    );
     let body: serde_json::Value = resp.json().await.unwrap();
-    assert!(body["error"]["message"].as_str().unwrap().contains("exhausted"));
+    assert!(body["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("exhausted"));
 }
 
 #[tokio::test]
 async fn test_images_endpoints_require_auth_scope() {
     use ponyllm_config::{generate_scoped_gateway_key, AuthCompat};
-    let (infer_plain, e_infer) = generate_scoped_gateway_key("agt-1", ponyllm_config::KeyScope::Inference);
+    let (infer_plain, e_infer) =
+        generate_scoped_gateway_key("agt-1", ponyllm_config::KeyScope::Inference);
     let mut config = GatewayConfig::default();
     config.auth_compat = AuthCompat::Strict;
     config.gateway_keys = vec![e_infer];
@@ -438,5 +477,9 @@ async fn test_images_endpoints_require_auth_scope() {
         .await
         .unwrap();
     assert_ne!(resp.status(), 401, "inference key must authenticate");
-    assert_ne!(resp.status(), 403, "inference key must be authorized on images");
+    assert_ne!(
+        resp.status(),
+        403,
+        "inference key must be authorized on images"
+    );
 }

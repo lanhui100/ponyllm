@@ -18,8 +18,6 @@
 
 use bytes::{Bytes, BytesMut};
 use futures_util::{Stream, StreamExt};
-use std::sync::Arc;
-use std::time::Instant;
 use parking_lot::Mutex;
 use ponyllm_core::telemetry::{
     gap_percentiles, EventBus, EventCtx, GatewayEvent, StageTimings, StreamFlowSample,
@@ -28,10 +26,11 @@ use ponyllm_protocol::anthropic::messages::MessageStreamEvent;
 use ponyllm_protocol::openai::chat::ChatCompletionChunk;
 use ponyllm_protocol::openai::responses::ResponseStreamEvent;
 use ponyllm_protocol::translator::{
-    antigravity_chunk_to_chat_chunk,
-    AnthropicStreamToChatFsm, AnthropicToResponsesFsm, ChatStreamToAnthropicFsm,
-    ChatToResponsesFsm, ResponsesToAnthropicFsm, ResponsesToChatFsm,
+    antigravity_chunk_to_chat_chunk, AnthropicStreamToChatFsm, AnthropicToResponsesFsm,
+    ChatStreamToAnthropicFsm, ChatToResponsesFsm, ResponsesToAnthropicFsm, ResponsesToChatFsm,
 };
+use std::sync::Arc;
+use std::time::Instant;
 
 /// A single parsed SSE frame.
 #[derive(Debug, Clone)]
@@ -79,7 +78,8 @@ pub const DEFAULT_TAIL_STALL_IDLE: std::time::Duration = std::time::Duration::fr
 /// Default heartbeat interval for downstream SSE streams: if no chunk is emitted to the downstream
 /// client for this duration (e.g. during deep thinking or upstream model scheduling), an SSE comment
 /// (`: ping\n\n`) is sent to keep the downstream connection alive and reset client-side idle watchdogs.
-pub const DEFAULT_DOWNSTREAM_HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
+pub const DEFAULT_DOWNSTREAM_HEARTBEAT_INTERVAL: std::time::Duration =
+    std::time::Duration::from_secs(15);
 
 /// Wrap a downstream byte stream so that if no chunk is emitted for longer than `interval`,
 /// an SSE comment keepalive line (`: ping\n\n`) is yielded to maintain connection activity
@@ -145,9 +145,10 @@ where
                     last = tokio::time::Instant::now();
                     Some((Ok(bytes), (inner, idle, last, false)))
                 }
-                Ok(Some(Err(e))) => {
-                    Some((Err(StallError::Transport(e.to_string())), (inner, idle, last, true)))
-                }
+                Ok(Some(Err(e))) => Some((
+                    Err(StallError::Transport(e.to_string())),
+                    (inner, idle, last, true),
+                )),
                 Ok(None) => None,
                 Err(_elapsed) => Some((Err(StallError::Stall { idle }), (inner, idle, last, true))),
             }
@@ -170,7 +171,8 @@ pub fn classify_stream_timeout_tag(error: &str, latency_ms: u64) -> &'static str
         "tail-stall"
     } else if error.contains("upstream TTFB timeout") {
         "ttfb-timeout"
-    } else if error.contains("error decoding response body") || error.contains("request timed out") {
+    } else if error.contains("error decoding response body") || error.contains("request timed out")
+    {
         // ~120s: a proxy/egress hard cap (Vercel maxDuration) suspect, or the
         // gateway total budget if someone configured it near 120s.
         if (118_000..=124_000).contains(&latency_ms) {
@@ -189,9 +191,7 @@ pub fn classify_stream_timeout_tag(error: &str, latency_ms: u64) -> &'static str
 /// ends — e.g. OpenAI upstream -> OpenAI client, or Anthropic upstream ->
 /// Anthropic client). The upstream frames are already correctly prefixed, so
 /// we must NOT re-wrap them.
-pub fn passthrough_sse<S, E>(
-    stream: S,
-) -> impl Stream<Item = Result<Bytes, E>>
+pub fn passthrough_sse<S, E>(stream: S) -> impl Stream<Item = Result<Bytes, E>>
 where
     S: Stream<Item = Result<Bytes, E>> + Send + 'static,
     E: Send + 'static,
@@ -208,9 +208,7 @@ fn find_sse_boundary(buf: &[u8]) -> Option<usize> {
             return Some(i + 2);
         }
         // \r\n\r\n boundary
-        if i + 3 < buf.len()
-            && buf[i..i + 4] == [b'\r', b'\n', b'\r', b'\n']
-        {
+        if i + 3 < buf.len() && buf[i..i + 4] == [b'\r', b'\n', b'\r', b'\n'] {
             return Some(i + 4);
         }
         i += 1;
@@ -256,9 +254,7 @@ pub const MAX_SSE_FRAME_BYTES: usize = 64 * 1024;
 /// frames that are split across network chunks. Trailing bytes at EOF that
 /// never formed a blank-line-terminated frame are discarded per SSE semantics
 /// rather than emitted as a synthetic event.
-pub fn sse_event_stream<S, E>(
-    stream: S,
-) -> impl Stream<Item = Result<SseEvent, E>>
+pub fn sse_event_stream<S, E>(stream: S) -> impl Stream<Item = Result<SseEvent, E>>
 where
     S: Stream<Item = Result<Bytes, E>> + Send + 'static,
     E: Send + 'static,
@@ -319,7 +315,9 @@ pub fn responses_event_to_sse_bytes(event: &ResponseStreamEvent) -> Option<Bytes
         ResponseStreamEvent::TextDelta(_) => "response.text.delta",
         ResponseStreamEvent::OutputTextDelta(_) => "response.output_text.delta",
         ResponseStreamEvent::ReasoningTextDelta(_) => "response.reasoning_text.delta",
-        ResponseStreamEvent::ReasoningSummaryTextDelta(_) => "response.reasoning_summary_text.delta",
+        ResponseStreamEvent::ReasoningSummaryTextDelta(_) => {
+            "response.reasoning_summary_text.delta"
+        }
         ResponseStreamEvent::FunctionCallArgumentsDelta(_) => {
             "response.function_call_arguments.delta"
         }
@@ -428,7 +426,11 @@ where
         }
         let iter = futures_util::stream::iter(out);
         futures_util::stream::BoxStream::from(Box::pin(iter)
-            as std::pin::Pin<Box<dyn futures_util::Stream<Item = Result<Bytes, ResponsesChatStreamError>> + Send>>)
+            as std::pin::Pin<
+                Box<
+                    dyn futures_util::Stream<Item = Result<Bytes, ResponsesChatStreamError>> + Send,
+                >,
+            >)
     });
 
     translated
@@ -499,7 +501,11 @@ where
     translated
         .chain(futures_util::stream::once(async move {
             let synthetic = if !stopped.load(std::sync::atomic::Ordering::SeqCst) {
-                match fsm.lock().finish_if_open().and_then(|e| responses_event_to_sse_bytes(&e)) {
+                match fsm
+                    .lock()
+                    .finish_if_open()
+                    .and_then(|e| responses_event_to_sse_bytes(&e))
+                {
                     Some(b) => b,
                     None => Bytes::new(),
                 }
@@ -625,7 +631,11 @@ where
     translated
         .chain(futures_util::stream::once(async move {
             let synthetic = if !stopped.load(std::sync::atomic::Ordering::SeqCst) {
-                match fsm.lock().finish_if_open().and_then(|e| responses_event_to_sse_bytes(&e)) {
+                match fsm
+                    .lock()
+                    .finish_if_open()
+                    .and_then(|e| responses_event_to_sse_bytes(&e))
+                {
                     Some(b) => b,
                     None => Bytes::new(),
                 }
@@ -798,7 +808,11 @@ pub fn is_antigravity_empty_stop_frame(val: &serde_json::Value) -> bool {
     }
 
     // Check if there are any non-empty parts
-    if let Some(parts) = first.get("content").and_then(|c| c.get("parts")).and_then(|p| p.as_array()) {
+    if let Some(parts) = first
+        .get("content")
+        .and_then(|c| c.get("parts"))
+        .and_then(|p| p.as_array())
+    {
         for p in parts {
             if let Some(t) = p.get("text").and_then(|v| v.as_str()) {
                 if !t.is_empty() {
@@ -823,7 +837,11 @@ pub fn has_antigravity_content(val: &serde_json::Value) -> bool {
         Some(f) => f,
         None => return false,
     };
-    if let Some(parts) = first.get("content").and_then(|c| c.get("parts")).and_then(|p| p.as_array()) {
+    if let Some(parts) = first
+        .get("content")
+        .and_then(|c| c.get("parts"))
+        .and_then(|p| p.as_array())
+    {
         for p in parts {
             if let Some(t) = p.get("text").and_then(|v| v.as_str()) {
                 if !t.is_empty() {
@@ -895,10 +913,18 @@ fn describe_antigravity_frame(val: &serde_json::Value) -> EmptyStopShape {
         // A "signature-only" part carries a thoughtSignature but no visible
         // payload: empty/missing text and no functionCall. Any non-empty text
         // (thought or visible) or functionCall disqualifies signature-only.
-        let text_empty = p.get("text").and_then(|v| v.as_str()).map(|t| t.is_empty()).unwrap_or(true);
+        let text_empty = p
+            .get("text")
+            .and_then(|v| v.as_str())
+            .map(|t| t.is_empty())
+            .unwrap_or(true);
         let has_sig = p.get("thoughtSignature").and_then(|v| v.as_str()).is_some();
         let has_call = p.get("functionCall").is_some();
-        let has_text = p.get("text").and_then(|v| v.as_str()).map(|t| !t.is_empty()).unwrap_or(false);
+        let has_text = p
+            .get("text")
+            .and_then(|v| v.as_str())
+            .map(|t| !t.is_empty())
+            .unwrap_or(false);
         if !(has_sig && text_empty && !has_call) || has_text {
             all_signature_only = false;
         }
@@ -936,9 +962,7 @@ pub enum AntigravityPreambleResult<S> {
         shape: EmptyStopShape,
     },
     /// Upstream safety block or deterministic error frame.
-    DeterministicBlock {
-        reason: String,
-    },
+    DeterministicBlock { reason: String },
     /// Stream ended prematurely before yielding any content or terminal candidate.
     AbruptTermination,
 }
@@ -1130,8 +1154,13 @@ where
             if !data.is_empty() && data != "[DONE]" {
                 if let Ok(val) = serde_json::from_str::<serde_json::Value>(data) {
                     // Check for safety filter block
-                    if let Some(feedback) = val.get("promptFeedback").or_else(|| val.get("response").and_then(|r| r.get("promptFeedback"))) {
-                        if let Some(block_reason) = feedback.get("blockReason").and_then(|b| b.as_str()) {
+                    if let Some(feedback) = val
+                        .get("promptFeedback")
+                        .or_else(|| val.get("response").and_then(|r| r.get("promptFeedback")))
+                    {
+                        if let Some(block_reason) =
+                            feedback.get("blockReason").and_then(|b| b.as_str())
+                        {
                             return Ok(AntigravityPreambleResult::DeterministicBlock {
                                 reason: format!("safety block: {}", block_reason),
                             });
@@ -1720,7 +1749,12 @@ where
         let evt = match tokio::time::timeout(chunk_timeout, sse_stream.next()).await {
             Ok(Some(res)) => res,
             Ok(None) => break,
-            Err(_) => return Err(format!("Chat SSE stream stalled: {:?} chunk timeout exceeded", chunk_timeout)),
+            Err(_) => {
+                return Err(format!(
+                    "Chat SSE stream stalled: {:?} chunk timeout exceeded",
+                    chunk_timeout
+                ))
+            }
         };
         let evt = match evt {
             Ok(e) => e,
@@ -1782,7 +1816,8 @@ where
                         }
                         if let Some(f) = tc.get("function") {
                             if tool.name.is_none() {
-                                tool.name = f.get("name").and_then(|v| v.as_str()).map(String::from);
+                                tool.name =
+                                    f.get("name").and_then(|v| v.as_str()).map(String::from);
                             }
                             if let Some(a) = f.get("arguments").and_then(|v| v.as_str()) {
                                 tool.arguments.push_str(a);
@@ -1839,15 +1874,30 @@ where
         .collect();
 
     let mut out = serde_json::Map::new();
-    out.insert("id".into(), serde_json::Value::String(id.unwrap_or_else(|| "chatcmpl-ponyllm".into())));
-    out.insert("object".into(), serde_json::Value::String("chat.completion".into()));
-    out.insert("created".into(), serde_json::Value::Number(created.unwrap_or_default().into()));
-    out.insert("model".into(), serde_json::Value::String(model.unwrap_or_default()));
+    out.insert(
+        "id".into(),
+        serde_json::Value::String(id.unwrap_or_else(|| "chatcmpl-ponyllm".into())),
+    );
+    out.insert(
+        "object".into(),
+        serde_json::Value::String("chat.completion".into()),
+    );
+    out.insert(
+        "created".into(),
+        serde_json::Value::Number(created.unwrap_or_default().into()),
+    );
+    out.insert(
+        "model".into(),
+        serde_json::Value::String(model.unwrap_or_default()),
+    );
     out.insert("choices".into(), serde_json::Value::Array(built_choices));
     if let Some(u) = usage {
         out.insert("usage".into(), u);
     } else {
-        out.insert("usage".into(), serde_json::json!({"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}));
+        out.insert(
+            "usage".into(),
+            serde_json::json!({"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}),
+        );
     }
     Ok(serde_json::Value::Object(out))
 }
@@ -1877,7 +1927,12 @@ where
         let evt = match tokio::time::timeout(chunk_timeout, sse_stream.next()).await {
             Ok(Some(res)) => res,
             Ok(None) => break,
-            Err(_) => return Err(format!("Responses SSE stream stalled: {:?} chunk timeout exceeded", chunk_timeout)),
+            Err(_) => {
+                return Err(format!(
+                    "Responses SSE stream stalled: {:?} chunk timeout exceeded",
+                    chunk_timeout
+                ))
+            }
         };
         let evt = match evt {
             Ok(e) => e,
@@ -1898,7 +1953,10 @@ where
                 }
             }
             "response.failed" | "error" => {
-                let err = val.get("response").and_then(|r| r.get("error")).unwrap_or(&val);
+                let err = val
+                    .get("response")
+                    .and_then(|r| r.get("error"))
+                    .unwrap_or(&val);
                 let msg = err
                     .get("message")
                     .and_then(|m| m.as_str())
@@ -1939,7 +1997,12 @@ where
         let chunk_res = match tokio::time::timeout(chunk_timeout, sse_stream.next()).await {
             Ok(Some(res)) => res,
             Ok(None) => break,
-            Err(_) => return Err(format!("Antigravity SSE stream stalled: {:?} chunk timeout exceeded", chunk_timeout)),
+            Err(_) => {
+                return Err(format!(
+                    "Antigravity SSE stream stalled: {:?} chunk timeout exceeded",
+                    chunk_timeout
+                ))
+            }
         };
 
         match chunk_res {
@@ -1949,8 +2012,14 @@ where
                     continue;
                 }
                 if let Ok(val) = serde_json::from_str::<serde_json::Value>(data) {
-                    if let Some(err_obj) = val.get("error").or_else(|| val.get("response").and_then(|r| r.get("error"))) {
-                        let msg = err_obj.get("message").and_then(|m| m.as_str()).unwrap_or("Antigravity upstream error frame");
+                    if let Some(err_obj) = val
+                        .get("error")
+                        .or_else(|| val.get("response").and_then(|r| r.get("error")))
+                    {
+                        let msg = err_obj
+                            .get("message")
+                            .and_then(|m| m.as_str())
+                            .unwrap_or("Antigravity upstream error frame");
                         tracing::error!(frame = frame_count + 1, error = %msg, "Antigravity upstream returned error frame");
                         return Err(format!("Antigravity stream error frame: {}", msg));
                     }
@@ -1963,13 +2032,23 @@ where
                                 finish_reason = Some(fr.to_string());
                                 tracing::debug!(frame = frame_count, finish_reason = %fr, "Antigravity SSE frame carries finishReason");
                             }
-                            if let Some(parts) = cand.get("content").and_then(|c| c.get("parts")).and_then(|p| p.as_array()) {
+                            if let Some(parts) = cand
+                                .get("content")
+                                .and_then(|c| c.get("parts"))
+                                .and_then(|p| p.as_array())
+                            {
                                 for part in parts {
                                     // R1: candidate parts are per-frame noise
                                     // (a bare thoughtSignature trailer is ~2KB);
                                     // log at debug with the signature redacted.
-                                    tracing::debug!("Antigravity candidate part: {:?}", redact_part_for_log(part));
-                                    let is_thought = part.get("thought").and_then(|t| t.as_bool()).unwrap_or(false);
+                                    tracing::debug!(
+                                        "Antigravity candidate part: {:?}",
+                                        redact_part_for_log(part)
+                                    );
+                                    let is_thought = part
+                                        .get("thought")
+                                        .and_then(|t| t.as_bool())
+                                        .unwrap_or(false);
                                     if let Some(txt) = part.get("text").and_then(|t| t.as_str()) {
                                         if is_thought {
                                             total_thought_bytes += txt.len();
@@ -1980,13 +2059,26 @@ where
                                     if part.get("functionCall").is_some() {
                                         function_call_count += 1;
                                     }
-                                    if let (Some(last), Some(new_text)) = (collected_parts.last_mut(), part.get("text").and_then(|t| t.as_str())) {
-                                        let last_thought = last.get("thought").and_then(|t| t.as_bool()).unwrap_or(false);
-                                        let new_thought = part.get("thought").and_then(|t| t.as_bool()).unwrap_or(false);
-                                        if last.get("text").is_some() && last_thought == new_thought {
+                                    if let (Some(last), Some(new_text)) = (
+                                        collected_parts.last_mut(),
+                                        part.get("text").and_then(|t| t.as_str()),
+                                    ) {
+                                        let last_thought = last
+                                            .get("thought")
+                                            .and_then(|t| t.as_bool())
+                                            .unwrap_or(false);
+                                        let new_thought = part
+                                            .get("thought")
+                                            .and_then(|t| t.as_bool())
+                                            .unwrap_or(false);
+                                        if last.get("text").is_some() && last_thought == new_thought
+                                        {
                                             if let Some(old_text) = last.get_mut("text") {
                                                 if let Some(s) = old_text.as_str() {
-                                                    *old_text = serde_json::Value::String(format!("{}{}", s, new_text));
+                                                    *old_text = serde_json::Value::String(format!(
+                                                        "{}{}",
+                                                        s, new_text
+                                                    ));
                                                     continue;
                                                 }
                                             }
@@ -2002,7 +2094,15 @@ where
                     }
                     tracing::trace!(
                         frame = frame_count,
-                        parts_in_frame = target.get("candidates").and_then(|c| c.as_array()).and_then(|c| c.first()).and_then(|f| f.get("content")).and_then(|c| c.get("parts")).and_then(|p| p.as_array()).map(|p| p.len()).unwrap_or(0),
+                        parts_in_frame = target
+                            .get("candidates")
+                            .and_then(|c| c.as_array())
+                            .and_then(|c| c.first())
+                            .and_then(|f| f.get("content"))
+                            .and_then(|c| c.get("parts"))
+                            .and_then(|p| p.as_array())
+                            .map(|p| p.len())
+                            .unwrap_or(0),
                         "Processed Antigravity SSE frame"
                     );
                 }
@@ -2153,7 +2253,8 @@ impl<S> TelemetryStream<S> {
         self.bytes_emitted += item_bytes.len() as u64;
 
         // Inspect SSE payload to extract real content characters and usage output_tokens
-        let (chars, usage_comp, usage_prompt, usage_cached, text_delta) = estimate_tokens_from_sse_bytes(item_bytes);
+        let (chars, usage_comp, usage_prompt, usage_cached, text_delta) =
+            estimate_tokens_from_sse_bytes(item_bytes);
         self.content_chars_emitted += chars as u64;
         if !text_delta.is_empty() && self.collected_text.len() < 10 * 1024 * 1024 {
             self.collected_text.push_str(&text_delta);
@@ -2172,15 +2273,15 @@ impl<S> TelemetryStream<S> {
     fn build_flow(&self, now: Instant) -> (StreamFlowSample, Option<f64>) {
         let start = self.failure_ctx.ctx.start;
         let attempt_start = self.failure_ctx.attempt_start.unwrap_or(start);
-        
+
         // Pure upstream TTFT: from successful attempt dispatch to first chunk received
-        let upstream_ttft_ms = self.first_token_time.map(|t| {
-            (t.saturating_duration_since(attempt_start).as_secs_f64() * 1000.0).max(1.0)
-        });
+        let upstream_ttft_ms = self
+            .first_token_time
+            .map(|t| (t.saturating_duration_since(attempt_start).as_secs_f64() * 1000.0).max(1.0));
         // End-to-end downstream TTFT: from client request start to first chunk yielded
-        let downstream_ttft_ms = self.first_token_time.map(|t| {
-            (t.saturating_duration_since(start).as_secs_f64() * 1000.0).max(1.0)
-        });
+        let downstream_ttft_ms = self
+            .first_token_time
+            .map(|t| (t.saturating_duration_since(start).as_secs_f64() * 1000.0).max(1.0));
         let ttlb_ms = now.saturating_duration_since(start).as_secs_f64() * 1000.0;
 
         // Accurate token calculation:
@@ -2210,7 +2311,11 @@ impl<S> TelemetryStream<S> {
             None
         };
         let (p50, p95, max) = gap_percentiles(self.gaps_ms.clone());
-        let max_gap = if self.max_gap_ms > 0.0 { Some(self.max_gap_ms) } else { max };
+        let max_gap = if self.max_gap_ms > 0.0 {
+            Some(self.max_gap_ms)
+        } else {
+            max
+        };
         let avg_gap = if self.gaps_ms.is_empty() {
             None
         } else {
@@ -2228,7 +2333,9 @@ impl<S> TelemetryStream<S> {
             tpot_p50_ms: p50,
             tpot_p95_ms: p95,
             tpot_mean_ms: avg_gap,
-            prompt_tokens: self.usage_prompt_tokens.unwrap_or(self.failure_ctx.estimated_prompt_tokens),
+            prompt_tokens: self
+                .usage_prompt_tokens
+                .unwrap_or(self.failure_ctx.estimated_prompt_tokens),
             completion_tokens,
             cached_tokens: self.usage_cached_tokens.unwrap_or(0),
         };
@@ -2237,10 +2344,15 @@ impl<S> TelemetryStream<S> {
 
     fn emit(&self, provider: Option<String>, event: GatewayEvent) {
         let fctx = &self.failure_ctx;
-        fctx.bus.append(&fctx.ctx, provider.or(Some(fctx.provider.clone())), event);
+        fctx.bus
+            .append(&fctx.ctx, provider.or(Some(fctx.provider.clone())), event);
     }
 
-    fn finish_stages(&self, upstream_ttft: Option<f64>, downstream_ttft: Option<f64>) -> StageTimings {
+    fn finish_stages(
+        &self,
+        upstream_ttft: Option<f64>,
+        downstream_ttft: Option<f64>,
+    ) -> StageTimings {
         let mut stages = self.failure_ctx.stages.lock().clone();
         if stages.upstream_ttft_ms.is_none() || upstream_ttft.is_some() {
             stages.upstream_ttft_ms = upstream_ttft;
@@ -2329,13 +2441,20 @@ where
                         } else {
                             None
                         };
-                        if let (Some(pool), Some(kid)) = (self.failure_ctx.key_pool.as_ref(), self.failure_ctx.key_id.as_deref()) {
+                        if let (Some(pool), Some(kid)) = (
+                            self.failure_ctx.key_pool.as_ref(),
+                            self.failure_ctx.key_id.as_deref(),
+                        ) {
                             let wall_ms = std::time::SystemTime::now()
                                 .duration_since(std::time::UNIX_EPOCH)
                                 .unwrap_or_default()
                                 .as_millis() as u64;
                             let prompt = sample.prompt_tokens;
-                            let comp = if sample.completion_tokens > 0 { sample.completion_tokens } else { sample.chunks.max(1) };
+                            let comp = if sample.completion_tokens > 0 {
+                                sample.completion_tokens
+                            } else {
+                                sample.chunks.max(1)
+                            };
                             pool.record_tokens(kid, wall_ms, prompt, comp, sample.cached_tokens);
                         }
                         self.emit(
@@ -2343,10 +2462,7 @@ where
                             GatewayEvent::StreamCompleted {
                                 flow: sample,
                                 stages,
-                                request_snippet: self
-                                    .failure_ctx
-                                    .request_snippet
-                                    .clone(),
+                                request_snippet: self.failure_ctx.request_snippet.clone(),
                                 response_snippet: resp_snippet,
                             },
                         );
@@ -2372,13 +2488,20 @@ impl<S> Drop for TelemetryStream<S> {
             if self.has_error || self.chunks_emitted == 0 {
                 let (sample, _avg_gap) = self.build_flow(now);
                 let stages = self.finish_stages(sample.ttft_ms, sample.downstream_ttft_ms);
-                if let (Some(pool), Some(kid)) = (self.failure_ctx.key_pool.as_ref(), self.failure_ctx.key_id.as_deref()) {
+                if let (Some(pool), Some(kid)) = (
+                    self.failure_ctx.key_pool.as_ref(),
+                    self.failure_ctx.key_id.as_deref(),
+                ) {
                     let wall_ms = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default()
                         .as_millis() as u64;
                     let prompt = sample.prompt_tokens;
-                    let comp = if sample.completion_tokens > 0 { sample.completion_tokens } else { sample.chunks };
+                    let comp = if sample.completion_tokens > 0 {
+                        sample.completion_tokens
+                    } else {
+                        sample.chunks
+                    };
                     if prompt > 0 || comp > 0 {
                         pool.record_tokens(kid, wall_ms, prompt, comp, sample.cached_tokens);
                     }
@@ -2386,13 +2509,20 @@ impl<S> Drop for TelemetryStream<S> {
                 self.emit_failure("stream dropped before completion", Some(sample), stages);
             } else {
                 let (sample, _avg_gap) = self.build_flow(now);
-                if let (Some(pool), Some(kid)) = (self.failure_ctx.key_pool.as_ref(), self.failure_ctx.key_id.as_deref()) {
+                if let (Some(pool), Some(kid)) = (
+                    self.failure_ctx.key_pool.as_ref(),
+                    self.failure_ctx.key_id.as_deref(),
+                ) {
                     let wall_ms = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default()
                         .as_millis() as u64;
                     let prompt = sample.prompt_tokens;
-                    let comp = if sample.completion_tokens > 0 { sample.completion_tokens } else { sample.chunks };
+                    let comp = if sample.completion_tokens > 0 {
+                        sample.completion_tokens
+                    } else {
+                        sample.chunks
+                    };
                     if prompt > 0 || comp > 0 {
                         pool.record_tokens(kid, wall_ms, prompt, comp, sample.cached_tokens);
                     }
@@ -2417,7 +2547,9 @@ impl<S> Drop for TelemetryStream<S> {
 /// Quick extraction of real content characters and usage tokens from SSE chunk bytes.
 /// Inspects `data:` lines for delta text and usage objects to prevent wire JSON boilerplate
 /// from inflating completion token counts and distorting TPS.
-fn estimate_tokens_from_sse_bytes(raw: &[u8]) -> (usize, Option<u64>, Option<u64>, Option<u64>, String) {
+fn estimate_tokens_from_sse_bytes(
+    raw: &[u8],
+) -> (usize, Option<u64>, Option<u64>, Option<u64>, String) {
     let Ok(text) = std::str::from_utf8(raw) else {
         return (0, None, None, None, String::new());
     };
@@ -2469,7 +2601,11 @@ fn estimate_tokens_from_sse_bytes(raw: &[u8]) -> (usize, Option<u64>, Option<u64
 
             // 3. Anthropic ContentBlockDelta / MessageDelta
             if let Some(delta) = obj.get("delta").and_then(|d| d.as_object()) {
-                if let Some(t) = delta.get("text").or_else(|| delta.get("thinking")).and_then(|s| s.as_str()) {
+                if let Some(t) = delta
+                    .get("text")
+                    .or_else(|| delta.get("thinking"))
+                    .and_then(|s| s.as_str())
+                {
                     content_chars += t.len();
                     text_delta.push_str(t);
                 }
@@ -2483,7 +2619,13 @@ fn estimate_tokens_from_sse_bytes(raw: &[u8]) -> (usize, Option<u64>, Option<u64
         }
     }
 
-    (content_chars, usage_completion, usage_prompt, usage_cached, text_delta)
+    (
+        content_chars,
+        usage_completion,
+        usage_prompt,
+        usage_cached,
+        text_delta,
+    )
 }
 
 /// Wrap a downstream byte stream with telemetry and an automatic SSE heartbeat guard
@@ -2511,34 +2653,47 @@ fn parse_lenient_u64(v: &serde_json::Value) -> Option<u64> {
 
 /// Extract prompt_tokens, completion_tokens, and cached_tokens from OpenAI/Anthropic/Antigravity JSON usage object
 pub fn extract_usage_tokens(val: &serde_json::Value) -> (u64, u64, u64) {
-    let usage_opt = val.get("usage")
+    let usage_opt = val
+        .get("usage")
         .or_else(|| val.get("response").and_then(|r| r.get("usage")))
         .or_else(|| val.get("message").and_then(|m| m.get("usage")))
         .or_else(|| val.get("usageMetadata"));
 
     if let Some(usage) = usage_opt {
-        let (prompt, cached) = if let Some(p) = usage.get("prompt_tokens").and_then(parse_lenient_u64) {
-            let cached = usage
-                .get("prompt_tokens_details")
-                .and_then(|d| d.get("cached_tokens"))
-                .or_else(|| usage.get("cached_tokens"))
-                .or_else(|| usage.get("prompt_cache_hit_tokens"))
-                .and_then(parse_lenient_u64)
-                .unwrap_or(0);
-            (p, cached)
-        } else if let Some(input) = usage.get("input_tokens").and_then(parse_lenient_u64) {
-            // Anthropic 兼容处理：总 Prompt = input + cache_read + cache_creation
-            let cached_read = usage.get("cache_read_input_tokens").and_then(parse_lenient_u64).unwrap_or(0);
-            let cached_create = usage.get("cache_creation_input_tokens").and_then(parse_lenient_u64).unwrap_or(0);
-            let total_prompt = input.saturating_add(cached_read).saturating_add(cached_create);
-            (total_prompt, cached_read)
-        } else if let Some(ptc) = usage.get("promptTokenCount").and_then(parse_lenient_u64) {
-            // Gemini / Antigravity
-            let cached = usage.get("cachedContentTokenCount").and_then(parse_lenient_u64).unwrap_or(0);
-            (ptc, cached)
-        } else {
-            (0, 0)
-        };
+        let (prompt, cached) =
+            if let Some(p) = usage.get("prompt_tokens").and_then(parse_lenient_u64) {
+                let cached = usage
+                    .get("prompt_tokens_details")
+                    .and_then(|d| d.get("cached_tokens"))
+                    .or_else(|| usage.get("cached_tokens"))
+                    .or_else(|| usage.get("prompt_cache_hit_tokens"))
+                    .and_then(parse_lenient_u64)
+                    .unwrap_or(0);
+                (p, cached)
+            } else if let Some(input) = usage.get("input_tokens").and_then(parse_lenient_u64) {
+                // Anthropic 兼容处理：总 Prompt = input + cache_read + cache_creation
+                let cached_read = usage
+                    .get("cache_read_input_tokens")
+                    .and_then(parse_lenient_u64)
+                    .unwrap_or(0);
+                let cached_create = usage
+                    .get("cache_creation_input_tokens")
+                    .and_then(parse_lenient_u64)
+                    .unwrap_or(0);
+                let total_prompt = input
+                    .saturating_add(cached_read)
+                    .saturating_add(cached_create);
+                (total_prompt, cached_read)
+            } else if let Some(ptc) = usage.get("promptTokenCount").and_then(parse_lenient_u64) {
+                // Gemini / Antigravity
+                let cached = usage
+                    .get("cachedContentTokenCount")
+                    .and_then(parse_lenient_u64)
+                    .unwrap_or(0);
+                (ptc, cached)
+            } else {
+                (0, 0)
+            };
 
         let completion = usage
             .get("completion_tokens")
@@ -2559,19 +2714,19 @@ mod tests {
     use futures_util::StreamExt;
     use ponyllm_core::telemetry::{FlightRecorder, GatewayEvent, MetricsCollector};
 
-    fn bytes_stream(chunks: Vec<Bytes>) -> impl Stream<Item = Result<Bytes, std::io::Error>> + Send + 'static {
+    fn bytes_stream(
+        chunks: Vec<Bytes>,
+    ) -> impl Stream<Item = Result<Bytes, std::io::Error>> + Send + 'static {
         futures_util::stream::iter(chunks.into_iter().map(Ok::<Bytes, std::io::Error>))
     }
 
     #[tokio::test]
-    async fn test_extract_event_split_across_chunks() {        let s = bytes_stream(vec![
+    async fn test_extract_event_split_across_chunks() {
+        let s = bytes_stream(vec![
             Bytes::from_static(b"data: {\"a\":1}\n"),
             Bytes::from_static(b"\ndata: {\"b\":2}\n\n"),
         ]);
-        let events: Vec<SseEvent> = sse_event_stream(s)
-            .map(|r| r.unwrap())
-            .collect()
-            .await;
+        let events: Vec<SseEvent> = sse_event_stream(s).map(|r| r.unwrap()).collect().await;
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].data, "{\"a\":1}");
         assert_eq!(events[0].event, "message");
@@ -2583,10 +2738,7 @@ mod tests {
         let s = bytes_stream(vec![Bytes::from_static(
             b"event: message_start\r\ndata: {\"x\":1}\r\n\r\n",
         )]);
-        let events: Vec<SseEvent> = sse_event_stream(s)
-            .map(|r| r.unwrap())
-            .collect()
-            .await;
+        let events: Vec<SseEvent> = sse_event_stream(s).map(|r| r.unwrap()).collect().await;
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].event, "message_start");
         assert_eq!(events[0].data, "{\"x\":1}");
@@ -2594,12 +2746,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_multiple_events_in_single_chunk() {
-        let chunk = Bytes::from_static(b"data: first\n\ndata: second\n\nevent: custom\ndata: third\n\n");
+        let chunk =
+            Bytes::from_static(b"data: first\n\ndata: second\n\nevent: custom\ndata: third\n\n");
         let s = bytes_stream(vec![chunk]);
-        let events: Vec<SseEvent> = sse_event_stream(s)
-            .map(|r| r.unwrap())
-            .collect()
-            .await;
+        let events: Vec<SseEvent> = sse_event_stream(s).map(|r| r.unwrap()).collect().await;
         assert_eq!(events.len(), 3);
         assert_eq!(events[0].data, "first");
         assert_eq!(events[1].data, "second");
@@ -2611,10 +2761,7 @@ mod tests {
     async fn test_parse_multiline_data_preserves_indentation() {
         // According to W3C SSE, only the first space after 'data:' is stripped.
         let s = bytes_stream(vec![Bytes::from_static(b"data:    def foo():\n\n")]);
-        let events: Vec<SseEvent> = sse_event_stream(s)
-            .map(|r| r.unwrap())
-            .collect()
-            .await;
+        let events: Vec<SseEvent> = sse_event_stream(s).map(|r| r.unwrap()).collect().await;
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].data, "   def foo():");
     }
@@ -2622,22 +2769,21 @@ mod tests {
     #[tokio::test]
     async fn test_parse_multiline_data() {
         let s = bytes_stream(vec![Bytes::from_static(b"data: line1\ndata: line2\n\n")]);
-        let events: Vec<SseEvent> = sse_event_stream(s)
-            .map(|r| r.unwrap())
-            .collect()
-            .await;
+        let events: Vec<SseEvent> = sse_event_stream(s).map(|r| r.unwrap()).collect().await;
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].data, "line1\nline2");
     }
 
     #[tokio::test]
     async fn test_eof_partial_frame_is_discarded() {
-        let s = bytes_stream(vec![Bytes::from_static(b"data: truncated-without-blank-line")]);
-        let events: Vec<SseEvent> = sse_event_stream(s)
-            .map(|r| r.unwrap())
-            .collect()
-            .await;
-        assert!(events.is_empty(), "partial EOF frame must not surface: {events:?}");
+        let s = bytes_stream(vec![Bytes::from_static(
+            b"data: truncated-without-blank-line",
+        )]);
+        let events: Vec<SseEvent> = sse_event_stream(s).map(|r| r.unwrap()).collect().await;
+        assert!(
+            events.is_empty(),
+            "partial EOF frame must not surface: {events:?}"
+        );
     }
 
     #[tokio::test]
@@ -2649,10 +2795,7 @@ mod tests {
             Bytes::from(first),
             Bytes::from_static(b"data: ok\n\n"),
         ]);
-        let events: Vec<SseEvent> = sse_event_stream(s)
-            .map(|r| r.unwrap())
-            .collect()
-            .await;
+        let events: Vec<SseEvent> = sse_event_stream(s).map(|r| r.unwrap()).collect().await;
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].data, "ok");
     }
@@ -2675,8 +2818,14 @@ mod tests {
             .map(|r| String::from_utf8_lossy(&r.unwrap()).to_string())
             .collect()
             .await;
-        assert!(out.iter().any(|f| f.starts_with("data: {\"id\":\"msg_1\"")), "missing message_start chunk: {out:?}");
-        assert!(out.last().unwrap().contains("[DONE]"), "missing [DONE]: {out:?}");
+        assert!(
+            out.iter().any(|f| f.starts_with("data: {\"id\":\"msg_1\"")),
+            "missing message_start chunk: {out:?}"
+        );
+        assert!(
+            out.last().unwrap().contains("[DONE]"),
+            "missing [DONE]: {out:?}"
+        );
     }
 
     #[tokio::test]
@@ -2692,8 +2841,14 @@ mod tests {
             .collect()
             .await;
         assert!(!out.is_empty(), "no anthropic events emitted");
-        assert!(out[0].starts_with("event: "), "not anthropic framing: {out:?}");
-        assert!(out[0].contains("message_start"), "missing message_start: {out:?}");
+        assert!(
+            out[0].starts_with("event: "),
+            "not anthropic framing: {out:?}"
+        );
+        assert!(
+            out[0].contains("message_start"),
+            "missing message_start: {out:?}"
+        );
         let has_delta = out.iter().any(|f| f.contains("content_block_delta"));
         assert!(has_delta, "missing content_block_delta: {out:?}");
     }
@@ -2716,16 +2871,20 @@ mod tests {
             .collect()
             .await;
         let joined = out.join("");
-        assert!(joined.contains("event: message_stop"), "missing synthesized message_stop: {joined}");
-        assert!(joined.contains("event: message_delta"), "missing synthesized message_delta: {joined}");
+        assert!(
+            joined.contains("event: message_stop"),
+            "missing synthesized message_stop: {joined}"
+        );
+        assert!(
+            joined.contains("event: message_delta"),
+            "missing synthesized message_delta: {joined}"
+        );
     }
 
     #[tokio::test]
     async fn test_telemetry_stream_records_flow_and_completion_frame() {
-        use ponyllm_core::telemetry::{
-            EventBus, EventCtx, MetricsProjection, StreamProjection,
-        };
         use crate::frames::FrameConverter;
+        use ponyllm_core::telemetry::{EventBus, EventCtx, MetricsProjection, StreamProjection};
 
         let metrics = Arc::new(MetricsCollector::new());
         let recorder = Arc::new(FlightRecorder::new(10));
@@ -2762,14 +2921,11 @@ mod tests {
         assert_eq!(stream_proj.node_for("opencode-zen").get_stream_count(), 1);
         // trace stitches the single-append journey by request_id
         let trace = bus.trace_for("req-flow-1");
-        assert!(trace.iter().any(|e| matches!(
-            e.event,
-            GatewayEvent::StreamCompleted { .. }
-        )));
+        assert!(trace
+            .iter()
+            .any(|e| matches!(e.event, GatewayEvent::StreamCompleted { .. })));
         let frames = recorder.get_recent_frames();
-        let done = frames.iter().find(|f| {
-            f.response_snippet.is_some()
-        });
+        let done = frames.iter().find(|f| f.response_snippet.is_some());
         let done = done.expect("completion frame kept");
         let flow = done.stream_flow.as_ref().expect("flow detail kept");
         assert_eq!(flow.chunks, Some(3));
@@ -2801,14 +2957,24 @@ mod tests {
                     "output": [], "usage": {"total_tokens": 9, "input_tokens": 6, "output_tokens": 3}}
             })
         );
-        let s = bytes_stream(vec![Bytes::from(created), Bytes::from(delta), Bytes::from(done)]);
+        let s = bytes_stream(vec![
+            Bytes::from(created),
+            Bytes::from(delta),
+            Bytes::from(done),
+        ]);
         let out: Vec<String> = responses_sse_to_chat_stream(s, "m")
             .map(|r| String::from_utf8_lossy(&r.unwrap()).to_string())
             .collect()
             .await;
         let joined = out.join("");
-        assert!(joined.contains("\"content\":\"hello\""), "missing text chunk: {joined}");
-        assert!(joined.contains("\"finish_reason\":\"stop\""), "missing finish: {joined}");
+        assert!(
+            joined.contains("\"content\":\"hello\""),
+            "missing text chunk: {joined}"
+        );
+        assert!(
+            joined.contains("\"finish_reason\":\"stop\""),
+            "missing finish: {joined}"
+        );
         assert!(out.last().unwrap().contains("[DONE]"), "missing [DONE]");
     }
 
@@ -2833,9 +2999,18 @@ mod tests {
             .collect()
             .await;
         let joined = out.join("");
-        assert!(joined.contains("event: response.created"), "missing created: {joined}");
-        assert!(joined.contains("event: response.output_text.delta"), "missing delta: {joined}");
-        assert!(joined.contains("event: response.completed"), "missing completed: {joined}");
+        assert!(
+            joined.contains("event: response.created"),
+            "missing created: {joined}"
+        );
+        assert!(
+            joined.contains("event: response.output_text.delta"),
+            "missing delta: {joined}"
+        );
+        assert!(
+            joined.contains("event: response.completed"),
+            "missing completed: {joined}"
+        );
     }
 
     #[tokio::test]
@@ -2851,7 +3026,10 @@ mod tests {
             .collect()
             .await;
         let joined = out.join("");
-        assert!(joined.contains("event: response.completed"), "missing synthesized completed: {joined}");
+        assert!(
+            joined.contains("event: response.completed"),
+            "missing synthesized completed: {joined}"
+        );
     }
 
     #[tokio::test]
@@ -2879,15 +3057,28 @@ mod tests {
                     "output": [], "usage": {"total_tokens": 5, "input_tokens": 3, "output_tokens": 2}}
             })
         );
-        let s = bytes_stream(vec![Bytes::from(created), Bytes::from(delta), Bytes::from(done)]);
+        let s = bytes_stream(vec![
+            Bytes::from(created),
+            Bytes::from(delta),
+            Bytes::from(done),
+        ]);
         let out: Vec<String> = responses_sse_to_anthropic_stream(s, "m")
             .map(|r| String::from_utf8_lossy(&r.unwrap()).to_string())
             .collect()
             .await;
         let joined = out.join("");
-        assert!(joined.contains("event: message_start"), "missing start: {joined}");
-        assert!(joined.contains("content_block_delta"), "missing delta: {joined}");
-        assert!(joined.contains("event: message_stop"), "missing stop: {joined}");
+        assert!(
+            joined.contains("event: message_start"),
+            "missing start: {joined}"
+        );
+        assert!(
+            joined.contains("content_block_delta"),
+            "missing delta: {joined}"
+        );
+        assert!(
+            joined.contains("event: message_stop"),
+            "missing stop: {joined}"
+        );
     }
 
     #[tokio::test]
@@ -2919,9 +3110,18 @@ mod tests {
             .collect()
             .await;
         let joined = out.join("");
-        assert!(joined.contains("event: response.created"), "missing created: {joined}");
-        assert!(joined.contains("event: response.output_text.delta"), "missing delta: {joined}");
-        assert!(joined.contains("event: response.completed"), "missing completed: {joined}");
+        assert!(
+            joined.contains("event: response.created"),
+            "missing created: {joined}"
+        );
+        assert!(
+            joined.contains("event: response.output_text.delta"),
+            "missing delta: {joined}"
+        );
+        assert!(
+            joined.contains("event: response.completed"),
+            "missing completed: {joined}"
+        );
     }
 
     #[tokio::test]
@@ -2948,12 +3148,18 @@ mod tests {
             .collect()
             .await;
         let joined = out.join("");
-        assert!(joined.contains("\"content\":\"world\""), "missing content: {joined}");
+        assert!(
+            joined.contains("\"content\":\"world\""),
+            "missing content: {joined}"
+        );
         assert!(
             joined.contains("\"finish_reason\":\"stop\""),
             "must synthesize finish_reason:stop at EOF so clients never fail with 'Stream ended without finish_reason': {joined}"
         );
-        assert!(out.last().unwrap().contains("[DONE]"), "missing [DONE]: {out:?}");
+        assert!(
+            out.last().unwrap().contains("[DONE]"),
+            "missing [DONE]: {out:?}"
+        );
     }
 
     #[tokio::test]
@@ -3050,7 +3256,10 @@ mod tests {
         let delta = Bytes::from_static(b"data: {\"type\":\"response.output_text.delta\",\"response_id\":\"r\",\"item_id\":\"i\",\"output_index\":0,\"content_index\":0,\"delta\":\"hi\"}\n\n");
         let s = futures_util::stream::iter(vec![
             Ok::<Bytes, std::io::Error>(delta),
-            Err(std::io::Error::new(std::io::ErrorKind::ConnectionReset, "conn reset")),
+            Err(std::io::Error::new(
+                std::io::ErrorKind::ConnectionReset,
+                "conn reset",
+            )),
         ]);
         let out: Vec<Result<Bytes, ResponsesChatStreamError>> =
             responses_sse_to_chat_stream(s, "m").collect().await;
@@ -3072,8 +3281,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_responses_to_chat_failed_is_recorded_as_stream_failed() {
-        use ponyllm_core::telemetry::{EventBus, EventCtx, MetricsProjection, StreamProjection};
         use crate::frames::FrameConverter;
+        use ponyllm_core::telemetry::{EventBus, EventCtx, MetricsProjection, StreamProjection};
 
         let metrics = Arc::new(MetricsCollector::new());
         let recorder = Arc::new(FlightRecorder::new(10));
@@ -3114,18 +3323,19 @@ mod tests {
         );
         let trace = bus.trace_for("req-failed-1");
         assert!(
-            trace.iter().any(|e| matches!(
-                e.event,
-                GatewayEvent::StreamFailed { .. }
-            )),
+            trace
+                .iter()
+                .any(|e| matches!(e.event, GatewayEvent::StreamFailed { .. })),
             "telemetry must record StreamFailed (not Completed): {:?}",
-            trace.iter().map(|e| format!("{:?}", e.event)).collect::<Vec<_>>()
+            trace
+                .iter()
+                .map(|e| format!("{:?}", e.event))
+                .collect::<Vec<_>>()
         );
         assert!(
-            !trace.iter().any(|e| matches!(
-                e.event,
-                GatewayEvent::StreamCompleted { .. }
-            )),
+            !trace
+                .iter()
+                .any(|e| matches!(e.event, GatewayEvent::StreamCompleted { .. })),
             "a failed stream must never record StreamCompleted"
         );
     }
@@ -3155,12 +3365,18 @@ mod tests {
             .collect()
             .await;
         let joined = out.join("");
-        assert!(joined.contains("\"content\":\"streaming content\""), "missing content: {joined}");
+        assert!(
+            joined.contains("\"content\":\"streaming content\""),
+            "missing content: {joined}"
+        );
         assert!(
             joined.contains("\"finish_reason\":\"stop\""),
             "must synthesize finish_reason:stop at EOF for anthropic->openai: {joined}"
         );
-        assert!(out.last().unwrap().contains("[DONE]"), "missing [DONE]: {out:?}");
+        assert!(
+            out.last().unwrap().contains("[DONE]"),
+            "missing [DONE]: {out:?}"
+        );
     }
 
     #[tokio::test]
@@ -3205,7 +3421,9 @@ mod tests {
             Bytes::from_static(done.as_bytes()),
         ]);
 
-        let json_val = collect_antigravity_sse_to_json(s).await.expect("collect should succeed");
+        let json_val = collect_antigravity_sse_to_json(s)
+            .await
+            .expect("collect should succeed");
         assert_eq!(
             json_val["candidates"][0]["content"]["parts"][0]["text"],
             "Hello, world!"
@@ -3263,7 +3481,11 @@ mod tests {
     #[tokio::test]
     async fn test_sse_chunk_timeout_guard() {
         let stream = futures_util::stream::pending::<Result<Bytes, std::io::Error>>();
-        let res = collect_antigravity_sse_to_json_with_timeout(stream, std::time::Duration::from_millis(30)).await;
+        let res = collect_antigravity_sse_to_json_with_timeout(
+            stream,
+            std::time::Duration::from_millis(30),
+        )
+        .await;
         assert!(res.is_err());
         let err_msg = res.unwrap_err();
         assert!(
@@ -3306,7 +3528,9 @@ mod tests {
             Bytes::from_static(done.as_bytes()),
         ]);
 
-        let json_val = collect_antigravity_sse_to_json(s).await.expect("collect should succeed");
+        let json_val = collect_antigravity_sse_to_json(s)
+            .await
+            .expect("collect should succeed");
         assert_eq!(
             json_val["candidates"][0]["content"]["parts"][0]["text"],
             "Thinking process only..."
@@ -3341,7 +3565,9 @@ mod tests {
             Bytes::from(chunk1),
             Bytes::from_static(b"data: [DONE]\n\n"),
         ]);
-        let json_val = collect_antigravity_sse_to_json(s).await.expect("thoughts-only STOP must succeed (R4)");
+        let json_val = collect_antigravity_sse_to_json(s)
+            .await
+            .expect("thoughts-only STOP must succeed (R4)");
         assert_eq!(json_val["candidates"][0]["finishReason"], "STOP");
         assert_eq!(
             json_val["candidates"][0]["content"]["parts"][0]["text"],
@@ -3349,9 +3575,15 @@ mod tests {
         );
 
         // Lock translator contract: thoughts-only must yield content: "" and reasoning_content: "Thinking process only..."
-        let chat_resp = ponyllm_protocol::translator::antigravity_to_chat_response(&json_val, "gemini-3.8-flash-high");
+        let chat_resp = ponyllm_protocol::translator::antigravity_to_chat_response(
+            &json_val,
+            "gemini-3.8-flash-high",
+        );
         assert_eq!(chat_resp["choices"][0]["message"]["content"], "");
-        assert_eq!(chat_resp["choices"][0]["message"]["reasoning_content"], "Thinking process only...");
+        assert_eq!(
+            chat_resp["choices"][0]["message"]["reasoning_content"],
+            "Thinking process only..."
+        );
         assert_eq!(chat_resp["choices"][0]["finish_reason"], "stop");
     }
 
@@ -3398,9 +3630,16 @@ mod tests {
         ]);
 
         let res = collect_antigravity_sse_to_json(s).await;
-        assert!(res.is_err(), "Must return Err on transient empty STOP to trigger gateway retry");
+        assert!(
+            res.is_err(),
+            "Must return Err on transient empty STOP to trigger gateway retry"
+        );
         let err_msg = res.unwrap_err();
-        assert!(err_msg.contains("transient empty STOP"), "Error message must indicate transient empty STOP: {}", err_msg);
+        assert!(
+            err_msg.contains("transient empty STOP"),
+            "Error message must indicate transient empty STOP: {}",
+            err_msg
+        );
     }
 
     #[tokio::test]
@@ -3435,9 +3674,20 @@ mod tests {
             .await;
 
         let joined = out.join("");
-        assert!(joined.contains("\"finish_reason\":\"stop\""), "Stream MUST emit finish_reason:stop: {}", joined);
-        assert!(!joined.contains("\"code\":\"EMPTY_RESPONSE\""), "Stream must NOT emit non-standard error frame into OpenAI stream: {}", joined);
-        assert!(joined.ends_with("data: [DONE]\n\n"), "Stream must end with [DONE]");
+        assert!(
+            joined.contains("\"finish_reason\":\"stop\""),
+            "Stream MUST emit finish_reason:stop: {}",
+            joined
+        );
+        assert!(
+            !joined.contains("\"code\":\"EMPTY_RESPONSE\""),
+            "Stream must NOT emit non-standard error frame into OpenAI stream: {}",
+            joined
+        );
+        assert!(
+            joined.ends_with("data: [DONE]\n\n"),
+            "Stream must end with [DONE]"
+        );
     }
 
     #[tokio::test]
@@ -3467,8 +3717,16 @@ mod tests {
             .await;
 
         let joined = out.join("");
-        assert!(joined.contains("api_error"), "Anthropic stream must emit error event: {}", joined);
-        assert!(joined.contains("returned a completed response with no content"), "Error message must indicate empty STOP: {}", joined);
+        assert!(
+            joined.contains("api_error"),
+            "Anthropic stream must emit error event: {}",
+            joined
+        );
+        assert!(
+            joined.contains("returned a completed response with no content"),
+            "Error message must indicate empty STOP: {}",
+            joined
+        );
     }
 
     #[tokio::test]
@@ -3493,7 +3751,10 @@ mod tests {
             .await;
 
         let joined = out.join("");
-        assert_eq!(joined, "data: [DONE]\n\n", "Error frame must be logged without panicking or creating fake choices");
+        assert_eq!(
+            joined, "data: [DONE]\n\n",
+            "Error frame must be logged without panicking or creating fake choices"
+        );
     }
 
     #[tokio::test]
@@ -3574,9 +3835,20 @@ mod tests {
 
         let joined = out.join("");
         // Must override Stop to tool_calls!
-        assert!(joined.contains("\"finish_reason\":\"tool_calls\""), "Stream must stickily preserve tool_calls finish reason: {}", joined);
-        assert!(!joined.contains("\"finish_reason\":\"stop\""), "Stream must NOT regress to stop when tool_calls were emitted: {}", joined);
-        assert!(joined.ends_with("data: [DONE]\n\n"), "Stream must end with [DONE]");
+        assert!(
+            joined.contains("\"finish_reason\":\"tool_calls\""),
+            "Stream must stickily preserve tool_calls finish reason: {}",
+            joined
+        );
+        assert!(
+            !joined.contains("\"finish_reason\":\"stop\""),
+            "Stream must NOT regress to stop when tool_calls were emitted: {}",
+            joined
+        );
+        assert!(
+            joined.ends_with("data: [DONE]\n\n"),
+            "Stream must end with [DONE]"
+        );
     }
 
     #[tokio::test]
@@ -3592,7 +3864,11 @@ mod tests {
             .await;
 
         let joined = out.join("");
-        assert!(!joined.contains("\"finish_reason\":\"stop\""), "Must not synthesize fake stop chunk on empty stream: {}", joined);
+        assert!(
+            !joined.contains("\"finish_reason\":\"stop\""),
+            "Must not synthesize fake stop chunk on empty stream: {}",
+            joined
+        );
         assert_eq!(joined, "data: [DONE]\n\n", "Must only contain [DONE]");
     }
 
@@ -3632,7 +3908,11 @@ mod tests {
         let snap = node.flow_snapshot();
         // Accurate token estimate: 24 chars / 3 = 8 tokens
         // Check that tps is within realistic LLM range, not thousands
-        assert!(snap.tps < 300.0, "TPS should be reasonably bounded, got {}", snap.tps);
+        assert!(
+            snap.tps < 300.0,
+            "TPS should be reasonably bounded, got {}",
+            snap.tps
+        );
         assert_eq!(snap.stream_count, 1);
     }
 
@@ -3662,12 +3942,15 @@ mod tests {
             AntigravityPreambleResult::Ready { buffered, .. } => {
                 assert_eq!(buffered.len(), 2);
             }
-            other => panic!("Expected Ready, got {:?}", match other {
-                AntigravityPreambleResult::TransientEmptyStop { .. } => "TransientEmptyStop",
-                AntigravityPreambleResult::DeterministicBlock { .. } => "DeterministicBlock",
-                AntigravityPreambleResult::AbruptTermination => "AbruptTermination",
-                _ => "Other",
-            }),
+            other => panic!(
+                "Expected Ready, got {:?}",
+                match other {
+                    AntigravityPreambleResult::TransientEmptyStop { .. } => "TransientEmptyStop",
+                    AntigravityPreambleResult::DeterministicBlock { .. } => "DeterministicBlock",
+                    AntigravityPreambleResult::AbruptTermination => "AbruptTermination",
+                    _ => "Other",
+                }
+            ),
         }
     }
 
@@ -3747,7 +4030,10 @@ mod tests {
             .await
             .expect("verification should succeed");
 
-        assert!(matches!(res, AntigravityPreambleResult::TransientEmptyStop { .. }));
+        assert!(matches!(
+            res,
+            AntigravityPreambleResult::TransientEmptyStop { .. }
+        ));
     }
 
     #[tokio::test]
@@ -3833,13 +4119,21 @@ mod tests {
                 }
             })
         ));
-        let s = bytes_stream(vec![role_frame; 10].into_iter().chain(std::iter::once(empty_stop)).collect());
+        let s = bytes_stream(
+            vec![role_frame; 10]
+                .into_iter()
+                .chain(std::iter::once(empty_stop))
+                .collect(),
+        );
 
         let res = verify_antigravity_stream_preamble(s, std::time::Duration::from_secs(1))
             .await
             .expect("verification should succeed");
 
-        assert!(matches!(res, AntigravityPreambleResult::TransientEmptyStop { .. }));
+        assert!(matches!(
+            res,
+            AntigravityPreambleResult::TransientEmptyStop { .. }
+        ));
     }
 
     #[tokio::test]
@@ -3863,14 +4157,16 @@ mod tests {
         // 1-based attempt schedule: 250ms doubling to a 2s cap, jitter ±25%.
         let first = empty_stop_retry_delay(1);
         assert!(
-            first >= std::time::Duration::from_millis(187) && first <= std::time::Duration::from_millis(313),
+            first >= std::time::Duration::from_millis(187)
+                && first <= std::time::Duration::from_millis(313),
             "first retry delay out of jitter band: {:?}",
             first
         );
         for attempt in 4..=8 {
             let d = empty_stop_retry_delay(attempt);
             assert!(
-                d >= std::time::Duration::from_millis(1500) && d <= std::time::Duration::from_millis(2500),
+                d >= std::time::Duration::from_millis(1500)
+                    && d <= std::time::Duration::from_millis(2500),
                 "capped delay out of jitter band at attempt {}: {:?}",
                 attempt,
                 d
@@ -3904,7 +4200,10 @@ mod tests {
         match res {
             AntigravityPreambleResult::TransientEmptyStop { shape, .. } => {
                 assert_eq!(shape.finish_reason.as_deref(), Some("STOP"));
-                assert!(shape.signature_only, "bare signature trailer must flag signature_only");
+                assert!(
+                    shape.signature_only,
+                    "bare signature trailer must flag signature_only"
+                );
                 assert_eq!(shape.skipped_frames, 0);
             }
             _ => panic!("Expected TransientEmptyStop"),
@@ -3967,9 +4266,19 @@ mod tests {
         let long_sig = "x".repeat(2048);
         let part = serde_json::json!({"thoughtSignature": long_sig, "text": ""});
         let redacted = redact_part_for_log(&part);
-        let sig = redacted.get("thoughtSignature").and_then(|v| v.as_str()).unwrap();
-        assert!(sig.len() < 64, "signature must be truncated, got {} chars", sig.len());
-        assert!(sig.contains("2048"), "truncated form must keep original length, got {sig}");
+        let sig = redacted
+            .get("thoughtSignature")
+            .and_then(|v| v.as_str())
+            .unwrap();
+        assert!(
+            sig.len() < 64,
+            "signature must be truncated, got {} chars",
+            sig.len()
+        );
+        assert!(
+            sig.contains("2048"),
+            "truncated form must keep original length, got {sig}"
+        );
         // Parts without a signature pass through untouched.
         let plain = serde_json::json!({"text": "hello"});
         assert_eq!(redact_part_for_log(&plain), plain);
@@ -4006,9 +4315,9 @@ mod tests {
     #[tokio::test]
     async fn test_stall_guard_trips_on_silence() {
         // One chunk, then silence longer than the idle budget.
-        let s = futures_util::stream::iter(vec![Ok::<Bytes, std::io::Error>(
-            Bytes::from_static(b"data: a\n\n"),
-        )])
+        let s = futures_util::stream::iter(vec![Ok::<Bytes, std::io::Error>(Bytes::from_static(
+            b"data: a\n\n",
+        ))])
         .chain(futures_util::stream::pending::<Result<Bytes, std::io::Error>>());
         let guarded = stall_guard(s, std::time::Duration::from_millis(50));
         let mut out = Vec::new();
@@ -4020,21 +4329,28 @@ mod tests {
                 _ => break,
             }
         }
-        assert!(out.iter().any(|r| matches!(r, Err(StallError::Stall { .. }))),
-            "silence must trip the stall watchdog: {:?}", out);
+        assert!(
+            out.iter()
+                .any(|r| matches!(r, Err(StallError::Stall { .. }))),
+            "silence must trip the stall watchdog: {:?}",
+            out
+        );
     }
 
     #[tokio::test]
     async fn test_stall_guard_normalizes_transport_error() {
-        let s = futures_util::stream::iter(vec![Err::<Bytes, std::io::Error>(std::io::Error::other(
-            "error decoding response body",
-        ))]);
+        let s = futures_util::stream::iter(vec![Err::<Bytes, std::io::Error>(
+            std::io::Error::other("error decoding response body"),
+        )]);
         let guarded = stall_guard(s, std::time::Duration::from_secs(5));
         let out: Vec<Result<Bytes, StallError>> = guarded.collect().await;
         assert_eq!(out.len(), 1);
         match &out[0] {
             Err(StallError::Transport(detail)) => {
-                assert!(detail.contains("error decoding response body"), "detail: {detail}");
+                assert!(
+                    detail.contains("error decoding response body"),
+                    "detail: {detail}"
+                );
             }
             other => panic!("expected Transport error, got {:?}", other),
         }
@@ -4043,18 +4359,60 @@ mod tests {
     #[test]
     fn test_classify_stream_timeout_tag() {
         // Tail-stall wording wins.
-        assert_eq!(classify_stream_timeout_tag("upstream stream stalled after 120s without bytes", 130_000), "tail-stall");
-        assert_eq!(classify_stream_timeout_tag("upstream stream stalled after 120s without bytes", 90_000), "tail-stall");
+        assert_eq!(
+            classify_stream_timeout_tag(
+                "upstream stream stalled after 120s without bytes",
+                130_000
+            ),
+            "tail-stall"
+        );
+        assert_eq!(
+            classify_stream_timeout_tag("upstream stream stalled after 120s without bytes", 90_000),
+            "tail-stall"
+        );
         // TTFB guard.
-        assert_eq!(classify_stream_timeout_tag("upstream TTFB timeout after 15s (no response headers)", 16_000), "ttfb-timeout");
+        assert_eq!(
+            classify_stream_timeout_tag(
+                "upstream TTFB timeout after 15s (no response headers)",
+                16_000
+            ),
+            "ttfb-timeout"
+        );
         // Vercel 120s hard-cap suspect: body decode error + ~120s elapsed.
-        assert_eq!(classify_stream_timeout_tag("upstream transport error: error decoding response body", 120_002), "total-budget-120s-suspect");
-        assert_eq!(classify_stream_timeout_tag("upstream transport error: error decoding response body", 123_900), "total-budget-120s-suspect");
+        assert_eq!(
+            classify_stream_timeout_tag(
+                "upstream transport error: error decoding response body",
+                120_002
+            ),
+            "total-budget-120s-suspect"
+        );
+        assert_eq!(
+            classify_stream_timeout_tag(
+                "upstream transport error: error decoding response body",
+                123_900
+            ),
+            "total-budget-120s-suspect"
+        );
         // Gateway total budget (20 min default) kill.
-        assert_eq!(classify_stream_timeout_tag("upstream transport error: error decoding response body", 1_200_003), "total-budget");
+        assert_eq!(
+            classify_stream_timeout_tag(
+                "upstream transport error: error decoding response body",
+                1_200_003
+            ),
+            "total-budget"
+        );
         // Plain transport at other latencies stays transport.
-        assert_eq!(classify_stream_timeout_tag("upstream transport error: error decoding response body", 5_000), "transport");
-        assert_eq!(classify_stream_timeout_tag("connection reset", 120_000), "transport");
+        assert_eq!(
+            classify_stream_timeout_tag(
+                "upstream transport error: error decoding response body",
+                5_000
+            ),
+            "transport"
+        );
+        assert_eq!(
+            classify_stream_timeout_tag("connection reset", 120_000),
+            "transport"
+        );
     }
 
     #[tokio::test]
@@ -4074,7 +4432,9 @@ mod tests {
         let mut it = std::pin::pin!(guarded);
 
         let mut collected = Vec::new();
-        while let Ok(Some(item)) = tokio::time::timeout(std::time::Duration::from_millis(150), it.next()).await {
+        while let Ok(Some(item)) =
+            tokio::time::timeout(std::time::Duration::from_millis(150), it.next()).await
+        {
             let b = item.expect("stream item should be ok");
             let is_second = b == Bytes::from_static(b"data: second\n\n");
             collected.push(b);
@@ -4083,9 +4443,21 @@ mod tests {
             }
         }
 
-        assert!(collected.len() >= 3, "expected first chunk, at least one ping, and second chunk; got: {:?}", collected);
+        assert!(
+            collected.len() >= 3,
+            "expected first chunk, at least one ping, and second chunk; got: {:?}",
+            collected
+        );
         assert_eq!(collected[0], Bytes::from_static(b"data: first\n\n"));
-        assert!(collected.iter().any(|b| b == &Bytes::from_static(b": ping\n\n")), "must contain SSE comment ping");
-        assert_eq!(*collected.last().unwrap(), Bytes::from_static(b"data: second\n\n"));
+        assert!(
+            collected
+                .iter()
+                .any(|b| b == &Bytes::from_static(b": ping\n\n")),
+            "must contain SSE comment ping"
+        );
+        assert_eq!(
+            *collected.last().unwrap(),
+            Bytes::from_static(b"data: second\n\n")
+        );
     }
 }

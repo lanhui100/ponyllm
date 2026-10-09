@@ -207,6 +207,13 @@ async function enterDashboard(): Promise<void> {
   await router.push(safeTarget);
 }
 
+/// B003: JWT 登录成功后的落点 — 统一进 /tokens（用户自助面板，JWT 可访问）。
+/// 绝不落 /dashboard：其数据面走 /api/admin/* gateway-key 矩阵，JWT 会话会被
+/// 401 单飞 bounce 回 /connect。cookie/legacy（key 家族）登录仍走 redirect 语义。
+async function enterUserHome(): Promise<void> {
+  await router.push('/tokens');
+}
+
 async function submit(): Promise<void> {
   if (loading.value) return;
   error.value = '';
@@ -225,7 +232,8 @@ async function submit(): Promise<void> {
       const { loginWithPassword } = await import('../lib/userApi');
       const resp = await loginWithPassword(username, password);
       session.loginWithJwt(resp.access_token, resp.user.role);
-      await enterDashboard();
+      // JWT 会话落 /tokens（用户自助面板），非 /dashboard（gateway-key 矩阵会 401 bounce）。
+      await enterUserHome();
       return;
     } catch (loginErr) {
       const code = (loginErr as Error & { code?: unknown }).code;
