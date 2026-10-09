@@ -628,12 +628,16 @@ def list_payload_problems(payload) -> list[str]:
 
 
 def resolve_payload(obj) -> dict | None:
-    """plan 输出解析：接受顶层即 payload，或顶层包一层 payload 键（契约措辞歧义兜底）。"""
+    """plan 输出解析：顶层即 payload，或顶层包一层 payload 键（契约 §4.2 措辞二选一，兜底两种形状）。
+
+    身份判定从严：只有同时带 provider 与 name 的对象才算 payload。
+    「必需字段是否齐全」不由这里判（那是 A4 的结构断言），避免两个判定互相吞掉。
+    """
     if isinstance(obj, dict):
-        if REQUIRED_PAYLOAD_KEYS & set(obj):
+        if {"provider", "name"} <= set(obj):
             return obj
         inner = obj.get("payload")
-        if isinstance(inner, dict):
+        if isinstance(inner, dict) and {"provider", "name"} <= set(inner):
             return inner
     return None
 
@@ -715,6 +719,15 @@ def _scan_gates(node, path, verdicts):
             _scan_gates(v, path + [f"[{i}]"], verdicts)
 
 
+def _verdict_token(text: str) -> str | None:
+    """人读表格里的判定词（整行不一定等于 PASS/FAIL，如「[PASS] I1 作用域」「I2 后缀：FAIL」）。"""
+    if re.search(r"(?<![A-Za-z])FAIL(?![A-Za-z])", text):
+        return "FAIL"
+    if re.search(r"(?<![A-Za-z])PASS(?![A-Za-z])", text):
+        return "PASS"
+    return None
+
+
 def extract_gate_verdicts(stdout: str) -> dict[str, str]:
     """从 check-gate 输出抽取 {I1/I2/I3: PASS/FAIL}；抽不到就返回残缺 dict（由调用方 FAIL）。"""
     raw = stdout.strip()
@@ -725,10 +738,10 @@ def extract_gate_verdicts(stdout: str) -> dict[str, str]:
         obj = None
     if obj is not None:
         _scan_gates(obj, [], verdicts)
-    if len(verdicts) < 3:  # 非 JSON 人读表格兜底
+    if len(verdicts) < 3:  # 非 JSON 人读表格兜底：逐行找「gate 标识 + PASS/FAIL 判定词」
         for line in raw.splitlines():
             gate = _gate_of(line)
-            verdict = _verdict_of(line)
+            verdict = _verdict_of(line) or _verdict_token(line)
             if gate and verdict and gate not in verdicts:
                 verdicts[gate] = verdict
     return verdicts
@@ -1049,7 +1062,7 @@ def test_a2_negative_subcommand_checker_detects_missing():
 
 def test_a2_negative_word_boundary_not_satisfied_by_substring():
     """防「在别处出现同名字符串就算命中」的假通过：listing/applyxyz 不算 list/apply。"""
-    assert missing_subcommands("usage: listing applyxyz [-h]") == sorted(SUBCOMMANDS), (
+    assert sorted(missing_subcommands("usage: listing applyxyz [-h]")) == sorted(SUBCOMMANDS), (
         "判定器自检失败：子串 listing/applyxyz 被误判为命中子命令"
     )
 
@@ -1225,10 +1238,16 @@ def test_a4_negative_payload_resolver_and_keys():
     good = {k: None for k in REQUIRED_PAYLOAD_KEYS}
     assert resolve_payload(good) is not None, "判定器自检失败：完整 payload 未被识别"
     assert resolve_payload({"payload": good}) is not None, "判定器自检失败：包一层 payload 未被识别"
-    for bad in ({}, {"provider": "opencode-zen"}, {"payload": {"provider": "opencode-zen"}}, [], "x"):
+    for bad in ({}, {"provider": "opencode-zen"}, {"name": "x-free"}, {"payload": {"provider": "opencode-zen"}}, [], "x"):
         assert resolve_payload(bad) is None, f"判定器自检失败：坏结构 {bad} 被误认成 payload"
-    keys = collect_keys({"payload": {"thinking_default": "Max"}})
-    assert has_key(keys, "thinking_default") and not has_key(keys, "thinking_max"), "判定器自检失败：键收集不正确"
+    tree = {"payload": {"thinking_default": "Max"}}
+    keys = collect_keys(tree)
+    assert "thinking_default" in keys and "thinking_max" not in keys, (
+        f"判定器自检失败：键收集不正确，实得 {keys}"
+    )
+    assert has_key(tree, "thinking_default") and not has_key(tree, "thinking_max"), (
+        "判定器自检失败：has_key 嵌套查找不正确"
+    )
 
 
 def test_a4_negative_size_and_tier_checkers_are_not_vacuous():
@@ -1244,8 +1263,15 @@ def test_a4_negative_size_and_tier_checkers_are_not_vacuous():
 
 @pytest.mark.parametrize("tier", ["F", "S"])
 def test_a5_explicit_tier_accepted(sandbox, home, tier):
-    payload = _plan(sandbox, home, STEP5["id"], "--tier", tier)
-    assert payload.get("tier") == tier, f"--tier {tier} 应原样落到 payload.tier，实得 {payload.get('tier')!r}"
+    cp = run_skill(sandbox, home, ["plan", STEP5["id"], "--json", "--tier", tier], env_key=FAKE_KEY)
+    assert_exit_zero(cp, f"plan --tier {tier}")
+    assert _tier_accepted(cp.returncode, cp.stdout, cp.stderr), (
+        f"--tier {tier} 应被接受（契约 §6 A5）\n--- STDOUT ---\n{cp.stdout}"
+    )
+    payload = resolve_payload(parse_json_stdout(cp, f"plan --tier {tier} --json"))
+    assert payload is not None and payload.get("tier") == tier, (
+        f"--tier {tier} 应原样落到 payload.tier，实得 {(payload or {}).get('tier')!r}"
+    )
 
 
 @pytest.mark.parametrize("tier", ["xx", "leader", "9", "F/S"])
@@ -1253,14 +1279,21 @@ def test_a5_invalid_tier_rejected_with_exit_2(sandbox, home, tier):
     """契约 §6 A5：F/S/L 之外必须拒绝，退出码 2。"""
     cp = run_skill(sandbox, home, ["plan", STEP5["id"], "--json", "--tier", tier], env_key=FAKE_KEY)
     assert_exit(cp, 2, f"plan --tier {tier}（非法 tier 必须退出码 2）")
+    assert not _tier_accepted(cp.returncode, cp.stdout, cp.stderr), (
+        f"非法 tier {tier} 被判为已接受\n--- STDOUT ---\n{cp.stdout}"
+    )
     assert cp.stderr.strip(), f"非法 tier 必须把原因打到 stderr（契约 §4：禁止吞异常）"
 
 
 def test_a5_negative_tier_acceptance_checker():
-    assert _tier_accepted(0, '{"tier": "F"}', ""), "判定器自检失败：合法 F 未被接受"
+    ok = json.dumps({"provider": "opencode-zen", "name": "x-free", "tier": "F"})
+    bad_tier = json.dumps({"provider": "opencode-zen", "name": "x-free", "tier": "xx"})
+    no_tier = json.dumps({"provider": "opencode-zen", "name": "x-free"})
+    assert _tier_accepted(0, ok, ""), "判定器自检失败：合法 F 未被接受"
     assert not _tier_accepted(2, "", "bad tier"), "判定器自检失败：退出码 2 未被判拒绝"
-    assert not _tier_accepted(0, '{"tier": "xx"}', ""), "判定器自检失败：tier=xx 被放行"
-    assert not _tier_accepted(0, "{}", ""), "判定器自检失败：缺 tier 字段被放行"
+    assert not _tier_accepted(0, bad_tier, ""), "判定器自检失败：tier=xx 被放行"
+    assert not _tier_accepted(0, no_tier, ""), "判定器自检失败：缺 tier 字段被放行"
+    assert not _tier_accepted(0, "not json", ""), "判定器自检失败：非 JSON 输出被放行"
 
 
 def _tier_accepted(returncode: int, stdout: str, stderr: str) -> bool:
@@ -1304,6 +1337,13 @@ def test_a6_non_free_model_other_gates_still_pass(sandbox, home):
         f"I1（provider 前缀 opencode）/I3（不填模型级 base_url、proxy）与后缀无关，应 PASS，实得 {verdicts}"
         f"\n--- STDOUT ---\n{cp.stdout}"
     )
+
+
+def test_a6_human_mode_gates_are_machine_readable(sandbox, home):
+    """人读表格（无 --json）同样必须给出三条可机读判定，防止判定器只在 JSON 分支上活着。"""
+    cp = run_skill(sandbox, home, ["check-gate", MUSE_PAID["id"]], env_key=FAKE_KEY)
+    verdicts = require_gate_verdicts(cp, f"{MUSE_PAID['id']}（人读模式）")
+    assert verdicts["I2"] == "FAIL", f"人读模式下非 -free 模型 I2 必须 FAIL，实得 {verdicts}\n{cp.stdout}"
 
 
 def test_a6_negative_gate_extractor_detects_failures():
