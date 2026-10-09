@@ -376,17 +376,6 @@ async fn auth_middleware(State(state): State<Arc<AppState>>, req: Request, next:
     // record into the same budget.
     let prefix = crate::auth::ratelimit_prefix(provided_token);
     if state.auth_ratelimiter.check(client_ip, prefix).is_err() {
-        state.sentry.capture_error(
-            "AuthRateLimitExceeded",
-            &format!("Auth rate limit exceeded for client {}", client_ip_str),
-            Some({
-                let mut tags = std::collections::HashMap::new();
-                tags.insert("client_ip".to_string(), client_ip_str.clone());
-                tags.insert("path".to_string(), path.clone());
-                tags
-            }),
-            None,
-        );
         return crate::auth::rate_limited();
     }
 
@@ -480,17 +469,6 @@ async fn auth_middleware(State(state): State<Arc<AppState>>, req: Request, next:
                 tracing::warn!(client_ip = %client_ip_str, user_agent, token_prefix, %method, %path, reason = "legacy_disabled", "admin interface rejected disabled legacy credential");
             }
             state.auth_ratelimiter.record_failure(client_ip, prefix);
-            state.sentry.capture_error(
-                "AuthLegacyDisabled",
-                &format!("Legacy credential rejected from {}", client_ip_str),
-                Some({
-                    let mut tags = std::collections::HashMap::new();
-                    tags.insert("client_ip".to_string(), client_ip_str.clone());
-                    tags.insert("path".to_string(), path.clone());
-                    tags
-                }),
-                None,
-            );
             crate::auth::legacy_disabled()
         }
         AuthVerdict::Allowed {
