@@ -99,9 +99,11 @@ pub fn classify_resource(method: &str, path: &str, query: Option<&str>) -> Resou
                 // list; inference is 403 via the matrix). Without this exact
                 // branch the fallthrough below would misclassify it as
                 // AdminWrite and wrongly 403 readonly callers.
-                | "/api/admin/gateway-keys" => return Resource::AdminRead,
+                | "/api/admin/gateway-keys" | "/api/admin/users" => return Resource::AdminRead,
                 _ => {
-                    if path.starts_with("/api/admin/providers/") {
+                    if path.starts_with("/api/admin/providers/")
+                        || (path.starts_with("/api/admin/users/") && !path.ends_with("/reset-usage"))
+                    {
                         return Resource::AdminRead;
                     }
                 }
@@ -149,10 +151,20 @@ pub fn scope_allows(scope: KeyScope, resource: Resource) -> bool {
     }
 }
 
-/// Outcome of credential verification (before the resource check).
+/// Caller identity attached to request extensions for downstream handlers.
+#[derive(Debug, Clone)]
+pub struct CallerIdentity {
+    pub scope: KeyScope,
+    pub key_id: Option<String>,
+    pub user_id: Option<String>,
+}
 pub enum AuthVerdict {
-    /// Credential valid: act with `scope` (`key_id=None` = legacy token).
-    Allowed { scope: KeyScope, key_id: Option<String> },
+    /// Credential valid: act with `scope` (`key_id=None` = legacy token), plus optional bound user_id.
+    Allowed {
+        scope: KeyScope,
+        key_id: Option<String>,
+        user_id: Option<String>,
+    },
     /// Unknown (incl. hard-deleted) / missing / revoked / expired credential.
     Invalid,
     /// Legacy token presented while `strict` rejects it.
@@ -198,6 +210,7 @@ pub fn authenticate(
                     return AuthVerdict::Allowed {
                         scope,
                         key_id: Some(e.id.clone()),
+                        user_id: e.user_id.clone(),
                     };
                 }
             }
@@ -214,6 +227,7 @@ pub fn authenticate(
         return AuthVerdict::Allowed {
             scope: KeyScope::Admin,
             key_id: None,
+            user_id: None,
         };
     }
     AuthVerdict::Invalid
@@ -587,9 +601,14 @@ mod tests {
         let entries = vec![e_admin, e_infer];
         // scoped hit
         match authenticate(&plain_infer, &entries, "legacy", false) {
-            AuthVerdict::Allowed { scope, key_id } => {
+            AuthVerdict::Allowed {
+                scope,
+                key_id,
+                user_id,
+            } => {
                 assert_eq!(scope, KeyScope::Inference);
                 assert_eq!(key_id.as_deref(), Some("i1"));
+                assert_eq!(user_id, None);
             }
             _ => panic!("scoped key must verify"),
         }
@@ -600,9 +619,14 @@ mod tests {
         }
         // legacy works in dual, dies in strict
         match authenticate("legacy", &entries, "legacy", false) {
-            AuthVerdict::Allowed { scope, key_id } => {
+            AuthVerdict::Allowed {
+                scope,
+                key_id,
+                user_id,
+            } => {
                 assert_eq!(scope, KeyScope::Admin);
                 assert!(key_id.is_none());
+                assert_eq!(user_id, None);
             }
             _ => panic!("legacy must map to admin in dual"),
         }
