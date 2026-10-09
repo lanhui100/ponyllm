@@ -24,6 +24,8 @@ lcov.info
 # Python 字节码缓存：
 __pycache__/
 *.pyc
+# 本地验收测试用虚拟环境（pytest，非交付物）：
+.venv-test/
 
 # Agent team 内部审计产物（findings/报告/复审/红相记录，不入库）：
 .dev-team/
