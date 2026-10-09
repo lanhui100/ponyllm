@@ -151,7 +151,50 @@ ponyllm keys list                                      # 列表（id/scope/前�
 ponyllm keys revoke --id agent-ci-1                    # 删除（硬删除：无残留记录，立即 fail-closed）
 ```
 
-兼容三态（`[gateway] auth_compat`，默认 `dual`）：`legacy-only`（旧行为）→ `dual`（旧单 token 全权 + `deprecated-auth` 打标）→ `strict`（旧单 token 一律 401，需重领分级 key；裸 token 无 `Bearer ` 前缀拒绝；`?token=` URL 直达禁用，Web 走表单登录）。
+### 6.1 用户管理与配额控制 (User Management & Quotas)
+
+针对单个用户或团队提供专属服务、限制模型权限与 Token 用量：
+```bash
+# 列出所有配置用户
+ponyllm user list
+
+# 创建/更新用户（支持限制模型白名单与最大 Token 用量）
+ponyllm user add user_alice --name "Alice" --models "gpt-4o-mini,deepseek/*" --max-tokens 100000
+
+# 签发绑定到该用户的专属 Gateway Key
+ponyllm keys issue --scope inference --id alice-key --user user_alice
+
+# 重置用户的已用 Token 计数（连接运行中的网关）
+ponyllm user reset-usage user_alice
+
+# 移除用户
+ponyllm user remove user_alice
+```
+
+- **模型白名单拦截**：若配置了 `allowed_models`，请求不在白名单内的模型直接返回 `403 model_forbidden_for_user`。
+- **Token 额度熔断**：当用户累计消耗的 Token 超过 `max_tokens` 时，后续推理请求直接返回 `429 user_quota_exhausted`。
+- **状态停用控制**：停用用户（`enabled=false`）的所有请求返回 `403 user_disabled`。
+
+### 6.2 Web 用户 JWT 登录与自助 Token（User Access / B002-B003）
+
+Web 控制台支持 **用户名/密码登录换发 JWT** 管理面会话；用户可**自助创建/管理 API Token**（`sk-pony-*`，仅限 LLM 调用，任何情况下不能访问管理面）：
+
+```bash
+# 启用用户平面（默认关闭，不影响既有网关行为）+ 注入 JWT 签名密钥
+# 环境变量方式（推荐，secret 不落盘）：
+PONYLLM_USER_TOKENS_ENABLED=1 PONYLLM_JWT_SECRET=<至少32字节随机串> ponyllm serve --config ponyllm.toml
+# 或在 ponyllm.toml 的 [gateway] 节：
+#   user_tokens_enabled = true
+#   jwt_secret = "<至少32字节随机串>"   # 仅配置注入口径，环境变量优先
+```
+
+- **登录**：Web 控制台 `/connect` 输入 `username + password` → 换取 HS256 JWT（默认 2h 有效，前端仅存内存不落 storage；浏览器打开 `/tokens` 自助面板）。
+- **自助 Token**：登录用户在 `/tokens` 创建 Token，可指定 `name`、**模型白名单**（默认全部，支持 `provider/model` 与 `deepseek/*` 通配）、**用量上限**（token 级额度）与过期时间；明文仅展示一次。
+- **Token 仅限 LLM**：`sk-pony-*` Token 调 `/v1/**` 推理正常，调 `/api/user/**` 一律 `401`（JWT 面独立校验，不回落 key 家族），调 `/api/admin/**` 依现有 scope 矩阵拒绝。
+- **双层配额叠乘**：推理入口同时检查用户级（`max_tokens`）与 token 级（`quota`）额度，任一超限返回 `429 token_quota_exhausted` / `user_quota_exhausted`；模型白名单取交集，命中即 `403 model_forbidden_for_user`。
+- **权限分层**：`admin` 用户可在 `/users` 全局管理（新增/停用/删除用户、设角色、重置密码与用量）；普通用户仅能浏览/管理自有数据与 Token，无全局预览与模型管理能力。
+- **管理员用户创建**：在 `ponyllm.toml` 的 `[[gateway.users]]` 定义或经 admin API 创建；首个 admin 由运维预置（web 自助注册明确不在范围）。
+- 支付/订单/套餐/邀请码等购物车能力**留待未来**（Non-Goals）。
 
 dual → strict 发版路径：先在 staging 切 `strict` 观 401 → 回 `dual`（RTO 演练）；正式发版后 Web 按网关 `/health` 版本强制 logout（旧会话不跨版本），`?token=` 书签请改走表单登录一次。401 = 换 key/重领，403 `insufficient_scope` = 提权换 key。
 
