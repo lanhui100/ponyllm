@@ -90,12 +90,36 @@ pub async fn handle_messages(
         .map(|s| s.trim().to_string());
     if let Some(uid) = caller_user_id.as_deref() {
         if let Err(err) = state.user_tracker.check_access(uid, &req.model) {
-            let status = match err {
+            let (status, code) = match err {
                 ponyllm_core::UserCheckError::QuotaExhausted { .. } => {
-                    StatusCode::TOO_MANY_REQUESTS
+                    (StatusCode::TOO_MANY_REQUESTS, "user_quota_exhausted")
                 }
-                _ => StatusCode::FORBIDDEN,
+                ponyllm_core::UserCheckError::ModelNotAllowed { .. } => {
+                    (StatusCode::FORBIDDEN, "model_forbidden_for_user")
+                }
+                ponyllm_core::UserCheckError::UserDisabled { .. } => {
+                    (StatusCode::FORBIDDEN, "user_disabled")
+                }
+                ponyllm_core::UserCheckError::UserNotFound { .. } => {
+                    (StatusCode::FORBIDDEN, "user_not_found")
+                }
             };
+            let mut tags = std::collections::HashMap::new();
+            tags.insert("user_id".to_string(), uid.to_string());
+            tags.insert("requested_model".to_string(), req.model.clone());
+            tags.insert("route".to_string(), "v1/messages".to_string());
+            tags.insert("error_code".to_string(), code.to_string());
+            state.sentry.capture_error(
+                "UserAccessDenied",
+                &format!("User access check failed for user '{uid}' on model '{}': {err}", req.model),
+                Some(tags),
+                Some(serde_json::json!({
+                    "user_id": uid,
+                    "model": req.model,
+                    "code": code,
+                    "error": err.to_string(),
+                })),
+            );
             return (
                 status,
                 Json(serde_json::json!({

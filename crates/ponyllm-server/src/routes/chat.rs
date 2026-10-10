@@ -96,6 +96,22 @@ pub async fn handle_chat_completions(
                     (StatusCode::FORBIDDEN, "user_not_found")
                 }
             };
+            let mut tags = std::collections::HashMap::new();
+            tags.insert("user_id".to_string(), uid.to_string());
+            tags.insert("requested_model".to_string(), req.model.clone());
+            tags.insert("route".to_string(), "v1/chat/completions".to_string());
+            tags.insert("error_code".to_string(), code.to_string());
+            state.sentry.capture_error(
+                "UserAccessDenied",
+                &format!("User access check failed for user '{uid}' on model '{}': {err}", req.model),
+                Some(tags),
+                Some(serde_json::json!({
+                    "user_id": uid,
+                    "model": req.model,
+                    "code": code,
+                    "error": err.to_string(),
+                })),
+            );
             return (
                 status,
                 Json(serde_json::json!({
