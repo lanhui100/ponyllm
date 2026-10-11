@@ -40,6 +40,10 @@ jobs:
         shell: bash
         run: bash .meta/gates/check-tasks.sh
 
+      - name: Check deployment prober CLI contract
+        shell: bash
+        run: bash tests/pre-flight/check-ci-prober-cli-contract.sh
+
       - name: Check workspace compilation
         run: cargo check --workspace
 

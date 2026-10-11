@@ -18,12 +18,33 @@ KEY="${PONYLLM_API_KEY:-}"
 command -v curl >/dev/null || { echo "FAIL: curl missing"; exit 1; }
 [ -n "$KEY" ] || { echo "FAIL: PONYLLM_API_KEY unset"; exit 1; }
 
-echo "== [1/2] gateway health =="
+echo "== [1/3] gateway health =="
 HEALTH="$(curl -s -m 15 -o /dev/null -w '%{http_code}' "$BASE/health" 2>/dev/null || true)"
 [ "$HEALTH" = "200" ] || { echo "FAIL: /health returned $HEALTH (expect 200)"; exit 1; }
 echo "OK: /health 200"
 
-echo "== [2/2] minimal completion through $MODEL =="
+echo "== [2/3] web SPA asset consistency probe =="
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+LOCAL_INDEX="$REPO_ROOT/web/dist/index.html"
+if [ -f "$LOCAL_INDEX" ]; then
+  EXPECTED_ASSET="$(grep -oE 'src="/assets/index-[^"]+\.js"' "$LOCAL_INDEX" | head -1 || true)"
+  if [ -n "$EXPECTED_ASSET" ]; then
+    ONLINE_HTML="$(curl -s -m 15 "$BASE/" 2>/dev/null || true)"
+    if ! echo "$ONLINE_HTML" | grep -Fq "$EXPECTED_ASSET"; then
+      echo "::error::[SPA-CACHE-MISMATCH] Production index.html asset does not match expected local build: $EXPECTED_ASSET"
+      echo "Production response asset snippet:"
+      echo "$ONLINE_HTML" | grep -oE 'src="/assets/index-[^"]+\.js"' || true
+      exit 1
+    fi
+    echo "OK: web SPA asset matches expected build ($EXPECTED_ASSET)"
+  else
+    echo "SKIP: expected asset pattern not found in local index.html"
+  fi
+else
+  echo "SKIP: local web/dist/index.html not present (running outside full build context)"
+fi
+
+echo "== [3/3] minimal completion through $MODEL =="
 RESP="$(curl -s -m 90 -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
   "$BASE/v1/chat/completions" \
   -d "{\"model\":\"$MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"max_tokens\":10,\"stream\":false}")"
