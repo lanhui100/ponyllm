@@ -297,6 +297,33 @@ async fn rotate_token_returns_new_plaintext() {
     let new_plain = v["api_key"].as_str().expect("new plaintext api_key");
     assert_ne!(new_plain, old_plain, "rotation must issue a NEW plaintext");
     assert!(new_plain.starts_with("sk-pony-"));
+
+    // 契约#8b: 检验旧 token 作废，新 token 可用
+    // 1. 旧 token 请求 /v1/models 应返回 401 Unauthorized
+    let old_infer_resp = c
+        .get(h.url("/v1/models"))
+        .header("Authorization", format!("Bearer {}", old_plain))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        old_infer_resp.status(),
+        StatusCode::UNAUTHORIZED,
+        "old token must be invalidated after rotation (401)"
+    );
+
+    // 2. 新 token 请求 /v1/models 应返回 200 OK
+    let new_infer_resp = c
+        .get(h.url("/v1/models"))
+        .header("Authorization", format!("Bearer {}", new_plain))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        new_infer_resp.status(),
+        StatusCode::OK,
+        "new token must be valid and authorized (200)"
+    );
 }
 
 /// 契约#6/#7 归属隔离：他人 token 删除/更新 → 404（bob 不能动 alice 的 token）。

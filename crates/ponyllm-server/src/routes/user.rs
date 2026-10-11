@@ -682,13 +682,20 @@ pub async fn handle_user_tokens_rotate(
         .iter_mut()
         .find(|k| k.id == key_id)
         .unwrap();
-    slot.salt = fresh.salt;
-    slot.key_hash = fresh.key_hash;
-    slot.last4 = fresh.last4;
+    slot.salt = fresh.salt.clone();
+    slot.key_hash = fresh.key_hash.clone();
+    slot.last4 = fresh.last4.clone();
+    let updated_entry = slot.clone();
     let new_ver = match save_store_config(&state, &mut file, &store_version).await {
         Ok(v) => v,
         Err(resp) => return resp,
     };
+    {
+        let mut cfg = state.config.write();
+        if let Some(s) = cfg.gateway_keys.iter_mut().find(|k| k.id == key_id) {
+            *s = updated_entry;
+        }
+    }
     tracing::info!(key_id = %key_id, user_id = %uid, config_version = new_ver, "user rotated self-service token");
     (
         axum::http::StatusCode::OK,

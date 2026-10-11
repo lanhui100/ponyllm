@@ -176,6 +176,36 @@ pub struct TelemetrySnapshot {
     pub flight_frames: Vec<Value>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChatRole {
+    User,
+    Assistant,
+    System,
+    Error,
+}
+
+#[derive(Debug, Clone)]
+pub struct ChatMessage {
+    pub role: ChatRole,
+    pub content: String,
+    pub timestamp: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChatSessionStatus {
+    Idle,
+    Sending,
+    Receiving,
+    Failed(String),
+}
+
+#[derive(Debug, Clone)]
+pub enum ChatEvent {
+    TokenChunk(String),
+    Finished,
+    Failed(String),
+}
+
 pub struct TuiApp {
     pub active_tab: usize,
     pub tab2_focus: Tab2Focus,
@@ -193,6 +223,13 @@ pub struct TuiApp {
     pub modal: Modal,
     pub should_quit: bool,
     pub status_message: String,
+    // ── Tab 5: 实时对话状态 ──
+    pub chat_messages: Vec<ChatMessage>,
+    pub chat_input: String,
+    pub chat_selected_model: String,
+    pub chat_status: ChatSessionStatus,
+    pub chat_scroll: u16,
+    pub chat_tx: Option<mpsc::Sender<ChatEvent>>,
 }
 
 impl TuiApp {
@@ -205,6 +242,13 @@ impl TuiApp {
         key_state.select(Some(0));
         let mut log_state = TableState::default();
         log_state.select(Some(0));
+
+        let initial_model = config
+            .providers
+            .values()
+            .next()
+            .and_then(|p| p.models.first().cloned().or_else(|| Some(p.default_model.clone())))
+            .unwrap_or_else(|| "default".to_string());
 
         Self {
             active_tab: 0,
@@ -222,7 +266,13 @@ impl TuiApp {
             log_table_state: log_state,
             modal: Modal::None,
             should_quit: false,
-            status_message: "就绪。按 [Tab] 切换面板，[a] 添加，[e] 编辑，[d] 删除，[q] 退出。".to_string(),
+            status_message: "就绪。按 [Tab] 切换面板，[1-5] 快捷切页，[q] 退出。".to_string(),
+            chat_messages: Vec::new(),
+            chat_input: String::new(),
+            chat_selected_model: initial_model,
+            chat_status: ChatSessionStatus::Idle,
+            chat_scroll: 0,
+            chat_tx: None,
         }
     }
 
@@ -279,6 +329,49 @@ impl TuiApp {
         self.metrics = snap.metrics;
         self.stream = snap.stream;
         self.flight_frames = snap.flight_frames;
+    }
+
+    pub fn available_models_for_chat(&self) -> Vec<String> {
+        let mut list = Vec::new();
+        for p in self.config.providers.values() {
+            for m in p.list_all_models() {
+                if !list.contains(&m.name) {
+                    list.push(m.name);
+                }
+            }
+            if !p.default_model.is_empty() && !list.contains(&p.default_model) {
+                list.push(p.default_model.clone());
+            }
+        }
+        if list.is_empty() {
+            list.push("default".to_string());
+        }
+        list.sort();
+        list
+    }
+
+    pub fn cycle_chat_model(&mut self, delta: isize) {
+        let models = self.available_models_for_chat();
+        if models.is_empty() {
+            return;
+        }
+        let cur_idx = models.iter().position(|m| m == &self.chat_selected_model).unwrap_or(0) as isize;
+        let next_idx = (cur_idx + delta).rem_euclid(models.len() as isize) as usize;
+        self.chat_selected_model = models[next_idx].clone();
+    }
+
+    pub fn append_chat_token(&mut self, token: &str) {
+        if let Some(last) = self.chat_messages.last_mut() {
+            if last.role == ChatRole::Assistant {
+                last.content.push_str(token);
+                return;
+            }
+        }
+        self.chat_messages.push(ChatMessage {
+            role: ChatRole::Assistant,
+            content: token.to_string(),
+            timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+        });
     }
 
     pub fn save_config(&mut self) -> Result<(), String> {
@@ -340,6 +433,107 @@ async fn fetch_telemetry_snapshot(gateway_url: &str) -> TelemetrySnapshot {
     }
 }
 
+async fn trigger_chat_completion(
+    gateway_url: String,
+    api_key: String,
+    model: String,
+    messages: Vec<ChatMessage>,
+    tx: mpsc::Sender<ChatEvent>,
+) {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(60))
+        .build()
+        .unwrap_or_default();
+
+    let base = gateway_url.trim_end_matches('/');
+    let url = format!("{}/v1/chat/completions", base);
+
+    let api_messages: Vec<serde_json::Value> = messages
+        .iter()
+        .filter(|m| m.role == ChatRole::User || m.role == ChatRole::Assistant || m.role == ChatRole::System)
+        .map(|m| {
+            let role_str = match m.role {
+                ChatRole::User => "user",
+                ChatRole::Assistant => "assistant",
+                ChatRole::System => "system",
+                _ => "user",
+            };
+            serde_json::json!({
+                "role": role_str,
+                "content": m.content,
+            })
+        })
+        .collect();
+
+    let body = serde_json::json!({
+        "model": model,
+        "messages": api_messages,
+        "stream": true,
+    });
+
+    let mut req = client.post(&url).json(&body);
+    if !api_key.is_empty() {
+        req = req.header("Authorization", format!("Bearer {}", api_key));
+    }
+
+    match req.send().await {
+        Ok(resp) => {
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let txt = resp.text().await.unwrap_or_else(|_| "未知错误".to_string());
+                let _ = tx.send(ChatEvent::Failed(format!("HTTP {}: {}", status, txt))).await;
+                return;
+            }
+
+            let mut stream = resp.bytes_stream();
+            let mut buffer = String::new();
+
+            while let Some(chunk_res) = stream.next().await {
+                match chunk_res {
+                    Ok(bytes) => {
+                        let text = String::from_utf8_lossy(&bytes);
+                        buffer.push_str(&text);
+
+                        // 逐行解析 SSE
+                        while let Some(newline_pos) = buffer.find('\n') {
+                            let line = buffer[..newline_pos].trim().to_string();
+                            buffer = buffer[newline_pos + 1..].to_string();
+
+                            if line.starts_with("data: ") {
+                                let payload = &line[6..].trim();
+                                if *payload == "[DONE]" {
+                                    let _ = tx.send(ChatEvent::Finished).await;
+                                    return;
+                                }
+                                if let Ok(val) = serde_json::from_str::<serde_json::Value>(payload) {
+                                    if let Some(delta) = val.get("choices")
+                                        .and_then(|c| c.get(0))
+                                        .and_then(|c| c.get("delta"))
+                                        .and_then(|d| d.get("content"))
+                                        .and_then(|cnt| cnt.as_str())
+                                    {
+                                        if !delta.is_empty() {
+                                            let _ = tx.send(ChatEvent::TokenChunk(delta.to_string())).await;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        let _ = tx.send(ChatEvent::Failed(format!("读取流中断: {}", e))).await;
+                        return;
+                    }
+                }
+            }
+            let _ = tx.send(ChatEvent::Finished).await;
+        }
+        Err(e) => {
+            let _ = tx.send(ChatEvent::Failed(format!("网络请求失败: {}", e))).await;
+        }
+    }
+}
+
 pub async fn run_tui(config: ConfigFile, config_path: String, gateway_url: String) -> Result<(), Box<dyn std::error::Error>> {
     let mut guard = TerminalGuard::new()?;
     let mut app = TuiApp::new(config, config_path, gateway_url.clone());
@@ -363,6 +557,10 @@ pub async fn run_tui(config: ConfigFile, config_path: String, gateway_url: Strin
         }
     });
 
+    // 2. 初始化 Chat 消息通道
+    let (chat_event_tx, mut chat_event_rx) = mpsc::channel::<ChatEvent>(100);
+    app.chat_tx = Some(chat_event_tx);
+
     let mut reader = crossterm::event::EventStream::new();
     let mut render_tick = tokio::time::interval(Duration::from_millis(50));
 
@@ -374,6 +572,28 @@ pub async fn run_tui(config: ConfigFile, config_path: String, gateway_url: Strin
                 // 定期消费遥测更新
                 while let Ok(snap) = telemetry_rx.try_recv() {
                     app.apply_telemetry(snap);
+                }
+                // 消费 Chat 事件更新
+                while let Ok(chat_ev) = chat_event_rx.try_recv() {
+                    match chat_ev {
+                        ChatEvent::TokenChunk(chunk) => {
+                            app.chat_status = ChatSessionStatus::Receiving;
+                            app.append_chat_token(&chunk);
+                        }
+                        ChatEvent::Finished => {
+                            app.chat_status = ChatSessionStatus::Idle;
+                            app.status_message = "✅ 模型回复已完成。".to_string();
+                        }
+                        ChatEvent::Failed(err) => {
+                            app.chat_status = ChatSessionStatus::Failed(err.clone());
+                            app.chat_messages.push(ChatMessage {
+                                role: ChatRole::Error,
+                                content: format!("请求失败: {}", err),
+                                timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                            });
+                            app.status_message = format!("❌ 对话出错: {}", err);
+                        }
+                    }
                 }
             }
             maybe_event = reader.next() => {
@@ -403,6 +623,93 @@ fn handle_key_event(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
         return;
     }
 
+    // 在 Tab 5 对话面板中，字符与回车等键优先用于输入聊天内容
+    if app.active_tab == 4 {
+        match key {
+            KeyCode::Esc => {
+                app.should_quit = true;
+                return;
+            }
+            KeyCode::Tab => {
+                app.active_tab = 0;
+                return;
+            }
+            KeyCode::BackTab => {
+                app.active_tab = 3;
+                return;
+            }
+            KeyCode::Char('1') if modifiers.contains(KeyModifiers::ALT) => { app.active_tab = 0; return; }
+            KeyCode::Char('2') if modifiers.contains(KeyModifiers::ALT) => { app.active_tab = 1; return; }
+            KeyCode::Char('3') if modifiers.contains(KeyModifiers::ALT) => { app.active_tab = 2; return; }
+            KeyCode::Char('4') if modifiers.contains(KeyModifiers::ALT) => { app.active_tab = 3; return; }
+            KeyCode::Char('5') if modifiers.contains(KeyModifiers::ALT) => { app.active_tab = 4; return; }
+            KeyCode::Left if modifiers.contains(KeyModifiers::ALT) => {
+                app.cycle_chat_model(-1);
+                return;
+            }
+            KeyCode::Right if modifiers.contains(KeyModifiers::ALT) => {
+                app.cycle_chat_model(1);
+                return;
+            }
+            KeyCode::Up => {
+                if app.chat_scroll > 0 {
+                    app.chat_scroll -= 1;
+                }
+                return;
+            }
+            KeyCode::Down => {
+                app.chat_scroll = app.chat_scroll.saturating_add(1);
+                return;
+            }
+            KeyCode::Enter => {
+                let input = app.chat_input.trim().to_string();
+                if input.is_empty() {
+                    return;
+                }
+                if app.chat_status == ChatSessionStatus::Sending || app.chat_status == ChatSessionStatus::Receiving {
+                    app.status_message = "⚠️ 当前模型正在输出，请等待完成...".to_string();
+                    return;
+                }
+
+                // 记录用户消息
+                app.chat_messages.push(ChatMessage {
+                    role: ChatRole::User,
+                    content: input.clone(),
+                    timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
+                });
+                app.chat_input.clear();
+                app.chat_status = ChatSessionStatus::Sending;
+                app.status_message = format!("🚀 正在请求模型 [{}]...", app.chat_selected_model);
+
+                if let Some(tx) = app.chat_tx.clone() {
+                    let gw_url = app.gateway_url.clone();
+                    let api_key = app.config.gateway.api_key.clone();
+                    let model = app.chat_selected_model.clone();
+                    let messages = app.chat_messages.clone();
+
+                    tokio::spawn(async move {
+                        trigger_chat_completion(gw_url, api_key, model, messages, tx).await;
+                    });
+                }
+                return;
+            }
+            KeyCode::Backspace => {
+                app.chat_input.pop();
+                return;
+            }
+            KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
+                app.chat_messages.clear();
+                app.status_message = "已清空当前会话历史。".to_string();
+                return;
+            }
+            KeyCode::Char(c) => {
+                app.chat_input.push(c);
+                return;
+            }
+            _ => return,
+        }
+    }
+
     match key {
         KeyCode::Char('q') | KeyCode::Esc => {
             app.should_quit = true;
@@ -414,7 +721,7 @@ fn handle_key_event(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                     Tab2Focus::Models => Tab2Focus::Providers,
                 };
             } else {
-                app.active_tab = (app.active_tab + 1) % 4;
+                app.active_tab = (app.active_tab + 1) % 5;
             }
         }
         KeyCode::BackTab => {
@@ -424,13 +731,14 @@ fn handle_key_event(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                     Tab2Focus::Models => Tab2Focus::Providers,
                 };
             } else {
-                app.active_tab = if app.active_tab == 0 { 3 } else { app.active_tab - 1 };
+                app.active_tab = if app.active_tab == 0 { 4 } else { app.active_tab - 1 };
             }
         }
         KeyCode::Char('1') => app.active_tab = 0,
         KeyCode::Char('2') => app.active_tab = 1,
         KeyCode::Char('3') => app.active_tab = 2,
         KeyCode::Char('4') => app.active_tab = 3,
+        KeyCode::Char('5') => app.active_tab = 4,
         KeyCode::Char('r') => {
             app.status_message = "正在后台刷新遥测数据...".to_string();
         }
@@ -1624,6 +1932,7 @@ fn ui(f: &mut Frame, app: &mut TuiApp) {
         1 => render_providers_and_models_tab(f, chunks[1], app),
         2 => render_keys_tab(f, chunks[1], app),
         3 => render_telemetry_tab(f, chunks[1], app),
+        4 => render_chat_tab(f, chunks[1], app),
         _ => {}
     }
 
@@ -1645,6 +1954,7 @@ fn render_header(f: &mut Frame, area: Rect, app: &TuiApp) {
         " 2 提供商与模型 ",
         " 3 Key 治理 ",
         " 4 故障录波 ",
+        " 5 实时对话 ",
     ];
 
     let tabs = Tabs::new(tab_titles)
@@ -1724,11 +2034,26 @@ fn render_footer(f: &mut Frame, area: Rect, app: &TuiApp) {
             Span::styled(" [q] ", Style::default().fg(Color::DarkGray)),
             Span::raw("退出"),
         ])
+    } else if app.active_tab == 4 {
+        Line::from(vec![
+            Span::styled(" [Enter] ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+            Span::raw("发送消息  "),
+            Span::styled(" [Alt+←/→] ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::raw("切换模型  "),
+            Span::styled(" [↑/↓] ", Style::default().fg(Color::Yellow)),
+            Span::raw("滚动历史  "),
+            Span::styled(" [Ctrl+C] ", Style::default().fg(Color::Red)),
+            Span::raw("清空对话  "),
+            Span::styled(" [Tab] ", Style::default().fg(Color::Yellow)),
+            Span::raw("切回概览  "),
+            Span::styled(" [Esc] ", Style::default().fg(Color::DarkGray)),
+            Span::raw("退出"),
+        ])
     } else {
         Line::from(vec![
             Span::styled(" [Tab] ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
             Span::raw("切页  "),
-            Span::styled(" [1-4] ", Style::default().fg(Color::Yellow)),
+            Span::styled(" [1-5] ", Style::default().fg(Color::Yellow)),
             Span::raw("直达  "),
             Span::styled(" [j/k/↑/↓] ", Style::default().fg(Color::DarkGray)),
             Span::raw("移动  "),
@@ -2352,6 +2677,118 @@ fn render_telemetry_tab(f: &mut Frame, area: Rect, app: &mut TuiApp) {
         )
         .wrap(Wrap { trim: true });
     f.render_widget(detail, chunks[1]);
+}
+
+fn render_chat_tab(f: &mut Frame, area: Rect, app: &TuiApp) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3), // 顶部配置条：当前选择模型、切换提示、状态指示
+            Constraint::Min(0),    // 消息历史展示区
+            Constraint::Length(3), // 底部输入框
+        ])
+        .split(area);
+
+    // 1. 顶部状态栏
+    let status_indicator = match &app.chat_status {
+        ChatSessionStatus::Idle => Span::styled("● 就绪 (IDLE)", Style::default().fg(Color::Green)),
+        ChatSessionStatus::Sending => Span::styled("● 发送中 (CONNECTING)...", Style::default().fg(Color::Yellow)),
+        ChatSessionStatus::Receiving => Span::styled("● 接收响应中 (STREAMING)...", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+        ChatSessionStatus::Failed(e) => Span::styled(format!("● 异常: {}", e), Style::default().fg(Color::Red)),
+    };
+
+    let header_line = Line::from(vec![
+        Span::styled(" 当前模型: ", Style::default().fg(Color::Gray)),
+        Span::styled(format!(" {} ", app.chat_selected_model), Style::default().fg(Color::Cyan).bg(Color::Rgb(25, 35, 45)).add_modifier(Modifier::BOLD)),
+        Span::raw("  "),
+        Span::styled("[Alt+←/→ 切换]", Style::default().fg(Color::Yellow)),
+        Span::raw("    "),
+        Span::styled("状态: ", Style::default().fg(Color::Gray)),
+        status_indicator,
+    ]);
+
+    let top_bar = Paragraph::new(vec![header_line])
+        .block(
+            Block::default()
+                .borders(Borders::BOTTOM)
+                .border_style(Style::default().fg(Color::Rgb(40, 50, 65)))
+                .title(" 会话设置 ")
+        );
+    f.render_widget(top_bar, chunks[0]);
+
+    // 2. 消息流展示区
+    let mut text_lines: Vec<Line> = Vec::new();
+    if app.chat_messages.is_empty() {
+        text_lines.push(Line::from(""));
+        text_lines.push(Line::from(vec![
+            Span::styled("  * 会话为空。在下方输入框键入问题后按 [Enter] 开始多轮对话。", Style::default().fg(Color::DarkGray)),
+        ]));
+        text_lines.push(Line::from(vec![
+            Span::styled("    支持多轮上下文记忆，支持流式 SSE 渲染。", Style::default().fg(Color::DarkGray)),
+        ]));
+    } else {
+        for msg in &app.chat_messages {
+            let (role_tag, role_style) = match msg.role {
+                ChatRole::User => ("[你 User]", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                ChatRole::Assistant => ("[模型 Assistant]", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                ChatRole::System => ("[系统 System]", Style::default().fg(Color::Magenta)),
+                ChatRole::Error => ("[错误 Error]", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+            };
+
+            text_lines.push(Line::from(vec![
+                Span::styled(role_tag, role_style),
+                Span::raw("  "),
+                Span::styled(format!("[{}]", msg.timestamp), Style::default().fg(Color::DarkGray)),
+            ]));
+
+            for subline in msg.content.lines() {
+                text_lines.push(Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(subline.to_string(), Style::default().fg(Color::White)),
+                ]));
+            }
+            text_lines.push(Line::from(""));
+        }
+    }
+
+    let history_widget = Paragraph::new(text_lines)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Plain)
+                .border_style(Style::default().fg(Color::Rgb(50, 60, 80)))
+                .title(" 对话历史记录 ")
+        )
+        .wrap(Wrap { trim: false })
+        .scroll((app.chat_scroll, 0));
+    f.render_widget(history_widget, chunks[1]);
+
+    // 3. 底部输入框
+    let input_title = if app.chat_input.is_empty() {
+        " 输入消息 (键入问题后按 Enter 发送，Alt+1~5 切换 Tab) "
+    } else {
+        " 编辑中 (Enter 发送，Backspace 删除，Ctrl+C 清空历史) "
+    };
+
+    let border_color = if app.chat_status == ChatSessionStatus::Sending || app.chat_status == ChatSessionStatus::Receiving {
+        Color::Yellow
+    } else {
+        Color::Cyan
+    };
+
+    let input_widget = Paragraph::new(Line::from(vec![
+        Span::styled(" › ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+        Span::styled(&app.chat_input, Style::default().fg(Color::White)),
+        Span::styled("█", Style::default().fg(Color::Cyan)), // 光标
+    ]))
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Plain)
+            .border_style(Style::default().fg(border_color))
+            .title(input_title)
+    );
+    f.render_widget(input_widget, chunks[2]);
 }
 
 fn safe_centered_rect(min_w: u16, min_h: u16, r: Rect) -> Rect {
@@ -3269,5 +3706,63 @@ mod tests {
         let r160 = Rect { x: 0, y: 0, width: 160, height: 40 };
         let box160 = safe_centered_rect(88, 20, r160);
         assert_eq!(box160.width, 102);
+    }
+
+    #[test]
+    fn test_chat_tab_navigation_and_multiturn_state_flow() {
+        let (mut app, _tmp, _cfg_path) = default_app();
+        assert_eq!(app.active_tab, 0);
+
+        // 快捷键 5 切换到对话面板
+        handle_key_event(&mut app, KeyCode::Char('5'), KeyModifiers::NONE);
+        assert_eq!(app.active_tab, 4);
+
+        // 输入第一轮消息 "你好，测试第一轮"
+        for c in "你好，测试第一轮".chars() {
+            handle_key_event(&mut app, KeyCode::Char(c), KeyModifiers::NONE);
+        }
+        assert_eq!(app.chat_input, "你好，测试第一轮");
+
+        // 回车提交
+        handle_key_event(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(app.chat_messages.len(), 1);
+        assert_eq!(app.chat_messages[0].role, ChatRole::User);
+        assert_eq!(app.chat_messages[0].content, "你好，测试第一轮");
+        assert_eq!(app.chat_input, "");
+        assert_eq!(app.chat_status, ChatSessionStatus::Sending);
+
+        // 模拟流式模型回复追加
+        app.append_chat_token("这是");
+        app.append_chat_token("第一轮回复。");
+        assert_eq!(app.chat_messages.len(), 2);
+        assert_eq!(app.chat_messages[1].role, ChatRole::Assistant);
+        assert_eq!(app.chat_messages[1].content, "这是第一轮回复。");
+        app.chat_status = ChatSessionStatus::Idle;
+
+        // 输入第二轮消息 "好的，那第二轮呢？"
+        for c in "好的，那第二轮呢？".chars() {
+            handle_key_event(&mut app, KeyCode::Char(c), KeyModifiers::NONE);
+        }
+        handle_key_event(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(app.chat_messages.len(), 3);
+        assert_eq!(app.chat_messages[2].role, ChatRole::User);
+        assert_eq!(app.chat_messages[2].content, "好的，那第二轮呢？");
+
+        // 模拟第二轮流式模型回复
+        app.append_chat_token("第二轮收到！");
+        assert_eq!(app.chat_messages.len(), 4);
+        assert_eq!(app.chat_messages[3].role, ChatRole::Assistant);
+        assert_eq!(app.chat_messages[3].content, "第二轮收到！");
+        app.chat_status = ChatSessionStatus::Idle;
+
+        // 验证切换模型
+        let _original_model = app.chat_selected_model.clone();
+        app.cycle_chat_model(1);
+        assert!(!app.chat_selected_model.is_empty());
+
+        // 验证清空会话 Ctrl+C
+        handle_key_event(&mut app, KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert_eq!(app.chat_messages.len(), 0);
+        assert_eq!(app.status_message, "已清空当前会话历史。");
     }
 }

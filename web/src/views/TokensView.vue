@@ -21,15 +21,18 @@ const loading = ref(true);
 const error = ref('');
 const { toast } = useToast();
 
-// Create form
+// Create Modal state & form
+const showCreateModal = ref(false);
 const name = ref('');
 const modelLimits = ref('');
 const quota = ref<number | null>(null);
 const creating = ref(false);
+const modalError = ref('');
 
-// One-time plaintext surface (cleared after display)
-const lastPlaintext = ref<{ keyId: string; apiKey: string } | null>(null);
-const lastRotated = ref<{ keyId: string; apiKey: string } | null>(null);
+// Token Result Modal state (for create & rotate)
+const showResultModal = ref(false);
+const resultToken = ref<{ keyId: string; apiKey: string; isRotate: boolean } | null>(null);
+const copied = ref(false);
 
 async function refresh(): Promise<void> {
   loading.value = true;
@@ -47,15 +50,29 @@ onMounted(() => {
   void refresh();
 });
 
+function openCreateModal(): void {
+  name.value = '';
+  modelLimits.value = '';
+  quota.value = null;
+  modalError.value = '';
+  showCreateModal.value = true;
+}
+
+function closeCreateModal(): void {
+  if (creating.value) return;
+  showCreateModal.value = false;
+  modalError.value = '';
+}
+
 async function handleCreate(): Promise<void> {
   if (creating.value) return;
   const trimmed = name.value.trim();
   if (trimmed === '') {
-    error.value = '请输入 Token 名称';
+    modalError.value = '请输入 Token 名称';
     return;
   }
   creating.value = true;
-  error.value = '';
+  modalError.value = '';
   try {
     const limits = modelLimits.value
       .split(',')
@@ -66,15 +83,15 @@ async function handleCreate(): Promise<void> {
       model_limits: limits.length > 0 ? limits : undefined,
       quota: quota.value ?? undefined,
     });
-    // 明文仅一次：立即展示，复制后由用户关闭/下次操作清空。
-    lastPlaintext.value = { keyId: created.key_id, apiKey: created.api_key };
-    name.value = '';
-    modelLimits.value = '';
-    quota.value = null;
+    // 保存后关闭编辑区，显示生成的 token 弹窗
+    showCreateModal.value = false;
+    resultToken.value = { keyId: created.key_id, apiKey: created.api_key, isRotate: false };
+    copied.value = false;
+    showResultModal.value = true;
     toast.success('Token 创建成功（明文仅显示一次）');
     await refresh();
   } catch (e) {
-    error.value = (e as Error).message ?? '创建失败';
+    modalError.value = (e as Error).message ?? '创建失败';
   } finally {
     creating.value = false;
   }
@@ -93,11 +110,13 @@ async function handleToggle(token: UserTokenMeta): Promise<void> {
 async function handleRotate(token: UserTokenMeta): Promise<void> {
   try {
     const rotated = await rotateMyToken(token.key_id);
-    lastRotated.value = { keyId: token.key_id, apiKey: rotated.api_key };
-    toast.success('Token 已旋转（新明文仅显示一次）');
+    resultToken.value = { keyId: token.key_id, apiKey: rotated.api_key, isRotate: true };
+    copied.value = false;
+    showResultModal.value = true;
+    toast.success('Token 已轮换（新明文仅显示一次）');
     await refresh();
   } catch (e) {
-    error.value = (e as Error).message ?? '旋转失败';
+    error.value = (e as Error).message ?? '轮换失败';
   }
 }
 
@@ -111,9 +130,41 @@ async function handleDelete(token: UserTokenMeta): Promise<void> {
   }
 }
 
-function clearPlaintext(): void {
-  lastPlaintext.value = null;
-  lastRotated.value = null;
+async function handleCopy(): Promise<void> {
+  if (!resultToken.value?.apiKey) return;
+  try {
+    await navigator.clipboard.writeText(resultToken.value.apiKey);
+    copied.value = true;
+    toast.success('已复制到剪贴板');
+    setTimeout(() => {
+      copied.value = false;
+    }, 2000);
+  } catch {
+    // 降级兜底方案
+    try {
+      const textarea = document.createElement('textarea');
+      textarea.value = resultToken.value.apiKey;
+      textarea.style.position = 'fixed';
+      textarea.style.opacity = '0';
+      document.body.appendChild(textarea);
+      textarea.select();
+      document.execCommand('copy');
+      document.body.removeChild(textarea);
+      copied.value = true;
+      toast.success('已复制到剪贴板');
+      setTimeout(() => {
+        copied.value = false;
+      }, 2000);
+    } catch {
+      toast.error('复制失败，请手动选取复制');
+    }
+  }
+}
+
+function closeResultModal(): void {
+  showResultModal.value = false;
+  resultToken.value = null;
+  copied.value = false;
 }
 
 function fmtTokens(n: number | null): string {
@@ -140,76 +191,13 @@ function fmtModels(list: string[] | null): string {
         <span class="error">{{ error }}</span>
       </div>
 
-      <!-- One-time plaintext surfaces -->
-      <UiCard v-if="lastPlaintext || lastRotated" class="p-4 border-emerald-200/70 bg-emerald-50/60">
-        <div class="flex items-start gap-3">
-          <Icons name="info" size="16" class="mt-0.5 shrink-0 text-emerald-600" />
-          <div class="flex-1 space-y-1.5 min-w-0">
-            <p class="text-xs font-semibold text-emerald-800">
-              {{ lastPlaintext ? '新 Token 明文（仅此一次，请立即保存）' : '旋转后的新明文（仅此一次）' }}
-            </p>
-            <p class="text-[11px] text-emerald-700 break-all font-mono leading-relaxed select-all">
-              {{ lastPlaintext?.apiKey ?? lastRotated?.apiKey }}
-            </p>
-          </div>
-          <UiButton variant="ghost" size="sm" @click="clearPlaintext">
-            <span>关闭</span>
-          </UiButton>
-        </div>
-      </UiCard>
-
-      <!-- Create form -->
-      <UiCard class="p-5">
-        <h2 class="text-sm font-semibold text-slate-800 mb-3">创建 Token</h2>
-        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
-          <div>
-            <label for="token-name" class="block text-xs font-medium text-slate-700 mb-1.5">名称（1-64 字符）</label>
-            <input
-              id="token-name"
-              v-model="name"
-              type="text"
-              placeholder="例如 ci-swe-token"
-              class="w-full h-10 px-3 py-2 text-sm bg-slate-50/50 border border-slate-200 rounded-lg focus:outline-none focus:bg-white focus:border-slate-400 text-slate-900 placeholder:text-slate-400 transition-all"
-            />
-          </div>
-          <div>
-            <label for="token-quota" class="block text-xs font-medium text-slate-700 mb-1.5">用量上限（Token 数，留空=不限）</label>
-            <input
-              id="token-quota"
-              v-model.number="quota"
-              type="number"
-              min="0"
-              placeholder="1000000"
-              class="w-full h-10 px-3 py-2 text-sm bg-slate-50/50 border border-slate-200 rounded-lg focus:outline-none focus:bg-white focus:border-slate-400 text-slate-900 placeholder:text-slate-400 transition-all"
-            />
-          </div>
-          <div class="sm:col-span-2">
-            <label for="token-models" class="block text-xs font-medium text-slate-700 mb-1.5">
-              模型白名单（逗号分隔，支持 provider/model 与 deepseek/* 通配；留空=全部）
-            </label>
-            <input
-              id="token-models"
-              v-model="modelLimits"
-              type="text"
-              placeholder="gpt-4o-mini, deepseek/*"
-              class="w-full h-10 px-3 py-2 text-sm bg-slate-50/50 border border-slate-200 rounded-lg focus:outline-none focus:bg-white focus:border-slate-400 text-slate-900 placeholder:text-slate-400 transition-all font-mono tracking-wide"
-            />
-          </div>
-        </div>
-        <div class="mt-4 flex justify-end">
-          <UiButton :disabled="creating" @click="handleCreate">
-            <Icons v-if="creating" name="refresh" size="14" class="animate-spin" />
-            <Icons v-else name="plus" size="14" />
-            <span>{{ creating ? '创建中...' : '创建 Token' }}</span>
-          </UiButton>
-        </div>
-      </UiCard>
-
       <!-- Token list -->
       <UiCard class="p-5">
-        <h2 class="text-sm font-semibold text-slate-800 mb-3">Token 列表</h2>
+        <div class="flex items-center justify-between mb-3">
+          <h2 class="text-sm font-semibold text-slate-800">Token 列表</h2>
+        </div>
         <div v-if="loading" class="text-xs text-slate-400 py-4">加载中...</div>
-        <div v-else-if="rows.length === 0" class="text-xs text-slate-400 py-4">还没有 Token，请在上方创建。</div>
+        <div v-else-if="rows.length === 0" class="text-xs text-slate-400 py-4">还没有 Token，请点击下方新增按钮创建。</div>
         <div v-else class="space-y-2.5">
           <div
             v-for="token in rows"
@@ -232,8 +220,9 @@ function fmtModels(list: string[] | null): string {
               <UiButton variant="secondary" size="sm" @click="handleToggle(token)">
                 {{ token.enabled ? '停用' : '启用' }}
               </UiButton>
-              <UiButton variant="outline" size="sm" @click="handleRotate(token)">
-                <span>旋转</span>
+              <UiButton variant="outline" size="sm" data-testid="rotate-token-btn" @click="handleRotate(token)">
+                <Icons name="refresh" size="13" />
+                <span>轮换</span>
               </UiButton>
               <UiButton variant="destructive" size="sm" @click="handleDelete(token)">
                 <span>删除</span>
@@ -241,7 +230,159 @@ function fmtModels(list: string[] | null): string {
             </div>
           </div>
         </div>
+
+        <!-- 列表下方新增按钮 -->
+        <div class="mt-4 pt-3 border-t border-slate-100 flex justify-start">
+          <UiButton data-testid="open-create-token-btn" @click="openCreateModal">
+            <Icons name="plus" size="14" />
+            <span>新增 Token</span>
+          </UiButton>
+        </div>
       </UiCard>
     </main>
+
+    <!-- 新增编辑弹窗 -->
+    <div
+      v-if="showCreateModal"
+      class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-md"
+      data-testid="create-token-modal"
+    >
+      <div class="bg-white/95 backdrop-blur-xl rounded-2xl shadow-2xl w-full max-w-lg overflow-hidden border border-slate-200/80">
+        <div class="p-5 border-b border-slate-100 flex items-center justify-between">
+          <h3 class="text-sm font-bold text-slate-900 flex items-center gap-2">
+            <Icons name="key" size="16" class="text-indigo-600" />
+            新增 Token
+          </h3>
+          <button
+            type="button"
+            class="text-slate-400 hover:text-slate-600 transition-colors p-1 rounded-lg"
+            @click="closeCreateModal"
+          >
+            <Icons name="cross" size="16" />
+          </button>
+        </div>
+
+        <div class="p-5 space-y-4">
+          <div v-if="modalError" class="p-2.5 rounded-lg bg-rose-50 border border-rose-200/60 text-xs text-rose-600">
+            {{ modalError }}
+          </div>
+
+          <div class="space-y-3">
+            <div>
+              <label for="token-name" class="block text-xs font-medium text-slate-700 mb-1.5">
+                名称（1-64 字符）<span class="text-rose-500">*</span>
+              </label>
+              <input
+                id="token-name"
+                v-model="name"
+                type="text"
+                placeholder="例如 ci-swe-token"
+                class="w-full h-10 px-3 py-2 text-sm bg-slate-50/50 border border-slate-200 rounded-lg focus:outline-none focus:bg-white focus:border-slate-400 text-slate-900 placeholder:text-slate-400 transition-all"
+                data-testid="token-name-input"
+              />
+            </div>
+
+            <div>
+              <label for="token-quota" class="block text-xs font-medium text-slate-700 mb-1.5">
+                用量上限（Token 数，留空=不限）
+              </label>
+              <input
+                id="token-quota"
+                v-model.number="quota"
+                type="number"
+                min="0"
+                placeholder="1000000"
+                class="w-full h-10 px-3 py-2 text-sm bg-slate-50/50 border border-slate-200 rounded-lg focus:outline-none focus:bg-white focus:border-slate-400 text-slate-900 placeholder:text-slate-400 transition-all"
+                data-testid="token-quota-input"
+              />
+            </div>
+
+            <div>
+              <label for="token-models" class="block text-xs font-medium text-slate-700 mb-1.5">
+                模型白名单（逗号分隔，支持 provider/model 与 deepseek/* 通配；留空=全部）
+              </label>
+              <input
+                id="token-models"
+                v-model="modelLimits"
+                type="text"
+                placeholder="gpt-4o-mini, deepseek/*"
+                class="w-full h-10 px-3 py-2 text-sm bg-slate-50/50 border border-slate-200 rounded-lg focus:outline-none focus:bg-white focus:border-slate-400 text-slate-900 placeholder:text-slate-400 transition-all font-mono tracking-wide"
+                data-testid="token-models-input"
+              />
+            </div>
+          </div>
+        </div>
+
+        <div class="p-4 bg-slate-50 border-t border-slate-100 flex items-center justify-end gap-2">
+          <UiButton variant="ghost" size="sm" :disabled="creating" @click="closeCreateModal">
+            取消
+          </UiButton>
+          <UiButton :disabled="creating" size="sm" data-testid="submit-create-token-btn" @click="handleCreate">
+            <Icons v-if="creating" name="refresh" size="14" class="animate-spin" />
+            <Icons v-else name="plus" size="14" />
+            <span>{{ creating ? '保存中...' : '保存' }}</span>
+          </UiButton>
+        </div>
+      </div>
+    </div>
+
+    <!-- 生成/轮换后 Token 展示与复制弹窗 -->
+    <div
+      v-if="showResultModal && resultToken"
+      class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-md"
+      data-testid="token-result-modal"
+    >
+      <div class="bg-white/95 backdrop-blur-xl rounded-2xl shadow-2xl w-full max-w-lg overflow-hidden border border-slate-200/80">
+        <div class="p-5 border-b border-slate-100 flex items-center justify-between">
+          <h3 class="text-sm font-bold text-slate-900 flex items-center gap-2">
+            <Icons name="key" size="16" class="text-emerald-600" />
+            {{ resultToken.isRotate ? 'Token 轮换成功' : 'Token 创建成功' }}
+          </h3>
+          <UiBadge variant="success">明文仅展示一次</UiBadge>
+        </div>
+
+        <div class="p-5 space-y-4 text-sm">
+          <div class="p-3 bg-emerald-50/80 border border-emerald-200/80 rounded-xl text-emerald-800 leading-relaxed text-xs">
+            <strong class="font-medium">安全提醒：</strong>
+            {{ resultToken.isRotate ? 'Token 已生成新明文凭证，旧凭证已即刻作废失效。' : '新凭证已生成。' }}
+            出于安全考量，明文密钥仅在此时展示一次，后续无法再次查看。请立即复制并妥善保管！
+          </div>
+
+          <div>
+            <label class="block text-xs font-medium text-slate-600 mb-1.5">
+              访问凭据 (ID: {{ resultToken.keyId }})
+            </label>
+            <div class="flex items-center gap-2">
+              <input
+                type="text"
+                readonly
+                :value="resultToken.apiKey"
+                class="flex-1 font-mono text-xs sm:text-sm bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-slate-900 select-all"
+                data-testid="plaintext-token-input"
+              />
+              <UiButton
+                variant="outline"
+                size="sm"
+                data-testid="copy-token-btn"
+                @click="handleCopy"
+              >
+                <Icons :name="copied ? 'check' : 'copy'" size="14" />
+                <span>{{ copied ? '已复制' : '复制' }}</span>
+              </UiButton>
+            </div>
+          </div>
+        </div>
+
+        <div class="p-4 bg-slate-50 border-t border-slate-100 flex justify-end">
+          <UiButton
+            size="sm"
+            data-testid="close-result-modal-btn"
+            @click="closeResultModal"
+          >
+            我已安全复制，关闭
+          </UiButton>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
