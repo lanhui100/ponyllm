@@ -326,8 +326,13 @@ jobs:
           PONYLLM_API_KEY: ${{ secrets.PONYLLM_API_KEY }}
           PONYLLM_BASE_URL: https://tokens.ponyjob.top
         run: |
-          # 逐 role (dev -> preprod -> proserver -> tencent) 串行滚动并执行 drain + 长流门禁
+          # 逐 role (dev -> preprod -> proserver -> tencent) 串行滚动并执行 drain + 长流门禁 + 级联回滚
           bash scripts/serialized-rollout.sh
+
+      - name: Cluster Image Parity Gate (Anti-Split-Brain)
+        run: |
+          # 机械硬门禁：断言全节点 Deployment 与 Pod 镜像 100% 绝对一致，杜绝版本撕裂
+          bash tests/pre-flight/check-cluster-image-parity.sh
 
       - name: Post-deploy smoke
         if: env.PONYLLM_API_KEY != ''
