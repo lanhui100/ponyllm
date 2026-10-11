@@ -14,8 +14,8 @@ import uuid
 
 PORT = int(os.environ.get("PORT", "9115"))
 BIND_ADDR = os.environ.get("PROBE_BIND_ADDR", "0.0.0.0")
-TARGET_URL = os.environ.get("PROBE_TARGET", "https://tokens.ponyjob.top/v1/chat/completions")
-API_KEY = os.environ.get("PROBE_API_KEY", "")
+TARGET_URL = os.environ.get("PROBE_TARGET") or (os.environ.get("PONYLLM_BASE_URL", "").rstrip("/") + "/v1/chat/completions" if os.environ.get("PONYLLM_BASE_URL") else "https://tokens.ponyjob.top/v1/chat/completions")
+API_KEY = os.environ.get("PROBE_API_KEY") or os.environ.get("PONYLLM_API_KEY", "")
 MGMT_TOKEN = os.environ.get("PROBE_MGMT_TOKEN", "")
 MODEL = os.environ.get("PROBE_MODEL", "deepseek-flash")
 # 探针间隔默认 30s；免费额度型模型（opencode-zen 的 *-free）请由 Deployment

@@ -204,7 +204,14 @@ for role in "${ROLES[@]}"; do
     gate_ok=1
     if python3 "$PROBER_SCRIPT" --help 2>&1 | grep -q -- '--long-stream-once'; then
       echo "Calling python3 $PROBER_SCRIPT --long-stream-once..."
-      if ! python3 "$PROBER_SCRIPT" --long-stream-once; then
+      prober_args=(--long-stream-once)
+      if [ -n "${PONYLLM_API_KEY:-}" ]; then
+        prober_args+=(--api-key "$PONYLLM_API_KEY")
+      fi
+      if [ -n "${PONYLLM_BASE_URL:-}" ]; then
+        prober_args+=(--url "${PONYLLM_BASE_URL%/}/v1/chat/completions")
+      fi
+      if ! python3 "$PROBER_SCRIPT" "${prober_args[@]}"; then
         gate_ok=0
       fi
     elif [ -n "${PONYLLM_BASE_URL:-}" ] && [ -n "${PONYLLM_API_KEY:-}" ]; then
