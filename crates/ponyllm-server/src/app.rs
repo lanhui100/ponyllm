@@ -476,6 +476,19 @@ async fn auth_middleware(State(state): State<Arc<AppState>>, req: Request, next:
             key_id,
             user_id,
         } => {
+            // Read-time defense: If token is bound to a user, the user MUST exist and be enabled in user_tracker.
+            // If the user was deleted (orphaned token) or is disabled, reject as 401 invalid_api_key.
+            if let Some(uid) = user_id.as_deref() {
+                let user_valid = state
+                    .user_tracker
+                    .get_user(uid)
+                    .map(|u| u.enabled)
+                    .unwrap_or(false);
+                if !user_valid {
+                    state.auth_ratelimiter.record_failure(client_ip, prefix);
+                    return crate::auth::invalid_api_key();
+                }
+            }
             let resource = classify_resource(&method, &path, query.as_deref());
             if matches!(resource, Resource::Exempt) {
                 return next.run(req).await;

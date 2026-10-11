@@ -453,6 +453,14 @@ pub async fn handle_user_tokens_create(
         Err(resp) => return resp,
     };
     state.token_tracker.upsert(&key_id);
+    {
+        let mut cfg = state.config.write();
+        if let Some(slot) = cfg.gateway_keys.iter_mut().find(|k| k.id == key_id) {
+            *slot = entry.clone();
+        } else {
+            cfg.gateway_keys.push(entry.clone());
+        }
+    }
 
     tracing::info!(key_id = %key_id, user_id = %uid, config_version = new_ver, "user created self-service token");
     (
@@ -630,6 +638,10 @@ pub async fn handle_user_tokens_delete(
         Err(resp) => return resp,
     };
     state.token_tracker.remove(&key_id);
+    {
+        let mut cfg = state.config.write();
+        cfg.gateway_keys.retain(|k| k.id != key_id);
+    }
     tracing::info!(key_id = %key_id, user_id = %uid, config_version = new_ver, "user deleted self-service token");
     (
         axum::http::StatusCode::OK,
@@ -935,12 +947,32 @@ pub async fn handle_admin_users_delete(
     if file.gateway.users.len() == before {
         return not_found("user not found", "user_not_found");
     }
+    // Cascade delete any gateway keys associated with this user
+    let cascade_key_ids: Vec<String> = file
+        .gateway
+        .gateway_keys
+        .iter()
+        .filter(|k| k.user_id.as_deref() == Some(&user_id))
+        .map(|k| k.id.clone())
+        .collect();
+    file.gateway
+        .gateway_keys
+        .retain(|k| k.user_id.as_deref() != Some(&user_id));
+
     let new_ver = match save_store_config(&state, &mut file, &store_version).await {
         Ok(v) => v,
         Err(resp) => return resp,
     };
     state.user_tracker.remove_user(&user_id);
-    tracing::info!(user_id = %user_id, config_version = new_ver, "admin deleted user");
+    for kid in &cascade_key_ids {
+        state.token_tracker.remove(kid);
+    }
+    {
+        let mut cfg = state.config.write();
+        cfg.users.retain(|u| u.id != user_id);
+        cfg.gateway_keys.retain(|k| k.user_id.as_deref() != Some(&user_id));
+    }
+    tracing::info!(user_id = %user_id, cascade_keys = ?cascade_key_ids, config_version = new_ver, "admin deleted user and cascaded keys");
     (
         axum::http::StatusCode::OK,
         Json(json!({ "ok": true, "config_version": new_ver })),

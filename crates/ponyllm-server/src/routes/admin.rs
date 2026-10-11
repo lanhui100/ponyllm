@@ -4483,6 +4483,18 @@ pub async fn handle_users_delete(
     };
     let removed = file.gateway.users.remove(idx);
 
+    // Cascade delete any gateway keys associated with this user
+    let cascade_key_ids: Vec<String> = file
+        .gateway
+        .gateway_keys
+        .iter()
+        .filter(|k| k.user_id.as_deref() == Some(&user_id))
+        .map(|k| k.id.clone())
+        .collect();
+    file.gateway
+        .gateway_keys
+        .retain(|k| k.user_id.as_deref() != Some(&user_id));
+
     let new_ver = match save_store_config(&state, &mut file, &store_version).await {
         Ok(v) => v,
         Err(resp) => return resp,
@@ -4490,8 +4502,16 @@ pub async fn handle_users_delete(
 
     // Mirror to memory
     state.user_tracker.remove_user(&user_id);
+    for kid in &cascade_key_ids {
+        state.token_tracker.remove(kid);
+    }
+    {
+        let mut cfg = state.config.write();
+        cfg.users.retain(|u| u.id != user_id);
+        cfg.gateway_keys.retain(|k| k.user_id.as_deref() != Some(&user_id));
+    }
 
-    tracing::info!(user_id = %user_id, config_version = new_ver, "admin deleted user");
+    tracing::info!(user_id = %user_id, cascade_keys = ?cascade_key_ids, config_version = new_ver, "admin deleted user and cascaded keys");
     (StatusCode::OK, Json(user_view(&removed, 0, new_ver))).into_response()
 }
 

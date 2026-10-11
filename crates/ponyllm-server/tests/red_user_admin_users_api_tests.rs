@@ -265,6 +265,93 @@ async fn admin_delete_user_returns_200() {
     );
 }
 
+/// 契约#12b：admin 删除用户时，必须级联清理其名下的 gateway_keys（写时级联删除），
+/// 且若存在孤儿 Token（如外部配置丢失用户），读时鉴权必须直接拒绝为 401（读时防御）。
+#[tokio::test]
+async fn admin_delete_user_cascades_keys_and_orphaned_key_auth_fails_401() {
+    let h = Gh::new().await;
+    let c = reqwest::Client::new();
+    let admin_t = login_token(&c, &h, "admin", "admin-pass-1234").await;
+
+    // 1. 创建临时用户 charlie
+    let created: serde_json::Value = c
+        .post(h.url("/api/user/admin/users"))
+        .header("Authorization", bearer(&admin_t))
+        .json(&json!({ "username": "charlie", "password": "charlie-pass-1234" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let charlie_uid = created["id"].as_str().unwrap();
+
+    // 2. 登录 charlie 并为其创建一个推理 Token
+    let charlie_t = login_token(&c, &h, "charlie", "charlie-pass-1234").await;
+    let tk_resp: serde_json::Value = c
+        .post(h.url("/api/user/tokens"))
+        .header("Authorization", bearer(&charlie_t))
+        .json(&json!({ "name": "charlie-key-1" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let raw_token = tk_resp["api_key"].as_str().expect("api_key present");
+    let _key_id = tk_resp["key_id"].as_str().expect("key_id present");
+
+    // 3. 在用户删除前，该 Token 访问推理接口应通过鉴权（由于无可用 provider，可能报 404/503 或正常，但绝非 401）
+    let probe_before = c
+        .post(h.url("/v1/chat/completions"))
+        .header("Authorization", format!("Bearer {raw_token}"))
+        .json(&json!({
+            "model": "auto",
+            "messages": [{"role": "user", "content": "hi"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_ne!(
+        probe_before.status(),
+        StatusCode::UNAUTHORIZED,
+        "token should authenticate before user deletion"
+    );
+
+    // 4. Admin 删除 charlie
+    let del_resp = c
+        .delete(h.url(&format!("/api/user/admin/users/{charlie_uid}")))
+        .header("Authorization", bearer(&admin_t))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(del_resp.status(), StatusCode::OK);
+
+    // 5. 断言：写时级联删除生效，charlie 的 token 必须从 gateway_keys 中被彻底清除
+    //    且使用已删除用户的 token 调用推理接口必须立即返回 401 invalid_api_key（而不是 403 user_not_found）
+    let probe_after = c
+        .post(h.url("/v1/chat/completions"))
+        .header("Authorization", format!("Bearer {raw_token}"))
+        .json(&json!({
+            "model": "auto",
+            "messages": [{"role": "user", "content": "hi"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        probe_after.status(),
+        StatusCode::UNAUTHORIZED,
+        "token of deleted user must immediately fail with 401 Unauthorized"
+    );
+    let err_json: serde_json::Value = probe_after.json().await.unwrap();
+    assert_eq!(
+        err_json["error"]["code"],
+        "invalid_api_key",
+        "must return code invalid_api_key instead of user_not_found"
+    );
+}
+
 /// 契约#13/#14：reset-password / reset-usage → 200。
 #[tokio::test]
 async fn admin_reset_password_and_usage_returns_200() {
