@@ -112,10 +112,9 @@ spec:
   entryPoints:
     - websecure
   routes:
-    # 加权数据面（2026-09-30）：路由 #2/#3/#4 按 dev:preprod:proserver:tencent
-    # = 5:4:1:1 加权分发（weight 为相对值）。fallback：readinessProbe(/health)
-    # 摘除不健康 Pod → Traefik 自动将该 Service weight 归零，剩余 Service 按
-    # 比例重分配（非显式 failover，如实声明）。
+    # 数据面高可用路由：收敛至集群通用服务 ponyllm-pod-service，
+    # 自动关联集群内所有就绪的 gateway Pod。当单节点宕机时，k8s 自动摘除端点，
+    # Traefik 无缝故障转移至其余存活节点，避免单节点宕机导致 503 或整条路由下线 (404)。
     # 1. 显式放行 ACME HTTP-01/TLS Challenge 直通有效容器服务
     #    挂 ratelimit + security-headers：限流防扫刷，安全头与全站一致。
     - match: Host(`tokens.ponyjob.top`) && PathPrefix(`/.well-known/acme-challenge/`)
@@ -138,36 +137,8 @@ spec:
       middlewares:
         - name: ponyllm-security-headers
       services:
-        - name: ponyllm-svc-dev
+        - name: ponyllm-pod-service
           port: 8080
-          weight: 5
-          healthCheck:
-            path: /health
-            intervalSeconds: 2
-            timeoutSeconds: 1
-          responseForwarding:
-            flushInterval: "100ms"
-        - name: ponyllm-svc-preprod
-          port: 8080
-          weight: 4
-          healthCheck:
-            path: /health
-            intervalSeconds: 2
-            timeoutSeconds: 1
-          responseForwarding:
-            flushInterval: "100ms"
-        - name: ponyllm-svc-proserver
-          port: 8080
-          weight: 1
-          healthCheck:
-            path: /health
-            intervalSeconds: 2
-            timeoutSeconds: 1
-          responseForwarding:
-            flushInterval: "100ms"
-        - name: ponyllm-svc-tencent
-          port: 8080
-          weight: 1
           healthCheck:
             path: /health
             intervalSeconds: 2
@@ -185,36 +156,8 @@ spec:
         - name: ponyllm-ratelimit
         - name: ponyllm-inflightreq
       services:
-        - name: ponyllm-svc-dev
+        - name: ponyllm-pod-service
           port: 8080
-          weight: 5
-          healthCheck:
-            path: /health
-            intervalSeconds: 2
-            timeoutSeconds: 1
-          responseForwarding:
-            flushInterval: "100ms"
-        - name: ponyllm-svc-preprod
-          port: 8080
-          weight: 4
-          healthCheck:
-            path: /health
-            intervalSeconds: 2
-            timeoutSeconds: 1
-          responseForwarding:
-            flushInterval: "100ms"
-        - name: ponyllm-svc-proserver
-          port: 8080
-          weight: 1
-          healthCheck:
-            path: /health
-            intervalSeconds: 2
-            timeoutSeconds: 1
-          responseForwarding:
-            flushInterval: "100ms"
-        - name: ponyllm-svc-tencent
-          port: 8080
-          weight: 1
           healthCheck:
             path: /health
             intervalSeconds: 2
@@ -250,36 +193,8 @@ spec:
         - name: ponyllm-ratelimit
         - name: ponyllm-inflightreq
       services:
-        - name: ponyllm-svc-dev
+        - name: ponyllm-pod-service
           port: 8080
-          weight: 5
-          healthCheck:
-            path: /health
-            intervalSeconds: 2
-            timeoutSeconds: 1
-          responseForwarding:
-            flushInterval: "100ms"
-        - name: ponyllm-svc-preprod
-          port: 8080
-          weight: 4
-          healthCheck:
-            path: /health
-            intervalSeconds: 2
-            timeoutSeconds: 1
-          responseForwarding:
-            flushInterval: "100ms"
-        - name: ponyllm-svc-proserver
-          port: 8080
-          weight: 1
-          healthCheck:
-            path: /health
-            intervalSeconds: 2
-            timeoutSeconds: 1
-          responseForwarding:
-            flushInterval: "100ms"
-        - name: ponyllm-svc-tencent
-          port: 8080
-          weight: 1
           healthCheck:
             path: /health
             intervalSeconds: 2
