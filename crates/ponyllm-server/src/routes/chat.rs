@@ -1590,11 +1590,15 @@ pub async fn handle_chat_completions(
         &request_id,
     );
 
-    // PonySentry 埋点上报网关耗尽/失败事件（过滤下游客户端 4xx/invalid_request_error 参数错误）
+    // PonySentry 埋点上报网关耗尽/失败事件（过滤下游客户端 4xx/invalid_request_error 参数错误，
+    // 且上游配额/限流/无可用 key/冷却类不上报，契约见
+    // .agents/notes/implemented/process/2026-10-12-suppress-upstream-quota-errors-in-sentry.md）
     let is_client_bad_request = last_error.contains("invalid_request_error")
         || last_error.contains("400 Bad Request")
         || last_error.contains("Duplicate function_call_output");
-    if !is_client_bad_request {
+    if !is_client_bad_request
+        && crate::routes::should_report_sentry_exhaustion(&last_kind, &last_error)
+    {
         let mut tags = std::collections::HashMap::new();
         tags.insert("requested_model".to_string(), requested_raw_model.clone());
         tags.insert("route".to_string(), "v1/chat/completions".to_string());
