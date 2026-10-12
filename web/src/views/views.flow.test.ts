@@ -38,19 +38,24 @@ describe('WEB-02 End-to-End User Flow (Connect -> Dashboard -> Recorder)', () =>
     document.body.removeChild(container);
   });
 
-  it('Flow 1: Connect flow & unauthenticated token login', async () => {
+  it('Flow 1: Connect flow & username/password login', async () => {
     const session = useSessionStore(pinia);
-    expect(session.token).toBe('');
+    expect(session.loggedIn).toBe(false);
 
     globalThis.fetch = vi.fn().mockImplementation((url: string) => {
-      // VULN-05 (Phase-3): 会话端点未启用（legacy 部署）→ 404 回退 token 内存流程
-      if (url.includes('/api/admin/session')) {
-        return Promise.resolve(new Response(JSON.stringify({ error: { code: 'not_found' } }), { status: 404 }));
+      if (url === '/health') {
+        return Promise.resolve(new Response(JSON.stringify({ version: '0.0.0' }), { status: 200 }));
       }
-      if (url.includes('/v1/models')) {
-        return Promise.resolve(new Response(JSON.stringify({ object: 'list', data: [] }), { status: 200 }));
+      if (url === '/v1/models') {
+        return Promise.resolve(new Response(JSON.stringify({ error: 'unauthorized' }), { status: 401 }));
       }
-      return Promise.reject(new Error('unhandled url'));
+      if (url.includes('/api/user/login')) {
+        return Promise.resolve(new Response(JSON.stringify({
+          access_token: 'jwt-test-user-token',
+          user: { id: 'u1', username: 'admin', role: 'admin' },
+        }), { status: 200 }));
+      }
+      return Promise.reject(new Error(`unhandled url: ${url}`));
     });
 
     const app = createApp(ConnectView);
@@ -59,17 +64,21 @@ describe('WEB-02 End-to-End User Flow (Connect -> Dashboard -> Recorder)', () =>
     app.mount(container);
 
     expect(container.textContent).toContain('连接网关');
-    const input = container.querySelector('input[type="password"]') as HTMLInputElement;
-    expect(input).not.toBeNull();
-    input.value = 'sk-test-secret-token';
-    input.dispatchEvent(new Event('input'));
+    const userInput = container.querySelector('#username-input') as HTMLInputElement;
+    const passInput = container.querySelector('#password-input') as HTMLInputElement;
+    expect(userInput).not.toBeNull();
+    expect(passInput).not.toBeNull();
+    userInput.value = 'admin';
+    userInput.dispatchEvent(new Event('input'));
+    passInput.value = 'password123';
+    passInput.dispatchEvent(new Event('input'));
 
     const form = container.querySelector('form') as HTMLFormElement;
     form.dispatchEvent(new Event('submit'));
 
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await new Promise((resolve) => setTimeout(resolve, 50));
     await nextTick();
-    expect(session.token).toBe('sk-test-secret-token');
+    expect(session.loggedIn).toBe(true);
     expect(router.currentRoute.value.path).toBe('/dashboard');
     app.unmount();
   });
@@ -79,14 +88,19 @@ describe('WEB-02 End-to-End User Flow (Connect -> Dashboard -> Recorder)', () =>
     session.logout();
 
     globalThis.fetch = vi.fn().mockImplementation((url: string) => {
-      // VULN-05 (Phase-3): 会话端点未启用（legacy 部署）→ 404 回退 token 内存流程
-      if (url.includes('/api/admin/session')) {
-        return Promise.resolve(new Response(JSON.stringify({ error: { code: 'not_found' } }), { status: 404 }));
+      if (url === '/health') {
+        return Promise.resolve(new Response(JSON.stringify({ version: '0.0.0' }), { status: 200 }));
       }
-      if (url.includes('/v1/models')) {
-        return Promise.resolve(new Response(JSON.stringify({ object: 'list', data: [] }), { status: 200 }));
+      if (url === '/v1/models') {
+        return Promise.resolve(new Response(JSON.stringify({ error: 'unauthorized' }), { status: 401 }));
       }
-      return Promise.reject(new Error('unhandled url'));
+      if (url.includes('/api/user/login')) {
+        return Promise.resolve(new Response(JSON.stringify({
+          access_token: 'jwt-valid-key',
+          user: { id: 'u1', username: 'admin', role: 'admin' },
+        }), { status: 200 }));
+      }
+      return Promise.reject(new Error(`unhandled url: ${url}`));
     });
 
     // Malicious open redirect query
@@ -97,17 +111,20 @@ describe('WEB-02 End-to-End User Flow (Connect -> Dashboard -> Recorder)', () =>
     app.use(pinia);
     app.mount(container);
 
-    const input = container.querySelector('input[type="password"]') as HTMLInputElement;
-    input.value = 'sk-valid-key';
-    input.dispatchEvent(new Event('input'));
+    const userInput = container.querySelector('#username-input') as HTMLInputElement;
+    const passInput = container.querySelector('#password-input') as HTMLInputElement;
+    userInput.value = 'admin';
+    userInput.dispatchEvent(new Event('input'));
+    passInput.value = 'password123';
+    passInput.dispatchEvent(new Event('input'));
 
     const form = container.querySelector('form') as HTMLFormElement;
     form.dispatchEvent(new Event('submit'));
 
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await new Promise((resolve) => setTimeout(resolve, 50));
     await nextTick();
 
-    expect(session.token).toBe('sk-valid-key');
+    expect(session.loggedIn).toBe(true);
     // Must fall back to safe internal dashboard instead of external domain
     expect(router.currentRoute.value.path).toBe('/dashboard');
     app.unmount();

@@ -40,72 +40,48 @@
 
         <form v-else class="space-y-4" @submit.prevent="submit">
           <div>
-            <div class="flex items-center justify-between mb-1.5">
-              <label for="token-input" class="block text-xs font-medium text-slate-700">
-                网关访问凭证 (Token)
-              </label>
-              <span class="text-[11px] text-slate-400">sk-pony-...（可选）</span>
-            </div>
+            <label for="username-input" class="block text-xs font-medium text-slate-700 mb-1.5">
+              用户名
+            </label>
             <div class="relative">
               <input
-                id="token-input"
-                v-model="input"
-                type="password"
-                autocomplete="new-password"
+                id="username-input"
+                v-model="usernameInput"
+                type="text"
+                autocomplete="username"
                 autocapitalize="none"
                 autocorrect="off"
                 spellcheck="false"
-                placeholder="请输入网关访问 API Key"
-                class="w-full h-10 px-3 py-2 text-sm bg-slate-50/50 border border-slate-200 rounded-lg focus:outline-none focus:bg-white focus:border-slate-400 focus:ring-2 focus:ring-slate-400/20 text-slate-900 placeholder:text-slate-400 transition-all font-mono tracking-wide"
+                placeholder="请输入用户名"
+                class="w-full h-10 px-3 py-2 text-sm bg-slate-50/50 border border-slate-200 rounded-lg focus:outline-none focus:bg-white focus:border-slate-400 focus:ring-2 focus:ring-slate-400/20 text-slate-900 placeholder:text-slate-400 transition-all tracking-wide"
                 :disabled="loading"
               />
             </div>
           </div>
 
-          <div class="flex items-center justify-between mb-1.5">
-            <label for="username-input" class="block text-xs font-medium text-slate-700">
-              或使用用户名登录
+          <div>
+            <label for="password-input" class="block text-xs font-medium text-slate-700 mb-1.5">
+              密码
             </label>
-            <span class="text-[11px] text-slate-400">Web 用户</span>
-          </div>
-          <div class="relative">
-            <input
-              id="username-input"
-              v-model="usernameInput"
-              type="text"
-              autocomplete="username"
-              autocapitalize="none"
-              autocorrect="off"
-              spellcheck="false"
-              placeholder="请输入用户名"
-              class="w-full h-10 px-3 py-2 text-sm bg-slate-50/50 border border-slate-200 rounded-lg focus:outline-none focus:bg-white focus:border-slate-400 focus:ring-2 focus:ring-slate-400/20 text-slate-900 placeholder:text-slate-400 transition-all tracking-wide"
-              :disabled="loading"
-            />
-          </div>
-
-          <div class="relative">
-            <input
-              id="password-input"
-              v-model="passwordInput"
-              type="password"
-              autocomplete="current-password"
-              autocapitalize="none"
-              autocorrect="off"
-              spellcheck="false"
-              placeholder="请输入密码"
-              class="w-full h-10 px-3 py-2 text-sm bg-slate-50/50 border border-slate-200 rounded-lg focus:outline-none focus:bg-white focus:border-slate-400 focus:ring-2 focus:ring-slate-400/20 text-slate-900 placeholder:text-slate-400 transition-all tracking-wide"
-              :disabled="loading"
-            />
+            <div class="relative">
+              <input
+                id="password-input"
+                v-model="passwordInput"
+                type="password"
+                autocomplete="current-password"
+                autocapitalize="none"
+                autocorrect="off"
+                spellcheck="false"
+                placeholder="请输入密码"
+                class="w-full h-10 px-3 py-2 text-sm bg-slate-50/50 border border-slate-200 rounded-lg focus:outline-none focus:bg-white focus:border-slate-400 focus:ring-2 focus:ring-slate-400/20 text-slate-900 placeholder:text-slate-400 transition-all tracking-wide"
+                :disabled="loading"
+              />
+            </div>
           </div>
 
           <div v-if="upgradedNotice" class="p-2.5 rounded-lg bg-amber-50 border border-amber-200/60 text-xs text-amber-700 flex items-start gap-2 animate-in fade-in duration-200">
             <Icons name="info" size="14" class="mt-0.5 shrink-0 text-amber-500" />
-            <span class="leading-relaxed">网关已发版，旧会话已清除，请重新连接。</span>
-          </div>
-
-          <div v-if="prefilledNotice" class="p-2.5 rounded-lg bg-sky-50 border border-sky-200/60 text-xs text-sky-700 flex items-start gap-2 animate-in fade-in duration-200">
-            <Icons name="info" size="14" class="mt-0.5 shrink-0 text-sky-500" />
-            <span class="leading-relaxed">已从链接预填凭证（未自动登录，URL token 不再直达），请点"连接"完成验证。strict 模式下旧版单 token 将被拒绝，请使用分级 key（<span class="font-mono">ponyllm keys issue --scope &lt;admin|inference|readonly&gt;</span>）。</span>
+            <span class="leading-relaxed">网关已发版，旧会话已清除，请重新登录。</span>
           </div>
 
           <div v-if="error" class="p-2.5 rounded-lg bg-rose-50 border border-rose-200/60 text-xs text-rose-600 flex items-start gap-2 animate-in fade-in duration-200">
@@ -122,7 +98,7 @@
           >
             <Icons v-if="loading" name="refresh" size="14" class="animate-spin" />
             <Icons v-else name="lock" size="14" />
-            <span>{{ loading ? '连接中...' : '连接' }}</span>
+            <span>{{ loading ? '登录中...' : '登录' }}</span>
           </UiButton>
         </form>
 
@@ -139,21 +115,17 @@
 import { ref, onMounted } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { useSessionStore } from '../stores/session';
-import { bearerValue } from '../lib/alova';
-import { PROBE_PATH, probeOpenMode, consumeTransferToken } from '../router';
+import { probeOpenMode } from '../router';
 import UiCard from '../components/ui/UiCard.vue';
 import UiButton from '../components/ui/UiButton.vue';
 import Icons from '../components/ui/Icons.vue';
 import PonyLogo from '../components/ui/PonyLogo.vue';
 
-const input = ref('');
 const usernameInput = ref('');
 const passwordInput = ref('');
 const error = ref('');
 const loading = ref(false);
 const openMode = ref(false);
-// P2: ?token= 预填提示（不再静默直达）与发版强制 logout 提示。
-const prefilledNotice = ref(false);
 const upgradedNotice = ref(false);
 const route = useRoute();
 const router = useRouter();
@@ -171,20 +143,7 @@ onMounted(async () => {
   } catch {
     // 网关不可达时不强制 logout，探针/表单提交会给出 DOWN/不可达态。
   }
-  const transferred = consumeTransferToken();
-  if (transferred) {
-    input.value = transferred;
-    prefilledNotice.value = true;
-    return;
-  }
-  const qToken = (route.query.token || route.query.key) as string | undefined;
-  if (qToken && typeof qToken === 'string' && qToken.trim() !== '') {
-    // P2: 只预填、不自动 submit。query 清洗由 router 守卫完成。
-    input.value = qToken.trim();
-    prefilledNotice.value = true;
-    return;
-  }
-  // If navigating to /connect explicitly without token in URL, clear any stale session
+  // If navigating to /connect explicitly, clear any stale session
   session.logout();
   openMode.value = await probeOpenMode().catch(() => false);
 });
@@ -217,100 +176,31 @@ async function enterUserHome(): Promise<void> {
 async function submit(): Promise<void> {
   if (loading.value) return;
   error.value = '';
-  const candidate = input.value.trim();
   const username = usernameInput.value.trim();
   const password = passwordInput.value;
 
-  // B003: username+password 双字段登录（/api/user/login → JWT 内存会话）。
-  if (username !== '' || password !== '') {
-    if (username === '' || password === '') {
-      error.value = '请输入用户名与密码';
-      return;
-    }
-    loading.value = true;
-    try {
-      const { loginWithPassword } = await import('../lib/userApi');
-      const resp = await loginWithPassword(username, password);
-      session.loginWithJwt(resp.access_token, resp.user.role);
-      await enterUserHome();
-      return;
-    } catch (loginErr) {
-      const code = (loginErr as Error & { code?: unknown }).code;
-      if (code === 'invalid_credentials') {
-        error.value = '用户名或密码错误（401）。';
-        return;
-      }
-      if (code === 'not_found' || (loginErr as Error & { status?: unknown }).status === 404) {
-        // user_tokens_enabled=off：登录端点未启用 → 清错误并回退旧 token 流程。
-        error.value = '';
-      } else if (code === 'rate_limit_exceeded') {
-        error.value = '登录尝试过于频繁，请稍后重试。';
-        return;
-      } else {
-        error.value = `登录失败：${(loginErr as Error).message ?? '未知错误'}`;
-        return;
-      }
-    } finally {
-      loading.value = false;
-    }
+  if (username === '' || password === '') {
+    error.value = '请输入用户名与密码';
+    return;
   }
 
-  if (candidate === '' && error.value === '') {
-    error.value = '请输入用户名/密码或网关 Token';
-    return;
-  }
-  if (candidate === '') {
-    return;
-  }
   loading.value = true;
   try {
-    // VULN-05: 优先会话端点（Bearer 交换 → 后端 Set-Cookie HttpOnly 接管），
-    // 成功即丢弃内存 token（cookie 已掌凭据）。
-    const sessionResp = await fetch('/api/admin/session', {
-      method: 'POST',
-      headers: { Authorization: bearerValue(candidate) },
-      credentials: 'same-origin',
-    });
-    if (sessionResp.status === 200) {
-      // R-S4: 换发响应体携带 sid（后端 R-S8），入内存供写请求 CSRF 双提交头
-      const body = (await sessionResp.json().catch(() => ({}))) as { sid?: unknown };
-      session.loginCookieMode(typeof body?.sid === 'string' ? body.sid : null);
-      await enterDashboard();
+    const { loginWithPassword } = await import('../lib/userApi');
+    const resp = await loginWithPassword(username, password);
+    session.loginWithJwt(resp.access_token, resp.user.role);
+    await enterUserHome();
+  } catch (loginErr) {
+    const code = (loginErr as Error & { code?: unknown }).code;
+    if (code === 'invalid_credentials') {
+      error.value = '用户名或密码错误（401）。';
       return;
     }
-    if (sessionResp.status === 401) {
-      error.value = 'Token 无效（401）。若网关已切 strict 模式，旧版单 token 会被拒绝，请改用分级 key（ponyllm keys issue --scope <admin|inference|readonly>）。';
+    if (code === 'rate_limit_exceeded') {
+      error.value = '登录尝试过于频繁，请稍后重试。';
       return;
     }
-    if (sessionResp.status === 403) {
-      error.value = '权限不足（403）：该 key 作用域不够，请更换高权限 key 后重试。';
-      return;
-    }
-    if (sessionResp.status === 404) {
-      // 会话端点未启用（legacy 部署）→ 回退原探测流程（token 内存 + 兼容保底）。
-      const resp = await fetch(PROBE_PATH, {
-        headers: { Authorization: bearerValue(candidate) },
-      });
-      // Tight: only 2xx logs in (P1-4).
-      if (resp.status === 401) {
-        error.value = 'Token 无效（401）。若网关已切 strict 模式，旧版单 token 会被拒绝，请改用分级 key（ponyllm keys issue --scope <admin|inference|readonly>）。';
-        return;
-      }
-      if (resp.status === 403) {
-        error.value = '权限不足（403）：该 key 作用域不够，请更换高权限 key 后重试。';
-        return;
-      }
-      if (!resp.ok) {
-        error.value = `网关异常（${resp.status}）`;
-        return;
-      }
-      session.login(candidate);
-      await enterDashboard();
-      return;
-    }
-    error.value = `网关异常（${sessionResp.status}）`;
-  } catch {
-    error.value = '网关不可达';
+    error.value = `登录失败：${(loginErr as Error).message ?? '未知错误'}`;
   } finally {
     loading.value = false;
   }
