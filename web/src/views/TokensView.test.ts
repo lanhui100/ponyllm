@@ -106,6 +106,10 @@ describe('TokensView.vue', () => {
     expect(openBtn).not.toBeNull();
     expect(openBtn?.textContent).toContain('新增 Token');
 
+    // 检查不再包含停用/启用状态徽标与切换按钮
+    expect(container.textContent).not.toContain('停用');
+    expect(container.textContent).not.toContain('启用');
+
     // 旋转已改为轮换
     const rotateBtns = container.querySelectorAll('[data-testid="rotate-token-btn"]');
     expect(rotateBtns.length).toBe(2);
@@ -172,12 +176,12 @@ describe('TokensView.vue', () => {
     // 编辑弹窗已关闭
     expect(container.querySelector('[data-testid="create-token-modal"]')).toBeNull();
 
-    // 弹出结果展示弹窗
+    // 弹出精简后的结果展示弹窗
     const resultModal = container.querySelector('[data-testid="token-result-modal"]');
     expect(resultModal).not.toBeNull();
     expect(resultModal?.textContent).toContain('Token 创建成功');
     expect(resultModal?.textContent).toContain('明文仅展示一次');
-    expect(resultModal?.textContent).toContain('安全提醒');
+    expect(resultModal?.textContent).not.toContain('安全提醒');
 
     // 检查明文输入框与复制按钮
     const input = container.querySelector('[data-testid="plaintext-token-input"]') as HTMLInputElement;
@@ -216,7 +220,8 @@ describe('TokensView.vue', () => {
     const resultModal = container.querySelector('[data-testid="token-result-modal"]');
     expect(resultModal).not.toBeNull();
     expect(resultModal?.textContent).toContain('Token 轮换成功');
-    expect(resultModal?.textContent).toContain('旧凭证已即刻作废失效');
+    expect(resultModal?.textContent).not.toContain('安全提醒');
+    expect(resultModal?.textContent).not.toContain('旧凭证已即刻作废失效');
 
     const input = container.querySelector('[data-testid="plaintext-token-input"]') as HTMLInputElement;
     expect(input.value).toBe('sk-pony-rotated-secret-5678');

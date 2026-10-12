@@ -183,7 +183,7 @@ function fmtModels(list: string[] | null): string {
       <div class="flex items-center justify-between">
         <div>
           <h1 class="text-xl font-bold tracking-tight text-slate-900">我的 Token</h1>
-          <p class="mt-1 text-xs text-slate-500">自助创建与管理仅限 LLM 调用使用的访问凭证（明文仅显示一次）。</p>
+          <p class="mt-1 text-xs text-slate-500">创建与管理 LLM 访问凭证。</p>
         </div>
       </div>
 
@@ -207,9 +207,6 @@ function fmtModels(list: string[] | null): string {
             <div class="min-w-0 space-y-1">
               <div class="flex items-center gap-2">
                 <span class="text-sm font-medium text-slate-800 truncate">{{ token.name ?? '未命名' }}</span>
-                <UiBadge :variant="token.enabled ? 'success' : 'secondary'">
-                  {{ token.enabled ? '启用' : '停用' }}
-                </UiBadge>
               </div>
               <div class="text-[11px] text-slate-500 font-mono truncate">{{ token.key_id }}</div>
               <div class="text-[11px] text-slate-500">
@@ -217,9 +214,6 @@ function fmtModels(list: string[] | null): string {
               </div>
             </div>
             <div class="flex items-center gap-1.5 shrink-0">
-              <UiButton variant="secondary" size="sm" @click="handleToggle(token)">
-                {{ token.enabled ? '停用' : '启用' }}
-              </UiButton>
               <UiButton variant="outline" size="sm" data-testid="rotate-token-btn" @click="handleRotate(token)">
                 <Icons name="refresh" size="13" />
                 <span>轮换</span>
@@ -270,13 +264,13 @@ function fmtModels(list: string[] | null): string {
           <div class="space-y-3">
             <div>
               <label for="token-name" class="block text-xs font-medium text-slate-700 mb-1.5">
-                名称（1-64 字符）<span class="text-rose-500">*</span>
+                名称 <span class="text-rose-500">*</span>
               </label>
               <input
                 id="token-name"
                 v-model="name"
                 type="text"
-                placeholder="例如 ci-swe-token"
+                placeholder="Token 名称"
                 class="w-full h-10 px-3 py-2 text-sm bg-slate-50/50 border border-slate-200 rounded-lg focus:outline-none focus:bg-white focus:border-slate-400 text-slate-900 placeholder:text-slate-400 transition-all"
                 data-testid="token-name-input"
               />
@@ -284,14 +278,14 @@ function fmtModels(list: string[] | null): string {
 
             <div>
               <label for="token-quota" class="block text-xs font-medium text-slate-700 mb-1.5">
-                用量上限（Token 数，留空=不限）
+                用量上限
               </label>
               <input
                 id="token-quota"
                 v-model.number="quota"
                 type="number"
                 min="0"
-                placeholder="1000000"
+                placeholder="留空为不限"
                 class="w-full h-10 px-3 py-2 text-sm bg-slate-50/50 border border-slate-200 rounded-lg focus:outline-none focus:bg-white focus:border-slate-400 text-slate-900 placeholder:text-slate-400 transition-all"
                 data-testid="token-quota-input"
               />
@@ -299,13 +293,13 @@ function fmtModels(list: string[] | null): string {
 
             <div>
               <label for="token-models" class="block text-xs font-medium text-slate-700 mb-1.5">
-                模型白名单（逗号分隔，支持 provider/model 与 deepseek/* 通配；留空=全部）
+                允许模型
               </label>
               <input
                 id="token-models"
                 v-model="modelLimits"
                 type="text"
-                placeholder="gpt-4o-mini, deepseek/*"
+                placeholder="留空为全部，多个用逗号分隔"
                 class="w-full h-10 px-3 py-2 text-sm bg-slate-50/50 border border-slate-200 rounded-lg focus:outline-none focus:bg-white focus:border-slate-400 text-slate-900 placeholder:text-slate-400 transition-all font-mono tracking-wide"
                 data-testid="token-models-input"
               />
@@ -342,15 +336,9 @@ function fmtModels(list: string[] | null): string {
         </div>
 
         <div class="p-5 space-y-4 text-sm">
-          <div class="p-3 bg-emerald-50/80 border border-emerald-200/80 rounded-xl text-emerald-800 leading-relaxed text-xs">
-            <strong class="font-medium">安全提醒：</strong>
-            {{ resultToken.isRotate ? 'Token 已生成新明文凭证，旧凭证已即刻作废失效。' : '新凭证已生成。' }}
-            出于安全考量，明文密钥仅在此时展示一次，后续无法再次查看。请立即复制并妥善保管！
-          </div>
-
           <div>
             <label class="block text-xs font-medium text-slate-600 mb-1.5">
-              访问凭据 (ID: {{ resultToken.keyId }})
+              访问凭据
             </label>
             <div class="flex items-center gap-2">
               <input
@@ -379,7 +367,7 @@ function fmtModels(list: string[] | null): string {
             data-testid="close-result-modal-btn"
             @click="closeResultModal"
           >
-            我已安全复制，关闭
+            关闭
           </UiButton>
         </div>
       </div>
