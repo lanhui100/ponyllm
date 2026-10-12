@@ -122,9 +122,16 @@ Jev 上游对部分字段校验较宽松，生产 agent 不应完全依赖上游
 - certainty `0.5–0.85`：生成草稿，请人确认后再执行。
 - certainty `< 0.5`：转人工，不自动执行、不生成终稿。
 
-## 经网关调用（统一计量）
+## 经网关调用与模型 Fallback 容灾
 
-ponyllm 网关提供 `POST <GW>/v1/systemone`（provider 名 `zen-jev`，网关鉴权 Bearer 网关 key，需 `inference` scope；401 = 网关 key 错，403 = scope 不足；每次调用的 usage 计入网关 quota `provider=zen-jev` 口径，见 `ponyllm-quota` skill）。网关为纯透传（只取顶层 `model` 做路由，其余原样转发），字段形态与本 skill 一致。
+ponyllm 网关提供统一接入点 `POST <GW>/v1/systemone`（网关鉴权 `Bearer <KEY>`，需 `inference` scope；401 = 网关 key 错，403 = scope 不足）：
+
+### 1. 主模型与 Fallback 模型定义
+- **默认主模型**：`jev-1.13-free`（提供商：`zen-jev`，直连 OpenCode Zen System One 节点）。
+- **备用降级模型 (Fallback)**：`convaiinnovations/laya`（短别名 `laya`，提供商：`vercel`，接入 Vercel AI Gateway 决策接口）。
+  - **协议兼容性**：Laya 与 Jev 均严格遵循 TypeSafe System One 契约（`state` + `questions`，包含 `noul`、`choice`、`score` 原语），返回结构完全一致，应用层无需适配代码。
+  - **网关自动降级**：ponyllm 内已为 `jev-1.13-free` 配置 `fallbacks = ["convaiinnovations/laya"]`。当主上游遭遇 429 限流/配额耗尽（`FreeUsageLimitError`）时，网关透明故障倒换至 Laya。
+  - **客户端显式调用**：客户端亦可直接请求 `model: "laya"` 或 `model: "convaiinnovations/laya"` 直达备选模型。
 
 ## 反模式
 

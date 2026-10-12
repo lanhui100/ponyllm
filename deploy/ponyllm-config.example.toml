@@ -87,6 +87,26 @@ output_price = 0.0
 models = ["jev-1.13-free"]
 default_protocol = "systemone"
 
+[[providers.zen-jev.model_configs]]
+name = "jev-1.13-free"
+fallbacks = ["convaiinnovations/laya"]
+
+# Vercel AI Gateway - Laya System One 决策模型
+[providers.vercel]
+base_url = "https://ai-gateway.vercel.sh/typesafe/v1"
+default_model = "convaiinnovations/laya"
+strategy = "priority"
+billing_mode = "free"
+input_price = 0.0
+cached_price = 0.0
+output_price = 0.0
+models = [
+    "convaiinnovations/laya",
+    "laya",
+    "convaiinnovations/laya-free",
+]
+default_protocol = "systemone"
+
 # antigravity 走 CONNECT 代理模式，proxy= 凭据形态为占位（真 token 只进 live secret）
 # [providers.antigravity]
 # proxy = "http://user:<PPROXY_CLIENT_TOKEN>@pproxy-host.ponyllm.svc:8899"

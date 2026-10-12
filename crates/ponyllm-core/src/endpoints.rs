@@ -41,6 +41,8 @@ pub fn canonicalize_model_name(model: &str) -> String {
     let lower = model.to_ascii_lowercase();
     if lower == "deepseek-v4.1-flash" {
         "deepseek-flash".to_string()
+    } else if lower == "laya" || lower == "laya-free" {
+        "convaiinnovations/laya".to_string()
     } else if lower == "gemini-3.8-flash-high"
         || lower == "gemini-3.8-flash-medium"
         || lower == "gemini-3.8-flash-low"
@@ -56,6 +58,8 @@ pub fn canonicalize_model_name(model: &str) -> String {
 pub fn model_aliases(canonical: &str) -> &'static [&'static str] {
     if canonical.eq_ignore_ascii_case("deepseek-flash") {
         &["deepseek-v4.1-flash"]
+    } else if canonical.eq_ignore_ascii_case("convaiinnovations/laya") {
+        &["laya", "laya-free"]
     } else {
         &[]
     }
@@ -145,5 +149,26 @@ mod tests {
         assert_eq!(canonicalize_model_name("deepseek-chat"), "deepseek-chat");
         assert!(model_aliases("deepseek-flash").contains(&"deepseek-v4.1-flash"));
         assert!(model_aliases("deepseek-chat").is_empty());
+    }
+
+    #[test]
+    fn test_laya_alias_canonicalizes() {
+        assert_eq!(
+            canonicalize_model_name("laya"),
+            "convaiinnovations/laya"
+        );
+        assert_eq!(
+            canonicalize_model_name("Laya"),
+            "convaiinnovations/laya"
+        );
+        assert_eq!(
+            canonicalize_model_name("laya-free"),
+            "convaiinnovations/laya"
+        );
+        assert_eq!(
+            canonicalize_model_name("convaiinnovations/laya"),
+            "convaiinnovations/laya"
+        );
+        assert!(model_aliases("convaiinnovations/laya").contains(&"laya"));
     }
 }
