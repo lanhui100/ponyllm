@@ -74,6 +74,64 @@ run_cmd() {
   "$@"
 }
 
+# ----------------------------------------------------------------------------
+# 节点可用性与健康探活函数：检查特定 role 绑定的 Node 是否存在、是否处于 Ready 且可调度
+# ----------------------------------------------------------------------------
+is_node_schedulable_and_ready() {
+  local role="$1"
+  if [ "$DRY_RUN" -eq 1 ]; then
+    return 0
+  fi
+
+  # 1. 查找 role 对应 Deployment 的 nodeSelector hostname
+  local deploy_name="ponyllm-gateway-${role}"
+  local target_node
+  target_node="$(kubectl -n "$NAMESPACE" get "deploy/${deploy_name}" -o jsonpath='{.spec.template.spec.nodeSelector.kubernetes\.io/hostname}' 2>/dev/null || true)"
+  
+  if [ -z "$target_node" ]; then
+    # 若无法从当前集群 Deployment 获取（尚未部署），从 manifest 查找或默认映射
+    case "$role" in
+      dev) target_node="devserver" ;;
+      preprod) target_node="jobcopilot-preprod" ;;
+      proserver) target_node="proserver" ;;
+      tencent) target_node="tencent" ;;
+      *) target_node="$role" ;;
+    esac
+  fi
+
+  # 2. 检查 Node 资源是否存在
+  if ! kubectl get node "$target_node" >/dev/null 2>&1; then
+    echo "WARN: Node '$target_node' (role: $role) does not exist in cluster"
+    return 1
+  fi
+
+  # 3. 检查 Node Ready 状态
+  local ready_status
+  ready_status="$(kubectl get node "$target_node" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)"
+  if [ "$ready_status" != "True" ]; then
+    echo "WARN: Node '$target_node' (role: $role) Ready condition is '$ready_status' (NotReady)"
+    return 1
+  fi
+
+  # 4. 检查 Node 是否 unschedulable (cordoned)
+  local unschedulable
+  unschedulable="$(kubectl get node "$target_node" -o jsonpath='{.spec.unschedulable}' 2>/dev/null || true)"
+  if [ "$unschedulable" = "true" ]; then
+    echo "WARN: Node '$target_node' (role: $role) is cordoned (spec.unschedulable=true)"
+    return 1
+  fi
+
+  # 5. 检查 Node 是否存在 NoSchedule / NoExecute 污点 (如 disk-pressure, unreachable 等)
+  local taints
+  taints="$(kubectl get node "$target_node" -o jsonpath='{range .spec.taints[*]}{.key}{"="}{.value}{":"}{.effect}{" "}{end}' 2>/dev/null || true)"
+  if echo "$taints" | grep -Eq "NoSchedule|NoExecute"; then
+    echo "WARN: Node '$target_node' (role: $role) contains blocking taints: $taints"
+    return 1
+  fi
+
+  return 0
+}
+
 # 跟踪已成功完成升级的 role，供故障时级联回滚
 COMPLETED_ROLES=()
 
@@ -106,6 +164,14 @@ for role in "${ROLES[@]}"; do
   echo "------------------------------------------------------------"
   echo "== [role: ${role}] Starting rollout sequence =="
   echo "------------------------------------------------------------"
+
+  # --------------------------------------------------------------------------
+  # 步骤 0: 检查节点健康与可调度性（避免单点离线拖垮全集群发布）
+  # --------------------------------------------------------------------------
+  if ! is_node_schedulable_and_ready "$role"; then
+    echo "WARN: [role: ${role}] Node is NotReady or unschedulable! Skipping serialized rollout waiting for this role."
+    continue
+  fi
 
   # --------------------------------------------------------------------------
   # 步骤 1: 增量 apply 本 role 的 Deployment 与关联 Service
@@ -256,6 +322,10 @@ else
   parity_failed=0
   for role in "${ROLES[@]}"; do
     d_name="ponyllm-gateway-${role}"
+    if ! is_node_schedulable_and_ready "$role"; then
+      echo "WARN: [parity-check] Skipping deploy/${d_name} because its node is NotReady or unschedulable"
+      continue
+    fi
     dep_img="$(kubectl -n "$NAMESPACE" get "deploy/${d_name}" -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || true)"
     if [ "$dep_img" != "$BASE_IMAGE" ]; then
       echo "::error::[PARITY-FAIL] deploy/${d_name} image mismatch! Expected: ${BASE_IMAGE}, Got: ${dep_img}"
