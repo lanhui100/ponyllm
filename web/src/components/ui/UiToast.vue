@@ -103,6 +103,18 @@ const typeConfig = computed(() => {
         <!-- 内部顶层高透微渐变光感 (增强毛玻璃流光与通透度) -->
         <div class="absolute -top-10 -right-10 w-36 h-36 rounded-full bg-gradient-to-br from-white/30 to-transparent blur-lg pointer-events-none" />
 
+        <!-- 手动关闭按钮 (位于卡片右上角，仅非 Confirm 或显式 closable 时展示) -->
+        <button
+          v-if="activeItem.closable && !isConfirm"
+          type="button"
+          class="absolute top-2.5 right-2.5 w-5 h-5 flex items-center justify-center rounded-full text-slate-400 hover:text-slate-700 hover:bg-slate-500/15 transition-colors cursor-pointer border-0 outline-none p-0 z-10"
+          aria-label="关闭通知"
+          data-testid="toast-close-btn"
+          @click="dismissToast(activeItem.id)"
+        >
+          <Icons name="cross" size="12" />
+        </button>
+
         <div class="relative flex items-start gap-3.5">
           <!-- 语义图标 (无背景、无边框、颜色更深) -->
           <div
@@ -129,18 +141,6 @@ const typeConfig = computed(() => {
               {{ activeItem.message }}
             </div>
           </div>
-
-          <!-- 手动关闭按钮 (仅非 Confirm 或显式 closable 时展示) -->
-          <button
-            v-if="activeItem.closable && !isConfirm"
-            type="button"
-            class="absolute top-2.5 right-2.5 w-7 h-7 flex items-center justify-center rounded-full text-slate-400 hover:text-slate-700 hover:bg-slate-500/15 transition-colors cursor-pointer"
-            aria-label="关闭通知"
-            data-testid="toast-close-btn"
-            @click="dismissToast(activeItem.id)"
-          >
-            <Icons name="cross" size="14" />
-          </button>
         </div>
 
         <!-- 二次确认交互按钮组 -->

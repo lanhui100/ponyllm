@@ -232,6 +232,9 @@ describe('UI Primitives & Modern Design System', () => {
     expect(closeBtn).not.toBeNull();
     expect(closeBtn.className).toContain('rounded-full');
     expect(closeBtn.className).toContain('hover:bg-slate-500/15');
+    expect(closeBtn.className).toContain('border-0');
+    expect(closeBtn.className).toContain('top-2.5');
+    expect(closeBtn.className).toContain('right-2.5');
     closeBtn.click();
     await nextTick();
 
