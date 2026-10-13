@@ -836,6 +836,14 @@ fn build_web_router(web_enabled: bool, web_dist_dir: &str) -> Router<Arc<AppStat
             "/governance",
             axum::routing::get_service(ServeFile::new(index.clone())),
         )
+        .route(
+            "/tokens",
+            axum::routing::get_service(ServeFile::new(index.clone())),
+        )
+        .route(
+            "/users",
+            axum::routing::get_service(ServeFile::new(index.clone())),
+        )
         .layer(axum::middleware::from_fn(html_no_cache));
     // R8：/app 前缀服务（ServeDir + SPA fallback）同样需要 no-cache——
     // index_routes 的 layer 只包裹已注册路由，nest_service 注册的 /app 分支
@@ -859,7 +867,7 @@ fn build_web_router(web_enabled: bool, web_dist_dir: &str) -> Router<Arc<AppStat
 /// - `/assets/*`：Vite 内容哈希产物（文件名含内容 hash），成功响应加
 ///   `Cache-Control: public, max-age=31536000, immutable`，杜绝浏览器
 ///   启发式缓存歧义；发版后文件名变化即自动取新资源。
-/// - HTML 入口（`/`、`/connect`、`/dashboard`、`/recorder`、`/governance`）：
+/// - HTML 入口（`/`、`/connect`、`/dashboard`、`/recorder`、`/governance`、`/tokens`、`/users`）：
 ///   `no-cache`，保证发版后 index.html 及时引用新哈希资源。
 async fn assets_cache_headers(req: Request, next: Next) -> Response {
     let mut res = next.run(req).await;

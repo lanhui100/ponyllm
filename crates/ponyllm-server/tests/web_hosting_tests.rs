@@ -491,15 +491,18 @@ async fn r8_app_legacy_routes_no_cache_and_assets_immutable() {
     }
 
     // 顶层 HTML 入口保持 no-cache
-    let resp = client
-        .get(format!("http://{}/dashboard", addr))
-        .send()
-        .await
-        .unwrap();
-    assert!(
-        cache_control(&resp).contains("no-cache"),
-        "顶层 HTML 入口须 no-cache"
-    );
+    for path in ["/dashboard", "/tokens", "/users"] {
+        let resp = client
+            .get(format!("http://{}{}", addr, path))
+            .send()
+            .await
+            .unwrap();
+        assert!(
+            cache_control(&resp).contains("no-cache"),
+            "顶层 HTML 入口 {} 须 no-cache",
+            path
+        );
+    }
 
     // 哈希资产保持 immutable（F11 回归）
     let resp = client
