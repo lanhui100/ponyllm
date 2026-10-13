@@ -127,11 +127,17 @@ export function sanitizeRedirectUrl(fullPath: string): string {
 router.beforeEach(async (to) => {
   const session = useSessionStore();
 
-  // VULN-05 (Phase-3): 会话端点协商（幂等缓存）——GET /api/admin/session：
-  // 200 → cookie 模式已登录；401(session_expired) → cookie 模式未登录；
-  // 404 → legacy 回退（token 内存 / 旧部署兼容）。协商后统一走 hasSession()。
+  // VULN-05 (Phase-3) & 方案 B：会话端点协商与用户态静默探活（幂等缓存）
+  // 1. 若 sessionMode 尚为 unknown，先协商管理面会话端点模式：
+  //    - 200 → cookie 模式已登录；401(session_expired) → cookie 模式未登录；
+  //    - 404 → legacy 回退（token 内存 / 旧部署兼容）。
+  // 2. 若协商后未获得会话且非已明确登录态，尝试一次 restoreUserSession() 静默探活：
+  //    - /api/user/me 携带 same-origin cookie，若返回 200 则直接恢复登录态与角色，避免刷新落入 /connect。
   if (session.sessionMode === 'unknown') {
     await session.negotiateSessionMode();
+  }
+  if (!session.hasSession()) {
+    await session.restoreUserSession();
   }
 
   // 1. Support URL fragment/hash (#token= / #key=) to pass tokens securely:

@@ -1,5 +1,15 @@
 <script setup lang="ts">
+import { onMounted } from 'vue';
 import UiToast from './components/ui/UiToast.vue';
+import { useSessionStore } from './stores/session';
+
+const session = useSessionStore();
+
+onMounted(async () => {
+  if (!session.hasSession()) {
+    await session.restoreUserSession();
+  }
+});
 </script>
 
 <template>

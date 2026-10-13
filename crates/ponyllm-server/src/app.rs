@@ -116,10 +116,9 @@ async fn auth_middleware(State(state): State<Arc<AppState>>, req: Request, next:
     //   `/api/user/` — including `/api/user/login` — is hidden (404). This
     //   must be decided HERE, before the key-family authenticate below, so a
     //   credential-less POST does not fall through to 401 (red anchor).
-    // - `/api/user/login`: self-authenticating handler (password + JWT issue).
-    // - Everything else: JWT-only. Verification failure is 401 with ZERO
-    //   fallback to the gateway-key family (an admin-scope machine key
-    //   presented against `/api/user/**` must still 401).
+    // - `/api/user/login` & `/api/user/logout`: self-authenticating handlers.
+    // - Everything else: JWT-only (Authorization: Bearer <jwt> OR Cookie: ponyllm_jwt=<jwt>).
+    //   Verification failure is 401 with ZERO fallback to the gateway-key family.
     if path.starts_with("/api/user/") {
         if !state.user_plane_enabled {
             return global_fallback().await.into_response();
@@ -148,8 +147,11 @@ async fn auth_middleware(State(state): State<Arc<AppState>>, req: Request, next:
                 .insert(crate::auth::ClientIp(client_ip));
             return next.run(req).await;
         }
+        if path == "/api/user/logout" {
+            return next.run(req).await;
+        }
         let headers = req.headers();
-        let provided: Option<&str> = headers
+        let mut provided: Option<String> = headers
             .get("authorization")
             .and_then(|v| v.to_str().ok())
             .map(|s| s.trim())
@@ -157,10 +159,15 @@ async fn auth_middleware(State(state): State<Arc<AppState>>, req: Request, next:
                 let lower = s.to_ascii_lowercase();
                 lower.starts_with("bearer ")
             })
-            .map(|s| s[7..].trim());
+            .map(|s| s[7..].trim().to_string());
+        if provided.as_deref().unwrap_or("").is_empty() {
+            if let Some(cookie_jwt) = crate::routes::user::extract_user_jwt_from_cookie(headers) {
+                provided = Some(cookie_jwt);
+            }
+        }
         let Some(token) = provided.filter(|t| !t.is_empty()) else {
             return crate::auth::unauthorized(
-                "Missing or invalid Authorization header: /api/user/** requires a JWT Bearer token",
+                "Missing or invalid Authorization header: /api/user/** requires a JWT Bearer token or ponyllm_jwt cookie",
             );
         };
         let Some(secret) = state.jwt_secret.clone() else {
@@ -168,7 +175,7 @@ async fn auth_middleware(State(state): State<Arc<AppState>>, req: Request, next:
             return crate::auth::unauthorized("JWT verification unavailable");
         };
         let verified =
-            crate::auth::verify_user_jwt(token, &secret, state.jwt_issuer, &state.user_tracker);
+            crate::auth::verify_user_jwt(&token, &secret, state.jwt_issuer, &state.user_tracker);
         let claims = match verified {
             Ok(c) => c,
             Err(kind) => {

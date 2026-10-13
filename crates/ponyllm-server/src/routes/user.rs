@@ -23,7 +23,42 @@ use crate::state::AppState;
 
 /// JWT lifetime for login-issued tokens (2h short TTL per ADR revocation
 /// strategy — no jti denylist, rely on exp + tv + enabled live checks).
-const JWT_TTL_SECS: i64 = 7200;
+pub const JWT_TTL_SECS: i64 = 7200;
+
+/// Cookie name for web user auth token.
+pub const USER_JWT_COOKIE_NAME: &str = "ponyllm_jwt";
+
+/// Build the HttpOnly cookie for user JWT auth.
+pub fn build_user_jwt_cookie(token: &str, max_age_secs: i64) -> axum::http::HeaderValue {
+    axum::http::HeaderValue::from_str(&format!(
+        "{USER_JWT_COOKIE_NAME}={token}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age={max_age_secs}"
+    ))
+    .expect("user jwt cookie header value is valid")
+}
+
+/// Build the expired HttpOnly cookie to clear user JWT auth.
+pub fn build_user_jwt_clear_cookie() -> axum::http::HeaderValue {
+    axum::http::HeaderValue::from_str(&format!(
+        "{USER_JWT_COOKIE_NAME}=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0"
+    ))
+    .expect("user jwt clear cookie header value is valid")
+}
+
+/// Extract `ponyllm_jwt=<token>` from request Cookie header.
+pub fn extract_user_jwt_from_cookie(headers: &HeaderMap) -> Option<String> {
+    let raw = headers.get(axum::http::header::COOKIE)?.to_str().ok()?;
+    for part in raw.split(';') {
+        let mut kv = part.trim().splitn(2, '=');
+        if kv.next()?.trim() == USER_JWT_COOKIE_NAME {
+            let v = kv.next()?.trim();
+            if !v.is_empty() {
+                return Some(v.to_string());
+            }
+            return None;
+        }
+    }
+    None
+}
 
 /// Login rate-limit prefix (F2 reuse): check-before-hash so an attacker
 /// cannot burn PBKDF2 CPU (ADR risk "登录限流 check-before-hash").
@@ -187,10 +222,10 @@ pub async fn handle_user_login(
                 .into_response();
         }
     };
-    (
+    let mut res = (
         axum::http::StatusCode::OK,
         Json(LoginResponse {
-            access_token: token,
+            access_token: token.clone(),
             user: PublicUser {
                 id: user.id.clone(),
                 username: user.username.clone().unwrap_or_default(),
@@ -200,7 +235,26 @@ pub async fn handle_user_login(
             },
         }),
     )
-        .into_response()
+        .into_response();
+    res.headers_mut().append(
+        axum::http::header::SET_COOKIE,
+        build_user_jwt_cookie(&token, JWT_TTL_SECS),
+    );
+    res
+}
+
+/// POST /api/user/logout — clear HttpOnly cookie for user JWT auth.
+pub async fn handle_user_logout() -> impl IntoResponse {
+    let mut res = (
+        axum::http::StatusCode::OK,
+        Json(json!({"ok": true})),
+    )
+        .into_response();
+    res.headers_mut().append(
+        axum::http::header::SET_COOKIE,
+        build_user_jwt_clear_cookie(),
+    );
+    res
 }
 
 fn login_invalid_credentials() -> axum::response::Response {
@@ -1072,6 +1126,7 @@ pub fn user_routes() -> axum::Router<Arc<AppState>> {
     use axum::routing::{get, post, put};
     axum::Router::new()
         .route("/api/user/login", post(handle_user_login))
+        .route("/api/user/logout", post(handle_user_logout))
         .route("/api/user/me", get(handle_user_me))
         .route("/api/user/me/password", put(handle_user_change_password))
         .route(

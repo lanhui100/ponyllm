@@ -121,6 +121,7 @@ export async function loginWithPassword(
   const resp = await fetch('/api/user/login', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
+    credentials: 'same-origin',
     body: JSON.stringify({ username, password }),
   });
   return parseJson<LoginResponse>(resp);
@@ -128,13 +129,19 @@ export async function loginWithPassword(
 
 /** 当前用户 profile + 用量：GET /api/user/me。 */
 export async function fetchMyProfile(): Promise<UserProfile & { used_tokens: number }> {
-  const resp = await fetch('/api/user/me', { headers: jwtHeader() });
+  const resp = await fetch('/api/user/me', {
+    headers: jwtHeader(),
+    credentials: 'same-origin',
+  });
   return parseJson(resp);
 }
 
 /** 列出当前用户的 token（含 used_tokens）。 */
 export async function listMyTokens(): Promise<UserTokenMeta[]> {
-  const resp = await fetch('/api/user/tokens', { headers: jwtHeader() });
+  const resp = await fetch('/api/user/tokens', {
+    headers: jwtHeader(),
+    credentials: 'same-origin',
+  });
   return parseJson<UserTokenMeta[]>(resp);
 }
 
@@ -145,6 +152,7 @@ export async function createMyToken(
   const resp = await fetch('/api/user/tokens', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...jwtHeader() },
+    credentials: 'same-origin',
     body: JSON.stringify(req),
   });
   return parseJson(resp);
@@ -158,6 +166,7 @@ export async function updateMyToken(
   const resp = await fetch(`/api/user/tokens/${encodeURIComponent(keyId)}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json', ...jwtHeader() },
+    credentials: 'same-origin',
     body: JSON.stringify(req),
   });
   return parseJson<UserTokenMeta>(resp);
@@ -168,6 +177,7 @@ export async function deleteMyToken(keyId: string): Promise<void> {
   const resp = await fetch(`/api/user/tokens/${encodeURIComponent(keyId)}`, {
     method: 'DELETE',
     headers: jwtHeader(),
+    credentials: 'same-origin',
   });
   if (!resp.ok) {
     await parseJson(resp);
@@ -179,6 +189,7 @@ export async function rotateMyToken(keyId: string): Promise<{ api_key: string }>
   const resp = await fetch(`/api/user/tokens/${encodeURIComponent(keyId)}/rotate`, {
     method: 'POST',
     headers: jwtHeader(),
+    credentials: 'same-origin',
   });
   return parseJson(resp);
 }
@@ -189,7 +200,10 @@ export async function rotateMyToken(keyId: string): Promise<{ api_key: string }>
 
 /** admin 列出全部用户（不含 password_hash）。 */
 export async function listAdminUsers(): Promise<AdminUserView[]> {
-  const resp = await fetch('/api/user/admin/users', { headers: jwtHeader() });
+  const resp = await fetch('/api/user/admin/users', {
+    headers: jwtHeader(),
+    credentials: 'same-origin',
+  });
   return parseJson<AdminUserView[]>(resp);
 }
 
@@ -200,6 +214,7 @@ export async function createAdminUser(
   const resp = await fetch('/api/user/admin/users', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...jwtHeader() },
+    credentials: 'same-origin',
     body: JSON.stringify(req),
   });
   return parseJson<AdminUserView>(resp);
@@ -213,6 +228,7 @@ export async function updateAdminUser(
   const resp = await fetch(`/api/user/admin/users/${encodeURIComponent(userId)}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json', ...jwtHeader() },
+    credentials: 'same-origin',
     body: JSON.stringify(req),
   });
   return parseJson<AdminUserView>(resp);
@@ -223,6 +239,7 @@ export async function deleteAdminUser(userId: string): Promise<void> {
   const resp = await fetch(`/api/user/admin/users/${encodeURIComponent(userId)}`, {
     method: 'DELETE',
     headers: jwtHeader(),
+    credentials: 'same-origin',
   });
   if (!resp.ok) {
     await parseJson(resp);
@@ -239,6 +256,7 @@ export async function resetAdminUserPassword(
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...jwtHeader() },
+      credentials: 'same-origin',
       body: JSON.stringify({ new_password: newPassword }),
     },
   );
@@ -251,7 +269,11 @@ export async function resetAdminUserPassword(
 export async function resetAdminUserUsage(userId: string): Promise<void> {
   const resp = await fetch(
     `/api/user/admin/users/${encodeURIComponent(userId)}/reset-usage`,
-    { method: 'POST', headers: jwtHeader() },
+    {
+      method: 'POST',
+      headers: jwtHeader(),
+      credentials: 'same-origin',
+    },
   );
   if (!resp.ok) {
     await parseJson(resp);

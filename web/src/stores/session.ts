@@ -172,6 +172,50 @@ export const useSessionStore = defineStore('session', () => {
     return sessionMode.value;
   }
 
+  /// 方案 B：HttpOnly Cookie 静默探活与会话恢复
+  /// 向 /api/user/me 发起 same-origin 请求：
+  /// - 200: 恢复已登录态（jwt 模式，角色赋予，token 可为空或后端下发的 token），返回 true
+  /// - 401: 保持/重置 loggedIn = false，返回 false
+  /// - 其它/网络错误: 返回 false
+  async function restoreUserSession(): Promise<boolean> {
+    try {
+      const resp = await fetch('/api/user/me', {
+        method: 'GET',
+        credentials: 'same-origin',
+      });
+      if (resp.status === 200) {
+        const data = (await resp.json().catch(() => ({}))) as {
+          token?: string;
+          role?: string;
+          user?: { role?: string };
+        };
+        const resolvedRole = data?.role || data?.user?.role || '';
+        loginWithJwt(data?.token || '', resolvedRole);
+        return true;
+      } else if (resp.status === 401) {
+        clearToken();
+        return false;
+      }
+    } catch {
+      // 网络错误保持未登录
+    }
+    return false;
+  }
+
+  /// 方案 B：退出用户会话并清除 HttpOnly Cookie
+  async function logoutUser(): Promise<void> {
+    try {
+      await fetch('/api/user/logout', {
+        method: 'POST',
+        credentials: 'same-origin',
+      });
+    } catch {
+      // 容错：即使后端登出失败也清理前端状态
+    }
+    clearToken();
+    unauthorizedHandled.value = false;
+  }
+
   return {
     token,
     loggedIn,
@@ -183,6 +227,8 @@ export const useSessionStore = defineStore('session', () => {
     login,
     loginCookieMode,
     logout,
+    logoutUser,
+    restoreUserSession,
     logoutIfGatewayUpgraded,
     clearToken,
     markUnauthorizedHandled,
