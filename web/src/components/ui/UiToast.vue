@@ -93,27 +93,26 @@ const typeConfig = computed(() => {
       data-testid="ui-toast"
       role="alert"
     >
+      <!-- 手动关闭按钮 (位于卡片右上角，仅非 Confirm 或显式 closable 时展示) -->
+      <button
+        v-if="activeItem.closable && !isConfirm"
+        type="button"
+        class="absolute top-2.5 right-2.5 w-4 h-4 flex items-center justify-center rounded-full text-slate-400 hover:text-slate-700 hover:bg-slate-500/15 transition-colors cursor-pointer border-0 outline-none p-0 z-20"
+        aria-label="关闭通知"
+        data-testid="toast-close-btn"
+        @click="dismissToast(activeItem.id)"
+      >
+        <Icons name="cross" size="10" />
+      </button>
+
       <div
-        class="relative overflow-hidden rounded-2xl p-5 shadow-2xl backdrop-blur-2xl border transition-all"
+        class="relative overflow-hidden rounded-2xl p-5 shadow-2xl backdrop-blur-2xl transition-all"
         :class="[
-          'bg-white/45 text-slate-900 border-white/40 shadow-slate-900/10 ring-1',
-          typeConfig.ring,
+          'bg-white/45 text-slate-900 shadow-slate-900/10',
         ]"
       >
         <!-- 内部顶层高透微渐变光感 (增强毛玻璃流光与通透度) -->
         <div class="absolute -top-10 -right-10 w-36 h-36 rounded-full bg-gradient-to-br from-white/30 to-transparent blur-lg pointer-events-none" />
-
-        <!-- 手动关闭按钮 (位于卡片右上角，仅非 Confirm 或显式 closable 时展示) -->
-        <button
-          v-if="activeItem.closable && !isConfirm"
-          type="button"
-          class="absolute top-2 right-2 w-4 h-4 flex items-center justify-center rounded-full text-slate-400 hover:text-slate-700 hover:bg-slate-500/15 transition-colors cursor-pointer border-0 outline-none p-0 z-10"
-          aria-label="关闭通知"
-          data-testid="toast-close-btn"
-          @click="dismissToast(activeItem.id)"
-        >
-          <Icons name="cross" size="10" />
-        </button>
 
         <div class="relative flex items-start gap-3.5">
           <!-- 语义图标 (无背景、无边框、颜色更深) -->
