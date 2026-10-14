@@ -16,6 +16,8 @@ describe('TokensView.vue', () => {
   let pinia: ReturnType<typeof createPinia>;
   let container: HTMLDivElement;
   let app: ReturnType<typeof createApp>;
+  /** Vue 组件内未捕获错误（"不得抛未捕获异常"的机器凭证）。 */
+  let vueErrors: unknown[];
 
   const dummyTokens: userApi.UserTokenMeta[] = [
     {
@@ -38,14 +40,23 @@ describe('TokensView.vue', () => {
     },
   ];
 
+  // wave-6：模型多选下拉的数据源（display_name 不含 a/b/c，保证按 id 定位选项无歧义）
+  const dummyModels: userApi.UserModelOption[] = [
+    { id: 'a', provider: 'ponyllm', display_name: 'One' },
+    { id: 'b', provider: 'openai', display_name: 'Two' },
+    { id: 'c', provider: 'anthropic', display_name: 'Three' },
+  ];
+
   beforeEach(() => {
     vi.clearAllMocks();
     pinia = createPinia();
     setActivePinia(pinia);
     container = document.createElement('div');
     document.body.appendChild(container);
+    vueErrors = [];
 
     vi.spyOn(userApi, 'listMyTokens').mockResolvedValue([...dummyTokens]);
+    vi.spyOn(userApi, 'listAvailableModels').mockResolvedValue([...dummyModels]);
     vi.spyOn(userApi, 'createMyToken').mockResolvedValue({
       key_id: 'tk-new',
       api_key: 'sk-pony-new-created-secret-1234',
@@ -82,12 +93,73 @@ describe('TokensView.vue', () => {
 
   async function mountView() {
     app = createApp(TokensView);
+    app.config.errorHandler = (err) => {
+      vueErrors.push(err);
+    };
     app.use(pinia);
     app.mount(container);
     // 等待 onMounted 加载完成
     await nextTick();
     await nextTick();
     await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+
+  function openCreateModal(): void {
+    const openBtn = container.querySelector(
+      '[data-testid="open-create-token-btn"]',
+    ) as HTMLButtonElement;
+    openBtn.click();
+  }
+
+  // --- wave-6「允许模型」多选下拉 helper（契约 §2.3 冻结 testid） ---
+  function modelTrigger(): HTMLButtonElement | null {
+    return container.querySelector(
+      '[data-testid="token-models-select"]',
+    ) as HTMLButtonElement | null;
+  }
+
+  function modelOptions(): HTMLElement[] {
+    return Array.from(
+      container.querySelectorAll('[data-testid="token-models-option"]'),
+    ) as HTMLElement[];
+  }
+
+  function openModelPicker(): void {
+    const trigger = modelTrigger();
+    expect(
+      trigger,
+      '契约 §2.3：必须存在 data-testid="token-models-select" 触发器（红相：仍是自由文本输入 → FAIL）',
+    ).not.toBeNull();
+    trigger!.click();
+  }
+
+  function selectModel(id: string): void {
+    if (modelOptions().length === 0) {
+      openModelPicker();
+    }
+    const options = modelOptions();
+    const opt =
+      options.find((el) => (el.textContent ?? '').trim() === id) ??
+      options.find((el) => (el.textContent ?? '').includes(id));
+    expect(
+      opt,
+      `契约 §2.3：展开后必须存在 data-testid="token-models-option" 且含模型 ${id}；` +
+        `当前选项文本 = ${JSON.stringify(options.map((o) => o.textContent))}`,
+    ).toBeDefined();
+    opt!.click();
+  }
+
+  function modelChips(): HTMLElement[] {
+    return Array.from(
+      container.querySelectorAll('[data-testid="token-models-chip"]'),
+    ) as HTMLElement[];
+  }
+
+  function removeFirstChip(): void {
+    const chips = modelChips();
+    expect(chips.length, '取消选中前必须存在 data-testid="token-models-chip"').toBeGreaterThan(0);
+    const removeBtn = chips[0].querySelector('button') as HTMLButtonElement | null;
+    (removeBtn ?? chips[0]).click();
   }
 
   it('renders token list, does NOT render embedded create form by default', async () => {
@@ -137,6 +209,48 @@ describe('TokensView.vue', () => {
     expect(container.querySelector('[data-testid="create-token-modal"]')).toBeNull();
   });
 
+  // -------------------------------------------------------------------------
+  // wave-6 新增：允许模型多选下拉契约（T-F5 / T-F6）
+  // -------------------------------------------------------------------------
+  it('renders model multi-select with frozen testids, placeholder and chips (wave-6)', async () => {
+    await mountView();
+    openCreateModal();
+    await nextTick();
+
+    // T-F5：触发器存在 + 零选中时占位文案逐字为「留空为全部模型」
+    const trigger = modelTrigger();
+    expect(trigger).not.toBeNull();
+    expect(trigger!.textContent).toContain('留空为全部模型');
+    // 旧自由文本输入必须已被替换
+    expect(container.querySelector('[data-testid="token-models-input"]')).toBeNull();
+
+    // 展开后：搜索框 + 选项
+    openModelPicker();
+    await nextTick();
+    expect(
+      container.querySelector('[data-testid="token-models-search"]'),
+      '契约 §2.3：展开后必须有 data-testid="token-models-search" 搜索框',
+    ).not.toBeNull();
+    expect(modelOptions().length).toBe(dummyModels.length);
+
+    // 选中一项 → chip 出现
+    selectModel('a');
+    await nextTick();
+    expect(modelChips().length).toBe(1);
+
+    // 搜索过滤：输入 'b' 后仅剩 id 含 'b' 的选项
+    const search = container.querySelector(
+      '[data-testid="token-models-search"]',
+    ) as HTMLInputElement;
+    search.value = 'b';
+    search.dispatchEvent(new Event('input'));
+    await nextTick();
+    expect(modelOptions().length).toBe(1);
+    expect(modelOptions()[0].textContent).toContain('b');
+
+    expect(vueErrors).toEqual([]);
+  });
+
   it('saves new token: closes create modal, displays token result modal with copy button', async () => {
     await mountView();
 
@@ -148,7 +262,6 @@ describe('TokensView.vue', () => {
     // 填写表单
     const nameInput = container.querySelector('[data-testid="token-name-input"]') as HTMLInputElement;
     const quotaInput = container.querySelector('[data-testid="token-quota-input"]') as HTMLInputElement;
-    const modelsInput = container.querySelector('[data-testid="token-models-input"]') as HTMLInputElement;
 
     nameInput.value = 'test-agent-token';
     nameInput.dispatchEvent(new Event('input'));
@@ -156,9 +269,10 @@ describe('TokensView.vue', () => {
     quotaInput.value = '100000';
     quotaInput.dispatchEvent(new Event('input'));
 
-    modelsInput.value = 'gpt-4o';
-    modelsInput.dispatchEvent(new Event('input'));
-
+    // wave-6：多选下拉选两项（替换原自由文本 'gpt-4o'）
+    selectModel('a');
+    await nextTick();
+    selectModel('b');
     await nextTick();
 
     // 保存
@@ -170,7 +284,7 @@ describe('TokensView.vue', () => {
     expect(userApi.createMyToken).toHaveBeenCalledWith({
       name: 'test-agent-token',
       quota: 100000,
-      model_limits: ['gpt-4o'],
+      model_limits: ['a', 'b'],
     });
 
     // 编辑弹窗已关闭
@@ -204,6 +318,79 @@ describe('TokensView.vue', () => {
     closeResultBtn.click();
     await nextTick();
     expect(container.querySelector('[data-testid="token-result-modal"]')).toBeNull();
+
+    expect(vueErrors).toEqual([]);
+  });
+
+  it('submits model_limits: undefined when all selected models are deselected (wave-6 T-F6)', async () => {
+    await mountView();
+    openCreateModal();
+    await nextTick();
+
+    const nameInput = container.querySelector('[data-testid="token-name-input"]') as HTMLInputElement;
+    nameInput.value = 'no-limit-token';
+    nameInput.dispatchEvent(new Event('input'));
+
+    // 先选中，再通过 chip 移除按钮全部取消
+    selectModel('a');
+    await nextTick();
+    expect(modelChips().length).toBe(1);
+    removeFirstChip();
+    await nextTick();
+    expect(modelChips().length).toBe(0);
+
+    const submitBtn = container.querySelector('[data-testid="submit-create-token-btn"]') as HTMLButtonElement;
+    submitBtn.click();
+    await nextTick();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    expect(userApi.createMyToken).toHaveBeenCalledTimes(1);
+    const arg = vi.mocked(userApi.createMyToken).mock.calls[0][0];
+    expect(
+      arg.model_limits,
+      '契约 §2.4：零选中必须提交 undefined（严禁空数组 [] —— Some([]) 语义为全部拒绝）',
+    ).toBeUndefined();
+    expect(
+      JSON.stringify(arg),
+      '契约 §2.4：零选中时 model_limits 键不得出现于 JSON 请求体',
+    ).not.toContain('model_limits');
+    expect(vueErrors).toEqual([]);
+  });
+
+  it('model list load failure does not block token creation (wave-6 T-F7 优雅降级)', async () => {
+    // Arrange：模型列表加载失败
+    vi.mocked(userApi.listAvailableModels).mockRejectedValue(new Error('models unavailable'));
+
+    await mountView();
+    openCreateModal();
+    await nextTick();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    // 触发器仍在（下拉字段存在，失败不应把字段整块删掉）
+    expect(modelTrigger()).not.toBeNull();
+
+    // 名称可填、提交按钮未被禁用
+    const nameInput = container.querySelector('[data-testid="token-name-input"]') as HTMLInputElement;
+    nameInput.value = 'degraded-token';
+    nameInput.dispatchEvent(new Event('input'));
+    await nextTick();
+
+    const submitBtn = container.querySelector('[data-testid="submit-create-token-btn"]') as HTMLButtonElement;
+    expect(submitBtn.disabled, '契约 §2.5：模型列表失败不得禁用提交按钮').toBe(false);
+
+    // Act：降级路径下未选择任何模型 → 照常提交
+    submitBtn.click();
+    await nextTick();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    // Assert
+    expect(userApi.createMyToken).toHaveBeenCalledTimes(1);
+    const arg = vi.mocked(userApi.createMyToken).mock.calls[0][0];
+    expect(arg.name).toBe('degraded-token');
+    expect(arg.model_limits).toBeUndefined();
+    expect(container.querySelector('[data-testid="create-token-modal"]')).toBeNull();
+    expect(container.querySelector('[data-testid="token-result-modal"]')).not.toBeNull();
+    expect(vueErrors, `降级路径不得抛未捕获异常：${JSON.stringify(vueErrors)}`).toEqual([]);
   });
 
   it('rotates token: triggers rotate API and displays result modal with new token and copy button', async () => {
