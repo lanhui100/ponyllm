@@ -1,0 +1,61 @@
+mock upstream on 127.0.0.1:42757
+PASS gateway /health 200
+PASS chat non-stream object==chat.completion
+PASS responses ns HTTP 200
+PASS responses ns object==response
+PASS responses ns id resp_ prefix
+PASS responses ns created_at int>0
+PASS responses ns error==null
+PASS responses ns incomplete_details==null
+PASS responses ns has separate reasoning item
+PASS responses ns message item present
+PASS responses ns part type==output_text
+PASS responses ns output_text has annotations==[]
+PASS responses ns never input_text/reasoning part
+PASS responses ns reasoning.summary[0].type==summary_text
+PASS responses ns usage real input/output
+PASS responses ns usage.input_tokens_details.cached_tokens==7
+PASS responses ns usage.output_tokens_details.reasoning_tokens==20
+PASS responses ss HTTP 200
+PASS responses ss no [DONE] sentinel
+PASS responses ss created first
+PASS responses ss in_progress second
+PASS responses ss has response.output_item.added
+PASS responses ss has response.content_part.added
+PASS responses ss has response.output_text.delta
+PASS responses ss has response.output_text.done
+PASS responses ss has response.content_part.done
+PASS responses ss has response.output_item.done
+PASS responses ss terminal last == response.completed
+PASS responses ss every frame has sequence_number
+PASS responses ss sequence_number strictly increasing
+PASS responses ss terminal parts are output_text
+PASS responses ss terminal usage real
+PASS responses ss item ids stable
+PASS anthropic ns HTTP 200
+PASS anthropic ns type==message
+PASS anthropic ns id msg_ prefix
+PASS anthropic ns stop_sequence key present
+PASS anthropic ns stop_reason non-null
+PASS anthropic ns has text block
+PASS anthropic ns thinking block has signature key
+PASS anthropic ns usage real input/output/cache
+PASS anthropic ss HTTP 200
+PASS anthropic ss no [DONE] sentinel
+PASS anthropic ss message_start first
+PASS anthropic ss message_stop last
+PASS anthropic ss exactly one message_stop
+PASS anthropic ss exactly one start per logical block (2 blocks)
+PASS anthropic ss exactly one stop per logical block (2 blocks)
+PASS anthropic ss block kinds are thinking then text
+PASS anthropic ss has signature_delta
+PASS anthropic ss no empty text_delta
+PASS anthropic ss message_start id msg_ prefix
+PASS anthropic ss message_start stop_sequence present
+PASS anthropic ss message_delta present
+PASS anthropic ss message_delta.delta.stop_sequence present
+PASS anthropic ss message_delta usage.input_tokens==42
+PASS anthropic ss message_delta usage.output_tokens==34
+
+=== SMOKE SUMMARY: 57/57 checks passed ===
+PASS: all Tier-1 local E2E smoke checks green

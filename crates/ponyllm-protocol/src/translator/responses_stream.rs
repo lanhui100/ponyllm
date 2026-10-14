@@ -874,6 +874,12 @@ impl ChatToResponsesFsm {
         self.emitter.ensure_started(&mut events);
 
         for choice in &chunk.choices {
+            // R-SS-12: the terminal event must be emitted exactly once and be the last frame, so a
+            // multi-choice chunk cannot emit anything after a finish_reason already closed the
+            // response.
+            if self.done {
+                break;
+            }
             if let Some(ref reasoning) = choice.delta.reasoning_content {
                 self.emitter.reasoning_delta(reasoning, &mut events);
             }

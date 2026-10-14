@@ -479,6 +479,13 @@ impl ChatStreamToAnthropicFsm {
 
         if self.pending_finish.is_none() {
             for choice in &chunk.choices {
+                // A-SS-12: the terminal set is emitted exactly once and last. A chunk may carry
+                // several choices, so re-check `done` between them: once `finish_turn()` has run,
+                // no further choice may emit anything.
+                if self.done {
+                    break;
+                }
+
                 // 1. Thinking / reasoning delta. A-SS-07/A-SS-15: an empty delta neither opens a
                 //    block nor reaches the wire.
                 if let Some(reasoning) = choice

@@ -133,6 +133,16 @@ fn chat_chunk(id: &str, delta: &str, finish: Option<&str>, usage: Option<&str>) 
     )
 }
 
+/// One SSE `data:` frame for a chat chunk carrying an explicit **multi-choice** `choices` array.
+///
+/// A single upstream chunk may legitimately carry more than one choice; the per-choice FSM loops
+/// must therefore re-check their terminal state mid-chunk (see the `a3` regression tests).
+fn chat_chunk_multi(id: &str, choices_json: &str, usage_json: &str) -> String {
+    format!(
+        "data: {{\"id\":\"{id}\",\"object\":\"chat.completion.chunk\",\"created\":1760417629,\"model\":\"{ROUTED_MODEL}\",\"choices\":{choices_json}{usage_json}}}\n\n"
+    )
+}
+
 /// Upstream that streams a turn and then **ends the SSE body without any `finish_reason`** and
 /// without a `[DONE]` sentinel (clean EOF).
 fn eof_without_finish_reason_router() -> Router {
@@ -612,6 +622,150 @@ async fn r_ss_a2_aborted_upstream_still_emits_terminal_event() {
             .all(|t| t == "output_text" || t == "refusal"),
         "R-SS-13: no invalid / non-official content-part type may appear on the abort path; \
          got {part_types:?}; raw body: {raw}"
+    );
+}
+
+// ===========================================================================
+// (a3) multi-choice upstream chunks — terminal event emitted exactly once, last
+// ===========================================================================
+
+/// The FIRST upstream chunk carries **three** choices: two `finish_reason` choices (which a
+/// mid-loop `done` guard must collapse into a single terminal event) followed by a choice that
+/// still carries content (which must never be emitted after the terminal). A second chunk keeps
+/// carrying content after the turn already finished.
+fn multi_choice_finish_parts() -> Vec<Vec<u8>> {
+    let finish_chunk = chat_chunk_multi(
+        "chatcmpl-multi",
+        "[{\"index\":0,\"delta\":{\"role\":\"assistant\"},\"finish_reason\":\"stop\"},\
+          {\"index\":1,\"delta\":{},\"finish_reason\":\"stop\"},\
+          {\"index\":2,\"delta\":{\"content\":\"late\"},\"finish_reason\":null}]",
+        ",\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":3,\"total_tokens\":8}",
+    );
+    let late_content = chat_chunk_multi(
+        "chatcmpl-multi",
+        "[{\"index\":0,\"delta\":{\"content\":\"later\"},\"finish_reason\":null}]",
+        "",
+    );
+    vec![
+        finish_chunk.into_bytes(),
+        late_content.into_bytes(),
+        b"data: [DONE]\n\n".to_vec(),
+    ]
+}
+
+/// A-SS-12 — a single upstream chunk carrying **more than one choice**, both with
+/// `finish_reason:"stop"`, must yield **exactly one** terminal `message_stop`, it must be the LAST
+/// frame, and nothing may follow it.
+///
+/// Regression: the per-choice loop in `crates/ponyllm-protocol/src/translator/stream.rs` did not
+/// re-check `self.done` mid-chunk, so the second `finish_reason` choice emitted a duplicate
+/// terminal set (`message_delta`, `message_stop` twice).
+#[tokio::test]
+async fn a_ss_a3_multi_choice_chunk_emits_exactly_one_terminal() {
+    let upstream = spawn_raw_chunked_upstream(multi_choice_finish_parts(), true).await;
+    let base = spawn_gateway_for(&upstream).await;
+
+    let resp = post_messages_stream(&base, "say ping").await;
+    assert_eq!(resp.status(), 200);
+    let raw = read_stream_body(resp.text().await, "A-SS-12");
+
+    let mut frames = parse_sse(&raw);
+    frames.retain(|(name, _)| name != "ping");
+
+    let stop_positions: Vec<usize> = frames
+        .iter()
+        .enumerate()
+        .filter(|(_, (n, _))| n == "message_stop")
+        .map(|(i, _)| i)
+        .collect();
+    let terminal = stop_positions.first().copied();
+    let after_terminal: Vec<String> = match terminal {
+        Some(t) => frames[t + 1..].iter().map(|(n, _)| n.clone()).collect(),
+        None => Vec::new(),
+    };
+    let content_after: Vec<String> = after_terminal
+        .iter()
+        .filter(|n| n.as_str() == "content_block_delta")
+        .cloned()
+        .collect();
+
+    // (a) exactly one terminal AND (b) nothing content-bearing after it — evaluated together so
+    // the red phase reports BOTH halves in a single failure instead of short-circuiting on (a).
+    assert!(
+        stop_positions.len() == 1 && content_after.is_empty(),
+        "A-SS-12: a single turn must emit exactly ONE terminal `message_stop` as the LAST frame, \
+         with no content-bearing event after it. Observed: {} terminal(s) at {stop_positions:?}; \
+         frames after the first terminal: {after_terminal:?}; content-bearing after it: \
+         {content_after:?}. Raw body: {raw}",
+        stop_positions.len()
+    );
+
+    assert_eq!(
+        terminal,
+        Some(frames.len() - 1),
+        "A-SS-12: `message_stop` must be the LAST frame; raw body: {raw}"
+    );
+    assert!(
+        after_terminal.is_empty(),
+        "A-SS-12: no frame at all may follow the terminal `message_stop`; got {after_terminal:?}; \
+         raw body: {raw}"
+    );
+}
+
+/// R-SS-12 — the same multi-choice chunk shape on `/v1/responses` must yield **exactly one**
+/// `response.completed`, it must be the last frame, and no `output_text.delta` may follow it.
+///
+/// Regression: the per-choice loop in `crates/ponyllm-protocol/src/translator/responses_stream.rs`
+/// did not re-check its terminal state mid-chunk, so the second `finish_reason` choice emitted a
+/// second `response.completed`.
+#[tokio::test]
+async fn r_ss_a3_multi_choice_chunk_emits_exactly_one_terminal() {
+    let upstream = spawn_raw_chunked_upstream(multi_choice_finish_parts(), true).await;
+    let base = spawn_gateway_for(&upstream).await;
+
+    let resp = post_responses_stream(&base, "say ping").await;
+    assert_eq!(resp.status(), 200);
+    let raw = read_stream_body(resp.text().await, "R-SS-12");
+
+    let frames = parse_sse(&raw);
+
+    let completed_positions: Vec<usize> = frames
+        .iter()
+        .enumerate()
+        .filter(|(_, (n, _))| n == "response.completed")
+        .map(|(i, _)| i)
+        .collect();
+    let terminal = completed_positions.first().copied();
+    let after_terminal: Vec<String> = match terminal {
+        Some(t) => frames[t + 1..].iter().map(|(n, _)| n.clone()).collect(),
+        None => Vec::new(),
+    };
+    let content_after: Vec<String> = after_terminal
+        .iter()
+        .filter(|n| n.as_str() == "response.output_text.delta")
+        .cloned()
+        .collect();
+
+    // (a) exactly one terminal AND (b) nothing content-bearing after it — evaluated together so
+    // the red phase reports BOTH halves in a single failure instead of short-circuiting on (a).
+    assert!(
+        completed_positions.len() == 1 && content_after.is_empty(),
+        "R-SS-12: a single turn must emit exactly ONE terminal `response.completed` as the LAST \
+         frame, with no content-bearing event after it. Observed: {} terminal(s) at \
+         {completed_positions:?}; frames after the first terminal: {after_terminal:?}; \
+         content-bearing after it: {content_after:?}. Raw body: {raw}",
+        completed_positions.len()
+    );
+
+    assert_eq!(
+        terminal,
+        Some(frames.len() - 1),
+        "R-SS-12: `response.completed` must be the LAST frame; raw body: {raw}"
+    );
+    assert!(
+        after_terminal.is_empty(),
+        "R-SS-12: no frame at all may follow the terminal `response.completed`; got \
+         {after_terminal:?}; raw body: {raw}"
     );
 }
 
