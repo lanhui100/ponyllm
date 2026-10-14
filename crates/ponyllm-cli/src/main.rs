@@ -343,12 +343,32 @@ async fn run_server(opts: ServerOptions) -> Result<(), Box<dyn std::error::Error
                 .clone()
                 .expect("kube source set for kubernetes backend"),
         );
-        let (hash, cfg) = src
-            .snapshot()
-            .await
-            .map_err(|e| -> Box<dyn std::error::Error> {
-                format!("kubernetes config backend load failed: {}", e).into()
-            })?;
+        let max_retries = 3;
+        let mut attempt = 0;
+        let (hash, cfg) = loop {
+            attempt += 1;
+            match src.snapshot().await {
+                Ok(res) => break res,
+                Err(e) if attempt < max_retries => {
+                    let backoff = std::time::Duration::from_millis(1000 * (1 << (attempt - 1)));
+                    tracing::warn!(
+                        attempt,
+                        max_retries,
+                        retry_after_ms = backoff.as_millis() as u64,
+                        error = %e,
+                        "kubernetes config initial snapshot failed, retrying after backoff"
+                    );
+                    tokio::time::sleep(backoff).await;
+                }
+                Err(e) => {
+                    return Err(format!(
+                        "kubernetes config backend load failed after {} attempts: {}",
+                        attempt, e
+                    )
+                    .into());
+                }
+            }
+        };
         poller_initial_identity = Some(hash);
         cfg
     } else {

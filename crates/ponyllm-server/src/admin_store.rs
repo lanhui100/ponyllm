@@ -208,9 +208,10 @@ fn base64_decode(encoded: &str) -> StoreResult<Vec<u8>> {
         .map_err(|e| ConfigStoreError::InvalidData(format!("invalid base64 in Secret data: {}", e)))
 }
 
-/// Default timeout for Kubernetes API server read requests (1500ms).
-/// Prevents the data gateway from hanging when the K8s control plane is partitioned or offline.
-pub const DEFAULT_KUBE_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1500);
+/// Default timeout for Kubernetes API server read requests (5000ms).
+/// Prevents the data gateway from hanging when the K8s control plane is partitioned or offline,
+/// while providing sufficient buffer against cross-node tail latency during cold starts.
+pub const DEFAULT_KUBE_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(5000);
 
 /// Default timeout for Kubernetes API server write requests (5000ms).
 /// Avoids false-negative split-brain writes during slow etcd fsync while still providing a hard timeout barrier.
@@ -804,5 +805,14 @@ mod tests {
         assert_eq!(base64_decode(&encoded).unwrap(), raw);
         // The wire format must be the standard padded encoding Kubernetes uses.
         assert_eq!(base64_encode(b"hello"), "aGVsbG8=");
+    }
+
+    #[test]
+    fn default_kube_read_timeout_baseline() {
+        assert_eq!(
+            DEFAULT_KUBE_READ_TIMEOUT,
+            std::time::Duration::from_millis(5000),
+            "read timeout must be 5000ms to tolerate cross-node tail latency during cold start"
+        );
     }
 }

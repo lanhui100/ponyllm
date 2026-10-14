@@ -233,7 +233,13 @@ impl ClusterTelemetryStore {
                 tps_sum_milli, tps_count,
                 updated_at
             ) VALUES (
-                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, NOW()
+                $1, $2, $3,
+                $4::bigint, $5::bigint,
+                $6::bigint, $7::bigint, $8::bigint,
+                $9::double precision, $10::bigint,
+                $11::double precision, $12::bigint,
+                $13::bigint, $14::bigint,
+                NOW()
             )
             ON CONFLICT (bucket_hour_ms, provider, model)
             DO UPDATE SET
