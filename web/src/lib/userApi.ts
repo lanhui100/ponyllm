@@ -194,6 +194,25 @@ export async function rotateMyToken(keyId: string): Promise<{ api_key: string }>
   return parseJson(resp);
 }
 
+/** 用户可用模型选项（GET /api/user/models，wave-6 契约冻结）。 */
+export interface UserModelOption {
+  id: string;
+  display_name: string | null;
+  provider: string;
+}
+
+/**
+ * 列出当前用户可用的系统模型（新增 Token 弹窗「允许模型」多选下拉数据源）。
+ *
+ * wave-6 契约空桩（红相：NotImplemented）；真实实现见
+ * `.dev-team/contracts/wave-6-user-models-picker.md` §2.2：
+ * GET /api/user/models + jwtHeader()，200 取 body.models，
+ * models 缺失/非数组 → []，非 2xx → 抛既有错误信封 Error（带 code/status）。
+ */
+export async function listAvailableModels(): Promise<UserModelOption[]> {
+  throw new Error('NotImplemented');
+}
+
 // ---------------------------------------------------------------------------
 // Admin user governance（仅 admin JWT；后端 403 非 admin）
 // ---------------------------------------------------------------------------

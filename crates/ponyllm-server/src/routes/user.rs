@@ -1120,6 +1120,20 @@ pub async fn handle_admin_users_reset_usage(
         .into_response()
 }
 
+/// GET /api/user/models — wave-6 契约空桩（红相：501 Not Implemented）。
+///
+/// 冻结契约见 `.dev-team/contracts/wave-6-user-models-picker.md`：
+/// 200 体恒为 `{"models":[{"id","provider","display_name"}]}`，顺序 =
+/// `AppState::list_all_models()` 原生顺序，过滤复用
+/// `state.user_tracker.check_access(uid, id)`（推理面用户门禁本体）。
+/// 本波次仅空桩，真实实现由后续波次落地。
+pub async fn handle_user_models(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    axum::http::StatusCode::NOT_IMPLEMENTED.into_response()
+}
+
 /// B002 user-plane router (mounted ALWAYS; the middleware hides the namespace
 /// while `user_plane_enabled` is off).
 pub fn user_routes() -> axum::Router<Arc<AppState>> {
@@ -1128,6 +1142,7 @@ pub fn user_routes() -> axum::Router<Arc<AppState>> {
         .route("/api/user/login", post(handle_user_login))
         .route("/api/user/logout", post(handle_user_logout))
         .route("/api/user/me", get(handle_user_me))
+        .route("/api/user/models", get(handle_user_models))
         .route("/api/user/me/password", put(handle_user_change_password))
         .route(
             "/api/user/tokens",
