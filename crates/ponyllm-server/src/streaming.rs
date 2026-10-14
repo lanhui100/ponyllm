@@ -307,6 +307,7 @@ pub fn anthropic_event_to_sse_bytes(event: &MessageStreamEvent) -> Option<Bytes>
 pub fn responses_event_to_sse_bytes(event: &ResponseStreamEvent) -> Option<Bytes> {
     let type_name = match event {
         ResponseStreamEvent::ResponseCreated { .. } => "response.created",
+        ResponseStreamEvent::ResponseInProgress { .. } => "response.in_progress",
         ResponseStreamEvent::ResponseDone { .. } => "response.done",
         ResponseStreamEvent::OutputItemAdded { .. } => "response.output_item.added",
         ResponseStreamEvent::OutputItemDone { .. } => "response.output_item.done",
@@ -314,9 +315,19 @@ pub fn responses_event_to_sse_bytes(event: &ResponseStreamEvent) -> Option<Bytes
         ResponseStreamEvent::ContentPartDone { .. } => "response.content_part.done",
         ResponseStreamEvent::TextDelta(_) => "response.text.delta",
         ResponseStreamEvent::OutputTextDelta(_) => "response.output_text.delta",
+        ResponseStreamEvent::OutputTextDone(_) => "response.output_text.done",
         ResponseStreamEvent::ReasoningTextDelta(_) => "response.reasoning_text.delta",
+        ResponseStreamEvent::ReasoningSummaryPartAdded(_) => {
+            "response.reasoning_summary_part.added"
+        }
         ResponseStreamEvent::ReasoningSummaryTextDelta(_) => {
             "response.reasoning_summary_text.delta"
+        }
+        ResponseStreamEvent::ReasoningSummaryTextDone(_) => {
+            "response.reasoning_summary_text.done"
+        }
+        ResponseStreamEvent::ReasoningSummaryPartDone(_) => {
+            "response.reasoning_summary_part.done"
         }
         ResponseStreamEvent::FunctionCallArgumentsDelta(_) => {
             "response.function_call_arguments.delta"
@@ -488,9 +499,11 @@ where
                     }
                 }
             }
-            Err(e) => {
-                stopped_flag.store(true, std::sync::atomic::Ordering::SeqCst);
-                out.push(Err(e));
+            Err(_e) => {
+                // R-SS-22: an upstream abort must not truncate the client body. The error is
+                // dropped here and the EOF tail below still closes the open items and emits a
+                // documented terminal event, so conformant SDK clients never hang and never see a
+                // malformed stream.
             }
         }
         let iter = futures_util::stream::iter(out);
@@ -500,19 +513,16 @@ where
 
     translated
         .chain(futures_util::stream::once(async move {
-            let synthetic = if !stopped.load(std::sync::atomic::Ordering::SeqCst) {
-                match fsm
-                    .lock()
-                    .finish_if_open()
-                    .and_then(|e| responses_event_to_sse_bytes(&e))
-                {
-                    Some(b) => b,
-                    None => Bytes::new(),
+            let mut buf = Vec::new();
+            if !stopped.load(std::sync::atomic::Ordering::SeqCst) {
+                // R-SS-22: close every open item and append exactly one terminal event.
+                for e in fsm.lock().finish_open_events() {
+                    if let Some(b) = responses_event_to_sse_bytes(&e) {
+                        buf.extend_from_slice(&b);
+                    }
                 }
-            } else {
-                Bytes::new()
-            };
-            Ok::<_, E>(synthetic)
+            }
+            Ok::<_, E>(Bytes::from(buf))
         }))
         .boxed()
 }
@@ -618,9 +628,11 @@ where
                     }
                 }
             }
-            Err(e) => {
-                stopped_flag.store(true, std::sync::atomic::Ordering::SeqCst);
-                out.push(Err(e));
+            Err(_e) => {
+                // R-SS-22: an upstream abort must not truncate the client body. The error is
+                // dropped here and the EOF tail below still closes the open items and emits a
+                // documented terminal event, so conformant SDK clients never hang and never see a
+                // malformed stream.
             }
         }
         let iter = futures_util::stream::iter(out);
@@ -630,19 +642,16 @@ where
 
     translated
         .chain(futures_util::stream::once(async move {
-            let synthetic = if !stopped.load(std::sync::atomic::Ordering::SeqCst) {
-                match fsm
-                    .lock()
-                    .finish_if_open()
-                    .and_then(|e| responses_event_to_sse_bytes(&e))
-                {
-                    Some(b) => b,
-                    None => Bytes::new(),
+            let mut buf = Vec::new();
+            if !stopped.load(std::sync::atomic::Ordering::SeqCst) {
+                // R-SS-22: close every open item and append exactly one terminal event.
+                for e in fsm.lock().finish_open_events() {
+                    if let Some(b) = responses_event_to_sse_bytes(&e) {
+                        buf.extend_from_slice(&b);
+                    }
                 }
-            } else {
-                Bytes::new()
-            };
-            Ok::<_, E>(synthetic)
+            }
+            Ok::<_, E>(Bytes::from(buf))
         }))
         .boxed()
 }
@@ -683,9 +692,10 @@ where
                     }
                 }
             }
-            Err(e) => {
-                stopped_flag.store(true, std::sync::atomic::Ordering::SeqCst);
-                out.push(Err(e));
+            Err(_e) => {
+                // A-SS-18: an upstream abort must not truncate the client body. The error is
+                // dropped here; the EOF tail below closes the open block(s) and guarantees a
+                // documented terminal event.
             }
         }
         let iter = futures_util::stream::iter(out);
@@ -693,27 +703,43 @@ where
             as std::pin::Pin<Box<dyn futures_util::Stream<Item = Result<Bytes, E>> + Send>>)
     });
 
-    // At stream end, guarantee the Anthropic conversation terminates unless a
-    // transport error already ended it with failure.
+    // At stream end, guarantee the Anthropic conversation terminates with exactly one documented
+    // terminal event — `message_stop` or `error` (A-SS-18) — even when the upstream aborted
+    // mid-stream without a finish_reason.
     translated
         .chain(futures_util::stream::once(async move {
-            let synthetic = if !stopped.load(std::sync::atomic::Ordering::SeqCst) {
-                match fsm.lock().finish_if_open() {
-                    Some(events) => {
-                        let mut buf = Vec::new();
-                        for e in &events {
-                            if let Some(b) = anthropic_event_to_sse_bytes(e) {
-                                buf.extend_from_slice(&b);
-                            }
+            let mut buf = Vec::new();
+            if !stopped.load(std::sync::atomic::Ordering::SeqCst) {
+                let mut terminal_seen = false;
+                if let Some(events) = fsm.lock().finish_if_open() {
+                    for e in &events {
+                        if matches!(
+                            e,
+                            MessageStreamEvent::MessageStop | MessageStreamEvent::Error { .. }
+                        ) {
+                            terminal_seen = true;
                         }
-                        Bytes::from(buf)
+                        if let Some(b) = anthropic_event_to_sse_bytes(e) {
+                            buf.extend_from_slice(&b);
+                        }
                     }
-                    None => Bytes::new(),
                 }
-            } else {
-                Bytes::new()
-            };
-            Ok::<_, E>(synthetic)
+                if !terminal_seen {
+                    // The FSM could not close the conversation (aborted upstream): emit the
+                    // documented `error` terminal so conformant clients never hang on a bare
+                    // connection close.
+                    let err = MessageStreamEvent::Error {
+                        error: ponyllm_protocol::anthropic::AnthropicErrorDetail {
+                            r#type: "api_error".to_string(),
+                            message: "upstream stream ended before completion".to_string(),
+                        },
+                    };
+                    if let Some(b) = anthropic_event_to_sse_bytes(&err) {
+                        buf.extend_from_slice(&b);
+                    }
+                }
+            }
+            Ok::<_, E>(Bytes::from(buf))
         }))
         .boxed()
 }

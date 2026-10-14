@@ -174,6 +174,13 @@ pub fn responses_to_anthropic_request(req: &CreateResponseRequest) -> Result<Mes
                                                 signature: None,
                                             });
                                         }
+                                        ResponseContentPart::SummaryText { text }
+                                        | ResponseContentPart::ReasoningText { text } => {
+                                            blocks.push(AnthropicContentBlock::Thinking {
+                                                thinking: text.clone(),
+                                                signature: None,
+                                            });
+                                        }
                                         ResponseContentPart::Refusal { .. }
                                         | ResponseContentPart::Unknown => {}
                                     }
@@ -565,7 +572,10 @@ pub fn anthropic_to_responses_request(req: &MessageRequest) -> Result<CreateResp
 
 
 /// Convert OpenAI Responses object to Anthropic Messages response.
-/// Reasoning parts become `Thinking` blocks; `FunctionCall` items become `ToolUse`.
+///
+/// Reasoning items become `Thinking` blocks; `FunctionCall` items become `ToolUse`. The message id
+/// is normalized to the `msg_` prefix (A-NS-14/A-NS-01) and the cache counters are always present
+/// (A-NS-14/A-NS-11).
 pub fn responses_to_anthropic_response(resp: &ResponseObject) -> Result<MessageResponse> {
     // Mirror the chat projection: a failed upstream must surface as a
     // Conversion error (failover-eligible) rather than an empty success
@@ -600,6 +610,13 @@ pub fn responses_to_anthropic_response(resp: &ResponseObject) -> Result<MessageR
                         ResponseContentPart::Reasoning { reasoning } => {
                             content.push(AnthropicContentBlock::Thinking {
                                 thinking: reasoning.clone(),
+                                signature: None,
+                            });
+                        }
+                        ResponseContentPart::SummaryText { text }
+                        | ResponseContentPart::ReasoningText { text } => {
+                            content.push(AnthropicContentBlock::Thinking {
+                                thinking: text.clone(),
                                 signature: None,
                             });
                         }
@@ -662,69 +679,17 @@ pub fn responses_to_anthropic_response(resp: &ResponseObject) -> Result<MessageR
                     cache_control: None,
                 });
             }
-            ResponseOutputItem::Reasoning {
-                content: parts,
-                summary,
-                ..
-            } => {
-                if let Some(parts) = parts {
-                    for part in parts {
-                        match part {
-                            ResponseContentPart::Text { text } => {
-                                content.push(AnthropicContentBlock::Thinking {
-                                    thinking: text.clone(),
-                                    signature: None,
-                                });
-                            }
-                            ResponseContentPart::Thought { thought } => {
-                                content.push(AnthropicContentBlock::Thinking {
-                                    thinking: thought.clone(),
-                                    signature: None,
-                                });
-                            }
-                            ResponseContentPart::Reasoning { reasoning } => {
-                                content.push(AnthropicContentBlock::Thinking {
-                                    thinking: reasoning.clone(),
-                                    signature: None,
-                                });
-                            }
-                            ResponseContentPart::Refusal { .. }
-                            | ResponseContentPart::InputImage { .. }
-                            | ResponseContentPart::InputAudio { .. }
-                            | ResponseContentPart::InputVideo { .. }
-                            | ResponseContentPart::InputFile { .. }
-                            | ResponseContentPart::Unknown => {}
-                        }
-                    }
-                }
-                if let Some(parts) = summary {
-                    for part in parts {
-                        match part {
-                            ResponseContentPart::Text { text } => {
-                                content.push(AnthropicContentBlock::Thinking {
-                                    thinking: text.clone(),
-                                    signature: None,
-                                });
-                            }
-                            ResponseContentPart::Thought { thought } => {
-                                content.push(AnthropicContentBlock::Thinking {
-                                    thinking: thought.clone(),
-                                    signature: None,
-                                });
-                            }
-                            ResponseContentPart::Reasoning { reasoning } => {
-                                content.push(AnthropicContentBlock::Thinking {
-                                    thinking: reasoning.clone(),
-                                    signature: None,
-                                });
-                            }
-                            ResponseContentPart::Refusal { .. }
-                            | ResponseContentPart::InputImage { .. }
-                            | ResponseContentPart::InputAudio { .. }
-                            | ResponseContentPart::InputVideo { .. }
-                            | ResponseContentPart::InputFile { .. }
-                            | ResponseContentPart::Unknown => {}
-                        }
+            ResponseOutputItem::Reasoning { content: parts, summary, .. } => {
+                // The conformant reasoning item carries its text both as `reasoning_text`
+                // (`content`) and as `summary_text` (`summary`); prefer `content` so the thinking
+                // block is not duplicated.
+                let thinking = reasoning_text(parts).or_else(|| reasoning_text(summary));
+                if let Some(thinking) = thinking {
+                    if !thinking.is_empty() {
+                        content.push(AnthropicContentBlock::Thinking {
+                            thinking,
+                            signature: None,
+                        });
                     }
                 }
             }
@@ -746,14 +711,19 @@ pub fn responses_to_anthropic_response(resp: &ResponseObject) -> Result<MessageR
         Some(u) => AnthropicUsage {
             input_tokens: u.input_tokens,
             output_tokens: u.output_tokens,
-            cache_creation_input_tokens: None,
-            cache_read_input_tokens: None,
+            cache_creation_input_tokens: Some(u.input_tokens_details.cache_write_tokens),
+            cache_read_input_tokens: Some(u.input_tokens_details.cached_tokens),
         },
-        None => AnthropicUsage::default(),
+        None => AnthropicUsage {
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_creation_input_tokens: Some(0),
+            cache_read_input_tokens: Some(0),
+        },
     };
 
     Ok(MessageResponse {
-        id: resp.id.clone(),
+        id: normalize_anthropic_message_id(&resp.id),
         r#type: "message".to_string(),
         role: "assistant".to_string(),
         content,
@@ -764,12 +734,50 @@ pub fn responses_to_anthropic_response(resp: &ResponseObject) -> Result<MessageR
     })
 }
 
+/// Joins the textual parts of a reasoning `content`/`summary` array.
+fn reasoning_text(parts: &Option<Vec<ResponseContentPart>>) -> Option<String> {
+    let parts = parts.as_ref()?;
+    let mut acc = String::new();
+    for part in parts {
+        match part {
+            ResponseContentPart::Text { text }
+            | ResponseContentPart::SummaryText { text }
+            | ResponseContentPart::ReasoningText { text } => acc.push_str(text),
+            ResponseContentPart::Thought { thought } => acc.push_str(thought),
+            ResponseContentPart::Reasoning { reasoning } => acc.push_str(reasoning),
+            _ => {}
+        }
+    }
+    Some(acc)
+}
+
+/// Normalizes an upstream/Responses id into the `msg_`-prefixed Anthropic message id
+/// (A-NS-01, A-NS-14).
+fn normalize_anthropic_message_id(raw: &str) -> String {
+    if raw.starts_with("msg_") && raw.len() > "msg_".len() {
+        return raw.to_string();
+    }
+    let tail: String = raw
+        .strip_prefix("resp_")
+        .unwrap_or(raw)
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect();
+    if tail.is_empty() {
+        format!("msg_{:x}", now_unix_secs())
+    } else {
+        format!("msg_{tail}")
+    }
+}
+
 /// Convert Anthropic Messages response to OpenAI Responses object.
-/// `Thinking` blocks become `Reasoning` parts; `ToolUse` becomes `FunctionCall` items.
+///
+/// `Thinking` blocks become a top-level `reasoning` output item (never an in-message content part);
+/// `ToolUse` becomes `FunctionCall` items (R-NS-24).
 pub fn anthropic_to_responses_response(resp: &MessageResponse) -> Result<ResponseObject> {
     let mut text_acc = String::new();
     let mut reasoning_acc = String::new();
-    let mut output = Vec::new();
+    let mut tool_items = Vec::new();
 
     for block in &resp.content {
         match block {
@@ -782,7 +790,7 @@ pub fn anthropic_to_responses_response(resp: &MessageResponse) -> Result<Respons
             AnthropicContentBlock::ToolUse {
                 id, name, input, ..
             } => {
-                output.push(ResponseOutputItem::FunctionCall {
+                tool_items.push(ResponseOutputItem::FunctionCall {
                     id: format!("fc_{}", id),
                     status: "completed".to_string(),
                     call_id: id.clone(),
@@ -794,26 +802,20 @@ pub fn anthropic_to_responses_response(resp: &MessageResponse) -> Result<Respons
         }
     }
 
-    let mut parts = Vec::new();
+    let response_id = normalize_response_id(&resp.id);
+    let mut output = Vec::new();
     if !reasoning_acc.is_empty() {
-        parts.push(ResponseContentPart::Reasoning {
-            reasoning: reasoning_acc,
-        });
+        output.push(reasoning_output_item(&response_id, &reasoning_acc));
     }
     if !text_acc.is_empty() {
-        parts.push(ResponseContentPart::Text { text: text_acc });
+        output.push(ResponseOutputItem::Message {
+            id: normalize_message_item_id(&resp.id),
+            status: "completed".to_string(),
+            role: "assistant".to_string(),
+            content: vec![ResponseContentPart::Text { text: text_acc }],
+        });
     }
-    if !parts.is_empty() {
-        output.insert(
-            0,
-            ResponseOutputItem::Message {
-                id: format!("msg_{}", resp.id),
-                status: "completed".to_string(),
-                role: "assistant".to_string(),
-                content: parts,
-            },
-        );
-    }
+    output.extend(tool_items);
 
     let status = match resp.stop_reason {
         Some(AnthropicStopReason::MaxTokens) => "incomplete".to_string(),
@@ -823,19 +825,22 @@ pub fn anthropic_to_responses_response(resp: &MessageResponse) -> Result<Respons
     let cached_read = resp.usage.cache_read_input_tokens.unwrap_or(0);
     let cached_create = resp.usage.cache_creation_input_tokens.unwrap_or(0);
     let input_tokens = resp.usage.input_tokens + cached_read + cached_create;
-    let usage = ResponseUsage {
+    let usage = ResponseUsage::new(
         input_tokens,
-        output_tokens: resp.usage.output_tokens,
-        total_tokens: input_tokens + resp.usage.output_tokens,
-    };
+        resp.usage.output_tokens,
+        cached_read,
+        cached_create,
+    );
 
     Ok(ResponseObject {
-        id: resp.id.clone(),
+        id: response_id,
         object: "response".to_string(),
+        created_at: now_unix_secs(),
+        completed_at: Some(now_unix_secs()),
         status,
         model: resp.model.clone(),
         output,
         usage: Some(usage),
-        error: None,
+        ..Default::default()
     })
 }

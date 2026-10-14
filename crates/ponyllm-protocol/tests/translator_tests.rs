@@ -5,6 +5,20 @@ use ponyllm_protocol::openai::responses::*;
 use ponyllm_protocol::translator::*;
 use serde_json::json;
 
+/// The wire `type` of a Responses stream event, read from its own serialization.
+///
+/// Used by the migrated stream-FSM tests to assert the exact ordered event sequence the frozen
+/// contract requires (R-SS-01..R-SS-13), instead of the legacy "delta is at index 1" expectation
+/// that predates the `response.in_progress` / item / content-part lifecycle.
+fn response_event_type(event: &ResponseStreamEvent) -> String {
+    serde_json::to_value(event)
+        .expect("ResponseStreamEvent must serialize")
+        .get("type")
+        .and_then(|t| t.as_str())
+        .expect("every Responses stream event carries a `type` field")
+        .to_string()
+}
+
 #[test]
 fn test_chat_to_anthropic_request() {
     let chat_req = ChatCompletionRequest {
@@ -278,7 +292,9 @@ fn test_chat_response_to_anthropic_response() {
     };
 
     let anthropic_resp = chat_to_anthropic_response(&chat_resp).unwrap();
-    assert_eq!(anthropic_resp.id, "chatcmpl-999");
+    // Contract A-NS-01: the message id is `msg_`-prefixed on the wire (legacy expectation was the
+    // raw upstream chat id `chatcmpl-999`).
+    assert_eq!(anthropic_resp.id, "msg_chatcmpl999");
     assert_eq!(
         anthropic_resp.stop_reason,
         Some(AnthropicStopReason::ToolUse)
@@ -379,8 +395,10 @@ fn test_responses_with_reasoning_to_chat_response() {
             total_tokens: 50,
             input_tokens: 20,
             output_tokens: 30,
+            ..Default::default()
         }),
         error: None,
+        ..Default::default()
     };
 
     let chat_resp = responses_to_chat_response(&resp_obj).unwrap();
@@ -494,7 +512,7 @@ fn test_streaming_anthropic_to_chat_fsm() {
             stop_reason: Some(AnthropicStopReason::ToolUse),
             stop_sequence: None,
         },
-        usage: Some(AnthropicDeltaUsage { output_tokens: 35 }),
+        usage: Some(AnthropicDeltaUsage { output_tokens: 35 , ..Default::default()}),
     };
     let chunks = fsm.process_event(msg_delta).unwrap();
     assert_eq!(chunks.len(), 1);
@@ -787,13 +805,39 @@ fn test_anthropic_response_to_responses_response() {
     };
     let out = anthropic_to_responses_response(&resp).unwrap();
     assert_eq!(out.status, "completed");
-    assert_eq!(out.output.len(), 2);
-    let msg = match &out.output[0] {
-        ResponseOutputItem::Message { content, .. } => content,
-        _ => panic!("expected message first"),
-    };
-    assert!(matches!(msg[0], ResponseContentPart::Reasoning { .. }));
-    assert!(matches!(msg[1], ResponseContentPart::Text { .. }));
+    // Contract R-NS-13/R-NS-14/R-NS-16: reasoning is a separate top-level output item and MUST NOT
+    // appear as a message content part, so the fixture's Thinking block adds its own item.
+    // Legacy expectation was 2 items with an in-message `reasoning` content part.
+    assert_eq!(out.output.len(), 3);
+    let reasoning_summary = out
+        .output
+        .iter()
+        .find_map(|item| match item {
+            ResponseOutputItem::Reasoning { summary, .. } => Some(summary),
+            _ => None,
+        })
+        .expect("R-NS-13: reasoning must be a separate top-level output item");
+    assert!(
+        reasoning_summary.as_ref().is_some_and(|s| !s.is_empty()),
+        "R-NS-14: the reasoning item must carry a non-empty summary"
+    );
+    assert!(
+        out.output
+            .iter()
+            .any(|item| matches!(item, ResponseOutputItem::FunctionCall { .. })),
+        "the ToolUse block must project to a function_call output item"
+    );
+    let msg = out
+        .output
+        .iter()
+        .find_map(|item| match item {
+            ResponseOutputItem::Message { content, .. } => Some(content),
+            _ => None,
+        })
+        .expect("R-NS-07: the assistant message item must be present");
+    // R-NS-11/R-NS-16: the message carries the text part only — never the reasoning part.
+    assert_eq!(msg.len(), 1);
+    assert!(matches!(msg[0], ResponseContentPart::Text { .. }));
     let back = responses_to_anthropic_response(&out).unwrap();
     assert_eq!(back.stop_reason, Some(AnthropicStopReason::ToolUse));
     assert_eq!(back.usage.input_tokens, 10);
@@ -838,7 +882,10 @@ fn test_chat_response_to_responses_response() {
     };
     let out = chat_to_responses_response(&resp).unwrap();
     assert_eq!(out.status, "completed");
-    assert_eq!(out.output.len(), 2);
+    // Contract R-NS-13: the `reasoning_content` of this fixture becomes its own top-level reasoning
+    // item, so the turn yields reasoning + message + function_call = 3 items (legacy expectation
+    // was 2, with the reasoning leaked as an in-message content part).
+    assert_eq!(out.output.len(), 3);
     assert_eq!(out.usage.as_ref().unwrap().total_tokens, 10);
     let back = responses_to_chat_response(&out).unwrap();
     let msg = &back.choices[0].message;
@@ -850,6 +897,7 @@ fn test_chat_response_to_responses_response() {
 fn test_responses_to_chat_stream_fsm() {
     let mut fsm = ResponsesToChatFsm::new("m");
     let created = ResponseStreamEvent::ResponseCreated {
+        sequence_number: 1,
         response: ResponseObject {
             id: "resp_1".to_string(),
             object: "response".to_string(),
@@ -858,6 +906,7 @@ fn test_responses_to_chat_stream_fsm() {
             output: vec![],
             usage: None,
             error: None,
+            ..Default::default()
         },
     };
     let chunks = fsm.process_event(created).unwrap();
@@ -881,17 +930,19 @@ fn test_responses_to_chat_stream_fsm() {
         Some("thinking")
     );
 
-    let text = ResponseStreamEvent::OutputTextDelta(ResponseTextDelta {
-        response_id: "resp_1".to_string(),
+    let text = ResponseStreamEvent::OutputTextDelta(ResponseOutputTextDelta {
+        sequence_number: 17,
         item_id: "it_0".to_string(),
         output_index: 0,
         content_index: 0,
         delta: "hello".to_string(),
+        logprobs: vec![],
     });
     let chunks = fsm.process_event(text).unwrap();
     assert_eq!(chunks[0].choices[0].delta.content.as_deref(), Some("hello"));
 
     let done = ResponseStreamEvent::Completed {
+        sequence_number: 2,
         response: ResponseObject {
             id: "resp_1".to_string(),
             object: "response".to_string(),
@@ -902,8 +953,10 @@ fn test_responses_to_chat_stream_fsm() {
                 total_tokens: 9,
                 input_tokens: 6,
                 output_tokens: 3,
+                ..Default::default()
             }),
             error: None,
+            ..Default::default()
         },
     };
     let chunks = fsm.process_event(done).unwrap();
@@ -936,11 +989,20 @@ fn test_chat_to_responses_stream_fsm() {
         service_tier: None,
     };
     let events = fsm.process_chunk(chunk).unwrap();
-    assert!(matches!(
-        events[0],
-        ResponseStreamEvent::ResponseCreated { .. }
-    ));
-    assert!(matches!(events[1], ResponseStreamEvent::OutputTextDelta(_)));
+    // Contract R-SS-01/R-SS-02/R-SS-03/R-SS-05/R-SS-06/R-SS-07: the first chunk opens the
+    // response, then the output item and its content part, and only then the text delta. The legacy
+    // expectation placed the delta at index 1, before the item/part lifecycle existed.
+    let kinds: Vec<String> = events.iter().map(response_event_type).collect();
+    assert_eq!(
+        kinds,
+        vec![
+            "response.created",
+            "response.in_progress",
+            "response.output_item.added",
+            "response.content_part.added",
+            "response.output_text.delta",
+        ]
+    );
 
     let fin = ChatCompletionChunk {
         id: "chatcmpl-1".to_string(),
@@ -964,7 +1026,19 @@ fn test_chat_to_responses_stream_fsm() {
         service_tier: None,
     };
     let events = fsm.process_chunk(fin).unwrap();
-    assert!(matches!(events[0], ResponseStreamEvent::Completed { .. }));
+    // Contract R-SS-08/R-SS-09/R-SS-10/R-SS-12: the terminal chunk closes the text part, the content
+    // part and the output item before `response.completed`. The legacy expectation had `Completed`
+    // as the first (and only) event of this chunk.
+    let kinds: Vec<String> = events.iter().map(response_event_type).collect();
+    assert_eq!(
+        kinds,
+        vec![
+            "response.output_text.done",
+            "response.content_part.done",
+            "response.output_item.done",
+            "response.completed",
+        ]
+    );
     assert!(fsm.finish_if_open().is_none());
 }
 
@@ -972,6 +1046,7 @@ fn test_chat_to_responses_stream_fsm() {
 fn test_responses_to_anthropic_stream_fsm() {
     let mut fsm = ResponsesToAnthropicFsm::new("m");
     let created = ResponseStreamEvent::ResponseCreated {
+        sequence_number: 3,
         response: ResponseObject {
             id: "resp_9".to_string(),
             object: "response".to_string(),
@@ -980,6 +1055,7 @@ fn test_responses_to_anthropic_stream_fsm() {
             output: vec![],
             usage: None,
             error: None,
+            ..Default::default()
         },
     };
     let events = fsm.process_event(created).unwrap();
@@ -1002,6 +1078,7 @@ fn test_responses_to_anthropic_stream_fsm() {
     )));
 
     let done = ResponseStreamEvent::ResponseDone {
+        sequence_number: 4,
         response: ResponseObject {
             id: "resp_9".to_string(),
             object: "response".to_string(),
@@ -1012,8 +1089,10 @@ fn test_responses_to_anthropic_stream_fsm() {
                 total_tokens: 5,
                 input_tokens: 3,
                 output_tokens: 2,
+                ..Default::default()
             }),
             error: None,
+            ..Default::default()
         },
     };
     let events = fsm.process_event(done).unwrap();
@@ -1050,7 +1129,17 @@ fn test_anthropic_to_responses_stream_fsm() {
         },
     };
     let events = fsm.process_event(delta).unwrap();
-    assert!(matches!(events[0], ResponseStreamEvent::OutputTextDelta(_)));
+    // Contract R-SS-06/R-SS-07: the text delta is preceded by the content-part lifecycle for the
+    // block it belongs to; the legacy expectation placed the bare delta at index 0.
+    let kinds: Vec<String> = events.iter().map(response_event_type).collect();
+    assert_eq!(
+        kinds,
+        vec![
+            "response.output_item.added",
+            "response.content_part.added",
+            "response.output_text.delta",
+        ]
+    );
 
     let stop = MessageStreamEvent::MessageStop;
     let events = fsm.process_event(stop).unwrap();
@@ -1194,6 +1283,7 @@ fn test_responses_to_anthropic_stream_fsm_empty_delta_and_dynamic_stop_reason() 
     let mut fsm = ResponsesToAnthropicFsm::new("claude-model");
     let _ = fsm
         .process_event(ResponseStreamEvent::ResponseCreated {
+            sequence_number: 5,
             response: ResponseObject {
                 id: "resp_dyn_1".to_string(),
                 object: "response".to_string(),
@@ -1202,6 +1292,7 @@ fn test_responses_to_anthropic_stream_fsm_empty_delta_and_dynamic_stop_reason() 
                 output: vec![],
                 usage: None,
                 error: None,
+                ..Default::default()
             },
         })
         .unwrap();
@@ -1228,6 +1319,7 @@ fn test_responses_to_anthropic_stream_fsm_empty_delta_and_dynamic_stop_reason() 
                 output_index: 0,
                 call_id: "call_tool_1".to_string(),
                 delta: "{\"id\":1}".to_string(),
+                ..Default::default()
             },
         ))
         .unwrap();
@@ -1254,6 +1346,7 @@ fn test_responses_to_anthropic_stream_fsm_empty_delta_and_dynamic_stop_reason() 
     let mut fsm_text = ResponsesToAnthropicFsm::new("claude-model");
     let _ = fsm_text
         .process_event(ResponseStreamEvent::ResponseCreated {
+            sequence_number: 6,
             response: ResponseObject {
                 id: "resp_dyn_2".to_string(),
                 object: "response".to_string(),
@@ -1262,6 +1355,7 @@ fn test_responses_to_anthropic_stream_fsm_empty_delta_and_dynamic_stop_reason() 
                 output: vec![],
                 usage: None,
                 error: None,
+                ..Default::default()
             },
         })
         .unwrap();
@@ -2553,6 +2647,7 @@ fn test_responses_failed_to_chat_response_returns_error() {
             code: "server_error".to_string(),
             message: "boom gone".to_string(),
         }),
+        ..Default::default()
     };
     let err = responses_to_chat_response(&failed).unwrap_err();
     match err {
@@ -2574,6 +2669,7 @@ fn test_responses_failed_to_chat_response_returns_error() {
         output: vec![],
         usage: None,
         error: None,
+        ..Default::default()
     };
     let err = responses_to_chat_response(&failed_no_error).unwrap_err();
     match err {
@@ -2597,6 +2693,7 @@ fn test_responses_failed_to_chat_response_returns_error() {
             code: "".to_string(),
             message: "   ".to_string(),
         }),
+        ..Default::default()
     };
     let err = responses_to_chat_response(&failed_blank_error).unwrap_err();
     match err {
@@ -2614,6 +2711,7 @@ fn test_responses_to_chat_stream_failed_returns_error() {
     // 1. Failed with error payload -> Err carrying code/message, done=true.
     let mut fsm = ResponsesToChatFsm::new("m");
     let failed = ResponseStreamEvent::Failed {
+        sequence_number: 7,
         response: ResponseObject {
             id: "resp_sf_1".to_string(),
             object: "response".to_string(),
@@ -2625,6 +2723,7 @@ fn test_responses_to_chat_stream_failed_returns_error() {
                 code: "server_error".to_string(),
                 message: "upstream blew up".to_string(),
             }),
+            ..Default::default()
         },
     };
     let err = fsm.process_event(failed).unwrap_err();
@@ -2645,6 +2744,7 @@ fn test_responses_to_chat_stream_failed_returns_error() {
     // 2. Failed without error payload -> Err with status fallback.
     let mut fsm2 = ResponsesToChatFsm::new("m");
     let failed_no_error = ResponseStreamEvent::Failed {
+        sequence_number: 8,
         response: ResponseObject {
             id: "resp_sf_2".to_string(),
             object: "response".to_string(),
@@ -2653,6 +2753,7 @@ fn test_responses_to_chat_stream_failed_returns_error() {
             output: vec![],
             usage: None,
             error: None,
+            ..Default::default()
         },
     };
     let err = fsm2.process_event(failed_no_error).unwrap_err();
@@ -2666,16 +2767,18 @@ fn test_responses_to_chat_stream_failed_returns_error() {
 
     // 3. Failed after text deltas still errors (never synthesizes Other chunk).
     let mut fsm3 = ResponsesToChatFsm::new("m");
-    let delta = ResponseStreamEvent::OutputTextDelta(ResponseTextDelta {
-        response_id: "resp_sf_3".to_string(),
+    let delta = ResponseStreamEvent::OutputTextDelta(ResponseOutputTextDelta {
+        sequence_number: 18,
         item_id: "it_0".to_string(),
         output_index: 0,
         content_index: 0,
         delta: "partial".to_string(),
+        logprobs: vec![],
     });
     let chunks = fsm3.process_event(delta).unwrap();
     assert_eq!(chunks.len(), 1);
     let failed_late = ResponseStreamEvent::Failed {
+        sequence_number: 9,
         response: ResponseObject {
             id: "resp_sf_3".to_string(),
             object: "response".to_string(),
@@ -2687,6 +2790,7 @@ fn test_responses_to_chat_stream_failed_returns_error() {
                 code: "c".to_string(),
                 message: "late failure".to_string(),
             }),
+            ..Default::default()
         },
     };
     assert!(fsm3.process_event(failed_late).is_err());
@@ -2698,6 +2802,7 @@ fn test_responses_to_anthropic_stream_failed_passes_message_through() {
     // 1. Real upstream message is passed through (not the hardcoded string).
     let mut fsm = ResponsesToAnthropicFsm::new("m");
     let failed = ResponseStreamEvent::Failed {
+        sequence_number: 10,
         response: ResponseObject {
             id: "resp_af_1".to_string(),
             object: "response".to_string(),
@@ -2709,6 +2814,7 @@ fn test_responses_to_anthropic_stream_failed_passes_message_through() {
                 code: "server_error".to_string(),
                 message: "upstream exploded".to_string(),
             }),
+            ..Default::default()
         },
     };
     let events = fsm.process_event(failed).unwrap();
@@ -2734,6 +2840,7 @@ fn test_responses_to_anthropic_stream_failed_passes_message_through() {
     // 2. Missing error payload -> status fallback.
     let mut fsm2 = ResponsesToAnthropicFsm::new("m");
     let failed_no_error = ResponseStreamEvent::Failed {
+        sequence_number: 11,
         response: ResponseObject {
             id: "resp_af_2".to_string(),
             object: "response".to_string(),
@@ -2742,6 +2849,7 @@ fn test_responses_to_anthropic_stream_failed_passes_message_through() {
             output: vec![],
             usage: None,
             error: None,
+            ..Default::default()
         },
     };
     let events = fsm2.process_event(failed_no_error).unwrap();
@@ -2758,6 +2866,7 @@ fn test_responses_to_anthropic_stream_failed_passes_message_through() {
     // 3. Blank message with code -> status fallback carrying the code.
     let mut fsm3 = ResponsesToAnthropicFsm::new("m");
     let failed_code_only = ResponseStreamEvent::Failed {
+        sequence_number: 12,
         response: ResponseObject {
             id: "resp_af_3".to_string(),
             object: "response".to_string(),
@@ -2769,6 +2878,7 @@ fn test_responses_to_anthropic_stream_failed_passes_message_through() {
                 code: "timeout".to_string(),
                 message: "".to_string(),
             }),
+            ..Default::default()
         },
     };
     let events = fsm3.process_event(failed_code_only).unwrap();
@@ -2801,6 +2911,7 @@ fn test_responses_failed_paths_preserve_stop_length_toolcalls_and_other() {
         }],
         usage: None,
         error: None,
+        ..Default::default()
     };
     let chat = responses_to_chat_response(&completed_text).unwrap();
     assert_eq!(chat.choices[0].finish_reason, Some(FinishReason::Stop));
@@ -2819,6 +2930,7 @@ fn test_responses_failed_paths_preserve_stop_length_toolcalls_and_other() {
         }],
         usage: None,
         error: None,
+        ..Default::default()
     };
     let chat = responses_to_chat_response(&completed_tool).unwrap();
     assert_eq!(chat.choices[0].finish_reason, Some(FinishReason::ToolCalls));
@@ -2826,6 +2938,7 @@ fn test_responses_failed_paths_preserve_stop_length_toolcalls_and_other() {
     // Streaming: Completed -> Stop, Incomplete -> Length, tool path -> ToolCalls.
     let mut fsm = ResponsesToChatFsm::new("m");
     let done = ResponseStreamEvent::Completed {
+        sequence_number: 13,
         response: ResponseObject {
             id: "r".to_string(),
             object: "response".to_string(),
@@ -2834,6 +2947,7 @@ fn test_responses_failed_paths_preserve_stop_length_toolcalls_and_other() {
             output: vec![],
             usage: None,
             error: None,
+            ..Default::default()
         },
     };
     let chunks = fsm.process_event(done).unwrap();
@@ -2841,6 +2955,7 @@ fn test_responses_failed_paths_preserve_stop_length_toolcalls_and_other() {
 
     let mut fsm_len = ResponsesToChatFsm::new("m");
     let incomplete = ResponseStreamEvent::Incomplete {
+        sequence_number: 14,
         response: ResponseObject {
             id: "r".to_string(),
             object: "response".to_string(),
@@ -2849,6 +2964,7 @@ fn test_responses_failed_paths_preserve_stop_length_toolcalls_and_other() {
             output: vec![],
             usage: None,
             error: None,
+            ..Default::default()
         },
     };
     let chunks = fsm_len.process_event(incomplete).unwrap();
@@ -2859,6 +2975,7 @@ fn test_responses_failed_paths_preserve_stop_length_toolcalls_and_other() {
 
     let mut fsm_tool = ResponsesToChatFsm::new("m");
     let added = ResponseStreamEvent::OutputItemAdded {
+        sequence_number: 15,
         response_id: "r".to_string(),
         output_index: 0,
         item: ResponseOutputItem::FunctionCall {
@@ -2871,6 +2988,7 @@ fn test_responses_failed_paths_preserve_stop_length_toolcalls_and_other() {
     };
     let _ = fsm_tool.process_event(added).unwrap();
     let done_tool = ResponseStreamEvent::Completed {
+        sequence_number: 16,
         response: ResponseObject {
             id: "r".to_string(),
             object: "response".to_string(),
@@ -2879,6 +2997,7 @@ fn test_responses_failed_paths_preserve_stop_length_toolcalls_and_other() {
             output: vec![],
             usage: None,
             error: None,
+            ..Default::default()
         },
     };
     let chunks = fsm_tool.process_event(done_tool).unwrap();
@@ -2903,6 +3022,7 @@ fn test_response_object_is_failed_and_reason_helpers() {
             output: vec![],
             usage: None,
             error,
+            ..Default::default()
         }
     }
     // Canonical failed status.
@@ -3006,6 +3126,7 @@ fn test_responses_failed_to_anthropic_response_returns_error() {
             code: "server_error".to_string(),
             message: "boom gone".to_string(),
         }),
+        ..Default::default()
     };
     let err = responses_to_anthropic_response(&failed).unwrap_err();
     match err {
@@ -3025,6 +3146,7 @@ fn test_responses_failed_to_anthropic_response_returns_error() {
         output: vec![],
         usage: None,
         error: None,
+        ..Default::default()
     };
     let msg = responses_to_anthropic_response(&ok).unwrap();
     assert_eq!(msg.stop_reason, Some(AnthropicStopReason::EndTurn));

@@ -259,6 +259,10 @@ pub fn responses_to_chat_request(req: &CreateResponseRequest) -> Result<ChatComp
                                         ResponseContentPart::Refusal { refusal } => {
                                             chat_parts.push(ContentPart::Text { text: refusal.clone() });
                                         }
+                                        ResponseContentPart::SummaryText { text }
+                                        | ResponseContentPart::ReasoningText { text } => {
+                                            chat_parts.push(ContentPart::Text { text: format!("<thought>{}</thought>", text) });
+                                        }
                                         ResponseContentPart::Unknown => {}
                                     }
                                 }
@@ -307,6 +311,8 @@ pub fn responses_to_chat_request(req: &CreateResponseRequest) -> Result<ChatComp
                                     ResponseContentPart::Thought { thought } => thought_texts.push(thought.clone()),
                                     ResponseContentPart::Reasoning { reasoning } => thought_texts.push(reasoning.clone()),
                                     ResponseContentPart::Text { text } => thought_texts.push(text.clone()),
+                                    ResponseContentPart::SummaryText { text }
+                                    | ResponseContentPart::ReasoningText { text } => thought_texts.push(text.clone()),
                                     _ => {}
                                 }
                             }
@@ -317,6 +323,8 @@ pub fn responses_to_chat_request(req: &CreateResponseRequest) -> Result<ChatComp
                                     ResponseContentPart::Thought { thought } => thought_texts.push(thought.clone()),
                                     ResponseContentPart::Reasoning { reasoning } => thought_texts.push(reasoning.clone()),
                                     ResponseContentPart::Text { text } => thought_texts.push(text.clone()),
+                                    ResponseContentPart::SummaryText { text }
+                                    | ResponseContentPart::ReasoningText { text } => thought_texts.push(text.clone()),
                                     _ => {}
                                 }
                             }
@@ -388,11 +396,15 @@ pub fn responses_to_chat_request(req: &CreateResponseRequest) -> Result<ChatComp
 }
 
 
-/// Convert ChatCompletionResponse to ResponseObject
+/// Convert ChatCompletionResponse to ResponseObject.
+///
+/// Wire conformance: `resp_`/`msg_` ids, `output_text` assistant parts carrying `annotations`, a
+/// separate top-level `reasoning` output item (never an in-message `reasoning` part), real `usage`
+/// with both `*_tokens_details` sub-objects, and the always-present nullable set.
 pub fn chat_to_responses_response(resp: &ChatCompletionResponse) -> Result<ResponseObject> {
     let mut text_acc = String::new();
     let mut reasoning_acc = String::new();
-    let mut output = Vec::new();
+    let mut tool_items = Vec::new();
     let mut finish_stop = true;
 
     if let Some(choice) = resp.choices.first() {
@@ -404,7 +416,7 @@ pub fn chat_to_responses_response(resp: &ChatCompletionResponse) -> Result<Respo
         }
         if let Some(ref tool_calls) = choice.message.tool_calls {
             for tc in tool_calls {
-                output.push(ResponseOutputItem::FunctionCall {
+                tool_items.push(ResponseOutputItem::FunctionCall {
                     id: format!("fc_{}", tc.id),
                     status: "completed".to_string(),
                     call_id: tc.id.clone(),
@@ -416,36 +428,51 @@ pub fn chat_to_responses_response(resp: &ChatCompletionResponse) -> Result<Respo
         finish_stop = !matches!(choice.finish_reason, Some(FinishReason::Length));
     }
 
-    let mut parts = Vec::new();
+    let response_id = normalize_response_id(&resp.id);
+    let mut output = Vec::new();
     if !reasoning_acc.is_empty() {
-        parts.push(ResponseContentPart::Reasoning {
-            reasoning: reasoning_acc,
-        });
+        output.push(reasoning_output_item(&response_id, &reasoning_acc));
     }
     if !text_acc.is_empty() {
-        parts.push(ResponseContentPart::Text { text: text_acc });
+        output.push(ResponseOutputItem::Message {
+            id: normalize_message_item_id(&resp.id),
+            status: "completed".to_string(),
+            role: "assistant".to_string(),
+            content: vec![ResponseContentPart::Text { text: text_acc }],
+        });
     }
-    if !parts.is_empty() {
-        output.insert(
-            0,
-            ResponseOutputItem::Message {
-                id: format!("msg_{}", resp.id),
-                status: "completed".to_string(),
-                role: "assistant".to_string(),
-                content: parts,
-            },
-        );
-    }
+    output.extend(tool_items);
 
-    let usage = resp.usage.as_ref().map(|u| ResponseUsage {
-        input_tokens: u.prompt_tokens,
-        output_tokens: u.completion_tokens,
-        total_tokens: u.total_tokens,
+    let usage = resp.usage.as_ref().map(|u| {
+        ResponseUsage::new(
+            u.prompt_tokens,
+            u.completion_tokens,
+            u.prompt_tokens_details
+                .as_ref()
+                .and_then(|d| d.cached_tokens)
+                .unwrap_or(0),
+            u.completion_tokens_details
+                .as_ref()
+                .and_then(|d| d.reasoning_tokens)
+                .unwrap_or(0),
+        )
     });
 
+    let created_at = if resp.created > 0 {
+        resp.created as i64
+    } else {
+        now_unix_secs()
+    };
+
     Ok(ResponseObject {
-        id: resp.id.clone(),
+        id: response_id,
         object: "response".to_string(),
+        created_at,
+        completed_at: if finish_stop {
+            Some(now_unix_secs())
+        } else {
+            None
+        },
         status: if finish_stop {
             "completed".to_string()
         } else {
@@ -454,7 +481,7 @@ pub fn chat_to_responses_response(resp: &ChatCompletionResponse) -> Result<Respo
         model: resp.model.clone(),
         output,
         usage,
-        error: None,
+        ..Default::default()
     })
 }
 
@@ -485,6 +512,10 @@ pub fn responses_to_chat_response(resp: &ResponseObject) -> Result<ChatCompletio
                         ResponseContentPart::Reasoning { reasoning } => {
                             reasoning_acc.push_str(reasoning);
                         }
+                        ResponseContentPart::SummaryText { text }
+                        | ResponseContentPart::ReasoningText { text } => {
+                            reasoning_acc.push_str(text);
+                        }
                         ResponseContentPart::Refusal { .. }
                         | ResponseContentPart::InputImage { .. }
                         | ResponseContentPart::InputAudio { .. }
@@ -512,33 +543,33 @@ pub fn responses_to_chat_response(resp: &ResponseObject) -> Result<ChatCompletio
             ResponseOutputItem::Reasoning {
                 content, summary, ..
             } => {
-                if let Some(parts) = content {
+                // The conformant reasoning item carries the same text twice — as `reasoning_text`
+                // in `content` and as `summary_text` in `summary` — so prefer `content` and only
+                // fall back to `summary`, otherwise the reverse translation would duplicate it.
+                let parts_text = |parts: &Vec<ResponseContentPart>| {
+                    let mut acc = String::new();
                     for part in parts {
                         match part {
-                            ResponseContentPart::Text { text } => reasoning_acc.push_str(text),
-                            ResponseContentPart::Thought { thought } => {
-                                reasoning_acc.push_str(thought)
-                            }
+                            ResponseContentPart::Text { text }
+                            | ResponseContentPart::SummaryText { text }
+                            | ResponseContentPart::ReasoningText { text } => acc.push_str(text),
+                            ResponseContentPart::Thought { thought } => acc.push_str(thought),
                             ResponseContentPart::Reasoning { reasoning } => {
-                                reasoning_acc.push_str(reasoning)
+                                acc.push_str(reasoning)
                             }
                             _ => {}
                         }
                     }
-                }
-                if let Some(parts) = summary {
-                    for part in parts {
-                        match part {
-                            ResponseContentPart::Text { text } => reasoning_acc.push_str(text),
-                            ResponseContentPart::Thought { thought } => {
-                                reasoning_acc.push_str(thought)
-                            }
-                            ResponseContentPart::Reasoning { reasoning } => {
-                                reasoning_acc.push_str(reasoning)
-                            }
-                            _ => {}
-                        }
-                    }
+                    acc
+                };
+                let from_content = content
+                    .as_ref()
+                    .map(parts_text)
+                    .unwrap_or_default();
+                if !from_content.is_empty() {
+                    reasoning_acc.push_str(&from_content);
+                } else if let Some(parts) = summary {
+                    reasoning_acc.push_str(&parts_text(parts));
                 }
             }
             ResponseOutputItem::Unknown => {}

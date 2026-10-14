@@ -232,7 +232,9 @@ pub enum AnthropicContentBlock {
     },
     Thinking {
         thinking: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
+        /// Contract A-NS-05 / A-SS-08: the key is always present on the wire as a string (`""`
+        /// when the gateway holds no upstream signature). Deserialize stays permissive (§5.5).
+        #[serde(default, serialize_with = "opt_string_as_empty")]
         signature: Option<String>,
     },
     RedactedThinking {
@@ -327,7 +329,9 @@ pub struct MessageResponse {
     pub content: Vec<AnthropicContentBlock>,
     pub model: String,
     pub stop_reason: Option<AnthropicStopReason>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Contract A-NS-07 / A-SS-05: always serialized, explicit `null` when no custom stop
+    /// sequence matched. `default` keeps the deserialize side permissive (§5.4).
+    #[serde(default)]
     pub stop_sequence: Option<String>,
     pub usage: AnthropicUsage,
 }
@@ -347,9 +351,11 @@ pub enum AnthropicStopReason {
 pub struct AnthropicUsage {
     pub input_tokens: u32,
     pub output_tokens: u32,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Contract A-NS-10 / A-NS-11: present as an integer `>= 0` on the wire. `None` (unknown)
+    /// serializes as `0`; a known count is passed through untouched.
+    #[serde(default, serialize_with = "opt_u32_as_zero")]
     pub cache_creation_input_tokens: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, serialize_with = "opt_u32_as_zero")]
     pub cache_read_input_tokens: Option<u32>,
 }
 
@@ -404,19 +410,50 @@ pub enum AnthropicDelta {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct MessageDeltaBody {
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Contract A-SS-10: the `message_delta.delta` body always carries `stop_reason` and
+    /// `stop_sequence` (explicit `null` when absent); `default` keeps deserialize permissive.
+    #[serde(default)]
     pub stop_reason: Option<AnthropicStopReason>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub stop_sequence: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct AnthropicDeltaUsage {
     pub output_tokens: u32,
+    /// Contract A-SS-17: the cumulative real input token count. Always present on the wire as an
+    /// integer (`0` when no upstream usage was observed); `None` on deserialize when an upstream
+    /// sends `null` or omits the key.
+    #[serde(default, serialize_with = "opt_u32_as_zero")]
+    pub input_tokens: Option<u32>,
+    /// Contract A-SS-19 (SHOULD): emitted when the upstream reported it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_creation_input_tokens: Option<u32>,
+    /// Contract A-SS-20 (SHOULD): emitted when the upstream reported it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read_input_tokens: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AnthropicErrorDetail {
     pub r#type: String,
     pub message: String,
+}
+
+/// Serialize `None` as `0`. Contract A-NS-10/A-NS-11/A-SS-17: these usage keys are always present
+/// on the wire as integers `>= 0`; an unknown count must not drop the key.
+fn opt_u32_as_zero<S>(value: &Option<u32>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serializer.serialize_u32(value.unwrap_or(0))
+}
+
+/// Serialize `None` as `""`. Contract A-NS-05/A-SS-08: a thinking block always carries a string
+/// `signature`, `""` when the gateway holds no upstream signature.
+fn opt_string_as_empty<S>(value: &Option<String>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serializer.serialize_str(value.as_deref().unwrap_or(""))
 }

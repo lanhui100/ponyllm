@@ -378,10 +378,23 @@ async fn post_messages_stream(base: &str, text: &str) -> reqwest::Response {
         .expect("gateway must accept the request")
 }
 
-/// Every content-part `type` that appears inside a `message` output item anywhere in the stream.
+/// Every content-part `type` that appears inside a **`message`** output item anywhere in the stream.
+///
+/// Scoping rules (deliberately narrow — a content part is only a content part when it belongs to a
+/// message item's `content` array):
+/// * `/response/output[type=="message"].content[]` — the terminal aggregate.
+/// * `/item.content[]` on a frame whose `item.type == "message"` — `response.output_item.added` /
+///   `.done`. The reasoning item's own `output_item.*` frames carry `item.type == "reasoning"` and
+///   are excluded here.
+/// * `/part` — ONLY on `response.content_part.*` frames, which are the message item's own
+///   content-part events. `response.reasoning_summary_part.added` / `.done` also carry a `part`
+///   object, but that part belongs to the **reasoning item's `summary` array** (type
+///   `summary_text`), not to any message's `content`. Collecting it here conflated the two and
+///   produced a false failure; the assertion itself is unchanged and still fails if a message's
+///   content ever contains `input_text`, `reasoning` or `summary_text`.
 fn responses_message_part_types(frames: &[(String, Value)]) -> Vec<String> {
     let mut out = Vec::new();
-    for (_, data) in frames {
+    for (name, data) in frames {
         // Terminal/aggregate responses carry `response.output`.
         if let Some(items) = data.pointer("/response/output").and_then(Value::as_array) {
             for item in items {
@@ -397,7 +410,7 @@ fn responses_message_part_types(frames: &[(String, Value)]) -> Vec<String> {
                 }
             }
         }
-        // Streaming item/part events carry `item` / `part`.
+        // Streaming item events carry `item` (message items only).
         if let Some(item) = data.pointer("/item") {
             if item.get("type").and_then(Value::as_str) == Some("message") {
                 if let Some(parts) = item.get("content").and_then(Value::as_array) {
@@ -410,9 +423,13 @@ fn responses_message_part_types(frames: &[(String, Value)]) -> Vec<String> {
                 }
             }
         }
-        if let Some(part) = data.pointer("/part") {
-            if let Some(t) = part.get("type").and_then(Value::as_str) {
-                out.push(t.to_string());
+        // Streaming content-part events carry `part` — scoped to the MESSAGE item's own
+        // `response.content_part.*` frames, never the reasoning summary part frames.
+        if name.starts_with("response.content_part.") {
+            if let Some(part) = data.pointer("/part") {
+                if let Some(t) = part.get("type").and_then(Value::as_str) {
+                    out.push(t.to_string());
+                }
             }
         }
     }
@@ -640,6 +657,10 @@ async fn r_ss_b1_oversized_reasoning_frame_no_malformed_json_no_non_official_par
     );
 
     let part_types = responses_message_part_types(&frames);
+    assert!(
+        !part_types.is_empty(),
+        "R-SS-13: the message item must carry at least one content part (guards against a vacuous pass); raw body: {raw}"
+    );
     assert!(
         !part_types.iter().any(|t| t == "input_text" || t == "reasoning"),
         "R-SS-13: a message content part must never be `input_text` or `reasoning`; got {part_types:?}; raw body: {raw}"

@@ -166,6 +166,8 @@ impl ResponseInputContent {
                 ResponseContentPart::InputFile { .. } => true,
                 ResponseContentPart::Thought { thought } => !thought.trim().is_empty(),
                 ResponseContentPart::Reasoning { reasoning } => !reasoning.trim().is_empty(),
+                ResponseContentPart::SummaryText { text }
+                | ResponseContentPart::ReasoningText { text } => !text.trim().is_empty(),
                 ResponseContentPart::Refusal { refusal } => !refusal.trim().is_empty(),
                 ResponseContentPart::Unknown => false,
             }),
@@ -322,22 +324,175 @@ pub enum ResponseToolDefinition {
     CodeInterpreter,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+/// Current Unix time in seconds. Never returns `0`, so `created_at > 0` always holds
+/// (R-NS-03).
+pub fn now_unix_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(1)
+        .max(1)
+}
+
+fn default_parallel_tool_calls() -> bool {
+    true
+}
+
+fn default_text_config() -> serde_json::Value {
+    serde_json::json!({ "format": { "type": "text" } })
+}
+
+fn default_tool_choice() -> serde_json::Value {
+    serde_json::Value::String("auto".to_string())
+}
+
+fn default_truncation() -> String {
+    "disabled".to_string()
+}
+
+fn id_tail(raw: &str) -> String {
+    let stripped = raw
+        .strip_prefix("chatcmpl-")
+        .or_else(|| raw.strip_prefix("cmb-"))
+        .or_else(|| raw.strip_prefix("resp_"))
+        .or_else(|| raw.strip_prefix("msg_"))
+        .or_else(|| raw.strip_prefix("rs_"))
+        .unwrap_or(raw);
+    stripped
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect()
+}
+
+/// Normalizes an upstream response id into the official `resp_`-prefixed form (R-NS-01).
+pub fn normalize_response_id(raw: &str) -> String {
+    if raw.starts_with("resp_") && raw.len() > "resp_".len() {
+        return raw.to_string();
+    }
+    let tail = id_tail(raw);
+    if tail.is_empty() {
+        format!("resp_{:x}", now_unix_secs())
+    } else {
+        format!("resp_{tail}")
+    }
+}
+
+/// Normalizes an upstream item id into a `msg_`-prefixed assistant-message item id (R-NS-08).
+pub fn normalize_message_item_id(raw: &str) -> String {
+    if raw.starts_with("msg_") && raw.len() > "msg_".len() {
+        return raw.to_string();
+    }
+    let tail = id_tail(raw);
+    if tail.is_empty() {
+        format!("msg_{:x}", now_unix_secs())
+    } else {
+        format!("msg_{tail}")
+    }
+}
+
+/// Builds the top-level `reasoning` output item (R-NS-13/14/15). The reasoning text is carried
+/// both as a `summary_text` part (MUST, R-NS-14) and as a `reasoning_text` content part (SHOULD,
+/// R-NS-15), matching the official target shape.
+pub fn reasoning_output_item(response_id: &str, reasoning: &str) -> ResponseOutputItem {
+    let tail = id_tail(response_id);
+    let item_id = if tail.is_empty() {
+        format!("rs_{:x}", now_unix_secs())
+    } else {
+        format!("rs_{tail}")
+    };
+    ResponseOutputItem::Reasoning {
+        id: Some(item_id),
+        status: Some("completed".to_string()),
+        encrypted_content: None,
+        content: Some(vec![ResponseContentPart::ReasoningText {
+            text: reasoning.to_string(),
+        }]),
+        summary: Some(vec![ResponseContentPart::SummaryText {
+            text: reasoning.to_string(),
+        }]),
+    }
+}
+
+/// OpenAI Responses API response object (`/v1/responses` non-stream body and the payload of
+/// every `response.*` streaming event).
+///
+/// Every field is serialized unconditionally: the contract requires the nullable set present as
+/// explicit `null`s (R-NS-20/21/23), `metadata` as `{}` (R-NS-22) and `created_at` as a positive
+/// integer (R-NS-03).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ResponseObject {
     #[serde(default)]
     pub id: String,
     #[serde(default)]
     pub object: String,
+    /// Unix seconds of creation. Stable for the whole lifetime of one response, including every
+    /// event of one stream.
+    #[serde(default)]
+    pub created_at: i64,
+    #[serde(default)]
+    pub completed_at: Option<i64>,
     #[serde(default)]
     pub status: String,
+    #[serde(default)]
+    pub error: Option<ResponseError>,
+    #[serde(default)]
+    pub incomplete_details: Option<serde_json::Value>,
+    #[serde(default)]
+    pub instructions: Option<String>,
     #[serde(default)]
     pub model: String,
     #[serde(default)]
     pub output: Vec<ResponseOutputItem>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default = "default_parallel_tool_calls")]
+    pub parallel_tool_calls: bool,
+    #[serde(default)]
+    pub previous_response_id: Option<String>,
+    #[serde(default)]
+    pub temperature: Option<f32>,
+    #[serde(default = "default_text_config")]
+    pub text: serde_json::Value,
+    #[serde(default = "default_tool_choice")]
+    pub tool_choice: serde_json::Value,
+    #[serde(default)]
+    pub tools: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub top_p: Option<f32>,
+    #[serde(default = "default_truncation")]
+    pub truncation: String,
+    #[serde(default)]
     pub usage: Option<ResponseUsage>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<ResponseError>,
+    #[serde(default)]
+    pub metadata: HashMap<String, String>,
+    #[serde(default)]
+    pub user: Option<String>,
+}
+
+impl Default for ResponseObject {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            object: "response".to_string(),
+            created_at: now_unix_secs(),
+            completed_at: None,
+            status: String::new(),
+            error: None,
+            incomplete_details: None,
+            instructions: None,
+            model: String::new(),
+            output: Vec::new(),
+            parallel_tool_calls: true,
+            previous_response_id: None,
+            temperature: None,
+            text: default_text_config(),
+            tool_choice: default_tool_choice(),
+            tools: Vec::new(),
+            top_p: None,
+            truncation: default_truncation(),
+            usage: None,
+            metadata: HashMap::new(),
+            user: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -399,7 +554,9 @@ pub enum ResponseOutputItem {
         status: String,
         #[serde(default)]
         role: String,
-        #[serde(default)]
+        /// Serialized as `output_text` parts: the wire type for assistant output is
+        /// `output_text`, never the input-side `input_text` (R-NS-11).
+        #[serde(default, serialize_with = "serialize_output_content_parts")]
         content: Vec<ResponseContentPart>,
     },
     FunctionCall {
@@ -419,7 +576,7 @@ pub enum ResponseOutputItem {
         id: Option<String>,
         #[serde(default)]
         status: Option<String>,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         encrypted_content: Option<String>,
         #[serde(default)]
         content: Option<Vec<ResponseContentPart>>,
@@ -448,6 +605,61 @@ where
 
 pub fn default_audio_format() -> String {
     "wav".to_string()
+}
+
+/// Serializes one content part the way a **response** body must: assistant text is
+/// `{"type":"output_text","text":…,"annotations":[],"logprobs":[]}`.
+///
+/// The input side keeps `ResponseContentPart::Text`'s own serialization (`input_text`) so a
+/// Responses-native upstream still receives legal input content (contract §5.1: serialize strict
+/// only inside a response body, deserialize permissive everywhere).
+struct OutputContentPart<'a>(&'a ResponseContentPart);
+
+impl Serialize for OutputContentPart<'_> {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeMap;
+        match self.0 {
+            ResponseContentPart::Text { text } => {
+                let mut map = serializer.serialize_map(Some(4))?;
+                map.serialize_entry("type", "output_text")?;
+                map.serialize_entry("text", text)?;
+                map.serialize_entry("annotations", &Vec::<serde_json::Value>::new())?;
+                map.serialize_entry("logprobs", &Vec::<serde_json::Value>::new())?;
+                map.end()
+            }
+            other => other.serialize(serializer),
+        }
+    }
+}
+
+/// `serialize_with` helper for a single response-side content part.
+pub fn serialize_output_content_part<S>(
+    part: &ResponseContentPart,
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    OutputContentPart(part).serialize(serializer)
+}
+
+/// `serialize_with` helper for a response-side content-part list.
+pub fn serialize_output_content_parts<S>(
+    parts: &[ResponseContentPart],
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    use serde::ser::SerializeSeq;
+    let mut seq = serializer.serialize_seq(Some(parts.len()))?;
+    for part in parts {
+        seq.serialize_element(&OutputContentPart(part))?;
+    }
+    seq.end()
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -495,8 +707,44 @@ pub enum ResponseContentPart {
     Refusal {
         refusal: String,
     },
+    /// Reasoning summary part of a top-level `reasoning` output item (R-NS-14).
+    #[serde(rename = "summary_text")]
+    SummaryText {
+        #[serde(default)]
+        text: String,
+    },
+    /// Reasoning content part of a top-level `reasoning` output item (R-NS-15).
+    #[serde(rename = "reasoning_text")]
+    ReasoningText {
+        #[serde(default)]
+        text: String,
+    },
     #[serde(other)]
     Unknown,
+}
+
+impl Default for ResponseContentPart {
+    fn default() -> Self {
+        Self::Text {
+            text: String::new(),
+        }
+    }
+}
+
+/// `usage.input_tokens_details` (R-NS-17).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ResponseInputTokensDetails {
+    #[serde(default)]
+    pub cached_tokens: u32,
+    #[serde(default)]
+    pub cache_write_tokens: u32,
+}
+
+/// `usage.output_tokens_details` (R-NS-18).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ResponseOutputTokensDetails {
+    #[serde(default)]
+    pub reasoning_tokens: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -507,21 +755,70 @@ pub struct ResponseUsage {
     pub input_tokens: u32,
     #[serde(default)]
     pub output_tokens: u32,
+    #[serde(default)]
+    pub input_tokens_details: ResponseInputTokensDetails,
+    #[serde(default)]
+    pub output_tokens_details: ResponseOutputTokensDetails,
 }
 
-/// Streaming events for OpenAI Responses API
+impl ResponseUsage {
+    /// Builds a usage object carrying the real upstream counts. `total_tokens` is always
+    /// `input_tokens + output_tokens` (R-NS-19).
+    pub fn new(
+        input_tokens: u32,
+        output_tokens: u32,
+        cached_tokens: u32,
+        reasoning_tokens: u32,
+    ) -> Self {
+        Self {
+            total_tokens: input_tokens + output_tokens,
+            input_tokens,
+            output_tokens,
+            input_tokens_details: ResponseInputTokensDetails {
+                cached_tokens,
+                cache_write_tokens: 0,
+            },
+            output_tokens_details: ResponseOutputTokensDetails { reasoning_tokens },
+        }
+    }
+}
+
+/// Streaming events for OpenAI Responses API.
+///
+/// Every variant carries a `sequence_number` (R-SS-04). The `response_id` fields retained on some
+/// variants exist only for inbound tolerance of older upstream frames; they are never serialized,
+/// because the official event schemas do not define them (R-SS-07).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ResponseStreamEvent {
     #[serde(rename = "response.created")]
-    ResponseCreated { response: ResponseObject },
+    ResponseCreated {
+        #[serde(default)]
+        sequence_number: u64,
+        response: ResponseObject,
+    },
 
+    /// Emitted once after `response.created` and before the first output item (R-SS-03).
+    #[serde(rename = "response.in_progress")]
+    ResponseInProgress {
+        #[serde(default)]
+        sequence_number: u64,
+        response: ResponseObject,
+    },
+
+    /// Legacy terminal event tolerated on inbound streams only.
     #[serde(rename = "response.done")]
-    ResponseDone { response: ResponseObject },
+    ResponseDone {
+        #[serde(default)]
+        sequence_number: u64,
+        response: ResponseObject,
+    },
 
     #[serde(rename = "response.output_item.added")]
     OutputItemAdded {
         #[serde(default)]
+        sequence_number: u64,
+        #[serde(default, skip_serializing)]
         response_id: String,
         #[serde(default)]
         output_index: u32,
@@ -531,6 +828,8 @@ pub enum ResponseStreamEvent {
     #[serde(rename = "response.output_item.done")]
     OutputItemDone {
         #[serde(default)]
+        sequence_number: u64,
+        #[serde(default, skip_serializing)]
         response_id: String,
         #[serde(default)]
         output_index: u32,
@@ -540,6 +839,8 @@ pub enum ResponseStreamEvent {
     #[serde(rename = "response.content_part.added")]
     ContentPartAdded {
         #[serde(default)]
+        sequence_number: u64,
+        #[serde(default, skip_serializing)]
         response_id: String,
         #[serde(default)]
         item_id: String,
@@ -547,12 +848,15 @@ pub enum ResponseStreamEvent {
         output_index: u32,
         #[serde(default)]
         content_index: u32,
+        #[serde(serialize_with = "serialize_output_content_part")]
         part: ResponseContentPart,
     },
 
     #[serde(rename = "response.content_part.done")]
     ContentPartDone {
         #[serde(default)]
+        sequence_number: u64,
+        #[serde(default, skip_serializing)]
         response_id: String,
         #[serde(default)]
         item_id: String,
@@ -560,34 +864,61 @@ pub enum ResponseStreamEvent {
         output_index: u32,
         #[serde(default)]
         content_index: u32,
+        #[serde(serialize_with = "serialize_output_content_part")]
         part: ResponseContentPart,
     },
 
+    /// Legacy wire name tolerated on inbound streams only.
     #[serde(rename = "response.text.delta")]
     TextDelta(ResponseTextDelta),
 
-    /// Real OpenAI wire name for text deltas (emitted by translators).
+    /// Real OpenAI wire name for assistant text deltas (R-SS-07).
     #[serde(rename = "response.output_text.delta")]
-    OutputTextDelta(ResponseTextDelta),
+    OutputTextDelta(ResponseOutputTextDelta),
+
+    /// Full text of the assistant message, emitted before `response.content_part.done` (R-SS-08).
+    #[serde(rename = "response.output_text.done")]
+    OutputTextDone(ResponseOutputTextDone),
 
     /// OpenAI Responses reasoning delta events.
     #[serde(rename = "response.reasoning_text.delta")]
     ReasoningTextDelta(ResponseTextDelta),
 
+    #[serde(rename = "response.reasoning_summary_part.added")]
+    ReasoningSummaryPartAdded(ResponseReasoningSummaryPart),
+
     #[serde(rename = "response.reasoning_summary_text.delta")]
-    ReasoningSummaryTextDelta(ResponseTextDelta),
+    ReasoningSummaryTextDelta(ResponseReasoningSummaryTextDelta),
+
+    #[serde(rename = "response.reasoning_summary_text.done")]
+    ReasoningSummaryTextDone(ResponseReasoningSummaryTextDone),
+
+    #[serde(rename = "response.reasoning_summary_part.done")]
+    ReasoningSummaryPartDone(ResponseReasoningSummaryPart),
 
     /// Real OpenAI terminal event carrying usage.
     #[serde(rename = "response.completed")]
-    Completed { response: ResponseObject },
+    Completed {
+        #[serde(default)]
+        sequence_number: u64,
+        response: ResponseObject,
+    },
 
     /// Real OpenAI incomplete/truncated event.
     #[serde(rename = "response.incomplete")]
-    Incomplete { response: ResponseObject },
+    Incomplete {
+        #[serde(default)]
+        sequence_number: u64,
+        response: ResponseObject,
+    },
 
     /// Real OpenAI failure event.
     #[serde(rename = "response.failed")]
-    Failed { response: ResponseObject },
+    Failed {
+        #[serde(default)]
+        sequence_number: u64,
+        response: ResponseObject,
+    },
 
     #[serde(rename = "response.function_call_arguments.delta")]
     FunctionCallArgumentsDelta(ResponseFunctionCallDelta),
@@ -610,9 +941,90 @@ pub struct ResponseTextDelta {
     pub delta: String,
 }
 
+/// `response.output_text.delta` payload (R-SS-07).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ResponseOutputTextDelta {
+    #[serde(default)]
+    pub sequence_number: u64,
+    #[serde(default)]
+    pub item_id: String,
+    #[serde(default)]
+    pub output_index: u32,
+    #[serde(default)]
+    pub content_index: u32,
+    #[serde(default)]
+    pub delta: String,
+    #[serde(default)]
+    pub logprobs: Vec<serde_json::Value>,
+}
+
+/// `response.output_text.done` payload (R-SS-08).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ResponseOutputTextDone {
+    #[serde(default)]
+    pub sequence_number: u64,
+    #[serde(default)]
+    pub item_id: String,
+    #[serde(default)]
+    pub output_index: u32,
+    #[serde(default)]
+    pub content_index: u32,
+    #[serde(default)]
+    pub text: String,
+    #[serde(default)]
+    pub logprobs: Vec<serde_json::Value>,
+}
+
+/// `response.reasoning_summary_part.added` / `.done` payload (R-SS-11/R-SS-23).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ResponseReasoningSummaryPart {
+    #[serde(default)]
+    pub sequence_number: u64,
+    #[serde(default)]
+    pub item_id: String,
+    #[serde(default)]
+    pub output_index: u32,
+    #[serde(default)]
+    pub summary_index: u32,
+    #[serde(default)]
+    pub part: ResponseContentPart,
+}
+
+/// `response.reasoning_summary_text.delta` payload (R-SS-11/R-SS-23).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ResponseReasoningSummaryTextDelta {
+    #[serde(default)]
+    pub sequence_number: u64,
+    #[serde(default)]
+    pub item_id: String,
+    #[serde(default)]
+    pub output_index: u32,
+    #[serde(default)]
+    pub summary_index: u32,
+    #[serde(default)]
+    pub delta: String,
+}
+
+/// `response.reasoning_summary_text.done` payload (R-SS-11/R-SS-23).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ResponseReasoningSummaryTextDone {
+    #[serde(default)]
+    pub sequence_number: u64,
+    #[serde(default)]
+    pub item_id: String,
+    #[serde(default)]
+    pub output_index: u32,
+    #[serde(default)]
+    pub summary_index: u32,
+    #[serde(default)]
+    pub text: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct ResponseFunctionCallDelta {
     #[serde(default)]
+    pub sequence_number: u64,
+    #[serde(default, skip_serializing)]
     pub response_id: String,
     #[serde(default)]
     pub item_id: String,

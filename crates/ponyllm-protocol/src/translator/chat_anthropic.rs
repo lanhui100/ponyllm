@@ -578,7 +578,11 @@ pub fn anthropic_to_chat_response(resp: &MessageResponse) -> Result<ChatCompleti
 /// Convert OpenAI ChatCompletionResponse to Anthropic MessageResponse
 pub fn chat_to_anthropic_response(resp: &ChatCompletionResponse) -> Result<MessageResponse> {
     let mut content_blocks = Vec::new();
-    let mut stop_reason = None;
+    // A-NS-06: in non-streaming mode `stop_reason` is always non-null on the wire. A custom
+    // stop-sequence match is not distinguishable at the chat pivot (`FinishReason` has no
+    // `StopSequence` variant), so `Stop` projects to `end_turn`; the same default covers
+    // `ContentFilter`/`Other` and a response with no `finish_reason` at all.
+    let mut stop_reason = Some(AnthropicStopReason::EndTurn);
 
     if let Some(choice) = resp.choices.first() {
         if let Some(ref reasoning) = choice.message.reasoning_content {
@@ -605,11 +609,12 @@ pub fn chat_to_anthropic_response(resp: &ChatCompletionResponse) -> Result<Messa
             }
         }
 
-        stop_reason = choice.finish_reason.as_ref().map(|f| match f {
-            FinishReason::Stop => AnthropicStopReason::EndTurn,
-            FinishReason::Length => AnthropicStopReason::MaxTokens,
-            FinishReason::ToolCalls | FinishReason::FunctionCall => AnthropicStopReason::ToolUse,
-            _ => AnthropicStopReason::Other,
+        stop_reason = Some(match choice.finish_reason {
+            Some(FinishReason::Length) => AnthropicStopReason::MaxTokens,
+            Some(FinishReason::ToolCalls) | Some(FinishReason::FunctionCall) => {
+                AnthropicStopReason::ToolUse
+            }
+            _ => AnthropicStopReason::EndTurn,
         });
     }
 
@@ -620,15 +625,18 @@ pub fn chat_to_anthropic_response(resp: &ChatCompletionResponse) -> Result<Messa
             AnthropicUsage {
                 input_tokens: fresh,
                 output_tokens: u.completion_tokens,
+                // A-NS-10/A-NS-11: both keys are always on the wire as integers; the chat pivot
+                // carries no cache-write counter, so creation stays unknown (`0` on the wire).
                 cache_creation_input_tokens: None,
-                cache_read_input_tokens: if cached > 0 { Some(cached) } else { None },
+                cache_read_input_tokens: Some(cached),
             }
         }
         None => AnthropicUsage::default(),
     };
 
     Ok(MessageResponse {
-        id: resp.id.clone(),
+        // A-NS-01: `msg_`-prefixed id per the official Messages example.
+        id: msg_id_from(&resp.id),
         r#type: "message".to_string(),
         role: "assistant".to_string(),
         content: content_blocks,
@@ -637,4 +645,22 @@ pub fn chat_to_anthropic_response(resp: &ChatCompletionResponse) -> Result<Messa
         stop_sequence: None,
         usage,
     })
+}
+
+/// A-NS-01: derive a `msg_`-prefixed, `^msg_[A-Za-z0-9]+$`-conformant id from the upstream chat
+/// completion id. Falls back to a monotonic-time id when the upstream id has no alphanumerics.
+fn msg_id_from(upstream_id: &str) -> String {
+    let alnum: String = upstream_id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect();
+    if alnum.is_empty() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        format!("msg_{:x}", now)
+    } else {
+        format!("msg_{}", alnum)
+    }
 }
