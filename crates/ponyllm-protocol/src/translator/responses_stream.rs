@@ -4,6 +4,7 @@ use crate::openai::chat::*;
 use crate::openai::responses::*;
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
+use uuid::Uuid;
 
 fn now_secs() -> u64 {
     SystemTime::now()
@@ -20,13 +21,13 @@ fn uuid_simple() -> String {
     format!("{:x}", now)
 }
 
-/// Process-unique suffix for generated response/item ids. A bare nanosecond timestamp is not
-/// enough: concurrent requests can be constructed inside the same clock tick, and R-SS-19 requires
-/// pairwise-distinct response ids across concurrent streams.
+/// Suffix for generated response/item ids.
+///
+/// A UUID v4 keeps the ids pairwise-distinct across concurrent streams **and** across the four
+/// production replicas, without any process-local shared state (the NFR baseline asserts
+/// `new_locks: 0` / stateless pure serialization on this path).
 fn unique_suffix() -> String {
-    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    format!("{}{:x}", uuid_simple(), n)
+    Uuid::new_v4().simple().to_string()
 }
 
 fn chat_text_chunk(id: &str, model: &str, created: u64, text: String) -> ChatCompletionChunk {

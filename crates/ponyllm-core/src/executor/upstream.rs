@@ -189,9 +189,26 @@ pub const SESSION_HEADER_PRIORITY: &[&str] = &[
 /// [`SESSION_HEADER_PRIORITY`].
 ///
 /// For OpenCode Zen targets, upstream strict regex validator requires `ses_` + exactly 26 chars!
+/// The first 12 chars of the suffix encode descending timestamp: 0xffffffffffff - (((t_ms & 0xfffffffff) << 12) | 1).
+/// The remaining 14 chars are base62 random.
 pub fn new_upstream_session_id() -> String {
-    let raw = uuid::Uuid::new_v4().simple().to_string();
-    format!("ses_{}", &raw[..26])
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let t_masked = now_ms & 0xfffffffff;
+    let inv = (t_masked << 12) | 1;
+    let prefix = 0xffffffffffff_u64.saturating_sub(inv);
+    let mut hex_buf = format!("{:012x}", prefix);
+
+    const BASE62: &[u8] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+    let rand_bytes = uuid::Uuid::new_v4();
+    let b = rand_bytes.as_bytes();
+    for &byte in &b[..14] {
+        hex_buf.push(BASE62[(byte as usize) % BASE62.len()] as char);
+    }
+    format!("ses_{}", hex_buf)
 }
 
 fn clean_session_value(value: &HeaderValue) -> Option<String> {
@@ -1683,8 +1700,8 @@ impl UpstreamExecutor {
                 .map_err(|e| CoreError::Internal(format!("Invalid client label: {}", e)))?;
             headers.insert("x-opencode-client", client_val);
             // OpenCode zen endpoints require an official OpenCode client User-Agent
-            // (FreeTierError otherwise for free models, e.g. >=1.17.0).
-            let ua_str = "opencode/1.18.31 (Linux; x64)";
+            // (FreeTierError otherwise for free models, e.g. >=1.18.0).
+            let ua_str = "opencode/1.18.35 (Linux; x64)";
             let ua_val = HeaderValue::from_static(ua_str);
             headers.insert(USER_AGENT, ua_val);
         }
@@ -3657,7 +3674,7 @@ mod session_header_tests {
         assert_eq!(headers.get("x-opencode-client").unwrap(), "ponyllm");
         assert_eq!(
             headers.get(USER_AGENT).unwrap().to_str().unwrap(),
-            "opencode/1.18.31 (Linux; x64)"
+            "opencode/1.18.35 (Linux; x64)"
         );
 
         let pool = Arc::new(KeyPool::new("test", RoutingStrategy::RoundRobin));
