@@ -35,7 +35,7 @@ BASE="${PONYLLM_BASE_URL:-https://tokens.ponyjob.top}"
 KEY="${PONYLLM_API_KEY:-}"
 MODEL="${PONYLLM_MODEL:-workbuddy/deepseek-v4.1-flash}"
 DURATION=600
-INTERVAL=2
+INTERVAL=20
 OUT=""
 STRICT=0
 
@@ -62,6 +62,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 TOTAL=0
 FAILS=0
+THROTTLED=0
 FIRST_FAIL=""
 START_TS="$(date +%s)"
 
@@ -105,6 +106,14 @@ probe_once() {
     -X POST "$url" -d "$body" 2>/dev/null)"
   rc=$?
   if [ "$rc" -ne 0 ]; then ok=0; reason="curl_rc=$rc"
+  elif [ "$code" = "429" ]; then
+    # 429 = the service is UP and answering; it is throttling us. That is a load signal, not an
+    # outage, and MUST NOT be counted as downtime. It is reported separately so an operator can
+    # tell "throttled by our own polling" from "service down".
+    THROTTLED=$((THROTTLED+1))
+    printf '{"t":%s,"proto":"%s","ok":true,"reason":"http_429_throttled"}\n' \
+      "$(( $(date +%s) - START_TS ))" "$proto" >> "$OUT"
+    return
   elif [ "$code" != "200" ]; then ok=0; reason="http_$code"
   elif [ ! -s "$body_file" ]; then ok=0; reason="empty_body"
   elif ! check_body "$body_file" "$proto" >/dev/null 2>&1; then ok=0; reason="shape_violation"
@@ -121,6 +130,15 @@ probe_once() {
     "$(( $(date +%s) - START_TS ))" "$proto" "$ok" "$reason" >> "$OUT"
 }
 
+cat <<'WARN'
+== [continuity-probe] WARNING ==
+Do NOT run this probe while the CI "GitOps Deploy (prod)" job is executing its C3 long-stream
+gate (deploy/prober.py --long-stream-once). Polling the same model from here competes for the
+same upstream rate-limit budget and can truncate the prober's long stream, which the gate scores
+as a rollout defect (truncated && duration < 85s). 2026-10-14: a 3s-interval probe run during a
+rollout produced 45 HTTP 429s and the long-stream gate FAILed, cascading a rollback.
+Use --interval 20 or higher, or wait for the deploy job to finish.
+WARN
 echo "== [continuity-probe] base=$BASE model=$MODEL duration=${DURATION}s interval=${INTERVAL}s strict_shape=$STRICT out=$OUT =="
 i=0
 while [ $(( $(date +%s) - START_TS )) -lt "$DURATION" ]; do
@@ -139,11 +157,11 @@ while [ $(( $(date +%s) - START_TS )) -lt "$DURATION" ]; do
   sleep "$INTERVAL"
 done
 
-echo "== [continuity-probe] samples=$TOTAL failures=$FAILS =="
+echo "== [continuity-probe] samples=$TOTAL outages=$FAILS throttled_429=$THROTTLED =="
 if [ "$FAILS" -ne 0 ]; then
-  echo "::error::[ZERO-DOWNTIME-VIOLATION] $FAILS/$TOTAL probes failed"
+  echo "::error::[ZERO-DOWNTIME-VIOLATION] $FAILS/$TOTAL probes failed (outages; 429 throttles are reported separately and not counted)"
   echo "first failure: $FIRST_FAIL"
   exit 1
 fi
-echo "PASS: continuity — $TOTAL/$TOTAL probes succeeded, 0 failures (strict_shape=$STRICT)"
+echo "PASS: continuity — $TOTAL probes, 0 outages, $THROTTLED throttled(429) (strict_shape=$STRICT)"
 exit 0
