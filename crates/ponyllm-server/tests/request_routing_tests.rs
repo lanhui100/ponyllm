@@ -2710,6 +2710,13 @@ fn test_deepseek_v41_flash_alias_routes_to_live_upstream_name() {
         .expect("explicit entry must resolve");
     assert_eq!(targets2[0].physical_model, "deepseek-v4.1-flash");
 
+    // Provider-qualified pin (e.g. "deepseek/deepseek-v4.1-flash") also respects explicit config
+    let targets_prefixed = state2
+        .resolve_routed_targets(&ParsedRequestModel::parse("deepseek/deepseek-v4.1-flash"), None)
+        .expect("explicit provider-prefixed entry must resolve");
+    assert_eq!(targets_prefixed[0].provider_name, "deepseek");
+    assert_eq!(targets_prefixed[0].physical_model, "deepseek-v4.1-flash");
+
     // Alias is listed for discovery, with its [1m] variant.
     let models = state.list_all_models();
     assert!(models

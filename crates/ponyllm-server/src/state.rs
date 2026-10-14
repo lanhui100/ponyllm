@@ -2557,9 +2557,17 @@ impl AppState {
         // 2. Prefix matching (e.g. "deepseek/deepseek-chat")
         if candidates.is_empty() {
             if let Some((prefix, sub_model)) = clean.split_once('/') {
-                let sub_canonical = canonicalize_model_name(sub_model);
-                let sub_effective = sub_canonical.as_str();
                 if let Some(p_cfg) = config.providers.get(prefix) {
+                    // Exact model name inside provider wins over alias (never shadow explicit config).
+                    let target_sub_model = if p_cfg.default_model == sub_model
+                        || p_cfg.models.iter().any(|m| m == sub_model)
+                        || p_cfg.model_specs.iter().any(|m| m.name == sub_model)
+                    {
+                        sub_model.to_string()
+                    } else {
+                        canonicalize_model_name(sub_model)
+                    };
+                    let sub_effective = target_sub_model.as_str();
                     let spec = p_cfg.get_model_spec(sub_effective);
                     let thinking_spec = spec.thinking_spec();
                     let pricing = p_cfg.get_model_pricing(sub_effective);
