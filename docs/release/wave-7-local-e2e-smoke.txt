@@ -1,4 +1,4 @@
-mock upstream on 127.0.0.1:42757
+mock upstream on 127.0.0.1:45675
 PASS gateway /health 200
 PASS chat non-stream object==chat.completion
 PASS responses ns HTTP 200
