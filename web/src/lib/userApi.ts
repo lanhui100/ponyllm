@@ -204,13 +204,40 @@ export interface UserModelOption {
 /**
  * 列出当前用户可用的系统模型（新增 Token 弹窗「允许模型」多选下拉数据源）。
  *
- * wave-6 契约空桩（红相：NotImplemented）；真实实现见
- * `.dev-team/contracts/wave-6-user-models-picker.md` §2.2：
- * GET /api/user/models + jwtHeader()，200 取 body.models，
- * models 缺失/非数组 → []，非 2xx → 抛既有错误信封 Error（带 code/status）。
+ * wave-6 契约（`.dev-team/contracts/wave-6-user-models-picker.md` §2.2）：
+ * GET /api/user/models + jwtHeader()，200 取 body.models；
+ * models 缺失/null/非数组 → []（不抛错）；元素级归一化到冻结的
+ * `UserModelOption` 不变式（非法 id 丢弃、display_name 非 string → null、
+ * provider 非 string → ''），保序不排序；非 2xx → 抛既有错误信封
+ * Error（带 code/status），绝不吞错返回 []。
  */
 export async function listAvailableModels(): Promise<UserModelOption[]> {
-  throw new Error('NotImplemented');
+  const resp = await fetch('/api/user/models', {
+    headers: jwtHeader(),
+    credentials: 'same-origin',
+  });
+  const body = await parseJson<{ models?: unknown }>(resp);
+  const raw = body?.models;
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+  const options: UserModelOption[] = [];
+  for (const item of raw) {
+    if (typeof item !== 'object' || item === null) {
+      continue;
+    }
+    const row = item as Record<string, unknown>;
+    const id = row.id;
+    if (typeof id !== 'string' || id.trim() === '') {
+      continue;
+    }
+    options.push({
+      id,
+      display_name: typeof row.display_name === 'string' ? row.display_name : null,
+      provider: typeof row.provider === 'string' ? row.provider : '',
+    });
+  }
+  return options;
 }
 
 // ---------------------------------------------------------------------------

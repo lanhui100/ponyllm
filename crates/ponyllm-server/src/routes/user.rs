@@ -1120,18 +1120,35 @@ pub async fn handle_admin_users_reset_usage(
         .into_response()
 }
 
-/// GET /api/user/models — wave-6 契约空桩（红相：501 Not Implemented）。
+/// GET /api/user/models — wave-6 用户面只读模型清单（真实实现）。
 ///
 /// 冻结契约见 `.dev-team/contracts/wave-6-user-models-picker.md`：
 /// 200 体恒为 `{"models":[{"id","provider","display_name"}]}`，顺序 =
-/// `AppState::list_all_models()` 原生顺序，过滤复用
-/// `state.user_tracker.check_access(uid, id)`（推理面用户门禁本体）。
-/// 本波次仅空桩，真实实现由后续波次落地。
+/// `AppState::list_all_models()` 原生顺序（逐元素保序映射），过滤复用
+/// `state.user_tracker.check_access(uid, id)`（推理面用户门禁本体，严禁自写通配匹配）。
 pub async fn handle_user_models(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    axum::http::StatusCode::NOT_IMPLEMENTED.into_response()
+    let Some(uid) = authenticated_user_id(&headers) else {
+        return unauthorized_json();
+    };
+    if state.user_tracker.get_user(&uid).is_none() {
+        return unauthorized_json();
+    }
+    let models: Vec<serde_json::Value> = state
+        .list_all_models()
+        .into_iter()
+        .filter(|(id, _, _, _)| state.user_tracker.check_access(&uid, id).is_ok())
+        .map(|(id, provider, display_name, _protocol)| {
+            json!({"id": id, "provider": provider, "display_name": display_name})
+        })
+        .collect();
+    (
+        axum::http::StatusCode::OK,
+        Json(json!({ "models": models })),
+    )
+        .into_response()
 }
 
 /// B002 user-plane router (mounted ALWAYS; the middleware hides the namespace
