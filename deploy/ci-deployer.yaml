@@ -1,6 +1,7 @@
 # CI 部署身份（GitOps deploy job 使用）——最小权限：
 #   仅 ponyllm 命名空间内 deployments/services 的读写 + pods 只读（rollout 状态）。
-#   无 secrets/configmaps 读取、无跨命名空间权限、无集群级权限。
+#   无 secrets/configmaps 读取、无跨命名空间权限。
+#   + 集群级 nodes 只读（get/list）：发布前必须判定目标节点 Ready/可调度/无阻塞污点。
 # 凭据形态：ServiceAccount + 长期 token Secret；kubeconfig 由运维导出后
 # base64 存入 GitHub Secrets（KUBECONFIG_BASE64），不经本清单落盘。
 apiVersion: v1
@@ -8,6 +9,32 @@ kind: ServiceAccount
 metadata:
   name: ci-deployer
   namespace: ponyllm
+---
+# 2026-10-14 事故修复：serialized-rollout.sh / check-cluster-image-parity.sh 都需要
+# `kubectl get node(s)`。缺失该权限时 403 被脚本 `2>/dev/null` 吞掉，误判为"节点不存在"，
+# 导致 4 个 role 全部跳过 apply（发布空跑）且一致性门禁以 0 个 Pod 判定 PASS（假放行）。
+# 该 ClusterRole 仅授予只读 get/list，不涉及任何写操作。
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: ponyllm-ci-deployer-node-reader
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ponyllm-ci-deployer-node-reader
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: ponyllm-ci-deployer-node-reader
+subjects:
+  - kind: ServiceAccount
+    name: ci-deployer
+    namespace: ponyllm
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role

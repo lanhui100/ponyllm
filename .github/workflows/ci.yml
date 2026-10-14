@@ -44,6 +44,13 @@ jobs:
         shell: bash
         run: bash tests/pre-flight/check-ci-prober-cli-contract.sh
 
+      # 2026-10-14 事故回归门禁：CI 身份缺集群级 nodes 读权限时，发布链路必须
+      # fail-closed（禁止静默跳过全部滚动 / 以 0 个 Pod 判定 PASS）。纯 shim 驱动，
+      # 不需要集群连接。
+      - name: Check deploy fail-closed gates (RBAC 403 / empty-set parity)
+        shell: bash
+        run: bash tests/pre-flight/test_deploy_failclosed_rbac.sh
+
       - name: Check workspace compilation
         run: cargo check --workspace
 

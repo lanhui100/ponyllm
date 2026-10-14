@@ -75,7 +75,31 @@ run_cmd() {
 }
 
 # ----------------------------------------------------------------------------
+# fail-closed 前置能力探针：CI 身份必须能读集群级 Node 资源。
+#
+# 历史缺陷（2026-10-14 实证）：ci-deployer 仅有 ponyllm 命名空间 Role，无集群级
+# `nodes` 读权限；`kubectl get node` 返回 403 被 `2>/dev/null` 吞掉，被误判为
+# "Node does not exist"，导致 4 个 role 全部 continue —— apply 从未执行、发布空跑，
+# 而 CI 仍报 PASS（假放行）。此处改为 fail-closed：读不到节点即硬失败。
+# ----------------------------------------------------------------------------
+assert_node_readable() {
+  if [ "$DRY_RUN" -eq 1 ]; then
+    return 0
+  fi
+  local err
+  if ! err="$(kubectl get nodes -o name 2>&1 >/dev/null)"; then
+    echo "::error::[serialized-rollout] 无法读取集群 Node 资源（RBAC 不足）: ${err}"
+    echo "::error::[serialized-rollout] fail-closed：节点健康无法判定时禁止继续，否则会静默跳过全部滚动并误报 PASS。"
+    echo "::error::[serialized-rollout] 修复：为 CI ServiceAccount 授予集群级 nodes get/list 权限（见 deploy/ci-deployer.yaml）。"
+    exit 1
+  fi
+}
+
+# ----------------------------------------------------------------------------
 # 节点可用性与健康探活函数：检查特定 role 绑定的 Node 是否存在、是否处于 Ready 且可调度
+#
+# 返回码：0 = 可调度；1 = 节点缺失/NotReady/cordoned/带阻塞污点（跳过该 role）；
+#         2 = RBAC 拒绝读取节点（调用方必须硬失败，禁止降级为"跳过"）
 # ----------------------------------------------------------------------------
 is_node_schedulable_and_ready() {
   local role="$1"
@@ -99,8 +123,15 @@ is_node_schedulable_and_ready() {
     esac
   fi
 
-  # 2. 检查 Node 资源是否存在
-  if ! kubectl get node "$target_node" >/dev/null 2>&1; then
+  # 2. 检查 Node 资源是否可读且存在（fail-closed：RBAC 拒绝 ≠ 节点不存在）
+  local node_err node_rc
+  node_rc=0
+  node_err="$(kubectl get node "$target_node" -o name 2>&1 >/dev/null)" || node_rc=$?
+  if [ "$node_rc" -ne 0 ]; then
+    if printf '%s' "$node_err" | grep -qiE 'forbidden|unauthorized|cannot (get|list)|access denied'; then
+      echo "::error::Node '$target_node' (role: $role) 读取被拒（RBAC 不足），无法判定节点健康: ${node_err}"
+      return 2
+    fi
     echo "WARN: Node '$target_node' (role: $role) does not exist in cluster"
     return 1
   fi
@@ -160,15 +191,24 @@ trigger_cascade_rollback() {
   fi
 }
 
+# fail-closed 前置探针（必须在任何 role 判定前执行）：
+# CI 身份读不到集群 Node 时直接硬失败，禁止退化为"全部跳过"。
+assert_node_readable
+
 for role in "${ROLES[@]}"; do
   echo "------------------------------------------------------------"
   echo "== [role: ${role}] Starting rollout sequence =="
   echo "------------------------------------------------------------"
-
   # --------------------------------------------------------------------------
   # 步骤 0: 检查节点健康与可调度性（避免单点离线拖垮全集群发布）
   # --------------------------------------------------------------------------
-  if ! is_node_schedulable_and_ready "$role"; then
+  node_probe_rc=0
+  is_node_schedulable_and_ready "$role" || node_probe_rc=$?
+  if [ "$node_probe_rc" -eq 2 ]; then
+    echo "::error::[role: ${role}] 无法读取集群 Node（RBAC 不足）—— fail-closed，拒绝在无法判定节点健康时继续发布"
+    exit 1
+  fi
+  if [ "$node_probe_rc" -ne 0 ]; then
     echo "WARN: [role: ${role}] Node is NotReady or unschedulable! Skipping serialized rollout waiting for this role."
     continue
   fi
@@ -302,6 +342,17 @@ for role in "${ROLES[@]}"; do
 done
 
 # ----------------------------------------------------------------------------
+# fail-closed：至少要有 1 个 role 真正完成滚动。
+# 若全部 role 被跳过（节点全不可调度 / 权限不足被降级），发布实际什么都没做，
+# 绝不能报 PASS —— 这正是 2026-10-14 假放行事故的第二个防线。
+# ----------------------------------------------------------------------------
+if [ "${#COMPLETED_ROLES[@]}" -eq 0 ]; then
+  echo "::error::[serialized-rollout] 没有任何 role 完成滚动（全部被跳过）—— 发布空跑，fail-closed 拒绝报 PASS"
+  exit 1
+fi
+echo "== [serialized-rollout] Rolled out roles: ${COMPLETED_ROLES[*]} =="
+
+# ----------------------------------------------------------------------------
 # 步骤 5: 全量镜像一致性硬门禁 (Post-Deploy Parity Gate)
 # ----------------------------------------------------------------------------
 echo "============================================================"
@@ -322,7 +373,13 @@ else
   parity_failed=0
   for role in "${ROLES[@]}"; do
     d_name="ponyllm-gateway-${role}"
-    if ! is_node_schedulable_and_ready "$role"; then
+    parity_probe_rc=0
+    is_node_schedulable_and_ready "$role" || parity_probe_rc=$?
+    if [ "$parity_probe_rc" -eq 2 ]; then
+      echo "::error::[parity-check] 无法读取 Node（RBAC 不足）—— fail-closed，拒绝以空集判定镜像一致性"
+      exit 1
+    fi
+    if [ "$parity_probe_rc" -ne 0 ]; then
       echo "WARN: [parity-check] Skipping deploy/${d_name} because its node is NotReady or unschedulable"
       continue
     fi

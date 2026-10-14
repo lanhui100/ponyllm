@@ -19,7 +19,27 @@ set -euo pipefail
 NAMESPACE="ponyllm"
 ROLES=("dev" "preprod" "proserver" "tencent")
 
+# ----------------------------------------------------------------------------
+# fail-closed 前置能力探针：CI 身份必须能读集群级 Node 资源。
+#
+# 历史缺陷（2026-10-14 实证）：ci-deployer 无集群级 nodes 读权限，
+# `kubectl get node` 的 403 被 `2>/dev/null` 吞掉 → 被误判为"节点不存在" →
+# 4 个 role 全部跳过 → 本门禁以 0 个 Pod 检查量输出 "PASS"（假放行）。
+# ----------------------------------------------------------------------------
+assert_node_readable() {
+  local err
+  if ! err="$(kubectl get nodes -o name 2>&1 >/dev/null)"; then
+    echo "::error::[check-cluster-image-parity] 无法读取集群 Node 资源（RBAC 不足）: ${err}"
+    echo "::error::[check-cluster-image-parity] fail-closed：禁止在无法判定节点状态时以空集判定 PASS。"
+    exit 1
+  fi
+}
+
 # 节点可用性与健康探活函数：检查特定 role 绑定的 Node 是否处于 Ready 且可调度
+#
+# 返回码：0 = 可调度；1 = 节点缺失/NotReady/cordoned/带阻塞污点（跳过该 role）；
+#         2 = RBAC 拒绝读取节点（调用方必须硬失败）
+# ----------------------------------------------------------------------------
 is_node_schedulable_and_ready() {
   local role="$1"
   local deploy_name="ponyllm-gateway-${role}"
@@ -36,7 +56,14 @@ is_node_schedulable_and_ready() {
     esac
   fi
 
-  if ! kubectl get node "$target_node" >/dev/null 2>&1; then
+  local node_err node_rc
+  node_rc=0
+  node_err="$(kubectl get node "$target_node" -o name 2>&1 >/dev/null)" || node_rc=$?
+  if [ "$node_rc" -ne 0 ]; then
+    if printf '%s' "$node_err" | grep -qiE 'forbidden|unauthorized|cannot (get|list)|access denied'; then
+      echo "::error::Node '$target_node' (role: $role) 读取被拒（RBAC 不足）: ${node_err}"
+      return 2
+    fi
     echo "WARN: Node '$target_node' (role: $role) 不存在"
     return 1
   fi
@@ -66,11 +93,18 @@ is_node_schedulable_and_ready() {
 }
 
 echo "== [check-cluster-image-parity] Starting cluster gateway parity verification =="
+assert_node_readable
 
 # 1. 检查各 Deployment 的 Spec 镜像一致性
 BASE_ROLE=""
 for role in "${ROLES[@]}"; do
-  if is_node_schedulable_and_ready "$role"; then
+  base_probe_rc=0
+  is_node_schedulable_and_ready "$role" || base_probe_rc=$?
+  if [ "$base_probe_rc" -eq 2 ]; then
+    echo "::error::[check-cluster-image-parity] 无法读取 Node（RBAC 不足）—— fail-closed"
+    exit 1
+  fi
+  if [ "$base_probe_rc" -eq 0 ]; then
     BASE_ROLE="$role"
     break
   fi
@@ -92,7 +126,13 @@ echo "基准镜像 (from ${BASE_DEPLOY}): ${BASE_IMAGE}"
 deploy_parity_fail=0
 for role in "${ROLES[@]}"; do
   dep_name="ponyllm-gateway-${role}"
-  if ! is_node_schedulable_and_ready "$role"; then
+  dep_probe_rc=0
+  is_node_schedulable_and_ready "$role" || dep_probe_rc=$?
+  if [ "$dep_probe_rc" -eq 2 ]; then
+    echo "::error::[check-cluster-image-parity] 无法读取 Node（RBAC 不足）—— fail-closed"
+    exit 1
+  fi
+  if [ "$dep_probe_rc" -ne 0 ]; then
     echo "WARN: 节点不可用，跳过 deploy/${dep_name} 的镜像一致性比对"
     continue
   fi
@@ -116,7 +156,13 @@ pod_parity_fail=0
 pod_count=0
 
 for role in "${ROLES[@]}"; do
-  if ! is_node_schedulable_and_ready "$role"; then
+  pod_probe_rc=0
+  is_node_schedulable_and_ready "$role" || pod_probe_rc=$?
+  if [ "$pod_probe_rc" -eq 2 ]; then
+    echo "::error::[check-cluster-image-parity] 无法读取 Node（RBAC 不足）—— fail-closed"
+    exit 1
+  fi
+  if [ "$pod_probe_rc" -ne 0 ]; then
     echo "WARN: 节点不可调度/NotReady，容错跳过 role=${role} 运行态 Pod 一致性断言"
     continue
   fi
@@ -144,6 +190,14 @@ done
 
 if [ "$pod_parity_fail" -ne 0 ]; then
   echo "::error::集群存在运行态 Pod 镜像分裂！"
+  exit 1
+fi
+
+# fail-closed：检查量为 0 不得判定 PASS。
+# 历史缺陷（2026-10-14）：全部 role 因 RBAC 403 被跳过，本门禁以
+# "0 个网关 Pod 镜像 100% 达成一致性" 输出 PASS，属于典型的空集假绿。
+if [ "$pod_count" -eq 0 ]; then
+  echo "::error::parity gate 检查了 0 个运行态网关 Pod —— fail-closed，禁止以空集判定 PASS"
   exit 1
 fi
 
