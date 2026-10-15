@@ -18,9 +18,6 @@ TARGET_URL = os.environ.get("PROBE_TARGET") or (os.environ.get("PONYLLM_BASE_URL
 API_KEY = os.environ.get("PROBE_API_KEY") or os.environ.get("PONYLLM_API_KEY", "")
 MGMT_TOKEN = os.environ.get("PROBE_MGMT_TOKEN", "")
 MODEL = os.environ.get("PROBE_MODEL", "deepseek-flash")
-# 探针间隔默认 30s；免费额度型模型（opencode-zen 的 *-free）请由 Deployment
-# 显式调大（PROBE_INTERVAL_SECONDS=600，2026-10-03 事故复盘）：30s 主动探测会
-# 持续消耗 Console 共享免费窗口，把上游打 429 并触发网关全 key 冷却。
 PROBE_INTERVAL = int(os.environ.get("PROBE_INTERVAL_SECONDS", "30"))
 # 上游首 token 可达 10~40s（opencode-zen/pproxy 路径实测），10s 硬超时必误报；
 # 默认对齐网关 90s TTFB 预算，可用 PROBE_TIMEOUT 覆盖。
@@ -42,12 +39,14 @@ PROBE_INTER_CHUNK_TIMEOUT = float(os.environ.get("PROBE_INTER_CHUNK_TIMEOUT", "3
 
 state = {
     "probe_success": 1,
+    "probe_throttled": 0,
     "probe_duration_seconds": 0.05,
     "probe_http_status": 200,
     "probe_status_class": "2xx",
     "probe_last_timestamp": int(time.time()),
     "total_probes": 0,
     "total_failures": 0,
+    "total_throttled": 0,
     "failures_by_class": {
         "4xx": 0,
         "5xx": 0,
@@ -113,15 +112,21 @@ def run_probe():
         
     s_class = get_status_class(status_code)
     now_ts = int(time.time())
+    is_throttled = (status_code == 429)
+    # HTTP 429: 上游速率限制，网关链路和进程本身正常响应并返回标准协议，不判定为服务中断 (outage)
+    effective_success = 1 if (success == 1 or is_throttled) else 0
     
     with lock:
         state["total_probes"] += 1
-        state["probe_success"] = success
+        state["probe_success"] = effective_success
+        state["probe_throttled"] = 1 if is_throttled else 0
         state["probe_duration_seconds"] = dur
         state["probe_http_status"] = status_code
         state["probe_status_class"] = s_class
         state["probe_last_timestamp"] = now_ts
-        if success == 0:
+        if is_throttled:
+            state["total_throttled"] += 1
+        elif success == 0:
             state["total_failures"] += 1
             if s_class in state["failures_by_class"]:
                 state["failures_by_class"][s_class] += 1
@@ -375,10 +380,12 @@ class MetricHandler(http.server.BaseHTTPRequestHandler):
         if self.path == "/metrics":
             with lock:
                 c_success = state["probe_success"]
+                c_throttled = state["probe_throttled"]
                 c_dur = state["probe_duration_seconds"]
                 c_last = state["probe_last_timestamp"]
                 c_total = state["total_probes"]
                 c_fail = state["total_failures"]
+                c_throttled_total = state["total_throttled"]
                 c_status = state["probe_http_status"]
                 c_class = state["probe_status_class"]
                 f_4xx = state["failures_by_class"]["4xx"]
@@ -394,6 +401,9 @@ class MetricHandler(http.server.BaseHTTPRequestHandler):
                 "# HELP ponyllm_synthetic_probe_success Synthetic inference probe success (1=yes, 0=no)",
                 "# TYPE ponyllm_synthetic_probe_success gauge",
                 f'ponyllm_synthetic_probe_success{{service="ponyllm",target="{TARGET_URL}",status_class="{c_class}"}} {c_success}',
+                "# HELP ponyllm_synthetic_probe_throttled Synthetic inference probe throttled by rate limit (1=yes, 0=no)",
+                "# TYPE ponyllm_synthetic_probe_throttled gauge",
+                f'ponyllm_synthetic_probe_throttled{{service="ponyllm",target="{TARGET_URL}"}} {c_throttled}',
                 "# HELP ponyllm_synthetic_probe_status_code Synthetic inference last HTTP status code",
                 "# TYPE ponyllm_synthetic_probe_status_code gauge",
                 f'ponyllm_synthetic_probe_status_code{{service="ponyllm",target="{TARGET_URL}"}} {c_status}',
@@ -409,6 +419,9 @@ class MetricHandler(http.server.BaseHTTPRequestHandler):
                 "# HELP ponyllm_synthetic_probe_failures_total Total number of synthetic probe failures",
                 "# TYPE ponyllm_synthetic_probe_failures_total counter",
                 f'ponyllm_synthetic_probe_failures_total{{service="ponyllm"}} {c_fail}',
+                "# HELP ponyllm_synthetic_probe_throttled_total Total number of synthetic probes throttled with HTTP 429",
+                "# TYPE ponyllm_synthetic_probe_throttled_total counter",
+                f'ponyllm_synthetic_probe_throttled_total{{service="ponyllm"}} {c_throttled_total}',
                 f'ponyllm_synthetic_probe_failures_by_class_total{{service="ponyllm",class="4xx"}} {f_4xx}',
                 f'ponyllm_synthetic_probe_failures_by_class_total{{service="ponyllm",class="5xx"}} {f_5xx}',
                 f'ponyllm_synthetic_probe_failures_by_class_total{{service="ponyllm",class="other"}} {f_other}',

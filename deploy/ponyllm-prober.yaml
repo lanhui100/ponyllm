@@ -45,23 +45,14 @@ spec:
                   name: ponyllm-probe-credentials
                   key: mgmt-token
                   optional: true
-            # 2026-09-30：探针目标从 deepseek-flash（直连）改为 mimo-v2.5-free
-            # （opencode-zen / pproxy 出海链路），覆盖此前 muse/gemini 那类路径。
-            # PROBE_TIMEOUT=90 对齐网关 90s TTFB 预算（opencode-zen 首 token
-            # 实测 10~40s，10s 默认会误报）。
+            # 2026-10-15：探针基准模型恢复为稳定直连的 deepseek-flash（高可用低延迟）；
+            # 避免受上游免费额度风控与频控干扰导致全网关存活状态误报。
             - name: PROBE_MODEL
-              value: mimo-v2.5-free
+              value: deepseek-flash
             - name: PROBE_TIMEOUT
               value: "90"
-            # 2026-10-03：免费额度探针降频 30s -> 600s。事故复盘（req_18daf7d30e…）：
-            # 探针每 30s 打一次 opencode-zen 免费额度模型，叠加真实流量把 Console
-            # 免费窗口打爆（FreeUsageLimitError 429），网关把三把 zen key 全部冷却
-            # （5m→2h 指数升级），全池无可用 key -> 生产请求本地 429。免费额度是
-            # 共享滑动窗口，30s 主动探测等于持续消耗额度；降频至 10min 保留链路
-            # 存活探测又不挖洞（一次失败冷却在下次探测前已过期）。脚本默认仍为 30s，
-            # 由本 Deployment 显式覆盖。
             - name: PROBE_INTERVAL_SECONDS
-              value: "600"
+              value: "30"
             # 契约 C3：长流连续性探针配置（默认关闭：长流按需由 CI 门禁单发启用，常开会持续消耗上游配额）
             - name: PROBE_LONG_STREAM
               value: "0"
@@ -70,7 +61,7 @@ spec:
             - name: PROBE_LONG_STREAM_SECONDS
               value: "120"
             - name: PROBE_LONG_STREAM_MODEL
-              value: mimo-v2.5-free
+              value: deepseek-flash
           command: ["python3", "/opt/prober/prober.py"]
           ports:
             - containerPort: 9115
