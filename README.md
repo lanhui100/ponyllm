@@ -226,9 +226,9 @@ request_body_limit = 134217728 # 请求体上限字节数，默认 128MB；1M �
 cross_provider_quota_failover = false   # 默认：某 provider 额度耗尽即报 insufficient_quota，不再跨提供商烧别家的额度；置 true 恢复旧"额度也跨提供商透明倒换"行为
 ```
 
-> 同名模型多提供商提示：`/v1/models` 中裸模型名去重为一条（=“池化名”，按策略评分选首候选）。<br>
-> 想精确控制消耗哪家额度，用 `provider/model` 显式 pin（如 `sense/deepseek-v4-flash`），各家实例（含共享 1M 模型的 `provider/model[1m]`）都已出现在列表里，`GET /v1/models/{provider}/{model}` 可直接查询。<br>
-> 注意：`model[1m]` 变体仍按池化名处理；若某提供商配置的字面模型名本身以 `provider/` 开头（如 openrouter 上的 `openai/gpt-4o`），字面名在路由时优先于 pin——无法用 `provider/model` 形式 pin 该场景；`provider/model` 别名仅 REST `/v1/models` 暴露，嵌入式 SDK `list_models` 保持裸名去重。
+> 同名模型与多提供商提示：`/v1/models` 中全部物理模型与合法别名均以 `provider/model` 格式提供，不再暴露裸物理模型名称，亦不再提供任何 `[1m]` / `[1024k]` 别名（纯 `auto` 虚拟模型保留）。<br>
+> 下游调用支持显式 pin（如 `sense/deepseek-v4-flash`）或直接使用裸模型名（如 `deepseek-v4-flash`）：使用裸模型名时，网关将根据各 provider 下该模型的权重（`priority` 优先级降序）依次尝试调用并在健康节点间透明倒换（某 provider 不可用时自动使用另一 provider 的同名模型）。<br>
+> GET 查询支持多段路由，如 `GET /v1/models/{provider}/{model}` 或 `GET /v1/models/{bare_model}`；嵌入式 SDK `list_models` 保持裸名去重。
 
 > **对外服务安全环境变量**（部署注记）：
 >

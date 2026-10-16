@@ -341,20 +341,20 @@ async fn tb2_valid_user_jwt_returns_200_models_envelope() {
         "契约 §1.4：`auto` 恒首位，不得重排；got {ids:?}"
     );
     assert!(
-        ids.iter().any(|id| id == OPENAI_DEFAULT),
-        "注入的 provider 模型 {OPENAI_DEFAULT} 必须出现（harness 注入生效）；got {ids:?}"
+        ids.iter().any(|id| id == &format!("openai/{OPENAI_DEFAULT}")),
+        "注入的 provider 模型 openai/{OPENAI_DEFAULT} 必须出现（harness 注入生效）；got {ids:?}"
     );
     assert!(
-        ids.iter().any(|id| id == ANTHROPIC_DEFAULT),
-        "注入的 provider 模型 {ANTHROPIC_DEFAULT} 必须出现；got {ids:?}"
+        ids.iter().any(|id| id == &format!("anthropic/{ANTHROPIC_DEFAULT}")),
+        "注入的 provider 模型 anthropic/{ANTHROPIC_DEFAULT} 必须出现；got {ids:?}"
     );
     // display_name 显式 null（不得省略键、不得空串代替）
     let gpt4o = v["models"]
         .as_array()
         .unwrap()
         .iter()
-        .find(|m| m["id"] == OPENAI_DEFAULT)
-        .expect("gpt-4o 必须在清单内");
+        .find(|m| m["id"] == format!("openai/{OPENAI_DEFAULT}"))
+        .expect("openai/gpt-4o 必须在清单内");
     assert!(
         gpt4o.get("display_name").is_some() && gpt4o["display_name"].is_null(),
         "契约 §1.3：无 display_name 的模型必须显式输出 null；got {gpt4o}"

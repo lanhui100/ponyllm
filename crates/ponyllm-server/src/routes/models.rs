@@ -191,11 +191,10 @@ pub async fn handle_get_model(
     get_model_by_id(state, &model_id).await
 }
 
-/// Handler for `GET /v1/models/:provider/:model` and `GET /models/:provider/:model`
-/// — the `provider/model` pin syntax. A single-segment `{model_id}` route
-/// cannot match a path containing `/`, so `provider/model` aliases (and any
-/// literal model name whose first segment happens to be a provider) need this
-/// two-segment route to resolve without URL-encoding the slash.
+/// Handler for `GET /v1/models/{provider}/{*model}` and `GET /models/{provider}/{*model}`
+/// — the `provider/model` pin syntax and multi-segment models (e.g. `zen/convaiinnovations/laya`).
+/// A single-segment `{model_id}` route cannot match a path containing `/`, so
+/// `provider/{*model}` route allows matching arbitrary segment depths without URL-encoding.
 pub async fn handle_get_model_provider_model(
     State(state): State<Arc<AppState>>,
     Path((provider, model)): Path<(String, String)>,

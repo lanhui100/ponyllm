@@ -178,17 +178,9 @@ impl UserQuotaTracker {
 
         // Check model permissions
         if let Some(allowed_models) = &user.entry.allowed_models {
-            let allowed = allowed_models.iter().any(|pattern| {
-                if pattern == "*" || pattern == model {
-                    return true;
-                }
-                if let Some(prefix) = pattern.strip_suffix('*') {
-                    if model.starts_with(prefix) {
-                        return true;
-                    }
-                }
-                false
-            });
+            let allowed = allowed_models
+                .iter()
+                .any(|pattern| model_matches_allowlist(pattern, model));
 
             if !allowed {
                 return Err(UserCheckError::ModelNotAllowed {
@@ -226,5 +218,96 @@ impl UserQuotaTracker {
             .get(user_id)
             .map(|u| u.used_tokens.load(Ordering::Relaxed))
             .unwrap_or(0)
+    }
+}
+
+/// Strip exactly one leading provider prefix segment separated by `/`.
+///
+/// Returns `Some(rest)` if `model.split_once('/')` yields `(_, rest)` and `!rest.is_empty()`,
+/// otherwise returns `None`.
+pub fn strip_provider_prefix(model: &str) -> Option<&str> {
+    match model.split_once('/') {
+        Some((_, rest)) if !rest.is_empty() => Some(rest),
+        _ => None,
+    }
+}
+
+/// Matches a single allowlist pattern against a model identifier under minimal authorization rules.
+///
+/// 1. (a) `pattern == model` -> `true`
+/// 2. (b) `pattern == "*"` -> `true`
+/// 3. (c) `pattern.strip_suffix('*') == Some(prefix)` && `model.starts_with(prefix)` -> `true`
+/// 4. (d) `!pattern.contains('/') && !pattern.contains('*')` && `strip_provider_prefix(model) == Some(bare) && pattern == bare` -> `true`
+/// 5. otherwise `false`
+pub fn model_matches_allowlist(pattern: &str, model: &str) -> bool {
+    if pattern == model {
+        return true;
+    }
+    if pattern == "*" {
+        return true;
+    }
+    if let Some(prefix) = pattern.strip_suffix('*') {
+        if model.starts_with(prefix) {
+            return true;
+        }
+    }
+    if !pattern.contains('/') && !pattern.contains('*') {
+        if let Some(bare) = strip_provider_prefix(model) {
+            if pattern == bare {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_strip_provider_prefix_truth_table() {
+        assert_eq!(strip_provider_prefix("m"), None);
+        assert_eq!(strip_provider_prefix("p/m"), Some("m"));
+        assert_eq!(strip_provider_prefix("p/q/m"), Some("q/m"));
+        assert_eq!(strip_provider_prefix("/m"), Some("m"));
+        assert_eq!(strip_provider_prefix("p/"), None);
+        assert_eq!(strip_provider_prefix(""), None);
+        assert_eq!(strip_provider_prefix("p//m"), Some("/m"));
+    }
+
+    #[test]
+    fn test_model_matches_allowlist_truth_table() {
+        // (b)
+        assert!(model_matches_allowlist("*", "anything"));
+        assert!(model_matches_allowlist("*", "p/m"));
+        // (a)
+        assert!(model_matches_allowlist("m", "m"));
+        // (d)
+        assert!(model_matches_allowlist("m", "p/m"));
+        // multi-slash bare does not match
+        assert!(!model_matches_allowlist("m", "p/q/m"));
+        // C10-14
+        assert!(model_matches_allowlist("deepseek-v4-flash", "deepseek/deepseek-v4-flash"));
+        // C10-05
+        assert!(model_matches_allowlist("deepseek/deepseek-v4-flash", "deepseek/deepseek-v4-flash"));
+        assert!(model_matches_allowlist("a/b", "a/b"));
+        // pattern with / does not enter (d)
+        assert!(!model_matches_allowlist("a/b", "x/a/b"));
+        assert!(!model_matches_allowlist("b/c", "a/b/c"));
+        // no modifier stripping
+        assert!(!model_matches_allowlist("p/m", "p/m[1m]"));
+        // (c) prefix wildcard
+        assert!(model_matches_allowlist("p/*", "p/m"));
+        assert!(!model_matches_allowlist("p/*", "x/p/m"));
+        assert!(!model_matches_allowlist("deepseek/*", "vercel/deepseek/deepseek-chat"));
+        assert!(!model_matches_allowlist("*/m", "x/m"));
+        // empty string
+        assert!(model_matches_allowlist("", ""));
+        assert!(!model_matches_allowlist("m", ""));
+        assert!(!model_matches_allowlist("", "p/m"));
+        // leading/trailing slash
+        assert!(model_matches_allowlist("m", "/m"));
+        assert!(!model_matches_allowlist("m", "p/"));
     }
 }

@@ -3,7 +3,7 @@ use ponyllm_core::error::{CoreError, Result};
 use ponyllm_core::executor::{EventSink, EventSinkCtx};
 use ponyllm_core::pool::refresh_gate::RefreshGate;
 use ponyllm_core::pool::{
-    is_context_capacity_compatible, parse_context_capacity_tokens, AntigravityTokenManager,
+    is_context_capacity_compatible, AntigravityTokenManager,
     BillingMode, EconomyScorer, EgressEntry, EgressPool, EgressStrategy, GatewayRoutingStrategy,
     HotCacheTracker, KeyPool, ModelThinkingSpec, ModelTier, NodeLatencyMetrics, PricingConfig,
     RefreshPersistHook, SpeedScorer, UpstreamProtocol,
@@ -534,6 +534,16 @@ impl std::fmt::Debug for dyn crate::admin_store::ConfigStore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("ConfigStore")
     }
+}
+
+/// Returns provider names ordered by String's Ord (ASCII/codepoint ascending, not locale).
+/// Deterministic across HashMap implementations.
+pub fn provider_names_ordered(
+    providers: &std::collections::HashMap<String, crate::config::ProviderConfig>,
+) -> Vec<String> {
+    let mut names: Vec<String> = providers.keys().cloned().collect();
+    names.sort();
+    names
 }
 
 impl AppState {
@@ -2479,7 +2489,9 @@ impl AppState {
         let mut candidates = Vec::new();
 
         // 1. Match exact model name across all providers (alias never shadows config)
-        for (p_name, p_cfg) in &config.providers {
+        let ordered_pnames = provider_names_ordered(&config.providers);
+        for p_name in &ordered_pnames {
+            let p_cfg = &config.providers[p_name];
             if p_cfg.default_model == *clean || p_cfg.models.iter().any(|m| m == clean) {
                 let spec = p_cfg.get_model_spec(clean);
                 let thinking_spec = spec.thinking_spec();
@@ -2515,7 +2527,8 @@ impl AppState {
         // 1b. Canonical alias fallback: retired/renamed request names map to the
         // live upstream name (e.g. deepseek-v4.1-flash -> deepseek-flash).
         if candidates.is_empty() && effective != clean.as_str() {
-            for (p_name, p_cfg) in &config.providers {
+            for p_name in &ordered_pnames {
+                let p_cfg = &config.providers[p_name];
                 if p_cfg.default_model == effective || p_cfg.models.iter().any(|m| m == effective) {
                     let spec = p_cfg.get_model_spec(effective);
                     let thinking_spec = spec.thinking_spec();
@@ -2608,7 +2621,8 @@ impl AppState {
         // 3. Keyword heuristic matching
         if candidates.is_empty() {
             let lower = effective.to_lowercase();
-            for (p_name, p_cfg) in &config.providers {
+            for p_name in &ordered_pnames {
+                let p_cfg = &config.providers[p_name];
                 if lower.contains(p_name)
                     || (p_name == "openai"
                         && (lower.starts_with("gpt")
@@ -2708,7 +2722,8 @@ impl AppState {
 
         let mut secondary_candidates = Vec::new();
         while let Some((fb_model, depth)) = queue.pop_front() {
-            for (p_name, p_cfg) in &config.providers {
+            for p_name in &ordered_pnames {
+                let p_cfg = &config.providers[p_name];
                 if p_cfg.default_model == fb_model || p_cfg.models.iter().any(|m| m == &fb_model) {
                     let spec = p_cfg.get_model_spec(&fb_model);
                     let thinking_spec = spec.thinking_spec();
@@ -3053,43 +3068,12 @@ impl AppState {
         ));
         seen.insert("auto".to_string());
 
-        // 2. Physical configured models and their [1m] aliases.
-        // Iteration is provider-name sorted so the list content and the bare
-        // name's `owned_by` are deterministic across restarts (the config map
-        // is a HashMap; unsorted iteration would randomize which provider's
-        // alias survives name collisions).
+        // 2. Physical configured models and their aliases, all provider-scoped (<provider>/<model>).
         let config = self.config.read();
-        let mut provider_names: Vec<&String> = config.providers.keys().collect();
-        provider_names.sort();
-        let literal_names: std::collections::HashSet<&str> = config
-            .providers
-            .values()
-            .flat_map(|cfg| {
-                cfg.models
-                    .iter()
-                    .map(String::as_str)
-                    .chain(std::iter::once(cfg.default_model.as_str()).filter(|d| !d.is_empty()))
-            })
-            .collect();
-        let mut model_provider_count: std::collections::HashMap<&str, usize> =
-            std::collections::HashMap::new();
-        for cfg in config.providers.values() {
-            for m in cfg
-                .models
-                .iter()
-                .map(String::as_str)
-                .chain(std::iter::once(cfg.default_model.as_str()).filter(|d| !d.is_empty()))
-            {
-                let canonical_m = if m.starts_with("gemini-3.8-flash-") {
-                    "gemini-3.8-flash"
-                } else {
-                    m
-                };
-                *model_provider_count.entry(canonical_m).or_insert(0) += 1;
-            }
-        }
+        let provider_names = provider_names_ordered(&config.providers);
+
         for provider_name in &provider_names {
-            let cfg = &config.providers[*provider_name];
+            let cfg = &config.providers[provider_name];
             let mut add_model_and_alias = |m: &str| {
                 // If model is an internal gemini-3.8-flash variant suffix, normalize to base gemini-3.8-flash for client listing
                 let canonical_m = if m.starts_with("gemini-3.8-flash-") {
@@ -3107,59 +3091,15 @@ impl AppState {
                     });
                 let spec = cfg.get_model_spec(m);
 
-                // 1. Bare model entry (deduped across providers)
-                if !seen.contains(canonical_m) {
-                    result.push((
-                        canonical_m.to_string(),
-                        provider_name.to_string(),
-                        None,
-                        proto.clone(),
-                    ));
-                    seen.insert(canonical_m.to_string());
-                }
-
-                // 2. Format provider-qualified alias provider/model
-                let shared = model_provider_count.get(canonical_m).copied().unwrap_or(0) >= 2;
                 let prefixed = format!("{}/{}", provider_name, canonical_m);
-                if shared && !seen.contains(&prefixed) && !literal_names.contains(prefixed.as_str())
-                {
-                    let alias_display = spec
-                        .display_name
-                        .clone()
-                        .unwrap_or_else(|| format!("{} ({})", canonical_m, provider_name));
+                if !seen.contains(&prefixed) {
                     result.push((
                         prefixed.clone(),
                         provider_name.to_string(),
-                        Some(alias_display),
-                        proto.clone(),
+                        spec.display_name.clone(),
+                        proto,
                     ));
-                    seen.insert(prefixed.clone());
-                }
-
-                if parse_context_capacity_tokens(&spec.context_window) >= 1048576 {
-                    let alias_1m = format!("{}[1m]", canonical_m);
-                    if !seen.contains(&alias_1m) {
-                        result.push((
-                            alias_1m.clone(),
-                            provider_name.to_string(),
-                            Some(format!("{} (1M 长上下文)", canonical_m)),
-                            proto.clone(),
-                        ));
-                        seen.insert(alias_1m);
-                    }
-                    let prefixed_1m = format!("{}[1m]", prefixed);
-                    if shared
-                        && !seen.contains(&prefixed_1m)
-                        && !literal_names.contains(prefixed.as_str())
-                    {
-                        result.push((
-                            prefixed_1m.clone(),
-                            provider_name.to_string(),
-                            Some(format!("{}[1m] ({})", canonical_m, provider_name)),
-                            proto.clone(),
-                        ));
-                        seen.insert(prefixed_1m);
-                    }
+                    seen.insert(prefixed);
                 }
             };
 

@@ -13,20 +13,11 @@ use axum::Json;
 use serde_json::json;
 use std::sync::Arc;
 
-/// Whether `model` matches an allowlist entry (exact name, `*` wildcard, or
-/// `prefix/*` wildcard) — shared semantic with `UserQuotaTracker::check_access`.
+/// Whether `model` matches an allowlist entry (delegating to core `model_matches_allowlist`).
 pub fn model_in_allowlist(allowlist: &[String], model: &str) -> bool {
-    allowlist.iter().any(|pattern| {
-        if pattern == "*" || pattern == model {
-            return true;
-        }
-        if let Some(prefix) = pattern.strip_suffix('*') {
-            if model.starts_with(prefix) {
-                return true;
-            }
-        }
-        false
-    })
+    allowlist
+        .iter()
+        .any(|pattern| ponyllm_core::user::model_matches_allowlist(pattern, model))
 }
 
 /// B002 token gate: for an authenticated gateway key (`x-key-id` injected by

@@ -629,13 +629,13 @@ pub fn create_app(state: Arc<AppState>) -> Router {
         .route("/models", get(handle_list_models))
         .route("/models/{model_id}", get(handle_get_model))
         .route(
-            "/models/{provider}/{model}",
+            "/models/{provider}/{*model}",
             get(handle_get_model_provider_model),
         )
         .route("/v1/models", get(handle_list_models))
         .route("/v1/models/{model_id}", get(handle_get_model))
         .route(
-            "/v1/models/{provider}/{model}",
+            "/v1/models/{provider}/{*model}",
             get(handle_get_model_provider_model),
         )
         .route("/chat/completions", post(handle_chat_completions))
