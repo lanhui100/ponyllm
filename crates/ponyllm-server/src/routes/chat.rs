@@ -448,6 +448,22 @@ pub async fn handle_chat_completions(
                             serde_json::json!({ "type": "disabled" }),
                         );
                     }
+                } else if effective_thinking.is_active() {
+                    // DeepSeek thinking-mode contract: When reasoning/thinking is active, upstream APIs require
+                    // `reasoning_content` in assistant messages (especially when tools are passed back in multi-turn).
+                    // If any assistant message lacks `reasoning_content`, inject an empty string `""` to satisfy
+                    // upstream validation and prevent 400 "The `reasoning_content` in the thinking mode must be passed back to the API".
+                    if let Some(messages) = val.get_mut("messages").and_then(|m| m.as_array_mut()) {
+                        for msg in messages {
+                            if msg.get("role").and_then(|r| r.as_str()) == Some("assistant") {
+                                if let Some(m_obj) = msg.as_object_mut() {
+                                    if !m_obj.contains_key("reasoning_content") || m_obj["reasoning_content"].is_null() {
+                                        m_obj.insert("reasoning_content".to_string(), serde_json::json!(""));
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
                 (url, val)
             }

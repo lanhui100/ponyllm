@@ -959,3 +959,135 @@ async fn test_antigravity_gemini3_thinking_suffix_routing() {
     // Request 5: provider-prefixed route with low effort
     assert_eq!(reqs[4]["model"], "gemini-3.8-flash-low");
 }
+
+#[tokio::test]
+async fn test_deepseek_thinking_mode_reasoning_content_backfill() {
+    let captured_requests = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
+    let captured_clone = captured_requests.clone();
+
+    // Mock upstream server that captures forwarded request bodies
+    let upstream_app = axum::Router::new().route(
+        "/v1/chat/completions",
+        axum::routing::post(move |axum::Json(body): axum::Json<serde_json::Value>| {
+            let captured = captured_clone.clone();
+            async move {
+                captured.lock().push(body);
+                let stream_body = "data: {\"id\":\"chatcmpl-test\",\"object\":\"chat.completion.chunk\",\"created\":1234567,\"model\":\"deepseek-v4.1-flash-free\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"done\"},\"finish_reason\":null}]}\n\ndata: {\"id\":\"chatcmpl-test\",\"object\":\"chat.completion.chunk\",\"created\":1234567,\"model\":\"deepseek-v4.1-flash-free\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+                axum::response::Response::builder()
+                    .header("content-type", "text/event-stream")
+                    .body(axum::body::Body::from(stream_body))
+                    .unwrap()
+            }
+        }),
+    );
+
+    let upstream_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_addr = upstream_listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(upstream_listener, upstream_app).await.unwrap();
+    });
+
+    let pool = Arc::new(KeyPool::new("opencode-zen", RoutingStrategy::Priority));
+    pool.add_key(ApiKeyEntry::new("test-key", "sk-test", 1, 10));
+
+    let mut config = GatewayConfig::default();
+    config.auth_mode = ponyllm_config::AuthMode::Open;
+    config.providers.insert(
+        "opencode-zen".to_string(),
+        ProviderConfig {
+            rate_limits: None,
+            base_url: format!("http://{}", upstream_addr),
+            default_model: "deepseek-v4.1-flash-free".to_string(),
+            strategy: "priority".to_string(),
+            billing_mode: BillingMode::Metered,
+            input_price: 0.0,
+            cached_price: 0.0,
+            output_price: 0.0,
+            models: vec!["deepseek-v4.1-flash-free".to_string()],
+            model_specs: vec![ModelSpec {
+                rate_limits: None,
+                priority: None,
+                name: "deepseek-v4.1-flash-free".to_string(),
+                tier: ModelTier::Standard,
+                thinking_default: Some(ReasoningEffort::High),
+                thinking_max: Some(ReasoningEffort::High),
+                ..Default::default()
+            }],
+            default_protocol: Some(UpstreamProtocol::Chat),
+            chat_url: None,
+            responses_url: None,
+            messages_url: None,
+            proxy: None,
+            timeout_secs: None,
+            ttfb_timeout_secs: None,
+            egress_pool: vec![],
+            egress_strategy: "round_robin".to_string(),
+        },
+    );
+
+    let state = Arc::new(AppState::new(config));
+    state.register_pool("opencode-zen", pool);
+
+    let gateway_app = create_app(state);
+    let gateway_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let gateway_addr = gateway_listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(gateway_listener, gateway_app).await.unwrap();
+    });
+
+    let client = reqwest::Client::new();
+
+    // Send a multi-turn chat request with tool calls where assistant messages lack `reasoning_content`
+    let resp = client
+        .post(format!("http://{}/v1/chat/completions", gateway_addr))
+        .json(&json!({
+            "model": "deepseek-v4.1-flash-free",
+            "messages": [
+                {"role": "user", "content": "run command"},
+                {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "bash", "arguments": "{\"command\":\"ls\"}"}
+                    }]
+                },
+                {"role": "tool", "tool_call_id": "call_1", "content": "file.txt"},
+                {
+                    "role": "assistant",
+                    "content": "Thinking about result",
+                    "reasoning_content": "my thoughts",
+                    "tool_calls": [{
+                        "id": "call_2",
+                        "type": "function",
+                        "function": {"name": "bash", "arguments": "{\"command\":\"pwd\"}"}
+                    }]
+                },
+                {"role": "tool", "tool_call_id": "call_2", "content": "/tmp"}
+            ],
+            "tools": [{
+                "type": "function",
+                "function": {"name": "bash", "parameters": {"type": "object"}}
+            }]
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    let status = resp.status();
+    let text = resp.text().await.unwrap();
+    assert_eq!(status, 200, "Response failed: {}", text);
+
+    let reqs = captured_requests.lock().clone();
+    assert_eq!(reqs.len(), 1);
+    let forwarded_messages = reqs[0]["messages"].as_array().unwrap();
+
+    // Verify first assistant message had missing reasoning_content backfilled to empty string ""
+    assert_eq!(forwarded_messages[1]["role"], "assistant");
+    assert_eq!(forwarded_messages[1]["reasoning_content"], "");
+
+    // Verify second assistant message preserved its original reasoning_content
+    assert_eq!(forwarded_messages[3]["role"], "assistant");
+    assert_eq!(forwarded_messages[3]["reasoning_content"], "my thoughts");
+}
