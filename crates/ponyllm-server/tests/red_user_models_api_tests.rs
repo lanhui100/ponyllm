@@ -420,7 +420,9 @@ async fn tb4_allowed_models_none_returns_full_list_in_native_order() {
         ids, expected,
         "契约 §1.4/§1.5：allowed_models=None 必须返回 list_all_models() 全量且逐元素保序（不得排序/去重/丢项）"
     );
-    assert!(ids.len() >= 7, "注入 3 个模型 + 3 个 [1m] 别名 + auto 至少 7 项；got {ids:?}");
+    // In wave 8, models are auto + anthropic/claude-3-5-sonnet + openai/gpt-4o + openai/gpt-4o-mini (no [1m])
+    assert!(ids.len() >= 4, "至少 auto + 3 个 provider/model 项；got {ids:?}");
+    assert!(!ids.iter().any(|id| id.contains("[1m]")), "no [1m] in user models");
 }
 
 // ---------------------------------------------------------------------------
@@ -442,19 +444,20 @@ async fn tb5_allowed_models_literal_only_returns_hits() {
     let ids = model_ids(&v);
     assert_eq!(
         ids,
-        vec!["auto".to_string(), OPENAI_DEFAULT.to_string()],
-        "契约 §1.5：字面白名单只放行精确命中项，且顺序 = 原生顺序（auto 首位）"
+        vec!["auto".to_string(), format!("openai/{}", OPENAI_DEFAULT)],
+        "契约 §1.5 / C10-04：字面白名单 gpt-4o 放行 openai/gpt-4o，auto 放行 auto"
     );
     // 被排除项必须确实不存在（逐项硬断言，防止"全量返回"式假绿）
     for excluded in [
-        OPENAI_EXTRA,
-        ANTHROPIC_DEFAULT,
-        "gpt-4o[1m]",
-        "gpt-4o-mini[1m]",
-        "claude-3-5-sonnet[1m]",
+        format!("openai/{}", OPENAI_EXTRA),
+        format!("anthropic/{}", ANTHROPIC_DEFAULT),
+        "gpt-4o".to_string(),
+        "gpt-4o[1m]".to_string(),
+        "gpt-4o-mini[1m]".to_string(),
+        "claude-3-5-sonnet[1m]".to_string(),
     ] {
         assert!(
-            !ids.iter().any(|id| id == excluded),
+            !ids.iter().any(|id| id == &excluded),
             "契约 §1.5：未命中项 {excluded} 必须被过滤；got {ids:?}"
         );
     }
@@ -468,18 +471,18 @@ async fn tb5_allowed_models_literal_only_returns_hits() {
 }
 
 // ---------------------------------------------------------------------------
-// T-B6a：通配前缀 Some(["gpt-*"]) → 仅前缀命中，auto 被过滤
+// T-B6a：通配前缀 Some(["openai/*"]) → 仅前缀命中，auto 被过滤
 // ---------------------------------------------------------------------------
 #[tokio::test]
 async fn tb6_prefix_wildcard_filters_out_auto() {
     // Arrange
-    let h = Gh::new(Some(vec!["gpt-*".into()]), true).await;
+    let h = Gh::new(Some(vec!["openai/*".into()]), true).await;
     let c = reqwest::Client::new();
     let tok = login_token(&c, &h, "alice", "alice-pass-1234").await;
     let expected: Vec<String> = h
         .native_model_ids()
         .into_iter()
-        .filter(|id| id.starts_with("gpt-"))
+        .filter(|id| id.starts_with("openai/"))
         .collect();
 
     // Act
@@ -491,19 +494,19 @@ async fn tb6_prefix_wildcard_filters_out_auto() {
     let ids = model_ids(&v);
     assert_eq!(
         ids, expected,
-        "契约 §1.5：`gpt-*` 前缀通配必须命中全部 gpt- 前缀项且保序"
+        "契约 §1.5：`openai/*` 前缀通配必须命中全部 openai/ 前缀项且保序"
     );
     assert!(
         !ids.is_empty(),
-        "前缀通配必须至少命中 gpt-4o（否则 harness 无意义）"
+        "前缀通配必须至少命中 openai/gpt-4o（否则 harness 无意义）"
     );
     for id in &ids {
-        assert!(id.starts_with("gpt-"), "前缀白名单下不得出现非 gpt- 项：{id}");
+        assert!(id.starts_with("openai/"), "前缀白名单下不得出现非 openai/ 项：{id}");
     }
-    for excluded in ["auto", ANTHROPIC_DEFAULT, "claude-3-5-sonnet[1m]"] {
+    for excluded in ["auto", "anthropic/claude-3-5-sonnet", "claude-3-5-sonnet"] {
         assert!(
             !ids.iter().any(|id| id == excluded),
-            "契约 §1.5：{excluded} 必须被 `gpt-*` 过滤掉；got {ids:?}"
+            "契约 §1.5：{excluded} 必须被 `openai/*` 过滤掉；got {ids:?}"
         );
     }
 }

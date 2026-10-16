@@ -260,8 +260,8 @@ async fn test_model_echo_policy_and_auto_routing() {
     assert!(!model_ids.contains(&"auto:flagship"));
     assert!(!model_ids.contains(&"auto:economy"));
     assert!(!model_ids.contains(&"auto:fastest"));
-    assert!(model_ids.contains(&"deepseek-v4-flash"));
-    assert!(model_ids.contains(&"deepseek-v4-flash[1m]"));
+    assert!(model_ids.contains(&"deepseek-v4-flash") || model_ids.contains(&"deepseek/deepseek-v4-flash"));
+    assert!(!model_ids.iter().any(|id| id.contains("[1m]")));
 
     // 6. Test single model GET /v1/models/:model_id
     let single_auto_resp = client
@@ -1351,35 +1351,30 @@ fn test_models_list_exposes_per_provider_aliases() {
     let models = state.list_all_models();
     let ids: Vec<&str> = models.iter().map(|(id, _, _, _)| id.as_str()).collect();
 
-    // The bare name is deduped to ONE entry...
-    assert_eq!(ids.iter().filter(|id| **id == "shared-model").count(), 1);
-    // ...while each provider's instance is exposed as a pindown alias.
+    // In wave 8, all non-auto entries are provider-scoped, no bare physical names, no [1m].
     assert!(
         ids.contains(&"alpha/shared-model"),
-        "missing alpha alias: {ids:?}"
+        "missing alpha/shared-model: {ids:?}"
     );
     assert!(
         ids.contains(&"beta/shared-model"),
-        "missing beta alias: {ids:?}"
-    );
-    // 1M shared models also get provider-scoped [1m] aliases; the pooled
-    // `shared-model[1m]` variant stays as before.
-    assert!(
-        ids.contains(&"shared-model[1m]"),
-        "missing pooled [1m]: {ids:?}"
+        "missing beta/shared-model: {ids:?}"
     );
     assert!(
-        ids.contains(&"alpha/shared-model[1m]"),
-        "missing alpha [1m] alias: {ids:?}"
+        ids.contains(&"alpha/solo-model"),
+        "single-provider model must also get provider prefix: {ids:?}"
     );
     assert!(
-        ids.contains(&"beta/shared-model[1m]"),
-        "missing beta [1m] alias: {ids:?}"
+        !ids.contains(&"shared-model"),
+        "bare physical name shared-model must not be present: {ids:?}"
     );
-    // Single-provider models get NO alias (the list stays lean).
     assert!(
-        !ids.contains(&"alpha/solo-model"),
-        "single-provider model must not get an alias: {ids:?}"
+        !ids.contains(&"solo-model"),
+        "bare physical name solo-model must not be present: {ids:?}"
+    );
+    assert!(
+        !ids.iter().any(|id| id.contains("[1m]")),
+        "list must have no [1m] entries: {ids:?}"
     );
     // Deterministic ordering: provider iteration is name-sorted, so the
     // alpha alias comes before the beta alias (and the list is stable).
@@ -2717,14 +2712,17 @@ fn test_deepseek_v41_flash_alias_routes_to_live_upstream_name() {
     assert_eq!(targets_prefixed[0].provider_name, "deepseek");
     assert_eq!(targets_prefixed[0].physical_model, "deepseek-v4.1-flash");
 
-    // Alias is listed for discovery, with its [1m] variant.
+    // Alias is listed for discovery under deepseek/<alias>, without [1m] variant.
     let models = state.list_all_models();
     assert!(models
         .iter()
-        .any(|(m, p, _, _)| m == "deepseek-v4.1-flash" && p == "deepseek"));
+        .any(|(m, p, _, _)| m == "deepseek/deepseek-v4.1-flash" && p == "deepseek"));
     assert!(models
         .iter()
-        .any(|(m, p, _, _)| m == "deepseek-v4.1-flash[1m]" && p == "deepseek"));
+        .any(|(m, p, _, _)| m == "deepseek/deepseek-flash" && p == "deepseek"));
+    assert!(!models
+        .iter()
+        .any(|(m, _, _, _)| m.contains("[1m]")));
 }
 
 #[tokio::test]
