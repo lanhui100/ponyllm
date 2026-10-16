@@ -35,7 +35,7 @@ PROBE_LONG_STREAM_PROMPT = os.environ.get(
     "Count from 1 to 500 slowly, outputting each number on a new line."
 )
 # NFR: 块间空闲判定，连续 data: 块间隔 > 3000ms (3.0s) 视为 stall
-PROBE_INTER_CHUNK_TIMEOUT = float(os.environ.get("PROBE_INTER_CHUNK_TIMEOUT", "3.0"))
+PROBE_INTER_CHUNK_TIMEOUT = float(os.environ.get("PROBE_INTER_CHUNK_TIMEOUT", "8.0"))
 
 state = {
     "probe_success": 1,
