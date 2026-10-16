@@ -526,7 +526,7 @@ fn test_models_listing_exposes_native_protocol() {
     let models = state.list_all_models();
     let found = models
         .iter()
-        .find(|(m, _, _, _)| m == "muse-spark")
+        .find(|(m, _, _, _)| m == "op/muse-spark")
         .expect("model listed");
     assert_eq!(found.1, "op");
     assert_eq!(found.3, "responses");
@@ -1696,8 +1696,8 @@ async fn test_gateway_configuration_hot_reload() {
         .iter()
         .map(|m| m["id"].as_str().unwrap())
         .collect();
-    assert!(ids_1.contains(&"model-a"));
-    assert!(!ids_1.contains(&"model-b"));
+    assert!(ids_1.contains(&"prov_a/model-a"));
+    assert!(!ids_1.contains(&"prov_b/model-b"));
 
     // 3. Perform Hot Reload: remove prov_a, add prov_b
     let mut new_config = GatewayConfig::default();
@@ -1750,8 +1750,8 @@ async fn test_gateway_configuration_hot_reload() {
         .iter()
         .map(|m| m["id"].as_str().unwrap())
         .collect();
-    assert!(!ids_2.contains(&"model-a"), "Old model-a should be removed");
-    assert!(ids_2.contains(&"model-b"), "New model-b should be exposed");
+    assert!(!ids_2.contains(&"prov_a/model-a"), "Old model-a should be removed");
+    assert!(ids_2.contains(&"prov_b/model-b"), "New model-b should be exposed");
 
     // 5. Query chat completions with model-b: should succeed seamlessly
     let chat_resp = client
