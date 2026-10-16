@@ -435,6 +435,15 @@ impl ApiKeyEntry {
             .successful_requests
             .fetch_add(1, Ordering::Relaxed);
         self.stats.consecutive_failures.store(0, Ordering::SeqCst);
+        // Pass-through recovery (ADR `2026-10-15-rate-limit-pool-passthrough`):
+        // a successful request is live evidence the transient upstream rate
+        // limit has lifted — clear a RateLimit cooldown immediately so a
+        // pass-through pool returns to Active bookkeeping instead of waiting
+        // out a stale fixed timer. Quota/Eligibility cooldowns keep their
+        // semantics (wall-clock reset / 3-day freeze).
+        if self.cooldown_reason() == Some(CooldownReason::RateLimit) {
+            self.clear_cooldown();
+        }
     }
 
     /// Record token consumption on this key
