@@ -203,7 +203,7 @@ describe('UI Primitives & Modern Design System', () => {
     app.unmount();
   });
 
-  it('renders center glassmorphism toast with semantic colors and icons', async () => {
+  it('renders bottom-right glassmorphism toast with semantic colors and icons', async () => {
     const app = createApp({
       render: () => h(UiToast),
     });
@@ -215,11 +215,13 @@ describe('UI Primitives & Modern Design System', () => {
 
     const toastEl = container.querySelector('[data-testid="ui-toast"]');
     expect(toastEl).not.toBeNull();
-    // 居中定位类
-    expect(toastEl?.className).toContain('top-1/2');
-    expect(toastEl?.className).toContain('left-1/2');
-    expect(toastEl?.className).toContain('-translate-x-1/2');
-    expect(toastEl?.className).toContain('-translate-y-1/2');
+    // 右下角锚定类（不再居中）
+    expect(toastEl?.className).toContain('bottom-6');
+    expect(toastEl?.className).toContain('right-6');
+    expect(toastEl?.className).not.toContain('top-1/2');
+    expect(toastEl?.className).not.toContain('left-1/2');
+    expect(toastEl?.className).not.toContain('-translate-x-1/2');
+    expect(toastEl?.className).not.toContain('-translate-y-1/2');
 
     // 文本与图标
     const msgEl = container.querySelector('[data-testid="toast-message"]');
@@ -266,6 +268,15 @@ describe('UI Primitives & Modern Design System', () => {
     // 遮罩层出现
     const overlay = container.querySelector('[data-testid="toast-overlay"]');
     expect(overlay).not.toBeNull();
+
+    // 二次确认仍为屏幕居中模态，不随轻提示移向右下角
+    const confirmEl = container.querySelector('[data-testid="ui-toast"]');
+    expect(confirmEl?.className).toContain('top-1/2');
+    expect(confirmEl?.className).toContain('left-1/2');
+    expect(confirmEl?.className).toContain('-translate-x-1/2');
+    expect(confirmEl?.className).toContain('-translate-y-1/2');
+    expect(confirmEl?.className).not.toContain('bottom-6');
+    expect(confirmEl?.className).not.toContain('right-6');
 
     // 检查按钮与文案
     const titleEl = container.querySelector('[data-testid="toast-title"]');

@@ -84,12 +84,16 @@ const typeConfig = computed(() => {
     />
   </Transition>
 
-  <!-- 居中毛玻璃 Toast/Confirm 容器 -->
-  <Transition name="pony-toast-center">
+  <!-- 轻提示 Toast 落屏幕右下角；二次确认 Confirm 仍居中 -->
+  <Transition :name="isConfirm ? 'pony-toast-center' : 'pony-toast-corner'">
     <div
       v-if="activeItem"
-      class="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-50 select-none pointer-events-auto"
-      :class="[isConfirm ? 'w-[90vw] max-w-md' : 'max-w-lg min-w-[280px] w-auto']"
+      class="fixed z-50 select-none pointer-events-auto"
+      :class="[
+        isConfirm
+          ? 'top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[90vw] max-w-md'
+          : 'bottom-6 right-6 min-w-[280px] w-auto max-w-[min(32rem,calc(100vw-3rem))]',
+      ]"
       data-testid="ui-toast"
       role="alert"
     >
@@ -187,6 +191,22 @@ const typeConfig = computed(() => {
 .pony-toast-center-leave-to {
   opacity: 0;
   transform: translate(-50%, -48%) scale(0.96);
+}
+
+/* 右下角 Toast：从右侧轻微滑入 */
+.pony-toast-corner-enter-active {
+  transition: all 0.22s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.pony-toast-corner-leave-active {
+  transition: all 0.18s cubic-bezier(0.4, 0, 1, 1);
+}
+.pony-toast-corner-enter-from {
+  opacity: 0;
+  transform: translate(12px, 8px) scale(0.97);
+}
+.pony-toast-corner-leave-to {
+  opacity: 0;
+  transform: translate(8px, 4px) scale(0.98);
 }
 
 .pony-overlay-enter-active,

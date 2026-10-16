@@ -28,7 +28,7 @@ onMounted(async () => {
       <router-view />
     </div>
 
-    <!-- 全局居中毛玻璃通用 Toast / 二次确认通知组件 -->
+    <!-- 全局毛玻璃通用 Toast（屏幕右下角）/ 二次确认通知组件（居中模态） -->
     <UiToast />
   </div>
 </template>
