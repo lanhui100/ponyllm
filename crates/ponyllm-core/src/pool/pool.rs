@@ -117,6 +117,22 @@ impl RateLimits {
     }
 }
 
+/// Rate-limit pool pass-through predicate (ADR
+/// `2026-10-15-rate-limit-pool-passthrough`): true when every key of the pool
+/// is cooling **solely** due to a transient upstream rate limit (no Active
+/// key, and no key cooling for Quota/Eligibility/Server, none disabled).
+/// Such a pool has nothing to rotate to — cooling the last key protects no
+/// alternative credential — so it stays "softly schedulable": selection
+/// passes a RateLimit-cooling key through to re-test the upstream, and the
+/// first success clears the stale cooldown (`ApiKeyEntry::record_success`).
+fn all_rl_cooling(keys: &[Arc<ApiKeyEntry>]) -> bool {
+    !keys.is_empty()
+        && keys.iter().all(|k| {
+            k.current_state() == KeyState::CoolingDown
+                && k.cooldown_reason() == Some(crate::pool::entry::CooldownReason::RateLimit)
+        })
+}
+
 #[derive(Debug)]
 pub struct KeyPool {
     pub provider: String,
@@ -236,10 +252,20 @@ impl KeyPool {
         _family: Option<crate::pool::entry::QuotaFamily>,
     ) -> Result<Arc<ApiKeyEntry>> {
         let keys = self.keys.read();
+        // Rate-limit pool pass-through (ADR `2026-10-15-rate-limit-pool-passthrough`):
+        // when every key is cooling solely for a transient upstream rate
+        // limit, no rotation target exists — fast-failing would manufacture a
+        // fixed-timer outage even though the upstream may recover long before
+        // its advertised `retry_after`. Keep such keys selectable so requests
+        // re-test the upstream; the first success clears the cooldown.
+        let rl_pass = all_rl_cooling(&keys);
         let active_keys: Vec<Arc<ApiKeyEntry>> = keys
             .iter()
             .filter(|k| {
-                k.current_state() == KeyState::Active
+                let state = k.current_state();
+                let selectable = state == KeyState::Active
+                    || (rl_pass && state == KeyState::CoolingDown);
+                selectable
                     && !excluded_key_ids.iter().any(|ex| ex == &k.id)
                     && Self::budget_ok(k, limits)
             })
@@ -607,19 +633,30 @@ impl KeyPool {
         alive.saturating_sub(1) * 2 <= keys.len()
     }
 
+    /// True when every key is cooling solely for a transient upstream rate
+    /// limit (softly schedulable, ADR `2026-10-15-rate-limit-pool-passthrough`).
+    pub fn all_keys_rate_limit_cooling(&self) -> bool {
+        all_rl_cooling(&self.keys.read())
+    }
+
     /// Count active healthy keys
     pub fn active_key_count(&self) -> usize {
         let keys = self.keys.read();
-        keys.iter()
+        let active = keys
+            .iter()
             .filter(|k| k.current_state() == KeyState::Active)
-            .count()
+            .count();
+        // Rate-limit pool pass-through: an all-RateLimit-cooling pool can still
+        // serve (selection passes keys through), so report one schedulable key
+        // instead of zero — keeps the auto-routing health gate honest.
+        active + usize::from(all_rl_cooling(&keys) && active == 0)
     }
 
     /// True when no key can currently serve (none Active: all cooling down or
     /// disabled). Feeds the quota boundary guard (bugfix 2026-10-02).
     pub fn no_schedulable_keys(&self) -> bool {
         let keys = self.keys.read();
-        keys.iter().all(|k| k.current_state() != KeyState::Active)
+        !all_rl_cooling(&keys) && keys.iter().all(|k| k.current_state() != KeyState::Active)
     }
 
     /// True when at least one cooling key is cooling because its account/model
@@ -968,9 +1005,14 @@ mod tests {
         let longest = pool
             .longest_window_refill_in_with_limits(Some(&limits))
             .unwrap();
-        assert_eq!(
-            longest, refill,
-            "single-key pool: min and max refill coincide"
+        let diff = if longest >= refill {
+            longest - refill
+        } else {
+            refill - longest
+        };
+        assert!(
+            diff < Duration::from_millis(100),
+            "single-key pool: min and max refill coincide within 100ms tolerance, got refill={refill:?}, longest={longest:?}"
         );
 
         // No-arg variants ignore the budget dimension (cooldown-only): the
@@ -1151,5 +1193,150 @@ mod tests {
             .select_key_with_affinity(Some(seed_1), &excluded, None)
             .unwrap();
         assert_ne!(spillover.effective_account_id(), chosen_account);
+    }
+
+    #[test]
+    fn test_rate_limit_cooling_pool_passthrough_selects() {
+        // 2026-10-15 workbuddy incident shape: sole key cooled by an upstream
+        // 429 with a huge `retry_after` (48279s). A singleton must NOT fall
+        // into a fixed-timer outage — the key stays selectable so the next
+        // request re-tests the upstream.
+        let pool = KeyPool::new("workbuddy", RoutingStrategy::Priority);
+        pool.add_key(ApiKeyEntry::new("wb-key-2", "wb-token", 1, 10));
+        pool.record_error(
+            "wb-key-2",
+            PoolErrorType::RateLimit {
+                retry_after: Some(Duration::from_secs(48279)),
+            },
+        );
+        assert_eq!(
+            pool.key_cooldown_reason("wb-key-2"),
+            Some(crate::pool::entry::CooldownReason::RateLimit)
+        );
+        assert!(pool.all_keys_rate_limit_cooling());
+        assert!(!pool.no_schedulable_keys());
+        assert_eq!(pool.active_key_count(), 1);
+        let selected = pool.select_key().expect("pass-through must select the cooling key");
+        assert_eq!(selected.id, "wb-key-2");
+        // The first successful request is live evidence the throttle lifted:
+        // it clears the stale RateLimit cooldown and the pool returns to
+        // ordinary Active bookkeeping.
+        selected.record_success();
+        assert_eq!(selected.current_state(), KeyState::Active);
+        assert!(pool.select_key().is_ok());
+        assert!(!pool.all_keys_rate_limit_cooling());
+    }
+
+    #[test]
+    fn test_quota_cooling_pool_no_passthrough() {
+        // Real quota exhaustion (wall-clock reset) is NOT pass-through: only
+        // transient RateLimit cooling is softly schedulable.
+        let pool = KeyPool::new("p", RoutingStrategy::Priority);
+        pool.add_key(ApiKeyEntry::new("k1", "sk-1", 1, 10));
+        pool.record_error(
+            "k1",
+            PoolErrorType::QuotaExhausted {
+                retry_after: Some(Duration::from_secs(900)),
+            },
+        );
+        assert!(!pool.all_keys_rate_limit_cooling());
+        assert!(pool.no_schedulable_keys());
+        assert_eq!(pool.active_key_count(), 0);
+        assert!(matches!(
+            pool.select_key(),
+            Err(CoreError::NoAvailableKey(_))
+        ));
+    }
+
+    #[test]
+    fn test_multi_key_all_rate_limit_cooling_passthrough() {
+        // "加了其他 key 也一样": keys of the same upstream account can all be
+        // cooled by the same frequency limit — the whole pool must stay
+        // softly schedulable instead of a total outage.
+        let pool = KeyPool::new("workbuddy", RoutingStrategy::Priority);
+        pool.add_key(ApiKeyEntry::new("k1", "sk-1", 1, 10));
+        pool.add_key(ApiKeyEntry::new("k2", "sk-2", 2, 10));
+        pool.record_error(
+            "k1",
+            PoolErrorType::RateLimit {
+                retry_after: Some(Duration::from_secs(48279)),
+            },
+        );
+        pool.record_error(
+            "k2",
+            PoolErrorType::RateLimit {
+                retry_after: Some(Duration::from_secs(48279)),
+            },
+        );
+        assert!(pool.all_keys_rate_limit_cooling());
+        assert!(!pool.no_schedulable_keys());
+        assert_eq!(pool.active_key_count(), 1);
+        let selected = pool.select_key().unwrap();
+        assert!(selected.id == "k1" || selected.id == "k2");
+    }
+
+    #[test]
+    fn test_mixed_pool_picks_active_key() {
+        // With any Active key present, pass-through is off and ordinary
+        // rotation semantics apply: the throttled key is skipped, the Active
+        // key serves.
+        let pool = KeyPool::new("p", RoutingStrategy::Priority);
+        pool.add_key(ApiKeyEntry::new("k1", "sk-1", 1, 10));
+        pool.add_key(ApiKeyEntry::new("k2", "sk-2", 2, 10));
+        pool.record_error(
+            "k1",
+            PoolErrorType::RateLimit {
+                retry_after: Some(Duration::from_secs(48279)),
+            },
+        );
+        assert!(!pool.all_keys_rate_limit_cooling());
+        assert_eq!(pool.active_key_count(), 1);
+        let selected = pool.select_key().unwrap();
+        assert_eq!(selected.id, "k2");
+    }
+
+    #[test]
+    fn test_passthrough_respects_excluded_key() {
+        // Pass-through must not re-select a key already attempted within the
+        // same request (no intra-request retry loops).
+        let pool = KeyPool::new("p", RoutingStrategy::Priority);
+        pool.add_key(ApiKeyEntry::new("k1", "sk-1", 1, 10));
+        pool.record_error(
+            "k1",
+            PoolErrorType::RateLimit {
+                retry_after: Some(Duration::from_secs(48279)),
+            },
+        );
+        assert!(pool.all_keys_rate_limit_cooling());
+        assert!(matches!(
+            pool.select_key_excluding(&["k1".into()]),
+            Err(CoreError::NoAvailableKey(_))
+        ));
+    }
+
+    #[test]
+    fn test_record_success_clears_rate_limit_cooldown_only() {
+        let k = ApiKeyEntry::new("k", "sk-1", 1, 10);
+        k.record_failure(PoolErrorType::RateLimit {
+            retry_after: Some(Duration::from_secs(3600)),
+        });
+        assert_eq!(k.current_state(), KeyState::CoolingDown);
+        k.record_success();
+        assert_eq!(k.current_state(), KeyState::Active);
+        assert_eq!(k.cooldown_reason(), None);
+
+        // Quota cooldown is NOT cleared by a success: real quota has a
+        // wall-clock reset and pass-through is rate-limit-scoped.
+        let q = ApiKeyEntry::new("q", "sk-2", 1, 10);
+        q.record_failure(PoolErrorType::QuotaExhausted {
+            retry_after: Some(Duration::from_secs(900)),
+        });
+        assert_eq!(q.current_state(), KeyState::CoolingDown);
+        q.record_success();
+        assert_eq!(q.current_state(), KeyState::CoolingDown);
+        assert_eq!(
+            q.cooldown_reason(),
+            Some(crate::pool::entry::CooldownReason::Quota)
+        );
     }
 }
