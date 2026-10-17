@@ -3122,6 +3122,17 @@ impl AppState {
         result
     }
 
+    /// B003 (contract `.dev-team/contracts/b003-model-capacity.md`): model
+    /// listing entries enriched with the capacity resolved from the same-named
+    /// capacity group (max over all providers' `default_model` ∪ `models`).
+    /// Entry set/order/dedup MUST stay identical to
+    /// [`Self::list_all_models`], which delegates here in phase B003-E.
+    ///
+    /// Phase B003-P: signature frozen, body intentionally unimplemented.
+    pub fn list_all_models_with_capacity(&self) -> Vec<ListedModel> {
+        unimplemented!("B003: model capacity listing")
+    }
+
     /// Legacy compatibility helper
     pub fn resolve_provider(&self, model: &str) -> Option<(String, ProviderConfig)> {
         let parsed = ParsedRequestModel::parse(model);
@@ -3133,6 +3144,25 @@ impl AppState {
         }
         None
     }
+}
+
+/// B003 (contract `.dev-team/contracts/b003-model-capacity.md`): one entry of
+/// `AppState::list_all_models_with_capacity` — the frozen `list_all_models`
+/// tuple fields plus the capacity resolved for its same-named model group.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListedModel {
+    /// `<provider>/<canonical model>`; exactly `"auto"` for the virtual entry.
+    pub id: String,
+    /// Owning provider; `"ponyllm"` for the virtual auto entry.
+    pub provider: String,
+    /// Cosmetic display name as surfaced today (`None` when unconfigured).
+    pub display_name: Option<String>,
+    /// Effective native protocol string (`auto` for the virtual entry).
+    pub protocol: String,
+    /// Max context window of the same-named group, in tokens (always > 0).
+    pub context_window: u64,
+    /// Max output tokens of the same-named group (always > 0).
+    pub max_output: u64,
 }
 
 pub use ponyllm_core::{
