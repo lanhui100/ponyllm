@@ -22,6 +22,14 @@
 
 ## 完成
 
+- **B003**（2026-10-17）`/v1/models` 容量字段 → 已实施：列表与单模型详情新增 `context_window` /
+  `max_output`（13 键），每模型按 `canonicalize_model_name` 同名组（default_model ∪ models 的
+  `get_model_spec`）取分项 max，别名/多段名/gemini 变体不回落默认 ModelSpec，auto 取全局 max；
+  `list_all_models()` 签名与逐元素行为不变。ADR:
+  `.agents/notes/implemented/feature/2026-10-17-b003-model-capacity-fields.md`。验收：冻结契约
+  CAP-01..15 / J-01..06 全绿（21/21）、`cargo test -p ponyllm-server` 569 passed、真实二进制
+  `ponyllm serve` + curl `/v1/models` 断言通过。
+
 - **B002**（2026-10-02）升级/重启导致 dashboard 数据从 0 开始 → 已修复：快照 key_usages 合并保留、
   热重载移植 usage tracker、schema v3 池级跨账号跨周期持久化累计基准 + benchmark 端点 + 前端接入。
 - **统一账户额度计量内核**（2026-09-30，本轮）：短窗计量 + 持久化迁移 + rate_limits 配置面

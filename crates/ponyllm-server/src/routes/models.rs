@@ -130,6 +130,8 @@ pub fn format_model_json(
     provider_name: &str,
     display_name: Option<&str>,
     protocol: &str,
+    context_window: u64,
+    max_output: u64,
 ) -> serde_json::Value {
     let display = display_name
         .map(|d| d.to_string())
@@ -146,21 +148,25 @@ pub fn format_model_json(
         "protocol": protocol,
         "permission": [],
         "root": model_id,
-        "parent": null
+        "parent": null,
+        "context_window": context_window,
+        "max_output": max_output
     })
 }
 
 /// Handler for `GET /v1/models` and `GET /models`
 pub async fn handle_list_models(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let models = state.list_all_models();
+    let models = state.list_all_models_with_capacity();
     let data: Vec<serde_json::Value> = models
         .into_iter()
-        .map(|(model_id, provider_name, display_name, protocol)| {
+        .map(|model| {
             format_model_json(
-                &model_id,
-                &provider_name,
-                display_name.as_deref(),
-                &protocol,
+                &model.id,
+                &model.provider,
+                model.display_name.as_deref(),
+                &model.protocol,
+                model.context_window,
+                model.max_output,
             )
         })
         .collect();
@@ -203,27 +209,27 @@ pub async fn handle_get_model_provider_model(
 }
 
 async fn get_model_by_id(state: Arc<AppState>, model_id: &str) -> impl IntoResponse {
-    let models = state.list_all_models();
+    let models = state.list_all_models_with_capacity();
     // Match exact model_id, or if model_id is bare name, match entry with `/<model_id>`
-    if let Some((m_id, provider_name, display_name, protocol)) =
-        models.into_iter().find(|(m, _, _, _)| {
-            m == model_id
-                || m.strip_suffix(&format!("/{}", model_id)).is_some()
-                || m.ends_with(&format!("/{}", model_id))
-        })
-    {
-        let resp_id = if m_id != model_id && (m_id.ends_with(&format!("/{}", model_id))) {
+    if let Some(hit) = models.into_iter().find(|m| {
+        m.id == model_id
+            || m.id.strip_suffix(&format!("/{}", model_id)).is_some()
+            || m.id.ends_with(&format!("/{}", model_id))
+    }) {
+        let resp_id = if hit.id != model_id && (hit.id.ends_with(&format!("/{}", model_id))) {
             model_id
         } else {
-            &m_id
+            hit.id.as_str()
         };
         (
             StatusCode::OK,
             Json(format_model_json(
                 resp_id,
-                &provider_name,
-                display_name.as_deref(),
-                &protocol,
+                &hit.provider,
+                hit.display_name.as_deref(),
+                &hit.protocol,
+                hit.context_window,
+                hit.max_output,
             )),
         )
             .into_response()

@@ -3,7 +3,7 @@ use ponyllm_core::error::{CoreError, Result};
 use ponyllm_core::executor::{EventSink, EventSinkCtx};
 use ponyllm_core::pool::refresh_gate::RefreshGate;
 use ponyllm_core::pool::{
-    is_context_capacity_compatible, AntigravityTokenManager,
+    is_context_capacity_compatible, parse_context_capacity_tokens, AntigravityTokenManager,
     BillingMode, EconomyScorer, EgressEntry, EgressPool, EgressStrategy, GatewayRoutingStrategy,
     HotCacheTracker, KeyPool, ModelThinkingSpec, ModelTier, NodeLatencyMetrics, PricingConfig,
     RefreshPersistHook, SpeedScorer, UpstreamProtocol,
@@ -13,7 +13,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::admin_store::{ConfigStore, ConfigStoreError};
-use crate::config::{GatewayConfig, ProviderConfig};
+use crate::config::{GatewayConfig, ModelSpec, ProviderConfig};
 use crate::frames::FrameConverter;
 use crate::routes::models::ParsedRequestModel;
 use ponyllm_config::ConfigFile;
@@ -3056,22 +3056,87 @@ impl AppState {
     /// The fourth tuple element is the effective native protocol (`chat` by
     /// default; `auto` for virtual models whose protocol resolves per request).
     pub fn list_all_models(&self) -> Vec<(String, String, Option<String>, String)> {
-        let mut result = Vec::new();
-        let mut seen = std::collections::HashSet::new();
+        self.list_all_models_with_capacity()
+            .into_iter()
+            .map(|m| (m.id, m.provider, m.display_name, m.protocol))
+            .collect()
+    }
 
-        // 1. auto virtual model (Pure auto only)
-        result.push((
-            "auto".to_string(),
-            "ponyllm".to_string(),
-            Some("Auto(智能·高可用主力)".to_string()),
-            "auto".to_string(),
-        ));
-        seen.insert("auto".to_string());
-
-        // 2. Physical configured models and their aliases, all provider-scoped (<provider>/<model>).
+    /// B003 (contract `.dev-team/contracts/b003-model-capacity.md`): model
+    /// listing entries enriched with the capacity resolved from the same-named
+    /// capacity group (max over all providers' `default_model` ∪ `models`).
+    /// Entry set/order/dedup MUST stay identical to
+    /// [`Self::list_all_models`], which delegates here in phase B003-E.
+    pub fn list_all_models_with_capacity(&self) -> Vec<ListedModel> {
+        // One config snapshot for the whole call (contract INV-10 / CAP-12).
         let config = self.config.read();
         let provider_names = provider_names_ordered(&config.providers);
 
+        // 1. Capacity groups (contract §4.1): contribution set is every
+        //    provider's `default_model` ∪ `models` only — aliases and orphan
+        //    `model_specs` entries never contribute. Keys are canonicalized so
+        //    e.g. `laya-free` groups with `convaiinnovations/laya`.
+        let mut groups: HashMap<String, (u64, u64)> = HashMap::new();
+        let mut global: Option<(u64, u64)> = None;
+        for provider_name in &provider_names {
+            let cfg = &config.providers[provider_name];
+            let mut names: Vec<&str> = Vec::new();
+            if !cfg.default_model.is_empty() {
+                names.push(cfg.default_model.as_str());
+            }
+            names.extend(cfg.models.iter().map(String::as_str));
+            for name in names {
+                let spec = cfg.get_model_spec(name);
+                let ctx = parse_context_capacity_tokens(&spec.context_window) as u64;
+                let out = parse_context_capacity_tokens(&spec.max_output) as u64;
+                let group = groups
+                    .entry(canonicalize_model_name(name))
+                    .or_insert((0, 0));
+                group.0 = group.0.max(ctx);
+                group.1 = group.1.max(out);
+                global = Some(match global {
+                    None => (ctx, out),
+                    Some((g_ctx, g_out)) => (g_ctx.max(ctx), g_out.max(out)),
+                });
+            }
+        }
+
+        let default_cap = (
+            parse_context_capacity_tokens(&ModelSpec::default().context_window) as u64,
+            parse_context_capacity_tokens(&ModelSpec::default().max_output) as u64,
+        );
+        let auto_cap = global.unwrap_or(default_cap);
+        // Contract §4.2: entry capacity = same-named group max; auto = global
+        // max; both fields clamped to > 0 (B10 / INV-04).
+        let capacity_for = |id: &str, provider: &str| -> (u64, u64) {
+            let (ctx, out) = if id == "auto" {
+                auto_cap
+            } else {
+                let model_name = id.strip_prefix(&format!("{}/", provider)).unwrap_or(id);
+                groups
+                    .get(&canonicalize_model_name(model_name))
+                    .copied()
+                    .unwrap_or(default_cap)
+            };
+            (ctx.max(1), out.max(1))
+        };
+
+        let mut result = Vec::new();
+        let mut seen = HashSet::new();
+
+        // 2. auto virtual model (Pure auto only)
+        let (context_window, max_output) = capacity_for("auto", "ponyllm");
+        result.push(ListedModel {
+            id: "auto".to_string(),
+            provider: "ponyllm".to_string(),
+            display_name: Some("Auto(智能·高可用主力)".to_string()),
+            protocol: "auto".to_string(),
+            context_window,
+            max_output,
+        });
+        seen.insert("auto".to_string());
+
+        // 3. Physical configured models and their aliases, all provider-scoped (<provider>/<model>).
         for provider_name in &provider_names {
             let cfg = &config.providers[provider_name];
             let mut add_model_and_alias = |m: &str| {
@@ -3093,12 +3158,15 @@ impl AppState {
 
                 let prefixed = format!("{}/{}", provider_name, canonical_m);
                 if !seen.contains(&prefixed) {
-                    result.push((
-                        prefixed.clone(),
-                        provider_name.to_string(),
-                        spec.display_name.clone(),
-                        proto,
-                    ));
+                    let (context_window, max_output) = capacity_for(&prefixed, provider_name);
+                    result.push(ListedModel {
+                        id: prefixed.clone(),
+                        provider: provider_name.to_string(),
+                        display_name: spec.display_name.clone(),
+                        protocol: proto,
+                        context_window,
+                        max_output,
+                    });
                     seen.insert(prefixed);
                 }
             };
@@ -3120,17 +3188,6 @@ impl AppState {
             }
         }
         result
-    }
-
-    /// B003 (contract `.dev-team/contracts/b003-model-capacity.md`): model
-    /// listing entries enriched with the capacity resolved from the same-named
-    /// capacity group (max over all providers' `default_model` ∪ `models`).
-    /// Entry set/order/dedup MUST stay identical to
-    /// [`Self::list_all_models`], which delegates here in phase B003-E.
-    ///
-    /// Phase B003-P: signature frozen, body intentionally unimplemented.
-    pub fn list_all_models_with_capacity(&self) -> Vec<ListedModel> {
-        unimplemented!("B003: model capacity listing")
     }
 
     /// Legacy compatibility helper
