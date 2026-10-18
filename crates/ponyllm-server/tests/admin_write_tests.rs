@@ -244,6 +244,7 @@ async fn test_admin_write_disabled_gate() {
             serde_json::json!({"context_window": "256K"}),
         ),
         ("DELETE", "/api/admin/models/gpt-4o", serde_json::json!({})),
+        ("POST", "/api/admin/models/gpt-4o/test", serde_json::json!({})),
         (
             "POST",
             "/api/admin/keys",
@@ -937,6 +938,175 @@ async fn test_key_dial_test_matrix() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+// -----------------------------------------------------------------------------
+// Test 7b: Model Dial-Test with Mock Upstream Server
+// (admin-plane model availability probe; replaces the web console's direct
+// data-plane /v1/chat/completions call — the JWT 401 → logout regression)
+// -----------------------------------------------------------------------------
+#[tokio::test]
+async fn test_model_dial_test_matrix() {
+    use axum::routing::post;
+    let mock_app = axum::Router::new()
+        .route(
+            "/ok/v1/chat/completions",
+            post(|| async {
+                (
+                    StatusCode::OK,
+                    axum::Json(serde_json::json!({
+                        "id": "mock-1",
+                        "choices": [{"message": {"role": "assistant", "content": "hi"}}]
+                    })),
+                )
+            }),
+        )
+        .route(
+            "/fail/v1/chat/completions",
+            post(|| async { (StatusCode::INTERNAL_SERVER_ERROR, "upstream boom") }),
+        );
+    let mock_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mock_addr = mock_listener.local_addr().unwrap();
+    let _mock_handle = tokio::spawn(async move {
+        axum::serve(mock_listener, mock_app).await.unwrap();
+    });
+
+    let harness = WriteTestHarness::new(true).await;
+    let client = reqwest::Client::new();
+    let auth = format!("Bearer {}", harness.api_key);
+    let mut ver = 0;
+
+    // Provider prov-ok (healthy upstream) + model m-ok + key k-ok.
+    let resp = client
+        .post(format!("http://{}/api/admin/providers", harness.addr))
+        .header("Authorization", &auth)
+        .header("If-Match", format!("\"{ver}\""))
+        .json(&serde_json::json!({
+            "name": "prov-ok",
+            "base_url": format!("http://{}/ok", mock_addr),
+            "default_model": "m-ok"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    ver += 1;
+
+    let resp = client
+        .post(format!("http://{}/api/admin/keys", harness.addr))
+        .header("Authorization", &auth)
+        .header("If-Match", format!("\"{ver}\""))
+        .json(&serde_json::json!({
+            "provider": "prov-ok",
+            "id": "k-ok",
+            "api_key": "test-key-material"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    ver += 1;
+
+    // Provider prov-fail (upstream 500) + model m-fail + key k-fail.
+    let resp = client
+        .post(format!("http://{}/api/admin/providers", harness.addr))
+        .header("Authorization", &auth)
+        .header("If-Match", format!("\"{ver}\""))
+        .json(&serde_json::json!({
+            "name": "prov-fail",
+            "base_url": format!("http://{}/fail", mock_addr),
+            "default_model": "m-fail"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    ver += 1;
+
+    let resp = client
+        .post(format!("http://{}/api/admin/keys", harness.addr))
+        .header("Authorization", &auth)
+        .header("If-Match", format!("\"{ver}\""))
+        .json(&serde_json::json!({
+            "provider": "prov-fail",
+            "id": "k-fail",
+            "api_key": "test-key-material"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+
+    // 1. Healthy upstream -> 200, success=true, full structured view.
+    let resp = client
+        .post(format!("http://{}/api/admin/models/m-ok/test", harness.addr))
+        .header("Authorization", &auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let view: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(view["success"], true);
+    assert_eq!(view["http_status"], 200);
+    // latency_ms is a present, non-negative u64 (u64 is unsigned by type).
+    assert!(view["latency_ms"].as_u64().is_some());
+    assert!(view["error_code"].is_null());
+    assert!(view["message"].as_str().unwrap().len() > 0);
+
+    // 2. Upstream 5xx -> 200 + success=false + upstream_error (never a 5xx).
+    let resp = client
+        .post(format!("http://{}/api/admin/models/m-fail/test", harness.addr))
+        .header("Authorization", &auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let view: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(view["success"], false);
+    assert_eq!(view["http_status"], 500);
+    assert_eq!(view["error_code"], "upstream_error");
+
+    // 3. Explicit ?provider= disambiguation: model not in that provider -> 404.
+    let resp = client
+        .post(format!(
+            "http://{}/api/admin/models/m-ok/test?provider=prov-fail",
+            harness.addr
+        ))
+        .header("Authorization", &auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    let err: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(err["error"]["code"], "model_not_found");
+
+    // 4. Unknown provider with ?provider= -> 404 provider_not_found.
+    let resp = client
+        .post(format!(
+            "http://{}/api/admin/models/m-ok/test?provider=ghost-prov",
+            harness.addr
+        ))
+        .header("Authorization", &auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    let err: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(err["error"]["code"], "provider_not_found");
+
+    // 5. Model exists in no provider -> 404 model_not_found.
+    let resp = client
+        .post(format!(
+            "http://{}/api/admin/models/ghost-model/test",
+            harness.addr
+        ))
+        .header("Authorization", &auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    let err: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(err["error"]["code"], "model_not_found");
 }
 
 // -----------------------------------------------------------------------------

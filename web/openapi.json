@@ -446,6 +446,46 @@
         }
       }
     },
+    "/api/admin/models/{name}/test": {
+      "post": {
+        "tags": [],
+        "summary": "One-shot model availability probe (WEB-06): performs a real, minimal\n(1-token) chat-completion request against the model's provider from the\nserver side, using the provider's stored pool credential. Web console\nmodel-row \"test\" buttons call this instead of dialing the data plane\ndirectly (whose auth middleware rejects the admin JWT — the 401 →\nlogout regression).",
+        "description": "Semantics:\n- Write-gated like every other admin CUD endpoint (404 when\n  `admin_write_enabled` is false).\n- `?provider=` resolution matches `handle_admin_delete_model`: explicit\n  provider must exist (404 `provider_not_found`); otherwise the first\n  provider containing the model is used; no provider has the model →\n  404 `model_not_found`.\n- Upstream failures are reported as HTTP 200 with `success=false` and a\n  stable `error_code` (never a 5xx for an unhealthy upstream).\n- Egress-gated (H2): the dial target passes `check_probe_url` and the\n  probe client never follows redirects. Logs are desensitized — no key\n  or secret material is printed.",
+        "operationId": "handle_admin_test_model",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "gateway model name to probe",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "provider",
+            "in": "query",
+            "description": "provider containing the model; the first provider with the model is used when omitted",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelTestView"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/admin/oauth/antigravity/auth-url": {
       "get": {
         "tags": [],
@@ -2163,6 +2203,42 @@
             "type": "integer",
             "format": "int32",
             "minimum": 0
+          }
+        }
+      },
+      "ModelTestView": {
+        "type": "object",
+        "description": "Result of one admin model availability probe (WEB-06): the server dials\nthe model's provider with a real, minimal (1 token) chat-completion\nrequest and reports the outcome. The web console calls this instead of\nthe data plane `/v1/chat/completions` (whose auth middleware rejects the\nadmin JWT — the 401 → logout regression).",
+        "required": [
+          "success",
+          "latency_ms",
+          "message"
+        ],
+        "properties": {
+          "error_code": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "http_status": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "minimum": 0
+          },
+          "latency_ms": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "message": {
+            "type": "string"
+          },
+          "success": {
+            "type": "boolean"
           }
         }
       },

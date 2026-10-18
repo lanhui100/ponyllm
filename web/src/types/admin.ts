@@ -232,6 +232,16 @@ export interface KeyTestView {
   usage?: KeyCapacityEstimate | null;
 }
 
+/** `POST /api/admin/models/{name}/test` —— 模型可用性拨测结果（管理面，服务端经 provider
+    池真实 1-token 推理并回传时延；避免直调数据面触发 JWT 401→登出）。 */
+export interface ModelTestView {
+  success: boolean;
+  latency_ms: number;
+  message: string;
+  http_status?: number | null;
+  error_code?: string | null;
+}
+
 export interface ServiceStatusView {
   uptime_seconds: number;
   bind: string;

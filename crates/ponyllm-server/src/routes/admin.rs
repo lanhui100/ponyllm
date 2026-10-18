@@ -686,6 +686,20 @@ pub struct KeyTestView {
     pub usage: Option<ponyllm_core::pool::usage::KeyCapacityEstimate>,
 }
 
+/// Result of one admin model availability probe (WEB-06): the server dials
+/// the model's provider with a real, minimal (1 token) chat-completion
+/// request and reports the outcome. The web console calls this instead of
+/// the data plane `/v1/chat/completions` (whose auth middleware rejects the
+/// admin JWT — the 401 → logout regression).
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct ModelTestView {
+    pub success: bool,
+    pub latency_ms: u64,
+    pub http_status: Option<u16>,
+    pub error_code: Option<String>,
+    pub message: String,
+}
+
 #[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct QuotaKeyView {
     pub provider: String,
@@ -2948,6 +2962,337 @@ pub async fn handle_admin_delete_model(
         "config_version": new_ver
     }))
     .into_response()
+}
+
+/// One-shot model availability probe (WEB-06): performs a real, minimal
+/// (1-token) chat-completion request against the model's provider from the
+/// server side, using the provider's stored pool credential. Web console
+/// model-row "test" buttons call this instead of dialing the data plane
+/// directly (whose auth middleware rejects the admin JWT — the 401 →
+/// logout regression).
+///
+/// Semantics:
+/// - Write-gated like every other admin CUD endpoint (404 when
+///   `admin_write_enabled` is false).
+/// - `?provider=` resolution matches `handle_admin_delete_model`: explicit
+///   provider must exist (404 `provider_not_found`); otherwise the first
+///   provider containing the model is used; no provider has the model →
+///   404 `model_not_found`.
+/// - Upstream failures are reported as HTTP 200 with `success=false` and a
+///   stable `error_code` (never a 5xx for an unhealthy upstream).
+/// - Egress-gated (H2): the dial target passes `check_probe_url` and the
+///   probe client never follows redirects. Logs are desensitized — no key
+///   or secret material is printed.
+#[utoipa::path(
+    post,
+    path = "/api/admin/models/{name}/test",
+    params(
+        ("name" = String, Path, description = "gateway model name to probe"),
+        ("provider" = Option<String>, Query, description = "provider containing the model; the first provider with the model is used when omitted"),
+    ),
+    responses((status = 200, body = ModelTestView))
+)]
+pub async fn handle_admin_test_model(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Query(query): Query<DeleteModelQuery>,
+) -> impl IntoResponse {
+    if let Err(resp) = check_admin_write_enabled(&state) {
+        return resp;
+    }
+    let (file, _store_version) = match load_store_config(&state).await {
+        Ok((f, ver)) => (f, ver),
+        Err(resp) => return resp,
+    };
+
+    // Provider resolution: identical semantics to handle_admin_delete_model
+    // (contract): explicit `?provider=` must exist (404 provider_not_found);
+    // otherwise the first provider containing the model wins (404
+    // model_not_found when none does).
+    let target_provider_name = if let Some(ref p) = query.provider {
+        if file.providers.contains_key(p) {
+            p.clone()
+        } else {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": {"message": format!("provider '{p}' not found"), "code": "provider_not_found"}})),
+            )
+                .into_response();
+        }
+    } else {
+        let found = file.providers.iter().find(|(_, p_sec)| {
+            p_sec.models.iter().any(|m| m == &name)
+                || p_sec.model_configs.iter().any(|m| m.name == name)
+        });
+        match found {
+            Some((p_name, _)) => p_name.clone(),
+            None => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(json!({"error": {"message": format!("model '{name}' not found"), "code": "model_not_found"}})),
+                )
+                    .into_response();
+            }
+        }
+    };
+
+    let p_sec = file.providers.get(&target_provider_name).unwrap().clone();
+    if !p_sec.models.iter().any(|m| m == &name)
+        && !p_sec.model_configs.iter().any(|m| m.name == name)
+    {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": {"message": format!("model '{name}' not found in provider '{target_provider_name}'"), "code": "model_not_found"}})),
+        )
+            .into_response();
+    }
+
+    // Credential: the provider's first stored key. Deterministic and
+    // desensitized — raw material is only used in request headers, never
+    // logged.
+    let Some(key_sec) = p_sec.keys.first().cloned() else {
+        return Json(ModelTestView {
+            success: false,
+            latency_ms: 0,
+            http_status: None,
+            error_code: Some("no_credentials".to_string()),
+            message: format!("provider '{target_provider_name}' has no keys configured"),
+        })
+        .into_response();
+    };
+
+    // Effective protocol: model-level override > provider default > legacy
+    // URL heuristic (mirrors the data-plane resolution).
+    let is_anthropic = p_sec
+        .get_model_config(&name)
+        .protocol
+        .or(p_sec.default_protocol)
+        .map(|p| matches!(p, UpstreamProtocol::Anthropic))
+        .unwrap_or(false)
+        || p_sec.base_url.contains("anthropic");
+
+    // H2: the dial target is operator-controlled — gate before dialing
+    // (same as the key dial-test).
+    let probe_url = if let Some(ref chat) = p_sec.chat_url {
+        chat.clone()
+    } else if is_anthropic {
+        p_sec
+            .messages_url
+            .clone()
+            .unwrap_or_else(|| ponyllm_core::normalize_messages_url(&p_sec.base_url))
+    } else {
+        ponyllm_core::normalize_chat_completions_url(&p_sec.base_url)
+    };
+    if let Err(reason) = crate::egress::check_probe_url(&probe_url).await {
+        return Json(ModelTestView {
+            success: false,
+            latency_ms: 0,
+            http_status: None,
+            error_code: Some("egress_blocked".to_string()),
+            message: format!("probe target blocked by egress policy: {}", reason),
+        })
+        .into_response();
+    }
+
+    // Real, minimal inference: 1 output token, non-streaming.
+    let body = json!({
+        "model": ponyllm_core::canonicalize_model_name(&name),
+        "messages": [{"role": "user", "content": "hi"}],
+        "max_tokens": 1,
+        "stream": false,
+    });
+
+    let start = Instant::now();
+    let is_antigravity = key_sec.is_antigravity(p_sec.default_protocol, &target_provider_name);
+
+    // Antigravity: resolve a live bearer token before dialing — in-pool
+    // token manager when present, otherwise a fresh one with the rotation
+    // hook attached (P0-7: the token minting and the probe must share the
+    // provider's egress IP, exactly like the key dial-test).
+    let mut bearer_override: Option<String> = None;
+    if is_antigravity {
+        let cred = match key_sec.to_antigravity_credential() {
+            Ok(c) => c,
+            Err(e) => {
+                return Json(ModelTestView {
+                    success: false,
+                    latency_ms: 0,
+                    http_status: None,
+                    error_code: Some("invalid_credential".to_string()),
+                    message: format!("Invalid Antigravity credential: {}", e),
+                })
+                .into_response();
+            }
+        };
+        let pool_mgr = {
+            let pools = state.pools.read();
+            pools.get(&target_provider_name).and_then(|pool| {
+                pool.snapshot_keys()
+                    .into_iter()
+                    .find(|entry| entry.id == key_sec.id)
+                    .and_then(|entry| entry.antigravity_manager())
+            })
+        };
+        let mgr = if let Some(m) = pool_mgr {
+            m
+        } else {
+            let m = Arc::new(ponyllm_core::pool::AntigravityTokenManager::new(
+                &key_sec.id,
+                cred,
+                state.http_client_for_provider(&target_provider_name),
+            ));
+            attach_rotation_hook(&state, &target_provider_name, &m);
+            m
+        };
+        let token_res = mgr.get_valid_token().await;
+        let latency_ms = start.elapsed().as_millis() as u64;
+        match token_res {
+            Ok(token) => bearer_override = Some(token),
+            Err(ponyllm_core::error::CoreError::RefreshSkipped { .. }) => {
+                return Json(ModelTestView {
+                    success: false,
+                    latency_ms,
+                    http_status: Some(429),
+                    error_code: Some("lock_busy".to_string()),
+                    message:
+                        "OAuth token refresh lock is currently held by another replica; retry shortly"
+                            .to_string(),
+                })
+                .into_response();
+            }
+            Err(e) => {
+                let is_invalid_grant =
+                    matches!(&e, ponyllm_core::error::CoreError::AuthInvalid { .. })
+                        || e.to_string().to_ascii_lowercase().contains("invalid_grant");
+                return Json(ModelTestView {
+                    success: false,
+                    latency_ms,
+                    http_status: Some(401),
+                    error_code: Some(if is_invalid_grant {
+                        "invalid_grant".to_string()
+                    } else {
+                        "auth_failed".to_string()
+                    }),
+                    message: format!("OAuth token refresh failed: {}", e),
+                })
+                .into_response();
+            }
+        }
+    }
+
+    // H2: probes use a dedicated no-redirect client — an attacker-controlled
+    // URL must not 302 to a metadata/private target after the gate above
+    // passed. Antigravity additionally resolves the provider-effective proxy
+    // so the probe shares the data plane's egress IP (P0-7).
+    let probe_client = if is_antigravity {
+        state.probe_http_client_for_provider(&target_provider_name)
+    } else {
+        crate::egress::probe_http_client()
+    };
+    let mut req = probe_client
+        .post(&probe_url)
+        .timeout(std::time::Duration::from_secs(3))
+        .header(header::USER_AGENT, "ponyllm-model-dialtest/0.1")
+        .json(&body);
+
+    if is_antigravity {
+        if let Some(token) = bearer_override {
+            req = req
+                .header(header::AUTHORIZATION, format!("Bearer {}", token.trim()))
+                .header("requestType", "agent")
+                .header("x-goog-api-client", "gl-node/22.14.0 gdcl/1.1.24")
+                .header(
+                    reqwest::header::ACCEPT,
+                    "text/event-stream, application/json",
+                )
+                .header(
+                    "requestId",
+                    format!(
+                        "agent/{}/{}/traj-default/1",
+                        uuid::Uuid::new_v4(),
+                        chrono::Utc::now().timestamp_millis()
+                    ),
+                );
+        }
+    } else if is_anthropic {
+        req = req
+            .header("x-api-key", key_sec.api_key.trim())
+            .header("anthropic-version", "2023-06-01");
+    } else {
+        req = req.header(header::AUTHORIZATION, format!("Bearer {}", key_sec.api_key.trim()));
+    }
+
+    let result = req.send().await;
+    let latency_ms = start.elapsed().as_millis() as u64;
+
+    let test_view = match result {
+        Ok(resp) => {
+            let status = resp.status();
+            if status.is_success() {
+                ModelTestView {
+                    success: true,
+                    latency_ms,
+                    http_status: Some(status.as_u16()),
+                    error_code: None,
+                    message: "probe ok".to_string(),
+                }
+            } else if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+                ModelTestView {
+                    success: false,
+                    latency_ms,
+                    http_status: Some(status.as_u16()),
+                    error_code: Some("unauthorized".to_string()),
+                    message: "upstream authentication failed".to_string(),
+                }
+            } else if status == StatusCode::TOO_MANY_REQUESTS {
+                ModelTestView {
+                    success: false,
+                    latency_ms,
+                    http_status: Some(status.as_u16()),
+                    error_code: Some("rate_limited".to_string()),
+                    message: "upstream rate limit exceeded".to_string(),
+                }
+            } else {
+                ModelTestView {
+                    success: false,
+                    latency_ms,
+                    http_status: Some(status.as_u16()),
+                    error_code: Some("upstream_error".to_string()),
+                    message: format!("upstream returned HTTP {}", status.as_u16()),
+                }
+            }
+        }
+        Err(e) => {
+            if e.is_timeout() {
+                ModelTestView {
+                    success: false,
+                    latency_ms: latency_ms.max(3000),
+                    http_status: None,
+                    error_code: Some("timeout".to_string()),
+                    message: "model probe timed out after 3s".to_string(),
+                }
+            } else {
+                ModelTestView {
+                    success: false,
+                    latency_ms,
+                    http_status: None,
+                    error_code: Some("connect_error".to_string()),
+                    message: "upstream connection error".to_string(),
+                }
+            }
+        }
+    };
+
+    tracing::info!(
+        provider = %target_provider_name,
+        model = %name,
+        url = %probe_url,
+        success = test_view.success,
+        latency_ms = test_view.latency_ms,
+        "admin model dial-test completed"
+    );
+
+    Json(test_view).into_response()
 }
 
 #[utoipa::path(get, path = "/api/admin/keys", responses((status = 200, body = [KeyView])))]
@@ -5796,6 +6141,7 @@ pub async fn handle_admin_provider_upstream_models(
         handle_admin_create_model,
         handle_admin_update_model,
         handle_admin_delete_model,
+        handle_admin_test_model,
         handle_admin_keys,
         handle_admin_create_key,
         handle_admin_update_key,
@@ -5837,6 +6183,7 @@ pub async fn handle_admin_provider_upstream_models(
         UpdateKeyPayload,
         CreateKeyResponse,
         KeyTestView,
+        ModelTestView,
         QuotaKeyView,
         QuotaCycleBenchmarkView,
         QuotaBenchmarkKindView,
@@ -5913,6 +6260,10 @@ pub fn admin_routes() -> axum::Router<Arc<AppState>> {
         .route(
             "/api/admin/models/{name}",
             put(handle_admin_update_model).delete(handle_admin_delete_model),
+        )
+        .route(
+            "/api/admin/models/{name}/test",
+            post(handle_admin_test_model),
         )
         .route(
             "/api/admin/keys",

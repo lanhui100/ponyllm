@@ -6,6 +6,7 @@ import type {
   ModelView,
   KeyView,
   KeyTestView,
+  ModelTestView,
   AutoModelsView,
   PutAutoModelsPayload,
   CreateProviderPayload,
@@ -158,15 +159,12 @@ export const adminApi = {
     return alova.Post<KeyTestView>(`/api/admin/keys/${encodeURIComponent(id)}/test`);
   },
 
-  /** 模型可用性拨测：直调数据面 chat completions，极小载荷（hi + max_tokens=1），
-      `send()` 返回为 2xx 即视为可用（时延由调用方以 performance.now() 计量）。 */
-  testModelChat(model: string) {
-    return alova.Post<Record<string, unknown>>('/v1/chat/completions', {
-      model,
-      messages: [{ role: 'user', content: 'hi' }],
-      max_tokens: 1,
-      stream: false,
-    }, { timeout: 15_000 });
+  /** 模型可用性拨测：走管理面 `/api/admin/models/{name}/test`（服务端经 provider 池
+      真实 1-token 推理并回传 latency_ms）。管理面 JWT 桥放行，避开直调数据面
+      `/v1/chat/completions` 在 auth 中间件下无 JWT 桥导致的 401→登出。 */
+  testModel(model: string, provider?: string) {
+    const qs = provider ? `?provider=${encodeURIComponent(provider)}` : '';
+    return alova.Post<ModelTestView>(`/api/admin/models/${encodeURIComponent(model)}/test${qs}`);
   },
 
   /** Issue a scoped gateway key: plaintext returned ONCE (no-store server side). */

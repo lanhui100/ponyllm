@@ -2,7 +2,7 @@
 import { ref, reactive, computed, onMounted, getCurrentInstance } from 'vue';
 import type { ModelView, CreateModelPayload, UpdateModelPayload, PricingMode, PricingPeriod } from '../../types/admin';
 import { adminApi } from '../../lib/adminApi';
-import { isUnauthorized } from '../../lib/alova';
+import { isUnauthorized, isAdminWriteDisabled } from '../../lib/alova';
 import Icons from '../ui/Icons.vue';
 import UiButton from '../ui/UiButton.vue';
 import UiBadge from '../ui/UiBadge.vue';
@@ -628,22 +628,29 @@ async function handleSubmit() {
 const testingModels = reactive(new Set<string>());
 
 /**
- * 模型可用性拨测：直调数据面 `/v1/chat/completions`（hi + max_tokens=1 极小载荷），
- * 2xx 即视为可用，toast 反馈时延；失败 toast 报错（401 单飞路径由 alova 统一处理，
- * 此处不重复弹错）。
+ * 模型可用性拨测：走管理面 `/api/admin/models/{name}/test`（带 provider 消歧），
+ * 服务端真实 1-token 推理并回传 latency_ms；`res.success` 决定成功/失败 toast。
+ * 401 单飞路径由 alova 统一处理（正确触发登出），此处不重复弹错；
+ * 管理写被关闭（404 信封 → AdminWriteDisabledError）给出「管理写未开启」语义。
  */
 async function handleTestModel(m: ModelView) {
   if (testingModels.has(m.name)) return;
   const label = m.display_name || m.name;
   testingModels.add(m.name);
-  const start = performance.now();
   try {
-    await adminApi.testModelChat(m.name).send();
-    const latencyMs = Math.round(performance.now() - start);
-    toast.success(`模型 "${label}" 可用 (${latencyMs} ms)`);
+    const res = await adminApi.testModel(m.name, props.providerName).send();
+    if (res.success) {
+      toast.success(`模型 "${label}" 可用 (${res.latency_ms} ms)`);
+    } else {
+      toast.error(`模型 "${label}" 不可用: ${res.message}`);
+    }
   } catch (err: unknown) {
     if (isUnauthorized(err)) return;
-    const message = err instanceof Error ? err.message : String(err);
+    const message = isAdminWriteDisabled(err)
+      ? '管理写未开启'
+      : err instanceof Error
+        ? err.message
+        : String(err);
     toast.error(`模型 "${label}" 不可用: ${message}`);
   } finally {
     testingModels.delete(m.name);
@@ -1327,7 +1334,7 @@ async function handleDelete(name: string) {
           </div>
 
           <div class="flex items-center gap-1.5 shrink-0">
-            <!-- 测试可用性纯图标按钮：直调数据面 chat completions 拨测 1 token -->
+            <!-- 测试可用性纯图标按钮：管理面拨测（POST /api/admin/models/{name}/test）真实 1 token -->
             <UiTooltip :content="testingModels.has(m.name) ? '拨测中…' : '测试模型可用性'">
               <UiButton
                 variant="ghost"

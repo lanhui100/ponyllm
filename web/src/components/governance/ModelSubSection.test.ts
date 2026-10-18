@@ -2,14 +2,14 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createApp, nextTick } from 'vue';
 import ModelSubSection from './ModelSubSection.vue';
-import type { ModelView } from '../../types/admin';
+import type { ModelView, ModelTestView } from '../../types/admin';
 import { adminApi } from '../../lib/adminApi';
 import { toast } from '../../composables/useToast';
-import { UnauthorizedError } from '../../lib/alova';
+import { UnauthorizedError, AdminWriteDisabledError } from '../../lib/alova';
 
 let upstreamImpl: () => Promise<{ provider: string; source: string; models: { id: string }[] }>;
 let proxyStatusImpl: () => Promise<any>;
-let modelChatImpl: () => Promise<Record<string, unknown>>;
+let modelTestImpl: () => Promise<ModelTestView>;
 
 vi.mock('../../lib/adminApi', () => ({
   adminApi: {
@@ -19,8 +19,8 @@ vi.mock('../../lib/adminApi', () => ({
     getProxyStatus: () => ({
       send: () => proxyStatusImpl(),
     }),
-    testModelChat: (_model: string) => ({
-      send: () => modelChatImpl(),
+    testModel: (_model: string, _provider?: string) => ({
+      send: () => modelTestImpl(),
     }),
   },
 }));
@@ -61,7 +61,13 @@ describe('ModelSubSection model form', () => {
       description: '本地代理',
       hint: '',
     });
-    modelChatImpl = async () => ({ id: 'chatcmpl-test', choices: [] });
+    modelTestImpl = async () => ({
+      success: true,
+      latency_ms: 123,
+      http_status: 200,
+      error_code: null,
+      message: 'ok',
+    });
   });
 
   it('cleans up extra badges on rows, retains tier and shows free badge when free', async () => {
@@ -435,7 +441,13 @@ describe('ModelSubSection model availability test button', () => {
       description: '本地代理',
       hint: '',
     });
-    modelChatImpl = async () => ({ id: 'chatcmpl-test', choices: [] });
+    modelTestImpl = async () => ({
+      success: true,
+      latency_ms: 123,
+      http_status: 200,
+      error_code: null,
+      message: 'ok',
+    });
     vi.restoreAllMocks();
   });
 
@@ -474,15 +486,21 @@ describe('ModelSubSection model availability test button', () => {
     document.body.removeChild(container);
   });
 
-  it('probes /v1/chat/completions via testModelChat and toasts success with latency', async () => {
+  it('probes the admin test endpoint via testModel and toasts success with backend latency', async () => {
     const { container, app } = mountSection({ defaultExpanded: true });
     await nextTick();
 
     const testSpy = vi
-      .spyOn(adminApi, 'testModelChat')
-      .mockImplementation((_model: string) =>
+      .spyOn(adminApi, 'testModel')
+      .mockImplementation((_model: string, _provider?: string) =>
         ({
-          send: async () => ({ id: 'chatcmpl-test', choices: [] }),
+          send: async () => ({
+            success: true,
+            latency_ms: 123,
+            http_status: 200,
+            error_code: null,
+            message: 'ok',
+          }),
         }) as never,
       );
     const successSpy = vi.spyOn(toast, 'success').mockImplementation(() => '');
@@ -495,9 +513,9 @@ describe('ModelSubSection model availability test button', () => {
       await nextTick();
     }
 
-    expect(testSpy).toHaveBeenCalledWith('gpt-4o');
+    expect(testSpy).toHaveBeenCalledWith('gpt-4o', 'openai');
     expect(successSpy).toHaveBeenCalledWith(expect.stringContaining('"gpt-4o" 可用'));
-    expect(successSpy).toHaveBeenCalledWith(expect.stringMatching(/\(\d+ ms\)/));
+    expect(successSpy).toHaveBeenCalledWith(expect.stringContaining('(123 ms)'));
 
     app.unmount();
     document.body.removeChild(container);
@@ -507,11 +525,11 @@ describe('ModelSubSection model availability test button', () => {
     const { container, app } = mountSection({ defaultExpanded: true });
     await nextTick();
 
-    let resolveSend!: (v: Record<string, unknown>) => void;
-    const gate = new Promise<Record<string, unknown>>((resolve) => {
+    let resolveSend!: (v: ModelTestView) => void;
+    const gate = new Promise<ModelTestView>((resolve) => {
       resolveSend = resolve;
     });
-    vi.spyOn(adminApi, 'testModelChat').mockImplementation(() =>
+    vi.spyOn(adminApi, 'testModel').mockImplementation(() =>
       ({ send: () => gate }) as never,
     );
 
@@ -524,7 +542,7 @@ describe('ModelSubSection model availability test button', () => {
     const svg = btn.querySelector('svg');
     expect(svg?.classList.contains('animate-spin')).toBe(true);
 
-    resolveSend({ id: 'chatcmpl-test', choices: [] });
+    resolveSend({ success: true, latency_ms: 123, http_status: 200, error_code: null, message: 'ok' });
     for (let i = 0; i < 6; i += 1) {
       await Promise.resolve();
       await nextTick();
@@ -538,15 +556,19 @@ describe('ModelSubSection model availability test button', () => {
     document.body.removeChild(container);
   });
 
-  it('toasts an error when the probe fails with an upstream message', async () => {
+  it('toasts the backend message when the probe reports success=false', async () => {
     const { container, app } = mountSection({ defaultExpanded: true });
     await nextTick();
 
-    vi.spyOn(adminApi, 'testModelChat').mockImplementation(() =>
+    vi.spyOn(adminApi, 'testModel').mockImplementation(() =>
       ({
-        send: async () => {
-          throw new Error('upstream returned HTTP 502');
-        },
+        send: async () => ({
+          success: false,
+          latency_ms: 0,
+          http_status: 502,
+          error_code: 'upstream_error',
+          message: 'upstream returned HTTP 502',
+        }),
       }) as never,
     );
     const errorSpy = vi.spyOn(toast, 'error').mockImplementation(() => '');
@@ -559,7 +581,7 @@ describe('ModelSubSection model availability test button', () => {
     }
 
     expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('不可用'));
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('HTTP 502'));
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('upstream returned HTTP 502'));
 
     app.unmount();
     document.body.removeChild(container);
@@ -569,7 +591,7 @@ describe('ModelSubSection model availability test button', () => {
     const { container, app } = mountSection({ defaultExpanded: true });
     await nextTick();
 
-    vi.spyOn(adminApi, 'testModelChat').mockImplementation(() =>
+    vi.spyOn(adminApi, 'testModel').mockImplementation(() =>
       ({
         send: async () => {
           throw new UnauthorizedError();
@@ -588,6 +610,33 @@ describe('ModelSubSection model availability test button', () => {
 
     expect(errorSpy).not.toHaveBeenCalled();
     expect(successSpy).not.toHaveBeenCalled();
+
+    app.unmount();
+    document.body.removeChild(container);
+  });
+
+  it('toasts 管理写未开启 when the admin test endpoint is write-disabled (404 envelope)', async () => {
+    const { container, app } = mountSection({ defaultExpanded: true });
+    await nextTick();
+
+    vi.spyOn(adminApi, 'testModel').mockImplementation(() =>
+      ({
+        send: async () => {
+          throw new AdminWriteDisabledError();
+        },
+      }) as never,
+    );
+    const errorSpy = vi.spyOn(toast, 'error').mockImplementation(() => '');
+
+    const btn = container.querySelector('[data-testid="test-model-btn"]') as HTMLButtonElement;
+    btn.click();
+    for (let i = 0; i < 6; i += 1) {
+      await Promise.resolve();
+      await nextTick();
+    }
+
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('不可用'));
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('管理写未开启'));
 
     app.unmount();
     document.body.removeChild(container);
