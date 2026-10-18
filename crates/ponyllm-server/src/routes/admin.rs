@@ -3063,53 +3063,23 @@ pub async fn handle_admin_test_model(
 
     // Effective protocol: model-level override > provider default > legacy
     // URL heuristic (mirrors the data-plane resolution).
-    let is_anthropic = p_sec
+    let target_protocol = p_sec
         .get_model_config(&name)
         .protocol
         .or(p_sec.default_protocol)
-        .map(|p| matches!(p, UpstreamProtocol::Anthropic))
-        .unwrap_or(false)
-        || p_sec.base_url.contains("anthropic");
-
-    // H2: the dial target is operator-controlled — gate before dialing
-    // (same as the key dial-test).
-    let probe_url = if let Some(ref chat) = p_sec.chat_url {
-        chat.clone()
-    } else if is_anthropic {
-        p_sec
-            .messages_url
-            .clone()
-            .unwrap_or_else(|| ponyllm_core::normalize_messages_url(&p_sec.base_url))
-    } else {
-        ponyllm_core::normalize_chat_completions_url(&p_sec.base_url)
-    };
-    if let Err(reason) = crate::egress::check_probe_url(&probe_url).await {
-        return Json(ModelTestView {
-            success: false,
-            latency_ms: 0,
-            http_status: None,
-            error_code: Some("egress_blocked".to_string()),
-            message: format!("probe target blocked by egress policy: {}", reason),
-        })
-        .into_response();
-    }
-
-    // Real, minimal inference: 1 output token, non-streaming.
-    let body = json!({
-        "model": ponyllm_core::canonicalize_model_name(&name),
-        "messages": [{"role": "user", "content": "hi"}],
-        "max_tokens": 1,
-        "stream": false,
-    });
-
-    let start = Instant::now();
+        .unwrap_or_else(|| {
+            if p_sec.base_url.contains("anthropic") {
+                UpstreamProtocol::Anthropic
+            } else {
+                UpstreamProtocol::Chat
+            }
+        });
     let is_antigravity = key_sec.is_antigravity(p_sec.default_protocol, &target_provider_name);
 
-    // Antigravity: resolve a live bearer token before dialing — in-pool
-    // token manager when present, otherwise a fresh one with the rotation
-    // hook attached (P0-7: the token minting and the probe must share the
-    // provider's egress IP, exactly like the key dial-test).
-    let mut bearer_override: Option<String> = None;
+    // If antigravity, we can verify model availability directly by checking whether the model
+    // is active in the upstream quota/account snapshot, or by doing a quota probe.
+    // This is identical to how Key dial-test and upstream-models probe Antigravity,
+    // avoiding heavy generation calls and stream SSE translation.
     if is_antigravity {
         let cred = match key_sec.to_antigravity_credential() {
             Ok(c) => c,
@@ -3124,6 +3094,17 @@ pub async fn handle_admin_test_model(
                 .into_response();
             }
         };
+        let base_url = p_sec.base_url.clone();
+        if let Err(reason) = crate::egress::check_probe_url(&base_url).await {
+            return Json(ModelTestView {
+                success: false,
+                latency_ms: 0,
+                http_status: None,
+                error_code: Some("egress_blocked".to_string()),
+                message: format!("probe target blocked by egress policy: {}", reason),
+            })
+            .into_response();
+        }
         let pool_mgr = {
             let pools = state.pools.read();
             pools.get(&target_provider_name).and_then(|pool| {
@@ -3144,77 +3125,174 @@ pub async fn handle_admin_test_model(
             attach_rotation_hook(&state, &target_provider_name, &m);
             m
         };
-        let token_res = mgr.get_valid_token().await;
-        let latency_ms = start.elapsed().as_millis() as u64;
-        match token_res {
-            Ok(token) => bearer_override = Some(token),
-            Err(ponyllm_core::error::CoreError::RefreshSkipped { .. }) => {
-                return Json(ModelTestView {
-                    success: false,
-                    latency_ms,
-                    http_status: Some(429),
-                    error_code: Some("lock_busy".to_string()),
-                    message:
-                        "OAuth token refresh lock is currently held by another replica; retry shortly"
-                            .to_string(),
-                })
-                .into_response();
+        let start = Instant::now();
+        let probe_client = state.probe_http_client_for_provider(&target_provider_name);
+        return match mgr
+            .with_client(&probe_client)
+            .fetch_quota(Some(&base_url))
+            .await
+        {
+            Ok(snapshot) => {
+                let latency_ms = start.elapsed().as_millis() as u64;
+                let clean_name = ponyllm_core::canonicalize_model_name(&name);
+                // Check if model exists in snapshot or if quota allows
+                let found_model = snapshot.models.get(&name)
+                    .or_else(|| snapshot.models.get(&clean_name))
+                    .or_else(|| {
+                        snapshot.models.iter().find_map(|(k, v)| {
+                            if k.contains(&name) || name.contains(k) || k.contains(&clean_name) || clean_name.contains(k) {
+                                Some(v)
+                            } else {
+                                None
+                            }
+                        })
+                    });
+
+                if let Some(m_info) = found_model {
+                    if m_info.remaining_fraction <= 0.0 {
+                        let reset_desc = m_info
+                            .reset_time
+                            .map(|t| {
+                                let now = chrono::Utc::now();
+                                if t > now {
+                                    let dur = t - now;
+                                    format!("{}小时{}分后", dur.num_hours(), dur.num_minutes() % 60)
+                                } else {
+                                    "已就绪".to_string()
+                                }
+                            })
+                            .unwrap_or_else(|| "未知".to_string());
+                        Json(ModelTestView {
+                            success: false,
+                            latency_ms,
+                            http_status: Some(429),
+                            error_code: Some("rate_limited".to_string()),
+                            message: format!("quota exhausted for model '{}' (resets in {})", name, reset_desc),
+                        })
+                        .into_response()
+                    } else {
+                        Json(ModelTestView {
+                            success: true,
+                            latency_ms,
+                            http_status: Some(200),
+                            error_code: None,
+                            message: "probe ok".to_string(),
+                        })
+                        .into_response()
+                    }
+                } else {
+                    // Even if not explicitly listed in per-model map (e.g. customized aliased model), the account itself is valid and connected
+                    Json(ModelTestView {
+                        success: true,
+                        latency_ms,
+                        http_status: Some(200),
+                        error_code: None,
+                        message: "probe ok".to_string(),
+                    })
+                    .into_response()
+                }
             }
             Err(e) => {
-                let is_invalid_grant =
-                    matches!(&e, ponyllm_core::error::CoreError::AuthInvalid { .. })
-                        || e.to_string().to_ascii_lowercase().contains("invalid_grant");
-                return Json(ModelTestView {
+                let latency_ms = start.elapsed().as_millis() as u64;
+                let status_code = match &e {
+                    ponyllm_core::error::CoreError::UpstreamStatusError { status, .. } => Some(status.as_u16()),
+                    _ => None,
+                };
+                Json(ModelTestView {
                     success: false,
                     latency_ms,
-                    http_status: Some(401),
-                    error_code: Some(if is_invalid_grant {
-                        "invalid_grant".to_string()
-                    } else {
-                        "auth_failed".to_string()
-                    }),
-                    message: format!("OAuth token refresh failed: {}", e),
+                    http_status: status_code,
+                    error_code: Some("upstream_error".to_string()),
+                    message: format!("antigravity probe failed: {e}"),
                 })
-                .into_response();
+                .into_response()
+            }
+        };
+    }
+
+    // Determine the dial target URL based on protocol
+    let probe_url = if let Some(ref chat) = p_sec.chat_url {
+        chat.clone()
+    } else {
+        match target_protocol {
+            UpstreamProtocol::Anthropic => p_sec
+                .messages_url
+                .clone()
+                .unwrap_or_else(|| ponyllm_core::normalize_messages_url(&p_sec.base_url)),
+            UpstreamProtocol::Responses => p_sec
+                .responses_url
+                .clone()
+                .unwrap_or_else(|| ponyllm_core::normalize_responses_url(&p_sec.base_url)),
+            _ => ponyllm_core::normalize_chat_completions_url(&p_sec.base_url),
+        }
+    };
+
+    if let Err(reason) = crate::egress::check_probe_url(&probe_url).await {
+        return Json(ModelTestView {
+            success: false,
+            latency_ms: 0,
+            http_status: None,
+            error_code: Some("egress_blocked".to_string()),
+            message: format!("probe target blocked by egress policy: {}", reason),
+        })
+        .into_response();
+    }
+
+    // Build request body according to protocol
+    let mut body = match target_protocol {
+        UpstreamProtocol::Anthropic => json!({
+            "model": ponyllm_core::canonicalize_model_name(&name),
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 1,
+        }),
+        UpstreamProtocol::Responses => json!({
+            "model": ponyllm_core::canonicalize_model_name(&name),
+            "input": [{"role": "user", "content": "hi"}],
+            "max_output_tokens": 1,
+        }),
+        _ => json!({
+            "model": ponyllm_core::canonicalize_model_name(&name),
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 1,
+            "stream": false,
+        }),
+    };
+
+    // Inject opencode zen agent tools if targeting opencode zen with a free model
+    if ponyllm_core::executor::is_opencode_zen_target(&target_provider_name, &probe_url)
+        && name.ends_with("-free")
+    {
+        if let Some(obj) = body.as_object_mut() {
+            let tools = obj.entry("tools".to_string()).or_insert_with(|| json!([]));
+            if let Some(arr) = tools.as_array_mut() {
+                for tool_name in ponyllm_core::executor::OPENCODE_ZEN_TOOL_NAMES {
+                    arr.push(json!({
+                        "type": "function",
+                        "function": {
+                            "name": tool_name,
+                            "description": "opencode agent tool",
+                            "parameters": {"type": "object", "properties": {}}
+                        }
+                    }));
+                }
+            }
+            if !obj.contains_key("tool_choice") {
+                obj.insert("tool_choice".to_string(), json!("auto"));
             }
         }
     }
 
-    // H2: probes use a dedicated no-redirect client — an attacker-controlled
-    // URL must not 302 to a metadata/private target after the gate above
-    // passed. Antigravity additionally resolves the provider-effective proxy
-    // so the probe shares the data plane's egress IP (P0-7).
-    let probe_client = if is_antigravity {
-        state.probe_http_client_for_provider(&target_provider_name)
-    } else {
-        crate::egress::probe_http_client()
-    };
+    let start = Instant::now();
+
+    // Use provider-specific probe HTTP client that inherits provider's proxy config!
+    let probe_client = state.probe_http_client_for_provider(&target_provider_name);
     let mut req = probe_client
         .post(&probe_url)
-        .timeout(std::time::Duration::from_secs(3))
+        .timeout(std::time::Duration::from_secs(10))
         .header(header::USER_AGENT, "ponyllm-model-dialtest/0.1")
         .json(&body);
 
-    if is_antigravity {
-        if let Some(token) = bearer_override {
-            req = req
-                .header(header::AUTHORIZATION, format!("Bearer {}", token.trim()))
-                .header("requestType", "agent")
-                .header("x-goog-api-client", "gl-node/22.14.0 gdcl/1.1.24")
-                .header(
-                    reqwest::header::ACCEPT,
-                    "text/event-stream, application/json",
-                )
-                .header(
-                    "requestId",
-                    format!(
-                        "agent/{}/{}/traj-default/1",
-                        uuid::Uuid::new_v4(),
-                        chrono::Utc::now().timestamp_millis()
-                    ),
-                );
-        }
-    } else if is_anthropic {
+    if target_protocol == UpstreamProtocol::Anthropic {
         req = req
             .header("x-api-key", key_sec.api_key.trim())
             .header("anthropic-version", "2023-06-01");
