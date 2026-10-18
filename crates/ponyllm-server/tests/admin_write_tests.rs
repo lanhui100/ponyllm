@@ -1036,6 +1036,7 @@ async fn test_model_dial_test_matrix() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::CREATED);
+    ver += 1;
 
     // 1. Healthy upstream -> 200, success=true, full structured view.
     let resp = client
@@ -1107,6 +1108,95 @@ async fn test_model_dial_test_matrix() {
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     let err: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(err["error"]["code"], "model_not_found");
+
+    // 6. OpenCode Zen free model probe: injects opencode/1.18.35 UA and compliant x-opencode-session
+    let zen_headers_received = std::sync::Arc::new(std::sync::Mutex::new(Vec::<(String, String)>::new()));
+    let zen_headers_clone = zen_headers_received.clone();
+    let zen_mock_app = axum::Router::new().route(
+        "/zen/v1/chat/completions",
+        post(move |headers: axum::http::HeaderMap, _body: axum::Json<serde_json::Value>| {
+            let ua = headers
+                .get(axum::http::header::USER_AGENT)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("")
+                .to_string();
+            let ses = headers
+                .get("x-opencode-session")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("")
+                .to_string();
+            zen_headers_clone.lock().unwrap().push((ua, ses));
+            async {
+                (
+                    StatusCode::OK,
+                    axum::Json(serde_json::json!({
+                        "id": "mock-zen-probe",
+                        "choices": [{"message": {"role": "assistant", "content": "hi"}}]
+                    })),
+                )
+            }
+        }),
+    );
+    let zen_mock_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let zen_mock_addr = zen_mock_listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(zen_mock_listener, zen_mock_app).await.unwrap();
+    });
+
+    let resp = client
+        .post(format!("http://{}/api/admin/providers", harness.addr))
+        .header("Authorization", &auth)
+        .header("If-Match", format!("\"{ver}\""))
+        .json(&serde_json::json!({
+            "name": "opencode-zen",
+            "base_url": format!("http://{}/zen", zen_mock_addr),
+            "default_model": "minimax-m2.5-free"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    ver += 1;
+
+    let resp = client
+        .post(format!("http://{}/api/admin/keys", harness.addr))
+        .header("Authorization", &auth)
+        .header("If-Match", format!("\"{ver}\""))
+        .json(&serde_json::json!({
+            "provider": "opencode-zen",
+            "id": "k-zen",
+            "api_key": "test-key-material"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    ver += 1;
+
+    let resp = client
+        .post(format!(
+            "http://{}/api/admin/models/minimax-m2.5-free/test",
+            harness.addr
+        ))
+        .header("Authorization", &auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let recorded = zen_headers_received.lock().unwrap();
+    assert_eq!(recorded.len(), 1);
+    let (ua, ses) = &recorded[0];
+    assert!(
+        ua.starts_with("opencode/1.18.35"),
+        "OpenCode Zen free dial-test must inject opencode/1.18.35 User-Agent, got: '{}'",
+        ua
+    );
+    assert!(
+        ses.starts_with("ses_") && ses.len() == 30 && ses[4..].chars().all(|c| c.is_ascii_alphanumeric()),
+        "OpenCode Zen free dial-test must inject valid ses_<26> x-opencode-session, got: '{}'",
+        ses
+    );
 }
 
 // -----------------------------------------------------------------------------

@@ -213,10 +213,19 @@ pub fn new_upstream_session_id() -> String {
 
 fn clean_session_value(value: &HeaderValue) -> Option<String> {
     let trimmed = value.to_str().ok()?.trim();
-    if trimmed.is_empty() || trimmed.len() > 256 {
+    if !is_valid_zen_session_format(trimmed) {
         return None;
     }
     Some(trimmed.to_string())
+}
+
+/// Validate whether a session string matches the OpenCode upstream requirement:
+/// starts with "ses_" followed by exactly 26 alphanumeric ASCII characters (total 30 chars).
+pub fn is_valid_zen_session_format(s: &str) -> bool {
+    if !s.starts_with("ses_") || s.len() != 30 {
+        return false;
+    }
+    s[4..].chars().all(|c| c.is_ascii_alphanumeric())
 }
 
 /// Transient-retry backoff for **singleton** pools only: when the sole key
@@ -3602,19 +3611,24 @@ mod session_header_tests {
 
     #[test]
     fn prefers_opencode_session_over_aliases() {
+        // Must conform to ses_<26> to be accepted upstream
+        let valid_ses = "ses_0123456789abcdefABCDEF0123";
+        let valid_aff = "ses_0123456789abcdefABCDEF0124";
         let headers = downstream(&[
-            ("x-session-affinity", "aff-1"),
-            ("x-opencode-session", "ses-1"),
+            ("x-session-affinity", valid_aff),
+            ("x-opencode-session", valid_ses),
         ]);
-        assert_eq!(resolve_upstream_session(&headers), "ses-1");
+        assert_eq!(resolve_upstream_session(&headers), valid_ses);
     }
 
     #[test]
     fn falls_back_through_alias_priority() {
-        let headers = downstream(&[("x-session-id", "sid-1")]);
-        assert_eq!(resolve_upstream_session(&headers), "sid-1");
-        let headers = downstream(&[("x-pony-session", "pony-ses-1")]);
-        assert_eq!(resolve_upstream_session(&headers), "pony-ses-1");
+        let valid_sid = "ses_0123456789abcdefABCDEF0125";
+        let headers = downstream(&[("x-session-id", valid_sid)]);
+        assert_eq!(resolve_upstream_session(&headers), valid_sid);
+        let valid_pony = "ses_0123456789abcdefABCDEF0126";
+        let headers = downstream(&[("x-pony-session", valid_pony)]);
+        assert_eq!(resolve_upstream_session(&headers), valid_pony);
     }
 
     #[test]
@@ -3664,13 +3678,14 @@ mod session_header_tests {
     fn build_headers_carries_session_and_own_ua_for_zen() {
         let pool = Arc::new(KeyPool::new("test", RoutingStrategy::RoundRobin));
         let key = ApiKeyEntry::new("k1", "sk-test", 1, 10);
+        let valid_ses = "ses_0123456789abcdefABCDEF0127";
         let executor = UpstreamExecutor::new(pool, 1)
-            .with_downstream_headers(&downstream(&[("x-opencode-session", "ses-keep")]))
+            .with_downstream_headers(&downstream(&[("x-opencode-session", valid_ses)]))
             .with_opencode_zen(true);
         let headers = futures::executor::block_on(executor.build_headers(&key, None)).unwrap();
-        assert_eq!(headers.get("x-opencode-session").unwrap(), "ses-keep");
-        assert_eq!(headers.get("x-session-affinity").unwrap(), "ses-keep");
-        assert_eq!(headers.get("x-session-id").unwrap(), "ses-keep");
+        assert_eq!(headers.get("x-opencode-session").unwrap(), valid_ses);
+        assert_eq!(headers.get("x-session-affinity").unwrap(), valid_ses);
+        assert_eq!(headers.get("x-session-id").unwrap(), valid_ses);
         assert_eq!(headers.get("x-opencode-client").unwrap(), "ponyllm");
         assert_eq!(
             headers.get(USER_AGENT).unwrap().to_str().unwrap(),

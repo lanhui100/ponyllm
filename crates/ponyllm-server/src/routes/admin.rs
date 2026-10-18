@@ -3258,10 +3258,11 @@ pub async fn handle_admin_test_model(
         }),
     };
 
+    let is_zen_free = ponyllm_core::executor::is_opencode_zen_target(&target_provider_name, &probe_url)
+        && name.ends_with("-free");
+
     // Inject opencode zen agent tools if targeting opencode zen with a free model
-    if ponyllm_core::executor::is_opencode_zen_target(&target_provider_name, &probe_url)
-        && name.ends_with("-free")
-    {
+    if is_zen_free {
         if let Some(obj) = body.as_object_mut() {
             let tools = obj.entry("tools".to_string()).or_insert_with(|| json!([]));
             if let Some(arr) = tools.as_array_mut() {
@@ -3286,11 +3287,26 @@ pub async fn handle_admin_test_model(
 
     // Use provider-specific probe HTTP client that inherits provider's proxy config!
     let probe_client = state.probe_http_client_for_provider(&target_provider_name);
+    let ua_str = if is_zen_free {
+        "opencode/1.18.35 (Linux; x64)"
+    } else {
+        "ponyllm-model-dialtest/0.1"
+    };
+
     let mut req = probe_client
         .post(&probe_url)
         .timeout(std::time::Duration::from_secs(10))
-        .header(header::USER_AGENT, "ponyllm-model-dialtest/0.1")
+        .header(header::USER_AGENT, ua_str)
         .json(&body);
+
+    if is_zen_free {
+        let session_id = ponyllm_core::executor::new_upstream_session_id();
+        req = req
+            .header("x-opencode-session", &session_id)
+            .header("x-session-affinity", &session_id)
+            .header("x-session-id", &session_id)
+            .header("x-opencode-client", "ponyllm");
+    }
 
     if target_protocol == UpstreamProtocol::Anthropic {
         req = req
