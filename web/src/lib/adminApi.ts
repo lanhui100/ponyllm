@@ -158,6 +158,17 @@ export const adminApi = {
     return alova.Post<KeyTestView>(`/api/admin/keys/${encodeURIComponent(id)}/test`);
   },
 
+  /** 模型可用性拨测：直调数据面 chat completions，极小载荷（hi + max_tokens=1），
+      `send()` 返回为 2xx 即视为可用（时延由调用方以 performance.now() 计量）。 */
+  testModelChat(model: string) {
+    return alova.Post<Record<string, unknown>>('/v1/chat/completions', {
+      model,
+      messages: [{ role: 'user', content: 'hi' }],
+      max_tokens: 1,
+      stream: false,
+    }, { timeout: 15_000 });
+  },
+
   /** Issue a scoped gateway key: plaintext returned ONCE (no-store server side). */
   issueGatewayKey(payload: IssueGatewayKeyPayload, ifMatchVersion?: number | string) {
     return alova.Post<IssueGatewayKeyResponse>('/api/admin/gateway-keys', payload, {

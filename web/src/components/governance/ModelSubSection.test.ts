@@ -3,9 +3,13 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createApp, nextTick } from 'vue';
 import ModelSubSection from './ModelSubSection.vue';
 import type { ModelView } from '../../types/admin';
+import { adminApi } from '../../lib/adminApi';
+import { toast } from '../../composables/useToast';
+import { UnauthorizedError } from '../../lib/alova';
 
 let upstreamImpl: () => Promise<{ provider: string; source: string; models: { id: string }[] }>;
 let proxyStatusImpl: () => Promise<any>;
+let modelChatImpl: () => Promise<Record<string, unknown>>;
 
 vi.mock('../../lib/adminApi', () => ({
   adminApi: {
@@ -14,6 +18,9 @@ vi.mock('../../lib/adminApi', () => ({
     }),
     getProxyStatus: () => ({
       send: () => proxyStatusImpl(),
+    }),
+    testModelChat: (_model: string) => ({
+      send: () => modelChatImpl(),
     }),
   },
 }));
@@ -54,6 +61,7 @@ describe('ModelSubSection model form', () => {
       description: '本地代理',
       hint: '',
     });
+    modelChatImpl = async () => ({ id: 'chatcmpl-test', choices: [] });
   });
 
   it('cleans up extra badges on rows, retains tier and shows free badge when free', async () => {
@@ -414,6 +422,175 @@ describe('ModelSubSection model form', () => {
       app.unmount();
       document.body.removeChild(container);
     });
+  });
+});
+
+describe('ModelSubSection model availability test button', () => {
+  beforeEach(() => {
+    upstreamImpl = async () => ({ provider: 'openai', source: 'upstream', models: [] });
+    proxyStatusImpl = async () => ({
+      available: true,
+      proxy_url: 'http://127.0.0.1:8899',
+      proxy_type: 'pproxy',
+      description: '本地代理',
+      hint: '',
+    });
+    modelChatImpl = async () => ({ id: 'chatcmpl-test', choices: [] });
+    vi.restoreAllMocks();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('renders one test icon button per model row and restores idle state after a probe', async () => {
+    const twoModels: ModelView[] = [
+      mockModels[0],
+      { ...mockModels[0], name: 'gpt-4o-mini' },
+    ];
+    const { container, app } = mountSection({ defaultExpanded: true, models: twoModels });
+    await nextTick();
+
+    const btns = container.querySelectorAll('[data-testid="test-model-btn"]');
+    expect(btns.length).toBe(2);
+    const first = btns[0] as HTMLButtonElement;
+    expect(first.disabled).toBe(false);
+    // 空闲态图标不带 spinner
+    expect(first.querySelector('svg')?.classList.contains('animate-spin')).toBe(false);
+
+    app.unmount();
+    document.body.removeChild(container);
+  });
+
+  it('disables the test button when adminWriteEnabled is false', async () => {
+    const { container, app } = mountSection({ defaultExpanded: true, adminWriteEnabled: false });
+    await nextTick();
+
+    const btn = container.querySelector('[data-testid="test-model-btn"]') as HTMLButtonElement;
+    expect(btn).not.toBeNull();
+    expect(btn.disabled).toBe(true);
+
+    app.unmount();
+    document.body.removeChild(container);
+  });
+
+  it('probes /v1/chat/completions via testModelChat and toasts success with latency', async () => {
+    const { container, app } = mountSection({ defaultExpanded: true });
+    await nextTick();
+
+    const testSpy = vi
+      .spyOn(adminApi, 'testModelChat')
+      .mockImplementation((_model: string) =>
+        ({
+          send: async () => ({ id: 'chatcmpl-test', choices: [] }),
+        }) as never,
+      );
+    const successSpy = vi.spyOn(toast, 'success').mockImplementation(() => '');
+
+    const btn = container.querySelector('[data-testid="test-model-btn"]') as HTMLButtonElement;
+    btn.click();
+    // 等待微任务 + Vue 渲染队列全部落地
+    for (let i = 0; i < 6; i += 1) {
+      await Promise.resolve();
+      await nextTick();
+    }
+
+    expect(testSpy).toHaveBeenCalledWith('gpt-4o');
+    expect(successSpy).toHaveBeenCalledWith(expect.stringContaining('"gpt-4o" 可用'));
+    expect(successSpy).toHaveBeenCalledWith(expect.stringMatching(/\(\d+ ms\)/));
+
+    app.unmount();
+    document.body.removeChild(container);
+  });
+
+  it('shows spinner and disables the button while probing, then restores on completion', async () => {
+    const { container, app } = mountSection({ defaultExpanded: true });
+    await nextTick();
+
+    let resolveSend!: (v: Record<string, unknown>) => void;
+    const gate = new Promise<Record<string, unknown>>((resolve) => {
+      resolveSend = resolve;
+    });
+    vi.spyOn(adminApi, 'testModelChat').mockImplementation(() =>
+      ({ send: () => gate }) as never,
+    );
+
+    const btn = container.querySelector('[data-testid="test-model-btn"]') as HTMLButtonElement;
+    btn.click();
+    await nextTick();
+
+    // 拨测进行中：禁用 + spinner 图标
+    expect(btn.disabled).toBe(true);
+    const svg = btn.querySelector('svg');
+    expect(svg?.classList.contains('animate-spin')).toBe(true);
+
+    resolveSend({ id: 'chatcmpl-test', choices: [] });
+    for (let i = 0; i < 6; i += 1) {
+      await Promise.resolve();
+      await nextTick();
+    }
+
+    // 完成后恢复可点且无 spinner
+    expect(btn.disabled).toBe(false);
+    expect(btn.querySelector('svg')?.classList.contains('animate-spin')).toBe(false);
+
+    app.unmount();
+    document.body.removeChild(container);
+  });
+
+  it('toasts an error when the probe fails with an upstream message', async () => {
+    const { container, app } = mountSection({ defaultExpanded: true });
+    await nextTick();
+
+    vi.spyOn(adminApi, 'testModelChat').mockImplementation(() =>
+      ({
+        send: async () => {
+          throw new Error('upstream returned HTTP 502');
+        },
+      }) as never,
+    );
+    const errorSpy = vi.spyOn(toast, 'error').mockImplementation(() => '');
+
+    const btn = container.querySelector('[data-testid="test-model-btn"]') as HTMLButtonElement;
+    btn.click();
+    for (let i = 0; i < 6; i += 1) {
+      await Promise.resolve();
+      await nextTick();
+    }
+
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('不可用'));
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('HTTP 502'));
+
+    app.unmount();
+    document.body.removeChild(container);
+  });
+
+  it('does not double-toast on 401 (single-flight owner is the router)', async () => {
+    const { container, app } = mountSection({ defaultExpanded: true });
+    await nextTick();
+
+    vi.spyOn(adminApi, 'testModelChat').mockImplementation(() =>
+      ({
+        send: async () => {
+          throw new UnauthorizedError();
+        },
+      }) as never,
+    );
+    const successSpy = vi.spyOn(toast, 'success').mockImplementation(() => '');
+    const errorSpy = vi.spyOn(toast, 'error').mockImplementation(() => '');
+
+    const btn = container.querySelector('[data-testid="test-model-btn"]') as HTMLButtonElement;
+    btn.click();
+    for (let i = 0; i < 6; i += 1) {
+      await Promise.resolve();
+      await nextTick();
+    }
+
+    expect(errorSpy).not.toHaveBeenCalled();
+    expect(successSpy).not.toHaveBeenCalled();
+
+    app.unmount();
+    document.body.removeChild(container);
   });
 });
 /**

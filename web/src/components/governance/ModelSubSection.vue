@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, getCurrentInstance } from 'vue';
+import { ref, reactive, computed, onMounted, getCurrentInstance } from 'vue';
 import type { ModelView, CreateModelPayload, UpdateModelPayload, PricingMode, PricingPeriod } from '../../types/admin';
 import { adminApi } from '../../lib/adminApi';
+import { isUnauthorized } from '../../lib/alova';
 import Icons from '../ui/Icons.vue';
 import UiButton from '../ui/UiButton.vue';
 import UiBadge from '../ui/UiBadge.vue';
@@ -620,6 +621,32 @@ async function handleSubmit() {
     formError.value = err instanceof Error ? err.message : String(err);
   } finally {
     submitting.value = false;
+  }
+}
+
+/** 正在拨测可用性的模型名集合（reactive Set：并发拨测互不阻塞，各自转 spinner）。 */
+const testingModels = reactive(new Set<string>());
+
+/**
+ * 模型可用性拨测：直调数据面 `/v1/chat/completions`（hi + max_tokens=1 极小载荷），
+ * 2xx 即视为可用，toast 反馈时延；失败 toast 报错（401 单飞路径由 alova 统一处理，
+ * 此处不重复弹错）。
+ */
+async function handleTestModel(m: ModelView) {
+  if (testingModels.has(m.name)) return;
+  const label = m.display_name || m.name;
+  testingModels.add(m.name);
+  const start = performance.now();
+  try {
+    await adminApi.testModelChat(m.name).send();
+    const latencyMs = Math.round(performance.now() - start);
+    toast.success(`模型 "${label}" 可用 (${latencyMs} ms)`);
+  } catch (err: unknown) {
+    if (isUnauthorized(err)) return;
+    const message = err instanceof Error ? err.message : String(err);
+    toast.error(`模型 "${label}" 不可用: ${message}`);
+  } finally {
+    testingModels.delete(m.name);
   }
 }
 
@@ -1300,6 +1327,25 @@ async function handleDelete(name: string) {
           </div>
 
           <div class="flex items-center gap-1.5 shrink-0">
+            <!-- 测试可用性纯图标按钮：直调数据面 chat completions 拨测 1 token -->
+            <UiTooltip :content="testingModels.has(m.name) ? '拨测中…' : '测试模型可用性'">
+              <UiButton
+                variant="ghost"
+                size="icon"
+                :aria-label="`测试模型 ${m.name} 可用性`"
+                :disabled="testingModels.has(m.name) || !adminWriteEnabled"
+                data-testid="test-model-btn"
+                class="text-slate-500 hover:text-sky-600 hover:bg-sky-50"
+                @click="handleTestModel(m)"
+              >
+                <Icons
+                  :name="testingModels.has(m.name) ? 'refresh' : 'zap'"
+                  size="14"
+                  :class="testingModels.has(m.name) ? 'animate-spin' : ''"
+                />
+              </UiButton>
+            </UiTooltip>
+
             <!-- 编辑纯图标按钮 -->
             <UiTooltip content="编辑模型参数">
               <UiButton
