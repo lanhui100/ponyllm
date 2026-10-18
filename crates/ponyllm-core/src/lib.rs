@@ -15,7 +15,8 @@ pub mod user;
 pub use discovery::{resolve_config_path, resolve_config_path_from};
 pub use endpoints::{
     canonicalize_model_name, model_aliases, normalize_chat_completions_url, normalize_messages_url,
-    normalize_responses_url, normalize_systemone_url,
+    normalize_responses_url, normalize_systemone_url, same_model_modulo_free_suffix,
+    strip_free_suffix,
 };
 pub use error::{CoreError, GatewayErrorKind, Result};
 pub use executor::*;

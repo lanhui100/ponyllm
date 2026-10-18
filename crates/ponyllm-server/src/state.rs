@@ -8,7 +8,9 @@ use ponyllm_core::pool::{
     HotCacheTracker, KeyPool, ModelThinkingSpec, ModelTier, NodeLatencyMetrics, PricingConfig,
     RefreshPersistHook, SpeedScorer, UpstreamProtocol,
 };
-use ponyllm_core::{canonicalize_model_name, model_aliases};
+use ponyllm_core::{
+    canonicalize_model_name, model_aliases, same_model_modulo_free_suffix, strip_free_suffix,
+};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -2567,8 +2569,82 @@ impl AppState {
             }
         }
 
+        // 1c. Free-tier suffix transparency: free upstreams publish the same
+        // logical model as `<base>-free` (opencode-zen) or `<base>:free`
+        // (OpenRouter). A bare request for either spelling must still resolve
+        // when only the other spelling is configured, so names are compared
+        // with the cosmetic suffix stripped. Exact same-name candidates always
+        // stay ahead of these (they are appended strictly as fallback
+        // candidates, never overrides); the reverse direction (request
+        // `<base>-free` -> configured `<base>`) only applies when no exact
+        // match exists, so an explicitly configured free model is never
+        // silently traded for its paid namesake.
+        let mut free_variant_candidates = Vec::new();
+        if !clean.contains('/') {
+            let requested_is_free = strip_free_suffix(clean).len() != clean.len();
+            for p_name in &ordered_pnames {
+                let p_cfg = &config.providers[p_name];
+                let mut configured_names: Vec<&str> = Vec::new();
+                if !p_cfg.default_model.is_empty() {
+                    configured_names.push(p_cfg.default_model.as_str());
+                }
+                for m in &p_cfg.models {
+                    if m != &p_cfg.default_model {
+                        configured_names.push(m.as_str());
+                    }
+                }
+                for configured in configured_names {
+                    // Exact same-name requests are handled by stage 1/1b.
+                    if configured == clean {
+                        continue;
+                    }
+                    if !same_model_modulo_free_suffix(configured, clean) {
+                        continue;
+                    }
+                    let configured_is_free =
+                        strip_free_suffix(configured).len() != configured.len();
+                    if requested_is_free && !configured_is_free && !candidates.is_empty() {
+                        continue;
+                    }
+                    let spec = p_cfg.get_model_spec(configured);
+                    let thinking_spec = spec.thinking_spec();
+                    let pricing = p_cfg.get_model_pricing(configured);
+                    let billing_mode = p_cfg.get_model_billing_mode(configured);
+                    let (protocol, endpoint_base) = resolve_effective_protocol(
+                        p_name,
+                        p_cfg,
+                        configured,
+                        proto_override,
+                        inbound,
+                    );
+                    free_variant_candidates.push(RoutedTarget {
+                        provider_name: p_name.clone(),
+                        base_url: spec
+                            .base_url
+                            .clone()
+                            .unwrap_or_else(|| p_cfg.base_url.clone()),
+                        physical_model: configured.to_string(),
+                        tier: spec.tier,
+                        priority: spec.priority,
+                        strategy,
+                        upstream_protocol: protocol,
+                        endpoint_base,
+                        context_window: spec.context_window,
+                        billing_mode,
+                        pricing,
+                        thinking_spec,
+                        temperature: spec.temperature,
+                        top_p: spec.top_p,
+                        input_types: spec.input_types,
+                        max_output: spec.max_output,
+                        output_types: spec.output_types.clone(),
+                    });
+                }
+            }
+        }
+
         // 2. Prefix matching (e.g. "deepseek/deepseek-chat")
-        if candidates.is_empty() {
+        if candidates.is_empty() && free_variant_candidates.is_empty() {
             if let Some((prefix, sub_model)) = clean.split_once('/') {
                 if let Some(p_cfg) = config.providers.get(prefix) {
                     // Exact model name inside provider wins over alias (never shadow explicit config).
@@ -2618,8 +2694,11 @@ impl AppState {
             }
         }
 
-        // 3. Keyword heuristic matching
-        if candidates.is_empty() {
+        // 3. Keyword heuristic matching. Skipped when a free-tier variant
+        // already resolved the bare name: the heuristic would otherwise bet on
+        // an unconfigured physical model (e.g. the paid namesake) instead of
+        // the configured free endpoint hit by stage 1c.
+        if candidates.is_empty() && free_variant_candidates.is_empty() {
             let lower = effective.to_lowercase();
             for p_name in &ordered_pnames {
                 let p_cfg = &config.providers[p_name];
@@ -2668,7 +2747,7 @@ impl AppState {
             }
         }
 
-        if candidates.is_empty() {
+        if candidates.is_empty() && free_variant_candidates.is_empty() {
             return Err(CoreError::Internal(format!(
                 "No provider configured to handle model '{}'",
                 clean
@@ -2687,7 +2766,7 @@ impl AppState {
 
         let mut queue: std::collections::VecDeque<(String, usize)> =
             std::collections::VecDeque::new();
-        for target in &candidates {
+        for target in candidates.iter().chain(free_variant_candidates.iter()) {
             if let Some(p_cfg) = config.providers.get(&target.provider_name) {
                 let spec = p_cfg.get_model_spec(&target.physical_model);
                 for fb in &spec.fallbacks {
@@ -2719,6 +2798,18 @@ impl AppState {
 
         let mut sorted_primary =
             self.sort_candidates(candidates, strategy, config, cached_provider, inbound);
+        // Exact same-name candidates stay ahead of free-tier variants: the
+        // suffix fallback must never outrank an explicitly configured match,
+        // even when the variant scores better on price/latency.
+        if !free_variant_candidates.is_empty() {
+            sorted_primary.extend(self.sort_candidates(
+                free_variant_candidates,
+                strategy,
+                config,
+                cached_provider,
+                inbound,
+            ));
+        }
 
         let mut secondary_candidates = Vec::new();
         while let Some((fb_model, depth)) = queue.pop_front() {
