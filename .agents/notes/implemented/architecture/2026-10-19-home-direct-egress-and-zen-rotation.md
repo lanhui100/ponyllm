@@ -40,9 +40,11 @@ DSH 调用 `opencode-zen/deepseek-v4.1-flash-free` 持续报「当前请求的�
    `egress_strategy=round_robin`），并把同一上游凭据重复登记为两个 key id
    （`zen-final-1` / `zen-final-1b`），使一次 403 只冷却一个 key，第二次尝试仍可命中
    另一出口/另一 key。
-4. **当前运行态**：devserver 住宅 IP 被上游间歇性判为 abusive（抽样 6 次命中 3 次 403），
-   preprod 住宅 IP 抽样 6 次命中 1 次，故 `egress_pool` **暂时只启用 `egress-home-pre`**；
-   dev 出口保留在清单与允许列表里，待上游标记消退后加回数组即可恢复双出口轮换。
+4. **最终运行态：双出口轮换已启用**（`egress-home-dev` + `egress-home-pre`）。
+   实测证明 403 与"速率"相关而非与"出口固定绑定"：3s 间隔采样 dev/pre 各 5/5 全 200；
+   2s 间隔交替 20/20 全 200；1.5s 间隔经公共入口 10/10 全 200；而 15 连发（无间隔）
+   会命中 `FreeTierError` 并按既有契约冷却 key 900s。故轮换的价值是**把每个 IP 的
+   速率减半**，不是"消灭限流"。
 
 ## Alternatives considered
 
@@ -65,8 +67,11 @@ DSH 调用 `opencode-zen/deepseek-v4.1-flash-free` 持续报「当前请求的�
   - 公共入口 `tokens.ponyjob.top` 连续 15 次 `deepseek-v4.1-flash-free` 流式请求
     **15/15 成功**；
   - 7 个 gateway 副本逐个探测 **7/7 成功**。
-- 双出口同时启用时若任一 IP 被上游判 abusive，403 会冷却 key（900s），因此"轮换"
-  只在出口健康时生效；上游滥用门禁是外部约束，网关侧只能降低单 IP 依赖度。
+- 双出口同时启用时若任一 IP 被上游判 abusive，403 会冷却 key（900s），因此轮换
+  只降低"每个 IP 的速率"，不能豁免限流；上游滥用门禁是外部约束。
+- 缓存副作用：实测**无**。同一 ~1.9k token prompt 在同一出口第二次请求 `cached_tokens=1920`，
+  切到另一出口仍为 `cached_tokens=1920`，切回亦同 —— zen 的 prompt cache 不绑定出口 IP
+  （按内容/session 记账），轮换不会降低缓存命中率。
 - `home-direct-proxy` 是新增的宿主机常驻服务（两台家庭节点，systemd），属集群基础设施；
   其代码与 unit 的权威副本建议同步到 `cluster-infra` 仓，本仓只保留接线清单与 ADR。
 - 回滚：把 `[providers.opencode-zen]` 的 `egress_pool` 改回
