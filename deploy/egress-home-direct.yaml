@@ -1,0 +1,58 @@
+# 住宅直连出口（home-direct-proxy）与 opencode-zen 双出口轮换接线
+#
+# 背景：两个家庭节点（devserver 100.95.193.103 / jobcopilot-preprod 100.97.143.121）
+# 原先只作为 pproxy 中继：pproxy 把 opencode 路由到上游 VPS（rn.ponygo.fun），
+# 最终出口统一是 192.210.231.8 —— 两个"家庭出口"实际共用同一个公网 IP 桶，
+# 既没有轮换，也一起被上游 FreeUsageLimitError / FreeTierError(abusive traffic) 打死。
+#
+# 本清单定义两个集群内 Service（无 selector，Endpoints 手工维护），
+# 分别指向两台家庭节点上 systemd 托管的 home-direct-proxy（CONNECT 直连、Basic 鉴权、
+# host allowlist=opencode.ai），从而提供两个互不相同的真实住宅出口 IP。
+#
+# 部署前置（在两台家庭节点上，均已执行）：
+#   /usr/local/bin/home-direct-proxy.py      # asyncio CONNECT 直连代理（IPv4 强制）
+#   /etc/home-direct-proxy.env               # HDP_LISTEN/HDP_USER/HDP_PASS/HDP_ALLOW
+#   /etc/systemd/system/home-direct-proxy.service
+#   systemctl enable --now home-direct-proxy
+#
+# 网关侧接线：Secret ponyllm-live-config 的 [providers.opencode-zen] 使用
+#   egress_pool = ["http://pony:<PASS>@egress-home-pre:8898", "http://pony:<PASS>@egress-home-dev:8898"]
+# 且 Deployment 的 PONYLLM_PROBE_ALLOWLIST 必须包含上面两个 Service 名（否则数据面
+# egress 守卫会以 "*.svc are not allowed" 丢弃条目，静默退化为直连）。
+apiVersion: v1
+kind: Service
+metadata:
+  name: egress-home-dev
+  namespace: ponyllm
+  labels: {app.kubernetes.io/name: egress-home-dev, app.kubernetes.io/component: egress}
+spec:
+  ports: [{name: http-proxy, port: 8898, targetPort: 8898, protocol: TCP}]
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: egress-home-dev
+  namespace: ponyllm
+  labels: {app.kubernetes.io/name: egress-home-dev, app.kubernetes.io/component: egress}
+subsets:
+  - addresses: [{ip: 100.95.193.103}]
+    ports: [{name: http-proxy, port: 8898, protocol: TCP}]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: egress-home-pre
+  namespace: ponyllm
+  labels: {app.kubernetes.io/name: egress-home-pre, app.kubernetes.io/component: egress}
+spec:
+  ports: [{name: http-proxy, port: 8898, targetPort: 8898, protocol: TCP}]
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: egress-home-pre
+  namespace: ponyllm
+  labels: {app.kubernetes.io/name: egress-home-pre, app.kubernetes.io/component: egress}
+subsets:
+  - addresses: [{ip: 100.97.143.121}]
+    ports: [{name: http-proxy, port: 8898, protocol: TCP}]
