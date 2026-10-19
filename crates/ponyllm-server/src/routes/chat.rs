@@ -323,20 +323,23 @@ pub async fn handle_chat_completions(
         }
 
         // Apply thinking-aware output token safeguard:
-        // 1. Ensures max_tokens is floored to safe minimum if thinking is active to prevent zero-content choking.
+        // 1. Ensures token limit is floored to safe minimum if thinking is active to prevent zero-content choking.
         // 2. Clamps against model's declared max_output.
-        target_req.max_tokens = ponyllm_core::pool::apply_thinking_output_safeguard(
-            target_req.max_tokens,
-            &target.max_output,
-            effective_thinking,
-        );
-        if let Some(ref mut mt) = target_req.max_completion_tokens {
-            *mt = ponyllm_core::pool::apply_thinking_output_safeguard(
-                Some(*mt),
+        // 3. Enforces strict mutual exclusivity between max_tokens and max_completion_tokens.
+        if target_req.max_completion_tokens.is_some() {
+            target_req.max_completion_tokens = ponyllm_core::pool::apply_thinking_output_safeguard(
+                target_req.max_completion_tokens,
                 &target.max_output,
                 effective_thinking,
-            )
-            .unwrap_or(*mt);
+            );
+            target_req.max_tokens = None;
+        } else {
+            target_req.max_tokens = ponyllm_core::pool::apply_thinking_output_safeguard(
+                target_req.max_tokens,
+                &target.max_output,
+                effective_thinking,
+            );
+            target_req.max_completion_tokens = None;
         }
 
         let (target_url, req_val) = match target.upstream_protocol {
