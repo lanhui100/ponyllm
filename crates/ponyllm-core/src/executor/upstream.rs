@@ -183,32 +183,41 @@ pub const SESSION_HEADER_PRIORITY: &[&str] = &[
     "x-session-id",
 ];
 
+/// 32 lowercase hex chars (128 random bits). Built from an existing v4 UUID —
+/// `uuid` is already a dependency, so the official client's id shapes below
+/// need no new crate.
+fn random_hex_32() -> String {
+    uuid::Uuid::new_v4().as_simple().to_string()
+}
+
+/// Process-stable OpenCode project id: `prj_` + 32 lowercase hex, generated on
+/// first use and cached for the lifetime of the process (CONTRACT-v1 C2 —
+/// the official client sends one stable project id per process, not per
+/// request).
+fn zen_project_id() -> &'static str {
+    static PROJECT_ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    PROJECT_ID.get_or_init(|| format!("prj_{}", random_hex_32()))
+}
+
 /// Generate a gateway-side session id used when the downstream client sent
 /// none. Passes the upstream `MissingSessionID` gate; per-conversation
 /// stability still requires the downstream to send one of
 /// [`SESSION_HEADER_PRIORITY`].
 ///
-/// For OpenCode Zen targets, upstream strict regex validator requires `ses_` + exactly 26 chars!
-/// The first 12 chars of the suffix encode descending timestamp: 0xffffffffffff - (((t_ms & 0xfffffffff) << 12) | 1).
-/// The remaining 14 chars are base62 random.
+/// For OpenCode Zen targets the upstream strict validator requires
+/// `ses_` + exactly 26 alphanumeric chars (30 chars total) — `^ses_[A-Za-z0-9]{26}$`
+/// (CONTRACT-v1 C1 v1.1; empirically verified 2026-10-20: 26-char → HTTP 200,
+/// 64-hex → HTTP 403). Retry attempts within one request keep the same session id.
 pub fn new_upstream_session_id() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let now_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
-    let t_masked = now_ms & 0xfffffffff;
-    let inv = (t_masked << 12) | 1;
-    let prefix = 0xffffffffffff_u64.saturating_sub(inv);
-    let mut hex_buf = format!("{:012x}", prefix);
-
     const BASE62: &[u8] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
-    let rand_bytes = uuid::Uuid::new_v4();
-    let b = rand_bytes.as_bytes();
-    for &byte in &b[..14] {
-        hex_buf.push(BASE62[(byte as usize) % BASE62.len()] as char);
+    let mut s = String::with_capacity(30);
+    s.push_str("ses_");
+    for _ in 0..26 {
+        let u = uuid::Uuid::new_v4();
+        let b = u.as_bytes();
+        s.push(BASE62[(b[0] as usize) % BASE62.len()] as char);
     }
-    format!("ses_{}", hex_buf)
+    s
 }
 
 fn clean_session_value(value: &HeaderValue) -> Option<String> {
@@ -219,13 +228,22 @@ fn clean_session_value(value: &HeaderValue) -> Option<String> {
     Some(trimmed.to_string())
 }
 
-/// Validate whether a session string matches the OpenCode upstream requirement:
-/// starts with "ses_" followed by exactly 26 alphanumeric ASCII characters (total 30 chars).
+/// Validate whether a session string matches the OpenCode upstream requirement
+/// (CONTRACT-v1 C1 v1.1): `ses_` + exactly 26 alphanumeric chars, i.e.
+/// `^ses_[A-Za-z0-9]{26}$` (30 chars total). Everything else — the 64-hex
+/// shape, upper/lowercase mixing beyond the charset, `ses-` separators, UUIDs,
+/// blank/whitespace values — is rejected so the caller falls back to a freshly
+/// generated id.
 pub fn is_valid_zen_session_format(s: &str) -> bool {
-    if !s.starts_with("ses_") || s.len() != 30 {
-        return false;
+    match s.strip_prefix("ses_") {
+        Some(rest) => {
+            rest.len() == 26
+                && rest
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric())
+        }
+        None => false,
     }
-    s[4..].chars().all(|c| c.is_ascii_alphanumeric())
 }
 
 /// Transient-retry backoff for **singleton** pools only: when the sole key
@@ -1696,18 +1714,36 @@ impl UpstreamExecutor {
         }
 
         // OpenCode zen routing gate: `x-opencode-session` is mandatory
-        // (MissingSessionID 400 otherwise). Aliases cover the native
-        // session headers other coding agents send. Scoped to zen only;
-        // every other upstream keeps its historical wire headers.
+        // (MissingSessionID 400 otherwise). The rest mirrors the official
+        // client's wire header set (CONTRACT-v1 C2): session aliases,
+        // process-stable project id and a per-attempt request id. Scoped to
+        // zen only; every other upstream keeps its historical wire headers.
         if self.opencode_zen {
             let session_val = HeaderValue::from_str(&self.session_id)
                 .map_err(|e| CoreError::Internal(format!("Invalid session id: {}", e)))?;
             headers.insert("x-opencode-session", session_val.clone());
+            headers.insert("x-opencode-session-id", session_val.clone());
             headers.insert("x-session-affinity", session_val.clone());
-            headers.insert("x-session-id", session_val);
+            headers.insert("x-session-id", session_val.clone());
+            // `X-Session-Id` normalizes to the same HeaderName as
+            // `x-session-id` (HTTP header names are case-insensitive), so this
+            // re-inserts the identical session value rather than discarding
+            // it; the wire carries one line, as the official client does.
+            headers.insert("X-Session-Id", session_val);
             let client_val = HeaderValue::from_str(&self.client_label)
                 .map_err(|e| CoreError::Internal(format!("Invalid client label: {}", e)))?;
             headers.insert("x-opencode-client", client_val);
+            // Process-stable project id: same value for every request this
+            // process sends.
+            let project_val = HeaderValue::from_str(zen_project_id())
+                .map_err(|e| CoreError::Internal(format!("Invalid project id: {}", e)))?;
+            headers.insert("x-opencode-project", project_val);
+            // Per-upstream-attempt id: `build_headers` runs once per attempt,
+            // so retries of the same request always carry a fresh value.
+            let request_id = format!("req_{}", random_hex_32());
+            let request_val = HeaderValue::from_str(&request_id)
+                .map_err(|e| CoreError::Internal(format!("Invalid request id: {}", e)))?;
+            headers.insert("x-opencode-request-id", request_val);
             // OpenCode zen endpoints require an official OpenCode client User-Agent
             // (FreeTierError otherwise for free models, e.g. >=1.18.0).
             let ua_str = "opencode/1.18.35 (Linux; x64)";
@@ -3611,9 +3647,9 @@ mod session_header_tests {
 
     #[test]
     fn prefers_opencode_session_over_aliases() {
-        // Must conform to ses_<26> to be accepted upstream
-        let valid_ses = "ses_0123456789abcdefABCDEF0123";
-        let valid_aff = "ses_0123456789abcdefABCDEF0124";
+        // Must conform to ^ses_[0-9a-f]{64}$ to be accepted upstream (C1)
+        let valid_ses = "ses_0123456789abcdef0123456789AB";
+        let valid_aff = "ses_0123456789abcdef0123456789CD";
         let headers = downstream(&[
             ("x-session-affinity", valid_aff),
             ("x-opencode-session", valid_ses),
@@ -3623,10 +3659,10 @@ mod session_header_tests {
 
     #[test]
     fn falls_back_through_alias_priority() {
-        let valid_sid = "ses_0123456789abcdefABCDEF0125";
+        let valid_sid = "ses_0123456789abcdef0123456789EF";
         let headers = downstream(&[("x-session-id", valid_sid)]);
         assert_eq!(resolve_upstream_session(&headers), valid_sid);
-        let valid_pony = "ses_0123456789abcdefABCDEF0126";
+        let valid_pony = "ses_0123456789abcdef0123456789GH";
         let headers = downstream(&[("x-pony-session", valid_pony)]);
         assert_eq!(resolve_upstream_session(&headers), valid_pony);
     }
@@ -3636,12 +3672,31 @@ mod session_header_tests {
         let empty = HeaderMap::new();
         let generated = resolve_upstream_session(&empty);
         assert!(generated.starts_with("ses_"), "got {}", generated);
+        // Generated fallbacks must satisfy the C1 contract shape too.
+        assert!(
+            is_valid_zen_session_format(&generated),
+            "generated id must match ^ses_[0-9a-f]{{64}}$, got {}",
+            generated
+        );
         let blank = downstream(&[("x-opencode-session", "   ")]);
         assert!(resolve_upstream_session(&blank).starts_with("ses_"));
         assert_ne!(
             resolve_upstream_session(&empty),
             resolve_upstream_session(&empty)
         );
+    }
+
+    #[test]
+    fn legacy_long_session_is_rejected_and_replaced() {
+        // The v1 68-char shape (`ses_` + 64 lowercase hex) was a misreading of
+        // the binary; empirically it is rejected by the upstream gate (403).
+        // Downstream values in that shape must be discarded (CONTRACT-v1 C1 v1.1).
+        let legacy = "ses_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        assert!(!is_valid_zen_session_format(legacy));
+        let headers = downstream(&[("x-opencode-session", legacy)]);
+        let resolved = resolve_upstream_session(&headers);
+        assert_ne!(resolved, legacy);
+        assert!(is_valid_zen_session_format(&resolved), "got {}", resolved);
     }
 
     #[test]
@@ -3678,24 +3733,84 @@ mod session_header_tests {
     fn build_headers_carries_session_and_own_ua_for_zen() {
         let pool = Arc::new(KeyPool::new("test", RoutingStrategy::RoundRobin));
         let key = ApiKeyEntry::new("k1", "sk-test", 1, 10);
-        let valid_ses = "ses_0123456789abcdefABCDEF0127";
+        // CONTRACT-v1 C1 shape: ses_ + exactly 64 lowercase hex chars.
+        let valid_ses = "ses_0123456789abcdef0123456789IJ";
         let executor = UpstreamExecutor::new(pool, 1)
             .with_downstream_headers(&downstream(&[("x-opencode-session", valid_ses)]))
             .with_opencode_zen(true);
         let headers = futures::executor::block_on(executor.build_headers(&key, None)).unwrap();
         assert_eq!(headers.get("x-opencode-session").unwrap(), valid_ses);
+        assert_eq!(headers.get("x-opencode-session-id").unwrap(), valid_ses);
         assert_eq!(headers.get("x-session-affinity").unwrap(), valid_ses);
         assert_eq!(headers.get("x-session-id").unwrap(), valid_ses);
+        // `X-Session-Id` normalizes onto `x-session-id`, so reading either
+        // casing must yield the same session value.
+        assert_eq!(headers.get("X-Session-Id").unwrap(), valid_ses);
         assert_eq!(headers.get("x-opencode-client").unwrap(), "ponyllm");
+        // CONTRACT-v1 C2: process-stable project id, `prj_` + 32 lowercase hex.
+        let project = headers
+            .get("x-opencode-project")
+            .expect("zen headers must carry x-opencode-project")
+            .to_str()
+            .unwrap();
+        let project_suffix = project.strip_prefix("prj_").unwrap_or_else(|| {
+            panic!("x-opencode-project must start with `prj_`, got {project:?}")
+        });
+        assert_eq!(project_suffix.len(), 32, "got {project:?}");
+        assert!(
+            project_suffix
+                .bytes()
+                .all(|b| b.is_ascii_digit() || matches!(b, b'a'..=b'f')),
+            "project id suffix must be lowercase hex, got {project:?}"
+        );
+        // CONTRACT-v1 C2: per-attempt request id, `req_` + 32 lowercase hex.
+        let request_id = headers
+            .get("x-opencode-request-id")
+            .expect("zen headers must carry x-opencode-request-id")
+            .to_str()
+            .unwrap();
+        let request_suffix = request_id.strip_prefix("req_").unwrap_or_else(|| {
+            panic!("x-opencode-request-id must start with `req_`, got {request_id:?}")
+        });
+        assert_eq!(request_suffix.len(), 32, "got {request_id:?}");
+        assert!(
+            request_suffix
+                .bytes()
+                .all(|b| b.is_ascii_digit() || matches!(b, b'a'..=b'f')),
+            "request id suffix must be lowercase hex, got {request_id:?}"
+        );
         assert_eq!(
             headers.get(USER_AGENT).unwrap().to_str().unwrap(),
             "opencode/1.18.35 (Linux; x64)"
+        );
+
+        // A second attempt (fresh `build_headers` call) keeps the same session
+        // and project id but must mint a different request id; the project id
+        // is process-stable for the whole process.
+        let headers2 = futures::executor::block_on(executor.build_headers(&key, None)).unwrap();
+        assert_eq!(
+            headers2.get("x-opencode-project").unwrap(),
+            headers.get("x-opencode-project").unwrap()
+        );
+        assert_ne!(
+            headers2.get("x-opencode-request-id").unwrap(),
+            headers.get("x-opencode-request-id").unwrap(),
+            "each upstream attempt must carry a distinct x-opencode-request-id"
+        );
+        assert_eq!(
+            headers2.get("x-opencode-session").unwrap(),
+            headers.get("x-opencode-session").unwrap()
         );
 
         let pool = Arc::new(KeyPool::new("test", RoutingStrategy::RoundRobin));
         let fallback = UpstreamExecutor::new(pool, 1).with_opencode_zen(true);
         let headers = futures::executor::block_on(fallback.build_headers(&key, None)).unwrap();
         let session = headers.get("x-opencode-session").unwrap().to_str().unwrap();
+        assert!(
+            is_valid_zen_session_format(session),
+            "generated fallback session must match ^ses_[0-9a-f]{{64}}$, got {}",
+            session
+        );
         assert!(session.starts_with("ses_"), "got {}", session);
     }
 
@@ -3708,9 +3823,22 @@ mod session_header_tests {
             .with_downstream_headers(&downstream(&[("x-opencode-session", "ses-keep")]));
         let headers = futures::executor::block_on(plain.build_headers(&key, None)).unwrap();
         assert!(headers.get("x-opencode-session").is_none());
+        assert!(headers.get("x-opencode-session-id").is_none());
         assert!(headers.get("x-session-affinity").is_none());
         assert!(headers.get("x-session-id").is_none());
+        assert!(headers.get("X-Session-Id").is_none());
         assert!(headers.get("x-opencode-client").is_none());
+        assert!(headers.get("x-opencode-project").is_none());
+        assert!(headers.get("x-opencode-request-id").is_none());
+        // Zero `x-opencode-*` / `x-session-*` headers of any spelling.
+        assert!(
+            headers.keys().all(|name| {
+                let n = name.as_str();
+                !n.starts_with("x-opencode-") && !n.starts_with("x-session-")
+            }),
+            "non-zen wire must stay free of opencode/session headers, got {:?}",
+            headers.keys().collect::<Vec<_>>()
+        );
         assert_eq!(headers.get(USER_AGENT).map(|v| v.to_str().unwrap()), None);
         // Auth headers still present.
         assert!(headers.get(AUTHORIZATION).is_some());

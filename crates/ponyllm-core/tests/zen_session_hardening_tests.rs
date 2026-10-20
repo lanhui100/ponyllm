@@ -1,11 +1,21 @@
-//! OpenCode Zen session hardening acceptance tests (Red phase).
+//! OpenCode Zen session hardening acceptance tests (CONTRACT-v1 C1 v1.1).
 //!
-//! Validates:
-//! 1. Downstream non-standard session IDs (e.g. "session-dsh-1234", "ses_" + 64 hex,
-//!    special characters, too short / too long) are sanitized and discarded by
-//!    `resolve_upstream_session`, automatically falling back to a compliant
-//!    `ses_<26 alphanumeric>` format (total length 30).
-//! 2. Downstream compliant `ses_<26 alphanumeric>` session IDs are preserved as-is.
+//! Frozen contract: `/home/dm/ponyllm/.dev-team/zen-rc/CONTRACT-v1.md` (C1 +
+//! its evolution note). The rule is now (v1.1, empirically verified on a healthy
+//! tencent exit on 2026-10-20):
+//!
+//! * A **legal** upstream session is `^ses_[A-Za-z0-9]{26}$` — `ses_` plus exactly
+//!   26 alphanumeric characters, 30 characters in total.
+//! * The **64-lowercase-hex shape** (`ses_` + 64 hex, the v1 misreading) is
+//!   NON-STANDARD: upstream returns HTTP 403 for it, so it must be
+//!   cleaned/discarded and replaced by a freshly generated compliant id.
+//!
+//! `resolve_upstream_session` therefore:
+//! 1. preserves a downstream contract-valid `ses_<26 alphanumeric>` session
+//!    (including via the alias headers `x-session-affinity` / `x-session-id`), and
+//! 2. discards every other shape (64-hex suffix, `ses-...`, `session-...`,
+//!    special characters, whitespace, UUID, wrong length) and falls back to a
+//!    generated id that satisfies the same contract shape.
 
 use axum::http::{HeaderMap, HeaderValue};
 use ponyllm_core::executor::resolve_upstream_session;
@@ -22,106 +32,108 @@ fn headers_from(pairs: &[(&str, &str)]) -> HeaderMap {
     map
 }
 
-/// Helper to verify whether a session id conforms to `ses_<26 alphanumeric>` (total 30 chars)
+/// CONTRACT-v1 C1 v1.1: legal session shape is `^ses_[A-Za-z0-9]{26}$` (30 chars).
 fn is_valid_zen_session(s: &str) -> bool {
-    if !s.starts_with("ses_") || s.len() != 30 {
-        return false;
+    match s.strip_prefix("ses_") {
+        Some(rest) => rest.len() == 26 && rest.chars().all(|c| c.is_ascii_alphanumeric()),
+        None => false,
     }
-    s[4..].chars().all(|c| c.is_ascii_alphanumeric())
+}
+
+/// A literal contract-valid session id: `ses_` + 26 alphanumeric chars.
+fn contract_session() -> String {
+    format!("ses_{}", "0123456789abcdefABCDEF0123")
 }
 
 #[test]
 fn test_resolve_upstream_session_preserves_valid_zen_session() {
-    // Exact 30 chars: "ses_" (4) + 26 base62 chars
-    let valid_ses = "ses_0123456789abcdefABCDEF0123";
-    assert_eq!(valid_ses.len(), 30);
-    assert!(is_valid_zen_session(valid_ses));
+    // `ses_` (4) + 26 alphanumeric = 30 chars.
+    let valid_ses = contract_session();
+    assert_eq!(valid_ses.len(), 30, "fixture must be 30 chars");
+    assert!(is_valid_zen_session(&valid_ses));
 
-    let headers = headers_from(&[("x-opencode-session", valid_ses)]);
+    let headers = headers_from(&[("x-opencode-session", &valid_ses)]);
     let resolved = resolve_upstream_session(&headers);
     assert_eq!(
         resolved, valid_ses,
-        "Compliant ses_<26> must be preserved as-is"
+        "CONTRACT C1: a contract-valid ses_<26 alnum> session must be preserved as-is"
     );
 
-    // Also verify when passed via alias priority (e.g., x-session-affinity)
-    let headers_alias = headers_from(&[("x-session-affinity", valid_ses)]);
+    // Also verify when passed via alias headers (affinity / session id).
+    let headers_alias = headers_from(&[("x-session-affinity", &valid_ses)]);
     let resolved_alias = resolve_upstream_session(&headers_alias);
     assert_eq!(
         resolved_alias, valid_ses,
-        "Compliant ses_<26> passed via alias header must also be preserved"
+        "CONTRACT C1: contract-valid session passed via `x-session-affinity` must also be preserved"
+    );
+
+    let headers_sid = headers_from(&[("x-session-id", &valid_ses)]);
+    assert_eq!(
+        resolve_upstream_session(&headers_sid),
+        valid_ses,
+        "CONTRACT C1: contract-valid session passed via `x-session-id` must also be preserved"
     );
 }
 
 #[test]
 fn test_resolve_upstream_session_rejects_and_falls_back_on_malformed_sessions() {
-    // 1. DSH legacy session format: "session-dsh-1234"
-    let dsh_session = "session-dsh-1234";
-    let headers = headers_from(&[("x-opencode-session", dsh_session)]);
-    let resolved = resolve_upstream_session(&headers);
-    assert_ne!(
-        resolved, dsh_session,
-        "DSH session format must not be passed upstream"
-    );
-    assert!(
-        is_valid_zen_session(&resolved),
-        "Must fall back to generated ses_<26>: got '{}'",
-        resolved
-    );
+    // Every rejected value: (label, downstream value). The contract requires the
+    // executor to discard it and fall back to a freshly generated legal id.
+    let malformed: Vec<(&str, String)> = vec![
+        (
+            "DSH legacy session format `session-dsh-1234`",
+            "session-dsh-1234".to_string(),
+        ),
+        (
+            "64 lowercase hex chars (v1 misread shape, upstream 403)",
+            format!("ses_{}", "0".repeat(64)),
+        ),
+        (
+            "25-char suffix (29 total)",
+            format!("ses_{}", "0".repeat(25)),
+        ),
+        (
+            "27-char suffix (31 total)",
+            format!("ses_{}", "0".repeat(27)),
+        ),
+        (
+            "`ses_` + too-short suffix",
+            "ses_short123".to_string(),
+        ),
+        (
+            "`ses_` + 26 chars containing special characters",
+            "ses_0123456789!@#$%^&*()-+=~".to_string(),
+        ),
+        (
+            "`ses_` + suffix containing whitespace",
+            "ses_0123456789 abcdefABCDEF01".to_string(),
+        ),
+        (
+            "`ses-` hyphen prefix",
+            format!("ses-{}", "a".repeat(26)),
+        ),
+        (
+            "UUID",
+            "550e8400-e29b-41d4-a716-446655440000".to_string(),
+        ),
+        (
+            "blank value",
+            "   ".to_string(),
+        ),
+    ];
 
-    // 2. ses_ + 64 hex characters (too long, not 26 chars)
-    let hex_64 = "ses_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-    let headers = headers_from(&[("x-opencode-session", hex_64)]);
-    let resolved = resolve_upstream_session(&headers);
-    assert_ne!(
-        resolved, hex_64,
-        "Oversized 64-hex session must be rejected"
-    );
-    assert!(
-        is_valid_zen_session(&resolved),
-        "Must fall back to generated ses_<26>: got '{}'",
-        resolved
-    );
-
-    // 3. ses_ + too short (e.g., 10 chars instead of 26)
-    let too_short = "ses_short123";
-    let headers = headers_from(&[("x-opencode-session", too_short)]);
-    let resolved = resolve_upstream_session(&headers);
-    assert_ne!(
-        resolved, too_short,
-        "Short session must be rejected"
-    );
-    assert!(
-        is_valid_zen_session(&resolved),
-        "Must fall back to generated ses_<26>: got '{}'",
-        resolved
-    );
-
-    // 4. ses_ + 26 chars containing non-alphanumeric special characters
-    let with_special_chars = "ses_0123456789!@#$%^&*()-+=~";
-    let headers = headers_from(&[("x-opencode-session", with_special_chars)]);
-    let resolved = resolve_upstream_session(&headers);
-    assert_ne!(
-        resolved, with_special_chars,
-        "Session with special characters must be rejected"
-    );
-    assert!(
-        is_valid_zen_session(&resolved),
-        "Must fall back to generated ses_<26>: got '{}'",
-        resolved
-    );
-
-    // 5. ses_ + 26 chars with whitespace/newlines
-    let with_whitespace = "ses_0123456789 abcdefABCDEF01";
-    let headers = headers_from(&[("x-opencode-session", with_whitespace)]);
-    let resolved = resolve_upstream_session(&headers);
-    assert_ne!(
-        resolved, with_whitespace,
-        "Session with whitespace must be rejected"
-    );
-    assert!(
-        is_valid_zen_session(&resolved),
-        "Must fall back to generated ses_<26>: got '{}'",
-        resolved
-    );
+    for (label, malformed_value) in malformed {
+        let headers = headers_from(&[("x-opencode-session", &malformed_value)]);
+        let resolved = resolve_upstream_session(&headers);
+        assert_ne!(
+            resolved, malformed_value,
+            "CONTRACT C1: non-standard session ({label}) must be discarded, not forwarded upstream; \
+             got it back unchanged: {resolved:?}"
+        );
+        assert!(
+            is_valid_zen_session(&resolved),
+            "CONTRACT C1: fallback for non-standard session ({label}) must be a freshly generated \
+             ^ses_[A-Za-z0-9]{{26}}$ id, got {resolved:?}"
+        );
+    }
 }
