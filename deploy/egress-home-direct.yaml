@@ -56,3 +56,21 @@ metadata:
 subsets:
   - addresses: [{ip: 100.97.143.121}]
     ports: [{name: http-proxy, port: 8898, protocol: TCP}]
+apiVersion: v1
+kind: Service
+metadata:
+  name: egress-home-tencent
+  namespace: ponyllm
+  labels: {app.kubernetes.io/name: egress-home-tencent, app.kubernetes.io/component: egress}
+spec:
+  ports: [{name: http-proxy, port: 8898, targetPort: 8898, protocol: TCP}]
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: egress-home-tencent
+  namespace: ponyllm
+  labels: {app.kubernetes.io/name: egress-home-tencent, app.kubernetes.io/component: egress}
+subsets:
+  - addresses: [{ip: 100.105.241.39}]
+    ports: [{name: http-proxy, port: 8898, protocol: TCP}]
