@@ -3647,9 +3647,9 @@ mod session_header_tests {
 
     #[test]
     fn prefers_opencode_session_over_aliases() {
-        // Must conform to ^ses_[0-9a-f]{64}$ to be accepted upstream (C1)
-        let valid_ses = "ses_0123456789abcdef0123456789AB";
-        let valid_aff = "ses_0123456789abcdef0123456789CD";
+        // Must conform to ^ses_[A-Za-z0-9]{26}$ to be accepted upstream (C1 v1.1)
+        let valid_ses = "ses_0123456789abcdef01234567AB";
+        let valid_aff = "ses_0123456789abcdef01234567CD";
         let headers = downstream(&[
             ("x-session-affinity", valid_aff),
             ("x-opencode-session", valid_ses),
@@ -3659,10 +3659,10 @@ mod session_header_tests {
 
     #[test]
     fn falls_back_through_alias_priority() {
-        let valid_sid = "ses_0123456789abcdef0123456789EF";
+        let valid_sid = "ses_0123456789abcdef01234567EF";
         let headers = downstream(&[("x-session-id", valid_sid)]);
         assert_eq!(resolve_upstream_session(&headers), valid_sid);
-        let valid_pony = "ses_0123456789abcdef0123456789GH";
+        let valid_pony = "ses_0123456789abcdef01234567GH";
         let headers = downstream(&[("x-pony-session", valid_pony)]);
         assert_eq!(resolve_upstream_session(&headers), valid_pony);
     }
@@ -3733,8 +3733,8 @@ mod session_header_tests {
     fn build_headers_carries_session_and_own_ua_for_zen() {
         let pool = Arc::new(KeyPool::new("test", RoutingStrategy::RoundRobin));
         let key = ApiKeyEntry::new("k1", "sk-test", 1, 10);
-        // CONTRACT-v1 C1 shape: ses_ + exactly 64 lowercase hex chars.
-        let valid_ses = "ses_0123456789abcdef0123456789IJ";
+        // CONTRACT-v1 C1 shape: ses_ + exactly 26 alnum chars (30 total).
+        let valid_ses = "ses_0123456789abcdef01234567IJ";
         let executor = UpstreamExecutor::new(pool, 1)
             .with_downstream_headers(&downstream(&[("x-opencode-session", valid_ses)]))
             .with_opencode_zen(true);
