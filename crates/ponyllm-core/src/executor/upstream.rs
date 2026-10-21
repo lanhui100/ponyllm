@@ -2189,9 +2189,17 @@ impl UpstreamExecutor {
                             key.set_family_quota_exhausted(fam, reset_at);
                         }
                     }
-                    // zen 免费额度按出口 IP 记账：无出口池时其余 key 共享同一 IP 桶，
-                    // 继续跨 key 轮询只会放大 429（契约 C7，2026-10-09）。
-                    if is_quota && is_zen_free_usage_limit_body(&err_body) && self.egress_pool.is_none()
+                    // zen 免费额度按出口 IP 记账：无出口池或仅单出口时其余 key
+                    // 共享同一 IP 桶，继续跨 key 轮询只会放大 429/403（契约 C7，
+                    // 2026-10-09；M2 扩展 2026-10-20 覆盖 pool len()<=1）。
+                    if is_quota
+                        && is_zen_free_usage_limit_body(&err_body)
+                        && (self.egress_pool.is_none()
+                            || self
+                                .egress_pool
+                                .as_ref()
+                                .map(|p| p.len() <= 1)
+                                .unwrap_or(true))
                     {
                         tracing::warn!(
                             key_id = %key.id,
@@ -2295,6 +2303,53 @@ impl UpstreamExecutor {
                     last_kind = kind;
                     attempt_kinds.push(last_kind.clone());
                     self.pool.record_error(&key.id, pool_err);
+                    // M1 (contract 2026-10-20-zen-403-hardening): an OpenCode
+                    // zen free-tier gate 403 (`FreeTierError`) is per-exit-IP,
+                    // not per-key. With an egress pool, cool ONLY the exit
+                    // that carried this attempt and fast-fail immediately —
+                    // polling the next key would smear 900s cooldowns across
+                    // the whole account behind one IP bucket. Other 403s keep
+                    // the legacy path untouched (no exit cooldown, no fast-fail).
+                    if matches!(last_kind, GatewayErrorKind::QuotaExhausted)
+                        && is_zen_free_tier_gate_body(&err_body)
+                    {
+                        if let (Some(eg_pool), Some(eg_entry)) = (&self.egress_pool, &egress_entry)
+                        {
+                            let body_reset = parse_reset_duration(&err_body);
+                            eg_pool
+                                .record_quota_exhausted(&eg_entry.id, body_reset.or(retry_after));
+                            tracing::warn!(
+                                key_id = %key.id,
+                                provider = %self.observer_provider.as_deref().unwrap_or("unknown"),
+                                egress_pool = true,
+                                "zen free-tier gate rejection on egress: cooling exit and fast-failing without cross-key retry"
+                            );
+                            let aggregated_error = format!(
+                                "{}{}",
+                                summarize_attempt_failures(&attempt_kinds),
+                                if last_error.is_empty() {
+                                    String::new()
+                                } else {
+                                    format!(": {}", last_error)
+                                }
+                            );
+                            self.emit_both(
+                                &key.id,
+                                attempt_idx,
+                                Some(status_code),
+                                last_kind.clone(),
+                                last_error.clone(),
+                                Some(err_body),
+                                attempt_start.elapsed(),
+                            );
+                            return Err(CoreError::AllRetriesFailed {
+                                retries: attempt + 1,
+                                attempted_keys,
+                                last_error: aggregated_error,
+                                kind: last_kind,
+                            });
+                        }
+                    }
                 } else if status_code == 402 {
                     // 402 Payment Required is balance exhaustion by
                     // definition: never transparent-wait on it.
@@ -2843,9 +2898,17 @@ impl UpstreamExecutor {
                             key.set_family_quota_exhausted(fam, reset_at);
                         }
                     }
-                    // zen 免费额度按出口 IP 记账：无出口池时其余 key 共享同一 IP 桶，
-                    // 继续跨 key 轮询只会放大 429（契约 C7，2026-10-09）。
-                    if is_quota && is_zen_free_usage_limit_body(&err_body) && self.egress_pool.is_none()
+                    // zen 免费额度按出口 IP 记账：无出口池或仅单出口时其余 key
+                    // 共享同一 IP 桶，继续跨 key 轮询只会放大 429/403（契约 C7，
+                    // 2026-10-09；M2 扩展 2026-10-20 覆盖 pool len()<=1）。
+                    if is_quota
+                        && is_zen_free_usage_limit_body(&err_body)
+                        && (self.egress_pool.is_none()
+                            || self
+                                .egress_pool
+                                .as_ref()
+                                .map(|p| p.len() <= 1)
+                                .unwrap_or(true))
                     {
                         tracing::warn!(
                             key_id = %key.id,
@@ -2949,6 +3012,53 @@ impl UpstreamExecutor {
                     last_kind = kind;
                     attempt_kinds.push(last_kind.clone());
                     self.pool.record_error(&key.id, pool_err);
+                    // M1 (contract 2026-10-20-zen-403-hardening): an OpenCode
+                    // zen free-tier gate 403 (`FreeTierError`) is per-exit-IP,
+                    // not per-key. With an egress pool, cool ONLY the exit
+                    // that carried this attempt and fast-fail immediately —
+                    // polling the next key would smear 900s cooldowns across
+                    // the whole account behind one IP bucket. Other 403s keep
+                    // the legacy path untouched (no exit cooldown, no fast-fail).
+                    if matches!(last_kind, GatewayErrorKind::QuotaExhausted)
+                        && is_zen_free_tier_gate_body(&err_body)
+                    {
+                        if let (Some(eg_pool), Some(eg_entry)) = (&self.egress_pool, &egress_entry)
+                        {
+                            let body_reset = parse_reset_duration(&err_body);
+                            eg_pool
+                                .record_quota_exhausted(&eg_entry.id, body_reset.or(retry_after));
+                            tracing::warn!(
+                                key_id = %key.id,
+                                provider = %self.observer_provider.as_deref().unwrap_or("unknown"),
+                                egress_pool = true,
+                                "zen free-tier gate rejection on egress: cooling exit and fast-failing without cross-key retry"
+                            );
+                            let aggregated_error = format!(
+                                "{}{}",
+                                summarize_attempt_failures(&attempt_kinds),
+                                if last_error.is_empty() {
+                                    String::new()
+                                } else {
+                                    format!(": {}", last_error)
+                                }
+                            );
+                            self.emit_both(
+                                &key.id,
+                                attempt_idx,
+                                Some(status_code),
+                                last_kind.clone(),
+                                last_error.clone(),
+                                Some(err_body),
+                                attempt_start.elapsed(),
+                            );
+                            return Err(CoreError::AllRetriesFailed {
+                                retries: attempt + 1,
+                                attempted_keys,
+                                last_error: aggregated_error,
+                                kind: last_kind,
+                            });
+                        }
+                    }
                 } else if status_code == 402 {
                     // 402 Payment Required is balance exhaustion by
                     // definition: never transparent-wait on it.
