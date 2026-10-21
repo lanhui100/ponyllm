@@ -10,23 +10,29 @@
 //! Coverage:
 //!   - A1: probe injected timeout (>3s NFR hard limit) → no panic, cooldown
 //!     kept, executor fail-fast inside a tokio::time::timeout (no hang).
-//!   - A2: malformed probe (200 + empty non-JSON body) → frozen as a probe
-//!     failure: cooldown kept, fail-fast, 0 upstream chat calls.
-//!     [RED DEGRADED: BODY-AGNOSTIC] — if the impl accepts any 200 as probe
-//!     success, A2's cooldown-kept / chat_calls==0 asserts flip; the Executor
-//!     must then add body validation per A2 or obtain Lead approval for the
-//!     degradation (the no-panic part of A2 still holds).
+//!   - A2: malformed probe (200 + empty non-JSON body) → probe failure:
+//!     cooldown kept, fail-fast, 0 upstream chat calls. The landed impl
+//!     validates the body (upstream.rs:1428-1431), so the frozen strict
+//!     asserts hold (A2 green).
 //!   - A3: 4 concurrent all-cooled probe requests (barrier-aligned) → exactly
 //!     one probe wins (throttle atomicity, C4): candidate-Some count == 1 and
 //!     models_calls == 1.
+//!   - A4 (L3-B review): executor INLINE probe against a 200-headers-then-
+//!     stalled body (>3s) — the whole-probe 3s hard timeout (upstream.rs:1418,
+//!     F1) must bound the request: completes in ~3s (no hang), cooldown kept,
+//!     fail-fast, 0 upstream chat calls.
 //!
-//! RED PHASE: `recovery_probe_candidate` / `record_probe_success` /
-//! `probe_throttle_remaining` are `unimplemented!()` stubs (egress.rs
-//! L353/L361/L368) — every case below panics on the current code (red).
+//! Phase history: written as RED phase against the `unimplemented!()` stubs
+//! (egress.rs L353/L361/L368) — all cases panicked, exit 101. The impl landed
+//! (0ca6609 / ef932cd) and the frozen suite is now fully green; A4 was added
+//! per the L3-B review to close the inline-probe coverage gap.
 
+use axum::body::{Body, Bytes};
+use axum::http::header::CONTENT_TYPE;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::{routing::{get, post}, Router};
+use futures::stream::once;
 use ponyllm_core::error::CoreError;
 use ponyllm_core::executor::*;
 use ponyllm_core::pool::*;
@@ -367,5 +373,117 @@ async fn egress_cooldown_selfheal_a3_concurrent_all_cooled_probe_runs_exactly_on
     assert!(
         eg.probe_throttle_remaining("dev").is_some(), // RED: unimplemented!()
         "throttle must remain engaged after the winning probe"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// A4 (L3-B review) — executor INLINE probe: 200 headers then stalled body
+// ---------------------------------------------------------------------------
+
+/// A4-only mock: GET /models sends 200 + JSON content-type headers
+/// immediately, then stalls the body 3.5s (> 3s `EGRESS_PROBE_TIMEOUT`)
+/// before yielding valid JSON; chat answers 200.
+async fn spawn_stalled_probe_mock() -> (String, String, Arc<AtomicUsize>, Arc<AtomicUsize>) {
+    let models_calls = Arc::new(AtomicUsize::new(0));
+    let chat_calls = Arc::new(AtomicUsize::new(0));
+    let (mc, cc) = (models_calls.clone(), chat_calls.clone());
+    let app = Router::new()
+        .route(
+            "/models",
+            get(move |_headers: axum::http::HeaderMap| {
+                let mc = mc.clone();
+                async move {
+                    mc.fetch_add(1, Ordering::SeqCst);
+                    // 200 headers now; the body arrives only after the stall.
+                    let stream = once(async move {
+                        tokio::time::sleep(Duration::from_millis(3500)).await;
+                        Ok::<Bytes, std::convert::Infallible>(Bytes::from_static(b"{}"))
+                    });
+                    let mut resp = axum::response::Response::new(Body::from_stream(stream));
+                    *resp.status_mut() = StatusCode::OK;
+                    resp.headers_mut()
+                        .insert(CONTENT_TYPE, "application/json".parse().unwrap());
+                    resp
+                }
+            }),
+        )
+        .route(
+            "/v1/chat/completions",
+            post(move |_headers: axum::http::HeaderMap, _body: String| {
+                let cc = cc.clone();
+                async move {
+                    cc.fetch_add(1, Ordering::SeqCst);
+                    (StatusCode::OK, completion_body("must never be reached")).into_response()
+                }
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let base = format!("http://{addr}");
+    let endpoint = format!("{base}/v1/chat/completions");
+    (endpoint, base, models_calls, chat_calls)
+}
+
+/// A4: the executor's INLINE recovery probe (upstream.rs:1385
+/// `egress_recovery_probe`) against a 200-headers-then-stalled body. The
+/// whole-probe 3s hard timeout (upstream.rs:1418-1435, F1 — wraps send, body
+/// read AND JSON parse) must bound the request: the call completes in ~3s
+/// inside a 6s outer window (never pinned to the mock's 3.5s stall), the
+/// cooldown is kept, the executor fail-fasts, and 0 upstream chat calls
+/// reach the mock. The probe attempt is observable on /models.
+#[tokio::test]
+async fn egress_cooldown_selfheal_a4_inline_probe_stalled_body_times_out_and_fails_fast() {
+    // Arrange — /models: 200 headers immediately, body stalls 3.5s.
+    let (endpoint, base, models_calls, chat_calls) = spawn_stalled_probe_mock().await;
+    let (_pool, eg, ex, _proxy_client) = adversarial_rig(base.clone());
+    cool_all(&eg);
+    assert!(eg.all_cooling(), "precondition: full cooldown required");
+
+    // Act — the executor's inline probe inside a 6s outer window.
+    let start = std::time::Instant::now();
+    let res = tokio::time::timeout(
+        Duration::from_secs(6),
+        ex.execute_json_request(&endpoint, &chat_payload()),
+    )
+    .await;
+    let elapsed = start.elapsed();
+
+    // Assert — completes (no hang), probe waited on the stalled body,
+    // cooldown kept, fail-fast, 0 upstream chat calls.
+    assert!(
+        res.is_ok(),
+        "the inline probe must bound the stalled body: the call must complete within the 6s window, got {res:?}"
+    );
+    let inner = res.unwrap();
+    assert!(
+        inner.is_err(),
+        "all-cooled pool must fail fast after a stalled-body probe, got {inner:?}"
+    );
+    assert!(
+        elapsed >= Duration::from_secs(2),
+        "the probe must have waited on the stalled body (~3s whole-probe timeout), got {elapsed:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(6),
+        "the whole call must stay inside the 3s-probe budget window, got {elapsed:?}"
+    );
+    assert!(
+        models_calls.load(Ordering::SeqCst) >= 1,
+        "the inline recovery probe must have hit GET /models, got {}",
+        models_calls.load(Ordering::SeqCst)
+    );
+    assert_eq!(
+        chat_calls.load(Ordering::SeqCst),
+        0,
+        "no upstream chat call may reach the mock after a stalled-body probe"
+    );
+    assert!(
+        eg.egress_cooldown("dev").0.is_some(),
+        "cooldown must be kept after a stalled-body probe"
     );
 }

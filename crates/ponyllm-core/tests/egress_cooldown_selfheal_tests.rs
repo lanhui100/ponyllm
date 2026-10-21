@@ -2,17 +2,22 @@
 //! `.dev-team/contracts/2026-10-22-egress-cooldown-selfheal.md`, frozen by Lead;
 //! task-2, Test Agent).
 //!
-//! RED PHASE (current code): `EgressPool::{recovery_probe_candidate,
-//! record_probe_success, probe_throttle_remaining}` are `unimplemented!()`
-//! stubs in `crates/ponyllm-core/src/pool/egress.rs` (L353/L361/L368). Every
-//! case that drives them panics with "not yet implemented" — that is the red
-//! evidence. Run: `cargo test -p ponyllm-core egress_cooldown_selfheal`.
+//! Phase history: written as RED phase against the `unimplemented!()` stubs
+//! (egress.rs L353/L361/L368) — all cases panicked, exit 101. The impl landed
+//! (0ca6609 / ef932cd) and the frozen suite is now fully green; T7 was added
+//! per the L3-B review to cover the executor inline-probe path.
 //!
 //! T6 (stream twin, C8): supported — `execute_stream_request_with_timing_and_key`
 //! (upstream.rs:2502) returns the raw `reqwest::Response` and fails fast on
 //! selection errors exactly like the JSON path, so the mock needs no SSE body;
 //! the twin asserts unlock + success and cooldown-kept + fail-fast on the
 //! stream executor path.
+//!
+//! T7 (L3-B review coverage): the EXECUTOR's inline recovery probe
+//! (upstream.rs:1385 `egress_recovery_probe`) — an all-cooled
+//! `execute_json_request` must itself probe GET {base}/models, unlock the exit
+//! and reselect, then POST the chat to success (no manual API driving;
+//! complements the manual-drive T1).
 //!
 //! The L2-AT adversarial suite (contract path
 //! `tests/acceptance/adversarial/egress_selfheal/`) is wired in below via
@@ -23,8 +28,9 @@
 //! CURRENT (unmodified) executor to prove the red phase.
 
 /// L2-AT adversarial module (A1 timeout / A2 malformed probe / A3 concurrent
-/// single-probe) — file lives at the frozen contract path and is included here
-/// so cargo runs it (`cargo test -p ponyllm-core egress_cooldown_selfheal`).
+/// single-probe / A4 inline stalled-body) — file lives at the frozen contract
+/// path and is included here so cargo runs it
+/// (`cargo test -p ponyllm-core egress_cooldown_selfheal`).
 #[path = "../../../tests/acceptance/adversarial/egress_selfheal/egress_selfheal_adversarial_tests.rs"]
 mod egress_selfheal_l2at;
 
@@ -525,5 +531,63 @@ async fn egress_cooldown_selfheal_t6b_stream_probe_429_keeps_cooldown_and_stream
         chat_calls.load(Ordering::SeqCst),
         0,
         "stream path must not reach upstream after a failed probe"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// T7 (L3-B review) — executor INLINE recovery probe, full chain
+// ---------------------------------------------------------------------------
+
+/// T7: the EXECUTOR's inline recovery probe (upstream.rs:1385
+/// `egress_recovery_probe`). An all-cooled `execute_json_request` must itself
+/// probe `GET {base}/models` (200 valid JSON), unlock the exit via
+/// `record_probe_success`, reselect it and POST the chat to success — no
+/// manual API driving. GREEN on the landed impl; any regression that drops
+/// the inline probe re-fails this case.
+#[tokio::test]
+async fn egress_cooldown_selfheal_t7_inline_probe_200_unlocks_and_chat_succeeds() {
+    // Arrange
+    let models = Arc::new(|_n: usize| {
+        (StatusCode::OK, r#"{"object":"list","data":[]}"#.to_string())
+    });
+    let chat = Arc::new(|_n: usize| {
+        (StatusCode::OK, completion_body("Inline self-heal success!"))
+    });
+    let (endpoint, base, models_calls, chat_calls) =
+        spawn_selfheal_mock(models, chat).await;
+    let (_pool, eg, ex, _proxy_client) = selfheal_rig(base.clone());
+    cool_all(&eg);
+    assert!(eg.all_cooling(), "precondition: full cooldown required");
+
+    // Act — the executor's inline probe fires inside the request path.
+    let resp = ex
+        .execute_json_request(&endpoint, &chat_payload())
+        .await
+        .expect("inline probe 200 must unlock and let the request succeed");
+
+    // Assert — probe fired, unlock persisted, chat succeeded (full chain).
+    assert!(
+        models_calls.load(Ordering::SeqCst) >= 1,
+        "the inline recovery probe must hit GET /models, got {}",
+        models_calls.load(Ordering::SeqCst)
+    );
+    assert_eq!(
+        resp["choices"][0]["message"]["content"],
+        "Inline self-heal success!",
+        "chat must succeed through the unlocked exit, got: {resp}"
+    );
+    assert!(
+        chat_calls.load(Ordering::SeqCst) >= 1,
+        "a real upstream chat call must occur, got {}",
+        chat_calls.load(Ordering::SeqCst)
+    );
+    assert!(
+        eg.egress_cooldown("dev").0.is_none(),
+        "the inline probe success must clear the cooldown, got {:?}",
+        eg.egress_cooldown("dev").0
+    );
+    assert!(
+        matches!(eg.select_egress(), Ok(_)),
+        "the exit must be reselectable after the inline probe unlock"
     );
 }
