@@ -467,6 +467,10 @@ pub struct GatewayConfig {
     /// behavior.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub empty_stop_total_timeout_secs: Option<u64>,
+    /// Global request-level pre-commit wall-clock budget in seconds.
+    /// None falls back to 140s (or empty_stop_total_timeout_secs if aligned); Some(0) disables.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre_commit_total_timeout_secs: Option<u64>,
     #[serde(default = "default_request_body_limit")]
     pub request_body_limit: usize,
     /// Hourly JSONL event-log directory. `None` (default) keeps events in the
@@ -619,6 +623,7 @@ impl Default for GatewayConfig {
             upstream_timeout_secs: default_upstream_timeout_secs(),
             upstream_ttfb_timeout_secs: None,
             empty_stop_total_timeout_secs: None,
+            pre_commit_total_timeout_secs: None,
             request_body_limit: default_request_body_limit(),
             event_log_dir: None,
             event_log_retention_days: default_event_log_retention_days(),
@@ -686,6 +691,17 @@ impl GatewayConfig {
             Some(0) => None,
             Some(secs) => Some(std::time::Duration::from_secs(secs)),
             None => Some(crate::streaming::MAX_EMPTY_STOP_TOTAL_DURATION),
+        }
+    }
+
+    /// Effective request-level pre-commit global wall-clock budget:
+    /// `Some(0)` disables the bound (=> None), `Some(s)` resolves to `s`, and
+    /// `None` falls back to `empty_stop_total_timeout_secs` or default (75s).
+    pub fn effective_pre_commit_timeout(&self) -> Option<std::time::Duration> {
+        match self.pre_commit_total_timeout_secs {
+            Some(0) => None,
+            Some(secs) => Some(std::time::Duration::from_secs(secs)),
+            None => self.effective_empty_stop_timeout(),
         }
     }
 

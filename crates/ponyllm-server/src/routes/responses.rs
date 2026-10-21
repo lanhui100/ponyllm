@@ -237,12 +237,12 @@ pub async fn handle_responses(
     let quota_failover_enabled =
         parsed.is_auto || state.config.read().cross_provider_quota_failover;
 
-    // Request-level pre-commit empty-STOP retry wall-clock budget (contract
-    // `2026-10-07-empty-stop-budget-contract`, ruling 1-2): one deadline taken
+    // Request-level pre-commit global wall-clock budget (contract
+    // `2026-10-07-empty-stop-budget-contract` & task-2): one deadline taken
     // once per request and shared by every target's retry loops, so N targets
-    // cannot accumulate past the downstream DSH ~300s idle watchdog. `None`
+    // cannot accumulate past the downstream DSH ~180s/300s watchdog. `None`
     // (config Some(0) / disabled) removes the gate entirely.
-    let empty_stop_budget = state.config.read().effective_empty_stop_timeout();
+    let empty_stop_budget = state.config.read().effective_pre_commit_timeout();
     let empty_stop_deadline = empty_stop_budget.map(|b| tokio::time::Instant::now() + b);
     // Per-target budget slice (adversarial review FIX-2): each routed target
     // gets at most budget/N of the request wall-clock, so a slow first target
@@ -251,6 +251,25 @@ pub async fn handle_responses(
     let per_target_budget = empty_stop_budget.map(|b| b / (targets.len().max(1) as u32));
 
     for target in targets {
+        // Pre-commit global wall-clock deadline check: if already exhausted, stop trying further targets
+        if state.config.read().pre_commit_total_timeout_secs.is_some() {
+            if let Some(deadline) = empty_stop_deadline {
+                if tokio::time::Instant::now() >= deadline {
+                    tracing::warn!(
+                        provider = %target.provider_name,
+                        "Pre-commit global wall-clock budget exhausted before target attempt; aborting fallback chain"
+                    );
+                    last_kind = ponyllm_core::error::GatewayErrorKind::UpstreamUnavailable;
+                    last_error = format!(
+                        "Pre-commit wall-clock budget ({}s) exhausted before attempting provider '{}'",
+                        empty_stop_budget.map(|b| b.as_secs()).unwrap_or(0),
+                        target.provider_name
+                    );
+                    last_retry_after = last_retry_after.or(Some(1));
+                    break;
+                }
+            }
+        }
         // If target is currently cooling down under the model circuit breaker, skip it
         if parsed.is_auto
             && state.is_model_cooling_down(&target.provider_name, &target.physical_model)

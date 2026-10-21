@@ -250,12 +250,12 @@ pub async fn handle_chat_completions(
     let quota_failover_enabled =
         parsed.is_auto || state.config.read().cross_provider_quota_failover;
 
-    // Request-level pre-commit empty-STOP retry wall-clock budget (contract
-    // `2026-10-07-empty-stop-budget-contract`, ruling 1-2): one deadline taken
+    // Request-level pre-commit global wall-clock budget (contract
+    // `2026-10-07-empty-stop-budget-contract` & task-2): one deadline taken
     // once per request and shared by every target's retry loops, so N targets
-    // cannot accumulate past the downstream DSH ~300s idle watchdog. `None`
+    // cannot accumulate past the downstream DSH ~180s/300s watchdog. `None`
     // (config Some(0) / disabled) removes the gate entirely.
-    let empty_stop_budget = state.config.read().effective_empty_stop_timeout();
+    let empty_stop_budget = state.config.read().effective_pre_commit_timeout();
     let empty_stop_deadline = empty_stop_budget.map(|b| tokio::time::Instant::now() + b);
     // Per-target budget slice (adversarial review FIX-2): each routed target
     // gets at most budget/N of the request wall-clock, so a slow first target
@@ -264,6 +264,25 @@ pub async fn handle_chat_completions(
     let per_target_budget = empty_stop_budget.map(|b| b / (targets.len().max(1) as u32));
 
     for target in targets {
+        // Pre-commit global wall-clock deadline check: if already exhausted, stop trying further targets
+        if state.config.read().pre_commit_total_timeout_secs.is_some() {
+            if let Some(deadline) = empty_stop_deadline {
+                if tokio::time::Instant::now() >= deadline {
+                    tracing::warn!(
+                        provider = %target.provider_name,
+                        "Pre-commit global wall-clock budget exhausted before target attempt; aborting fallback chain"
+                    );
+                    last_kind = ponyllm_core::error::GatewayErrorKind::UpstreamUnavailable;
+                    last_error = format!(
+                        "Pre-commit wall-clock budget ({}s) exhausted before attempting provider '{}'",
+                        empty_stop_budget.map(|b| b.as_secs()).unwrap_or(0),
+                        target.provider_name
+                    );
+                    last_retry_after = last_retry_after.or(Some(1));
+                    break;
+                }
+            }
+        }
         // If target is currently cooling down under the model circuit breaker, skip it
         if parsed.is_auto
             && state.is_model_cooling_down(&target.provider_name, &target.physical_model)
@@ -622,28 +641,30 @@ pub async fn handle_chat_completions(
                 // more doomed dial.
                 let remaining = target_deadline
                     .map(|d| d.saturating_duration_since(tokio::time::Instant::now()));
-                if stream_attempt > 1 {
-                    if let Some(r) = remaining {
-                        if r.is_zero() {
-                            tracing::warn!(
-                                provider = %target.provider_name,
-                                stream_attempt,
-                                "Antigravity empty-STOP retry wall-clock budget exhausted; failing fast"
-                            );
-                            last_kind = ponyllm_core::error::GatewayErrorKind::UpstreamUnavailable;
-                            last_error = format!(
-                                "Antigravity empty-STOP retry wall-clock budget ({}s) exhausted after {} attempts",
-                                empty_stop_budget.map(|b| b.as_secs()).unwrap_or(0),
-                                stream_attempt - 1
-                            );
-                            last_retry_after = crate::extractors::retry_after_secs(
-                                &last_kind,
-                                retry_unlock_hint(&last_kind, &pool, rate_limits.as_ref()),
-                            )
-                            .or(Some(1));
-                            break;
-                        }
-                    }
+                let global_remaining = empty_stop_deadline
+                    .map(|d| d.saturating_duration_since(tokio::time::Instant::now()));
+                let is_wallclock_exhausted = remaining.map(|r| r.is_zero()).unwrap_or(false)
+                    || global_remaining.map(|r| r.is_zero()).unwrap_or(false);
+
+                let has_explicit_wallclock = state.config.read().pre_commit_total_timeout_secs.is_some();
+                if (stream_attempt > 1 || has_explicit_wallclock) && is_wallclock_exhausted {
+                    tracing::warn!(
+                        provider = %target.provider_name,
+                        stream_attempt,
+                        "Pre-commit stream retry wall-clock budget exhausted; failing fast"
+                    );
+                    last_kind = ponyllm_core::error::GatewayErrorKind::UpstreamUnavailable;
+                    last_error = format!(
+                        "Pre-commit retry wall-clock budget ({}s) exhausted after {} attempts",
+                        empty_stop_budget.map(|b| b.as_secs()).unwrap_or(0),
+                        stream_attempt - 1
+                    );
+                    last_retry_after = crate::extractors::retry_after_secs(
+                        &last_kind,
+                        retry_unlock_hint(&last_kind, &pool, rate_limits.as_ref()),
+                    )
+                    .or(Some(1));
+                    break;
                 }
                 // R2: rebuild the attempt executor with the tried-keys list.
                 // `UpstreamExecutor` is cheap (Arc pool + client clone); the
@@ -687,13 +708,22 @@ pub async fn handle_chat_completions(
                                 raw_stream,
                                 std::time::Duration::from_secs(10),
                                 if stream_attempt == 1 {
-                                    // FIX-1: first attempt uses the legacy
-                                    // DEFAULT_PREAMBLE_DEADLINE verbatim.
+                                    // FIX-1 / C9: first attempt keeps the legacy
+                                    // DEFAULT_PREAMBLE_DEADLINE verbatim so a
+                                    // guaranteed dial can never be downgraded to
+                                    // an instant Ready-commit by an expired
+                                    // wall clock (expired-deadline preamble
+                                    // verification returns Ready immediately).
                                     DEFAULT_PREAMBLE_DEADLINE
                                 } else {
-                                    remaining.map_or(DEFAULT_PREAMBLE_DEADLINE, |r| {
-                                        r.min(DEFAULT_PREAMBLE_DEADLINE)
-                                    })
+                                    match (remaining, global_remaining) {
+                                        (Some(r), Some(gr)) => {
+                                            r.min(gr).min(DEFAULT_PREAMBLE_DEADLINE)
+                                        }
+                                        (Some(r), None) => r.min(DEFAULT_PREAMBLE_DEADLINE),
+                                        (None, Some(gr)) => gr.min(DEFAULT_PREAMBLE_DEADLINE),
+                                        (None, None) => DEFAULT_PREAMBLE_DEADLINE,
+                                    }
                                 },
                             )
                             .await
@@ -877,7 +907,39 @@ pub async fn handle_chat_completions(
                                 );
                                 // In-flight backoff never sleeps past the
                                 // request-level wall-clock budget.
-                                tokio::time::sleep(remaining.map_or(delay, |r| delay.min(r))).await;
+                                let current_now = tokio::time::Instant::now();
+                                let remaining = target_deadline.map(|d| d.saturating_duration_since(current_now));
+                                let global_remaining = empty_stop_deadline.map(|d| d.saturating_duration_since(current_now));
+                                let sleep_cap = match (remaining, global_remaining) {
+                                    (Some(r), Some(gr)) => Some(r.min(gr)),
+                                    (Some(r), None) => Some(r),
+                                    (None, Some(gr)) => Some(gr),
+                                    (None, None) => None,
+                                };
+                                if let Some(cap) = sleep_cap {
+                                    if cap.is_zero() {
+                                        last_kind = ponyllm_core::error::GatewayErrorKind::UpstreamUnavailable;
+                                        last_error = format!(
+                                            "Pre-commit retry wall-clock budget ({}s) exhausted before empty-STOP backoff sleep",
+                                            empty_stop_budget.map(|b| b.as_secs()).unwrap_or(0)
+                                        );
+                                        last_retry_after = last_retry_after.or(Some(1));
+                                        break;
+                                    }
+                                }
+                                tokio::time::sleep(sleep_cap.map_or(delay, |r| delay.min(r))).await;
+                                let current_now_after = tokio::time::Instant::now();
+                                if let Some(deadline) = empty_stop_deadline {
+                                    if current_now_after >= deadline {
+                                        last_kind = ponyllm_core::error::GatewayErrorKind::UpstreamUnavailable;
+                                        last_error = format!(
+                                            "Pre-commit retry wall-clock budget ({}s) exhausted after empty-STOP backoff sleep",
+                                            empty_stop_budget.map(|b| b.as_secs()).unwrap_or(0)
+                                        );
+                                        last_retry_after = last_retry_after.or(Some(1));
+                                        break;
+                                    }
+                                }
                                 // R2: mutate upstream identity, cut toxic KV-cache affinity and escalate reasoning depth
                                 if target.upstream_protocol
                                     == ponyllm_core::pool::UpstreamProtocol::Antigravity
@@ -1138,19 +1200,20 @@ pub async fn handle_chat_completions(
                     // deadline; never dial with no budget left.
                     let remaining_c = target_deadline
                         .map(|d| d.saturating_duration_since(tokio::time::Instant::now()));
-                    if collect_attempt > 1 {
-                        if let Some(r) = remaining_c {
-                            if r.is_zero() {
-                                last_kind =
-                                    ponyllm_core::error::GatewayErrorKind::UpstreamUnavailable;
-                                last_error = format!(
-                                    "Antigravity stream collect failed: empty-STOP retry wall-clock budget ({}s) exhausted after {} attempts",
-                                    empty_stop_budget.map(|b| b.as_secs()).unwrap_or(0),
-                                    collect_attempt - 1
-                                );
-                                break (Err(CoreError::Internal(last_error.clone())), None);
-                            }
-                        }
+                    let global_remaining_c = empty_stop_deadline
+                        .map(|d| d.saturating_duration_since(tokio::time::Instant::now()));
+                    let is_collect_wallclock_exhausted = remaining_c.map(|r| r.is_zero()).unwrap_or(false)
+                        || global_remaining_c.map(|r| r.is_zero()).unwrap_or(false);
+
+                    if collect_attempt > 1 && is_collect_wallclock_exhausted {
+                        last_kind =
+                            ponyllm_core::error::GatewayErrorKind::UpstreamUnavailable;
+                        last_error = format!(
+                            "Pre-commit stream collect failed: retry wall-clock budget ({}s) exhausted after {} attempts",
+                            empty_stop_budget.map(|b| b.as_secs()).unwrap_or(0),
+                            collect_attempt - 1
+                        );
+                        break (Err(CoreError::Internal(last_error.clone())), None);
                     }
                     let collect_executor = UpstreamExecutor::with_client(
                         pool.clone(),

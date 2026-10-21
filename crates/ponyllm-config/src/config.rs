@@ -62,6 +62,11 @@ pub struct GatewaySection {
     /// transparent retry phase. None resolves to 75s; Some(0) disables the bound.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub empty_stop_total_timeout_secs: Option<u64>,
+    /// Gateway global request-level wall-clock budget (seconds) for pre-commit
+    /// phase (across all candidate targets and attempts). None resolves to fallback
+    /// default (e.g. 140s or empty_stop_total_timeout_secs); Some(0) disables the bound.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre_commit_total_timeout_secs: Option<u64>,
     #[serde(default = "default_api_key")]
     pub api_key: String,
     #[serde(default = "default_request_body_limit")]
@@ -579,6 +584,7 @@ impl Default for GatewaySection {
             upstream_timeout_secs: default_upstream_timeout_secs(),
             upstream_ttfb_timeout_secs: None,
             empty_stop_total_timeout_secs: None,
+            pre_commit_total_timeout_secs: None,
             api_key: default_api_key(),
             request_body_limit: default_request_body_limit(),
             proxy: None,
