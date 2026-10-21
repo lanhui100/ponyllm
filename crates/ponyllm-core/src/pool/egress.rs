@@ -39,6 +39,22 @@ pub const MAX_EGRESS_COOLDOWN: Duration = Duration::from_secs(30 * 24 * 60 * 60)
 /// this default).
 pub const DEFAULT_EGRESS_COOLDOWN: Duration = Duration::from_secs(900);
 
+/// Minimum interval between recovery probes of the SAME exit (contract C4):
+/// even while it stays cooling, at most one probe per exit per window, so an
+/// all-cooling outage can never amplify upstream free-tier rate limiting
+/// (probe storm guard; `2026-10-22-egress-cooldown-selfheal`).
+pub const PROBE_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Per-exit recovery-probe throttle state (contract C4): monotonic last-probe
+/// timestamp encoded as `AtomicU64` nanos, updated lock-free
+/// (compare-and-swap) so concurrent all-cooling request paths can never
+/// double-probe one exit within [`PROBE_INTERVAL`] (adversarial A3: 4
+/// concurrent requests → exactly 1 probe).
+#[derive(Debug, Default)]
+pub struct ProbeThrottle {
+    pub last_probe_at: AtomicU64,
+}
+
 /// Egress rotation strategy (contract C2). `egress_strategy` stays a plain
 /// string in the TOML model; this is the canonical parse entry
 /// (`EgressStrategy::from_str`), pinned by the core acceptance tests.
@@ -328,6 +344,29 @@ impl EgressPool {
         if let Some(entry) = self.find(egress_id) {
             entry.clear_cooldown();
         }
+    }
+
+    /// C1/C4/C5: recovery-probe candidate when the pool is fully cooling — the
+    /// exit with the SHORTEST remaining cooldown, or `None` when the pool is
+    /// empty, a healthy exit is already selectable, or the candidate is still
+    /// inside its [`PROBE_INTERVAL`] throttle window (no probe due).
+    pub fn recovery_probe_candidate(&self) -> Option<Arc<EgressEntry>> {
+        unimplemented!("egress recovery probe candidate selection (C1/C4/C5)")
+    }
+
+    /// C2: a recovery probe returned HTTP 200 — clear this exit's cooldown so
+    /// `select_egress` dials it again on the normal success path; emits the
+    /// structured `egress_recovery_probe` event (provider/key/egress/status/
+    /// cooldown_remaining_secs, contract NFR).
+    pub fn record_probe_success(&self, _egress_id: &str) {
+        unimplemented!("egress recovery probe success — clear cooldown (C2)")
+    }
+
+    /// C4: remaining [`PROBE_INTERVAL`] throttle for `egress_id`, read from the
+    /// per-exit [`ProbeThrottle`] atomic timestamp (lock-free); `None` means a
+    /// probe is due (or this exit has never been probed).
+    pub fn probe_throttle_remaining(&self, _egress_id: &str) -> Option<Duration> {
+        unimplemented!("egress recovery probe throttle state (C4)")
     }
 
     /// Snapshot rows for the admin quota view: per-entry index / entry string
