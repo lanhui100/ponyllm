@@ -28,6 +28,7 @@ curl -s -H "Authorization: Bearer <KEY>" '<GW>/api/admin/overview'
 开工前按序只读（本 skill 每条规则的出处，不接受"上游文档说"式口头依据）：
 
 - `.agents/notes/implemented/feature/2026-10-06-space-bunny-free-opencode-zen.md`（真实加模型先例：字段映射全表、`protocol=chat` 教训）
+- `.agents/notes/implemented/feature/2026-10-18-tokenharbor-deepseek-v4.1-flash-free.md`（新 provider 先例：provider+key+模型三步写入、地域封锁须 provider 级代理、免费档 402 隔离）
 - `.agents/notes/implemented/feature/2026-10-06-remove-openrouter-space-bunny-alpha.md`（下架双证据先例）
 - `.agents/notes/implemented/bug-fix/2026-10-03-fledge-alpha-free-protocol-chat.md`（protocol 教训：继承 `responses` 报 `ModelProtocolUnsupported`，切 `chat` 可用）
 - `crates/ponyllm-server/src/routes/admin.rs`（`CreateModelPayload` 字段、`pricing_mode` 小写、`parse_tier`、`If-Match` → 412）
@@ -50,6 +51,11 @@ curl -s '<UPSTREAM_BASE>/models' | python3 -c "import json,sys; print([m.get('id
 
 - 目录无该 id → 停下报告（靠 review：可能是上游改名/未发布），不要编造 listing。
 - 把 listing 的上下文/输出上限/输入输出模态/推理档位原样记下来——它是步骤 2 的唯一输入。
+- **新 provider 场景**（目录属于网关上还没有的上游）：目录核对之外还要补三件事——
+  ① `POST /api/admin/providers`（`base_url`/`default_protocol`/`strategy`/`billing_mode`）；
+  ② `POST /api/admin/keys`（上游 key 进 provider 池，`priority`/`weight`）；
+  ③ 若上游对网关节点所在地域封锁（实测 403 `region not available` 一类）或需固定出口，
+  用 `PUT /api/admin/providers/{name}` 设 **provider 级** `proxy`（模型级不写，契约 I3）。
 
 ### 步骤 2——字段映射（网关字段 ← 上游来源）
 
@@ -112,6 +118,9 @@ curl -s -H "Authorization: Bearer <KEY>" -H 'Content-Type: application/json' \
 
 - 第 1 条含新模型且字段与步骤 2 一致、第 2 条 200 且内容正确 → 接入完成。
 - 第 2 条报 `400 ModelProtocolUnsupported` → protocol 错了，按 fledge 路径 `PUT protocol=chat` 修复（靠 review 确认）。
+- 第 2 条报 **503 且末因是上游 403 地域/封锁** → 不是模型不可用：给该 provider 配 `proxy` 后重试
+  （tokenharbor 即此形态：直连 403 `region not available`，经 `http://pproxy-host:8899` 200）。
+- 第 2 条报 **402 balance_zero** 一类 → 免费额度/付费路由二选一错了：改用上游目录的 `:free` 档 id，不要改模型名去适配。
 
 ### 步骤 5——下架（删模型与删 provider）
 
@@ -132,6 +141,8 @@ curl -s -H "Authorization: Bearer <KEY>" -H 'Content-Type: application/json' \
 - 反例：`max_output` 与其他 free 模型对齐填 `16K` → 长推理+长输出被提前截断 → 拒绝（按上游天花板填）。
 - 反例：`protocol` 留空继承 provider 的 `responses`（fledge 初始态）→ `400 ModelProtocolUnsupported` 并耗尽 key → 拒绝（zen 新 free 默认显式 `chat`）。
 - 反例：仅凭第三方帖子说下架就删（无目录 + 直调双证据）→ 拒绝（误判即生产事故）。
+- 反例：TokenHarbor 目录里 `deepseek-v4.1-flash:free` 去掉 `:free` 后缀接入 → 上游 `402 balance_zero`（余额 0）→ 拒绝（免费档必须带后缀，改名即换计费路由）。
+- 反例：上游目录不声明 `max_output` 就照别家填 `16K`/`512K` → 声明值即天花板，填错要么截断要么虚报 → 拒绝（目录缺项实测后与同厂模型对齐，并在报告注明取值依据）。
 
 ## 验证与报告
 
