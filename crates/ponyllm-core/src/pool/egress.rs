@@ -21,12 +21,27 @@
 use std::fmt;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 
 use parking_lot::RwLock;
 
 use crate::error::CoreError;
+
+/// Monotonic nanosecond clock for the per-exit probe throttle: nanos since the
+/// first use in this process (Instant is monotonic, so NTP jumps cannot
+/// stretch or shrink the [`PROBE_INTERVAL`] window). `0` is reserved as the
+/// "never probed" sentinel, so the first call clamps to at least 1ns — a real
+/// claim can never collide with the sentinel and a second concurrent caller
+/// can never double-win the atomic slot (adversarial A3).
+fn monotonic_probe_nanos() -> u64 {
+    static EPOCH: OnceLock<Instant> = OnceLock::new();
+    let epoch = *EPOCH.get_or_init(Instant::now);
+    Instant::now()
+        .duration_since(epoch)
+        .as_nanos()
+        .max(1) as u64
+}
 
 /// Ceiling for any single egress cooldown: mirrors the key pool's
 /// [`crate::pool::entry::MAX_COOLDOWN`] (30 days) so a garbled or hostile
@@ -53,6 +68,44 @@ pub const PROBE_INTERVAL: Duration = Duration::from_secs(60);
 #[derive(Debug, Default)]
 pub struct ProbeThrottle {
     pub last_probe_at: AtomicU64,
+}
+
+impl ProbeThrottle {
+    /// Remaining [`PROBE_INTERVAL`] throttle window since the last recorded
+    /// probe (monotonic clock), lock-free. `None` when a probe is due — this
+    /// exit has never been probed (`last_probe_at == 0`) or the window has
+    /// already elapsed (contract C4).
+    fn remaining(&self) -> Option<Duration> {
+        let last = self.last_probe_at.load(Ordering::Acquire);
+        if last == 0 {
+            return None;
+        }
+        let elapsed = monotonic_probe_nanos().saturating_sub(last);
+        let interval = PROBE_INTERVAL.as_nanos() as u64;
+        (elapsed < interval).then(|| Duration::from_nanos(interval - elapsed))
+    }
+
+    /// Atomically claim the throttle slot if a probe is due (compare-and-swap,
+    /// lock-free): exactly one concurrent all-cooling caller wins — the loser
+    /// observes the freshly claimed timestamp and returns `false` (A3: 4
+    /// concurrent requests → exactly 1 probe).
+    fn claim(&self) -> bool {
+        let now = monotonic_probe_nanos();
+        let last = self.last_probe_at.load(Ordering::Acquire);
+        if last != 0 && now.saturating_sub(last) < PROBE_INTERVAL.as_nanos() as u64 {
+            return false;
+        }
+        self.last_probe_at
+            .compare_exchange(last, now, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
+    /// Re-base the throttle clock to now (unconditional store): lets the
+    /// executor align the window with the actual probe fire time after the
+    /// candidate claim reserved the slot.
+    fn record_now(&self) {
+        self.last_probe_at.store(monotonic_probe_nanos(), Ordering::Release);
+    }
 }
 
 /// Egress rotation strategy (contract C2). `egress_strategy` stays a plain
@@ -101,6 +154,12 @@ impl fmt::Display for EgressStrategy {
 /// `Arc` handed out by [`EgressPool::select_egress`]) and mirrors the key
 /// entry conventions: monotonic deadline + wall-clock reset mirror written in
 /// lockstep, `MAX_EGRESS_COOLDOWN` clamp, keep-max on re-cooldown.
+///
+/// Recovery-probe throttle state also lives ON the entry (contract C4): the
+/// acceptance tests build entries directly via [`Self::direct`] /
+/// [`Self::proxy`] and cool them through `record_quota_exhausted`, so the
+/// throttle cannot live in an external registry — it must travel with the
+/// entry itself.
 #[derive(Debug)]
 pub struct EgressEntry {
     pub id: String,
@@ -108,6 +167,9 @@ pub struct EgressEntry {
     cooldown_until: RwLock<Option<Instant>>,
     cooldown_reset_at: RwLock<Option<SystemTime>>,
     transient_failures: AtomicU64,
+    /// Per-exit recovery-probe throttle (contract C4): monotonic
+    /// last-probe timestamp, lock-free CAS claim.
+    probe_throttle: ProbeThrottle,
 }
 
 impl EgressEntry {
@@ -119,6 +181,7 @@ impl EgressEntry {
             cooldown_until: RwLock::new(None),
             cooldown_reset_at: RwLock::new(None),
             transient_failures: AtomicU64::new(0),
+            probe_throttle: ProbeThrottle::default(),
         }
     }
 
@@ -130,6 +193,7 @@ impl EgressEntry {
             cooldown_until: RwLock::new(None),
             cooldown_reset_at: RwLock::new(None),
             transient_failures: AtomicU64::new(0),
+            probe_throttle: ProbeThrottle::default(),
         }
     }
 
@@ -350,23 +414,81 @@ impl EgressPool {
     /// exit with the SHORTEST remaining cooldown, or `None` when the pool is
     /// empty, a healthy exit is already selectable, or the candidate is still
     /// inside its [`PROBE_INTERVAL`] throttle window (no probe due).
+    ///
+    /// The winning return atomically CLAIMS the per-exit throttle slot
+    /// (lock-free CAS on the entry's `ProbeThrottle`): concurrent all-cooling
+    /// callers are serialized so exactly one probe per exit per
+    /// [`PROBE_INTERVAL`] fires (adversarial A3). Callers must therefore not
+    /// double-record the attempt; [`Self::record_probe_attempt`] exists only to
+    /// re-align the throttle clock with the actual probe fire time.
     pub fn recovery_probe_candidate(&self) -> Option<Arc<EgressEntry>> {
-        unimplemented!("egress recovery probe candidate selection (C1/C4/C5)")
+        let entries = self.entries.read();
+        // C5: empty pool — nothing to probe; select_egress fails fast as today.
+        if entries.is_empty() {
+            return None;
+        }
+        // C5: a healthy exit is already selectable — no recovery probe needed.
+        if entries.iter().any(|e| !e.is_cooling()) {
+            return None;
+        }
+        // C1: fully cooling — probe the exit with the SHORTEST remaining
+        // cooldown (earliest natural recovery, best first-unlock candidate).
+        let candidate = entries
+            .iter()
+            .min_by_key(|e| e.cooldown_remaining().map(|d| d.as_nanos()).unwrap_or(u128::MAX))?;
+        // C4: still inside the per-exit throttle window → no probe due.
+        if candidate.probe_throttle.remaining().is_some() {
+            return None;
+        }
+        // Atomic claim: exactly one concurrent caller wins the slot (A3).
+        candidate
+            .probe_throttle
+            .claim()
+            .then(|| candidate.clone())
     }
 
     /// C2: a recovery probe returned HTTP 200 — clear this exit's cooldown so
     /// `select_egress` dials it again on the normal success path; emits the
     /// structured `egress_recovery_probe` event (provider/key/egress/status/
     /// cooldown_remaining_secs, contract NFR).
-    pub fn record_probe_success(&self, _egress_id: &str) {
-        unimplemented!("egress recovery probe success — clear cooldown (C2)")
+    ///
+    /// Field interpretation: `key` is the cooled exit identity (`egress_id`,
+    /// the only key-shaped identity the frozen pool API carries) and `egress`
+    /// is its dial shape (proxy URL or `"direct"`); `status` is frozen to
+    /// `"success"` and `cooldown_remaining_secs` to `0` (cooldown just
+    /// cleared).
+    pub fn record_probe_success(&self, egress_id: &str) {
+        let Some(entry) = self.find(egress_id) else {
+            return;
+        };
+        entry.clear_cooldown();
+        tracing::info!(
+            provider = %self.provider,
+            key = %egress_id,
+            egress = %entry.url.clone().unwrap_or_else(|| "direct".to_string()),
+            status = "success",
+            cooldown_remaining_secs = 0u64,
+            "egress_recovery_probe"
+        );
+    }
+
+    /// C4: explicitly record a recovery-probe attempt on `egress_id`,
+    /// re-basing the per-exit throttle clock to now. The atomic claim in
+    /// [`Self::recovery_probe_candidate`] already reserves the slot; this is
+    /// the executor's hook to align the throttle window with the actual probe
+    /// fire time (idempotent — re-recording within the window only shifts it).
+    pub fn record_probe_attempt(&self, egress_id: &str) {
+        if let Some(entry) = self.find(egress_id) {
+            entry.probe_throttle.record_now();
+        }
     }
 
     /// C4: remaining [`PROBE_INTERVAL`] throttle for `egress_id`, read from the
     /// per-exit [`ProbeThrottle`] atomic timestamp (lock-free); `None` means a
     /// probe is due (or this exit has never been probed).
-    pub fn probe_throttle_remaining(&self, _egress_id: &str) -> Option<Duration> {
-        unimplemented!("egress recovery probe throttle state (C4)")
+    pub fn probe_throttle_remaining(&self, egress_id: &str) -> Option<Duration> {
+        self.find(egress_id)
+            .and_then(|entry| entry.probe_throttle.remaining())
     }
 
     /// Snapshot rows for the admin quota view: per-entry index / entry string

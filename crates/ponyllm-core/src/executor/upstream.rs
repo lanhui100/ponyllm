@@ -8,6 +8,36 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+/// Hard timeout for one egress recovery probe (NFR baseline:
+/// `external_call_timeout_ms = 3000`): a probe that cannot get response
+/// headers within 3s is a failed probe — cooldown kept, fail-fast preserved,
+/// no hang (`2026-10-22-egress-cooldown-selfheal`).
+const EGRESS_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Derive the provider base from a normalized protocol endpoint so the
+/// recovery probe targets `GET {base_url}/models` (contract C7). The executor
+/// only receives the normalized endpoint (`{base}/v1/chat/completions`,
+/// `{base}/v1/responses`, `{base}/v1/messages`, `{base}/systemone`), so the
+/// base is recovered by stripping the protocol leaf. `None` when the endpoint
+/// matches no known shape — the caller keeps fail-fast (no probe target).
+fn probe_base_from_endpoint(endpoint: &str) -> Option<String> {
+    let trimmed = endpoint.trim_end_matches('/');
+    for leaf in [
+        "/v1/chat/completions",
+        "/chat/completions",
+        "/v1/responses",
+        "/responses",
+        "/v1/messages",
+        "/messages",
+        "/systemone",
+    ] {
+        if let Some(base) = trimmed.strip_suffix(leaf) {
+            return Some(base.to_string());
+        }
+    }
+    None
+}
+
 /// One upstream attempt outcome inside an executor retry loop.
 ///
 /// Emitted for every try (key selection, header build, HTTP status, network),
@@ -1340,6 +1370,55 @@ impl UpstreamExecutor {
         }
     }
 
+    /// C1/C2/C3/C7: one recovery probe on the shortest-cooling exit when the
+    /// pool is fully cooling — the executor-side half of egress self-heal
+    /// (contract `2026-10-22-egress-cooldown-selfheal`).
+    ///
+    /// Walks the SAME exit (per-proxy client, C6) toward `GET {base}/models`
+    /// (C7) under a 3s hard timeout (NFR). Returns `Some(entry)` only when the
+    /// probe is HTTP 200 with a non-empty, valid-JSON body (C2 → the exit's
+    /// cooldown is cleared and the caller re-selects on the normal path).
+    /// Every other outcome — non-200, malformed/empty body (A2), timeout
+    /// (A1), network error — silently keeps the cooldown and returns `None`,
+    /// so the caller preserves fail-fast. The probe never records an upstream
+    /// error on the key (C9) and never counts toward the attempt budget (C3).
+    async fn egress_recovery_probe(&self, endpoint: &str) -> Option<Arc<EgressEntry>> {
+        let eg_pool = self.egress_pool.as_ref()?;
+        let entry = eg_pool.recovery_probe_candidate()?;
+        // C4: the candidate claim already atomically reserved the throttle
+        // slot; re-align the clock to the actual probe fire time.
+        eg_pool.record_probe_attempt(&entry.id);
+        // C6: dial through the SAME exit as a real request — direct entries
+        // use the base client, proxy entries the per-URL client.
+        let client = entry
+            .url
+            .as_deref()
+            .and_then(|u| self.egress_clients.as_ref().and_then(|cs| cs.get(u)))
+            .unwrap_or(&self.client);
+        let Some(base) = probe_base_from_endpoint(endpoint) else {
+            return None;
+        };
+        let probe_url = format!("{base}/models");
+        match tokio::time::timeout(EGRESS_PROBE_TIMEOUT, client.get(&probe_url).send()).await {
+            Ok(Ok(resp)) if resp.status().is_success() => {
+                // A2: a 200 with an empty / non-JSON body is a MALFORMED probe
+                // → treated as failure (cooldown kept, fail-fast).
+                match resp.text().await {
+                    Ok(body)
+                        if !body.trim().is_empty()
+                            && serde_json::from_str::<Value>(&body).is_ok() =>
+                    {
+                        eg_pool.record_probe_success(&entry.id);
+                        Some(entry)
+                    }
+                    _ => None,
+                }
+            }
+            // Non-200, timeout, or network error: keep cooling, fail-fast.
+            _ => None,
+        }
+    }
+
     /// Transparent pool-wait hook for full-pool exhaustion.
     ///
     /// Called when `select_key_excluding_with_limits` can no longer produce a
@@ -2019,24 +2098,62 @@ impl UpstreamExecutor {
                         // empty: all keys of this provider share the pool, so
                         // no other key can succeed. Fail fast with
                         // quota_exhausted (contract C6).
-                        last_error = format!("No available egress for {}: {}", key.id, e);
-                        last_kind = GatewayErrorKind::QuotaExhausted;
-                        attempt_kinds.push(last_kind.clone());
-                        self.emit_both(
-                            &key.id,
-                            attempt_idx,
-                            None,
-                            last_kind.clone(),
-                            last_error.clone(),
-                            None,
-                            attempt_start.elapsed(),
-                        );
-                        return Err(CoreError::AllRetriesFailed {
-                            retries: attempt,
-                            attempted_keys,
-                            last_error,
-                            kind: last_kind,
-                        });
+                        //
+                        // C1 (2026-10-22 egress-cooldown-selfheal): BEFORE
+                        // failing fast, try ONE recovery probe on the
+                        // shortest-cooling exit (GET {base}/models through the
+                        // SAME exit, 3s hard timeout). A 200 + valid JSON body
+                        // unlocks that exit (C2) and we re-select on the
+                        // normal success path; anything else (non-200 /
+                        // malformed body / timeout / network error) silently
+                        // keeps the cooldown and the fail-fast below (C3 —
+                        // probe attempts never count toward the upstream
+                        // budget, C9 — probe failures never record the key).
+                        let reselect = if self.egress_recovery_probe(url).await.is_some() {
+                            eg_pool.select_egress()
+                        } else {
+                            Err(e)
+                        };
+                        match reselect {
+                            Ok(entry) => {
+                                // `direct` exits dial on the base client;
+                                // proxy exits dial on the per-URL client.
+                                let client = entry
+                                    .url
+                                    .as_deref()
+                                    .and_then(|u| {
+                                        self.egress_clients
+                                            .as_ref()
+                                            .and_then(|cs| cs.get(u))
+                                    })
+                                    .unwrap_or(&self.client);
+                                egress_entry = Some(entry);
+                                client
+                                    .post(url)
+                                    .headers(headers)
+                                    .json(effective_body.as_ref())
+                            }
+                            Err(e) => {
+                                last_error = format!("No available egress for {}: {}", key.id, e);
+                                last_kind = GatewayErrorKind::QuotaExhausted;
+                                attempt_kinds.push(last_kind.clone());
+                                self.emit_both(
+                                    &key.id,
+                                    attempt_idx,
+                                    None,
+                                    last_kind.clone(),
+                                    last_error.clone(),
+                                    None,
+                                    attempt_start.elapsed(),
+                                );
+                                return Err(CoreError::AllRetriesFailed {
+                                    retries: attempt,
+                                    attempted_keys,
+                                    last_error,
+                                    kind: last_kind,
+                                });
+                            }
+                        }
                     }
                 },
             };
@@ -2741,24 +2858,62 @@ impl UpstreamExecutor {
                         // empty: all keys of this provider share the pool, so
                         // no other key can succeed. Fail fast with
                         // quota_exhausted (contract C6).
-                        last_error = format!("No available egress for {}: {}", key.id, e);
-                        last_kind = GatewayErrorKind::QuotaExhausted;
-                        attempt_kinds.push(last_kind.clone());
-                        self.emit_both(
-                            &key.id,
-                            attempt_idx,
-                            None,
-                            last_kind.clone(),
-                            last_error.clone(),
-                            None,
-                            attempt_start.elapsed(),
-                        );
-                        return Err(CoreError::AllRetriesFailed {
-                            retries: attempt,
-                            attempted_keys,
-                            last_error,
-                            kind: last_kind,
-                        });
+                        //
+                        // C1 (2026-10-22 egress-cooldown-selfheal): BEFORE
+                        // failing fast, try ONE recovery probe on the
+                        // shortest-cooling exit (GET {base}/models through the
+                        // SAME exit, 3s hard timeout). A 200 + valid JSON body
+                        // unlocks that exit (C2) and we re-select on the
+                        // normal success path; anything else (non-200 /
+                        // malformed body / timeout / network error) silently
+                        // keeps the cooldown and the fail-fast below (C3 —
+                        // probe attempts never count toward the upstream
+                        // budget, C9 — probe failures never record the key).
+                        let reselect = if self.egress_recovery_probe(url).await.is_some() {
+                            eg_pool.select_egress()
+                        } else {
+                            Err(e)
+                        };
+                        match reselect {
+                            Ok(entry) => {
+                                // `direct` exits dial on the base client;
+                                // proxy exits dial on the per-URL client.
+                                let client = entry
+                                    .url
+                                    .as_deref()
+                                    .and_then(|u| {
+                                        self.egress_clients
+                                            .as_ref()
+                                            .and_then(|cs| cs.get(u))
+                                    })
+                                    .unwrap_or(&self.client);
+                                egress_entry = Some(entry);
+                                client
+                                    .post(url)
+                                    .headers(headers)
+                                    .json(effective_body.as_ref())
+                            }
+                            Err(e) => {
+                                last_error = format!("No available egress for {}: {}", key.id, e);
+                                last_kind = GatewayErrorKind::QuotaExhausted;
+                                attempt_kinds.push(last_kind.clone());
+                                self.emit_both(
+                                    &key.id,
+                                    attempt_idx,
+                                    None,
+                                    last_kind.clone(),
+                                    last_error.clone(),
+                                    None,
+                                    attempt_start.elapsed(),
+                                );
+                                return Err(CoreError::AllRetriesFailed {
+                                    retries: attempt,
+                                    attempted_keys,
+                                    last_error,
+                                    kind: last_kind,
+                                });
+                            }
+                        }
                     }
                 },
             };
