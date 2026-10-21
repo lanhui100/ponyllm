@@ -410,10 +410,14 @@ impl EgressPool {
         }
     }
 
-    /// C1/C4/C5: recovery-probe candidate when the pool is fully cooling — the
-    /// exit with the SHORTEST remaining cooldown, or `None` when the pool is
-    /// empty, a healthy exit is already selectable, or the candidate is still
-    /// inside its [`PROBE_INTERVAL`] throttle window (no probe due).
+    /// C1/C4/C5 + F3: recovery-probe candidate when the pool is fully cooling.
+    /// Exits are considered in SHORTEST-remaining-cooldown order (C1); the
+    /// first one whose per-exit [`PROBE_INTERVAL`] throttle is free is
+    /// returned — a throttled shortest exit falls through to the second
+    /// shortest instead of starving the whole pool on one exit's throttle
+    /// (F3, L3-A review: per-exit throttle liveness). `None` when the pool is
+    /// empty, a healthy exit is already selectable, or EVERY cooling exit is
+    /// still inside its throttle window.
     ///
     /// The winning return atomically CLAIMS the per-exit throttle slot
     /// (lock-free CAS on the entry's `ProbeThrottle`): concurrent all-cooling
@@ -431,20 +435,26 @@ impl EgressPool {
         if entries.iter().any(|e| !e.is_cooling()) {
             return None;
         }
-        // C1: fully cooling — probe the exit with the SHORTEST remaining
-        // cooldown (earliest natural recovery, best first-unlock candidate).
-        let candidate = entries
-            .iter()
-            .min_by_key(|e| e.cooldown_remaining().map(|d| d.as_nanos()).unwrap_or(u128::MAX))?;
-        // C4: still inside the per-exit throttle window → no probe due.
-        if candidate.probe_throttle.remaining().is_some() {
-            return None;
+        // C1: fully cooling — shortest remaining cooldown first; F3: fall
+        // through a throttled exit to the next-shortest (per-exit throttle).
+        let mut cooling: Vec<&Arc<EgressEntry>> = entries.iter().collect();
+        cooling.sort_by_key(|e| {
+            e.cooldown_remaining()
+                .map(|d| d.as_nanos())
+                .unwrap_or(u128::MAX)
+        });
+        for candidate in cooling {
+            // C4: still inside this exit's throttle window → try the next.
+            if candidate.probe_throttle.remaining().is_some() {
+                continue;
+            }
+            // Atomic claim: exactly one concurrent caller wins this exit's
+            // slot (A3); a lost race falls through to the next exit.
+            if candidate.probe_throttle.claim() {
+                return Some(candidate.clone());
+            }
         }
-        // Atomic claim: exactly one concurrent caller wins the slot (A3).
-        candidate
-            .probe_throttle
-            .claim()
-            .then(|| candidate.clone())
+        None
     }
 
     /// C2: a recovery probe returned HTTP 200 — clear this exit's cooldown so
@@ -452,11 +462,11 @@ impl EgressPool {
     /// structured `egress_recovery_probe` event (provider/key/egress/status/
     /// cooldown_remaining_secs, contract NFR).
     ///
-    /// Field interpretation: `key` is the cooled exit identity (`egress_id`,
-    /// the only key-shaped identity the frozen pool API carries) and `egress`
-    /// is its dial shape (proxy URL or `"direct"`); `status` is frozen to
-    /// `"success"` and `cooldown_remaining_secs` to `0` (cooldown just
-    /// cleared).
+    /// Field interpretation: `key`/`egress` both carry the exit identity
+    /// (`egress_id`, the only key-shaped identity the frozen pool API carries)
+    /// — the raw proxy URL is deliberately NOT logged (F2, L3-B review: it may
+    /// embed userinfo credentials); `status` is frozen to `"success"` and
+    /// `cooldown_remaining_secs` to `0` (cooldown just cleared).
     pub fn record_probe_success(&self, egress_id: &str) {
         let Some(entry) = self.find(egress_id) else {
             return;
@@ -465,7 +475,7 @@ impl EgressPool {
         tracing::info!(
             provider = %self.provider,
             key = %egress_id,
-            egress = %entry.url.clone().unwrap_or_else(|| "direct".to_string()),
+            egress = %entry.id,
             status = "success",
             cooldown_remaining_secs = 0u64,
             "egress_recovery_probe"

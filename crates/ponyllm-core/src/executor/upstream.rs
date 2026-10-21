@@ -1383,39 +1383,61 @@ impl UpstreamExecutor {
     /// so the caller preserves fail-fast. The probe never records an upstream
     /// error on the key (C9) and never counts toward the attempt budget (C3).
     async fn egress_recovery_probe(&self, endpoint: &str) -> Option<Arc<EgressEntry>> {
-        let eg_pool = self.egress_pool.as_ref()?;
-        let entry = eg_pool.recovery_probe_candidate()?;
-        // C4: the candidate claim already atomically reserved the throttle
-        // slot; re-align the clock to the actual probe fire time.
-        eg_pool.record_probe_attempt(&entry.id);
-        // C6: dial through the SAME exit as a real request — direct entries
-        // use the base client, proxy entries the per-URL client.
-        let client = entry
-            .url
-            .as_deref()
-            .and_then(|u| self.egress_clients.as_ref().and_then(|cs| cs.get(u)))
-            .unwrap_or(&self.client);
+        // F4 (L3-A review): endpoint→base derivation happens BEFORE any slot
+        // claim — an endpoint that cannot reverse-derive a probe base must not
+        // consume the per-exit throttle slot (no white-burned throttle).
         let Some(base) = probe_base_from_endpoint(endpoint) else {
             return None;
         };
         let probe_url = format!("{base}/models");
-        match tokio::time::timeout(EGRESS_PROBE_TIMEOUT, client.get(&probe_url).send()).await {
-            Ok(Ok(resp)) if resp.status().is_success() => {
+        let eg_pool = self.egress_pool.as_ref()?;
+        let entry = eg_pool.recovery_probe_candidate()?;
+        // C6 (same-exit dial): direct entries use the base client; proxy
+        // entries MUST dial the per-URL client. F5 (L3-A review): a proxy
+        // entry whose URL has no `egress_clients` mapping is explicitly
+        // rejected — never silently degraded to the base client (that would
+        // probe a DIFFERENT exit IP and could wrongly unlock this exit).
+        let client = match entry.url.as_deref() {
+            None => &self.client,
+            Some(u) => match self.egress_clients.as_ref().and_then(|cs| cs.get(u)) {
+                Some(c) => c,
+                None => {
+                    tracing::warn!(
+                        provider = %self.pool.provider,
+                        egress = %entry.id,
+                        "egress recovery probe rejected: proxy exit has no per-URL client mapping"
+                    );
+                    return None;
+                }
+            },
+        };
+        // C4: the candidate claim already atomically reserved the throttle
+        // slot; re-align the clock to the actual probe fire time (the probe is
+        // now guaranteed to fire — base derived, same-exit client resolved).
+        eg_pool.record_probe_attempt(&entry.id);
+        // F1 (L3-A/L3-B review): the 3s hard timeout wraps the WHOLE probe —
+        // send, body read AND JSON parse — so a 200-heads-then-stalled body
+        // can never pin this call past EGRESS_PROBE_TIMEOUT.
+        let probe = async {
+            let resp = client.get(&probe_url).send().await.ok()?;
+            if !resp.status().is_success() {
+                // Non-200: cooldown kept, fail-fast.
+                return None;
+            }
+            let body = resp.text().await.ok()?;
+            if body.trim().is_empty() || serde_json::from_str::<Value>(&body).is_err() {
                 // A2: a 200 with an empty / non-JSON body is a MALFORMED probe
                 // → treated as failure (cooldown kept, fail-fast).
-                match resp.text().await {
-                    Ok(body)
-                        if !body.trim().is_empty()
-                            && serde_json::from_str::<Value>(&body).is_ok() =>
-                    {
-                        eg_pool.record_probe_success(&entry.id);
-                        Some(entry)
-                    }
-                    _ => None,
-                }
+                return None;
             }
-            // Non-200, timeout, or network error: keep cooling, fail-fast.
-            _ => None,
+            Some(())
+        };
+        if matches!(tokio::time::timeout(EGRESS_PROBE_TIMEOUT, probe).await, Ok(Some(()))) {
+            eg_pool.record_probe_success(&entry.id);
+            Some(entry)
+        } else {
+            // Timeout, network error, non-200, or malformed body: keep cooling.
+            None
         }
     }
 
