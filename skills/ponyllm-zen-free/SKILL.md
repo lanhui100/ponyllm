@@ -33,7 +33,7 @@ description: |
 开工前按序只读（本 skill 每条规则的出处，不接受「上游文档说」式口头依据）：
 
 - `crates/ponyllm-core/src/executor/upstream.rs`
-  - `new_upstream_session_id()`（L192）：`"ses_" + uuid4().simple()[:26]`
+  - `new_upstream_session_id()`（L202）：`"ses_" + 12 位小写 hex + 14 位 base62`（`^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$`）
   - `is_opencode_zen_target()`（L779）：provider 以 `opencode` 开头 ⇒ 命中 zen 作用域
   - `zen_free_tier_forces_upstream_stream()`（L794）：`*-free` ⇒ 强制上游 stream
   - `OPENCODE_ZEN_TOOL_NAMES`（L808）+ `zen_stub_tool()`（L887）：12 个 opencode 工具名与两种线形
@@ -91,7 +91,7 @@ python3 <Z> probe step-5-preview-free --protocol auto --via auto --json
 **门禁三条件（缺一即 `403 FreeTierError`，实测见 gate-probe 笔记）：**
 
 1. `user-agent` 以 `opencode/` 开头且版本 ≥ 1.18.0（脚本固定 `opencode/1.18.31 (Linux; x64)`；低版本 → `426 UpgradeRequired`）；
-2. 头 `x-opencode-session` 形如 `ses_` + **恰好 26 字符**（长度本身是硬门禁，`ses_`+64 hex 会 403；无需注册会话）；
+2. 头 `x-opencode-session` 形如 `ses_` + **12 位小写 hex + 14 位 base62**（总长 30；`ses_`+64 hex、以及前 12 位含非 hex 字符的 26 字符串都会 403；无需注册会话）；
 3. body 同时含 `stream: true` **且** `tools` 带**被识别的 opencode 工具名**——按名字判定不按数量，
    最小可行集是 `bash` + `read`，**单名（只发 `read`）实测仍 403**。schema 无关，stub 空 parameters 即可。
 
@@ -208,7 +208,8 @@ curl -s -H "Authorization: Bearer <KEY>" -H 'Content-Type: application/json' \
   `200 / finish=stop / text="zen-ok"` → 可接入。
 - 正例：`muse-spark-1.3-contributor-free` 直连 403 `not available in your country`（`cf-ray`、`cf-placement: remote-ORD`）
   → `--via auto` 自动切 `http://127.0.0.1:8899` → 200（`muse-ok`）⇒ **该类模型必须走代理，不是模型不可用**。
-- 正例：会话头写成 `ses_`+64 hex → `403 FreeTierError`；改成 `ses_`+26 字符 → 200。**长度是硬门禁，不是格式洁癖。**
+- 正例：会话头写成 `ses_`+64 hex → `403 FreeTierError`；改成 `ses_`+12 hex+14 base62 → 200。
+- 反例：26 位全 base62（前 12 位含非 hex 字符）→ 仍 `403 FreeTierError`（2026-10-21 实证，见 `.agents/notes/implemented/bug-fix/2026-10-21-zen-session-hex12-prefix-fix.md`）。**前缀形态是硬门禁，不是格式洁癖。**
 - 反例：只发 `read` 一条工具 → `403 FreeTierError`（门禁按被识别的工具名判定，**单名不够**），
   发 `bash` + `read` 或全量 12 名才过。
 - 反例：`stream` 置 `false` → `403 FreeTierError`（强制 stream 是 `zen_free_tier_forces_upstream_stream` 的硬要求）。

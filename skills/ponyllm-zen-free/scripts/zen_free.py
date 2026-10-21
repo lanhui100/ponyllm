@@ -5,7 +5,7 @@
 真相源（契约 .dev-team/contracts/zen-free-skill-contract.md §2，注释里的行号是代码依据，不得凭记忆改）：
 
   crates/ponyllm-core/src/executor/upstream.rs
-    :192  new_upstream_session_id()            → "ses_" + uuid4().simple()[:26]
+    :214  new_upstream_session_id()            → "ses_" + 12 位小写 hex + 14 位 base62
     :779  is_opencode_zen_target()             → provider 前缀 opencode ⇒ 头注入作用域
     :794  zen_free_tier_forces_upstream_stream()→ id 以 -free 结尾 ⇒ 强制上游 stream
     :808  OPENCODE_ZEN_TOOL_NAMES              → 12 个 opencode 工具名
@@ -46,8 +46,9 @@ LOCAL_PROXY = "http://127.0.0.1:8899"  # §5：本机代理，仅用于 geo_bloc
 # upstream.rs:1672-1690 硬编码的 UA；zen 门禁要求以 opencode/ 开头且版本 >= 1.18.0
 OPENCODE_UA = "opencode/1.18.31 (Linux; x64)"
 
-# upstream.rs:192 new_upstream_session_id() = "ses_" + uuid4().simple()[:26]
-# 长度 26 是 zen 门禁硬条件（ses_ + 64 hex 会 403 FreeTierError）
+# upstream.rs:214 new_upstream_session_id() = "ses_" + 12 位小写 hex + 14 位 base62
+# 门禁形状是 ^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$：26 字符总长之外，前 12 位必须全为小写 hex
+# （ses_ + 64 hex、以及前 12 位含非 hex 字符的 26 字符串都会 403 FreeTierError）
 SESSION_ID_LEN = 26
 
 # upstream.rs:808 OPENCODE_ZEN_TOOL_NAMES —— 默认全量发送（安全超集）。
@@ -369,13 +370,19 @@ def _http_call(url: str, body, headers: dict, use_proxy: bool, timeout: int, met
 
 # --------------------------------------------------------------------------
 # zen 免费层门禁（契约 §4.1 + .dev-team/notes/zen-free-gate-probe.md）
-#   三个正交条件：opencode/ 开头的 UA（>=1.18.0）、x-opencode-session = ses_+26 字符、
+#   三个正交条件：opencode/ 开头的 UA（>=1.18.0）、x-opencode-session = ses_+12 hex+14 base62、
 #   body 同时含 stream:true 与被识别的 opencode 工具名。缺一即 403 FreeTierError。
 # --------------------------------------------------------------------------
 
 
 def new_session_id() -> str:
-    """ses_ + 恰好 26 字符（对齐 upstream.rs:192；长度本身是门禁硬条件）。"""
+    """ses_ + 12 位小写 hex + 14 位 base62（对齐 upstream.rs:214）。
+
+    门禁形状是 ^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$：总长必须恰好 26，且前 12 位
+    只能是 0-9a-f（实测同一 payload/IP/key 下 12 hex + 14 base62 → 200，
+    而前 12 位含非 hex 字符的 26 字符串 → 403 FreeTierError）。
+    token_hex 生成 26 位全 hex，前 12 位天然满足 hex 前缀要求。
+    """
     return "ses_" + secrets.token_hex(13)[:SESSION_ID_LEN]
 
 
@@ -386,7 +393,7 @@ def probe_headers(key: str, session: str) -> dict:
         "content-type": "application/json",
         # 门禁条件 1：以 opencode/ 开头且 >= 1.18.0；低版本 → 426 UpgradeRequired
         "user-agent": OPENCODE_UA,
-        # 门禁条件 2：ses_ + 26 字符；无需服务端注册
+        # 门禁条件 2：ses_ + 12 位小写 hex + 14 位 base62（共 26）；无需服务端注册
         "x-opencode-session": session,
         # 以下对齐 upstream.rs:1672-1690，探活非必需但与真实网关 wire 一致
         "x-session-affinity": session,

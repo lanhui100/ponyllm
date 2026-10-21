@@ -10,7 +10,8 @@
 //!
 //! C2 requires, for `opencode_zen == true`:
 //!   x-opencode-session / x-opencode-session-id / x-session-affinity /
-//!   x-session-id / X-Session-Id  == session (`^ses_[A-Za-z0-9]{26}$`),
+//!   x-session-id / X-Session-Id  == session
+//!                                  (`^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$`),
 //!   x-opencode-project      == `^prj_[0-9a-f]{32}$`   (process-stable),
 //!   x-opencode-request-id   == `^req_[0-9a-f]{32}$`   (fresh per attempt),
 //!   User-Agent              == `opencode/1.18.35 (Linux; x64)`.
@@ -77,12 +78,20 @@ fn zen_payload() -> Value {
     })
 }
 
-/// Contract C1/C2 session shape: `^ses_[A-Za-z0-9]{26}$`.
+/// Contract C1/C2 session shape: `^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$` — 12
+/// lowercase-hex chars (the upstream free-tier gate's load-bearing prefix)
+/// followed by 14 base62 chars. Kept in lockstep with
+/// `ponyllm_core::executor::is_valid_zen_session_format`.
 fn is_contract_session(s: &str) -> bool {
-    match s.strip_prefix("ses_") {
-        Some(rest) => rest.len() == 26 && rest.chars().all(|c| c.is_ascii_alphanumeric()),
-        None => false,
-    }
+    let Some(rest) = s.strip_prefix("ses_") else {
+        return false;
+    };
+    let bytes = rest.as_bytes();
+    bytes.len() == 26
+        && bytes[..12]
+            .iter()
+            .all(|b| b.is_ascii_digit() || matches!(b, b'a'..=b'f'))
+        && bytes[12..].iter().all(|b| b.is_ascii_alphanumeric())
 }
 
 /// `prefix` + exactly 32 lowercase hex chars (`prj_` / `req_`).
@@ -114,7 +123,8 @@ fn assert_fingerprint_headers(headers: &HeaderMap, label: &str) {
     });
     assert!(
         is_contract_session(&session),
-        "CONTRACT C1/C2: {label}: session must match ^ses_[A-Za-z0-9]{{26}}$, got {session:?}"
+        "CONTRACT C1/C2: {label}: session must match \
+         ^ses_[0-9a-f]{{12}}[0-9A-Za-z]{{14}}$, got {session:?}"
     );
 
     // NOTE: HTTP header names are case-insensitive and hyper lowercases them on

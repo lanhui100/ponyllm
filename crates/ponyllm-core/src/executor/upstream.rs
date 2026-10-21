@@ -204,18 +204,45 @@ fn zen_project_id() -> &'static str {
 /// stability still requires the downstream to send one of
 /// [`SESSION_HEADER_PRIORITY`].
 ///
-/// For OpenCode Zen targets the upstream strict validator requires
-/// `ses_` + exactly 26 alphanumeric chars (30 chars total) — `^ses_[A-Za-z0-9]{26}$`
-/// (CONTRACT-v1 C1 v1.1; empirically verified 2026-10-20: 26-char → HTTP 200,
-/// 64-hex → HTTP 403). Retry attempts within one request keep the same session id.
+/// The OpenCode Zen gate does **not** accept an arbitrary 26-char alphanumeric
+/// suffix: it requires `^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$` — the first 12 chars
+/// must be lowercase hex (the real client puts a millisecond clock plus a
+/// counter there, as hex); only the trailing 14 may be base62. Same
+/// payload/IP/key receipts: 12 hex + 14 base62 → HTTP 200; 12 hex + 14 `A` →
+/// HTTP 200; 26 base62 whose leading 12 are not all hex → HTTP 403
+/// FreeTierError. Retry attempts within one request keep the same session id.
 pub fn new_upstream_session_id() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
     const BASE62: &[u8] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+    const HEX_PREFIX_LEN: usize = 12;
+    const SUFFIX_LEN: usize = 14;
+    // Distinguishes ids minted inside the same millisecond: the ms clock has
+    // 42 significant bits, so shifting it left by 6 stays inside the 48-bit
+    // (12 hex) prefix budget and leaves 6 bits of sequence.
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
     let mut s = String::with_capacity(30);
     s.push_str("ses_");
-    for _ in 0..26 {
-        let u = uuid::Uuid::new_v4();
-        let b = u.as_bytes();
-        s.push(BASE62[(b[0] as usize) % BASE62.len()] as char);
+
+    // 12 lowercase hex: low 48 bits of the millisecond clock shifted left by 6
+    // plus a per-process sequence — mirrors the real client's `hex(ms) +
+    // counter` prefix instead of uniformly random base62 (which lands non-hex
+    // chars in the first 12 and is rejected with 403).
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let seq = SEQUENCE.fetch_add(1, Ordering::Relaxed) & 0x3f;
+    let prefix = ((now_ms << 6) | seq) & 0x0000_FFFF_FFFF_FFFF;
+    let prefix = format!("{prefix:0width$x}", width = HEX_PREFIX_LEN);
+    debug_assert_eq!(prefix.len(), HEX_PREFIX_LEN);
+    s.push_str(&prefix);
+
+    // 14 base62 chars, one UUID byte per char.
+    let suffix = uuid::Uuid::new_v4();
+    for byte in suffix.as_bytes().iter().take(SUFFIX_LEN) {
+        s.push(BASE62[(*byte as usize) % BASE62.len()] as char);
     }
     s
 }
@@ -228,22 +255,28 @@ fn clean_session_value(value: &HeaderValue) -> Option<String> {
     Some(trimmed.to_string())
 }
 
-/// Validate whether a session string matches the OpenCode upstream requirement
-/// (CONTRACT-v1 C1 v1.1): `ses_` + exactly 26 alphanumeric chars, i.e.
-/// `^ses_[A-Za-z0-9]{26}$` (30 chars total). Everything else — the 64-hex
-/// shape, upper/lowercase mixing beyond the charset, `ses-` separators, UUIDs,
-/// blank/whitespace values — is rejected so the caller falls back to a freshly
+/// Validate whether a session string matches the OpenCode upstream requirement:
+/// `^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$` (30 chars total) — a 12-char lowercase
+/// hex prefix followed by 14 alphanumeric (base62) chars. The prefix is
+/// load-bearing: a 26-char suffix whose first 12 chars are not all lowercase
+/// hex is rejected upstream with HTTP 403 FreeTierError even when every char is
+/// alphanumeric. Everything else — the 64-hex shape, uppercase or non-hex in
+/// the prefix, `ses-` separators, UUIDs, blank/whitespace values — is rejected
+/// so `clean_session_value` drops it and the caller falls back to a freshly
 /// generated id.
 pub fn is_valid_zen_session_format(s: &str) -> bool {
-    match s.strip_prefix("ses_") {
-        Some(rest) => {
-            rest.len() == 26
-                && rest
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric())
-        }
-        None => false,
+    let rest = match s.strip_prefix("ses_") {
+        Some(rest) => rest.as_bytes(),
+        None => return false,
+    };
+    if rest.len() != 26 {
+        return false;
     }
+    let (prefix, suffix) = rest.split_at(12);
+    prefix
+        .iter()
+        .all(|b| b.is_ascii_digit() || matches!(b, b'a'..=b'f'))
+        && suffix.iter().all(|b| b.is_ascii_alphanumeric())
 }
 
 /// Transient-retry backoff for **singleton** pools only: when the sole key
@@ -3761,7 +3794,7 @@ mod session_header_tests {
 
     #[test]
     fn prefers_opencode_session_over_aliases() {
-        // Must conform to ^ses_[A-Za-z0-9]{26}$ to be accepted upstream (C1 v1.1)
+        // Must conform to ^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$ (12 hex + 14 base62).
         let valid_ses = "ses_0123456789abcdef01234567AB";
         let valid_aff = "ses_0123456789abcdef01234567CD";
         let headers = downstream(&[
@@ -3786,10 +3819,10 @@ mod session_header_tests {
         let empty = HeaderMap::new();
         let generated = resolve_upstream_session(&empty);
         assert!(generated.starts_with("ses_"), "got {}", generated);
-        // Generated fallbacks must satisfy the C1 contract shape too.
+        // Generated fallbacks must satisfy the session contract shape too.
         assert!(
             is_valid_zen_session_format(&generated),
-            "generated id must match ^ses_[0-9a-f]{{64}}$, got {}",
+            "generated id must match ^ses_[0-9a-f]{{12}}[0-9A-Za-z]{{14}}$, got {}",
             generated
         );
         let blank = downstream(&[("x-opencode-session", "   ")]);
@@ -3804,13 +3837,44 @@ mod session_header_tests {
     fn legacy_long_session_is_rejected_and_replaced() {
         // The v1 68-char shape (`ses_` + 64 lowercase hex) was a misreading of
         // the binary; empirically it is rejected by the upstream gate (403).
-        // Downstream values in that shape must be discarded (CONTRACT-v1 C1 v1.1).
+        // Downstream values in that shape must be discarded.
         let legacy = "ses_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
         assert!(!is_valid_zen_session_format(legacy));
         let headers = downstream(&[("x-opencode-session", legacy)]);
         let resolved = resolve_upstream_session(&headers);
         assert_ne!(resolved, legacy);
         assert!(is_valid_zen_session_format(&resolved), "got {}", resolved);
+    }
+
+    #[test]
+    fn non_hex_prefix_session_is_rejected_and_replaced() {
+        // 26 alphanumeric chars is NOT enough: the gate requires 12 lowercase
+        // hex first. Both shapes below were observed returning HTTP 403
+        // FreeTierError while `12 hex + 14 base62` returned 200 (same payload).
+        let prefixed_ok = "ses_4c09de94431dAAAAAAAAAAAAAA";
+        assert!(is_valid_zen_session_format(prefixed_ok));
+        for rejected in [
+            "ses_GQs9Ss1p7NsR7NoY1p7hRVA5sV",
+            "ses_f5UiF7wZNEXb7qX7ffel4GaRb2",
+            "ses_PziUUHVrMVc4TPCkQnvULUGYLk",
+        ] {
+            assert!(
+                !is_valid_zen_session_format(rejected),
+                "26-char all-base62 session with a non-hex prefix must be rejected, got {}",
+                rejected
+            );
+            let headers = downstream(&[("x-opencode-session", rejected)]);
+            let resolved = resolve_upstream_session(&headers);
+            assert_ne!(
+                resolved, rejected,
+                "non-hex-prefix downstream session must be discarded and regenerated"
+            );
+            assert!(
+                is_valid_zen_session_format(&resolved),
+                "regenerated session must satisfy ^ses_[0-9a-f]{{12}}[0-9A-Za-z]{{14}}$, got {}",
+                resolved
+            );
+        }
     }
 
     #[test]
@@ -3847,7 +3911,7 @@ mod session_header_tests {
     fn build_headers_carries_session_and_own_ua_for_zen() {
         let pool = Arc::new(KeyPool::new("test", RoutingStrategy::RoundRobin));
         let key = ApiKeyEntry::new("k1", "sk-test", 1, 10);
-        // CONTRACT-v1 C1 shape: ses_ + exactly 26 alnum chars (30 total).
+        // Session shape: ses_ + 12 lowercase hex + 14 base62 (30 total).
         let valid_ses = "ses_0123456789abcdef01234567IJ";
         let executor = UpstreamExecutor::new(pool, 1)
             .with_downstream_headers(&downstream(&[("x-opencode-session", valid_ses)]))
@@ -3922,7 +3986,7 @@ mod session_header_tests {
         let session = headers.get("x-opencode-session").unwrap().to_str().unwrap();
         assert!(
             is_valid_zen_session_format(session),
-            "generated fallback session must match ^ses_[0-9a-f]{{64}}$, got {}",
+            "generated fallback session must match ^ses_[0-9a-f]{{12}}[0-9A-Za-z]{{14}}$, got {}",
             session
         );
         assert!(session.starts_with("ses_"), "got {}", session);

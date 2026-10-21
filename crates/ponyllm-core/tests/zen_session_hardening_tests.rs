@@ -1,21 +1,27 @@
-//! OpenCode Zen session hardening acceptance tests (CONTRACT-v1 C1 v1.1).
+//! OpenCode Zen session hardening acceptance tests (CONTRACT-v1 C1, hex12 form).
 //!
 //! Frozen contract: `/home/dm/ponyllm/.dev-team/zen-rc/CONTRACT-v1.md` (C1 +
-//! its evolution note). The rule is now (v1.1, empirically verified on a healthy
-//! tencent exit on 2026-10-20):
+//! its evolution note). The rule is now (empirically verified 2026-10-21:
+//! `ses_5e67a59ef81ehxVk8zG0o0Nd9h` → HTTP 200,
+//! `ses_GQs9Ss1p7NsR7NoY1p7hRVA5sV` → HTTP 403 FreeTierError):
 //!
-//! * A **legal** upstream session is `^ses_[A-Za-z0-9]{26}$` — `ses_` plus exactly
-//!   26 alphanumeric characters, 30 characters in total.
+//! * A **legal** upstream session is `^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$` — `ses_`
+//!   plus 12 lowercase-hex chars plus 14 alphanumeric (base62) chars, 30
+//!   characters in total. The hex prefix is load-bearing: an all-alphanumeric
+//!   26-char suffix whose first 12 chars are not lowercase hex is rejected
+//!   upstream with HTTP 403.
 //! * The **64-lowercase-hex shape** (`ses_` + 64 hex, the v1 misreading) is
 //!   NON-STANDARD: upstream returns HTTP 403 for it, so it must be
 //!   cleaned/discarded and replaced by a freshly generated compliant id.
 //!
 //! `resolve_upstream_session` therefore:
-//! 1. preserves a downstream contract-valid `ses_<26 alphanumeric>` session
-//!    (including via the alias headers `x-session-affinity` / `x-session-id`), and
-//! 2. discards every other shape (64-hex suffix, `ses-...`, `session-...`,
-//!    special characters, whitespace, UUID, wrong length) and falls back to a
-//!    generated id that satisfies the same contract shape.
+//! 1. preserves a downstream contract-valid
+//!    `ses_<12 hex><14 alphanumeric>` session (including via the alias headers
+//!    `x-session-affinity` / `x-session-id`), and
+//! 2. discards every other shape (64-hex suffix, non-hex 12-char prefix,
+//!    `ses-...`, `session-...`, special characters, whitespace, UUID, wrong
+//!    length) and falls back to a generated id that satisfies the same contract
+//!    shape.
 
 use axum::http::{HeaderMap, HeaderValue};
 use ponyllm_core::executor::resolve_upstream_session;
@@ -32,22 +38,32 @@ fn headers_from(pairs: &[(&str, &str)]) -> HeaderMap {
     map
 }
 
-/// CONTRACT-v1 C1 v1.1: legal session shape is `^ses_[A-Za-z0-9]{26}$` (30 chars).
+/// CONTRACT-v1 C1 (hex12 form): legal session shape is
+/// `^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$` (30 chars) — first 12 payload chars are
+/// lowercase hex, the trailing 14 are base62. Mirrors the upstream-side check in
+/// `ponyllm_core::executor::is_valid_zen_session_format` so this file can never
+/// drift looser than the implementation again.
 fn is_valid_zen_session(s: &str) -> bool {
-    match s.strip_prefix("ses_") {
-        Some(rest) => rest.len() == 26 && rest.chars().all(|c| c.is_ascii_alphanumeric()),
-        None => false,
-    }
+    let Some(rest) = s.strip_prefix("ses_") else {
+        return false;
+    };
+    let bytes = rest.as_bytes();
+    bytes.len() == 26
+        && bytes[..12]
+            .iter()
+            .all(|b| b.is_ascii_digit() || matches!(b, b'a'..=b'f'))
+        && bytes[12..].iter().all(|b| b.is_ascii_alphanumeric())
 }
 
-/// A literal contract-valid session id: `ses_` + 26 alphanumeric chars.
+/// A literal contract-valid session id: `ses_` + 12 lowercase hex + 14 base62
+/// (`0123456789ab` | `cdefABCDEF0123`).
 fn contract_session() -> String {
     format!("ses_{}", "0123456789abcdefABCDEF0123")
 }
 
 #[test]
 fn test_resolve_upstream_session_preserves_valid_zen_session() {
-    // `ses_` (4) + 26 alphanumeric = 30 chars.
+    // `ses_` (4) + 12 lowercase hex + 14 alphanumeric = 30 chars.
     let valid_ses = contract_session();
     assert_eq!(valid_ses.len(), 30, "fixture must be 30 chars");
     assert!(is_valid_zen_session(&valid_ses));
@@ -56,7 +72,7 @@ fn test_resolve_upstream_session_preserves_valid_zen_session() {
     let resolved = resolve_upstream_session(&headers);
     assert_eq!(
         resolved, valid_ses,
-        "CONTRACT C1: a contract-valid ses_<26 alnum> session must be preserved as-is"
+        "CONTRACT C1: a contract-valid ses_<12 hex><14 alnum> session must be preserved as-is"
     );
 
     // Also verify when passed via alias headers (affinity / session id).
@@ -101,12 +117,16 @@ fn test_resolve_upstream_session_rejects_and_falls_back_on_malformed_sessions() 
             "ses_short123".to_string(),
         ),
         (
+            // 12 hex + 14 specials = 26 payload chars, so the value is rejected
+            // for its charset, not for its length.
             "`ses_` + 26 chars containing special characters",
-            "ses_0123456789!@#$%^&*()-+=~".to_string(),
+            "ses_0123456789ab!@#$%^&*()-+=~".to_string(),
         ),
         (
-            "`ses_` + suffix containing whitespace",
-            "ses_0123456789 abcdefABCDEF01".to_string(),
+            // 12 hex + 1 space + 13 alnum = 26 payload chars: rejected because of
+            // the whitespace, not because of a short length.
+            "`ses_` + 26 chars containing whitespace",
+            "ses_0123456789ab abcdefABCDEF0".to_string(),
         ),
         (
             "`ses-` hyphen prefix",
@@ -133,7 +153,7 @@ fn test_resolve_upstream_session_rejects_and_falls_back_on_malformed_sessions() 
         assert!(
             is_valid_zen_session(&resolved),
             "CONTRACT C1: fallback for non-standard session ({label}) must be a freshly generated \
-             ^ses_[A-Za-z0-9]{{26}}$ id, got {resolved:?}"
+             ^ses_[0-9a-f]{{12}}[0-9A-Za-z]{{14}}$ id, got {resolved:?}"
         );
     }
 }

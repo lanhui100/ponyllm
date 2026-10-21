@@ -38,3 +38,11 @@ HANDOFF-OPENCODE-ZEN.md 交接的 opencode-zen 免费模型门禁治理存在两
 - DSH 侧：zen 门禁文本不再显示「API 密钥无效」，UI 显示原文；真实鉴权 401/403（带鉴权上下文）仍正确显示。
 - 已知边界（契约 A-M1-3 固化）：`egress_pool=None` 部署形态下 zen 403 仍走 legacy 跨 key 轮询——live 恒单出口，无池非生产形态，未来出现时另行决策。
 - 已知边界（L3-B finding 2，未入波）：全角 Unicode 变体（如 `Ｆｒｅｅｔｉｅｒｅｒｒｏｒ`）两侧（ponyllm `to_ascii_lowercase` / JS 无 u 标志）均不折叠折叠，DSH 凭 `403` 数字落 AUTH——非本波范围，记录待后续 Unicode 规范化专项。
+## 补记（2026-10-21）：FreeTierError 归因更正
+
+本笔记 v1.3/v1.4 把 zen `FreeTierError` 403 归因为「客户端指纹级拒绝（TLS 层）」，该归因**作废**。
+真因是网关自己生成的 session id 形态不合门禁：67e708e 把 `ses_` + 26 hex 改成 26 位全 base62，
+而上游要求 `^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$`（前 12 位必须小写 hex）。同一 payload 交给旧/新二进制
+得到 200/403、请求体逐字节相同，TLS 与 HTTP 层由同一个本地 relay 承担 ⇒ 指纹假设不成立。
+详见 `.agents/notes/implemented/bug-fix/2026-10-21-zen-session-hex12-prefix-fix.md`。
+v1.4 的「不冷却 key/出口」行为在语义上仍合理（该 403 不属额度信号），保留不变。
