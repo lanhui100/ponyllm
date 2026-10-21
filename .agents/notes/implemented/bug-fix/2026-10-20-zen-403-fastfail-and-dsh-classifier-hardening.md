@@ -15,11 +15,12 @@ HANDOFF-OPENCODE-ZEN.md 交接的 opencode-zen 免费模型门禁治理存在两
 
 契约 `.dev-team/contracts/2026-10-20-zen-403-hardening.md`（v1.2 冻结）落地三条修复：
 
-1. **M1（ponyllm-core upstream.rs，JSON+streaming 双孪生路径同改）**：zen `FreeTierError` 403 且走 egress pool 时 → 冷却当前出口（`record_quota_exhausted`，retry_after 或 900s 默认）+ **立即** `AllRetriesFailed{retries:1}`，不再跨 key 轮询烧 key。非 zen 403 / 无池 403 行为不变（契约 A-M1-3 固化）。
+1. **M1（ponyllm-core upstream.rs，JSON+streaming 双孪生路径同改）**：zen `FreeTierError` 403 且走 egress pool 时 → **不冷却出口、不冷却 key**，仅 warn + **立即** `AllRetriesFailed{retries:1}`（不跨 key 轮询）；非 zen 403 / 无池 403 的既有 `record_error` 记账 fall-through 保留（契约 v1.4 §10，A-M1-3/4 不变）。
+   > **v1.3/v1.4 修正（2026-10-21，撤回 v1.2 的「冷却出口」）**：实测证明该 403 是**客户端指纹级**拒绝而非出口 IP / key 级——同一 dev egress、同一时刻，官方 CLI（Bun）200 而 rustls 探针 403；即使把 TLS ClientHello 逐字节复刻（BoringSSL + PQ X25519MLKEM768 + 17 ciphers + 扩展顺序全同）仍 403。原「冷却出口 + 冷却 key」会把 3 出口 / 6 key 依次冷却 900s，导致上游窗口恢复后网关仍自锁 15 分钟（生产 0/18 全 429 的放大原因）。v1.3 删出口冷却，v1.4 删 key 冷却（key 池保持健康、round_robin 自然轮换、每请求仅 1 次上游调用）。M2（429 FreeUsageLimitError 的出口冷却 + 快返）不变——429 才是额度/IP 级信号。
 2. **M2（upstream.rs 双孪生路径）**：zen 429 fast-fail 条件从 `egress_pool.is_none()` 扩展为 `is_none() || len()<=1`（单出口共享 IP 桶，跨 key 轮询无意义）。
 3. **M3（deepseek-harness llm-pi-ai stream.ts）**：`classifyPiAiError` 的 AUTH 分支改抑制形态——`GATE_WORD_RE`（六触发词：FreeTierError / free tier can only be used / abusive traffic / Local key pool exhausted / All candidate upstream providers exhausted / Endpoint is unavailable）命中时仅抑制 AUTH，消息继续走既有 quota/429/5xx/timeout/transport 管线（`429+Endpoint is unavailable`→RATE_LIMIT、`503`→SERVER 等回归锚保留）；`AUTH_RE = AUTH_PHRASE_RE（invalid api key / auth(?:entication)? failed / unauthorized）|| \b401\b（裸 401 无条件 AUTH，adapter.spec.ts:379 锚点）|| (\b403\b && 鉴权上下文 token)`。裸 403 无鉴权上下文不再判 AUTH（本波修复本体）。
 
-契约演进：v1（M1/M2/M3 初稿）→ v1.1（L3-A/B 双审 FAIL：门禁词分支前置阻断 429/5xx 重试语义、裸词 authentication 过宽，改为抑制形态+短语级）→ v1.2（exec-dsh 全包回归发现 v1.1 误伤裸 401，拆分 A-M3-4a/4b + 新增 A-M3-8 锚定 adapter.spec.ts:379）。
+契约演进：v1（M1/M2/M3 初稿）→ v1.1（L3-A/B 双审 FAIL：门禁词分支前置阻断 429/5xx 重试语义、裸词 authentication 过宽，改为抑制形态+短语级）→ v1.2（exec-dsh 全包回归发现 v1.1 误伤裸 401，拆分 A-M3-4a/4b + 新增 A-M3-8 锚定 adapter.spec.ts:379）→ v1.3（M1 删出口冷却：403 归因为客户端指纹级）→ v1.4（M1 再删 key 冷却：同源误归因，L3 审查残余风险）。
 
 验收：ponyllm `zen_403_fastfail_contract_tests.rs` 17 用例全绿（M1/M2 双线 + L2-AT 变体）；DSH `stream-classify.spec.ts` 17 用例全绿 + llm-pi-ai 全包 431/431 + tsc exit 0；cargo test -p ponyllm-core 全量 exit 0（含 C7 6 例、zen_session_hardening、zen_fingerprint 回归）。
 

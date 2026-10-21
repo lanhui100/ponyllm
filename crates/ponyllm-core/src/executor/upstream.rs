@@ -2302,54 +2302,56 @@ impl UpstreamExecutor {
                     let (kind, pool_err) = classify_forbidden(&err_body, retry_after);
                     last_kind = kind;
                     attempt_kinds.push(last_kind.clone());
-                    self.pool.record_error(&key.id, pool_err);
-                    // M1 (contract 2026-10-20-zen-403-hardening): an OpenCode
-                    // zen free-tier gate 403 (`FreeTierError`) is per-exit-IP,
-                    // not per-key. With an egress pool, cool ONLY the exit
-                    // that carried this attempt and fast-fail immediately —
-                    // polling the next key would smear 900s cooldowns across
-                    // the whole account behind one IP bucket. Other 403s keep
-                    // the legacy path untouched (no exit cooldown, no fast-fail).
+                    // M1 (contract 2026-10-20-zen-403-hardening, v1.4 2026-10-21): an
+                    // OpenCode zen free-tier gate 403 (`FreeTierError`) is a
+                    // CLIENT-FINGERPRINT-level rejection (TLS/HTTP client
+                    // fingerprint), not an exit-IP or key failure — same
+                    // egress, same instant: official CLI (Bun) 200 vs rustls
+                    // probe 403 even with a byte-identical ClientHello. With
+                    // an egress pool, fast-fail immediately WITHOUT cooling
+                    // the exit or the key (cooling would lock every exit/key
+                    // 900s and keep the gateway dead after the upstream window
+                    // recovers). Other 403s keep the legacy path untouched.
                     if matches!(last_kind, GatewayErrorKind::QuotaExhausted)
                         && is_zen_free_tier_gate_body(&err_body)
+                        && self.egress_pool.is_some()
                     {
-                        if let (Some(eg_pool), Some(eg_entry)) = (&self.egress_pool, &egress_entry)
-                        {
-                            let body_reset = parse_reset_duration(&err_body);
-                            eg_pool
-                                .record_quota_exhausted(&eg_entry.id, body_reset.or(retry_after));
-                            tracing::warn!(
-                                key_id = %key.id,
-                                provider = %self.observer_provider.as_deref().unwrap_or("unknown"),
-                                egress_pool = true,
-                                "zen free-tier gate rejection on egress: cooling exit and fast-failing without cross-key retry"
-                            );
-                            let aggregated_error = format!(
-                                "{}{}",
-                                summarize_attempt_failures(&attempt_kinds),
-                                if last_error.is_empty() {
-                                    String::new()
-                                } else {
-                                    format!(": {}", last_error)
-                                }
-                            );
-                            self.emit_both(
-                                &key.id,
-                                attempt_idx,
-                                Some(status_code),
-                                last_kind.clone(),
-                                last_error.clone(),
-                                Some(err_body),
-                                attempt_start.elapsed(),
-                            );
-                            return Err(CoreError::AllRetriesFailed {
-                                retries: attempt + 1,
-                                attempted_keys,
-                                last_error: aggregated_error,
-                                kind: last_kind,
-                            });
-                        }
+                        tracing::warn!(
+                            key_id = %key.id,
+                            provider = %self.observer_provider.as_deref().unwrap_or("unknown"),
+                            egress_pool = true,
+                            "zen free-tier gate rejection (client fingerprint): fast-failing without cross-key retry, key cooldown, or exit cooldown"
+                        );
+                        let aggregated_error = format!(
+                            "{}{}",
+                            summarize_attempt_failures(&attempt_kinds),
+                            if last_error.is_empty() {
+                                String::new()
+                            } else {
+                                format!(": {}", last_error)
+                            }
+                        );
+                        self.emit_both(
+                            &key.id,
+                            attempt_idx,
+                            Some(status_code),
+                            last_kind.clone(),
+                            last_error.clone(),
+                            Some(err_body),
+                            attempt_start.elapsed(),
+                        );
+                        return Err(CoreError::AllRetriesFailed {
+                            retries: attempt + 1,
+                            attempted_keys,
+                            last_error: aggregated_error,
+                            kind: last_kind,
+                        });
                     }
+                    // Fall-through (non-zen 403 / no egress pool): keep the
+                    // legacy key accounting unchanged (contract v1.4
+                    // §10.2/§10.3 — only the M1 fingerprint-gate branch skips
+                    // key cooling; A-M1-3/A-M1-4 semantics preserved).
+                    self.pool.record_error(&key.id, pool_err);
                 } else if status_code == 402 {
                     // 402 Payment Required is balance exhaustion by
                     // definition: never transparent-wait on it.
@@ -3011,54 +3013,56 @@ impl UpstreamExecutor {
                     let (kind, pool_err) = classify_forbidden(&err_body, retry_after);
                     last_kind = kind;
                     attempt_kinds.push(last_kind.clone());
-                    self.pool.record_error(&key.id, pool_err);
-                    // M1 (contract 2026-10-20-zen-403-hardening): an OpenCode
-                    // zen free-tier gate 403 (`FreeTierError`) is per-exit-IP,
-                    // not per-key. With an egress pool, cool ONLY the exit
-                    // that carried this attempt and fast-fail immediately —
-                    // polling the next key would smear 900s cooldowns across
-                    // the whole account behind one IP bucket. Other 403s keep
-                    // the legacy path untouched (no exit cooldown, no fast-fail).
+                    // M1 (contract 2026-10-20-zen-403-hardening, v1.4 2026-10-21): an
+                    // OpenCode zen free-tier gate 403 (`FreeTierError`) is a
+                    // CLIENT-FINGERPRINT-level rejection (TLS/HTTP client
+                    // fingerprint), not an exit-IP or key failure — same
+                    // egress, same instant: official CLI (Bun) 200 vs rustls
+                    // probe 403 even with a byte-identical ClientHello. With
+                    // an egress pool, fast-fail immediately WITHOUT cooling
+                    // the exit or the key (cooling would lock every exit/key
+                    // 900s and keep the gateway dead after the upstream window
+                    // recovers). Other 403s keep the legacy path untouched.
                     if matches!(last_kind, GatewayErrorKind::QuotaExhausted)
                         && is_zen_free_tier_gate_body(&err_body)
+                        && self.egress_pool.is_some()
                     {
-                        if let (Some(eg_pool), Some(eg_entry)) = (&self.egress_pool, &egress_entry)
-                        {
-                            let body_reset = parse_reset_duration(&err_body);
-                            eg_pool
-                                .record_quota_exhausted(&eg_entry.id, body_reset.or(retry_after));
-                            tracing::warn!(
-                                key_id = %key.id,
-                                provider = %self.observer_provider.as_deref().unwrap_or("unknown"),
-                                egress_pool = true,
-                                "zen free-tier gate rejection on egress: cooling exit and fast-failing without cross-key retry"
-                            );
-                            let aggregated_error = format!(
-                                "{}{}",
-                                summarize_attempt_failures(&attempt_kinds),
-                                if last_error.is_empty() {
-                                    String::new()
-                                } else {
-                                    format!(": {}", last_error)
-                                }
-                            );
-                            self.emit_both(
-                                &key.id,
-                                attempt_idx,
-                                Some(status_code),
-                                last_kind.clone(),
-                                last_error.clone(),
-                                Some(err_body),
-                                attempt_start.elapsed(),
-                            );
-                            return Err(CoreError::AllRetriesFailed {
-                                retries: attempt + 1,
-                                attempted_keys,
-                                last_error: aggregated_error,
-                                kind: last_kind,
-                            });
-                        }
+                        tracing::warn!(
+                            key_id = %key.id,
+                            provider = %self.observer_provider.as_deref().unwrap_or("unknown"),
+                            egress_pool = true,
+                            "zen free-tier gate rejection (client fingerprint): fast-failing without cross-key retry, key cooldown, or exit cooldown"
+                        );
+                        let aggregated_error = format!(
+                            "{}{}",
+                            summarize_attempt_failures(&attempt_kinds),
+                            if last_error.is_empty() {
+                                String::new()
+                            } else {
+                                format!(": {}", last_error)
+                            }
+                        );
+                        self.emit_both(
+                            &key.id,
+                            attempt_idx,
+                            Some(status_code),
+                            last_kind.clone(),
+                            last_error.clone(),
+                            Some(err_body),
+                            attempt_start.elapsed(),
+                        );
+                        return Err(CoreError::AllRetriesFailed {
+                            retries: attempt + 1,
+                            attempted_keys,
+                            last_error: aggregated_error,
+                            kind: last_kind,
+                        });
                     }
+                    // Fall-through (non-zen 403 / no egress pool): keep the
+                    // legacy key accounting unchanged (contract v1.4
+                    // §10.2/§10.3 — only the M1 fingerprint-gate branch skips
+                    // key cooling; A-M1-3/A-M1-4 semantics preserved).
+                    self.pool.record_error(&key.id, pool_err);
                 } else if status_code == 402 {
                     // 402 Payment Required is balance exhaustion by
                     // definition: never transparent-wait on it.

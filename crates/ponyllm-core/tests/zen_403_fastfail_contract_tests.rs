@@ -1,5 +1,6 @@
-//! Wave zen-403 red-phase acceptance tests — contract M1/M2 (frozen contract
-//! `.dev-team/contracts/2026-10-20-zen-403-hardening.md`, Lead-frozen).
+//! Wave zen-403 red-phase acceptance tests — contract M1/M2/M3 (frozen
+//! contract `.dev-team/contracts/2026-10-20-zen-403-hardening.md`, Lead-frozen;
+//! v1.3 §9 + v1.4 §10 error-attribution revisions apply to M1).
 //!
 //! Twin-path ruling (contract fact A6 + M1/M2, Lead 2026-10-20): upstream.rs
 //! keeps TWO twin implementations of the same 429/403/402 semantics — the JSON
@@ -8,21 +9,36 @@
 //! `stream:true`). M1/M2 MUST land on both lines; every red/green case here is
 //! therefore duplicated across the two caller paths.
 //!
-//! Red-phase discipline: every assertion is pinned to the FROZEN post-impl
-//! contract, then run against the CURRENT (unmodified) executor to prove the
-//! red phase:
-//!   - A-M1-1 / A-M1-1s / A-M1-2 / A-M1-2s (zen FreeTierError 403 + egress
-//!     pool → cool the exit + immediate AllRetriesFailed, no cross-key burn)
-//!     must FAIL on current code: today the 403 branch only record_error()s
-//!     the key and keeps polling → retries=N, N upstream calls, exit NOT
-//!     cooled.
-//!   - A-M2-2 / A-M2-2s (zen 429 + egress pool len()==1 → fast-fail) must FAIL
-//!     on current code: fast-fail fires only when `egress_pool.is_none()`;
-//!     with a singleton exit the first 429 cools the exit and the very next
-//!     `select_egress` answers NoAvailableKey (attempted_keys grows to 2),
-//!     instead of the contract's single-attempt `(failures: 1 …)`.
-//!   - A-M1-3(+s) / A-M1-4(+s) / A-M2-1(+s) / A-M2-3(+s) are GREEN regression
-//!     anchors (no-trigger scenes keep today's behavior, now and after impl).
+//! M1 v1.3/v1.4 semantics (contract §9/§10, 2026-10-21): zen `FreeTierError`
+//! 403 is a CLIENT-FINGERPRINT rejection, unrelated to both the exit IP and
+//! the key (official CLI 200 / rustls 403 on the same exit at the same time;
+//! byte-identical ClientHello still 403; the same key works from the official
+//! CLI). M1 therefore keeps the immediate single-attempt AllRetriesFailed
+//! (retries=1, no cross-key polling) but DELETES BOTH cooldowns: the exit is
+//! not cooled (v1.3 — `egress_cooldown(...).0.is_none()` + `select_egress`
+//! returns the same exit) AND the attempted key is not cooled (v1.4 — no
+//! `record_error(key, QuotaExhausted)`, so `key_cooldown(...).0.is_none()` and
+//! repeated gate 403s never produce an all-keys-cooling state).
+//!
+//! M2 (zen 429 `FreeUsageLimitError` — quota/IP-level) is unchanged: exit
+//! cooldown + fast-fail on `egress_pool.is_none() || len() <= 1` stay as-is
+//! (including the key record_error).
+//!
+//! Red-phase discipline (task-12, v1.4 wave): the assertions are pinned to the
+//! FROZEN v1.4 post-impl contract and run against the CURRENT executor
+//! (v1.3 form: exit cooldown removed, but `record_error(key, QuotaExhausted
+//! 900s)` still runs) to prove the red phase:
+//!   - A-M1-1 / A-M1-1s (zen 403 + pool → immediate AllRetriesFailed, exit NOT
+//!     cooled, current key NOT cooled) must FAIL on current code: the attempted
+//!     key still gets `record_error` → 900s cooldown, contradicting the v1.4
+//!     `key_cooldown(...).0.is_none()` assertions.
+//!   - A-M1-2 / A-M1-2s (multi-exit, ALL keys uncooled) must FAIL: zen-1 is
+//!     still cooled by `record_error`.
+//!   - A-M1-5 (7 consecutive gate 403s, 6-key pool) must FAIL: keys zen-1..6
+//!     get cooled one per request, and the 7th request hits all-keys-cooling
+//!     instead of a healthy single-attempt fast-fail.
+//!   - A-M1-3(+s) / A-M1-4(+s) / A-M2-1(+s) / A-M2-2(+s) / A-M2-3(+s) / L2-AT
+//!     non-gate & M2 variants are GREEN regression anchors (unchanged scenes).
 //!   - L2-AT: case/JSON variants of the gate body (M1) and of the zen 429 body
 //!     (M2) must behave identically to the canonical bodies; a body carrying
 //!     the digits "403" but no gate wording (or an empty body) must NOT trip
@@ -130,15 +146,17 @@ fn single_direct_pool() -> Arc<EgressPool> {
 }
 
 // ---------------------------------------------------------------------------
-// M1 — zen FreeTierError 403 + egress pool → cool the exit + immediate
-//       AllRetriesFailed (both twin paths).
+// M1 — zen FreeTierError 403 + egress pool → immediate single-attempt
+//       AllRetriesFailed WITHOUT exit cooldown (both twin paths, v1.3 §9).
 // ---------------------------------------------------------------------------
 
 /// A-M1-1 (JSON line): zen `FreeTierError` 403 + single-exit egress pool →
 /// `AllRetriesFailed{retries:1, kind:QuotaExhausted}`, exactly ONE upstream
-/// call, only the current key attempted, the exit cooled to 900s, and the
-/// remaining keys NOT burned. Red on current code (today: 3 calls, retries=3,
-/// attempted_keys=[zen-1,zen-2,zen-3], exit not cooled, keys 2/3 cooldown 900s).
+/// call, only the current key attempted, the exit NOT cooled (v1.3: the 403 is
+/// a client-fingerprint rejection, so the exit must stay selectable), and the
+/// remaining keys NOT burned. Red on the CURRENT executor (task-3 v1.2 form):
+/// M1 still records the exit cooldown → `egress_cooldown` is Some and
+/// `select_egress` answers NoAvailableKey, contradicting the v1.3 assertions.
 #[tokio::test]
 async fn zen_403_fastfail_am1_1_json_zen_403_single_exit_pool_fastfails_one_call() {
     // Arrange
@@ -199,11 +217,19 @@ async fn zen_403_fastfail_am1_1_json_zen_403_single_exit_pool_fastfails_one_call
         calls.load(Ordering::SeqCst)
     );
     assert!(
-        eg_pool.egress_cooldown("direct").0.is_some(),
-        "M1: the offending exit must be cooled (record_quota_exhausted), got {:?}",
+        eg_pool.egress_cooldown("direct").0.is_none(),
+        "M1 v1.3: the exit must NOT be cooled (403 is a client-fingerprint rejection, not exit-IP), got {:?}",
         eg_pool.egress_cooldown("direct")
     );
-    // Key-protection criterion: no cross-key burn — zen-2/zen-3 untouched.
+    // Key-protection criterion (v1.4 §10.4): the CURRENT key must NOT be
+    // cooled either (403 is fingerprint-level, unrelated to the key), and no
+    // cross-key burn — zen-2/zen-3 untouched.
+    assert_eq!(
+        pool.key_cooldown("zen-1"),
+        (None, None),
+        "M1 v1.4: the attempted key zen-1 must NOT be cooled (no record_error), got {:?}",
+        pool.key_cooldown("zen-1")
+    );
     assert_eq!(
         pool.key_cooldown("zen-2"),
         (None, None),
@@ -214,11 +240,13 @@ async fn zen_403_fastfail_am1_1_json_zen_403_single_exit_pool_fastfails_one_call
         (None, None),
         "M1: zen-3 must NOT be cooled (contract: no cross-key polling)"
     );
-    // Exit cooldown must make the next selection impossible on a singleton.
-    assert!(
-        matches!(eg_pool.select_egress(), Err(CoreError::NoAvailableKey(_))),
-        "M1: with the singleton exit cooling, select_egress must answer NoAvailableKey, got {:?}",
-        eg_pool.select_egress()
+    // The exit is NOT cooling, so the next selection still returns it (the
+    // singleton stays selectable — contract v1.3 §9.4).
+    let next = eg_pool.select_egress().expect("singleton exit must remain selectable");
+    assert_eq!(
+        next.id, "direct",
+        "M1 v1.3: select_egress must still return the same exit (no cooldown recorded), got {:?}",
+        next.id
     );
 }
 
@@ -285,27 +313,34 @@ async fn zen_403_fastfail_am1_1s_stream_zen_403_single_exit_pool_fastfails_one_c
         calls.load(Ordering::SeqCst)
     );
     assert!(
-        eg_pool.egress_cooldown("direct").0.is_some(),
-        "streaming M1: the offending exit must be cooled, got {:?}",
+        eg_pool.egress_cooldown("direct").0.is_none(),
+        "streaming M1 v1.3: the exit must NOT be cooled, got {:?}",
         eg_pool.egress_cooldown("direct")
+    );
+    assert_eq!(
+        pool.key_cooldown("zen-1"),
+        (None, None),
+        "streaming M1 v1.4: the attempted key zen-1 must NOT be cooled, got {:?}",
+        pool.key_cooldown("zen-1")
     );
     assert_eq!(
         pool.key_cooldown("zen-2"),
         (None, None),
         "streaming M1: zen-2 must NOT be cooled (no cross-key polling)"
     );
-    assert!(
-        matches!(eg_pool.select_egress(), Err(CoreError::NoAvailableKey(_))),
-        "streaming M1: singleton exit cooling ⇒ NoAvailableKey, got {:?}",
-        eg_pool.select_egress()
+    let next = eg_pool.select_egress().expect("singleton exit must remain selectable");
+    assert_eq!(
+        next.id, "direct",
+        "streaming M1 v1.3: select_egress must still return the same exit, got {:?}",
+        next.id
     );
 }
 
 /// A-M1-2 (JSON line, multi-exit pool): the FIRST (Priority) exit `direct`
-/// answers the zen 403 → M1 cools ONLY `direct` and fast-fails after one call;
-/// `select_egress` must SKIP the cooled exit and return the healthy twin
-/// (`vps`). Red on current code (today: 3 calls, exit never cooled, selection
-/// keeps returning `direct`).
+/// answers the zen 403 → M1 fast-fails after one call WITHOUT cooling any exit
+/// (v1.3: fingerprint rejection); `select_egress` still returns `direct`.
+/// Red on the CURRENT executor (task-3 v1.2 form: `direct` gets cooled and
+/// selection skips it to `vps`).
 #[tokio::test]
 async fn zen_403_fastfail_am1_2_json_zen_403_two_exit_pool_cools_only_offending_exit() {
     // Arrange
@@ -364,8 +399,8 @@ async fn zen_403_fastfail_am1_2_json_zen_403_two_exit_pool_cools_only_offending_
         calls.load(Ordering::SeqCst)
     );
     assert!(
-        eg_pool.egress_cooldown("direct").0.is_some(),
-        "M1: ONLY the offending exit may be cooled, direct got {:?}",
+        eg_pool.egress_cooldown("direct").0.is_none(),
+        "M1 v1.3: the exit must NOT be cooled (client-fingerprint rejection), direct got {:?}",
         eg_pool.egress_cooldown("direct")
     );
     assert_eq!(
@@ -373,11 +408,20 @@ async fn zen_403_fastfail_am1_2_json_zen_403_two_exit_pool_cools_only_offending_
         None,
         "M1: the untouched exit must stay active"
     );
-    // Selection skips the cooled exit → healthy twin is returned next.
-    let next = eg_pool.select_egress().expect("vps must remain selectable");
+    // v1.4 §10.4: ALL keys must stay uncooled (403 is fingerprint-level).
+    for id in ["zen-1", "zen-2", "zen-3"] {
+        assert_eq!(
+            pool.key_cooldown(id),
+            (None, None),
+            "M1 v1.4: key {id} must NOT be cooled, got {:?}",
+            pool.key_cooldown(id)
+        );
+    }
+    // No cooldown was recorded, so selection still returns the FIRST exit.
+    let next = eg_pool.select_egress().expect("direct must remain selectable");
     assert_eq!(
-        next.id, "vps",
-        "M1: select_egress must SKIP the cooled direct exit, got {:?}",
+        next.id, "direct",
+        "M1 v1.3: select_egress must still return the same exit, got {:?}",
         next.id
     );
 }
@@ -442,17 +486,105 @@ async fn zen_403_fastfail_am1_2s_stream_zen_403_two_exit_pool_cools_only_offendi
         calls.load(Ordering::SeqCst)
     );
     assert!(
-        eg_pool.egress_cooldown("direct").0.is_some(),
-        "streaming M1: ONLY direct may be cooled, got {:?}",
+        eg_pool.egress_cooldown("direct").0.is_none(),
+        "streaming M1 v1.3: the exit must NOT be cooled, direct got {:?}",
         eg_pool.egress_cooldown("direct")
     );
     assert_eq!(eg_pool.egress_cooldown("vps").0, None, "vps must stay active");
-    let next = eg_pool.select_egress().expect("vps must remain selectable");
+    // v1.4 §10.4: ALL keys must stay uncooled (streaming twin).
+    for id in ["zen-1", "zen-2", "zen-3"] {
+        assert_eq!(
+            pool.key_cooldown(id),
+            (None, None),
+            "streaming M1 v1.4: key {id} must NOT be cooled, got {:?}",
+            pool.key_cooldown(id)
+        );
+    }
+    let next = eg_pool.select_egress().expect("direct must remain selectable");
     assert_eq!(
-        next.id, "vps",
-        "streaming M1: select_egress must skip the cooled direct exit, got {:?}",
+        next.id, "direct",
+        "streaming M1 v1.3: select_egress must still return the same exit, got {:?}",
         next.id
     );
+}
+
+/// A-M1-5 (JSON line, v1.4 §10.4): SEVEN consecutive zen `FreeTierError` 403s
+/// against a multi-key pool (6 keys, single exit) must leave the KEY POOL
+/// fully healthy — every request is the single-attempt M1 fast-fail, NO key
+/// ever enters cooldown, the pool keeps selecting keys (no NoAvailableKey /
+/// all-keys-cooling path), and exactly ONE upstream call is issued per
+/// request. Red on the CURRENT executor (v1.3 form): each 403 still
+/// `record_error()`s the attempted key with 900s QuotaExhausted, so requests
+/// 1..6 cool keys zen-1..zen-6 one by one and the 7th request hits
+/// all-keys-cooling instead of a fast-fail.
+#[tokio::test]
+async fn zen_403_fastfail_am1_5_seven_gate_403s_leave_key_pool_uncooled() {
+    // Arrange — single-exit pool, 6-key pool, mock answers zen 403 always.
+    let gate = free_tier_403_value();
+    let (endpoint, _base, calls) = spawn_mock_server(Arc::new(move |_n, _auth| {
+        (StatusCode::FORBIDDEN, gate.clone())
+    }))
+    .await;
+    let keys = ["zen-1", "zen-2", "zen-3", "zen-4", "zen-5", "zen-6"];
+    let pool = zen_pool(&keys);
+    let eg_pool = single_direct_pool();
+    let executor = UpstreamExecutor::new(pool.clone(), 3)
+        .with_egress(Some(eg_pool.clone()), Some(HashMap::new()));
+    let payload = chat_payload();
+
+    // Act — 7 consecutive gate 403s on the SAME executor/pool.
+    for i in 0..7usize {
+        let err = executor
+            .execute_json_request(&endpoint, &payload)
+            .await
+            .unwrap_err();
+
+        // Assert — every request is the single-attempt M1 fast-fail.
+        match &err {
+            CoreError::AllRetriesFailed {
+                retries,
+                attempted_keys,
+                kind,
+                ..
+            } => {
+                assert_eq!(
+                    *kind,
+                    GatewayErrorKind::QuotaExhausted,
+                    "req {i}: kind must be QuotaExhausted, got {kind:?} (err: {err})"
+                );
+                assert_eq!(
+                    *retries, 1,
+                    "req {i}: single-attempt fast-fail expected, got {retries} (err: {err})"
+                );
+                assert_eq!(
+                    attempted_keys.len(),
+                    1,
+                    "req {i}: exactly one key attempted, got {attempted_keys:?} (err: {err})"
+                );
+            }
+            other => panic!("req {i}: expected AllRetriesFailed, got {other:?}"),
+        }
+
+        // Assert — the key pool must NEVER accumulate any cooldown (v1.4:
+        // zen 403 is a client-fingerprint rejection unrelated to keys).
+        for k in keys {
+            assert_eq!(
+                pool.key_cooldown(k),
+                (None, None),
+                "req {i}: key {k} must NOT be cooled (v1.4 no record_error), got {:?}",
+                pool.key_cooldown(k)
+            );
+        }
+
+        // Assert — every request still issues exactly ONE upstream call (no
+        // all-keys-cooling path where selection fails before dialing).
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            i + 1,
+            "req {i}: exactly one upstream call so far, got {}",
+            calls.load(Ordering::SeqCst)
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1013,9 +1145,10 @@ async fn zen_403_fastfail_am2_3s_stream_zen_429_two_exit_pool_fails_over() {
 
 /// L2-AT (M1): zen gate bodies in hostile case / wording / JSON variants must
 /// behave EXACTLY like the canonical `FreeTierError` body — fast-fail on the
-/// prefix key, cool the singleton exit, ONE upstream call. Every variant is
+/// prefix key, exit NOT cooled (v1.3), ONE upstream call. Every variant is
 /// `is_zen_free_tier_gate_body`-matched (contract A2), so M1 applies. Red on
-/// current code (all variants: 3 calls, exit never cooled).
+/// the CURRENT executor (task-3 v1.2 form: every variant cools the singleton
+/// exit, so `select_egress` answers NoAvailableKey).
 #[tokio::test]
 async fn zen_403_fastfail_lat_m1_gate_body_case_and_json_variants_fastfail() {
     let variants: Vec<(&str, Value)> = vec![
@@ -1108,14 +1241,15 @@ async fn zen_403_fastfail_lat_m1_gate_body_case_and_json_variants_fastfail() {
             calls.load(Ordering::SeqCst)
         );
         assert!(
-            eg_pool.egress_cooldown("direct").0.is_some(),
-            "[{label}] the exit must be cooled, got {:?}",
+            eg_pool.egress_cooldown("direct").0.is_none(),
+            "[{label}] M1 v1.3: the exit must NOT be cooled, got {:?}",
             eg_pool.egress_cooldown("direct")
         );
-        assert!(
-            matches!(eg_pool.select_egress(), Err(CoreError::NoAvailableKey(_))),
-            "[{label}] cooled singleton exit ⇒ NoAvailableKey, got {:?}",
-            eg_pool.select_egress()
+        let next = eg_pool.select_egress().expect("singleton exit must remain selectable");
+        assert_eq!(
+            next.id, "direct",
+            "[{label}] M1 v1.3: select_egress must still return the same exit, got {:?}",
+            next.id
         );
     }
 }
