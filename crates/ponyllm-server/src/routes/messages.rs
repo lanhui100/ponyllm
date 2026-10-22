@@ -591,54 +591,41 @@ pub async fn handle_messages(
                     chat_req.extra.remove("reasoning_effort");
                     chat_req.extra.remove("thinking");
                 }
-                let mut val = match serde_json::to_value(&chat_req) {
-                    Ok(v) => v,
+                // Wave-11 (R-MT-01/02 + R-TOOL-02/03/06): reuse the shared
+                // deepseek-web prompt builder — deterministic role template
+                // (`[system]/[user]/[assistant]/[tool:<name>]`), tool schema +
+                // convention injection, ordered image extraction. Same
+                // semantics as /v1/chat/completions (messages→chat translation
+                // already produced `chat_req` with typed messages + tools).
+                let parts = match crate::routes::chat::extract_web_prompt_parts(&chat_req) {
+                    Ok(p) => p,
                     Err(e) => {
-                        last_error =
-                            format!("Serialization error for {}: {}", target.provider_name, e);
-                        continue;
+                        // R-TOOL-FAIL-01/04/05 + R-TOOL-10: explicit 4xx
+                        // (Anthropic envelope), never silent / never 5xx.
+                        let (msg, msg_code) = match &e {
+                            crate::routes::chat::WebPromptError::UnmatchedToolCallId(id) => (
+                                format!(
+                                    "role:tool message references unknown tool_call_id '{id}' (R-TOOL-FAIL-05)"
+                                ),
+                                "unmatched_tool_call_id",
+                            ),
+                            crate::routes::chat::WebPromptError::UnknownFunction(n) => (
+                                format!(
+                                    "tool_choice references undeclared function '{n}' (R-TOOL-FAIL-04)"
+                                ),
+                                "unknown_function",
+                            ),
+                            _ => (format!("{}", e), "tool_emulation_disabled"),
+                        };
+                        return crate::extractors::render_anthropic_error(
+                            StatusCode::BAD_REQUEST,
+                            "invalid_request_error",
+                            &format!("{} ({})", msg, msg_code),
+                        );
                     }
                 };
-                // Rebuild into the deepseek-web completion shape (DW-Q-01 +
-                // R-VIS-02 image extraction). The __web_images side channel is
-                // consumed by the executor bridge, never sent on the wire.
-                let mut prompt = String::new();
-                let mut images: Vec<serde_json::Value> = Vec::new();
-                if let Some(messages) = val.get_mut("messages").and_then(|m| m.as_array_mut()) {
-                    for msg in messages.iter() {
-                        if let Some(content) = msg.get("content") {
-                            match content {
-                                serde_json::Value::String(s) => {
-                                    if !prompt.is_empty() {
-                                        prompt.push('\n');
-                                    }
-                                    prompt.push_str(s);
-                                }
-                                serde_json::Value::Array(parts) => {
-                                    for part in parts {
-                                        if let Some(t) = part.get("text").and_then(|t| t.as_str())
-                                        {
-                                            if !prompt.is_empty() {
-                                                prompt.push('\n');
-                                            }
-                                            prompt.push_str(t);
-                                        }
-                                        if let Some(url) = part
-                                            .get("image_url")
-                                            .and_then(|u| u.as_str().or_else(|| u.get("url").and_then(|x| x.as_str())))
-                                        {
-                                            images.push(serde_json::json!({
-                                                "kind": "image_url",
-                                                "url": url,
-                                            }));
-                                        }
-                                    }
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
-                }
+                let prompt = parts.text;
+                let images = parts.images;
                 let mut body_obj = serde_json::json!({
                     "chat_session_id": "",
                     "parent_message_id": null,
@@ -653,8 +640,30 @@ pub async fn handle_messages(
                     "preempt": false,
                 });
                 if !images.is_empty() {
+                    let wire: Vec<serde_json::Value> = images
+                        .iter()
+                        .map(|img| match img {
+                            crate::routes::chat::WebImageRef::ImageUrl(o) => {
+                                serde_json::json!({ "kind": "image_url", "url": o.url })
+                            }
+                            crate::routes::chat::WebImageRef::File(f) => {
+                                let mut m = serde_json::Map::new();
+                                m.insert("kind".into(), "file".into());
+                                if let Some(id) = &f.file_id {
+                                    m.insert("file_id".into(), serde_json::Value::String(id.clone()));
+                                }
+                                if let Some(u) = &f.file_url {
+                                    m.insert("file_url".into(), serde_json::Value::String(u.clone()));
+                                }
+                                if let Some(n) = &f.filename {
+                                    m.insert("filename".into(), serde_json::Value::String(n.clone()));
+                                }
+                                serde_json::Value::Object(m)
+                            }
+                        })
+                        .collect();
                     if let Some(obj) = body_obj.as_object_mut() {
-                        obj.insert("__web_images".to_string(), serde_json::Value::Array(images));
+                        obj.insert("__web_images".to_string(), serde_json::Value::Array(wire));
                     }
                 }
                 (url, body_obj)
@@ -1157,6 +1166,9 @@ pub async fn handle_messages(
                                 let openai_chunks = crate::routes::chat::deepseek_web_sse_to_openai_stream(
                                     final_raw_stream,
                                     &target.physical_model,
+                                    crate::routes::chat::web_tool_mode_for_anthropic(
+                                        &target_req,
+                                    ),
                                 );
                                 let stream = openai_sse_to_anthropic_stream(
                                     openai_chunks,
@@ -1525,6 +1537,9 @@ pub async fn handle_messages(
                         let translated = crate::routes::chat::deepseek_web_sse_to_openai_stream(
                             raw_stream,
                             &target.physical_model,
+                            crate::routes::chat::web_tool_mode_for_anthropic(
+                                &target_req,
+                            ),
                         );
                         let collected =
                             crate::streaming::collect_chat_sse_to_json(translated).await;
@@ -1537,10 +1552,9 @@ pub async fn handle_messages(
                                     "deepseek-web upstream stream collection failed"
                                 );
                                 (
-                                    Err(CoreError::Internal(format!(
-                                        "deepseek-web stream collect failed: {}",
-                                        e
-                                    ))),
+                                    Err(crate::routes::chat::deepseek_web_collect_error_to_core(
+                                        e,
+                                    )),
                                     Some(kid),
                                 )
                             }
@@ -1764,6 +1778,19 @@ pub async fn handle_messages(
                         err
                     );
                     last_kind = err.kind();
+
+                    // Wave-11 (R-TOOL-FAIL-02/04/05): CLIENT/contract errors
+                    // terminate immediately with an explicit 4xx — never
+                    // retried / failed over / cooled. Anthropic envelope.
+                    if matches!(
+                        last_kind,
+                        ponyllm_core::error::GatewayErrorKind::ClientBadRequest
+                    ) {
+                        return crate::extractors::project_anthropic_error(
+                            &last_kind,
+                            &err.to_string(),
+                        );
+                    }
 
                     // Auto resilience: if model failed with ModelNotFound or 404/400 model error, trigger model circuit breaker & PonySentry report
                     if parsed.is_auto

@@ -70,63 +70,535 @@ pub struct WebPromptParts {
     pub images: Vec<WebImageRef>,
 }
 
-impl WebPromptParts {
-    fn push_text(&mut self, text: &str) {
-        if !text.is_empty() {
-            if !self.text.is_empty() {
-                self.text.push('\n');
+/// deepseek-web-only extraction: visible text + ordered images across the
+/// request messages (R-VIS-02). The shared [`extract_chat_prompt`] (and
+/// `as_plain_text`) semantics for other providers are untouched.
+///
+/// Wave-11 (R-MT-01..05 + R-TOOL-02..06): the text is built as a deterministic
+/// role-tagged template — `[system]` first, then per-input-order
+/// `[user]`/`[assistant]`/`[tool:<name>]` segments; adjacent same-role
+/// messages merge, empty messages are skipped, assistant tool_calls are kept
+/// readable as `[tool-call:<name>] <compact-json>` lines, and `role:"tool"`
+/// results map to `[tool:<name>]` via the nearest-preceding assistant
+/// tool_calls id→name mapping (unmappable → explicit error, R-TOOL-FAIL-05).
+///
+/// Tool emulation (R-TOOL-02/03/04/06): when the request carries `tools` and
+/// the emulation switch is on, a system schema section + the frozen call
+/// convention are prepended; `tool_choice` gates the instruction strength.
+pub(crate) fn extract_web_prompt_parts(
+    req: &ChatCompletionRequest,
+) -> Result<WebPromptParts, WebPromptError> {
+    use std::collections::HashMap;
+
+    let mut acc = WebPromptParts::default();
+    let mut tool_id_to_name: HashMap<String, String> = HashMap::new();
+    // Builder state for adjacent-same-role merging.
+    let mut open_role: Option<&'static str> = None;
+    let mut segment_lines: Vec<String> = Vec::new();
+    // Whether any [system] segment was flushed (for preamble placement).
+    let mut saw_system_segment = false;
+    // R-TOOL-02/03/06: tool schema + convention text to fold INTO the system
+    // section (R-MT-01: system first). `None` when not injected.
+    let mut system_preamble: Option<String> = None;
+
+    // Tool emulation gate (R-TOOL-01): env default on; off disables.
+    let emulation = web_tool_emulation_enabled();
+
+    // R-TOOL-02/03/04/06: tools present + emulation on → inject system schema
+    // + convention. choice semantics: none → no call instruction (schema
+    // optional); auto/missing → may answer or call; required/specific → strong
+    // constraint.
+    let tools = req.tools.as_deref().unwrap_or(&[]);
+    if emulation && !tools.is_empty() {
+        // R-TOOL-10 limits: ≤64 tools, schema ≤64KB.
+        if tools.len() > WEB_TOOL_MAX_TOOLS {
+            return Err(WebPromptError::ToolLimit(format!(
+                "too many tools ({} > {WEB_TOOL_MAX_TOOLS})",
+                tools.len()
+            )));
+        }
+        let mut schema_total = 0usize;
+        for t in tools {
+            let fn_def = &t.function;
+            let sz = fn_def.name.len()
+                + fn_def.description.as_deref().map(str::len).unwrap_or(0)
+                + fn_def
+                    .parameters
+                    .as_ref()
+                    .map(|p| serde_json::to_string(p).map(|s| s.len()).unwrap_or(0))
+                    .unwrap_or(0);
+            schema_total += sz;
+        }
+        if schema_total > WEB_TOOL_MAX_SCHEMA_BYTES {
+            return Err(WebPromptError::ToolLimit(format!(
+                "tool schema exceeds 64KB ({} bytes)",
+                schema_total
+            )));
+        }
+        // tool_choice specific name must exist (R-TOOL-FAIL-04).
+        if let Some(specific) = web_tool_choice_specific_name(req) {
+            let names: Vec<&str> = tools.iter().map(|t| t.function.name.as_str()).collect();
+            if !names.contains(&specific.as_str()) {
+                return Err(WebPromptError::UnknownFunction(specific));
             }
-            self.text.push_str(text);
+        }
+        let choice_kind = web_tool_choice_kind(req);
+        // choice none (R-TOOL-04): skip schema+convention entirely.
+        if choice_kind != WebToolChoiceKind::None {
+            let schema = web_tool_schema_section(tools, choice_kind);
+            let conv = web_tool_convention(choice_kind);
+            if conv.is_empty() {
+                system_preamble = Some(schema);
+            } else {
+                system_preamble = Some(format!("{schema}\n\n{conv}"));
+            }
+        }
+    } else if !emulation && !tools.is_empty() {
+        // R-TOOL-FAIL-01: emulation off + tools → explicit 4xx, never silent.
+        return Err(WebPromptError::EmulationDisabled);
+    }
+
+    // Flush helper: close an open segment. The system segment carries the
+    // preamble (schema + convention) after its own content (R-MT-01/R-TOOL-02).
+    fn flush(
+        acc: &mut WebPromptParts,
+        role: &str,
+        lines: &[String],
+        preamble: &Option<String>,
+        saw_system: &mut bool,
+    ) {
+        let joined = lines.join("\n");
+        if joined.trim().is_empty() {
+            return; // R-MT-03: empty segment skipped
+        }
+        let marker = match role {
+            "system" => "[system]",
+            "user" => "[user]",
+            "assistant" => "[assistant]",
+            _ => return,
+        };
+        // System segment folds the tool schema + convention after its own
+        // content (R-MT-01 system-first + R-TOOL-02/03).
+        if role == "system" {
+            *saw_system = true;
+        }
+        if !acc.text.is_empty() {
+            acc.text.push_str("\n\n");
+        }
+        acc.text.push_str(marker);
+        acc.text.push('\n');
+        acc.text.push_str(&joined);
+        if role == "system" {
+            if let Some(p) = preamble {
+                acc.text.push_str("\n\n");
+                acc.text.push_str(p);
+            }
         }
     }
 
-    fn push_message_parts(&mut self, content: &ponyllm_protocol::openai::chat::MessageContent) {
-        match content {
-            ponyllm_protocol::openai::chat::MessageContent::Text(s) => self.push_text(s),
-            ponyllm_protocol::openai::chat::MessageContent::Parts(parts) => {
-                for part in parts {
-                    match part {
-                        ContentPart::Text { text } => self.push_text(text),
-                        ContentPart::ImageUrl { image_url } => {
-                            self.images.push(WebImageRef::ImageUrl(image_url.clone()));
-                        }
-                        ContentPart::File { file } => {
-                            self.images.push(WebImageRef::File(file.clone()));
-                        }
-                        // InputAudio / VideoUrl keep the legacy drop semantics
-                        // (wave-10 NON-GOAL §10.2).
-                        ContentPart::InputAudio { .. } | ContentPart::VideoUrl { .. } => {}
+    for msg in &req.messages {
+        // Determine the role segment and its content lines.
+        let role = match msg {
+            ChatMessage::System(_) | ChatMessage::Developer(_) => "system",
+            ChatMessage::User(_) => "user",
+            ChatMessage::Assistant(_) => "assistant",
+            ChatMessage::Tool(_) => "tool",
+            ChatMessage::Function(_) => "tool",
+        };
+        let mut lines: Vec<String> = Vec::new();
+        match msg {
+            ChatMessage::System(m) => collect_web_parts(&m.content, &mut acc, &mut lines),
+            ChatMessage::Developer(m) => collect_web_parts(&m.content, &mut acc, &mut lines),
+            ChatMessage::User(m) => collect_web_parts(&m.content, &mut acc, &mut lines),
+            ChatMessage::Assistant(m) => {
+                if let Some(c) = m.content.as_ref() {
+                    collect_web_parts(c, &mut acc, &mut lines);
+                }
+                // R-MT-04: keep assistant tool_calls readable.
+                if let Some(tcs) = m.tool_calls.as_ref() {
+                    for tc in tcs {
+                        tool_id_to_name.insert(tc.id.clone(), tc.function.name.clone());
+                        // `FunctionCall.arguments` is a STRING (protocol
+                        // chat.rs:298) that already holds the JSON text; a
+                        // naive `to_string` on it would double-encode (quote
+                        // + escapes, R-MT-04 defect). If it parses as JSON,
+                        // compact re-serialize to the single-line form
+                        // `{"city":"Shanghai"}`; unparseable → passthrough
+                        // verbatim (never panic, never fabricate).
+                        let args = serde_json::from_str::<serde_json::Value>(
+                            tc.function.arguments.as_str(),
+                        )
+                        .ok()
+                        .and_then(|v| serde_json::to_string(&v).ok())
+                        .unwrap_or_else(|| tc.function.arguments.clone());
+                        lines.push(format!(
+                            "[tool-call:{}] {}",
+                            tc.function.name, args
+                        ));
                     }
+                }
+            }
+            ChatMessage::Tool(m) => {
+                // R-MT-05: map tool_call_id → name from preceding assistant.
+                let name = tool_id_to_name.get(&m.tool_call_id).cloned().ok_or_else(|| {
+                    WebPromptError::UnmatchedToolCallId(m.tool_call_id.clone())
+                })?;
+                collect_web_parts(&m.content, &mut acc, &mut lines);
+                // [tool:<name>] is its own segment (tool role).
+                let joined = lines.join("\n");
+                if joined.trim().is_empty() {
+                    continue; // empty tool result skipped (R-MT-03)
+                }
+                if !acc.text.is_empty() {
+                    acc.text.push_str("\n\n");
+                }
+                acc.text.push_str(&format!("[tool:{name}]"));
+                acc.text.push('\n');
+                acc.text.push_str(&joined);
+                continue;
+            }
+            ChatMessage::Function(m) => {
+                if let Some(c) = m.content.as_deref() {
+                    lines.push(c.to_string());
+                }
+            }
+        }
+
+        // R-MT-03: adjacent same-role merge; different role → flush previous.
+        if role == "tool" {
+            // handled above (tool segments flush immediately).
+        } else if let Some(open) = open_role {
+            if open == role {
+                segment_lines.extend(lines);
+            } else {
+                flush(&mut acc, open, &segment_lines, &system_preamble, &mut saw_system_segment);
+                open_role = Some(role);
+                segment_lines = lines;
+            }
+        } else {
+            open_role = Some(role);
+            segment_lines = lines;
+        }
+    }
+    if let Some(open) = open_role {
+        flush(&mut acc, open, &segment_lines, &system_preamble, &mut saw_system_segment);
+    }
+    // R-MT-01/R-TOOL-02: when the request has no system message but tools are
+    // declared, the schema/convention still need a home — synthesize a
+    // standalone `[system]` segment first (system area is always the first
+    // region of the prompt).
+    if !saw_system_segment {
+        if let Some(p) = &system_preamble {
+            let mut head = String::from("[system]\n");
+            head.push_str(p);
+            if !acc.text.is_empty() {
+                head.push_str("\n\n");
+                head.push_str(&acc.text);
+            }
+            acc.text = head;
+        }
+    }
+    Ok(acc)
+}
+
+/// Collect text/images from a message content into the accumulator and the
+/// current segment lines (wave-10 R-VIS-02 + wave-11 role template).
+fn collect_web_parts(
+    content: &ponyllm_protocol::openai::chat::MessageContent,
+    acc: &mut WebPromptParts,
+    lines: &mut Vec<String>,
+) {
+    match content {
+        ponyllm_protocol::openai::chat::MessageContent::Text(s) => {
+            if !s.trim().is_empty() {
+                lines.push(s.clone());
+            }
+        }
+        ponyllm_protocol::openai::chat::MessageContent::Parts(parts) => {
+            for part in parts {
+                match part {
+                    ContentPart::Text { text } => {
+                        if !text.trim().is_empty() {
+                            lines.push(text.clone());
+                        }
+                    }
+                    ContentPart::ImageUrl { image_url } => {
+                        acc.images.push(WebImageRef::ImageUrl(image_url.clone()));
+                    }
+                    ContentPart::File { file } => {
+                        acc.images.push(WebImageRef::File(file.clone()));
+                    }
+                    ContentPart::InputAudio { .. } | ContentPart::VideoUrl { .. } => {}
                 }
             }
         }
     }
 }
 
-/// deepseek-web-only extraction: visible text + ordered images across the
-/// request messages (R-VIS-02). The shared [`extract_chat_prompt`] (and
-/// `as_plain_text`) semantics for other providers are untouched.
-fn extract_web_prompt_parts(req: &ChatCompletionRequest) -> WebPromptParts {
-    let mut acc = WebPromptParts::default();
-    for msg in &req.messages {
-        match msg {
-            ChatMessage::System(m) => acc.push_message_parts(&m.content),
-            ChatMessage::User(m) => acc.push_message_parts(&m.content),
-            ChatMessage::Developer(m) => acc.push_message_parts(&m.content),
-            ChatMessage::Assistant(m) => {
-                if let Some(c) = m.content.as_ref() {
-                    acc.push_message_parts(c);
-                }
+/// Wave-11 prompt-format / tool-emulation errors (R-TOOL-FAIL-*). All map to
+/// explicit 4xx at the route; nothing is silently dropped.
+#[derive(Debug)]
+pub enum WebPromptError {
+    /// R-TOOL-FAIL-01: emulation off but `tools` present.
+    EmulationDisabled,
+    /// R-TOOL-FAIL-04: tool_choice names an undeclared function.
+    UnknownFunction(String),
+    /// R-TOOL-FAIL-05: a role:tool message references an unknown tool_call_id.
+    UnmatchedToolCallId(String),
+    /// R-TOOL-10: tools/schema/parse limits exceeded.
+    ToolLimit(String),
+}
+
+impl std::fmt::Display for WebPromptError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WebPromptError::EmulationDisabled => write!(
+                f,
+                "tool emulation is disabled (PONYLLM_DEEPSEEK_WEB_TOOL_EMULATION=off) but tools were requested"
+            ),
+            WebPromptError::UnknownFunction(n) => {
+                write!(f, "tool_choice references undeclared function '{n}'")
             }
-            ChatMessage::Tool(m) => acc.push_message_parts(&m.content),
-            ChatMessage::Function(m) => {
-                if let Some(c) = m.content.as_deref() {
-                    acc.push_text(c);
-                }
+            WebPromptError::UnmatchedToolCallId(id) => {
+                write!(f, "role:tool message references unknown tool_call_id '{id}'")
             }
+            WebPromptError::ToolLimit(m) => write!(f, "tool limit exceeded: {m}"),
         }
     }
-    acc
+}
+
+/// Emulation switch (R-TOOL-01): `PONYLLM_DEEPSEEK_WEB_TOOL_EMULATION`
+/// unset → on; trim+lowercase == "off" → off; any other value → on. No new
+/// config key — the env var is the only switch.
+pub fn web_tool_emulation_enabled() -> bool {
+    match std::env::var("PONYLLM_DEEPSEEK_WEB_TOOL_EMULATION") {
+        Ok(v) => !(v.trim().eq_ignore_ascii_case("off")),
+        Err(_) => true,
+    }
+}
+
+/// R-TOOL-10: hard limits for tool emulation construction.
+const WEB_TOOL_MAX_TOOLS: usize = 64;
+const WEB_TOOL_MAX_SCHEMA_BYTES: usize = 64 * 1024;
+/// R-TOOL-08: max parallel calls parsed from a model output.
+const WEB_TOOL_MAX_PARSE_CALLS: usize = 64;
+
+/// Resolved `tool_choice` semantics for emulation-strength gating.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WebToolChoiceKind {
+    /// `tool_choice="none"` → no call instruction (R-TOOL-04).
+    None,
+    /// missing or `"auto"` → may answer or call (R-TOOL-05).
+    Auto,
+    /// `"required"` or `{"function":{"name":..}}` (R-TOOL-06).
+    Required,
+}
+
+/// Map the request's `tool_choice` to the emulation kind (R-TOOL-04..06).
+pub fn web_tool_choice_kind(req: &ChatCompletionRequest) -> WebToolChoiceKind {
+    use ponyllm_protocol::openai::chat::ToolChoice;
+    match req.tool_choice.as_ref() {
+        None => WebToolChoiceKind::Auto,
+        Some(ToolChoice::Mode(m)) => {
+            let m = m.trim().to_ascii_lowercase();
+            if m == "none" {
+                WebToolChoiceKind::None
+            } else if m == "required" {
+                WebToolChoiceKind::Required
+            } else {
+                // "auto" (and any unknown mode default to permissive).
+                WebToolChoiceKind::Auto
+            }
+        }
+        Some(ToolChoice::Specific { .. }) => WebToolChoiceKind::Required,
+    }
+}
+
+/// The specific function name when `tool_choice` is `{"function":{"name"}}`.
+pub fn web_tool_choice_specific_name(
+    req: &ChatCompletionRequest,
+) -> Option<String> {
+    use ponyllm_protocol::openai::chat::ToolChoice;
+    match req.tool_choice.as_ref() {
+        Some(ToolChoice::Specific { function, .. }) => Some(function.name.clone()),
+        _ => None,
+    }
+}
+
+/// Response-side tool mode for the SSE translator (R-TOOL-04..07): no tools /
+/// emulation off / choice none → `None` (legacy live content); auto → `Auto`;
+/// required/specific → `Required`. Independent of (and consistent with) the
+/// prompt-builder gating — the translator only needs the response semantics.
+pub fn web_tool_mode_for(req: &ChatCompletionRequest) -> DeepSeekWebToolMode {
+    let has_tools = req
+        .tools
+        .as_ref()
+        .map(|t| !t.is_empty())
+        .unwrap_or(false);
+    if !has_tools || !web_tool_emulation_enabled() {
+        return DeepSeekWebToolMode::None;
+    }
+    match web_tool_choice_kind(req) {
+        WebToolChoiceKind::None => DeepSeekWebToolMode::None,
+        WebToolChoiceKind::Auto => DeepSeekWebToolMode::Auto,
+        WebToolChoiceKind::Required => DeepSeekWebToolMode::Required,
+    }
+}
+
+/// Anthropic-flavored [`web_tool_mode_for`] for the `/v1/messages` bridge
+/// (R-TOOL-09): Anthropic `tools` non-empty + emulation on → the choice
+/// decides; `auto` → `Auto`; `any`/`tool:<name>` (both force a call) →
+/// `Required`; no tools / emulation off → `None`.
+pub fn web_tool_mode_for_anthropic(
+    req: &ponyllm_protocol::anthropic::messages::MessageRequest,
+) -> DeepSeekWebToolMode {
+    use ponyllm_protocol::anthropic::messages::AnthropicToolChoice;
+    let has_tools = req
+        .tools
+        .as_ref()
+        .map(|t| !t.is_empty())
+        .unwrap_or(false);
+    if !has_tools || !web_tool_emulation_enabled() {
+        return DeepSeekWebToolMode::None;
+    }
+    match req.tool_choice.as_ref() {
+        None => DeepSeekWebToolMode::Auto,
+        Some(AnthropicToolChoice::Auto { .. }) => DeepSeekWebToolMode::Auto,
+        Some(AnthropicToolChoice::Any { .. }) | Some(AnthropicToolChoice::Tool { .. }) => {
+            DeepSeekWebToolMode::Required
+        }
+    }
+}
+
+/// R-TOOL-02: system schema section — one line per tool with
+/// `name | description | parameters (JSON Schema, compact single-line)`.
+/// Deterministic (same input → byte-identical output).
+pub fn web_tool_schema_section(
+    tools: &[ponyllm_protocol::openai::chat::ToolDefinition],
+    _kind: WebToolChoiceKind,
+) -> String {
+    let mut out = String::from("You have access to the following tools:");
+    for t in tools {
+        let params = t
+            .function
+            .parameters
+            .as_ref()
+            .map(|p| serde_json::to_string(p).unwrap_or_else(|_| "{}".to_string()))
+            .unwrap_or_else(|| "{}".to_string());
+        let desc = t.function.description.as_deref().unwrap_or("");
+        out.push_str(&format!(
+            "\n- {name} | {desc} | {params}",
+            name = t.function.name,
+            desc = desc,
+            params = params,
+        ));
+    }
+    out
+}
+
+/// R-TOOL-03/05/06: frozen call-convention text. `tool_choice` gates the
+/// strength: auto → may answer or call; required → must call (specific name
+/// enforced by the schema section caller). Byte-deterministic.
+pub fn web_tool_convention(kind: WebToolChoiceKind) -> String {
+    match kind {
+        WebToolChoiceKind::None => String::new(),
+        WebToolChoiceKind::Auto => {
+            "When you need information from a tool, respond with ONLY a single JSON object \
+             in this exact shape: {\"tool_call\":\"<tool_name>\",\"arguments\":{<json arguments>}}. \
+             When the answer does not require a tool, respond with plain text normally."
+                .to_string()
+        }
+        WebToolChoiceKind::Required => {
+            "You MUST respond with ONLY a single JSON object in this exact shape: \
+             {\"tool_call\":\"<tool_name>\",\"arguments\":{<json arguments>}}. \
+             Do not include any other text or explanation."
+                .to_string()
+        }
+    }
+}
+
+/// R-TOOL-07/08: parse the model's output text into tool calls with tolerance:
+/// optional code fences, optional surrounding text, single object or array.
+/// Returns `(reason, calls)` where a non-empty `calls` means a tool call was
+/// parsed; `reason` carries the failure text for the auto-passthrough path
+/// (R-TOOL-FAIL-03).
+pub fn parse_web_tool_calls(
+    text: &str,
+) -> (String, Vec<ponyllm_protocol::openai::chat::ToolCall>) {
+    let trimmed = text.trim();
+    // Strip code fences if present.
+    let cleaned = trimmed
+        .strip_prefix("```json")
+        .or_else(|| trimmed.strip_prefix("```"))
+        .map(|s| s.strip_suffix("```").unwrap_or(s))
+        .unwrap_or(trimmed)
+        .trim();
+    // Try single object first, then array.
+    let value = serde_json::from_str::<serde_json::Value>(cleaned)
+        .ok()
+        .or_else(|| {
+            // Tolerate trailing/leading prose: first `{` … last `}` (or `[` … `]`).
+            let start = cleaned.find('{').or_else(|| cleaned.find('['))?;
+            let end = cleaned.rfind('}').or_else(|| cleaned.rfind(']'))?;
+            if end <= start {
+                return None;
+            }
+            serde_json::from_str::<serde_json::Value>(&cleaned[start..=end]).ok()
+        });
+    let Some(value) = value else {
+        return (
+            format!("model output is not parseable as tool JSON: {text:?}"),
+            Vec::new(),
+        );
+    };
+    let items: Vec<&serde_json::Value> = match &value {
+        serde_json::Value::Object(_) => vec![&value],
+        serde_json::Value::Array(arr) => arr.iter().collect(),
+        _ => {
+            return (
+                format!("model output tool JSON is neither object nor array: {text:?}"),
+                Vec::new(),
+            )
+        }
+    };
+    let mut calls = Vec::new();
+    for (i, item) in items.iter().enumerate() {
+        if calls.len() >= WEB_TOOL_MAX_PARSE_CALLS {
+            break;
+        }
+        let Some(name) = item.get("tool_call").and_then(|n| n.as_str()) else {
+            continue; // skip entries without the frozen field
+        };
+        let args = item
+            .get("arguments")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({}));
+        let args_str = serde_json::to_string(&args).unwrap_or_else(|_| "{}".to_string());
+        calls.push(ponyllm_protocol::openai::chat::ToolCall {
+            id: format!("call_{}_{}", short_rand_id(), i),
+            r#type: "function".to_string(),
+            function: ponyllm_protocol::openai::chat::FunctionCall {
+                name: name.to_string(),
+                arguments: args_str,
+            },
+        });
+    }
+    if calls.is_empty() {
+        return (
+            format!("model output had no `tool_call` field: {text:?}"),
+            Vec::new(),
+        );
+    }
+    (String::new(), calls)
+}
+
+/// Short random id for synthesized `tool_calls[].id` (R-TOOL-07:
+/// `call_<random>`); avoids the full 32-hex noise.
+fn short_rand_id() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static CTR: AtomicU64 = AtomicU64::new(0x9e37_79b9);
+    let n = CTR.fetch_add(0x9e37_79b9, Ordering::Relaxed) ^ 0xdead_beef;
+    format!("{:012x}", n & 0xffff_ffff_ffff)
 }
 
 /// Translate a deepseek-web completion SSE byte stream into OpenAI Chat
@@ -169,6 +641,7 @@ fn extract_web_prompt_parts(req: &ChatCompletionRequest) -> WebPromptParts {
 pub(crate) fn deepseek_web_sse_to_openai_stream<S, E>(
     stream: S,
     fallback_model: &str,
+    tool_mode: DeepSeekWebToolMode,
 ) -> impl futures_util::Stream<Item = Result<bytes::Bytes, E>>
 where
     S: futures_util::Stream<Item = Result<bytes::Bytes, E>> + Send + 'static,
@@ -191,6 +664,9 @@ where
         finished_stop: false,
         transport_errored: false,
         current_segment_type: None,
+        tool_mode,
+        tool_resolved: false,
+        tool_content_len: 0,
     }));
     // Clones for the post-loop terminal chain (the flat_map below moves its
     // own copies of `state`/`model`).
@@ -239,6 +715,26 @@ where
         .chain(futures_util::stream::once(async move {
             let mut buf = Vec::new();
             let mut st = state_tail.lock().unwrap();
+            // Wave-11 tool terminal (NON-GOAL 4, R-TOOL-07/08): decide on the
+            // buffered content at EOF too (abrupt streams never saw finish).
+            if st.tool_mode != DeepSeekWebToolMode::None && !st.tool_resolved {
+                // The tool terminal emits into a fresh vec; the EOF stop below
+                // still fires for the Auto-passthrough case (which returns
+                // Passthrough without marking the stream finished).
+                let mut tool_out: Vec<Result<bytes::Bytes, E>> = Vec::new();
+                let decision =
+                    deepseek_web_tool_terminal(&model_tail, &mut st, &mut tool_out);
+                for o in tool_out {
+                    if let Ok(b) = o {
+                        buf.extend_from_slice(&b);
+                    }
+                }
+                if decision == DeepSeekWebToolTerminal::Decided {
+                    // tool_calls / required-unmet already emitted their terminal;
+                    // the synthesized stop below must not double-emit.
+                    st.finished_stop = true;
+                }
+            }
             let had_any_chunk =
                 st.emitted_assistant_role || !st.content.is_empty() || st.finished_stop;
             if !st.finished_stop
@@ -304,6 +800,31 @@ struct DeepSeekWebTranslateState {
     /// Last seen segment `type` marker under `/message/content/...` (DW-T-02):
     /// `text` → visible content, anything else (e.g. `thinking`) → reasoning.
     current_segment_type: Option<String>,
+    /// Wave-11 tool emulation mode (R-TOOL-07/08, NON-GOAL 4): `None` → no
+    /// tool parsing (content streams live as usual); `Auto`/`Required` →
+    /// content is BUFFERED (never live-emitted — the model's JSON tool frame
+    /// must not leak into downstream content, R-TOOL-07), then parsed once at
+    /// the terminal (finish/close/EOF): parseable → tool_calls chunks +
+    /// `finish_reason="tool_calls"`; unparseable → Auto: passthrough the
+    /// buffered text (R-TOOL-FAIL-03); Required: explicit error frame
+    /// (R-TOOL-FAIL-02, surfaced 4xx by non-streaming collectors).
+    tool_mode: DeepSeekWebToolMode,
+    /// Latched when the tool decision was already produced at a terminal.
+    tool_resolved: bool,
+    /// Cursor into `content` already live-emitted in tool mode (0 when the
+    /// whole buffer is still pending the terminal decision).
+    tool_content_len: usize,
+}
+
+/// Wave-11 tool-emulation response mode (R-TOOL-07/08, NON-GOAL 4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeepSeekWebToolMode {
+    /// No tools in the request (or emulation off) — legacy live content.
+    None,
+    /// `tool_choice` auto/default: may answer or call (R-TOOL-05).
+    Auto,
+    /// `tool_choice` required / specific: must call (R-TOOL-06).
+    Required,
 }
 
 /// Translate one typed deepseek-web event into OpenAI chunk bytes (DW-T-*).
@@ -354,6 +875,18 @@ fn deepseek_web_translate_event<E>(
             deepseek_web_apply_delta(op, model, &mut st, out);
         }
         SseEvent::Finish { usage } => {
+            // Wave-11 tool decision first (R-TOOL-07/08, NON-GOAL 4):
+            // tool_calls success → its own terminal chunk (finish_reason=
+            // tool_calls); Required-unmet → error frame; Auto-passthrough →
+            // buffered text chunk, then fall through to the normal stop.
+            if st.tool_mode != DeepSeekWebToolMode::None {
+                if deepseek_web_tool_terminal(model, &mut st, out)
+                    == DeepSeekWebToolTerminal::Decided
+                {
+                    st.finished_stop = true;
+                    return;
+                }
+            }
             if !st.finished_stop {
                 st.finished_stop = true;
                 let usage_map = usage.as_ref().and_then(|u| u.as_object());
@@ -409,6 +942,18 @@ fn deepseek_web_translate_event<E>(
             let reason = close_reason.as_deref().unwrap_or("success");
             match reason {
                 "success" => {
+                    // Wave-11 tool decision first (R-TOOL-07/08): same terminal
+                    // gating as `finish` — Decided (tool_calls / required-unmet)
+                    // returns early with its own terminal; Auto-passthrough
+                    // falls through to the normal stop.
+                    if st.tool_mode != DeepSeekWebToolMode::None {
+                        if deepseek_web_tool_terminal(model, &mut st, out)
+                            == DeepSeekWebToolTerminal::Decided
+                        {
+                            st.finished_stop = true;
+                            return;
+                        }
+                    }
                     if !st.finished_stop {
                         st.finished_stop = true;
                         // DW-T-06 (Lead ruling): same increment-only conclusive
@@ -715,6 +1260,13 @@ fn deepseek_web_append_content<E>(
         return;
     }
     st.content.push_str(text);
+    // Wave-11 tool emulation (NON-GOAL 4): in Auto/Required mode the content is
+    // BUFFERED — the model's JSON tool frame must never leak into downstream
+    // content (R-TOOL-07). The terminal decides: parseable → tool_calls chunks;
+    // unparseable → Auto passthrough / Required error (R-TOOL-FAIL-02/03).
+    if st.tool_mode != DeepSeekWebToolMode::None {
+        return;
+    }
     if !st.degraded {
         // Only explicit reasoning types (THINK/THINKING/reasoning) route to
         // reasoning_content; TEXT / RESPONSE (user-visible answers) and
@@ -828,6 +1380,210 @@ fn deepseek_web_conclusive_increment_chunk(
         system_fingerprint: None,
         service_tier: None,
     })
+}
+
+/// Wave-11 tool-emulation terminal decision (R-TOOL-07/08 + R-TOOL-FAIL-02/03,
+/// NON-GOAL 4 — decided at finish, never mid-stream): called from the
+/// `finish`, `close success` and abrupt-EOF terminals. When the request had no
+/// tools (`tool_mode == None`) it is a no-op. Otherwise the buffered content
+/// is parsed once:
+/// - parseable `{"tool_call","arguments"}` (object or array, fences/whitespace
+///   tolerated) → emit a `tool_calls` delta chunk AND the terminal
+///   `finish_reason="tool_calls"` chunk; the JSON never appears in `content`
+///   (R-TOOL-07). Returns `Decided` — the caller must NOT emit a stop chunk.
+/// - unparseable + `Required` (R-TOOL-FAIL-02): explicit error frame
+///   (`tool_call_required_unmet` embedded in the message); returns `Decided`.
+/// - unparseable + `Auto` (R-TOOL-FAIL-03): the buffered text is emitted as a
+///   normal content chunk + debug log — the model chose to answer directly
+///   (legal in auto). Returns `Passthrough` — the caller still emits the
+///   normal stop chunk after it.
+///
+/// `NoOp` = mode None / already resolved / nothing buffered (caller proceeds
+/// unchanged).
+#[allow(clippy::too_many_arguments)]
+fn deepseek_web_tool_terminal<E>(
+    model: &str,
+    st: &mut DeepSeekWebTranslateState,
+    out: &mut Vec<Result<bytes::Bytes, E>>,
+) -> DeepSeekWebToolTerminal {
+    use bytes::Bytes;
+
+    if st.tool_mode == DeepSeekWebToolMode::None || st.tool_resolved {
+        return DeepSeekWebToolTerminal::NoOp;
+    }
+    // Nothing buffered → nothing to decide.
+    if st.content.is_empty() {
+        return DeepSeekWebToolTerminal::NoOp;
+    }
+    st.tool_resolved = true;
+    let (reason, calls) = parse_web_tool_calls(&st.content);
+    if !calls.is_empty() {
+        // R-TOOL-07: emit tool_calls delta chunk (content stays absent).
+        // Full-context delta chunks: index 0..n, id/type/function all present
+        // (downstream clients aggregate id + name + arguments per index).
+        let chunk_calls: Vec<ponyllm_protocol::openai::chat::ToolCallChunk> = calls
+            .iter()
+            .enumerate()
+            .map(|(i, tc)| ponyllm_protocol::openai::chat::ToolCallChunk {
+                index: i as u32,
+                id: Some(tc.id.clone()),
+                r#type: Some(tc.r#type.clone()),
+                function: Some(ponyllm_protocol::openai::chat::FunctionCallChunk {
+                    name: Some(tc.function.name.clone()),
+                    arguments: Some(tc.function.arguments.clone()),
+                }),
+            })
+            .collect();
+        let chunk = ChatCompletionChunk {
+            id: st.response_id.clone().unwrap_or_else(|| {
+                format!("chatcmpl-dsw-{}", uuid_simple())
+            }),
+            object: "chat.completion.chunk".to_string(),
+            created: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+            model: model.to_string(),
+            choices: vec![ChatChunkChoice {
+                index: 0,
+                delta: ChatChunkDelta {
+                    tool_calls: Some(chunk_calls),
+                    ..Default::default()
+                },
+                finish_reason: None,
+                logprobs: None,
+            }],
+            usage: None,
+            system_fingerprint: None,
+            service_tier: None,
+        };
+        if let Ok(json) = serde_json::to_string(&chunk) {
+            out.push(Ok(Bytes::from(format!("data: {json}\n\n"))));
+        }
+        st.tool_content_len = st.content.len();
+        // Terminal chunk: finish_reason=tool_calls (R-TOOL-07).
+        let fin = ChatCompletionChunk {
+            id: st.response_id.clone().unwrap_or_else(|| {
+                format!("chatcmpl-dsw-{}", uuid_simple())
+            }),
+            object: "chat.completion.chunk".to_string(),
+            created: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+            model: model.to_string(),
+            choices: vec![ChatChunkChoice {
+                index: 0,
+                delta: ChatChunkDelta::default(),
+                finish_reason: Some(FinishReason::ToolCalls),
+                logprobs: None,
+            }],
+            usage: None,
+            system_fingerprint: None,
+            service_tier: None,
+        };
+        if let Ok(json) = serde_json::to_string(&fin) {
+            out.push(Ok(Bytes::from(format!("data: {json}\n\n"))));
+        }
+        return DeepSeekWebToolTerminal::Decided;
+    }
+    match st.tool_mode {
+        DeepSeekWebToolMode::Auto => {
+            // R-TOOL-FAIL-03: passthrough the buffered text as content.
+            tracing::debug!(
+                model = %model,
+                reason = %reason,
+                "deepseek-web tool parse failed in auto mode; passing text through as content (R-TOOL-FAIL-03)"
+            );
+            let text = st.content.clone();
+            let chunk = ChatCompletionChunk {
+                id: st.response_id.clone().unwrap_or_else(|| {
+                    format!("chatcmpl-dsw-{}", uuid_simple())
+                }),
+                object: "chat.completion.chunk".to_string(),
+                created: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs(),
+                model: model.to_string(),
+                choices: vec![ChatChunkChoice {
+                    index: 0,
+                    delta: ChatChunkDelta {
+                        content: Some(text),
+                        ..Default::default()
+                    },
+                    finish_reason: None,
+                    logprobs: None,
+                }],
+                usage: None,
+                system_fingerprint: None,
+                service_tier: None,
+            };
+            if let Ok(json) = serde_json::to_string(&chunk) {
+                out.push(Ok(Bytes::from(format!("data: {json}\n\n"))));
+            }
+            st.tool_content_len = st.content.len();
+            DeepSeekWebToolTerminal::Passthrough
+        }
+        DeepSeekWebToolMode::Required => {
+            // R-TOOL-FAIL-02: required tool call not made → explicit error.
+            // The marker is embedded in the MESSAGE (the SSE collector keeps
+            // only `message`, not `code`) so non-streaming bridges can map it
+            // to 4xx; the body wording avoids the "model" token so the kind()
+            // classifier never mislabels it as ModelNotFound.
+            tracing::debug!(
+                model = %model,
+                reason = %reason,
+                "deepseek-web tool_choice=required but no parseable tool call (R-TOOL-FAIL-02)"
+            );
+            let err_frame = serde_json::json!({
+                "error": {
+                    "message": "tool_choice=required but the assistant produced no parseable tool call (tool_call_required_unmet)",
+                    "type": "invalid_request_error",
+                    "code": "tool_call_required_unmet"
+                }
+            });
+            if let Ok(json) = serde_json::to_string(&err_frame) {
+                out.push(Ok(Bytes::from(format!("data: {json}\n\n"))));
+            }
+            st.tool_content_len = st.content.len();
+            DeepSeekWebToolTerminal::Decided
+        }
+        DeepSeekWebToolMode::None => DeepSeekWebToolTerminal::NoOp,
+    }
+}
+
+/// Outcome of [`deepseek_web_tool_terminal`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeepSeekWebToolTerminal {
+    /// The terminal was fully decided (tool_calls chunks emitted, or the
+    /// required-unmet error frame): the caller must NOT emit a stop chunk and
+    /// should mark the stream finished.
+    Decided,
+    /// Auto-mode passthrough: content chunk emitted; caller still emits the
+    /// normal stop chunk afterwards.
+    Passthrough,
+    /// Nothing to do (mode None / already resolved / empty buffer).
+    NoOp,
+}
+
+/// Map a non-streaming deepseek-web collect error to a `CoreError`
+/// (R-TOOL-FAIL-02): the `tool_call_required_unmet` error frame emitted by the
+/// tool terminal is a CLIENT error (4xx — `tool_choice=required` was not
+/// honored); every other collect failure stays `Internal` (which the route
+/// projects as 5xx upstream-style). Shared by the chat and messages
+/// non-streaming bridges.
+pub fn deepseek_web_collect_error_to_core(e: String) -> CoreError {
+    if e.contains("tool_call_required_unmet") {
+        // Wording deliberately avoids the "model" token so the CoreError
+        // kind() classifier never mislabels it as ModelNotFound.
+        return CoreError::UpstreamStatusError {
+            status: reqwest::StatusCode::BAD_REQUEST,
+            body: "tool_choice=required but the assistant produced no parseable tool call (R-TOOL-FAIL-02)"
+                .to_string(),
+        };
+    }
+    CoreError::Internal(format!("deepseek-web stream collect failed: {e}"))
 }
 
 pub async fn handle_chat_completions(
@@ -1331,7 +2087,46 @@ pub async fn handle_chat_completions(
                 // injects `ref_file_ids` in the same order (R-VIS-03/12). The
                 // wire body itself never carries the side key.
                 let url = target.deepseek_web_completion_url();
-                let parts = extract_web_prompt_parts(&req);
+                let parts = match extract_web_prompt_parts(&req) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        // Wave-11 R-TOOL-FAIL-01/04/05 + R-TOOL-10: explicit 4xx,
+                        // never silent; also never routed as upstream fault.
+                        return match e {
+                            WebPromptError::UnmatchedToolCallId(id) => {
+                                let msg = format!(
+                                    "role:tool message references unknown tool_call_id '{id}' (R-TOOL-FAIL-05)"
+                                );
+                                crate::extractors::render_openai_error(
+                                    StatusCode::BAD_REQUEST,
+                                    "invalid_request_error",
+                                    "unmatched_tool_call_id",
+                                    &msg,
+                                )
+                            }
+                            WebPromptError::UnknownFunction(n) => {
+                                let msg = format!(
+                                    "tool_choice references undeclared function '{n}' (R-TOOL-FAIL-04)"
+                                );
+                                crate::extractors::render_openai_error(
+                                    StatusCode::BAD_REQUEST,
+                                    "invalid_request_error",
+                                    "unknown_function",
+                                    &msg,
+                                )
+                            }
+                            _ => {
+                                let msg = format!("{}", e);
+                                crate::extractors::render_openai_error(
+                                    StatusCode::BAD_REQUEST,
+                                    "invalid_request_error",
+                                    "tool_emulation_disabled",
+                                    &msg,
+                                )
+                            }
+                        };
+                    }
+                };
                 let prompt = parts.text;
                 let images = parts.images;
                 let mut body_obj = serde_json::json!({
@@ -1900,6 +2695,7 @@ pub async fn handle_chat_completions(
                                 let stream = deepseek_web_sse_to_openai_stream(
                                     final_raw_stream,
                                     &target.physical_model,
+                                    web_tool_mode_for(&req),
                                 );
                                 let monitored = wrap_telemetry_stream(stream, failure_ctx);
                                 axum::body::Body::from_stream(monitored)
@@ -2294,6 +3090,7 @@ pub async fn handle_chat_completions(
                         let translated = deepseek_web_sse_to_openai_stream(
                             raw_stream,
                             &target.physical_model,
+                            web_tool_mode_for(&req),
                         );
                         let collected =
                             crate::streaming::collect_chat_sse_to_json(translated).await;
@@ -2306,10 +3103,7 @@ pub async fn handle_chat_completions(
                                     "deepseek-web upstream stream collection failed"
                                 );
                                 (
-                                    Err(CoreError::Internal(format!(
-                                        "deepseek-web stream collect failed: {}",
-                                        e
-                                    ))),
+                                    Err(deepseek_web_collect_error_to_core(e)),
                                     Some(kid),
                                 )
                             }
@@ -2512,6 +3306,22 @@ pub async fn handle_chat_completions(
                         err
                     );
                     last_kind = err.kind();
+
+                    // Wave-11 (R-TOOL-FAIL-02/04/05, wave-10 R-VIS-13):
+                    // CLIENT/contract errors must terminate immediately with
+                    // an explicit 4xx — never retried, never failed over to
+                    // another key/provider, never cooled. (Mirrors the
+                    // bridge-rejection early-exit in the executor.)
+                    if matches!(
+                        last_kind,
+                        ponyllm_core::error::GatewayErrorKind::ClientBadRequest
+                    ) {
+                        let resp = crate::extractors::project_openai_error(
+                            &last_kind,
+                            &err.to_string(),
+                        );
+                        return resp;
+                    }
 
                     // Auto resilience: if model failed with ModelNotFound or 404/400 model error, trigger model circuit breaker & PonySentry report
                     if parsed.is_auto

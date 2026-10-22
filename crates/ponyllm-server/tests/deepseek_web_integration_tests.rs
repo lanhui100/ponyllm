@@ -102,7 +102,9 @@ async fn spawn_mock_upstream() -> String {
                 }
                 assert_eq!(req["chat_session_id"], "sess-mock-1");
                 assert_eq!(req["model_type"], "deepseek-v4-flash");
-                assert_eq!(req["prompt"], "Hello");
+                // Wave-11 R-MT-01: the prompt is the deterministic role
+                // template — a single user message renders `[user]` + content.
+                assert_eq!(req["prompt"], "[user]\nHello");
                 // Amendment v4 (DW-Q-03): source must be pinned to "default" —
                 // the live service rejects any other variant with 422.
                 assert_eq!(req["source"], "default", "source must be pinned to default");
