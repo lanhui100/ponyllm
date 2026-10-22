@@ -20,6 +20,9 @@ pub enum UpstreamProtocol {
     Antigravity,
     /// Systemone透传 (zen-jev `/systemone` 纯透传,body原样转发)
     Systemone,
+    /// chat.deepseek.com 网页版 Web Provider (wave-9 契约 DW-*; 用户自持 web
+    /// token + PoW challenge→solve→X-DS-PoW-Response→/api/v0/chat/completion SSE)
+    DeepSeekWeb,
 }
 
 impl UpstreamProtocol {
@@ -30,6 +33,7 @@ impl UpstreamProtocol {
             Self::Anthropic => "anthropic",
             Self::Antigravity => "antigravity",
             Self::Systemone => "systemone",
+            Self::DeepSeekWeb => "deepseek-web",
         }
     }
 
@@ -43,6 +47,10 @@ impl UpstreamProtocol {
 
     pub fn is_antigravity(&self) -> bool {
         matches!(self, Self::Antigravity)
+    }
+
+    pub fn is_deepseek_web(&self) -> bool {
+        matches!(self, Self::DeepSeekWeb)
     }
 }
 
@@ -60,6 +68,9 @@ impl FromStr for UpstreamProtocol {
             "anthropic" | "messages" | "claude" => Ok(Self::Anthropic),
             "antigravity" | "ant" | "gcli" | "cloudcode" => Ok(Self::Antigravity),
             "systemone" | "system_one" | "system-one" => Ok(Self::Systemone),
+            "deepseek-web" | "deepseek_web" | "deepseekweb" | "ds-web" | "dsw" => {
+                Ok(Self::DeepSeekWeb)
+            }
             _ => Err(format!("Unknown upstream protocol '{}'", s)),
         }
     }

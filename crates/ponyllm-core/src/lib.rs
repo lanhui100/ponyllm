@@ -1,5 +1,6 @@
 //! ponyllm-core: Core runtime, key pooling, failover and telemetry.
 
+pub mod deepseek_web;
 pub mod discovery;
 pub mod endpoints;
 pub mod error;

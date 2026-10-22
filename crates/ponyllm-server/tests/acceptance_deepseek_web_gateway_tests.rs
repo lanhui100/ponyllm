@@ -86,7 +86,7 @@ async fn spawn_mock_chain(completion_sse: String, completion_status: u16) -> Moc
         )
         .route(
             "/api/v0/chat/completion",
-            axum::routing::post(move |_: axum::Json<serde_json::Value>, headers: HeaderMap| {
+            axum::routing::post(move |headers: HeaderMap, _: axum::Json<serde_json::Value>| {
                 let cc2 = cc2.clone();
                 let sse = completion_sse.clone();
                 async move {
@@ -504,19 +504,26 @@ async fn gw_40012_banned_surfaces_at_gateway() {
     use axum::response::Response as AxResponse;
     let challenge_calls = Arc::new(AtomicUsize::new(0));
     let cc = challenge_calls.clone();
-    let app = axum::Router::new().route(
-        "/api/v0/chat/create_pow_challenge",
-        axum::routing::post(move |axum::Json(_): axum::Json<serde_json::Value>| async move {
-            cc.fetch_add(1, Ordering::SeqCst);
-            AxResponse::builder()
-                .status(St::OK)
-                .header("content-type", "application/json")
-                .body(axum::body::Body::from(
-                    r#"{"data":{"biz_code":40012,"biz_msg":"USER_IS_BANNED","biz_data":null}}"#,
-                ))
-                .unwrap()
-        }),
-    );
+    let app = axum::Router::new()
+        .route(
+            "/api/v0/chat_session/create",
+            axum::routing::post(|| async move {
+                axum::Json(serde_json::from_str::<serde_json::Value>(SESSION_OK).unwrap())
+            }),
+        )
+        .route(
+            "/api/v0/chat/create_pow_challenge",
+            axum::routing::post(move |axum::Json(_): axum::Json<serde_json::Value>| async move {
+                cc.fetch_add(1, Ordering::SeqCst);
+                AxResponse::builder()
+                    .status(St::OK)
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        r#"{"data":{"biz_code":40012,"biz_msg":"USER_IS_BANNED","biz_data":null}}"#,
+                    ))
+                    .unwrap()
+            }),
+        );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -531,11 +538,11 @@ async fn gw_40012_banned_surfaces_at_gateway() {
         .send()
         .await
         .unwrap();
+    let status = resp.status();
     let text = resp.text().await.unwrap_or_default();
     assert!(
-        !resp.status().is_success() || text.to_lowercase().contains("banned"),
-        "gw: 40012 must surface as an explicit error; status {:?} body {text}",
-        resp.status()
+        !status.is_success() || text.to_lowercase().contains("banned"),
+        "gw: 40012 must surface as an explicit error; status {status} body {text}"
     );
     assert_eq!(
         challenge_calls.load(Ordering::SeqCst),
@@ -596,11 +603,11 @@ async fn gw_40301_invalid_pow_surfaces_at_gateway() {
         .send()
         .await
         .unwrap();
+    let status = resp.status();
     let text = resp.text().await.unwrap_or_default();
     assert!(
-        !resp.status().is_success() || text.to_lowercase().contains("pow"),
-        "gw: 40301 must surface as an explicit error; status {:?} body {text}",
-        resp.status()
+        !status.is_success() || text.to_lowercase().contains("pow"),
+        "gw: 40301 must surface as an explicit error; status {status} body {text}"
     );
     assert_eq!(
         completion_calls.load(Ordering::SeqCst),
@@ -617,18 +624,25 @@ async fn gw_waf_captcha_surfaces_at_gateway() {
     use axum::response::Response as AxResponse;
     let challenge_calls = Arc::new(AtomicUsize::new(0));
     let cc = challenge_calls.clone();
-    let app = axum::Router::new().route(
-        "/api/v0/chat/create_pow_challenge",
-        axum::routing::post(move |axum::Json(_): axum::Json<serde_json::Value>| async move {
-            cc.fetch_add(1, Ordering::SeqCst);
-            AxResponse::builder()
-                .status(St::OK)
-                .header("content-type", "application/json")
-                .header("x-amzn-waf-action", "captcha")
-                .body(axum::body::Body::from(CHALLENGE_OK))
-                .unwrap()
-        }),
-    );
+    let app = axum::Router::new()
+        .route(
+            "/api/v0/chat_session/create",
+            axum::routing::post(|| async move {
+                axum::Json(serde_json::from_str::<serde_json::Value>(SESSION_OK).unwrap())
+            }),
+        )
+        .route(
+            "/api/v0/chat/create_pow_challenge",
+            axum::routing::post(move |axum::Json(_): axum::Json<serde_json::Value>| async move {
+                cc.fetch_add(1, Ordering::SeqCst);
+                AxResponse::builder()
+                    .status(St::OK)
+                    .header("content-type", "application/json")
+                    .header("x-amzn-waf-action", "captcha")
+                    .body(axum::body::Body::from(CHALLENGE_OK))
+                    .unwrap()
+            }),
+        );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -643,11 +657,11 @@ async fn gw_waf_captcha_surfaces_at_gateway() {
         .send()
         .await
         .unwrap();
+    let status = resp.status();
     let text = resp.text().await.unwrap_or_default();
     assert!(
-        !resp.status().is_success() || text.to_lowercase().contains("captcha"),
-        "gw: WAF captcha must surface explicitly, never be bypassed; status {:?} body {text}",
-        resp.status()
+        !status.is_success() || text.to_lowercase().contains("captcha"),
+        "gw: WAF captcha must surface explicitly, never be bypassed; status {status} body {text}"
     );
     assert_eq!(
         challenge_calls.load(Ordering::SeqCst),

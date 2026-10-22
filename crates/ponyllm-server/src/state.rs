@@ -220,6 +220,22 @@ impl RoutedTarget {
         format!("{}/v1internal:streamGenerateContent?alt=sse", base)
     }
 
+    /// chat.deepseek.com web completion URL (wave-9 contract DW-S-04):
+    /// `{base}/api/v0/chat/completion` (SSE). The PoW challenge is fetched
+    /// separately by the executor before this call. Idempotent: a base that
+    /// already ends with the completion path is returned unchanged.
+    pub fn deepseek_web_completion_url(&self) -> String {
+        let base = self
+            .endpoint_base
+            .as_deref()
+            .unwrap_or(&self.base_url)
+            .trim_end_matches('/');
+        if base.ends_with("/api/v0/chat/completion") {
+            return base.to_string();
+        }
+        format!("{base}/api/v0/chat/completion")
+    }
+
     /// Systemone透传上游地址:显式 endpoint_base 优先,否则 base_url + `/systemone`.
     pub fn systemone_url(&self) -> String {
         ponyllm_core::normalize_systemone_url(
@@ -231,8 +247,13 @@ impl RoutedTarget {
 /// Legacy protocol guess preserved for zero-migration old configs that set
 /// neither provider `default_protocol` nor model `protocol`. Single unified
 /// heuristic for every routing branch: an `anthropic` path segment wins, else
-/// an `anthropic` provider name (outside `/v1/chat` bases) wins.
+/// an `anthropic` provider name (outside `/v1/chat` bases) wins; a
+/// chat.deepseek.com web base URL resolves to the DeepSeekWeb protocol
+/// (wave-9 contract DW-*: user-held web token + PoW + /api/v0 SSE).
 fn infer_legacy_protocol(provider_name: &str, base_url: &str) -> UpstreamProtocol {
+    if base_url.contains("chat.deepseek.com") {
+        return UpstreamProtocol::DeepSeekWeb;
+    }
     let is_ant = base_url.contains("anthropic")
         || (provider_name.contains("anthropic") && !base_url.contains("v1/chat"));
     if is_ant {

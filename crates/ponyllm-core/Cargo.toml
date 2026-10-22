@@ -31,6 +31,13 @@ async-trait = { workspace = true }
 # rustls, base64 0.22.1 via workspace; zero new version resolution).
 ring = "0.17"
 base64 = { workspace = true }
+sha3 = "0.10"
+# L3A F4: peek 深链 completion 2xx 响应头判断 biz_code 信封（40012/40301）
+# 并重建流。http-body-util 0.1.5 已在 Cargo.lock（reqwest 的既有传递依赖，
+# 零新版本解析）；仅在此处直接声明以便用 BodyExt::into_data_stream 拆流。
+http-body-util = "0.1.5"
+# http crate (1.x) 与 reqwest 同源版本，用于 http::Response 重建（From 互转公开）。
+http = "1"
 
 [dev-dependencies]
 axum = { workspace = true }

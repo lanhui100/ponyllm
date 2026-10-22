@@ -403,6 +403,9 @@ impl ProviderConfig {
             // `/systemone`(见 RoutedTarget::systemone_url);这里返回 None 让
             // with_endpoint 落到 base_url 兜底,仅保留编译穷举完整.
             UpstreamProtocol::Systemone => None,
+            // deepseek-web 固定 base_url + `/api/v0/chat/completion`,无
+            // per-protocol endpoint 覆盖 (wave-9 契约 §9.6 不新增配置键).
+            UpstreamProtocol::DeepSeekWeb => None,
         }
     }
 }

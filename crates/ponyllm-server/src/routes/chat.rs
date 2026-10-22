@@ -4,8 +4,8 @@ use crate::state::{AppState, RoutedTarget};
 use crate::streaming::{
     anthropic_sse_to_openai_stream, antigravity_sse_to_openai_stream,
     collect_antigravity_sse_to_json, empty_stop_retry_delay, extract_usage_tokens,
-    is_transient_empty_stop_error, passthrough_sse, responses_sse_to_chat_stream, stall_guard,
-    verify_antigravity_stream_preamble_with_deadline, wrap_telemetry_stream,
+    is_transient_empty_stop_error, passthrough_sse, responses_sse_to_chat_stream, sse_event_stream,
+    stall_guard, verify_antigravity_stream_preamble_with_deadline, wrap_telemetry_stream,
     AntigravityPreambleResult, StreamFailureContext, DEFAULT_PREAMBLE_DEADLINE,
     DEFAULT_TAIL_STALL_IDLE,
 };
@@ -15,12 +15,16 @@ use axum::response::IntoResponse;
 use axum::Json;
 use futures_util::StreamExt;
 use parking_lot::Mutex;
+use ponyllm_core::deepseek_web::{parse_completion_event, DeltaOp, SseEvent};
 use ponyllm_core::error::CoreError;
 use ponyllm_core::executor::{is_opencode_zen_target, EventSinkCtx, UpstreamExecutor};
 use ponyllm_core::pool::GatewayRoutingStrategy;
 use ponyllm_core::telemetry::{EventCtx, GatewayEvent, StageTimings};
 use ponyllm_protocol::anthropic::messages::MessageResponse;
-use ponyllm_protocol::openai::chat::ChatCompletionRequest;
+use ponyllm_protocol::openai::chat::{
+    ChatChunkChoice, ChatChunkDelta, ChatCompletionChunk, ChatCompletionRequest, FinishReason,
+    Usage,
+};
 use ponyllm_protocol::translator::{
     anthropic_to_chat_response, antigravity_to_chat_response, chat_to_anthropic_request,
     chat_to_antigravity_request, chat_to_responses_request, responses_to_chat_response,
@@ -40,6 +44,537 @@ fn extract_chat_prompt(msg: &ChatMessage) -> Option<String> {
         ChatMessage::Tool(m) => Some(m.content.as_plain_text()),
         ChatMessage::Function(m) => m.content.clone(),
     }
+}
+
+/// Translate a deepseek-web completion SSE byte stream into OpenAI Chat
+/// Completions SSE chunks (wave-9 contract DW-T-01..09).
+///
+/// Event model (REA §5 / `deepseek_web::sse`):
+/// - `ready` → first assistant chunk (role + `chatcmpl-dsw-<response_message_id>`
+///   id), no content (DW-T-01); `request_message_id` never leaks downstream.
+/// - `delta` `SET` → append text by path semantics: `/message/content/...`
+///   fragments carrying `type` (e.g. `text`/`thinking`) and `content` merge
+///   into the current incremental content as an OpenAI `content` delta;
+///   non-`text` fragments (e.g. `thinking`) go to `reasoning_content`
+///   (DW-T-02).
+/// - `delta` `BATCH` → recursively, in-order expansion (DW-T-03).
+/// - `finish` → terminal chunk with `finish_reason=stop`; `usage` mapped when
+///   present (prompt/completion/total — DW-T-04), omitted (never fabricated)
+///   when absent.
+/// - `close` `close_reason`: `success` (or missing, known limitation §10.2) →
+///   normal stop (if no `finish` arrived yet); `invalid_query`/`error` →
+///   explicit upstream error frame (`data: {"error": …}`); `timeout` → same
+///   error frame so the interruption is visible downstream (DW-T-05).
+/// - Degradation fallback (DW-T-06): when delta ops cannot be unambiguously
+///   reduced to text (missing SET fragment / unknown path structure), all ops
+///   are recorded at debug level and the `finish`-era accumulated final
+///   content is emitted ONCE as a conclusive `content` chunk — never silently
+///   dropped, never fabricated mid-stream.
+/// - `hint`/`toast`/`title`/`updateSession` → non-fatal: logged at debug, no
+///   chunk, stream continues (DW-T-07).
+/// - Non-event frames (keep-alive, `[DONE]` sentinels, comment lines),
+///   unknown event names → ignored / tolerated (DW-T-08/DW-T-09). This layer
+///   never adds its own `data: [DONE]`.
+///
+/// The returned stream is generic over the upstream error type `E` (same shape
+/// as [`crate::streaming::antigravity_sse_to_openai_stream`]) so the existing
+/// stall-guarded / telemetry-wrapped plumbing is reused unchanged.
+fn deepseek_web_sse_to_openai_stream<S, E>(
+    stream: S,
+    fallback_model: &str,
+) -> impl futures_util::Stream<Item = Result<bytes::Bytes, E>>
+where
+    S: futures_util::Stream<Item = Result<bytes::Bytes, E>> + Send + 'static,
+    E: Send + 'static,
+{
+    use bytes::Bytes;
+    use futures_util::StreamExt;
+
+    let model = fallback_model.to_string();
+    // Shared translator state flips as frames arrive. `content` accumulates
+    // every unambiguously-reduced text fragment; `degraded` latches when an
+    // op defies clean reduction so the finish-time conclusive chunk is
+    // emitted exactly once. `stopped` gates the terminal chunk.
+    let state = std::sync::Arc::new(std::sync::Mutex::new(DeepSeekWebTranslateState {
+        response_id: None,
+        emitted_assistant_role: false,
+        content: String::new(),
+        emitted_content_len: 0,
+        degraded: false,
+        finished_stop: false,
+        transport_errored: false,
+        current_segment_type: None,
+    }));
+    // Clones for the post-loop terminal chain (the flat_map below moves its
+    // own copies of `state`/`model`).
+    let state_tail = state.clone();
+    let model_tail = model.clone();
+
+    let translated = sse_event_stream(stream).flat_map(move |res| {
+        let mut out: Vec<Result<Bytes, E>> = Vec::new();
+        match res {
+            Ok(evt) => {
+                // Event frames carry `event:` + `data:`; translate, never fatal.
+                match parse_completion_event(&evt.event, &evt.data) {
+                    Ok(Some(event)) => {
+                        deepseek_web_translate_event(
+                            &event,
+                            &state,
+                            &model,
+                            &mut out,
+                        );
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        tracing::debug!(
+                            model = %model,
+                            error = %e,
+                            "deepseek-web SSE frame ignored (non-fatal parse)"
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                state.lock().unwrap().transport_errored = true;
+                out.push(Err(e));
+            }
+        }
+        futures_util::stream::iter(out)
+    });
+
+    // Terminal handling: close/success already emits stop; an abrupt EOF with
+    // no stop and no transport error synthesizes stop only when at least one
+    // chunk was emitted (mirrors antigravity's EOF semantics — never a fake
+    // Stop for a zero-chunk stream). L3A F2: the EOF chain must also flush a
+    // pending DW-T-06 conclusive increment before the stop chunk (idempotent —
+    // the cursor makes a repeated call a no-op).
+    translated
+        .chain(futures_util::stream::once(async move {
+            let mut buf = Vec::new();
+            let mut st = state_tail.lock().unwrap();
+            let had_any_chunk =
+                st.emitted_assistant_role || !st.content.is_empty() || st.finished_stop;
+            if !st.finished_stop
+                && !st.transport_errored
+                && had_any_chunk
+            {
+                // Degraded streams: emit the not-yet-live remainder (if any)
+                // exactly once, then the synthesized stop.
+                if let Some(conclusive) =
+                    deepseek_web_conclusive_increment_chunk(&model_tail, &mut st)
+                {
+                    if let Ok(json) = serde_json::to_string(&conclusive) {
+                        buf.extend_from_slice(format!("data: {json}\n\n").as_bytes());
+                    }
+                }
+                let final_chunk = ChatCompletionChunk {
+                    id: st.response_id.clone().unwrap_or_else(|| {
+                        format!("chatcmpl-dsw-{}", uuid_simple())
+                    }),
+                    object: "chat.completion.chunk".to_string(),
+                    created: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs(),
+                    model: model_tail.clone(),
+                    choices: vec![ChatChunkChoice {
+                        index: 0,
+                        delta: ChatChunkDelta::default(),
+                        finish_reason: Some(FinishReason::Stop),
+                        logprobs: None,
+                    }],
+                    usage: None,
+                    system_fingerprint: None,
+                    service_tier: None,
+                };
+                if let Ok(json) = serde_json::to_string(&final_chunk) {
+                    buf.extend_from_slice(format!("data: {json}\n\n").as_bytes());
+                }
+            }
+            drop(st);
+            Ok::<_, E>(Bytes::from(buf))
+        }))
+        .boxed()
+}
+
+/// Per-stream state for the deepseek-web → OpenAI translator (DW-T-*).
+struct DeepSeekWebTranslateState {
+    response_id: Option<String>,
+    emitted_assistant_role: bool,
+    /// Accumulated unambiguously-reduced text (DW-T-06 degradation source).
+    content: String,
+    /// Cursor into `content` already emitted live as OpenAI content deltas
+    /// (DW-T-06 Lead ruling): a degradation conclusive chunk emits only the
+    /// `content[emitted_content_len..]` increment — never a repeat of what was
+    /// already streamed.
+    emitted_content_len: usize,
+    /// Latched when a delta op defies clean reduction (DW-T-06).
+    degraded: bool,
+    /// `finish`/`close success` already emitted the stop chunk (DW-T-04/05).
+    finished_stop: bool,
+    /// Upstream transport error seen (never synthesize a stop over it).
+    transport_errored: bool,
+    /// Last seen segment `type` marker under `/message/content/...` (DW-T-02):
+    /// `text` → visible content, anything else (e.g. `thinking`) → reasoning.
+    current_segment_type: Option<String>,
+}
+
+/// Translate one typed deepseek-web event into OpenAI chunk bytes (DW-T-*).
+fn deepseek_web_translate_event<E>(
+    event: &SseEvent,
+    state: &std::sync::Arc<std::sync::Mutex<DeepSeekWebTranslateState>>,
+    model: &str,
+    out: &mut Vec<Result<bytes::Bytes, E>>,
+) {
+    use bytes::Bytes;
+
+    let mut st = state.lock().unwrap();
+    match event {
+        SseEvent::Ready {
+            response_message_id,
+            ..
+        } => {
+            if !st.emitted_assistant_role {
+                st.response_id = Some(format!("chatcmpl-dsw-{}", response_message_id));
+                st.emitted_assistant_role = true;
+                let chunk = ChatCompletionChunk {
+                    id: st.response_id.clone().unwrap(),
+                    object: "chat.completion.chunk".to_string(),
+                    created: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs(),
+                    model: model.to_string(),
+                    choices: vec![ChatChunkChoice {
+                        index: 0,
+                        delta: ChatChunkDelta {
+                            role: Some("assistant".to_string()),
+                            ..Default::default()
+                        },
+                        finish_reason: None,
+                        logprobs: None,
+                    }],
+                    usage: None,
+                    system_fingerprint: None,
+                    service_tier: None,
+                };
+                if let Ok(json) = serde_json::to_string(&chunk) {
+                    out.push(Ok(Bytes::from(format!("data: {json}\n\n"))));
+                }
+            }
+        }
+        SseEvent::Delta(op) => {
+            deepseek_web_apply_delta(op, model, &mut st, out);
+        }
+        SseEvent::Finish { usage } => {
+            if !st.finished_stop {
+                st.finished_stop = true;
+                let usage_map = usage.as_ref().and_then(|u| u.as_object());
+                let usage_field = usage_map.map(|u| Usage {
+                    prompt_tokens: u
+                        .get("prompt_tokens")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0) as u32,
+                    completion_tokens: u
+                        .get("completion_tokens")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0) as u32,
+                    total_tokens: u
+                        .get("total_tokens")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0) as u32,
+                    prompt_tokens_details: None,
+                    completion_tokens_details: None,
+                });
+                // DW-T-06 (Lead ruling): when degraded, emit the *remaining*
+                // content increment (content[emitted_content_len..]) once —
+                // never a repeat of already-streamed text. Empty increment →
+                // nothing (everything already visible in the stream).
+                deepseek_web_emit_conclusive_increment(model, &mut st, out);
+                let final_chunk = ChatCompletionChunk {
+                    id: st.response_id.clone().unwrap_or_else(|| {
+                        format!("chatcmpl-dsw-{}", uuid_simple())
+                    }),
+                    object: "chat.completion.chunk".to_string(),
+                    created: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs(),
+                    model: model.to_string(),
+                    choices: vec![ChatChunkChoice {
+                        index: 0,
+                        delta: ChatChunkDelta::default(),
+                        finish_reason: Some(FinishReason::Stop),
+                        logprobs: None,
+                    }],
+                    usage: usage_field,
+                    system_fingerprint: None,
+                    service_tier: None,
+                };
+                if let Ok(json) = serde_json::to_string(&final_chunk) {
+                    out.push(Ok(Bytes::from(format!("data: {json}\n\n"))));
+                }
+            }
+        }
+        SseEvent::Close { close_reason } => {
+            // DW-T-05: success / missing → normal stop if not yet finished.
+            // invalid_query / timeout / error → explicit upstream error frame.
+            let reason = close_reason.as_deref().unwrap_or("success");
+            match reason {
+                "success" => {
+                    if !st.finished_stop {
+                        st.finished_stop = true;
+                        // DW-T-06 (Lead ruling): same increment-only conclusive
+                        // emission as on `finish` — close must not repeat text
+                        // already live-streamed.
+                        deepseek_web_emit_conclusive_increment(model, &mut st, out);
+                        let final_chunk = ChatCompletionChunk {
+                            id: st.response_id.clone().unwrap_or_else(|| {
+                                format!("chatcmpl-dsw-{}", uuid_simple())
+                            }),
+                            object: "chat.completion.chunk".to_string(),
+                            created: std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs(),
+                            model: model.to_string(),
+                            choices: vec![ChatChunkChoice {
+                                index: 0,
+                                delta: ChatChunkDelta::default(),
+                                finish_reason: Some(FinishReason::Stop),
+                                logprobs: None,
+                            }],
+                            usage: None,
+                            system_fingerprint: None,
+                            service_tier: None,
+                        };
+                        if let Ok(json) = serde_json::to_string(&final_chunk) {
+                            out.push(Ok(Bytes::from(format!("data: {json}\n\n"))));
+                        }
+                    }
+                }
+                other => {
+                    // invalid_query / timeout / error → explicit error frame
+                    // (DW-T-05), visible downstream; never synthesize stop.
+                    // L3A F3: terminal state is monotone — once a stop has
+                    // been emitted (successful `finish`), a trailing
+                    // close(error) must NOT append an error frame that a strict
+                    // SSE client would misread as a failure.
+                    if !st.finished_stop {
+                        st.finished_stop = true;
+                        let msg = if other == "timeout" {
+                            "deepseek-web stream timed out upstream"
+                        } else if other == "invalid_query" {
+                            "deepseek-web rejected the query upstream (close_reason invalid_query)"
+                        } else {
+                            "deepseek-web upstream error"
+                        };
+                        let err_frame = serde_json::json!({
+                            "error": {
+                                "message": msg,
+                                "type": "upstream_error",
+                                "code": format!("close_reason={}", other),
+                            }
+                        });
+                        if let Ok(json) = serde_json::to_string(&err_frame) {
+                            out.push(Ok(Bytes::from(format!("data: {json}\n\n"))));
+                        }
+                    }
+                }
+            }
+        }
+        SseEvent::Hint(v) | SseEvent::Toast(v) | SseEvent::Title(v) | SseEvent::UpdateSession(v) => {
+            // DW-T-07: non-fatal — log, keep streaming, no chunk.
+            tracing::debug!(
+                model = %model,
+                payload = %v,
+                "deepseek-web non-fatal event (no chunk emitted)"
+            );
+        }
+    }
+}
+
+/// Apply one delta op tree (SET / BATCH, recursing in order — DW-T-02/03).
+fn deepseek_web_apply_delta<E>(
+    op: &DeltaOp,
+    model: &str,
+    st: &mut DeepSeekWebTranslateState,
+    out: &mut Vec<Result<bytes::Bytes, E>>,
+) {
+    use bytes::Bytes;
+
+    match op {
+        DeltaOp::Set { path, value } => {
+            // Unambiguous reduction (DW-T-02): a `type` fragment is metadata
+            // steering later content; a `content` fragment (or a bare string
+            // value under `/message/content/...`) carries the text delta. A
+            // `type` value of anything other than `text` (e.g. `thinking`)
+            // marks the current segment as reasoning; the following content
+            // fragment goes to `reasoning_content`, never visible content.
+            let lower = path.to_ascii_lowercase();
+            let ends_with_type = lower.ends_with("/type");
+            let under_content =
+                lower.contains("/message/content") || lower.contains("content/");
+            let value_str = value.as_str();
+            let object_content = value
+                .as_object()
+                .and_then(|o| o.get("content"))
+                .and_then(|c| c.as_str());
+            let object_type = value
+                .as_object()
+                .and_then(|o| o.get("type"))
+                .and_then(|t| t.as_str());
+
+            // `type` marker: update the segment type, never emit a chunk.
+            if ends_with_type {
+                if value_str.is_some() {
+                    st.current_segment_type = value_str.map(|s| s.to_string());
+                } else if object_type.is_some() {
+                    st.current_segment_type = object_type.map(|s| s.to_string());
+                }
+                return;
+            }
+
+            if under_content {
+                if let Some(text) = object_content.or(value_str) {
+                    if text.is_empty() {
+                        return;
+                    }
+                    st.content.push_str(text);
+                    if !st.degraded {
+                        // Type != text (e.g. thinking) → reasoning (DW-T-02).
+                        let reasoning = st
+                            .current_segment_type
+                            .as_deref()
+                            .is_some_and(|t| t != "text");
+                        let chunk = ChatCompletionChunk {
+                            id: st.response_id.clone().unwrap_or_else(|| {
+                                format!("chatcmpl-dsw-{}", uuid_simple())
+                            }),
+                            object: "chat.completion.chunk".to_string(),
+                            created: std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs(),
+                            model: model.to_string(),
+                            choices: vec![ChatChunkChoice {
+                                index: 0,
+                                delta: ChatChunkDelta {
+                                    content: if reasoning { None } else { Some(text.to_string()) },
+                                    reasoning_content: if reasoning {
+                                        Some(text.to_string())
+                                    } else {
+                                        None
+                                    },
+                                    ..Default::default()
+                                },
+                                finish_reason: None,
+                                logprobs: None,
+                            }],
+                            usage: None,
+                            system_fingerprint: None,
+                            service_tier: None,
+                        };
+                        if let Ok(json) = serde_json::to_string(&chunk) {
+                            out.push(Ok(Bytes::from(format!("data: {json}\n\n"))));
+                        }
+                        // Lead ruling (DW-T-06): advance the content cursor so a
+                        // later conclusive chunk emits only the increment.
+                        st.emitted_content_len = st.content.len();
+                    }
+                    return;
+                }
+            }
+            // Unknown path/value shape we cannot unambiguously reduce: latch
+            // degradation (DW-T-06) and record the raw op for debug; never
+            // fabricate mid-stream text.
+            st.degraded = true;
+            tracing::debug!(
+                model = %model,
+                path = %path,
+                value = %value,
+                "deepseek-web delta op not unambiguously reducible (degraded mode)"
+            );
+        }
+        DeltaOp::Batch(ops) => {
+            for child in ops {
+                deepseek_web_apply_delta(child, model, st, out);
+            }
+        }
+    }
+}
+
+/// DW-T-06 degradation conclusive emission (Lead ruling): emits **only the
+/// increment** `content[emitted_content_len..]` as one OpenAI content chunk
+/// when the stream degraded and that slice is non-empty; emits nothing when
+/// the slice is empty (all text already live-streamed — no repeats, nothing
+/// silently dropped since the already-visible part is in the stream). The
+/// un-restorable op values are never surfaced as visible content (existing
+/// semantics preserved).
+///
+/// Shared by the `finish`, `close success` and abrupt-EOF terminal paths
+/// (L3A F2: the EOF chain must also flush a pending conclusive increment
+/// before its synthesized stop so degraded content is never lost).
+fn deepseek_web_emit_conclusive_increment<E>(
+    model: &str,
+    st: &mut DeepSeekWebTranslateState,
+    out: &mut Vec<Result<bytes::Bytes, E>>,
+) {
+    use bytes::Bytes;
+
+    let chunk = deepseek_web_conclusive_increment_chunk(model, st);
+    if let Some(content_chunk) = chunk {
+        if let Ok(json) = serde_json::to_string(&content_chunk) {
+            out.push(Ok(Bytes::from(format!("data: {json}\n\n"))));
+        }
+    }
+}
+
+/// Build (and commit the cursor advance for) the DW-T-06 conclusive increment
+/// chunk, or `None` when there is nothing left to emit (not degraded, or all
+/// accumulated content already live-streamed). Advances `emitted_content_len`
+/// only when a chunk is actually produced, so repeated callers stay idempotent.
+fn deepseek_web_conclusive_increment_chunk(
+    model: &str,
+    st: &mut DeepSeekWebTranslateState,
+) -> Option<ChatCompletionChunk> {
+    if !st.degraded {
+        return None;
+    }
+    let len = st.content.len();
+    if st.emitted_content_len >= len {
+        // Nothing left to emit: every accumulated byte is already visible in
+        // the live stream (or the content is empty). Skip the conclusive chunk.
+        return None;
+    }
+    let increment = &st.content[st.emitted_content_len..];
+    if increment.is_empty() {
+        return None;
+    }
+    st.emitted_content_len = len;
+    Some(ChatCompletionChunk {
+        id: st.response_id.clone().unwrap_or_else(|| {
+            format!("chatcmpl-dsw-{}", uuid_simple())
+        }),
+        object: "chat.completion.chunk".to_string(),
+        created: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+        model: model.to_string(),
+        choices: vec![ChatChunkChoice {
+            index: 0,
+            delta: ChatChunkDelta {
+                content: Some(increment.to_string()),
+                ..Default::default()
+            },
+            finish_reason: None,
+            logprobs: None,
+        }],
+        usage: None,
+        system_fingerprint: None,
+        service_tier: None,
+    })
 }
 
 pub async fn handle_chat_completions(
@@ -526,6 +1061,37 @@ pub async fn handle_chat_completions(
                 );
                 continue;
             }
+            ponyllm_core::pool::UpstreamProtocol::DeepSeekWeb => {
+                // Wave-9 contract DW-Q-01..03: the deepseek-web completion body
+                // is fixed-shape (`chat_session_id` is created + patched by the
+                // executor after the PoW dance; `prompt` is the request text;
+                // `model_type` carries the routed model). `thinking_enabled`
+                // follows the effective thinking decision (default true,
+                // DW-Q-03); `search_enabled` stays false (web search is
+                // out-of-scope for this gateway surface). `source` is the
+                // literal released upstream per §10.5.
+                let url = target.deepseek_web_completion_url();
+                let prompt = req
+                    .messages
+                    .iter()
+                    .rev()
+                    .find_map(extract_chat_prompt)
+                    .unwrap_or_default();
+                let val = serde_json::json!({
+                    "chat_session_id": "",
+                    "parent_message_id": null,
+                    "model_type": target.physical_model,
+                    "prompt": prompt,
+                    "ref_file_ids": [],
+                    "thinking_enabled": effective_thinking.is_active()
+                        || requested_thinking != Some(ponyllm_protocol::common::ReasoningEffort::Off),
+                    "search_enabled": false,
+                    "source": "default",
+                    "action": null,
+                    "preempt": false,
+                });
+                (url, val)
+            }
         };
 
         // VULN-07/F6: refuse to dial upstream URLs that resolve (or rebind)
@@ -585,6 +1151,10 @@ pub async fn handle_chat_completions(
         let executor = UpstreamExecutor::with_client(pool.clone(), http_client, max_retries)
             .with_downstream_headers(&headers)
             .with_opencode_zen(is_opencode_zen_target(&target.provider_name, &target_url))
+            .with_deepseek_web(
+                target.upstream_protocol
+                    == ponyllm_core::pool::UpstreamProtocol::DeepSeekWeb,
+            )
             .with_rate_limits(rate_limits)
             .with_ttfb_timeout(ttfb_timeout)
             .with_egress(egress_pool.clone(), egress_clients.clone())
@@ -676,6 +1246,10 @@ pub async fn handle_chat_completions(
                 )
                 .with_downstream_headers(&headers)
                 .with_opencode_zen(is_opencode_zen_target(&target.provider_name, &target_url))
+                .with_deepseek_web(
+                    target.upstream_protocol
+                        == ponyllm_core::pool::UpstreamProtocol::DeepSeekWeb,
+                )
                 .with_rate_limits(rate_limits)
                 .with_ttfb_timeout(if stream_attempt == 1 {
                     // First attempt keeps the configured TTFB verbatim
@@ -1035,6 +1609,14 @@ pub async fn handle_chat_completions(
                                     "Use /v1/systemone for systemone models",
                                 );
                             }
+                            ponyllm_core::pool::UpstreamProtocol::DeepSeekWeb => {
+                                let stream = deepseek_web_sse_to_openai_stream(
+                                    final_raw_stream,
+                                    &target.physical_model,
+                                );
+                                let monitored = wrap_telemetry_stream(stream, failure_ctx);
+                                axum::body::Body::from_stream(monitored)
+                            }
                         };
 
                         let mut resp = axum::response::Response::new(body);
@@ -1363,7 +1945,6 @@ pub async fn handle_chat_completions(
                 ponyllm_core::pool::UpstreamProtocol::Chat
                     | ponyllm_core::pool::UpstreamProtocol::Responses
             ) {
-                // Zen free tier: the Console gate rejects non-stream upstream
                 // bodies even with the tool gate satisfied. Force an upstream
                 // stream and aggregate to the JSON shape the downstream asked
                 // for (mirrors the Antigravity stream-collector pattern).
@@ -1398,6 +1979,48 @@ pub async fn handle_chat_completions(
                                 (
                                     Err(CoreError::Internal(format!(
                                         "Zen stream collect failed: {}",
+                                        e
+                                    ))),
+                                    Some(kid),
+                                )
+                            }
+                        }
+                    }
+                    Err(e) => (Err(e), None),
+                }
+            } else if target.upstream_protocol
+                == ponyllm_core::pool::UpstreamProtocol::DeepSeekWeb
+            {
+                // deepseek-web completion is SSE-only (DW-S-04): a downstream
+                // non-streaming request still forces the upstream SSE stream,
+                // translates it to OpenAI chunks, and aggregates to the JSON
+                // completion the caller asked for (mirrors the zen/Antigravity
+                // stream-collector pattern). The completion body already
+                // carries no `stream` key (exact DW-Q-01 key set), so the
+                // upstream SSE is the wire regardless of the downstream flag.
+                match executor
+                    .execute_stream_request_with_timing_and_key(&target_url, &req_val)
+                    .await
+                {
+                    Ok((resp, _instant, kid)) => {
+                        let raw_stream = resp.bytes_stream();
+                        let translated = deepseek_web_sse_to_openai_stream(
+                            raw_stream,
+                            &target.physical_model,
+                        );
+                        let collected =
+                            crate::streaming::collect_chat_sse_to_json(translated).await;
+                        match collected {
+                            Ok(v) => (Ok(v), Some(kid)),
+                            Err(e) => {
+                                tracing::warn!(
+                                    provider = %target.provider_name,
+                                    error = %e,
+                                    "deepseek-web upstream stream collection failed"
+                                );
+                                (
+                                    Err(CoreError::Internal(format!(
+                                        "deepseek-web stream collect failed: {}",
                                         e
                                     ))),
                                     Some(kid),

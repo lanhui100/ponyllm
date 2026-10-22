@@ -51,6 +51,7 @@ pub fn run_interactive_init(output_path: &str) -> Result<(), Box<dyn std::error:
         println!("\n--- 配置模型提供商 (Provider) ---");
         let provider_options = vec![
             "DeepSeek - 三协议合一 (https://api.deepseek.com, 默认模型: deepseek-v4-flash)",
+            "DeepSeek Web - 网页版登录态 (https://chat.deepseek.com, 默认模型: deepseek-v4-flash)",
             "OpenAI (官方接口及各大兼容中转: https://api.openai.com, 默认模型: gpt-4o)",
             "Anthropic (官方 Messages 接口: https://api.anthropic.com, 默认模型: claude-3-7-sonnet-20250219)",
             "OpenRouter (聚合网关)",
@@ -60,7 +61,9 @@ pub fn run_interactive_init(output_path: &str) -> Result<(), Box<dyn std::error:
         let selection = Select::new("选择要配置的提供商接口:", provider_options).prompt()?;
         let is_custom = selection.starts_with("Custom");
 
-        let (p_name, default_url, default_model, preset_messages_url) = if selection.contains("DeepSeek") {
+        let (p_name, default_url, default_model, preset_messages_url) = if selection.contains("DeepSeek") && selection.contains("Web") {
+            ("deepseek-web".to_string(), "https://chat.deepseek.com", "deepseek-v4-flash", None)
+        } else if selection.contains("DeepSeek") {
             ("deepseek".to_string(), "https://api.deepseek.com", "deepseek-v4-flash", Some("https://api.deepseek.com/anthropic".to_string()))
         } else if selection.starts_with("OpenAI") {
             ("openai".to_string(), "https://api.openai.com", "gpt-4o", None)
@@ -103,12 +106,17 @@ pub fn run_interactive_init(output_path: &str) -> Result<(), Box<dyn std::error:
             "chat (OpenAI Chat Completions: /v1/chat/completions，默认)",
             "responses (OpenAI Responses: /v1/responses，如 opencode muse-spark)",
             "anthropic (Anthropic Messages: /v1/messages)",
+            "deepseek-web (chat.deepseek.com 网页版: /api/v0/chat/completion，PoW 自动求解)",
         ];
         let proto_sel = Select::new("  原生上游协议 (模型默认继承，可被模型单独覆盖):", proto_options).prompt()?;
         let default_protocol = if proto_sel.starts_with("responses") {
             Some(ponyllm_core::pool::UpstreamProtocol::Responses)
         } else if proto_sel.starts_with("anthropic") {
             Some(ponyllm_core::pool::UpstreamProtocol::Anthropic)
+        } else if proto_sel.starts_with("deepseek-web") || p_name == "deepseek-web" {
+            // chat.deepseek.com 网页版模板：协议固定 deepseek-web，key 即用户
+            // 自持 web 登录态 token（wave-9 契约 DW-S-03，PoW 由网关自动求解）。
+            Some(ponyllm_core::pool::UpstreamProtocol::DeepSeekWeb)
         } else {
             Some(ponyllm_core::pool::UpstreamProtocol::Chat)
         };
@@ -151,9 +159,14 @@ pub fn run_interactive_init(output_path: &str) -> Result<(), Box<dyn std::error:
                 .with_default(&format!("{}-key-{}", p_name, key_idx))
                 .prompt()?;
 
+            let key_help = if p_name == "deepseek-web" {
+                "输入您的 chat.deepseek.com 网页版登录态 Token (web token)"
+            } else {
+                "输入上游供应商给您的 API Key (输入内容已掩码)"
+            };
             let api_key = Password::new("    API Key 秘钥:")
                 .with_display_mode(PasswordDisplayMode::Masked)
-                .with_help_message("输入上游供应商给您的 API Key (输入内容已掩码)")
+                .with_help_message(key_help)
                 .prompt()?;
 
             let priority = Text::new("    优先级 (数值越小越优先，默认为 1):")

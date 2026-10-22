@@ -1,3 +1,8 @@
+use crate::deepseek_web::{
+    encode_pow_response_header, is_pow_challenge_expired, solve_pow, DeepSeekWebClient,
+    ClientError, CLIENT_BUNDLE_ID, CLIENT_LOCALE, CLIENT_PLATFORM, CLIENT_TIMEZONE_OFFSET,
+    CLIENT_VERSION,
+};
 use crate::error::{CoreError, GatewayErrorKind, Result};
 use crate::pool::{ApiKeyEntry, EgressEntry, EgressPool, KeyPool, KeyState, PoolErrorType};
 use crate::telemetry::{GatewayEvent, StageTimings};
@@ -13,6 +18,12 @@ use std::time::{Duration, Instant};
 /// headers within 3s is a failed probe — cooldown kept, fail-fast preserved,
 /// no hang (`2026-10-22-egress-cooldown-selfheal`).
 const EGRESS_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// DeepSeek Web completion endpoint path (wave-9 contract DW-S-04, REA §3):
+/// `POST {base}/api/v0/chat/completion` returns a `text/event-stream` body.
+/// The PoW challenge endpoint is `/api/v0/chat/create_pow_challenge` for the
+/// same `target_path` (DW-S-01).
+const DEEPSEEK_WEB_COMPLETION_PATH: &str = "/api/v0/chat/completion";
 
 /// Derive the provider base from a normalized protocol endpoint so the
 /// recovery probe targets `GET {base_url}/models` (contract C7). The executor
@@ -33,6 +44,186 @@ fn probe_base_from_endpoint(endpoint: &str) -> Option<String> {
     ] {
         if let Some(base) = trimmed.strip_suffix(leaf) {
             return Some(base.to_string());
+        }
+    }
+    None
+}
+
+/// Derive the deepseek-web provider base URL from the completion endpoint
+/// (`{base}/api/v0/chat/completion`) so the PoW challenge can be fetched from
+/// the SAME origin as the completion request (DW-S-01: `{base}/api/v0/...`).
+fn deepseek_web_base_from_completion_url(completion_url: &str) -> String {
+    let trimmed = completion_url.trim_end_matches('/');
+    if let Some(base) = trimmed.strip_suffix(DEEPSEEK_WEB_COMPLETION_PATH) {
+        base.to_string()
+    } else if let Some(base) = trimmed.strip_suffix("/api/v0/chat/completion/") {
+        base.to_string()
+    } else {
+        // Keep the executor honest: an unexpected shape still points at the
+        // protocol home base so the error surfaces upstream, never masked.
+        crate::deepseek_web::DEFAULT_BASE_URL.to_string()
+    }
+}
+
+/// Current unix time in seconds (used for the PoW challenge expiry check
+/// H-03 / DW-P-06: `issued_at + expire_after <= now`).
+fn now_unix_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Map a deepseek-web [`ClientError`] (DW-E-*) onto a gateway `CoreError`
+/// whose kind feeds the existing failover/cooldown machinery:
+///
+/// - `Banned` (40012) and `Token` (40002/40003) → `AuthInvalid`: permanent,
+///   the key is isolated (DW-E-02/DW-E-04).
+/// - everything else (429/network/HTTP/captcha wall/unknown) →
+///   `UpstreamUnavailable` (503-flavored), so the standard transient
+///   failover applies (DW-E-01/05/06, DW-G-02/03 — the client already
+///   performed its bounded single Retry-After backoff internally).
+fn map_deepseek_web_client_error(e: ClientError, key_id: &str) -> CoreError {
+    match e {
+        ClientError::Banned => CoreError::AuthInvalid {
+            key_id: key_id.to_string(),
+            reason: "deepseek-web user is banned (40012, DW-E-02)".to_string(),
+        },
+        ClientError::Token => CoreError::AuthInvalid {
+            key_id: key_id.to_string(),
+            reason: "deepseek-web missing or invalid web token (40002/40003, DW-E-04)"
+                .to_string(),
+        },
+        other => CoreError::UpstreamStatusError {
+            status: reqwest::StatusCode::SERVICE_UNAVAILABLE,
+            body: format!("deepseek-web upstream error: {other}"),
+        },
+    }
+}
+
+/// How many bytes of a deepseek-web completion response head to inspect for a
+/// `biz_code` error envelope before declaring a 2xx a success (L3A F4).
+/// Error envelopes are small JSON blobs; the SSE stream body itself may be
+/// arbitrarily large, so only the head is peeked and the inspected bytes are
+/// re-prefixed onto the remaining stream before returning.
+const DEEPSEEK_WEB_PEEK_HEAD_BYTES: usize = 64 * 1024;
+
+/// True when the concatenated peeked bytes already contain a complete SSE
+/// frame boundary (`\n\n` or `\r\n\r\n`) — a healthy completion stream has one
+/// in its first chunk, so we stop peeking there and hand the frame back whole.
+fn deepseek_web_head_has_sse_boundary(chunks: &[bytes::Bytes]) -> bool {
+    let mut buf: Vec<u8> = Vec::with_capacity(128);
+    for c in chunks {
+        buf.extend_from_slice(c);
+    }
+    buf.windows(2).any(|w| w == b"\n\n") || buf.windows(4).any(|w| w == b"\r\n\r\n")
+}
+
+/// Peek the head of a deepseek-web completion response and detect a non-zero
+/// `biz_code` error envelope (40012 USER_IS_BANNED / 40301 INVALID_POW_RESPONSE
+/// / other), per L3A F4. Returns `Err((biz_code, biz_msg))` when the head is
+/// an error envelope; otherwise `Ok(resp)` with the peeked bytes re-prefixed
+/// onto the remaining body stream so the SSE translation sees the full body.
+///
+/// `reqwest::Response` exposes no public `into_parts`, so the conversion goes
+/// through `http::Response` (both `From` impls are public); the body stream is
+/// split via `http_body_util::BodyExt::into_data_stream` and re-wrapped with
+/// `reqwest::Body::wrap_stream` (http-body-util 0.1.5 is an existing lock
+/// dependency of reqwest — zero new version resolution).
+async fn deepseek_web_peek_completion_envelope(
+    resp: reqwest::Response,
+) -> std::result::Result<reqwest::Response, (i64, String)> {
+    use futures_util::StreamExt;
+    use http_body_util::BodyExt;
+
+    let http_resp: http::Response<reqwest::Body> = resp.into();
+    let (parts, body) = http_resp.into_parts();
+    let mut stream = body.into_data_stream();
+    let mut head: Vec<bytes::Bytes> = Vec::new();
+    let mut total: usize = 0;
+    while total < DEEPSEEK_WEB_PEEK_HEAD_BYTES {
+        match stream.next().await {
+            Some(Ok(chunk)) => {
+                total += chunk.len();
+                head.push(chunk);
+                // Stop at the first complete SSE frame: a healthy stream must
+                // be handed back whole (the peek is only an envelope probe).
+                if deepseek_web_head_has_sse_boundary(&head) {
+                    break;
+                }
+            }
+            Some(Err(_)) | None => break,
+        }
+    }
+
+    // Interpret the head: either a JSON error envelope or an SSE stream.
+    let joined: bytes::Bytes = head.iter().map(|c| c.as_ref()).collect::<Vec<&[u8]>>().concat().into();
+    let text = String::from_utf8_lossy(&joined);
+    let trimmed = text.trim();
+    // Envelope shape: `{"biz_code":N,...}` or `{"data":{"biz_code":N,...}}`
+    // (both wire shapes seen; the client's parse accepts either).
+    if let Ok(val) = serde_json::from_str::<Value>(trimmed) {
+        let inner = val.get("data").unwrap_or(&val);
+        if let Some(code) = inner.get("biz_code").and_then(|c| c.as_i64()) {
+            if code != 0 {
+                let msg = inner
+                    .get("biz_msg")
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                return Err((code, msg));
+            }
+        }
+        // biz_code == 0 / absent on a bare JSON body is not an error envelope:
+        // fall through and treat it as a healthy (non-SSE) body.
+    }
+
+    // Rebuild the response with the peeked head re-prefixed.
+    let remaining = stream;
+    let replayed = futures_util::stream::iter(
+        head.into_iter().map(|b| Ok::<bytes::Bytes, reqwest::Error>(b)),
+    )
+    .chain(remaining);
+    let new_body = reqwest::Body::wrap_stream(replayed);
+    let new_resp = http::Response::from_parts(parts, new_body);
+    Ok(new_resp.into())
+}
+
+/// Classify a non-zero `biz_code` envelope found on a 2xx completion response
+/// (L3A F4, DW-E-02/DW-E-03): 40012 USER_IS_BANNED → AuthInvalid (isolate the
+/// key, never re-consume the token); 40300/40301 INVALID_POW_RESPONSE →
+/// UpstreamUnavailable (bounded re-solve window is the per-attempt fresh
+/// challenge; repeated 40301 surfaces as an explicit error, DW-E-03).
+fn classify_deepseek_web_completion_envelope(biz_code: i64, biz_msg: &str) -> (GatewayErrorKind, PoolErrorType) {
+    match biz_code {
+        40012 => (
+            GatewayErrorKind::AuthInvalid,
+            PoolErrorType::AuthInvalid {
+                reason: Some(format!("deepseek-web banned (40012): {biz_msg}")),
+            },
+        ),
+        40002 | 40003 => (
+            GatewayErrorKind::AuthInvalid,
+            PoolErrorType::AuthInvalid {
+                reason: Some(format!("deepseek-web token ({}): {biz_msg}", biz_code)),
+            },
+        ),
+        _ => (
+            GatewayErrorKind::UpstreamUnavailable,
+            PoolErrorType::NetworkError,
+        ),
+    }
+}
+
+/// Detect a WAF/captcha marker on a deepseek-web response (DW-G-02):
+/// `x-amzn-waf-action: captcha` or `cf-mitigated: challenge` → explicit
+/// failure, zero retries/bypass attempts. Returns the marker verbatim.
+fn deepseek_web_waf_marker(resp: &reqwest::Response) -> Option<String> {
+    for (name, needle) in [("x-amzn-waf-action", "captcha"), ("cf-mitigated", "challenge")] {
+        if let Some(v) = resp.headers().get(name).and_then(|v| v.to_str().ok()) {
+            if v.eq_ignore_ascii_case(needle) {
+                return Some(format!("{}: {}", name, v));
+            }
         }
     }
     None
@@ -133,6 +324,12 @@ pub struct UpstreamExecutor {
     /// byte-identical wire headers to before.
     opencode_zen: bool,
     systemone: bool,
+    /// DeepSeek Web scope (wave-9 contract DW-*): when enabled the executor
+    /// runs the PoW dance — `create_pow_challenge` → `solve_pow` →
+    /// `X-DS-PoW-Response` — before each completion attempt and sends the
+    /// completion request through the existing guarded path. Defaults to off
+    /// so every other upstream keeps its historical behavior.
+    deepseek_web: bool,
     /// Resolved short-window budget (provider default merged with the model
     /// override) plumbed by the routes. `None` = budget dimension disabled
     /// (legacy unlimited behavior). Feeds both the budget-filtered key
@@ -1294,6 +1491,7 @@ impl UpstreamExecutor {
             client_label: "ponyllm".to_string(),
             opencode_zen: false,
             systemone: false,
+            deepseek_web: false,
             rate_limits: None,
             ttfb_timeout: Some(DEFAULT_UPSTREAM_TTFB_TIMEOUT),
             excluded_keys: Vec::new(),
@@ -1349,6 +1547,16 @@ impl UpstreamExecutor {
 
     pub fn with_systemone(mut self, enabled: bool) -> Self {
         self.systemone = enabled;
+        self
+    }
+
+    /// Opt into the DeepSeek Web PoW treatment (wave-9 contract DW-*): the
+    /// executor fetches a fresh challenge, solves it and attaches the
+    /// `X-DS-PoW-Response` header to the completion request before sending it
+    /// through the same guarded/TTFB path as every other upstream. Routes set
+    /// this when the resolved target protocol is `DeepSeekWeb`.
+    pub fn with_deepseek_web(mut self, enabled: bool) -> Self {
+        self.deepseek_web = enabled;
         self
     }
 
@@ -1882,6 +2090,40 @@ impl UpstreamExecutor {
             )));
         }
 
+        // DeepSeek Web (chat.deepseek.com, wave-9 contract DW-S-03): the key's
+        // `api_key` IS the user-held web session token. Header group mirrors the
+        // official client (REA §2): Bearer token + `x-client-*` group. The
+        // protocol-specific `X-DS-PoW-Response` header is attached by the
+        // deepseek_web request prep after the challenge is solved (executor
+        // branch in the attempt loop), because its value is per-attempt and
+        // requires a fresh PoW challenge.
+        if self.deepseek_web {
+            let bearer_val =
+                HeaderValue::from_str(&format!("Bearer {}", clean_key)).map_err(|e| {
+                    CoreError::Internal(format!(
+                        "Invalid characters in API key for '{}': {}",
+                        key.id, e
+                    ))
+                })?;
+            headers.insert(AUTHORIZATION, bearer_val);
+            headers.insert("x-client-bundle-id", HeaderValue::from_static(CLIENT_BUNDLE_ID));
+            headers.insert("x-client-platform", HeaderValue::from_static(CLIENT_PLATFORM));
+            headers.insert("x-client-version", HeaderValue::from_static(CLIENT_VERSION));
+            headers.insert("x-client-locale", HeaderValue::from_static(CLIENT_LOCALE));
+            headers.insert(
+                "x-client-timezone-offset",
+                HeaderValue::from_static(CLIENT_TIMEZONE_OFFSET),
+            );
+            // `x-device-id` is a locally generated UUID, never a fabricated
+            // browser fingerprint (DW-G-01): one per attempt (per-request
+            // reuse is also allowed per contract §10.4).
+            let device_id = uuid::Uuid::new_v4().as_simple().to_string();
+            if let Ok(v) = HeaderValue::from_str(&device_id) {
+                headers.insert("x-device-id", v);
+            }
+            return Ok(headers);
+        }
+
         // systemone only needs Bearer + Zen client headers; do not send
         // Anthropic x-api-key or anthropic-version to a custom endpoint.
         if self.systemone {
@@ -1951,6 +2193,77 @@ impl UpstreamExecutor {
         }
 
         Ok(headers)
+    }
+
+    /// DeepSeek Web PoW prelude (wave-9, DW-P-01/02/05/06/07, DW-S-02,
+    /// DW-E-*): create a chat session (needed by the completion body,
+    /// DW-Q-01), patch `chat_session_id` into the body, fetch a fresh
+    /// challenge for `/api/v0/chat/completion`, solve it exactly once (no
+    /// replay, DW-P-07/DW-G-04) and return the `X-DS-PoW-Response` header
+    /// value (H-02 encoding).
+    ///
+    /// Both short calls (session / challenge, `external_call_timeout_ms ≤
+    /// 3000`, NFR baseline) ride the [`DeepSeekWebClient`]'s own bounded 3s
+    /// budget + single Retry-After backoff (DW-G-03), so this helper only
+    /// classifies the outcome. The completion request itself is sent
+    /// afterwards through the existing guarded path (TTFB =
+    /// `DEFAULT_UPSTREAM_TTFB_TIMEOUT`, NON-GOAL, contract §8). The session
+    /// is per-token-per-attempt (a chat_session belongs to the token that
+    /// created it), so key failover always uses a session it owns.
+    ///
+    /// Error mapping (contract §6 DW-E-*): token/banned → `AuthInvalid`
+    /// (permanent, key isolated); everything else (network, HTTP status,
+    /// captcha wall) → `UpstreamUnavailable` so the existing
+    /// failover/cooldown machinery applies.
+    async fn prepare_deepseek_web_completion(
+        &self,
+        key: &ApiKeyEntry,
+        url: &str,
+        effective_body: &mut std::borrow::Cow<'_, Value>,
+    ) -> std::result::Result<String, CoreError> {
+        // The completion URL is `{base}/api/v0/chat/completion`; the PoW and
+        // session endpoints live under the same `{base}/api/v0/...` origin.
+        let base = deepseek_web_base_from_completion_url(url);
+        // `x-device-id` is a locally generated UUID (DW-G-01); per-attempt
+        // generation is allowed (contract §10.4) and keeps zero shared state.
+        let device_id = uuid::Uuid::new_v4().as_simple().to_string();
+        let mut client =
+            DeepSeekWebClient::new(Some(key.api_key.trim().to_string()), device_id);
+        client.base_url = base;
+        let target_path = DEEPSEEK_WEB_COMPLETION_PATH;
+
+        // DW-S-02: the completion body carries `chat_session_id`; create the
+        // session with THIS key's token and patch the id into the body.
+        let session = match client.create_chat_session().await {
+            Ok(s) => s,
+            Err(e) => return Err(map_deepseek_web_client_error(e, &key.id)),
+        };
+        let mut owned = effective_body.clone().into_owned();
+        owned["chat_session_id"] = Value::String(session.id);
+        *effective_body = std::borrow::Cow::Owned(owned);
+
+        let mut challenge = match client.create_pow_challenge(target_path).await {
+            Ok(c) => c,
+            Err(e) => return Err(map_deepseek_web_client_error(e, &key.id)),
+        };
+        // DW-P-06: an expired challenge (issued_at + expireAfter <= now) must
+        // be re-fetched once before solving — never solved stale.
+        if is_pow_challenge_expired(now_unix_secs(), &challenge) {
+            challenge = match client.create_pow_challenge(target_path).await {
+                Ok(c) => c,
+                Err(e) => return Err(map_deepseek_web_client_error(e, &key.id)),
+            };
+        }
+        let pow = match solve_pow(&challenge, target_path) {
+            Ok(p) => p,
+            Err(e) => {
+                return Err(CoreError::UpstreamStatusError {
+                    status: reqwest::StatusCode::SERVICE_UNAVAILABLE,
+                    body: format!("deepseek-web PoW solve failed: {e}"),
+                })
+            }
+        };
+        Ok(encode_pow_response_header(&pow))
     }
 
     /// Execute a JSON request with transparent automatic failover before response body starts
@@ -2877,9 +3190,48 @@ impl UpstreamExecutor {
             // path has no usage here, so `tokens` stays 0 (known limitation).
             let _attempt_meter = AttemptMeterGuard::admit(key.meter());
 
-            let effective_body =
+            // DeepSeek Web (wave-9, DW-P-*/DW-S-*/DW-G-*): per-attempt honest
+            // PoW dance — create a chat session, fetch a fresh challenge
+            // (short calls, 3s budget), solve it exactly once (no replay,
+            // DW-P-07/DW-G-04), attach the `X-DS-PoW-Response` header to the
+            // completion request. Runs BEFORE building the request so the
+            // guarded send below already carries the PoW answer; TTFB stays
+            // on the existing `send_guarded` path (NON-GOAL, contract §8).
+            let mut deepseek_web_pow_header: Option<String> = None;
+            let mut effective_body =
                 self.inject_zen_free_tier_tools(url, Self::prepare_effective_body(&key, body));
-            let headers = match self
+            if self.deepseek_web {
+                match self
+                    .prepare_deepseek_web_completion(&key, url, &mut effective_body)
+                    .await
+                {
+                    Ok(value) => deepseek_web_pow_header = Some(value),
+                    Err(e) => {
+                        let pool_err = match &e {
+                            CoreError::AuthInvalid { reason, .. } => {
+                                PoolErrorType::AuthInvalid { reason: Some(reason.clone()) }
+                            }
+                            _ => PoolErrorType::NetworkError,
+                        };
+                        self.pool.record_error(&key.id, pool_err);
+                        last_error = e.to_string();
+                        last_kind = e.kind();
+                        attempt_kinds.push(last_kind.clone());
+                        self.emit_both(
+                            &key.id,
+                            attempt_idx,
+                            None,
+                            last_kind.clone(),
+                            last_error.clone(),
+                            None,
+                            attempt_start.elapsed(),
+                        );
+                        continue;
+                    }
+                }
+            }
+
+            let mut headers = match self
                 .build_headers(&key, Some(effective_body.as_ref()))
                 .await
             {
@@ -2915,6 +3267,13 @@ impl UpstreamExecutor {
                     continue;
                 }
             };
+            // Attach the solved PoW answer to the completion request
+            // (wave-9 DW-S-03: `X-DS-PoW-Response` on the completion call).
+            if let Some(pow_header) = &deepseek_web_pow_header {
+                if let Ok(v) = HeaderValue::from_str(pow_header) {
+                    headers.insert("X-DS-PoW-Response", v);
+                }
+            }
 
             let mut egress_entry: Option<Arc<EgressEntry>> = None;
             let req = match &self.egress_pool {
@@ -3092,6 +3451,85 @@ impl UpstreamExecutor {
             {
                 let status = resp.status();
                 if status.is_success() {
+                    // L3A F4 / L3B finding 1: a 2xx completion may still carry
+                    // (a) a WAF/captcha wall header (x-amzn-waf-action: captcha,
+                    // cf-mitigated: challenge — DW-G-02: explicit failure, ZERO
+                    // retries/bypass attempts) or (b) a non-zero `biz_code`
+                    // error envelope (40012 USER_IS_BANNED / 40301
+                    // INVALID_POW_RESPONSE / token errors) in its body instead
+                    // of an SSE stream. Check BOTH before recording success.
+                    if self.deepseek_web {
+                        if let Some(marker) = deepseek_web_waf_marker(&resp) {
+                            // WAF/captcha wall is environmental, not key
+                            // health: fail explicitly with zero retries
+                            // (DW-G-02). Do NOT cool or isolate the key — the
+                            // next user request may pass once the wall lifts.
+                            last_error = format!(
+                                "deepseek-web completion captcha wall from {}: {}",
+                                key.id, marker
+                            );
+                            last_kind = GatewayErrorKind::UpstreamUnavailable;
+                            attempt_kinds.push(last_kind.clone());
+                            self.emit_both(
+                                &key.id,
+                                attempt_idx,
+                                Some(status.as_u16()),
+                                last_kind.clone(),
+                                last_error.clone(),
+                                None,
+                                attempt_start.elapsed(),
+                            );
+                            return Err(CoreError::AllRetriesFailed {
+                                retries: attempt + 1,
+                                attempted_keys,
+                                last_error,
+                                kind: last_kind,
+                            });
+                        }
+                        match deepseek_web_peek_completion_envelope(resp).await {
+                            Ok(clean_resp) => {
+                                self.pool.record_success(&key.id);
+                                self.emit_headers(&key.id, attempt_idx, attempt_start.elapsed());
+                                return Ok((clean_resp, attempt_start, key.id.clone()));
+                            }
+                            Err((biz_code, biz_msg)) => {
+                                let (kind, pool_err) =
+                                    classify_deepseek_web_completion_envelope(
+                                        biz_code,
+                                        &biz_msg,
+                                    );
+                                last_error = format!(
+                                    "deepseek-web completion envelope error biz_code={} from {}: {}",
+                                    biz_code, key.id, biz_msg
+                                );
+                                last_kind = kind.clone();
+                                attempt_kinds.push(last_kind.clone());
+                                self.pool.record_error(&key.id, pool_err);
+                                self.emit_both(
+                                    &key.id,
+                                    attempt_idx,
+                                    Some(status.as_u16()),
+                                    last_kind.clone(),
+                                    last_error.clone(),
+                                    Some(biz_msg),
+                                    attempt_start.elapsed(),
+                                );
+                                // AuthInvalid isolates the token permanently; the
+                                // 40301 path is a transient envelope that still
+                                // fails this attempt (bounded by the attempt
+                                // budget; no silent success accounting).
+                                if matches!(last_kind, GatewayErrorKind::AuthInvalid) {
+                                    continue;
+                                }
+                                return Err(CoreError::AllRetriesFailed {
+                                    retries: attempt + 1,
+                                    attempted_keys,
+                                    last_error,
+                                    kind: last_kind,
+                                });
+                            }
+                        }
+                    }
                     self.pool.record_success(&key.id);
                     self.emit_headers(&key.id, attempt_idx, attempt_start.elapsed());
                     return Ok((resp, attempt_start, key.id.clone()));

@@ -566,6 +566,13 @@ pub async fn handle_messages(
                 );
                 continue;
             }
+            ponyllm_core::pool::UpstreamProtocol::DeepSeekWeb => {
+                last_error = format!(
+                    "deepseek-web protocol cannot be served by messages endpoint for {}",
+                    target.provider_name
+                );
+                continue;
+            }
         };
 
         // VULN-07/F6: refuse to dial upstream URLs that resolve (or rebind)
@@ -1049,6 +1056,13 @@ pub async fn handle_messages(
                                     "Use /v1/systemone for systemone models",
                                 );
                             }
+                            ponyllm_core::pool::UpstreamProtocol::DeepSeekWeb => {
+                                return crate::extractors::render_anthropic_error(
+                                    StatusCode::BAD_REQUEST,
+                                    "invalid_request_error",
+                                    "deepseek-web models must be served through /v1/chat/completions",
+                                );
+                            }
                         };
 
                         let mut resp = axum::response::Response::new(body);
@@ -1493,6 +1507,12 @@ pub async fn handle_messages(
                                     .to_string();
                             continue;
                         }
+                        ponyllm_core::pool::UpstreamProtocol::DeepSeekWeb => {
+                            last_error =
+                                "deepseek-web protocol cannot be projected as Anthropic messages"
+                                    .to_string();
+                            continue;
+                        }
                     };
 
                     // Model Echo Rule: Strictly echo requested model name in response body
@@ -1654,11 +1674,14 @@ pub async fn handle_messages(
         &request_id,
     );
 
-    // PonySentry 埋点上报网关耗尽/失败事件（过滤下游客户端 4xx/invalid_request_error 参数错误）
+    // PonySentry 埋点上报网关耗尽/失败事件（过滤下游客户端 4xx/invalid_request_error 参数错误，
+    // 以及上游配额/限流/瞬态网络故障；瞬态故障走指标与告警而不创建 issue）
     let is_client_bad_request = last_error.contains("invalid_request_error")
         || last_error.contains("400 Bad Request")
         || last_error.contains("Duplicate function_call_output");
-    if !is_client_bad_request {
+    if !is_client_bad_request
+        && crate::routes::should_report_sentry_exhaustion(&last_kind, &last_error)
+    {
         let mut tags = std::collections::HashMap::new();
         tags.insert("requested_model".to_string(), requested_raw_model.clone());
         tags.insert("route".to_string(), "v1/messages".to_string());

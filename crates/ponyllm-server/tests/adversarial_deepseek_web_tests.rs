@@ -51,7 +51,7 @@ async fn spawn_tagged_mock(tag_fn: Arc<dyn Fn() -> String + Send + Sync>) -> (St
         )
         .route(
             "/api/v0/chat/completion",
-            axum::routing::post(move |_: axum::Json<serde_json::Value>, _h: HeaderMap| {
+            axum::routing::post(move |_h: HeaderMap, _: axum::Json<serde_json::Value>| {
                 let tag_fn = tag_fn.clone();
                 let cc2 = cc2.clone();
                 async move {
@@ -134,18 +134,25 @@ async fn adv_gw_timeout_injection_bounded_failure() {
     let challenge_calls = Arc::new(AtomicUsize::new(0));
     let cc = challenge_calls.clone();
     use axum::response::Response as AxResponse;
-    let app = axum::Router::new().route(
-        "/api/v0/chat/create_pow_challenge",
-        axum::routing::post(move |axum::Json(_): axum::Json<serde_json::Value>| async move {
-            cc.fetch_add(1, Ordering::SeqCst);
-            std::thread::sleep(delay);
-            AxResponse::builder()
-                .status(200)
-                .header("content-type", "application/json")
-                .body(axum::body::Body::from(CHALLENGE_OK))
-                .unwrap()
-        }),
-    );
+    let app = axum::Router::new()
+        .route(
+            "/api/v0/chat_session/create",
+            axum::routing::post(|| async move {
+                axum::Json(serde_json::from_str::<serde_json::Value>(SESSION_OK).unwrap())
+            }),
+        )
+        .route(
+            "/api/v0/chat/create_pow_challenge",
+            axum::routing::post(move |axum::Json(_): axum::Json<serde_json::Value>| async move {
+                cc.fetch_add(1, Ordering::SeqCst);
+                std::thread::sleep(delay);
+                AxResponse::builder()
+                    .status(200)
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(CHALLENGE_OK))
+                    .unwrap()
+            }),
+        );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -189,6 +196,7 @@ async fn adv_gw_timeout_injection_bounded_failure() {
 async fn adv_gw_malformed_upstream_sse_terminates_wellformed() {
     use axum::response::Response as AxResponse;
     let one = Arc::new(AtomicUsize::new(0));
+    let one_c = one.clone();
     let app = axum::Router::new()
         .route(
             "/api/v0/chat/create_pow_challenge",
@@ -205,7 +213,7 @@ async fn adv_gw_malformed_upstream_sse_terminates_wellformed() {
         .route(
             "/api/v0/chat/completion",
             axum::routing::post(move |_: axum::Json<serde_json::Value>| {
-                let one = one.clone();
+                let one = one_c.clone();
                 async move {
                     one.fetch_add(1, Ordering::SeqCst);
                     // Malformed SSE: broken JSON frame then an error close.

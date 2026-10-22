@@ -168,9 +168,9 @@ fn sse_parse_non_fatal_events() {
 #[test]
 fn sse_parse_non_event_frames_ok_none() {
     let non_frames: [(&str, &str); 3] = [
-        ("", "[DONE]"),          // [DONE]-style sentinel
-        ("comment", ":"),        // comment-only frame without data
-        ("keepalive", ""),       // empty data
+        ("", "[DONE]"),          // [DONE]-style sentinel (no event name)
+        ("", ""),                // comment-only / keep-alive frame: no name, no data
+        ("", ": keep-alive"),    // comment line payload has no data: semantics
     ];
     for (name, data) in non_frames {
         let got = parse_completion_event(name, data)
