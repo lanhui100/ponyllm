@@ -412,8 +412,19 @@ fn deepseek_web_apply_delta<E>(
             // fragment goes to `reasoning_content`, never visible content.
             let lower = path.to_ascii_lowercase();
             let ends_with_type = lower.ends_with("/type");
-            let under_content =
-                lower.contains("/message/content") || lower.contains("content/");
+            // Real-wire (downstream call 2026-10-22): live delta paths carry
+            // `response/fragments/-1/content` (ends with `/content` but does
+            // NOT contain `content/`) and `response/fragments/-1/type`;
+            // legacy `message/content/...` shapes still appear. A path that
+            // ENDS with `/content` (or contains the content locality) is a
+            // content path. State-metadata paths (`response/status`,
+            // `/…/status`) are NEVER content even though they are short and
+            // could be misread — a `/status` tail excludes them.
+            let ends_with_status = lower.ends_with("/status");
+            let under_content = (lower.ends_with("/content")
+                || lower.contains("/message/content")
+                || lower.contains("content/"))
+                && !ends_with_status;
             let value_str = value.as_str();
             let object_content = value
                 .as_object()
@@ -424,12 +435,13 @@ fn deepseek_web_apply_delta<E>(
                 .and_then(|o| o.get("type"))
                 .and_then(|t| t.as_str());
 
-            // `type` marker: update the segment type, never emit a chunk.
+            // `type` marker: update the segment type (lowercase-normalized, since the
+            // real wire may send `THINK`/`TEXT`), never emit a chunk.
             if ends_with_type {
                 if value_str.is_some() {
-                    st.current_segment_type = value_str.map(|s| s.to_string());
+                    st.current_segment_type = value_str.map(|s| s.to_ascii_lowercase());
                 } else if object_type.is_some() {
-                    st.current_segment_type = object_type.map(|s| s.to_string());
+                    st.current_segment_type = object_type.map(|s| s.to_ascii_lowercase());
                 }
                 return;
             }
@@ -439,6 +451,26 @@ fn deepseek_web_apply_delta<E>(
                     deepseek_web_append_content(model, st, out, text);
                     return;
                 }
+            }
+            // Fragment-bearing values (array or `{"response":{fragments:[...]}}`
+            // object) can arrive under any content-ish path (real APPEND frames
+            // use `response/fragments`; be symmetric for SET too).
+            if deepseek_web_append_snapshot_fragments(model, st, out, value) {
+                return;
+            }
+            // Metadata SET frames (status / elapsed_secs / timestamps / ids /
+            // non-content numerics etc.) are NOT content and NOT degradation:
+            // silently skip, keep streaming (downstream call 2026-10-22: a
+            // `{"p":"response/status","o":"SET","v":"FINISHED"}` and
+            // `{"p":"response/fragments/-1/elapsed_secs","o":"SET","v":0.586}`
+            // must neither reach downstream content nor latch degraded).
+            if lower.ends_with("/status")
+                || lower.ends_with("elapsed_secs")
+                || lower.ends_with("/id")
+                || lower.ends_with("_at")
+                || value_str.is_none()
+            {
+                return;
             }
             // Unknown path/value shape we cannot unambiguously reduce: latch
             // degradation (DW-T-06) and record the raw op for debug; never
@@ -452,38 +484,65 @@ fn deepseek_web_apply_delta<E>(
             );
         }
         DeltaOp::Append { path, value } => {
-            // Real-wire (Amendment v4): live SSE deltas are
-            // `{"p":"...content","o":"APPEND","v":"text"}` or the
-            // `o`-absent implicit append `{"v":"text"}`. Append `v` to the
-            // current content/reasoning segment exactly like a SET content
-            // fragment — `type != text` (tracked via prior `type` markers)
-            // routes to reasoning_content (DW-T-02).
+            // Real-wire (Amendment v4 + downstream calls 2026-10-22): live SSE
+            // deltas are `{"p":"...content","o":"APPEND","v":"text"}` or the
+            // `o`-absent implicit append `{"v":"text"}` — append `v` to the
+            // current content/reasoning segment. An OBJECT `v` is a full-state
+            // snapshot / fragment array (`{"v":{"response":{fragments:[...]}}}`
+            // or `{"p":"response/fragments","o":"APPEND","v":[{...}]}`) — it
+            // must NOT be appended as raw text; `fragments[].type/content` are
+            // extracted (TEXT/RESPONSE → content, THINK → reasoning).
+            if deepseek_web_append_snapshot_fragments(model, st, out, value) {
+                return;
+            }
             let value_str = value.as_str();
             let object_content = value
                 .as_object()
                 .and_then(|o| o.get("content"))
                 .and_then(|c| c.as_str());
             if let Some(text) = object_content.or(value_str) {
+                // Path gate (downstream call 2026-10-22, round 3): a BATCH child
+                // with absent `o` (`{"p":"quasi_status","v":"FINISHED"}`) is
+                // parsed as an implicit Append whose path is NOT a content path
+                // — such metadata must be silently skipped, never appended
+                // (mirrors the SET metadata rule). Only append when:
+                // - `path == None` (true implicit content append, `{"v":","}`),
+                // - `path` ends with `/content` (`response/fragments/-1/content`).
+                let path_lower = path.as_deref().unwrap_or("").to_ascii_lowercase();
+                let is_appendable_path = path.is_none()
+                    || path_lower.ends_with("/content")
+                    || path_lower.contains("/message/content")
+                    || path_lower.contains("content/");
+                if !is_appendable_path {
+                    tracing::debug!(
+                        model = %model,
+                        path = path.as_deref().unwrap_or("(implicit)"),
+                        value = %value,
+                        "deepseek-web append delta skipped (non-content path, no chunk)"
+                    );
+                    return;
+                }
                 // A `type` object ({type, content}) also re-marks the segment.
                 if let Some(t) = value
                     .as_object()
                     .and_then(|o| o.get("type"))
                     .and_then(|t| t.as_str())
                 {
-                    st.current_segment_type = Some(t.to_string());
+                    st.current_segment_type = Some(t.to_ascii_lowercase());
                 }
                 deepseek_web_append_content(model, st, out, text);
                 return;
             }
-            // Non-string append (e.g. a type marker object without content, or
-            // an unknown shape): treat like SET's un-reducible path — record,
-            // never fabricate.
-            st.degraded = true;
+            // Non-string, non-fragment append: metadata / numeric / object
+            // without content — silently skip, never latch degraded and never
+            // fabricate (downstream call 2026-10-22: real frames include
+            // `{"p":"response/fragments","o":"APPEND","v":[{...}]}` handled
+            // above, and non-content numeric values that must stay quiet).
             tracing::debug!(
                 model = %model,
                 path = path.as_deref().unwrap_or("(implicit)"),
                 value = %value,
-                "deepseek-web append delta not unambiguously reducible (degraded mode)"
+                "deepseek-web append delta skipped (non-text metadata, no chunk)"
             );
         }
         DeltaOp::Batch(ops) => {
@@ -492,6 +551,66 @@ fn deepseek_web_apply_delta<E>(
             }
         }
     }
+}
+
+/// True only for explicit reasoning segment types (case-insensitive; the real
+/// wire sends `THINK`/`THINKING`). `TEXT`, `RESPONSE` (user-visible answer
+/// fragments) and unknown types are all user-visible content (DW-T-02 +
+/// downstream call 2026-10-22).
+fn deepseek_web_is_reasoning_type(t: &str) -> bool {
+    matches!(
+        t.to_ascii_lowercase().as_str(),
+        "think" | "thinking" | "reasoning"
+    )
+}
+
+/// Parse an OBJECT- or ARRAY-valued delta `v` carrying fragments:
+/// - object snapshot: `{"response":{...fragments:[{type:"THINK",content:...},
+///   {type:"TEXT",content:...}]}}` (implicit-o full state);
+/// - bare array: `[{id:3,type:"RESPONSE",content:"Hi",...}]` (real APPEND
+///   frame `{"p":"response/fragments","o":"APPEND","v":[...]}`).
+///
+/// Returns `true` when fragments were recognized and consumed. `TEXT` /
+/// `RESPONSE` fragment content → user-visible `content`; `THINK`/`THINKING`
+/// → `reasoning_content` (tracked via `current_segment_type`). The envelope /
+/// frame itself never yields a chunk. Any other shape returns `false`.
+fn deepseek_web_append_snapshot_fragments<E>(
+    model: &str,
+    st: &mut DeepSeekWebTranslateState,
+    out: &mut Vec<Result<bytes::Bytes, E>>,
+    value: &serde_json::Value,
+) -> bool {
+    // Envelope: bare array (real fragments APPEND), or object snapshot
+    // `response.fragments` / legacy `fragments`.
+    let fragments: &[serde_json::Value] = if let Some(arr) = value.as_array() {
+        arr
+    } else {
+        let Some(arr) = value
+            .get("response")
+            .or_else(|| value.get("fragments"))
+            .and_then(|r| r.get("fragments"))
+            .and_then(|f| f.as_array())
+        else {
+            return false;
+        };
+        arr
+    };
+    for fragment in fragments {
+        let frag_type = fragment
+            .get("type")
+            .and_then(|t| t.as_str())
+            .unwrap_or("TEXT");
+        let Some(content) = fragment.get("content").and_then(|c| c.as_str()) else {
+            continue;
+        };
+        // Track the current segment type so subsequent APPEND frames route the
+        // same way until the next `type` marker re-marks the segment. The real
+        // wire sends uppercase `THINK`/`TEXT`/`RESPONSE`; normalize to
+        // lowercase so the reasoning check stays case-insensitive.
+        st.current_segment_type = Some(frag_type.to_ascii_lowercase());
+        deepseek_web_append_content(model, st, out, content);
+    }
+    true
 }
 
 /// Shared DW-T-02 content append: accumulate into `st.content`, emit a content
@@ -510,11 +629,14 @@ fn deepseek_web_append_content<E>(
     }
     st.content.push_str(text);
     if !st.degraded {
-        // Type != text (e.g. thinking) → reasoning (DW-T-02).
+        // Only explicit reasoning types (THINK/THINKING/reasoning) route to
+        // reasoning_content; TEXT / RESPONSE (user-visible answers) and
+        // unknown types are visible content (DW-T-02 + downstream call).
         let reasoning = st
             .current_segment_type
             .as_deref()
-            .is_some_and(|t| t != "text");
+            .map(deepseek_web_is_reasoning_type)
+            .unwrap_or(false);
         let chunk = ChatCompletionChunk {
             id: st.response_id.clone().unwrap_or_else(|| {
                 format!("chatcmpl-dsw-{}", uuid_simple())

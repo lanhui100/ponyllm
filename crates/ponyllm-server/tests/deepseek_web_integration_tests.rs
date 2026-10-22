@@ -394,6 +394,268 @@ async fn deepseek_web_delta_append_and_implicit_append_translate() {
     assert_eq!(last["usage"]["total_tokens"], 7);
 }
 
+/// Real-shape frames (downstream call 2026-10-22): the live service opens with
+/// a full-state snapshot frame `{"v":{"response":{...fragments:[{type:"THINK",
+/// content:...},{type:"TEXT",content:...}]}}}` (object value, implicit o), then
+/// streams `{"p":"response/fragments/-1/content","o":"APPEND","v":"..."}` and
+/// o-absent implicit frames. The snapshot must feed content/reasoning from its
+/// fragments (TEXT → content, THINK → reasoning) WITHOUT emitting a chunk for
+/// the snapshot envelope itself, and `response/fragments/-1/content` must be
+/// recognized as a content path (was misjudged un-reducible → empty output).
+#[tokio::test]
+async fn deepseek_web_real_shape_snapshot_then_fragment_append() {
+    let upstream = spawn_mock_upstream_with_sse(concat!(
+        "event: ready\ndata: ",
+        r#"{"response_message_id":"r-real","request_message_id":"q-real","model_type":"deepseek-v4-flash"}"#,
+        "\n\nevent: delta\ndata: ",
+        // Full-state snapshot: object value, implicit o. THINK + TEXT fragments.
+        r#"{"v":{"response":{"fragments":[{"type":"THINK","content":"Chain of thought."},{"type":"TEXT","content":"Hello"}]}}}"#,
+        "\n\nevent: delta\ndata: ",
+        r#"{"p":"response/fragments/-1/content","o":"APPEND","v":","}"#,
+        "\n\nevent: delta\ndata: ",
+        r#"{"v":" world"}"#,
+        "\n\nevent: finish\ndata: ",
+        r#"{"usage":{"prompt_tokens":4,"completion_tokens":3,"total_tokens":7}}"#,
+        "\n\nevent: close\ndata: ",
+        r#"{"close_reason":"success"}"#,
+        "\n\n",
+    ))
+    .await;
+
+    let mut config = GatewayConfig::default();
+    config.auth_mode = ponyllm_config::AuthMode::Open;
+    config
+        .providers
+        .insert("deepseek-web".to_string(), provider_config(&upstream));
+    let pool = Arc::new(KeyPool::new("deepseek-web", RoutingStrategy::RoundRobin));
+    pool.add_key(ApiKeyEntry::new("ds-web-k1", "user-web-token-abc", 1, 10));
+    let state = Arc::new(AppState::new(config));
+    state.register_pool("deepseek-web", pool);
+
+    let app = create_app(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let gw_addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://{}/v1/chat/completions", gw_addr))
+        .json(&json!({
+            "model": "deepseek-v4-flash",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": true
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.unwrap();
+
+    let chunks: Vec<serde_json::Value> = body
+        .lines()
+        .filter_map(|l| l.strip_prefix("data: "))
+        .filter_map(|d| serde_json::from_str::<serde_json::Value>(d).ok())
+        .filter(|v| v.get("object").and_then(|o| o.as_str()) == Some("chat.completion.chunk"))
+        .collect();
+    assert!(!chunks.is_empty(), "expected translated chunks, got body: {body}");
+
+    // Snapshot TEXT "Hello" + APPEND "," + implicit " world" → "Hello, world".
+    let content: String = chunks
+        .iter()
+        .filter_map(|c| c["choices"][0]["delta"]["content"].as_str())
+        .collect();
+    assert_eq!(content, "Hello, world", "real-shape frames must accumulate visible content");
+    // Snapshot THINK → reasoning_content only (never visible content).
+    let reasoning: String = chunks
+        .iter()
+        .filter_map(|c| c["choices"][0]["delta"]["reasoning_content"].as_str())
+        .collect();
+    assert_eq!(reasoning, "Chain of thought.", "THINK fragment must route to reasoning_content");
+    let last = chunks.last().unwrap();
+    assert_eq!(last["choices"][0]["finish_reason"], "stop");
+    assert_eq!(last["usage"]["total_tokens"], 7);
+}
+
+/// Final real-wire shapes (downstream call 2026-10-22, round 2):
+/// (1) fragment ARRAY APPEND `{"p":"response/fragments","o":"APPEND",
+///     "v":[{id,type:"RESPONSE",content:"Hi",...}]}` — the RESPONSE fragment is
+///     the user-visible answer and MUST land in content (not reasoning, not
+///     dropped);
+/// (2) `{"p":"response/status","o":"SET","v":"FINISHED"}` — status metadata,
+///     excluded from content;
+/// (3) `{"p":"response/fragments/-1/elapsed_secs","o":"SET","v":0.586...}` —
+///     numeric metadata, silently ignored (no chunk).
+#[tokio::test]
+async fn deepseek_web_real_wire_response_fragment_and_metadata_handling() {
+    let upstream = spawn_mock_upstream_with_sse(concat!(
+        "event: ready\ndata: ",
+        r#"{"response_message_id":"r-r2","request_message_id":"q-r2","model_type":"deepseek-v4-flash"}"#,
+        "\n\nevent: delta\ndata: ",
+        // (1) fragment ARRAY with RESPONSE type — visible answer.
+        r#"{"p":"response/fragments","o":"APPEND","v":[{"id":3,"type":"RESPONSE","content":"Hi","elapsed_secs":0.586}]}"#,
+        "\n\nevent: delta\ndata: ",
+        // (2) status SET must be excluded from content.
+        r#"{"p":"response/status","o":"SET","v":"FINISHED"}"#,
+        "\n\nevent: delta\ndata: ",
+        // (3) numeric metadata SET must be silently ignored.
+        r#"{"p":"response/fragments/-1/elapsed_secs","o":"SET","v":0.586123}"#,
+        "\n\nevent: delta\ndata: ",
+        r#"{"p":"response/fragments/-1/content","o":"APPEND","v":" there"}"#,
+        "\n\nevent: finish\ndata: ",
+        r#"{"usage":{"prompt_tokens":4,"completion_tokens":2,"total_tokens":6}}"#,
+        "\n\nevent: close\ndata: ",
+        r#"{"close_reason":"success"}"#,
+        "\n\n",
+    ))
+    .await;
+
+    let mut config = GatewayConfig::default();
+    config.auth_mode = ponyllm_config::AuthMode::Open;
+    config
+        .providers
+        .insert("deepseek-web".to_string(), provider_config(&upstream));
+    let pool = Arc::new(KeyPool::new("deepseek-web", RoutingStrategy::RoundRobin));
+    pool.add_key(ApiKeyEntry::new("ds-web-k1", "user-web-token-abc", 1, 10));
+    let state = Arc::new(AppState::new(config));
+    state.register_pool("deepseek-web", pool);
+
+    let app = create_app(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let gw_addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://{}/v1/chat/completions", gw_addr))
+        .json(&json!({
+            "model": "deepseek-v4-flash",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": true
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.unwrap();
+
+    let chunks: Vec<serde_json::Value> = body
+        .lines()
+        .filter_map(|l| l.strip_prefix("data: "))
+        .filter_map(|d| serde_json::from_str::<serde_json::Value>(d).ok())
+        .filter(|v| v.get("object").and_then(|o| o.as_str()) == Some("chat.completion.chunk"))
+        .collect();
+    assert!(!chunks.is_empty(), "expected translated chunks, got body: {body}");
+
+    // RESPONSE fragment "Hi" + APPEND " there" → visible content "Hi there";
+    // "FINISHED" and the numeric metadata must never appear.
+    let content: String = chunks
+        .iter()
+        .filter_map(|c| c["choices"][0]["delta"]["content"].as_str())
+        .collect();
+    assert_eq!(content, "Hi there", "RESPONSE fragment + APPEND must flow to content");
+    assert!(
+        !content.contains("FINISHED"),
+        "status metadata must not enter content, got {content:?}"
+    );
+    assert!(
+        !content.contains("0.586"),
+        "numeric metadata must not enter content, got {content:?}"
+    );
+    let last = chunks.last().unwrap();
+    assert_eq!(last["choices"][0]["finish_reason"], "stop");
+    assert_eq!(last["usage"]["total_tokens"], 6);
+}
+
+/// BATCH-with-metadata-child frame (downstream call 2026-10-22, round 3):
+/// `{"p":"response","o":"BATCH","v":[{"p":"accumulated_token_usage","v":63},
+/// {"p":"quasi_status","v":"FINISHED"}]}` — a child with absent `o` parses as
+/// an implicit Append whose `path` is NOT a content path; it must be silently
+/// skipped (no `FINISHED` in content). True implicit appends (`{"v":"..."}`)
+/// and `/content`-terminated APPENDs must still flow.
+#[tokio::test]
+async fn deepseek_web_batch_metadata_child_skipped_implicit_append_kept() {
+    let upstream = spawn_mock_upstream_with_sse(concat!(
+        "event: ready\ndata: ",
+        r#"{"response_message_id":"r-b","request_message_id":"q-b","model_type":"deepseek-v4-flash"}"#,
+        "\n\nevent: delta\ndata: ",
+        r#"{"v":", no"}"#,
+        "\n\nevent: delta\ndata: ",
+        // BATCH with metadata children (quasi_status FINISHED / token usage)
+        // plus one real content child.
+        r#"{"p":"response","o":"BATCH","v":[{"p":"accumulated_token_usage","v":63},{"p":"quasi_status","v":"FINISHED"},{"p":"response/fragments/-1/content","o":"APPEND","v":" problem"}]}"#,
+        "\n\nevent: delta\ndata: ",
+        r#"{"v":" here"}"#,
+        "\n\nevent: finish\ndata: ",
+        r#"{"usage":{"prompt_tokens":4,"completion_tokens":2,"total_tokens":6}}"#,
+        "\n\nevent: close\ndata: ",
+        r#"{"close_reason":"success"}"#,
+        "\n\n",
+    ))
+    .await;
+
+    let mut config = GatewayConfig::default();
+    config.auth_mode = ponyllm_config::AuthMode::Open;
+    config
+        .providers
+        .insert("deepseek-web".to_string(), provider_config(&upstream));
+    let pool = Arc::new(KeyPool::new("deepseek-web", RoutingStrategy::RoundRobin));
+    pool.add_key(ApiKeyEntry::new("ds-web-k1", "user-web-token-abc", 1, 10));
+    let state = Arc::new(AppState::new(config));
+    state.register_pool("deepseek-web", pool);
+
+    let app = create_app(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let gw_addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://{}/v1/chat/completions", gw_addr))
+        .json(&json!({
+            "model": "deepseek-v4-flash",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": true
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.unwrap();
+
+    let chunks: Vec<serde_json::Value> = body
+        .lines()
+        .filter_map(|l| l.strip_prefix("data: "))
+        .filter_map(|d| serde_json::from_str::<serde_json::Value>(d).ok())
+        .filter(|v| v.get("object").and_then(|o| o.as_str()) == Some("chat.completion.chunk"))
+        .collect();
+    assert!(!chunks.is_empty(), "expected translated chunks, got body: {body}");
+
+    // implicit ", no" + BATCH content child " problem" + implicit " here" →
+    // ", no problem here"; "FINISHED" / "accumulated_token_usage" never appear.
+    let content: String = chunks
+        .iter()
+        .filter_map(|c| c["choices"][0]["delta"]["content"].as_str())
+        .collect();
+    assert_eq!(content, ", no problem here", "implicit + BATCH content APPEND must flow");
+    assert!(
+        !content.contains("FINISHED"),
+        "quasi_status child must not leak into content, got {content:?}"
+    );
+    assert!(
+        !content.contains("accumulated_token_usage"),
+        "token-usage metadata child must not leak, got {content:?}"
+    );
+    let last = chunks.last().unwrap();
+    assert_eq!(last["choices"][0]["finish_reason"], "stop");
+    assert_eq!(last["usage"]["total_tokens"], 6);
+}
+
 /// Spawn a mock upstream with a caller-provided completion SSE body (used by
 /// the APPEND/implicit-append wire test above).
 async fn spawn_mock_upstream_with_sse(completion_sse: &str) -> String {
