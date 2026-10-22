@@ -38,6 +38,34 @@ fn probe_base_from_endpoint(endpoint: &str) -> Option<String> {
     None
 }
 
+/// Failure category for one egress recovery probe — surfaced as the
+/// structured `egress_recovery_probe` event's `reason` field
+/// (`status="failed"`) so operators can distinguish a probe timeout from an
+/// upstream refusal, a malformed body, or a wire failure (`2026-10-22`-egress-
+/// cooldown-selfheal, L3-P review).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProbeFailureKind {
+    /// 3s NFR hard timeout fired (no response / stalled body within budget).
+    Timeout,
+    /// Response arrived with a non-2xx status.
+    Non200,
+    /// HTTP 200 with an empty or non-JSON body (adversarial A2).
+    MalformedBody,
+    /// Transport/wire failure on send or body read.
+    Network,
+}
+
+impl ProbeFailureKind {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Timeout => "timeout",
+            Self::Non200 => "non_200",
+            Self::MalformedBody => "malformed_body",
+            Self::Network => "network",
+        }
+    }
+}
+
 /// One upstream attempt outcome inside an executor retry loop.
 ///
 /// Emitted for every try (key selection, header build, HTTP status, network),
@@ -1379,9 +1407,13 @@ impl UpstreamExecutor {
     /// probe is HTTP 200 with a non-empty, valid-JSON body (C2 → the exit's
     /// cooldown is cleared and the caller re-selects on the normal path).
     /// Every other outcome — non-200, malformed/empty body (A2), timeout
-    /// (A1), network error — silently keeps the cooldown and returns `None`,
-    /// so the caller preserves fail-fast. The probe never records an upstream
-    /// error on the key (C9) and never counts toward the attempt budget (C3).
+    /// (A1), network error — keeps the cooldown, returns `None` (fail-fast
+    /// preserved) and emits the structured `egress_recovery_probe` event with
+    /// `status="failed"` and a `reason` category (timeout | non_200 |
+    /// malformed_body | network, L3-P review) — still no panic and no URL /
+    /// response-body / key material in the log. The probe never records an
+    /// upstream error on the key (C9) and never counts toward the attempt
+    /// budget (C3).
     async fn egress_recovery_probe(&self, endpoint: &str) -> Option<Arc<EgressEntry>> {
         // F4 (L3-A review): endpoint→base derivation happens BEFORE any slot
         // claim — an endpoint that cannot reverse-derive a probe base must not
@@ -1417,27 +1449,60 @@ impl UpstreamExecutor {
         eg_pool.record_probe_attempt(&entry.id);
         // F1 (L3-A/L3-B review): the 3s hard timeout wraps the WHOLE probe —
         // send, body read AND JSON parse — so a 200-heads-then-stalled body
-        // can never pin this call past EGRESS_PROBE_TIMEOUT.
+        // can never pin this call past EGRESS_PROBE_TIMEOUT. The probe returns
+        // a [`ProbeFailureKind`] so the failure event below can distinguish
+        // timeout / non-200 / malformed body / network (L3-P review).
         let probe = async {
-            let resp = client.get(&probe_url).send().await.ok()?;
+            let resp = match client.get(&probe_url).send().await {
+                Ok(r) => r,
+                Err(_) => return Err(ProbeFailureKind::Network),
+            };
             if !resp.status().is_success() {
                 // Non-200: cooldown kept, fail-fast.
-                return None;
+                return Err(ProbeFailureKind::Non200);
             }
-            let body = resp.text().await.ok()?;
+            let body = match resp.text().await {
+                Ok(b) => b,
+                Err(_) => return Err(ProbeFailureKind::Network),
+            };
             if body.trim().is_empty() || serde_json::from_str::<Value>(&body).is_err() {
                 // A2: a 200 with an empty / non-JSON body is a MALFORMED probe
                 // → treated as failure (cooldown kept, fail-fast).
-                return None;
+                return Err(ProbeFailureKind::MalformedBody);
             }
-            Some(())
+            Ok(())
         };
-        if matches!(tokio::time::timeout(EGRESS_PROBE_TIMEOUT, probe).await, Ok(Some(()))) {
-            eg_pool.record_probe_success(&entry.id);
-            Some(entry)
-        } else {
-            // Timeout, network error, non-200, or malformed body: keep cooling.
-            None
+        // L3-P review: every probe failure emits the structured
+        // `egress_recovery_probe` event with status="failed" and a reason
+        // category — same event name / field shape as the success event
+        // (egress.rs `record_probe_success`), no URL raw / response body /
+        // key material (only the exit id, which is not a credential).
+        let emit_failure = |kind: ProbeFailureKind, entry: &EgressEntry| {
+            tracing::warn!(
+                provider = %self.pool.provider,
+                egress = %entry.id,
+                status = "failed",
+                reason = kind.as_str(),
+                cooldown_remaining_secs = entry
+                    .cooldown_remaining()
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0),
+                "egress_recovery_probe"
+            );
+        };
+        match tokio::time::timeout(EGRESS_PROBE_TIMEOUT, probe).await {
+            Ok(Ok(())) => {
+                eg_pool.record_probe_success(&entry.id);
+                Some(entry)
+            }
+            Ok(Err(kind)) => {
+                emit_failure(kind, &entry);
+                None
+            }
+            Err(_elapsed) => {
+                emit_failure(ProbeFailureKind::Timeout, &entry);
+                None
+            }
         }
     }
 
