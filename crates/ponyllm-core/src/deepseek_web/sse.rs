@@ -4,9 +4,10 @@
 //! from raw SSE frames.
 //!
 //! Event names (REA §5): `ready`, `delta`, `finish`, `close`, plus non-fatal
-//! `hint`/`toast`/`title`/`updateSession`. `delta` is a JSON-patch op
-//! `{o, p, v}` with `o ∈ {SET, BATCH}`; a BATCH's `v` is an op array applied
-//! recursively, in order (DW-T-03).
+//! `hint`/`toast`/`title`/`updateSession`. `delta` is a `{p, o, v}` frame with
+//! `o ∈ {APPEND, SET, BATCH}`; a **missing `o` is an implicit APPEND**
+//! (real-wire frames `{"v":","}`, `{"v":" the"}` — Amendment v4 / REA §5);
+//! a BATCH's `v` is an op array applied recursively, in order (DW-T-03).
 
 use serde_json::Value;
 
@@ -34,10 +35,16 @@ pub enum SseEvent {
     UpdateSession(Value),
 }
 
-/// One delta op `{o, p, v}` (REA §5): `o` is `SET` or `BATCH` (`v` of a BATCH
-/// is an op array applied recursively, in order — DW-T-03).
+/// One delta op `{p, o, v}` (REA §5, Amendment v4): `o ∈ {APPEND, SET, BATCH}`;
+/// a missing `o` is an implicit `APPEND` (real wire `{"v":","}`). `v` of a
+/// BATCH is an op array applied recursively, in order (DW-T-03); sub-ops may
+/// be APPEND / SET / implicit-APPEND / nested BATCH.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeltaOp {
+    /// `APPEND`: append `value` as incremental text (real path
+    /// `response/fragments/-1/content`); `path` is `None` on implicit-APPEND
+    /// frames that only carry `v` (DW-T-02, Amendment v4).
+    Append { path: Option<String>, value: Value },
     /// `SET`: set path `p` to value `v`.
     Set { path: String, value: Value },
     /// `BATCH`: `v` is an op array, applied recursively in order.
@@ -93,14 +100,17 @@ pub fn parse_completion_event(name: &str, data: &str) -> Result<Option<SseEvent>
     }
 }
 
-/// Recursively parse one delta payload `{o, p, v}` (DW-T-02/03).
+/// Recursively parse one delta payload `{p, o, v}` (DW-T-02/03, Amendment v4).
+///
+/// * `o = "APPEND"` → [`DeltaOp::Append`] with the frame's optional `p`;
+/// * **missing `o`** → implicit [`DeltaOp::Append`] (real wire
+///   `{"v":","}`, `{"v":" the"}`);
+/// * `o = "SET"` → [`DeltaOp::Set`];
+/// * `o = "BATCH"` → recursive expansion of the `v` op array.
 pub fn parse_delta(value: &Value) -> Result<DeltaOp, SseError> {
-    let op = value
-        .get("o")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| SseError::Malformed("delta missing 'o'".to_string()))?;
+    let op = value.get("o").and_then(|v| v.as_str());
     match op {
-        "SET" => {
+        Some("SET") => {
             let path = value
                 .get("p")
                 .and_then(|v| v.as_str())
@@ -112,7 +122,18 @@ pub fn parse_delta(value: &Value) -> Result<DeltaOp, SseError> {
                 .clone();
             Ok(DeltaOp::Set { path, value: v })
         }
-        "BATCH" => {
+        Some("APPEND") | None => {
+            let path = value
+                .get("p")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let v = value
+                .get("v")
+                .ok_or_else(|| SseError::Malformed("delta missing 'v'".to_string()))?
+                .clone();
+            Ok(DeltaOp::Append { path, value: v })
+        }
+        Some("BATCH") => {
             let items = value
                 .get("v")
                 .and_then(|v| v.as_array())
@@ -123,7 +144,7 @@ pub fn parse_delta(value: &Value) -> Result<DeltaOp, SseError> {
             }
             Ok(DeltaOp::Batch(ops))
         }
-        other => Err(SseError::UnknownOp(other.to_string())),
+        Some(other) => Err(SseError::UnknownOp(other.to_string())),
     }
 }
 
@@ -237,6 +258,95 @@ mod tests {
                 DeltaOp::Set { path: "/message/content/3".to_string(), value: json!("C") },
             ]))
         );
+    }
+
+    #[test]
+    fn delta_append_with_path_parses() {
+        let ev = parse_completion_event(
+            "delta",
+            r#"{"p":"response/fragments/-1/content","o":"APPEND","v":"Hello"}"#,
+        )
+        .unwrap()
+        .expect("append parses");
+        assert_eq!(
+            ev,
+            SseEvent::Delta(DeltaOp::Append {
+                path: Some("response/fragments/-1/content".to_string()),
+                value: json!("Hello"),
+            })
+        );
+    }
+
+    #[test]
+    fn delta_implicit_append_when_o_missing() {
+        // real-wire frames (Amendment v4 / REA §5): {"v":","}, {"v":" the"}
+        for (frame, want) in [
+            (r#"{"v":","}"#, ","),
+            (r#"{"v":" the"}"#, " the"),
+        ] {
+            let ev = parse_completion_event("delta", frame).unwrap().expect("implicit append parses");
+            assert_eq!(
+                ev,
+                SseEvent::Delta(DeltaOp::Append { path: None, value: json!(want) }),
+                "frame {frame}"
+            );
+        }
+        // a missing `o` frame that still carries a path keeps it
+        let ev = parse_completion_event(
+            "delta",
+            r#"{"p":"response/fragments/-1/content","v":"x"}"#,
+        )
+        .unwrap()
+        .expect("implicit append with path parses");
+        assert_eq!(
+            ev,
+            SseEvent::Delta(DeltaOp::Append {
+                path: Some("response/fragments/-1/content".to_string()),
+                value: json!("x"),
+            })
+        );
+    }
+
+    #[test]
+    fn delta_batch_mixed_append_set_implicit() {
+        // Amendment v4: BATCH sub-ops may be APPEND / SET / implicit APPEND,
+        // nested BATCH recurses — all in order.
+        let ev = parse_completion_event(
+            "delta",
+            r#"{"o":"BATCH","v":[
+                {"o":"APPEND","p":"response/fragments/-1/content","v":"A"},
+                {"v":","},
+                {"o":"SET","p":"/message/content/0/type","v":"text"},
+                {"o":"BATCH","v":[{"o":"APPEND","p":"response/fragments/-1/content","v":"B"}]},
+                {"v":" the"}
+            ]}"#,
+        )
+        .unwrap()
+        .expect("mixed batch parses");
+        assert_eq!(
+            ev,
+            SseEvent::Delta(DeltaOp::Batch(vec![
+                DeltaOp::Append {
+                    path: Some("response/fragments/-1/content".to_string()),
+                    value: json!("A")
+                },
+                DeltaOp::Append { path: None, value: json!(",") },
+                DeltaOp::Set { path: "/message/content/0/type".to_string(), value: json!("text") },
+                DeltaOp::Batch(vec![DeltaOp::Append {
+                    path: Some("response/fragments/-1/content".to_string()),
+                    value: json!("B")
+                }]),
+                DeltaOp::Append { path: None, value: json!(" the") },
+            ]))
+        );
+    }
+
+    #[test]
+    fn delta_missing_o_and_v_errors() {
+        assert!(matches!(
+            parse_completion_event("delta", r#"{}"#),
+            Err(SseError::Malformed(_))
+        ));
     }
 
     #[test]

@@ -394,15 +394,14 @@ fn deepseek_web_translate_event<E>(
     }
 }
 
-/// Apply one delta op tree (SET / BATCH, recursing in order — DW-T-02/03).
+/// Apply one delta op tree (SET / APPEND / BATCH, recursing in order —
+/// DW-T-02/03, Amendment v4 real-wire).
 fn deepseek_web_apply_delta<E>(
     op: &DeltaOp,
     model: &str,
     st: &mut DeepSeekWebTranslateState,
     out: &mut Vec<Result<bytes::Bytes, E>>,
 ) {
-    use bytes::Bytes;
-
     match op {
         DeltaOp::Set { path, value } => {
             // Unambiguous reduction (DW-T-02): a `type` fragment is metadata
@@ -437,51 +436,7 @@ fn deepseek_web_apply_delta<E>(
 
             if under_content {
                 if let Some(text) = object_content.or(value_str) {
-                    if text.is_empty() {
-                        return;
-                    }
-                    st.content.push_str(text);
-                    if !st.degraded {
-                        // Type != text (e.g. thinking) → reasoning (DW-T-02).
-                        let reasoning = st
-                            .current_segment_type
-                            .as_deref()
-                            .is_some_and(|t| t != "text");
-                        let chunk = ChatCompletionChunk {
-                            id: st.response_id.clone().unwrap_or_else(|| {
-                                format!("chatcmpl-dsw-{}", uuid_simple())
-                            }),
-                            object: "chat.completion.chunk".to_string(),
-                            created: std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap_or_default()
-                                .as_secs(),
-                            model: model.to_string(),
-                            choices: vec![ChatChunkChoice {
-                                index: 0,
-                                delta: ChatChunkDelta {
-                                    content: if reasoning { None } else { Some(text.to_string()) },
-                                    reasoning_content: if reasoning {
-                                        Some(text.to_string())
-                                    } else {
-                                        None
-                                    },
-                                    ..Default::default()
-                                },
-                                finish_reason: None,
-                                logprobs: None,
-                            }],
-                            usage: None,
-                            system_fingerprint: None,
-                            service_tier: None,
-                        };
-                        if let Ok(json) = serde_json::to_string(&chunk) {
-                            out.push(Ok(Bytes::from(format!("data: {json}\n\n"))));
-                        }
-                        // Lead ruling (DW-T-06): advance the content cursor so a
-                        // later conclusive chunk emits only the increment.
-                        st.emitted_content_len = st.content.len();
-                    }
+                    deepseek_web_append_content(model, st, out, text);
                     return;
                 }
             }
@@ -496,11 +451,100 @@ fn deepseek_web_apply_delta<E>(
                 "deepseek-web delta op not unambiguously reducible (degraded mode)"
             );
         }
+        DeltaOp::Append { path, value } => {
+            // Real-wire (Amendment v4): live SSE deltas are
+            // `{"p":"...content","o":"APPEND","v":"text"}` or the
+            // `o`-absent implicit append `{"v":"text"}`. Append `v` to the
+            // current content/reasoning segment exactly like a SET content
+            // fragment — `type != text` (tracked via prior `type` markers)
+            // routes to reasoning_content (DW-T-02).
+            let value_str = value.as_str();
+            let object_content = value
+                .as_object()
+                .and_then(|o| o.get("content"))
+                .and_then(|c| c.as_str());
+            if let Some(text) = object_content.or(value_str) {
+                // A `type` object ({type, content}) also re-marks the segment.
+                if let Some(t) = value
+                    .as_object()
+                    .and_then(|o| o.get("type"))
+                    .and_then(|t| t.as_str())
+                {
+                    st.current_segment_type = Some(t.to_string());
+                }
+                deepseek_web_append_content(model, st, out, text);
+                return;
+            }
+            // Non-string append (e.g. a type marker object without content, or
+            // an unknown shape): treat like SET's un-reducible path — record,
+            // never fabricate.
+            st.degraded = true;
+            tracing::debug!(
+                model = %model,
+                path = path.as_deref().unwrap_or("(implicit)"),
+                value = %value,
+                "deepseek-web append delta not unambiguously reducible (degraded mode)"
+            );
+        }
         DeltaOp::Batch(ops) => {
             for child in ops {
                 deepseek_web_apply_delta(child, model, st, out);
             }
         }
+    }
+}
+
+/// Shared DW-T-02 content append: accumulate into `st.content`, emit a content
+/// (or reasoning) delta chunk when not degraded, and advance the DW-T-06
+/// conclusive cursor exactly as the live-streamed bytes grow.
+fn deepseek_web_append_content<E>(
+    model: &str,
+    st: &mut DeepSeekWebTranslateState,
+    out: &mut Vec<Result<bytes::Bytes, E>>,
+    text: &str,
+) {
+    use bytes::Bytes;
+
+    if text.is_empty() {
+        return;
+    }
+    st.content.push_str(text);
+    if !st.degraded {
+        // Type != text (e.g. thinking) → reasoning (DW-T-02).
+        let reasoning = st
+            .current_segment_type
+            .as_deref()
+            .is_some_and(|t| t != "text");
+        let chunk = ChatCompletionChunk {
+            id: st.response_id.clone().unwrap_or_else(|| {
+                format!("chatcmpl-dsw-{}", uuid_simple())
+            }),
+            object: "chat.completion.chunk".to_string(),
+            created: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+            model: model.to_string(),
+            choices: vec![ChatChunkChoice {
+                index: 0,
+                delta: ChatChunkDelta {
+                    content: if reasoning { None } else { Some(text.to_string()) },
+                    reasoning_content: if reasoning { Some(text.to_string()) } else { None },
+                    ..Default::default()
+                },
+                finish_reason: None,
+                logprobs: None,
+            }],
+            usage: None,
+            system_fingerprint: None,
+            service_tier: None,
+        };
+        if let Ok(json) = serde_json::to_string(&chunk) {
+            out.push(Ok(Bytes::from(format!("data: {json}\n\n"))));
+        }
+        // Lead ruling (DW-T-06): advance the content cursor so a later
+        // conclusive chunk emits only the increment.
+        st.emitted_content_len = st.content.len();
     }
 }
 

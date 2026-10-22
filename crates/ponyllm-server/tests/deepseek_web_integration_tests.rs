@@ -103,6 +103,9 @@ async fn spawn_mock_upstream() -> String {
                 assert_eq!(req["chat_session_id"], "sess-mock-1");
                 assert_eq!(req["model_type"], "deepseek-v4-flash");
                 assert_eq!(req["prompt"], "Hello");
+                // Amendment v4 (DW-Q-03): source must be pinned to "default" —
+                // the live service rejects any other variant with 422.
+                assert_eq!(req["source"], "default", "source must be pinned to default");
 
                 let body = format!(
                     "event: ready\ndata: {}\n\n\
@@ -303,4 +306,136 @@ async fn deepseek_web_error_mapping_40012_banned_surfaces_and_stops() {
         "banned token must fail, got {}",
         resp.status()
     );
+}
+
+/// Amendment v4 (DW-T-02/DW-T-03): real-wire deltas are `o=APPEND` (path
+/// `response/fragments/-1/content`) and **`o`-absent implicit APPEND**
+/// (`{"v":","}`, `{"v":" the"}`). The gateway translator must append these to
+/// the OpenAI `content` delta exactly like SET content fragments, in order;
+/// `thinking`-typed segments still route to `reasoning_content`.
+#[tokio::test]
+async fn deepseek_web_delta_append_and_implicit_append_translate() {
+    let upstream = spawn_mock_upstream_with_sse(concat!(
+        "event: ready\ndata: ",
+        r#"{"response_message_id":"r-append","request_message_id":"q-append","model_type":"deepseek-v4-flash"}"#,
+        "\n\nevent: delta\ndata: ",
+        r#"{"p":"response/fragments/-1/content","o":"APPEND","v":"Hello"}"#,
+        "\n\nevent: delta\ndata: ",
+        r#"{"v":","}"#,
+        "\n\nevent: delta\ndata: ",
+        r#"{"p":"/message/content/1/type","o":"SET","v":"thinking"}"#,
+        "\n\nevent: delta\ndata: ",
+        r#"{"o":"APPEND","v":"(hidden)"}"#,
+        "\n\nevent: delta\ndata: ",
+        r#"{"p":"/message/content/2/type","o":"SET","v":"text"}"#,
+        "\n\nevent: delta\ndata: ",
+        r#"{"v":" world"}"#,
+        "\n\nevent: finish\ndata: ",
+        r#"{"usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7}}"#,
+        "\n\nevent: close\ndata: ",
+        r#"{"close_reason":"success"}"#,
+        "\n\n",
+    ))
+    .await;
+
+    let mut config = GatewayConfig::default();
+    config.auth_mode = ponyllm_config::AuthMode::Open;
+    config
+        .providers
+        .insert("deepseek-web".to_string(), provider_config(&upstream));
+    let pool = Arc::new(KeyPool::new("deepseek-web", RoutingStrategy::RoundRobin));
+    pool.add_key(ApiKeyEntry::new("ds-web-k1", "user-web-token-abc", 1, 10));
+    let state = Arc::new(AppState::new(config));
+    state.register_pool("deepseek-web", pool);
+
+    let app = create_app(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let gw_addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://{}/v1/chat/completions", gw_addr))
+        .json(&json!({
+            "model": "deepseek-v4-flash",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": true
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.unwrap();
+
+    let chunks: Vec<serde_json::Value> = body
+        .lines()
+        .filter_map(|l| l.strip_prefix("data: "))
+        .filter_map(|d| serde_json::from_str::<serde_json::Value>(d).ok())
+        .filter(|v| v.get("object").and_then(|o| o.as_str()) == Some("chat.completion.chunk"))
+        .collect();
+    assert!(!chunks.is_empty(), "expected translated chunks, got body: {body}");
+
+    // APPEND "Hello" + implicit "," + implicit " world" → visible content
+    // "Hello, world"; the thinking segment "(hidden)" goes to reasoning only.
+    let content: String = chunks
+        .iter()
+        .filter_map(|c| c["choices"][0]["delta"]["content"].as_str())
+        .collect();
+    assert_eq!(content, "Hello, world", "APPEND/implicit-APPEND text must concatenate");
+    let reasoning: String = chunks
+        .iter()
+        .filter_map(|c| c["choices"][0]["delta"]["reasoning_content"].as_str())
+        .collect();
+    assert_eq!(reasoning, "(hidden)", "thinking segment must route to reasoning_content");
+    let last = chunks.last().unwrap();
+    assert_eq!(last["choices"][0]["finish_reason"], "stop");
+    assert_eq!(last["usage"]["total_tokens"], 7);
+}
+
+/// Spawn a mock upstream with a caller-provided completion SSE body (used by
+/// the APPEND/implicit-append wire test above).
+async fn spawn_mock_upstream_with_sse(completion_sse: &str) -> String {
+    let challenge = json!({
+        "biz_code": 0,
+        "biz_data": {
+            "challenge": {
+                "algorithm": "DeepSeekHashV1",
+                "challenge": "f8fb769c7e72e8c700bc813f7fea91949c91f96264d04cfe64063a76bd48fafb",
+                "salt": "abc",
+                "difficulty": 1,
+                "signature": "sig1",
+                "expireAt": 12345,
+                "expireAfter": 3600
+            }
+        }
+    });
+    let completion = completion_sse.to_string();
+    let app = Router::new()
+        .route(
+            "/api/v0/chat/create_pow_challenge",
+            post(|Json(_req): Json<serde_json::Value>| async move { Json(challenge) }),
+        )
+        .route(
+            "/api/v0/chat_session/create",
+            post(|Json(_req): Json<serde_json::Value>| async move {
+                Json(json!({
+                    "biz_code": 0,
+                    "biz_data": { "chat_session": { "id": "sess-mock-1" } }
+                }))
+            }),
+        )
+        .route(
+            "/api/v0/chat/completion",
+            post(move |Json(_req): Json<serde_json::Value>| async move {
+                axum::response::Response::new(axum::body::Body::from(completion.clone()))
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    format!("http://{}", addr)
 }

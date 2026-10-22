@@ -21,7 +21,7 @@ use ponyllm_core::pool::{ApiKeyEntry, BillingMode, KeyPool, RoutingStrategy, Ups
 use ponyllm_server::{create_app, AppState, GatewayConfig, ModelSpec, ProviderConfig};
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 const CHALLENGE_OK: &str = r#"{"data":{"biz_code":0,"biz_data":{"challenge":{
 "algorithm":"DeepSeekHashV1",
@@ -35,12 +35,16 @@ const CHALLENGE_OK: &str = r#"{"data":{"biz_code":0,"biz_data":{"challenge":{
 const SESSION_OK: &str = r#"{"data":{"biz_code":0,"biz_data":{"chat_session":{"id":"sess-mock-1","title":"New chat"}},"biz_msg":"ok"}}"#;
 
 /// Full-chain SSE fixture exercising DW-T-01..09 (except the degradation and
-/// close-reason scenarios, which use dedicated fixtures).
+/// close-reason scenarios, which use dedicated fixtures). Amendment v4:
+/// includes o=APPEND, missing-o (implicit APPEND) and a mixed BATCH so the
+/// text-append semantics are pinned end-to-end (real-chain smoke 2026-10-22).
 const T_STREAM: &str = "event: ready\ndata: {\"response_message_id\":\"rsp_01\",\"request_message_id\":\"req_01\",\"model_type\":\"deepseek-chat\"}\n\n\
 event: delta\ndata: {\"o\":\"SET\",\"p\":\"/message/content/0/type\",\"v\":\"text\"}\n\n\
 event: delta\ndata: {\"o\":\"SET\",\"p\":\"/message/content/0/content/0/type\",\"v\":\"text\"}\n\n\
 event: delta\ndata: {\"o\":\"SET\",\"p\":\"/message/content/0/content/0/text\",\"v\":\"Hello \"}\n\n\
-event: delta\ndata: {\"o\":\"BATCH\",\"p\":\"/message/content/0/content\",\"v\":[{\"o\":\"SET\",\"p\":\"/message/content/0/content/1/type\",\"v\":\"text\"},{\"o\":\"SET\",\"p\":\"/message/content/0/content/1/text\",\"v\":\"world\"}]}\n\n\
+event: delta\ndata: {\"o\":\"BATCH\",\"p\":\"/message/content/0/content\",\"v\":[{\"o\":\"APPEND\",\"p\":\"response/fragments/-1/content\",\"v\":\"world\"},{\"v\":\"!\"}]}\n\n\
+event: delta\ndata: {\"p\":\"response/fragments/-1/content\",\"o\":\"APPEND\",\"v\":\" the\"}\n\n\
+event: delta\ndata: {\"v\":\" end\"}\n\n\
 event: delta\ndata: {\"o\":\"SET\",\"p\":\"/message/content/0/content/2/type\",\"v\":\"thinking\"}\n\n\
 event: delta\ndata: {\"o\":\"SET\",\"p\":\"/message/content/0/content/2/text\",\"v\":\"(hidden reasoning)\"}\n\n\
 event: hint\ndata: {\"type\":\"notice\"}\n\n\
@@ -59,6 +63,9 @@ struct MockChain {
     base: String,
     challenge_calls: Arc<AtomicUsize>,
     completion_calls: Arc<AtomicUsize>,
+    /// Last completion body captured by the mock (Amendment v4: gateway MUST
+    /// emit `source == "default"`; the server 422s any other value).
+    completion_body: Arc<Mutex<Option<serde_json::Value>>>,
 }
 
 async fn spawn_mock_chain(completion_sse: String, completion_status: u16) -> MockChain {
@@ -67,8 +74,10 @@ async fn spawn_mock_chain(completion_sse: String, completion_status: u16) -> Moc
 
     let challenge_calls = Arc::new(AtomicUsize::new(0));
     let completion_calls = Arc::new(AtomicUsize::new(0));
+    let completion_body = Arc::new(Mutex::new(None));
     let cc1 = challenge_calls.clone();
     let cc2 = completion_calls.clone();
+    let cbody = completion_body.clone();
 
     let app = axum::Router::new()
         .route(
@@ -86,11 +95,13 @@ async fn spawn_mock_chain(completion_sse: String, completion_status: u16) -> Moc
         )
         .route(
             "/api/v0/chat/completion",
-            axum::routing::post(move |headers: HeaderMap, _: axum::Json<serde_json::Value>| {
+            axum::routing::post(move |headers: HeaderMap, body: axum::Json<serde_json::Value>| {
                 let cc2 = cc2.clone();
                 let sse = completion_sse.clone();
+                let cbody = cbody.clone();
                 async move {
                     cc2.fetch_add(1, Ordering::SeqCst);
+                    *cbody.lock().unwrap() = Some(body.0);
                     // T4 wiring: the pool key must reach the upstream as the
                     // user-held web token (REA §2 Authorization: Bearer).
                     assert_eq!(
@@ -117,6 +128,7 @@ async fn spawn_mock_chain(completion_sse: String, completion_status: u16) -> Moc
         base: format!("http://{addr}"),
         challenge_calls,
         completion_calls,
+        completion_body,
     }
 }
 
@@ -236,6 +248,19 @@ async fn dw_t_01_ready_emits_role_and_id_prefix() {
     let chunks = parse_chunks(&lines);
     assert!(!chunks.is_empty(), "DW-T-01: stream must produce chunks");
 
+    // Amendment v4 (DW-Q-03): the gateway-emitted completion body MUST carry
+    // source "default" (server enum {default, landing}, anything else 422).
+    let body = mock.completion_body.lock().unwrap().clone().expect("completion body captured");
+    assert_eq!(
+        body["source"],
+        json!("default"),
+        "DW-Q-03: gateway completion request source must be 'default'; got {body}"
+    );
+    assert!(
+        body["prompt"].is_string() && !body["prompt"].as_str().unwrap().is_empty(),
+        "DW-T-01: prompt must be forwarded; got {body}"
+    );
+
     let first = &chunks[0];
     assert_eq!(
         role(first),
@@ -268,17 +293,18 @@ async fn dw_t_01_ready_emits_role_and_id_prefix() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn dw_t_02_set_op_appends_text() {
+async fn dw_t_02_delta_text_append_semantics() {
     let mock = spawn_mock_chain(T_STREAM.to_string(), 200).await;
     let gw = spawn_gateway(&mock.base).await;
 
+    // Amendment v4: SET merge, o=APPEND append, and missing-o implicit APPEND
+    // all contribute incremental text, in frame order.
     let chunks = parse_chunks(&sse_data_lines(&stream_chat(&gw).await));
     let mut content: Vec<&str> = chunks.iter().filter_map(delta_content).collect();
-    // compact: drop empty
     content.retain(|c| !c.is_empty());
     assert_eq!(
-        content, vec!["Hello ", "world"],
-        "DW-T-02: SET text fragments appended in order (incl. BATCH recursion)"
+        content, vec!["Hello ", "world", "!", " the", " end"],
+        "DW-T-02: SET/APPEND/missing-o text appended in order (incl. mixed BATCH)"
     );
     let all = chunks.iter().map(|c| delta_content(c).unwrap_or("")).collect::<String>();
     assert!(
@@ -298,9 +324,13 @@ async fn dw_t_03_batch_recursive_in_order() {
 
     let chunks = parse_chunks(&sse_data_lines(&stream_chat(&gw).await));
     let content: Vec<&str> = chunks.iter().filter_map(delta_content).filter(|c| !c.is_empty()).collect();
-    // BATCH [SET type, SET text "world"] must yield "world" AFTER "Hello ".
+    // BATCH [APPEND "world", missing-o "!"] must yield "world" then "!" AFTER "Hello ".
     let joined = content.join("|");
-    assert_eq!(joined, "Hello |world", "DW-T-03: BATCH applied recursively in order; got {joined:?}");
+    assert_eq!(
+        joined,
+        "Hello |world|!| the| end",
+        "DW-T-03: BATCH recursion preserves APPEND/SET/missing-o order; got {joined:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------

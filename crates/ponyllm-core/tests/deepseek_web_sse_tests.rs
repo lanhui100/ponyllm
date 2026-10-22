@@ -203,6 +203,98 @@ fn sse_parse_unknown_op_errors() {
 }
 
 // ---------------------------------------------------------------------------
+// Amendment v4 delta frames: o=APPEND and missing-o (implicit APPEND) must
+// parse to a value-carrying DeltaOp (REA §5 v4; real-chain smoke 2026-10-22:
+// {"p":"response/fragments/-1/content","o":"APPEND","v":"..."},
+// {"v":","}, {"v":" the"}).
+// ---------------------------------------------------------------------------
+
+/// Extract the text value carried by a DeltaOp (Set arm; Batch carries none).
+/// Compile-safe against future DeltaOp variants (wildcard arm).
+fn delta_value(op: &DeltaOp) -> Option<&serde_json::Value> {
+    match op {
+        DeltaOp::Set { value, .. } => Some(value),
+        // Amendment v4: APPEND carries the appended text (real frame
+        // {"p":"response/fragments/-1/content","o":"APPEND","v":"..."}).
+        DeltaOp::Append { value, .. } => Some(value),
+        _ => None,
+    }
+}
+
+/// Flatten a DeltaOp tree into the ordered list of text values (BATCH recursed).
+fn delta_values_in_order(op: &DeltaOp, out: &mut Vec<serde_json::Value>) {
+    match op {
+        DeltaOp::Set { value, .. } => out.push(value.clone()),
+        DeltaOp::Append { value, .. } => out.push(value.clone()),
+        DeltaOp::Batch(ops) => {
+            for sub in ops {
+                delta_values_in_order(sub, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+#[test]
+fn sse_parse_delta_append_op() {
+    let got = parse_completion_event(
+        "delta",
+        r#"{"p":"response/fragments/-1/content","o":"APPEND","v":"Hel"}"#,
+    )
+    .expect("stub panics -> red")
+    .expect("APPEND frame must produce an event (Amendment v4)");
+    match got {
+        SseEvent::Delta(op) => assert_eq!(
+            delta_value(&op),
+            Some(&json!("Hel")),
+            "DW-T-02: APPEND carries the appended text as its value"
+        ),
+        other => panic!("APPEND frame -> Delta; got {other:?}"),
+    }
+}
+
+#[test]
+fn sse_parse_delta_missing_op_implicit_append() {
+    for (label, data, expected) in [
+        ("implicit append 1", r#"{"v":","}"#, json!(",")),
+        ("implicit append 2", r#"{"v":" the"}"#, json!(" the")),
+    ] {
+        let got = parse_completion_event("delta", data)
+            .expect("stub panics -> red")
+            .expect("missing-o frame must produce an event (Amendment v4)");
+        match got {
+            SseEvent::Delta(op) => assert_eq!(
+                delta_value(&op),
+                Some(&expected),
+                "{label}: missing o -> implicit APPEND with value"
+            ),
+            other => panic!("{label}: missing-o -> Delta; got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn sse_parse_delta_batch_mixed_append_set_missing() {
+    let data = r#"{"o":"BATCH","p":"/message/content/0/content","v":[{"o":"APPEND","p":"response/fragments/-1/content","v":"A"},{"v":"B"},{"o":"SET","p":"/message/content/0/content/0/text","v":"C"}]}"#;
+    let got = parse_completion_event("delta", data)
+        .expect("stub panics -> red")
+        .expect("BATCH with mixed ops must produce an event (Amendment v4)");
+    match got {
+        SseEvent::Delta(op) => {
+            let mut values = Vec::new();
+            delta_values_in_order(&op, &mut values);
+            assert_eq!(
+                values,
+                vec![json!("A"), json!("B"), json!("C")],
+                "DW-T-03: BATCH recursion preserves APPEND/SET/missing-o order"
+            );
+        }
+        other => panic!("mixed BATCH -> Delta; got {other:?}"),
+    }
+}
+
+
+// ---------------------------------------------------------------------------
 // Full-stream framing pipeline: raw SSE text -> sequence of typed events,
 // mirroring the gateway-side consumer (event name + joined data -> H-09)
 // ---------------------------------------------------------------------------

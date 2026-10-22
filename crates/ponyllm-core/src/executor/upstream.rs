@@ -2240,6 +2240,12 @@ impl UpstreamExecutor {
         };
         let mut owned = effective_body.clone().into_owned();
         owned["chat_session_id"] = Value::String(session.id);
+        // Real-wire fix (Amendment v4): the live service only accepts
+        // `source` ∈ {`default`, `landing`} — anything else is a 422. The
+        // deepseek-web completion body therefore pins `source` to the safest
+        // literal regardless of what the caller sent (gateway does not
+        // interpret or forward arbitrary source strings, contract §10.5).
+        owned["source"] = Value::String("default".to_string());
         *effective_body = std::borrow::Cow::Owned(owned);
 
         let mut challenge = match client.create_pow_challenge(target_path).await {
