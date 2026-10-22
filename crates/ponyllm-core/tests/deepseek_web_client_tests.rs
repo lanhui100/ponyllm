@@ -256,7 +256,7 @@ async fn dw_s_04_completion_body_wire_shape() {
         ref_file_ids: vec!["f1".into()],
         thinking_enabled: true,
         search_enabled: false,
-        source: "web_chat".into(),
+        source: "default".into(),
         action: Some("continue".into()),
         preempt: true,
     };
@@ -310,7 +310,7 @@ fn dw_q_01_exact_key_set_and_types() {
         ref_file_ids: vec!["f1".into()],
         thinking_enabled: true,
         search_enabled: false,
-        source: "web_chat".into(),
+        source: "default".into(),
         action: Some("continue".into()),
         preempt: true,
     };
@@ -386,16 +386,18 @@ fn dw_q_02_defaults_null_or_false() {
 }
 
 // ---------------------------------------------------------------------------
-// DW-Q-03 (SHOULD) caller-side thinking/search defaults (REA §3 example body)
+// DW-Q-03 (Amendment v4) source enum + thinking/search defaults (REA §3)
 // ---------------------------------------------------------------------------
 
 #[test]
-fn dw_q_03_thinking_search_defaults() {
-    // Caller convention: no explicit config -> thinking_enabled=true,
-    // search_enabled=false (REA example body). The frozen struct's serde
-    // wire-default is `false` for absent keys; the caller-facing default is
-    // the REA example — deviation needs written justification (SHOULD).
-    let req = CompletionRequest {
+fn dw_q_03_source_enum_and_flag_defaults() {
+    // Source enum per Amendment v4 (real-chain smoke 2026-10-22): the server
+    // accepts ONLY `default` | `landing` (anything else -> HTTP 422 "unknown
+    // variant" — the old REA "web_chat"/"search" literals are DEBUNKED). The
+    // GATEWAY default/passthrough value is FIXED to `default` (`landing` is
+    // landing-page-specific, gateway never self-selects it).
+    // (a) canonical gateway value "default" serializes verbatim
+    let req_default = CompletionRequest {
         chat_session_id: "sess-1".into(),
         parent_message_id: None,
         model_type: "deepseek-chat".into(),
@@ -407,9 +409,26 @@ fn dw_q_03_thinking_search_defaults() {
         action: None,
         preempt: false,
     };
-    let j = serde_json::to_value(&req).unwrap();
+    let j = serde_json::to_value(&req_default).unwrap();
+    assert_eq!(j["source"], json!("default"), "DW-Q-03: gateway source is 'default'");
     assert_eq!(j["thinking_enabled"], json!(true), "DW-Q-03: thinking default true");
     assert_eq!(j["search_enabled"], json!(false), "DW-Q-03: search default false");
+    // (b) "landing" is the second (and only other) valid enum value
+    let req_landing = CompletionRequest { source: "landing".into(), ..req_default };
+    assert_eq!(
+        serde_json::to_value(&req_landing).unwrap()["source"],
+        json!("landing"),
+        "DW-Q-03: landing is the server's only other valid source value"
+    );
+    // (c) any other value is server-invalid (422 unknown variant); the client
+    // type is String so this is a gateway-side convention — the gateway MUST
+    // emit "default" (asserted at the gateway acceptance layer via the
+    // captured completion body). Values outside {default, landing} must
+    // never be chosen by the gateway.
+    assert!(
+        !["web_chat", "search"].iter().any(|v| v == &req_default.source.as_str()),
+        "DW-Q-03: debunked literals must not be the emitted source"
+    );
 }
 
 // ---------------------------------------------------------------------------
