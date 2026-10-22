@@ -26,8 +26,8 @@ pub mod sse;
 
 pub use client::{
     classify_api_error, ApiErrorEnvelope, ChatSession, ClientError, CompletionRequest,
-    DeepSeekWebClient, CLIENT_BUNDLE_ID, CLIENT_LOCALE, CLIENT_PLATFORM,
-    CLIENT_TIMEZONE_OFFSET, CLIENT_VERSION, DEFAULT_BASE_URL,
+    DeepSeekWebClient, FileInfo, FileParseStatus, UploadedFile, CLIENT_BUNDLE_ID, CLIENT_LOCALE,
+    CLIENT_PLATFORM, CLIENT_TIMEZONE_OFFSET, CLIENT_VERSION, DEFAULT_BASE_URL,
 };
 pub use pow::{
     encode_pow_response_header, is_pow_challenge_expired, solve_pow, PowChallenge, PowError,

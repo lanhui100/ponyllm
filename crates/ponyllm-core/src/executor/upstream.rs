@@ -101,6 +101,19 @@ fn map_deepseek_web_client_error(e: ClientError, key_id: &str) -> CoreError {
     }
 }
 
+/// Map a deepseek-web IMAGE BRIDGE rejection (decode / SSRF / type / size /
+/// parse-timeout — wave-10 R-VIS-06..09/13/14) to an explicit **4xx** client
+/// error. `CoreError::UpstreamStatusError{status:400}` kinds to
+/// `GatewayErrorKind::ClientBadRequest` (which `triggers_failover() == false`)
+/// so the routes render 400-499 and never treat the rejection as an upstream
+/// fault that should fail over to another provider.
+fn map_deepseek_web_bridge_error(msg: impl Into<String>) -> CoreError {
+    CoreError::UpstreamStatusError {
+        status: reqwest::StatusCode::BAD_REQUEST,
+        body: msg.into(),
+    }
+}
+
 /// How many bytes of a deepseek-web completion response head to inspect for a
 /// `biz_code` error envelope before declaring a 2xx a success (L3A F4).
 /// Error envelopes are small JSON blobs; the SSE stream body itself may be
@@ -227,6 +240,102 @@ fn deepseek_web_waf_marker(resp: &reqwest::Response) -> Option<String> {
         }
     }
     None
+}
+
+/// Resolve one `__web_images` entry into `(file_name, mime, bytes)` for
+/// upload (wave-10 R-VIS-03/06..09):
+/// - `{kind:"image_url", url:"data:<mime>;base64,<payload>"}` → decode;
+/// - `{kind:"image_url", url:"http(s)://..."}` → SSRF-safe fetch
+///   (`crate::executor::image::fetch_image_bytes`);
+/// - `{kind:"file", file_id:...}` → upstream already holds the file, no
+///   re-upload (R-VIS-15: per-request fresh uploads; a downstream-provided
+///   file_id is passed through — it is not a gateway cache).
+/// Any decode/fetch failure is an explicit error — never a silent drop.
+async fn deepseek_web_image_to_upload(
+    image: &Value,
+) -> std::result::Result<(String, String, Vec<u8>), String> {
+    let kind = image.get("kind").and_then(|k| k.as_str()).unwrap_or("image_url");
+    match kind {
+        "file" => {
+            // Downstream-provided file_id: the gateway does not re-upload
+            // what the client already holds (R-VIS-15: no gateway-side cache).
+            // A plain file reference without file_id is unsupported this wave.
+            Err("deepseek-web file reference requires a downstream file_id (unsupported without it)".to_string())
+        }
+        _ => {
+            let url = image
+                .get("url")
+                .and_then(|u| u.as_str())
+                .ok_or_else(|| "image_url entry missing 'url'".to_string())?;
+            if let Some((mime, bytes)) = decode_image_data_uri(url)? {
+                let ext = mime
+                    .trim_start_matches("image/")
+                    .split(';')
+                    .next()
+                    .unwrap_or("png")
+                    .to_ascii_lowercase();
+                let ext = if ext == "jpeg" { "jpg".to_string() } else { ext };
+                if !crate::executor::image::is_allowed_image_ext(&ext) {
+                    return Err(format!("image mime {mime} not in allowed image whitelist (R-VIS-11)"));
+                }
+                let file_name = format!("image.{ext}");
+                Ok((file_name, mime.to_string(), bytes))
+            } else {
+                let bytes = crate::executor::image::fetch_image_bytes(url)
+                    .await
+                    .map_err(|e| format!("image fetch rejected: {e}"))?;
+                // Extension from the URL (fetch_image_bytes already validated
+                // it); derive mime from the whitelist.
+                let ext = url
+                    .split('?')
+                    .next()
+                    .unwrap_or(url)
+                    .rsplit('.')
+                    .next()
+                    .unwrap_or("png")
+                    .to_ascii_lowercase();
+                let ext = if ext == "jpeg" { "jpg".to_string() } else { ext };
+                let mime = format!("image/{ext}");
+                let file_name = format!("image.{ext}");
+                Ok((file_name, mime, bytes))
+            }
+        }
+    }
+}
+
+/// Decode a `data:<mime>;base64,<payload>` image data URI (R-VIS-03/09):
+/// mime must be `image/*` from the whitelist, base64 must decode, size
+/// ≤100MB. Returns `(mime, bytes)`; `None` when the URI is not a data URI.
+fn decode_image_data_uri(url: &str) -> std::result::Result<Option<(String, Vec<u8>)>, String> {
+    let Some(payload) = url.strip_prefix("data:") else {
+        return Ok(None);
+    };
+    let (meta, b64) = payload
+        .split_once(',')
+        .ok_or_else(|| "malformed data URI (missing comma)".to_string())?;
+    let (mime, _rest) = meta
+        .split_once(';')
+        .unwrap_or((meta, ""));
+    let mime = mime.to_ascii_lowercase();
+    if !mime.starts_with("image/") {
+        return Err(format!("data URI mime {mime} is not an image (R-VIS-11)"));
+    }
+    let ext = mime.trim_start_matches("image/").to_ascii_lowercase();
+    let ext = if ext == "jpeg" { "jpg".to_string() } else { ext };
+    if !crate::executor::image::is_allowed_image_ext(&ext) {
+        return Err(format!("data URI mime {mime} not in image whitelist (R-VIS-11)"));
+    }
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(b64)
+        .map_err(|e| format!("base64 image decode failed: {e} (R-VIS-13)"))?;
+    if bytes.len() as u64 > crate::executor::image::MAX_IMAGE_FETCH_BYTES {
+        return Err(format!(
+            "image exceeds 100MB limit ({} bytes) (R-VIS-09)",
+            bytes.len()
+        ));
+    }
+    Ok(Some((format!("image/{ext}"), bytes)))
 }
 
 /// Failure category for one egress recovery probe — surfaced as the
@@ -2195,26 +2304,23 @@ impl UpstreamExecutor {
         Ok(headers)
     }
 
-    /// DeepSeek Web PoW prelude (wave-9, DW-P-01/02/05/06/07, DW-S-02,
-    /// DW-E-*): create a chat session (needed by the completion body,
-    /// DW-Q-01), patch `chat_session_id` into the body, fetch a fresh
-    /// challenge for `/api/v0/chat/completion`, solve it exactly once (no
-    /// replay, DW-P-07/DW-G-04) and return the `X-DS-PoW-Response` header
-    /// value (H-02 encoding).
+    /// DeepSeek Web PoW prelude + image bridge (wave-9 DW-P-*; wave-10
+    /// R-VIS-01..05/12): create a chat session, patch `chat_session_id`, pop
+    /// the route's `__web_images` side channel (if any), fetch/decode/upload
+    /// each image in ORDER (SSRF-safe, ≤50/request, ≤100MB each) →
+    /// `wait_file_ready` (≤60s) → inject `ref_file_ids` in the same order
+    /// (R-VIS-03/12), then fetch the completion PoW challenge, solve it
+    /// exactly once (DW-P-07) and return the `X-DS-PoW-Response` header value.
     ///
-    /// Both short calls (session / challenge, `external_call_timeout_ms ≤
-    /// 3000`, NFR baseline) ride the [`DeepSeekWebClient`]'s own bounded 3s
-    /// budget + single Retry-After backoff (DW-G-03), so this helper only
-    /// classifies the outcome. The completion request itself is sent
-    /// afterwards through the existing guarded path (TTFB =
-    /// `DEFAULT_UPSTREAM_TTFB_TIMEOUT`, NON-GOAL, contract §8). The session
-    /// is per-token-per-attempt (a chat_session belongs to the token that
-    /// created it), so key failover always uses a session it owns.
+    /// The `__web_images` key is internal-only: it never reaches the wire.
+    /// Any image failure (decode / SSRF / upload / parse timeout / over-limit)
+    /// aborts the WHOLE request with an explicit 4xx-flavored error — images
+    /// are never silently dropped (R-VIS-05/13) and a degraded no-image call
+    /// is never sent.
     ///
-    /// Error mapping (contract §6 DW-E-*): token/banned → `AuthInvalid`
-    /// (permanent, key isolated); everything else (network, HTTP status,
-    /// captcha wall) → `UpstreamUnavailable` so the existing
-    /// failover/cooldown machinery applies.
+    /// Error mapping: token/banned → `AuthInvalid`; image bridge failures →
+    /// `CoreError::Internal` with a clear message (routes render 4xx);
+    /// other upstream faults → `UpstreamUnavailable`.
     async fn prepare_deepseek_web_completion(
         &self,
         key: &ApiKeyEntry,
@@ -2246,6 +2352,33 @@ impl UpstreamExecutor {
         // literal regardless of what the caller sent (gateway does not
         // interpret or forward arbitrary source strings, contract §10.5).
         owned["source"] = Value::String("default".to_string());
+
+        // Wave-10 image bridge (R-VIS-03/05/12): pop the route's side channel,
+        // upload each image in ORDER and inject `ref_file_ids`. The key is
+        // internal-only and must never reach the wire.
+        if let Some(images) = owned.get("__web_images").and_then(|v| v.as_array()) {
+            if !images.is_empty() {
+                if images.len() > 50 {
+                    // R-VIS-11: explicit 4xx (never 5xx / upstream fault).
+                    return Err(map_deepseek_web_bridge_error(format!(
+                        "deepseek-web image bridge: {} images exceed the 50-file per-request limit (R-VIS-11)",
+                        images.len()
+                    )));
+                }
+                let file_ids = self
+                    .bridge_deepseek_web_images(&key, &client, images)
+                    .await?;
+                owned["ref_file_ids"] = Value::Array(
+                    file_ids
+                        .into_iter()
+                        .map(Value::String)
+                        .collect::<Vec<_>>(),
+                );
+            }
+            if let Some(obj) = owned.as_object_mut() {
+                obj.remove("__web_images");
+            }
+        }
         *effective_body = std::borrow::Cow::Owned(owned);
 
         let mut challenge = match client.create_pow_challenge(target_path).await {
@@ -2270,6 +2403,102 @@ impl UpstreamExecutor {
             }
         };
         Ok(encode_pow_response_header(&pow))
+    }
+
+    /// Wave-10 image bridge (R-VIS-03/05/11/12): upload each image reference
+    /// from the route's `__web_images` side channel, wait for parse readiness
+    /// and collect the `file_id`s IN ORDER. Images arrive as serialized
+    /// `{kind:"image_url",url}` / `{kind:"file",file_id|file_url|filename}`
+    /// values (the chat/messages routes build them; core stays
+    /// server-agnostic by consuming the wire shape).
+    ///
+    /// Guardrails: >50 images → explicit error (R-VIS-11, no upload attempt);
+    /// each image decode/fetch is SSRF-safe and size-capped (R-VIS-06..09);
+    /// upload failure / parse timeout → explicit error (R-VIS-13/14) — images
+    /// are never silently dropped, and a degraded no-image completion is never
+    /// sent (R-VIS-05). `wait_file_ready` uses the configured parse budget
+    /// (default 60s, `PONYLLM_VISION_PARSE_TIMEOUT_MS`, clamp ≥500ms).
+    async fn bridge_deepseek_web_images(
+        &self,
+        key: &ApiKeyEntry,
+        client: &DeepSeekWebClient,
+        images: &[Value],
+    ) -> std::result::Result<Vec<String>, CoreError> {
+        if images.len() > 50 {
+            return Err(map_deepseek_web_bridge_error(format!(
+                "deepseek-web image bridge: {} images exceed the 50-file per-request limit (R-VIS-11)",
+                images.len()
+            )));
+        }
+        // Parse-readiness budget (R-VIS-14): default 60s, clamp ≥500ms so a
+        // misconfigured 0 can never turn into an instant silent failure.
+        let parse_timeout = {
+            let raw = std::env::var("PONYLLM_VISION_PARSE_TIMEOUT_MS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(60_000);
+            Duration::from_millis(raw.max(500))
+        };
+
+        let mut file_ids = Vec::with_capacity(images.len());
+        for image in images {
+            let (file_name, mime, bytes) = match deepseek_web_image_to_upload(image).await {
+                Ok(t) => t,
+                Err(e) => {
+                    // Client-side image rejection (decode / SSRF / type /
+                    // size): explicit 4xx, never an upstream fault and never a
+                    // silent drop (R-VIS-06..09/13).
+                    return Err(map_deepseek_web_bridge_error(
+                        format!("deepseek-web image bridge rejected an image: {e}"),
+                    ));
+                }
+            };
+            let uploaded = match client.upload_file(&file_name, &mime, bytes).await {
+                Ok(u) => u,
+                Err(e) => {
+                    // Upload failure (R-VIS-13): ALWAYS a client-visible 4xx —
+                    // never an upstream fault / 5xx. For Banned/Token the key
+                    // is additionally isolated (it will not be re-selected),
+                    // but the response stays 4xx (a banned or invalid token is
+                    // a client credential problem, not upstream unavailability).
+                    if matches!(e, ClientError::Banned | ClientError::Token) {
+                        self.pool.record_error(
+                            &key.id,
+                            PoolErrorType::AuthInvalid {
+                                reason: Some(format!("deepseek-web upload: {e}")),
+                            },
+                        );
+                    }
+                    return Err(map_deepseek_web_bridge_error(format!(
+                        "deepseek-web image upload failed: {e}"
+                    )));
+                }
+            };
+            let ready = match client.wait_file_ready(&uploaded.id, parse_timeout).await {
+                Ok(f) => f,
+                Err(e) => {
+                    // Parse timeout (R-VIS-14): explicit 4xx, never upstream
+                    // fault, never half-reference.
+                    return Err(map_deepseek_web_bridge_error(format!(
+                        "deepseek-web image parse not ready within {parse_timeout:?} for {}: {e}",
+                        uploaded.id
+                    )));
+                }
+            };
+            // Only completed-parses are injected (R-VIS-12): a PENDING/Unknown
+            // leftover must abort, never half-reference.
+            match ready.status {
+                crate::deepseek_web::FileParseStatus::Success => {}
+                other => {
+                    return Err(map_deepseek_web_bridge_error(format!(
+                        "deepseek-web image {} not in success state: {:?} (R-VIS-12)",
+                        uploaded.id, other
+                    )));
+                }
+            }
+            file_ids.push(uploaded.id);
+        }
+        Ok(file_ids)
     }
 
     /// Execute a JSON request with transparent automatic failover before response body starts
@@ -3213,6 +3442,35 @@ impl UpstreamExecutor {
                 {
                     Ok(value) => deepseek_web_pow_header = Some(value),
                     Err(e) => {
+                        // Wave-10 (R-VIS-13): bridge rejections (decode /
+                        // SSRF / type / size / parse-timeout) and credential
+                        // failures are CLIENT errors — do NOT continue/retry
+                        // or fail over to another key; surface the 4xx
+                        // immediately. Other upstream faults keep the legacy
+                        // per-key failover path.
+                        let kind = e.kind();
+                        if matches!(kind, GatewayErrorKind::ClientBadRequest)
+                            || matches!(kind, GatewayErrorKind::AuthInvalid)
+                        {
+                            last_error = e.to_string();
+                            last_kind = kind.clone();
+                            attempt_kinds.push(last_kind.clone());
+                            self.emit_both(
+                                &key.id,
+                                attempt_idx,
+                                None,
+                                last_kind.clone(),
+                                last_error.clone(),
+                                None,
+                                attempt_start.elapsed(),
+                            );
+                            return Err(CoreError::AllRetriesFailed {
+                                retries: attempt + 1,
+                                attempted_keys,
+                                last_error,
+                                kind: last_kind,
+                            });
+                        }
                         let pool_err = match &e {
                             CoreError::AuthInvalid { reason, .. } => {
                                 PoolErrorType::AuthInvalid { reason: Some(reason.clone()) }

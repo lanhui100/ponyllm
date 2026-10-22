@@ -33,7 +33,9 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Instant;
 
-use ponyllm_protocol::openai::chat::ChatMessage;
+use ponyllm_protocol::openai::chat::{
+    ChatMessage, ContentPart, ImageUrlObject, InputFileObject,
+};
 
 fn extract_chat_prompt(msg: &ChatMessage) -> Option<String> {
     match msg {
@@ -46,8 +48,93 @@ fn extract_chat_prompt(msg: &ChatMessage) -> Option<String> {
     }
 }
 
+/// One image reference extracted from a downstream message part (wave-10
+/// R-VIS-02/03): the raw `image_url` (base64 data URI or http(s) URL) or an
+/// input file reference. Order is preserved per message; the bridge uploads
+/// each and injects `ref_file_ids` in the same order.
+#[derive(Debug, Clone)]
+pub enum WebImageRef {
+    /// `ContentPart::ImageUrl{image_url}` — `url` is `data:<mime>;base64,<...>`
+    /// or `http(s)://...`.
+    ImageUrl(ImageUrlObject),
+    /// `ContentPart::File{file}` — file_id / file_url / filename reference.
+    File(InputFileObject),
+}
+
+/// Extracted deepseek-web prompt material: visible text plus the ordered image
+/// references (R-VIS-02). Never drops `ContentPart::ImageUrl`/`File` on the
+/// deepseek-web path (G1/G2 静默丢图禁令).
+#[derive(Debug, Default, Clone)]
+pub struct WebPromptParts {
+    pub text: String,
+    pub images: Vec<WebImageRef>,
+}
+
+impl WebPromptParts {
+    fn push_text(&mut self, text: &str) {
+        if !text.is_empty() {
+            if !self.text.is_empty() {
+                self.text.push('\n');
+            }
+            self.text.push_str(text);
+        }
+    }
+
+    fn push_message_parts(&mut self, content: &ponyllm_protocol::openai::chat::MessageContent) {
+        match content {
+            ponyllm_protocol::openai::chat::MessageContent::Text(s) => self.push_text(s),
+            ponyllm_protocol::openai::chat::MessageContent::Parts(parts) => {
+                for part in parts {
+                    match part {
+                        ContentPart::Text { text } => self.push_text(text),
+                        ContentPart::ImageUrl { image_url } => {
+                            self.images.push(WebImageRef::ImageUrl(image_url.clone()));
+                        }
+                        ContentPart::File { file } => {
+                            self.images.push(WebImageRef::File(file.clone()));
+                        }
+                        // InputAudio / VideoUrl keep the legacy drop semantics
+                        // (wave-10 NON-GOAL §10.2).
+                        ContentPart::InputAudio { .. } | ContentPart::VideoUrl { .. } => {}
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// deepseek-web-only extraction: visible text + ordered images across the
+/// request messages (R-VIS-02). The shared [`extract_chat_prompt`] (and
+/// `as_plain_text`) semantics for other providers are untouched.
+fn extract_web_prompt_parts(req: &ChatCompletionRequest) -> WebPromptParts {
+    let mut acc = WebPromptParts::default();
+    for msg in &req.messages {
+        match msg {
+            ChatMessage::System(m) => acc.push_message_parts(&m.content),
+            ChatMessage::User(m) => acc.push_message_parts(&m.content),
+            ChatMessage::Developer(m) => acc.push_message_parts(&m.content),
+            ChatMessage::Assistant(m) => {
+                if let Some(c) = m.content.as_ref() {
+                    acc.push_message_parts(c);
+                }
+            }
+            ChatMessage::Tool(m) => acc.push_message_parts(&m.content),
+            ChatMessage::Function(m) => {
+                if let Some(c) = m.content.as_deref() {
+                    acc.push_text(c);
+                }
+            }
+        }
+    }
+    acc
+}
+
 /// Translate a deepseek-web completion SSE byte stream into OpenAI Chat
 /// Completions SSE chunks (wave-9 contract DW-T-01..09).
+///
+/// `pub(crate)` — shared by `/v1/chat/completions` and `/v1/messages`
+/// (wave-10 R-VIS-17: the messages endpoint serves deepseek-web through the
+/// same bridge, then re-translates OpenAI chunks to Anthropic events).
 ///
 /// Event model (REA §5 / `deepseek_web::sse`):
 /// - `ready` → first assistant chunk (role + `chatcmpl-dsw-<response_message_id>`
@@ -79,7 +166,7 @@ fn extract_chat_prompt(msg: &ChatMessage) -> Option<String> {
 /// The returned stream is generic over the upstream error type `E` (same shape
 /// as [`crate::streaming::antigravity_sse_to_openai_stream`]) so the existing
 /// stall-guarded / telemetry-wrapped plumbing is reused unchanged.
-fn deepseek_web_sse_to_openai_stream<S, E>(
+pub(crate) fn deepseek_web_sse_to_openai_stream<S, E>(
     stream: S,
     fallback_model: &str,
 ) -> impl futures_util::Stream<Item = Result<bytes::Bytes, E>>
@@ -1228,22 +1315,26 @@ pub async fn handle_chat_completions(
                 continue;
             }
             ponyllm_core::pool::UpstreamProtocol::DeepSeekWeb => {
-                // Wave-9 contract DW-Q-01..03: the deepseek-web completion body
-                // is fixed-shape (`chat_session_id` is created + patched by the
-                // executor after the PoW dance; `prompt` is the request text;
-                // `model_type` carries the routed model). `thinking_enabled`
-                // follows the effective thinking decision (default true,
-                // DW-Q-03); `search_enabled` stays false (web search is
-                // out-of-scope for this gateway surface). `source` is the
-                // literal released upstream per §10.5.
+                // Wave-9 contract DW-Q-01..03 + wave-10 R-VIS-02/03: the
+                // deepseek-web completion body is fixed-shape (`chat_session_id`
+                // is created + patched by the executor after the PoW dance;
+                // `prompt` is the request text; `model_type` carries the routed
+                // model). `thinking_enabled` follows the effective thinking
+                // decision (default true, DW-Q-03); `search_enabled` stays
+                // false; `source` pinned `default` (Amendment v4).
+                //
+                // Wave-10 image bridge: images are extracted in ORDER (never
+                // dropped, R-VIS-02) and carried to the executor via a
+                // transient side channel (`__web_images`). The executor pops it
+                // inside `prepare_deepseek_web_completion`, uploads each image
+                // (SSRF-safe fetch/decode → upload_file → wait_file_ready) and
+                // injects `ref_file_ids` in the same order (R-VIS-03/12). The
+                // wire body itself never carries the side key.
                 let url = target.deepseek_web_completion_url();
-                let prompt = req
-                    .messages
-                    .iter()
-                    .rev()
-                    .find_map(extract_chat_prompt)
-                    .unwrap_or_default();
-                let val = serde_json::json!({
+                let parts = extract_web_prompt_parts(&req);
+                let prompt = parts.text;
+                let images = parts.images;
+                let mut body_obj = serde_json::json!({
                     "chat_session_id": "",
                     "parent_message_id": null,
                     "model_type": target.physical_model,
@@ -1256,7 +1347,37 @@ pub async fn handle_chat_completions(
                     "action": null,
                     "preempt": false,
                 });
-                (url, val)
+                if !images.is_empty() {
+                    let wire: Vec<serde_json::Value> = images
+                        .iter()
+                        .map(|img| match img {
+                            WebImageRef::ImageUrl(o) => {
+                                serde_json::json!({ "kind": "image_url", "url": o.url })
+                            }
+                            WebImageRef::File(f) => {
+                                let mut m = serde_json::Map::new();
+                                m.insert("kind".into(), "file".into());
+                                if let Some(id) = &f.file_id {
+                                    m.insert("file_id".into(), serde_json::Value::String(id.clone()));
+                                }
+                                if let Some(u) = &f.file_url {
+                                    m.insert("file_url".into(), serde_json::Value::String(u.clone()));
+                                }
+                                if let Some(n) = &f.filename {
+                                    m.insert("filename".into(), serde_json::Value::String(n.clone()));
+                                }
+                                serde_json::Value::Object(m)
+                            }
+                        })
+                        .collect();
+                    if let Some(obj) = body_obj.as_object_mut() {
+                        obj.insert(
+                            "__web_images".to_string(),
+                            serde_json::Value::Array(wire),
+                        );
+                    }
+                }
+                (url, body_obj)
             }
         };
 

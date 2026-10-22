@@ -132,6 +132,8 @@ pub fn format_model_json(
     protocol: &str,
     context_window: u64,
     max_output: u64,
+    input_types: &[String],
+    output_types: &[String],
 ) -> serde_json::Value {
     let display = display_name
         .map(|d| d.to_string())
@@ -150,7 +152,12 @@ pub fn format_model_json(
         "root": model_id,
         "parent": null,
         "context_window": context_window,
-        "max_output": max_output
+        "max_output": max_output,
+        // Wave-10 R-VIS-19: expose declared input/output modalities (e.g.
+        // deepseek-web declares ["text","image"]) so clients can discover
+        // vision capability without probing.
+        "input_types": input_types,
+        "output_types": output_types
     })
 }
 
@@ -167,6 +174,8 @@ pub async fn handle_list_models(State(state): State<Arc<AppState>>) -> impl Into
                 &model.protocol,
                 model.context_window,
                 model.max_output,
+                &model.input_types,
+                &model.output_types,
             )
         })
         .collect();
@@ -230,6 +239,8 @@ async fn get_model_by_id(state: Arc<AppState>, model_id: &str) -> impl IntoRespo
                 &hit.protocol,
                 hit.context_window,
                 hit.max_output,
+                &hit.input_types,
+                &hit.output_types,
             )),
         )
             .into_response()

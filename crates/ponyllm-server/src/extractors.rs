@@ -440,6 +440,55 @@ pub fn retry_after_secs(
 }
 
 /// Project a `GatewayErrorKind` into an OpenAI format HTTP response.
+/// Extract the plain client-visible reason for a `ClientBadRequest` failure
+/// (wave-10 production UX): the `format_exhausted_message` wrapper ("All
+/// candidate upstream providers exhausted … (upstream-side failure, gateway
+/// did attempt upstream). Last error: … across keys [redacted]: …") leaks
+/// gateway internals and mislabels a client error as an upstream fault. For
+/// bridge rejections (image decode / SSRF / type / size / parse-timeout /
+/// upload 40012) the message must be the raw cause only.
+///
+/// Handles the two wrapper shapes produced by the executor:
+/// - `AllRetriesFailed.long`: `… across keys [redacted]: <reason>`
+/// - `UpstreamStatusError`: `Upstream error (status 400 Bad Request): <reason>`
+/// Falls back to `message` unchanged when no recognized wrapper is present.
+pub fn extract_client_error_reason(message: &str) -> String {
+    // Path A: AllRetriesFailed carries "upstream error (status 400 Bad
+    // Request): <reason>" or the bare bridge message after "redacted]: ".
+    if let Some(idx) = message.find("]: ") {
+        let tail = &message[idx + 3..];
+        // tail may itself be "Upstream error (status 400 Bad Request): <r>".
+        if let Some(r) = strip_upstream_status_prefix(tail) {
+            return r;
+        }
+        // tail may be the raw bridge rejection (Internal-wrapped earlier);
+        // strip a leading "Internal core error: " if present.
+        return strip_internal_prefix(tail);
+    }
+    if let Some(r) = strip_upstream_status_prefix(message) {
+        return r;
+    }
+    strip_internal_prefix(message)
+}
+
+fn strip_upstream_status_prefix(s: &str) -> Option<String> {
+    for needle in [
+        "Upstream error (status 400 Bad Request): ",
+        "Upstream error (status 400): ",
+        "upstream error: ",
+    ] {
+        if let Some(t) = s.strip_prefix(needle) {
+            return Some(t.trim().to_string());
+        }
+    }
+    None
+}
+
+fn strip_internal_prefix(s: &str) -> String {
+    let t = s.strip_prefix("Internal core error: ").unwrap_or(s);
+    t.trim().to_string()
+}
+
 pub fn project_openai_error(
     kind: &ponyllm_core::error::GatewayErrorKind,
     message: &str,
@@ -490,7 +539,14 @@ pub fn project_openai_error(
             (StatusCode::BAD_GATEWAY, "bad_gateway", "upstream_exhausted")
         }
     };
-    render_openai_error(status, err_type, code, message)
+    // Client errors must surface the raw cause, not the exhausted/keys
+    // wrapper (wave-10 production UX).
+    let rendered = if matches!(kind, GatewayErrorKind::ClientBadRequest) {
+        extract_client_error_reason(message)
+    } else {
+        message.to_string()
+    };
+    render_openai_error(status, err_type, code, &rendered)
 }
 
 /// Project a `GatewayErrorKind` into an Anthropic format HTTP response.
@@ -513,7 +569,13 @@ pub fn project_anthropic_error(
         GatewayErrorKind::ModelNotFound => (StatusCode::NOT_FOUND, "not_found_error"),
         GatewayErrorKind::Internal => (StatusCode::BAD_GATEWAY, "api_error"),
     };
-    render_anthropic_error(status, err_type, message)
+    // Client errors must surface the raw cause (wave-10 production UX).
+    let rendered = if matches!(kind, GatewayErrorKind::ClientBadRequest) {
+        extract_client_error_reason(message)
+    } else {
+        message.to_string()
+    };
+    render_anthropic_error(status, err_type, &rendered)
 }
 
 /// Maximum snippet characters captured for telemetry and flight recorder frames (10MB for rich UI inspection).

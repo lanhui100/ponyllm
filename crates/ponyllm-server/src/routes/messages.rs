@@ -567,11 +567,97 @@ pub async fn handle_messages(
                 continue;
             }
             ponyllm_core::pool::UpstreamProtocol::DeepSeekWeb => {
-                last_error = format!(
-                    "deepseek-web protocol cannot be served by messages endpoint for {}",
-                    target.provider_name
-                );
-                continue;
+                // Wave-10 R-VIS-17 (Lead ruling): deepseek-web IS served on
+                // /v1/messages — translate the Anthropic request to Chat,
+                // then to the deepseek-web completion body (prompt + ordered
+                // images), same bridge as /v1/chat/completions.
+                let url = target.deepseek_web_completion_url();
+                let mut chat_req = match anthropic_to_chat_request(&target_req) {
+                    Ok(cr) => cr,
+                    Err(e) => {
+                        last_error =
+                            format!("Translation error for {}: {}", target.provider_name, e);
+                        continue;
+                    }
+                };
+                if effective_thinking.is_active() {
+                    chat_req.reasoning_effort = Some(effective_thinking);
+                } else if requested_thinking == Some(ponyllm_protocol::common::ReasoningEffort::Off)
+                {
+                    chat_req.reasoning_effort =
+                        Some(ponyllm_protocol::common::ReasoningEffort::Off);
+                } else {
+                    chat_req.reasoning_effort = None;
+                    chat_req.extra.remove("reasoning_effort");
+                    chat_req.extra.remove("thinking");
+                }
+                let mut val = match serde_json::to_value(&chat_req) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        last_error =
+                            format!("Serialization error for {}: {}", target.provider_name, e);
+                        continue;
+                    }
+                };
+                // Rebuild into the deepseek-web completion shape (DW-Q-01 +
+                // R-VIS-02 image extraction). The __web_images side channel is
+                // consumed by the executor bridge, never sent on the wire.
+                let mut prompt = String::new();
+                let mut images: Vec<serde_json::Value> = Vec::new();
+                if let Some(messages) = val.get_mut("messages").and_then(|m| m.as_array_mut()) {
+                    for msg in messages.iter() {
+                        if let Some(content) = msg.get("content") {
+                            match content {
+                                serde_json::Value::String(s) => {
+                                    if !prompt.is_empty() {
+                                        prompt.push('\n');
+                                    }
+                                    prompt.push_str(s);
+                                }
+                                serde_json::Value::Array(parts) => {
+                                    for part in parts {
+                                        if let Some(t) = part.get("text").and_then(|t| t.as_str())
+                                        {
+                                            if !prompt.is_empty() {
+                                                prompt.push('\n');
+                                            }
+                                            prompt.push_str(t);
+                                        }
+                                        if let Some(url) = part
+                                            .get("image_url")
+                                            .and_then(|u| u.as_str().or_else(|| u.get("url").and_then(|x| x.as_str())))
+                                        {
+                                            images.push(serde_json::json!({
+                                                "kind": "image_url",
+                                                "url": url,
+                                            }));
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+                let mut body_obj = serde_json::json!({
+                    "chat_session_id": "",
+                    "parent_message_id": null,
+                    "model_type": target.physical_model,
+                    "prompt": prompt,
+                    "ref_file_ids": [],
+                    "thinking_enabled": effective_thinking.is_active()
+                        || requested_thinking != Some(ponyllm_protocol::common::ReasoningEffort::Off),
+                    "search_enabled": false,
+                    "source": "default",
+                    "action": null,
+                    "preempt": false,
+                });
+                if !images.is_empty() {
+                    if let Some(obj) = body_obj.as_object_mut() {
+                        obj.insert("__web_images".to_string(), serde_json::Value::Array(images));
+                    }
+                }
+                (url, body_obj)
             }
         };
 
@@ -634,6 +720,9 @@ pub async fn handle_messages(
         let executor = UpstreamExecutor::with_client(pool.clone(), http_client, max_retries)
             .with_downstream_headers(&headers)
             .with_opencode_zen(is_opencode_zen_target(&target.provider_name, &target_url))
+            .with_deepseek_web(
+                target.upstream_protocol == ponyllm_core::pool::UpstreamProtocol::DeepSeekWeb,
+            )
             .with_rate_limits(rate_limits)
             .with_ttfb_timeout(ttfb_timeout)
             .with_egress(egress_pool.clone(), egress_clients.clone())
@@ -717,6 +806,10 @@ pub async fn handle_messages(
                 )
                 .with_downstream_headers(&headers)
                 .with_opencode_zen(is_opencode_zen_target(&target.provider_name, &target_url))
+                .with_deepseek_web(
+                    target.upstream_protocol
+                        == ponyllm_core::pool::UpstreamProtocol::DeepSeekWeb,
+                )
                 .with_rate_limits(rate_limits)
                 .with_ttfb_timeout(if stream_attempt == 1 {
                     // First attempt keeps the configured TTFB verbatim
@@ -1057,11 +1150,20 @@ pub async fn handle_messages(
                                 );
                             }
                             ponyllm_core::pool::UpstreamProtocol::DeepSeekWeb => {
-                                return crate::extractors::render_anthropic_error(
-                                    StatusCode::BAD_REQUEST,
-                                    "invalid_request_error",
-                                    "deepseek-web models must be served through /v1/chat/completions",
+                                // Wave-10 R-VIS-17: deepseek-web served on
+                                // /v1/messages — deepseek-web SSE → OpenAI
+                                // chunks → Anthropic SSE events (same bridge
+                                // as chat, then Anthropic-format re-wrap).
+                                let openai_chunks = crate::routes::chat::deepseek_web_sse_to_openai_stream(
+                                    final_raw_stream,
+                                    &target.physical_model,
                                 );
+                                let stream = openai_sse_to_anthropic_stream(
+                                    openai_chunks,
+                                    &target.physical_model,
+                                );
+                                let monitored = wrap_telemetry_stream(stream, failure_ctx);
+                                axum::body::Body::from_stream(monitored)
                             }
                         };
 
@@ -1406,6 +1508,46 @@ pub async fn handle_messages(
                     }
                     Err(e) => (Err(e), None),
                 }
+            } else if target.upstream_protocol
+                == ponyllm_core::pool::UpstreamProtocol::DeepSeekWeb
+            {
+                // Wave-10 R-VIS-17: deepseek-web completion is SSE-only; a
+                // downstream non-streaming /v1/messages request forces the
+                // upstream SSE stream, translates deepseek-web chunks to
+                // OpenAI chat chunks, aggregates to OpenAI JSON, then the
+                // projection below converts to an Anthropic response.
+                match executor
+                    .execute_stream_request_with_timing_and_key(&target_url, &req_val)
+                    .await
+                {
+                    Ok((resp, _instant, kid)) => {
+                        let raw_stream = resp.bytes_stream();
+                        let translated = crate::routes::chat::deepseek_web_sse_to_openai_stream(
+                            raw_stream,
+                            &target.physical_model,
+                        );
+                        let collected =
+                            crate::streaming::collect_chat_sse_to_json(translated).await;
+                        match collected {
+                            Ok(v) => (Ok(v), Some(kid)),
+                            Err(e) => {
+                                tracing::warn!(
+                                    provider = %target.provider_name,
+                                    error = %e,
+                                    "deepseek-web upstream stream collection failed"
+                                );
+                                (
+                                    Err(CoreError::Internal(format!(
+                                        "deepseek-web stream collect failed: {}",
+                                        e
+                                    ))),
+                                    Some(kid),
+                                )
+                            }
+                        }
+                    }
+                    Err(e) => (Err(e), None),
+                }
             } else {
                 match executor
                     .execute_json_request_with_key(&target_url, &req_val)
@@ -1508,10 +1650,28 @@ pub async fn handle_messages(
                             continue;
                         }
                         ponyllm_core::pool::UpstreamProtocol::DeepSeekWeb => {
-                            last_error =
-                                "deepseek-web protocol cannot be projected as Anthropic messages"
-                                    .to_string();
-                            continue;
+                            // Wave-10 R-VIS-17: the collected value is an
+                            // OpenAI chat-completion JSON (deepseek-web SSE was
+                            // translated + aggregated above); project it to an
+                            // Anthropic response exactly like the Chat branch.
+                            let chat_resp: ChatCompletionResponse =
+                                match serde_json::from_value(resp_val) {
+                                    Ok(cr) => cr,
+                                    Err(e) => {
+                                        last_error = format!(
+                                            "Invalid deepseek-web translated response from {}: {}",
+                                            target.provider_name, e
+                                        );
+                                        continue;
+                                    }
+                                };
+                            match chat_to_anthropic_response(&chat_resp) {
+                                Ok(ar) => ar,
+                                Err(e) => {
+                                    last_error = format!("Translation error: {}", e);
+                                    continue;
+                                }
+                            }
                         }
                     };
 

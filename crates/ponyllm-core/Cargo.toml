@@ -16,7 +16,10 @@ tokio = { workspace = true }
 futures = { workspace = true }
 futures-util = { workspace = true }
 bytes = { workspace = true }
-reqwest = { workspace = true }
+# wave-10 (task-6): multipart form upload for `/api/v0/file/upload_file`
+# (H-V01). reqwest's `multipart` is an opt-in feature not in the workspace
+# defaults; enabling it here adds capability only (feature unification).
+reqwest = { workspace = true, features = ["multipart"] }
 tracing = { workspace = true }
 parking_lot = { workspace = true }
 dashmap = { workspace = true }
