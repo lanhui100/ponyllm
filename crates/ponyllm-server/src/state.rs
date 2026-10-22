@@ -3245,6 +3245,8 @@ impl AppState {
             protocol: "auto".to_string(),
             context_window,
             max_output,
+            input_types: vec!["text".to_string()],
+            output_types: vec!["text".to_string()],
         });
         seen.insert("auto".to_string());
 
@@ -3267,6 +3269,8 @@ impl AppState {
                         infer_legacy_protocol(provider_name, &cfg.base_url).to_string()
                     });
                 let spec = cfg.get_model_spec(m);
+                let input_types = spec.input_types.clone();
+                let output_types = spec.output_types.clone();
 
                 let prefixed = format!("{}/{}", provider_name, canonical_m);
                 if !seen.contains(&prefixed) {
@@ -3278,6 +3282,8 @@ impl AppState {
                         protocol: proto,
                         context_window,
                         max_output,
+                        input_types,
+                        output_types,
                     });
                     seen.insert(prefixed);
                 }
@@ -3332,6 +3338,11 @@ pub struct ListedModel {
     pub context_window: u64,
     /// Max output tokens of the same-named group (always > 0).
     pub max_output: u64,
+    /// Declared input modalities (e.g. `["text"]` or `["text","image"]` —
+    /// wave-10 R-VIS-19: deepseek-web declares image capability here).
+    pub input_types: Vec<String>,
+    /// Declared output modalities (e.g. `["text"]`).
+    pub output_types: Vec<String>,
 }
 
 pub use ponyllm_core::{
