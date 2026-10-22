@@ -20,11 +20,18 @@ use ponyllm_core::pool::{ApiKeyEntry, BillingMode, KeyPool, RoutingStrategy, Ups
 use ponyllm_server::{create_app, AppState, GatewayConfig, ModelSpec, ProviderConfig};
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Once};
 
-/// Serializes PONYLLM_* env mutations across tests (process-global env +
-/// parallel harness threads would otherwise race).
-static ENV_LOCK: Mutex<()> = Mutex::new(());
+/// Set-once process-global env (no locks, no cleanup — the process exits and
+/// the env dies). Same fixed values for the whole binary; tests that need a
+/// DIFFERENT value live in dedicated binaries.
+static VISION_ENV_ONCE: Once = Once::new();
+fn ensure_vision_env() {
+    VISION_ENV_ONCE.call_once(|| {
+        std::env::set_var("PONYLLM_IMAGE_HOST_ALLOWLIST", "127.0.0.1");
+        std::env::set_var("PONYLLM_VISION_PARSE_TIMEOUT_MS", "2000");
+    });
+}
 
 const CHALLENGE_OK: &str = r#"{"data":{"biz_code":0,"biz_data":{"challenge":{
 "algorithm":"DeepSeekHashV1",
@@ -360,6 +367,7 @@ fn img_content(urls: Vec<&str>) -> Value {
 
 #[test]
 fn r_vis_01_downstream_wire_unchanged() {
+    // (non-async test: no env dependency)
     // Protocol surface (green-by-design at red phase): the OpenAI image part
     // serializes to EXACTLY {"type":"image_url","image_url":{"url":...}} — no
     // invented keys; the Anthropic part to {"type":"image","source":{...}}.
@@ -498,8 +506,7 @@ async fn r_vis_03_bridge_chain_ref_file_ids_order() {
     // fetched SSRF-safely (test allowlist reaches the local image server).
     let img = spawn_image_server().await;
     let img_base = img.base.clone();
-    let _guard = ENV_LOCK.lock().unwrap();
-    std::env::set_var("PONYLLM_IMAGE_HOST_ALLOWLIST", "127.0.0.1");
+    ensure_vision_env();
     let up2 = spawn_upstream().await;
     let gw2 = spawn_gateway(&up2.base, true, 256).await;
     let (status2, text2) = chat_completions(
@@ -523,7 +530,6 @@ async fn r_vis_03_bridge_chain_ref_file_ids_order() {
         1,
         "R-VIS-03: image server fetched exactly once"
     );
-    std::env::remove_var("PONYLLM_IMAGE_HOST_ALLOWLIST");
 }
 
 // ---------------------------------------------------------------------------
@@ -720,8 +726,7 @@ async fn r_vis_08_fetch_budget_and_redirect_revalidation() {
     // With the test allowlist the mock is reachable; img1->...->img5 is FOUR
     // redirect hops which exceeds the budget (<=3, Lead ruling off-by-one:
     // 3 hops is within budget), so the fetch must fail with an explicit error.
-    let _guard = ENV_LOCK.lock().unwrap();
-    std::env::set_var("PONYLLM_IMAGE_HOST_ALLOWLIST", "127.0.0.1");
+    ensure_vision_env();
     let up = spawn_upstream().await;
     let gw = spawn_gateway(&up.base, true, 256).await;
     let (status, text) = chat_completions(&gw, img_content(vec![format!("{base}/img1.png").as_str()]), "deepseek-chat").await;
@@ -735,7 +740,6 @@ async fn r_vis_08_fetch_budget_and_redirect_revalidation() {
         !status2.is_success() && status2.as_u16() < 500,
         "R-VIS-08: redirect-to-private -> 4xx; got {status2} {text2}"
     );
-    std::env::remove_var("PONYLLM_IMAGE_HOST_ALLOWLIST");
 }
 
 // ---------------------------------------------------------------------------
@@ -777,8 +781,7 @@ async fn r_vis_09_size_and_content_type_checks() {
         axum::serve(l2, ext).await.unwrap();
     });
 
-    let _guard = ENV_LOCK.lock().unwrap();
-    std::env::set_var("PONYLLM_IMAGE_HOST_ALLOWLIST", "127.0.0.1");
+    ensure_vision_env();
     let up = spawn_upstream().await;
     let gw = spawn_gateway(&up.base, true, 256).await;
     let (s1, t1) = chat_completions(&gw, img_content(vec![format!("http://{a1}/img.png").as_str()]), "deepseek-chat").await;
@@ -791,7 +794,6 @@ async fn r_vis_09_size_and_content_type_checks() {
         !s2.is_success() && s2.as_u16() < 500,
         "R-VIS-09: extension mismatch (.txt served image/png) -> 4xx; got {s2} {t2}"
     );
-    std::env::remove_var("PONYLLM_IMAGE_HOST_ALLOWLIST");
 }
 
 // ---------------------------------------------------------------------------
@@ -837,8 +839,7 @@ async fn r_vis_11_gateway_prevalidate_before_upload() {
 async fn r_vis_12_ref_file_ids_only_ready() {
     // Mock keeps fetch_files PENDING forever + shortened parse window -> the
     // id must never reach completion; request -> explicit 4xx.
-    let _guard = ENV_LOCK.lock().unwrap();
-    std::env::set_var("PONYLLM_VISION_PARSE_TIMEOUT_MS", "2000");
+    ensure_vision_env();
     let up = spawn_upstream().await;
     up.never_ready.store(1, Ordering::SeqCst); // fetch stays PENDING forever
     let gw = spawn_gateway(&up.base, true, 256).await;
@@ -852,7 +853,6 @@ async fn r_vis_12_ref_file_ids_only_ready() {
         0,
         "R-VIS-12: unfinished file_id must not reach completion"
     );
-    std::env::remove_var("PONYLLM_VISION_PARSE_TIMEOUT_MS");
 }
 
 // ---------------------------------------------------------------------------
@@ -898,8 +898,7 @@ async fn r_vis_13_explicit_4xx_no_silent_drop() {
 async fn r_vis_14_parse_timeout_explicit_error() {
     // Contract allows a shortened measurable window (mock clock / config);
     // frozen test knob: PONYLLM_VISION_PARSE_TIMEOUT_MS.
-    let _guard = ENV_LOCK.lock().unwrap();
-    std::env::set_var("PONYLLM_VISION_PARSE_TIMEOUT_MS", "2000");
+    ensure_vision_env();
     let up = spawn_upstream().await;
     up.never_ready.store(1, Ordering::SeqCst);
     let gw = spawn_gateway(&up.base, true, 256).await;
@@ -915,7 +914,6 @@ async fn r_vis_14_parse_timeout_explicit_error() {
         "R-VIS-14: bounded (shortened) window; elapsed {:?}",
         elapsed
     );
-    std::env::remove_var("PONYLLM_VISION_PARSE_TIMEOUT_MS");
 }
 
 // ---------------------------------------------------------------------------

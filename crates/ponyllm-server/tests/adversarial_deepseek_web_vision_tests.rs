@@ -20,8 +20,6 @@ use std::sync::{Arc, Mutex};
 
 /// Serializes PONYLLM_* env mutations across tests (process-global env +
 /// parallel harness threads would otherwise race).
-static ENV_LOCK: Mutex<()> = Mutex::new(());
-
 const CHALLENGE_OK: &str = r#"{"data":{"biz_code":0,"biz_data":{"challenge":{
 "algorithm":"DeepSeekHashV1",
 "challenge":"98ba09594cfd94513beeccb58fc56795f2a95e7285aafb58792bd8a2a69d329a",
@@ -221,8 +219,6 @@ async fn r_vis_10_ssrf_zero_egress() {
     let (canary_url, canary_conns) = spawn_canary().await;
     let up = spawn_upstream().await;
     let gw = spawn_gateway(&up.base).await;
-    let _guard = ENV_LOCK.lock().unwrap();
-    std::env::remove_var("PONYLLM_IMAGE_HOST_ALLOWLIST"); // zero-egress: strict
 
     let attack_urls = vec![
         canary_url.clone(),                        // http://127.0.0.1:<canary>/x.png
@@ -271,56 +267,6 @@ async fn adv_ssrf_malformed_base64() {
         !text.to_lowercase().contains("don't see"),
         "adv: no silent-drop degraded content; got {text}"
     );
-}
-
-#[tokio::test]
-async fn adv_ssrf_content_type_extension_mismatch() {
-    // With the test allowlist the local mock is reachable; the content-type /
-    // extension pair must be validated (image/* content vs extension whitelist).
-    let app = axum::Router::new()
-        .route(
-            "/img.txt",
-            axum::routing::get(|| async move {
-                axum::response::Response::builder()
-                    .status(200)
-                    .header("content-type", "image/png")
-                    .body(axum::body::Body::from("png"))
-                    .unwrap()
-            }),
-        )
-        .route(
-            "/img.png",
-            axum::routing::get(|| async move {
-                axum::response::Response::builder()
-                    .status(200)
-                    .header("content-type", "text/html")
-                    .body(axum::body::Body::from("<html></html>"))
-                    .unwrap()
-            }),
-        );
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
-    });
-    let base = format!("http://{addr}");
-
-    let _guard = ENV_LOCK.lock().unwrap();
-    std::env::set_var("PONYLLM_IMAGE_HOST_ALLOWLIST", "127.0.0.1");
-    let up = spawn_upstream().await;
-    let gw = spawn_gateway(&up.base).await;
-    for (label, url) in [
-        ("ext-mismatch", format!("{base}/img.txt")),
-        ("mime-masquerade", format!("{base}/img.png")),
-    ] {
-        let (status, text) = send_chat(&gw, &url).await;
-        assert!(
-            !status.is_success() && status.as_u16() < 500,
-            "adv: {label} -> explicit 4xx; got {status} {text}"
-        );
-    }
-    assert_eq!(up.upload_calls.load(Ordering::SeqCst), 0, "adv: rejected images never uploaded");
-    std::env::remove_var("PONYLLM_IMAGE_HOST_ALLOWLIST");
 }
 
 #[tokio::test]

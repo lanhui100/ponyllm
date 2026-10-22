@@ -13,11 +13,6 @@ use serde_json::{json, Value};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-static ENV_LOCK: Mutex<()> = Mutex::new(());
-fn env_guard() -> std::sync::MutexGuard<'static, ()> {
-    ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
-}
-
 const CHALLENGE_OK: &str = r#"{"data":{"biz_code":0,"biz_data":{"challenge":{
 "algorithm":"DeepSeekHashV1",
 "challenge":"98ba09594cfd94513beeccb58fc56795f2a95e7285aafb58792bd8a2a69d329a",
@@ -180,7 +175,6 @@ fn tool_calls_of(body: &Value) -> Vec<Value> {
 
 #[tokio::test]
 async fn adv_tools_malformed_json_variants() {
-    let _guard = env_guard();
     std::env::remove_var("PONYLLM_DEEPSEEK_WEB_TOOL_EMULATION");
     let variants: [(&str, &str); 3] = [
         ("truncated", r#"{"tool_call":"get_weather","arguments":{"city":"Sha"#),
@@ -219,7 +213,6 @@ async fn adv_tools_malformed_json_variants() {
 
 #[tokio::test]
 async fn adv_tools_explanation_wrapped_output() {
-    let _guard = env_guard();
     std::env::remove_var("PONYLLM_DEEPSEEK_WEB_TOOL_EMULATION");
     let wrapped = r#"Okay! I will call the tool now: {"tool_call":"get_weather","arguments":{"city":"Shanghai"}} please wait"#;
     let up = spawn_upstream(sse_with(wrapped)).await;
@@ -245,7 +238,6 @@ async fn adv_tools_explanation_wrapped_output() {
 
 #[tokio::test]
 async fn adv_tools_over_limits_zero_upstream() {
-    let _guard = env_guard();
     std::env::remove_var("PONYLLM_DEEPSEEK_WEB_TOOL_EMULATION");
     // 65 tools
     let up = spawn_upstream(sse_with("x")).await;
@@ -271,7 +263,6 @@ impl Upstream {
 
 #[tokio::test]
 async fn adv_tools_schema_over_64kb_zero_upstream() {
-    let _guard = env_guard();
     std::env::remove_var("PONYLLM_DEEPSEEK_WEB_TOOL_EMULATION");
     let big = json!({"type": "object", "properties": {"x": {"type": "string", "description": "a".repeat(66000)}}});
     let up = spawn_upstream(sse_with("x")).await;
@@ -298,7 +289,6 @@ async fn adv_tools_schema_over_64kb_zero_upstream() {
 
 #[tokio::test]
 async fn adv_tools_illegal_choice_name_zero_upstream() {
-    let _guard = env_guard();
     std::env::remove_var("PONYLLM_DEEPSEEK_WEB_TOOL_EMULATION");
     let up = spawn_upstream(sse_with("x")).await;
     let gw = spawn_gateway(&up.base).await;
@@ -324,31 +314,7 @@ async fn adv_tools_illegal_choice_name_zero_upstream() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn adv_tools_env_off_no_silent_completion() {
-    let _guard = env_guard();
-    std::env::set_var("PONYLLM_DEEPSEEK_WEB_TOOL_EMULATION", "OFF");
-    let up = spawn_upstream(sse_with("I have no tools")).await;
-    let gw = spawn_gateway(&up.base).await;
-    let (s, t) = chat(&gw, tools_req(json!([tool("get_weather")]), None)).await;
-    assert!(
-        !s.is_success() && s.as_u16() < 500,
-        "adv: env=off + tools -> 4xx (G-T3 must never surface as a tool-less 200); got {s} {t}"
-    );
-    assert!(
-        up.snapshot_for_test().is_empty(),
-        "adv: env=off + tools -> zero upstream requests (no silent completion); got {:?}",
-        up.snapshot_for_test()
-    );
-    std::env::remove_var("PONYLLM_DEEPSEEK_WEB_TOOL_EMULATION");
-}
-
-// ---------------------------------------------------------------------------
-// schema never leaks into the streamed downstream body (raw-text check)
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
 async fn adv_tools_schema_not_in_streamed_body() {
-    let _guard = env_guard();
     std::env::remove_var("PONYLLM_DEEPSEEK_WEB_TOOL_EMULATION");
     let up = spawn_upstream(sse_with("plain answer")).await;
     let gw = spawn_gateway(&up.base).await;

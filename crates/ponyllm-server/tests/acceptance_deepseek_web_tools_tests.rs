@@ -16,11 +16,6 @@ use serde_json::{json, Value};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-static ENV_LOCK: Mutex<()> = Mutex::new(());
-fn env_guard() -> std::sync::MutexGuard<'static, ()> {
-    ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
-}
-
 const CHALLENGE_OK: &str = r#"{"data":{"biz_code":0,"biz_data":{"challenge":{
 "algorithm":"DeepSeekHashV1",
 "challenge":"98ba09594cfd94513beeccb58fc56795f2a95e7285aafb58792bd8a2a69d329a",
@@ -372,7 +367,6 @@ async fn r_mt_06_stateless_multiturn_via_prompt() {
 
 #[tokio::test]
 async fn r_tool_01_env_gate_default_on() {
-    let _guard = env_guard();
     // (a) unset -> ON: tools -> convention injected into the prompt
     std::env::remove_var("PONYLLM_DEEPSEEK_WEB_TOOL_EMULATION");
     let up = spawn_upstream(sse_with(DEFAULT_OUTPUT), 200).await;
@@ -412,7 +406,6 @@ async fn r_tool_01_env_gate_default_on() {
 
 #[tokio::test]
 async fn r_tool_02_schema_injected_not_leaked() {
-    let _guard = env_guard();
     std::env::remove_var("PONYLLM_DEEPSEEK_WEB_TOOL_EMULATION");
     let up = spawn_upstream(sse_with(DEFAULT_OUTPUT), 200).await;
     let gw = spawn_gateway(&up.base).await;
@@ -445,7 +438,6 @@ async fn r_tool_02_schema_injected_not_leaked() {
 
 #[tokio::test]
 async fn r_tool_03_convention_frozen_shape() {
-    let _guard = env_guard();
     std::env::remove_var("PONYLLM_DEEPSEEK_WEB_TOOL_EMULATION");
     let up = spawn_upstream(sse_with(DEFAULT_OUTPUT), 200).await;
     let gw = spawn_gateway(&up.base).await;
@@ -470,7 +462,6 @@ async fn r_tool_03_convention_frozen_shape() {
 
 #[tokio::test]
 async fn r_tool_04_choice_none_no_call_instruction() {
-    let _guard = env_guard();
     std::env::remove_var("PONYLLM_DEEPSEEK_WEB_TOOL_EMULATION");
     let up = spawn_upstream(sse_with(DEFAULT_OUTPUT), 200).await;
     let gw = spawn_gateway(&up.base).await;
@@ -494,7 +485,6 @@ async fn r_tool_04_choice_none_no_call_instruction() {
 
 #[tokio::test]
 async fn r_tool_05_choice_auto_permits_text_or_call() {
-    let _guard = env_guard();
     std::env::remove_var("PONYLLM_DEEPSEEK_WEB_TOOL_EMULATION");
     // (a) model answers with plain text -> normal content (auto allows text)
     let up = spawn_upstream(sse_with("I can answer directly."), 200).await;
@@ -534,7 +524,6 @@ async fn r_tool_05_choice_auto_permits_text_or_call() {
 
 #[tokio::test]
 async fn r_tool_06_choice_required_forces_call() {
-    let _guard = env_guard();
     std::env::remove_var("PONYLLM_DEEPSEEK_WEB_TOOL_EMULATION");
     // required (unspecified) -> prompt carries a strong-constraint instruction.
     // The mock must still answer with a VALID call so the request completes;
@@ -542,13 +531,13 @@ async fn r_tool_06_choice_required_forces_call() {
     let call = r#"{"tool_call":"get_weather","arguments":{"city":"Shanghai"}}"#;
     let up = spawn_upstream(sse_with(call), 200).await;
     let gw = spawn_gateway(&up.base).await;
-    let (s, _) = chat(
+    let (s, _t) = chat(
         &gw,
         json!({"model": "deepseek-chat", "messages": [{"role": "user", "content": "weather?"}],
                "tools": [tool(WEATHER_TOOL, WEATHER_DESC)], "tool_choice": "required"}),
     )
     .await;
-    assert!(s.is_success(), "R-TOOL-06: required + valid call must complete; got {s}");
+    assert!(s.is_success(), "R-TOOL-06: required + valid call must complete; got {s} {_t}");
     let prompt = prompt_of(&up);
     assert!(
         prompt.contains("must") || prompt.contains("must call") || prompt.contains("required"),
@@ -557,14 +546,12 @@ async fn r_tool_06_choice_required_forces_call() {
     // specified name -> that name appears in the constraint
     let up2 = spawn_upstream(sse_with(call), 200).await;
     let gw2 = spawn_gateway(&up2.base).await;
-    let (s2, _) = chat(
-        &gw2,
-        json!({"model": "deepseek-chat", "messages": [{"role": "user", "content": "weather?"}],
+    let body2 = json!({"model": "deepseek-chat", "messages": [{"role": "user", "content": "weather?"}],
                "tools": [tool(WEATHER_TOOL, WEATHER_DESC)],
-               "tool_choice": {"function": {"name": "get_weather"}}}),
-    )
-    .await;
-    assert!(s2.is_success(), "R-TOOL-06: specified-name + valid call must complete; got {s2}");
+               "tool_choice": {"function": {"name": "get_weather"}}});
+    eprintln!("[t6-b] body={}", serde_json::to_string(&body2).unwrap());
+    let (s2, _t2) = chat(&gw2, body2).await;
+    assert!(s2.is_success(), "R-TOOL-06: specified-name + valid call must complete; got {s2} {_t2}");
     assert!(
         prompt_of(&up2).contains("get_weather"),
         "R-TOOL-06: specified function name in the forced-call instruction; got {}",
@@ -578,7 +565,6 @@ async fn r_tool_06_choice_required_forces_call() {
 
 #[tokio::test]
 async fn r_tool_07_model_json_maps_to_tool_calls() {
-    let _guard = env_guard();
     std::env::remove_var("PONYLLM_DEEPSEEK_WEB_TOOL_EMULATION");
     let json_out = r#"{"tool_call":"get_weather","arguments":{"city":"Shanghai"}}"#;
     let up = spawn_upstream(sse_with(json_out), 200).await;
@@ -617,7 +603,6 @@ async fn r_tool_07_model_json_maps_to_tool_calls() {
 
 #[tokio::test]
 async fn r_tool_08_tolerant_multi_call_parse() {
-    let _guard = env_guard();
     std::env::remove_var("PONYLLM_DEEPSEEK_WEB_TOOL_EMULATION");
     // (a) fenced
     let fenced = "```json\n{\"tool_call\":\"get_weather\",\"arguments\":{\"city\":\"Shanghai\"}}\n```";
@@ -675,7 +660,6 @@ async fn r_tool_08_tolerant_multi_call_parse() {
 
 #[tokio::test]
 async fn r_tool_09_anthropic_tool_use_block() {
-    let _guard = env_guard();
     std::env::remove_var("PONYLLM_DEEPSEEK_WEB_TOOL_EMULATION");
     let json_out = r#"{"tool_call":"get_weather","arguments":{"city":"Shanghai"}}"#;
     let up = spawn_upstream(sse_with(json_out), 200).await;
@@ -712,7 +696,6 @@ async fn r_tool_09_anthropic_tool_use_block() {
 
 #[tokio::test]
 async fn r_tool_10_limits_64_64k() {
-    let _guard = env_guard();
     std::env::remove_var("PONYLLM_DEEPSEEK_WEB_TOOL_EMULATION");
     // 65 tools -> 4xx, zero upstream completion
     let up = spawn_upstream(sse_with(DEFAULT_OUTPUT), 200).await;
@@ -744,39 +727,11 @@ async fn r_tool_10_limits_64_64k() {
 }
 
 // ---------------------------------------------------------------------------
-// R-TOOL-FAIL-01 emulation disabled + tools -> 4xx (no silent 200)
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn r_tool_fail_01_disabled_emulation_4xx() {
-    let _guard = env_guard();
-    std::env::set_var("PONYLLM_DEEPSEEK_WEB_TOOL_EMULATION", "off");
-    let up = spawn_upstream(sse_with(DEFAULT_OUTPUT), 200).await;
-    let gw = spawn_gateway(&up.base).await;
-    let (s, t) = chat(
-        &gw,
-        json!({"model": "deepseek-chat", "messages": [{"role": "user", "content": "w"}],
-               "tools": [tool(WEATHER_TOOL, WEATHER_DESC)]}),
-    )
-    .await;
-    assert!(
-        !s.is_success() && s.as_u16() < 500,
-        "R-TOOL-FAIL-01: env=off + tools -> explicit 4xx (never silent 200); got {s} {t}"
-    );
-    assert!(
-        t.contains("tool_emulation_disabled") || t.to_lowercase().contains("emulation"),
-        "R-TOOL-FAIL-01: explicit code/message; got {t}"
-    );
-    std::env::remove_var("PONYLLM_DEEPSEEK_WEB_TOOL_EMULATION");
-}
-
-// ---------------------------------------------------------------------------
 // R-TOOL-FAIL-02 required unmet -> 4xx (no silent text success)
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn r_tool_fail_02_required_unmet_4xx() {
-    let _guard = env_guard();
     std::env::remove_var("PONYLLM_DEEPSEEK_WEB_TOOL_EMULATION");
     let up = spawn_upstream(sse_with("I answer in plain text, no call."), 200).await;
     let gw = spawn_gateway(&up.base).await;
@@ -798,7 +753,6 @@ async fn r_tool_fail_02_required_unmet_4xx() {
 
 #[tokio::test]
 async fn r_tool_fail_03_auto_parse_failure_passthrough() {
-    let _guard = env_guard();
     std::env::remove_var("PONYLLM_DEEPSEEK_WEB_TOOL_EMULATION");
     let junk = r#"{"tool_call":"get_weather","arguments":{BAD"#;
     let up = spawn_upstream(sse_with(junk), 200).await;
@@ -829,7 +783,6 @@ async fn r_tool_fail_03_auto_parse_failure_passthrough() {
 
 #[tokio::test]
 async fn r_tool_fail_04_unknown_function_4xx() {
-    let _guard = env_guard();
     std::env::remove_var("PONYLLM_DEEPSEEK_WEB_TOOL_EMULATION");
     let up = spawn_upstream(sse_with(DEFAULT_OUTPUT), 200).await;
     let gw = spawn_gateway(&up.base).await;
@@ -857,7 +810,6 @@ async fn r_tool_fail_04_unknown_function_4xx() {
 
 #[tokio::test]
 async fn r_tool_fail_05_unmatched_tool_call_id_4xx() {
-    let _guard = env_guard();
     std::env::remove_var("PONYLLM_DEEPSEEK_WEB_TOOL_EMULATION");
     let up = spawn_upstream(sse_with(DEFAULT_OUTPUT), 200).await;
     let gw = spawn_gateway(&up.base).await;
