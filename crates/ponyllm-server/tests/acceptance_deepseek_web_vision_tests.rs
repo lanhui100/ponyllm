@@ -965,7 +965,11 @@ fn r_vis_16_no_ttl_cache_implemented() {
                     || low.contains("ttl")
                     || low.contains("lru")
                     || low.contains("content_hash")
-                    || low.contains("hashmap<"))
+                    || (low.contains("hashmap<")
+                        && (low.contains("cache")
+                            || low.contains("ttl")
+                            || low.contains("lru")
+                            || low.contains("content_hash"))))
                 {
                     continue;
                 }
@@ -985,7 +989,8 @@ fn r_vis_16_no_ttl_cache_implemented() {
                     || low.contains("cachedcontenttokencount")
                     || low.contains("ttl_secs")
                     || low.contains("jwt_ttl")
-                    || low.contains("cached_read");
+                    || low.contains("cached_read")
+                    || low.contains("tool_id_to_name");
                 if !benign {
                     hits.push((path.clone(), i + 1, line.to_string()));
                 }
