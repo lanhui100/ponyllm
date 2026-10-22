@@ -211,6 +211,35 @@ pub(crate) fn extract_web_prompt_parts(
             ChatMessage::Developer(m) => collect_web_parts(&m.content, &mut acc, &mut lines),
             ChatMessage::User(m) => collect_web_parts(&m.content, &mut acc, &mut lines),
             ChatMessage::Assistant(m) => {
+                // Wave-12 R-THINK-05/06: history reasoning injected as its own
+                // `[assistant-reasoning]` segment BEFORE the message's
+                // `[assistant]` segment (multi-turn reasoning context is
+                // otherwise lost — G-TH2). Empty/missing → skipped; over the
+                // byte budget → deterministic TAIL truncation + `…(truncated)`.
+                if let Some(reasoning) = m.reasoning_content.as_deref() {
+                    if !reasoning.trim().is_empty() {
+                        // Flush any open segment first so ordering holds.
+                        if let Some(open) = open_role {
+                            flush(
+                                &mut acc,
+                                open,
+                                &segment_lines,
+                                &system_preamble,
+                                &mut saw_system_segment,
+                            );
+                            open_role = None;
+                            segment_lines = Vec::new();
+                        }
+                        let budget = web_reasoning_history_max_bytes();
+                        let body = web_truncate_reasoning_history(reasoning, budget);
+                        if !acc.text.is_empty() {
+                            acc.text.push_str("\n\n");
+                        }
+                        acc.text.push_str("[assistant-reasoning]");
+                        acc.text.push('\n');
+                        acc.text.push_str(&body);
+                    }
+                }
                 if let Some(c) = m.content.as_ref() {
                     collect_web_parts(c, &mut acc, &mut lines);
                 }
@@ -383,6 +412,41 @@ const WEB_TOOL_MAX_SCHEMA_BYTES: usize = 64 * 1024;
 /// R-TOOL-08: max parallel calls parsed from a model output.
 const WEB_TOOL_MAX_PARSE_CALLS: usize = 64;
 
+/// Wave-12 R-THINK-06: per-message `[assistant-reasoning]` byte budget.
+/// Env `PONYLLM_WEB_REASONING_HISTORY_MAX_BYTES` (bytes; missing/invalid/≤0 →
+/// 4096). Truncation keeps the TAIL (latest reasoning conclusions matter most
+/// in multi-turn) with a fixed `…(truncated)` marker that does NOT count
+/// against the budget. UTF-8 safe (never splits a codepoint).
+const WEB_REASONING_HISTORY_DEFAULT_MAX_BYTES: usize = 4096;
+
+/// Wave-12 R-THINK-06: read the history-reasoning byte budget from env.
+fn web_reasoning_history_max_bytes() -> usize {
+    std::env::var("PONYLLM_WEB_REASONING_HISTORY_MAX_BYTES")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(WEB_REASONING_HISTORY_DEFAULT_MAX_BYTES)
+}
+
+/// Wave-12 R-THINK-06: deterministic UTF-8-safe TAIL truncation to `budget`
+/// bytes. Returns the full text when it fits; otherwise the longest suffix
+/// whose byte length ≤ `budget`, plus the fixed `…(truncated)` marker (the
+/// marker does not consume budget).
+fn web_truncate_reasoning_history(text: &str, budget: usize) -> String {
+    const MARKER: &str = "…(truncated)";
+    if text.len() <= budget {
+        return text.to_string();
+    }
+    // Walk the char boundaries from the end to find the longest suffix
+    // fitting `budget` bytes without splitting a UTF-8 codepoint.
+    let mut cut = budget;
+    while cut > 0 && !text.is_char_boundary(text.len() - cut) {
+        cut -= 1;
+    }
+    let suffix = &text[text.len() - cut..];
+    format!("{suffix}{MARKER}")
+}
+
 /// Resolved `tool_choice` semantics for emulation-strength gating.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WebToolChoiceKind {
@@ -425,12 +489,83 @@ pub fn web_tool_choice_specific_name(
     }
 }
 
+/// Wave-12 (R-THINK-02/04): derive the requested thinking from the BODY —
+/// the highest-priority source. Sources in priority order (R-THINK-01):
+/// body `thinking` (`{"type":"disabled"|"enabled"}`, parsed via the
+/// flattened `extra` map) > body `reasoning_effort` > header > model suffix
+/// > default On.
+///
+/// `thinking.type`: `"disabled"` → Off, `"enabled"` → On; unknown type
+/// (incl. `"auto"`, non-string, array/object literal) → ignored with a debug
+/// log (falls through to the next source, never errors — R-THINK-02).
+/// `reasoning_effort` uses the degraded mapping (R-THINK-04): Off/none/off
+/// family → Off; Low/Medium/High/Max family → On (web has no levels).
+pub fn web_requested_thinking_from_body(
+    req: &ChatCompletionRequest,
+) -> Option<ponyllm_protocol::common::ReasoningEffort> {
+    use ponyllm_protocol::common::ReasoningEffort;
+    // Source ①: body `thinking` object (highest priority).
+    if let Some(t) = req.extra.get("thinking") {
+        match t {
+            serde_json::Value::Object(map) => {
+                if let Some(tv) = map.get("type") {
+                    match tv.as_str() {
+                        Some(s) => match s.trim().to_ascii_lowercase().as_str() {
+                            "disabled" | "off" | "none" | "false" => {
+                                return Some(ReasoningEffort::Off)
+                            }
+                            "enabled" | "on" | "true" | "low" | "medium" | "high" | "max" => {
+                                return Some(ReasoningEffort::Medium)
+                            }
+                            other => {
+                                tracing::debug!(
+                                    thinking_type = %other,
+                                    "wave-12 body `thinking.type` unknown; ignored (R-THINK-02)"
+                                );
+                            }
+                        },
+                        None => {
+                            tracing::debug!(
+                                "wave-12 body `thinking.type` not a string; ignored (R-THINK-02)"
+                            );
+                        }
+                    }
+                }
+            }
+            // Non-object `thinking` (string literal / array) → ignored.
+            other => {
+                tracing::debug!(
+                    thinking = %other,
+                    "wave-12 body `thinking` not an object; ignored (R-THINK-02)"
+                );
+            }
+        }
+    }
+    // Source ②: body `reasoning_effort` (degraded mapping, R-THINK-04).
+    req.get_reasoning_effort()
+}
+
+/// Wave-12 R-THINK-01: unify the four sources into ONE On/Off decision.
+/// Priority: body (thinking > reasoning_effort) > header > model suffix >
+/// default On. Returns the web `thinking_enabled` boolean.
+pub fn web_thinking_enabled_from(
+    req: &ChatCompletionRequest,
+    header_thinking: Option<ponyllm_protocol::common::ReasoningEffort>,
+    parsed_thinking_override: Option<ponyllm_protocol::common::ReasoningEffort>,
+) -> bool {
+    use ponyllm_protocol::common::ReasoningEffort;
+    let decision = web_requested_thinking_from_body(req)
+        .or(header_thinking)
+        .or(parsed_thinking_override)
+        .unwrap_or(ReasoningEffort::Medium); // default On (DW-Q-03)
+    !matches!(decision, ReasoningEffort::Off)
+}
+
 /// Response-side tool mode for the SSE translator (R-TOOL-04..07): no tools /
 /// emulation off / choice none → `None` (legacy live content); auto → `Auto`;
 /// required/specific → `Required`. Independent of (and consistent with) the
 /// prompt-builder gating — the translator only needs the response semantics.
-pub fn web_tool_mode_for(req: &ChatCompletionRequest) -> DeepSeekWebToolMode {
-    let has_tools = req
+pub fn web_tool_mode_for(req: &ChatCompletionRequest) -> DeepSeekWebToolMode {    let has_tools = req
         .tools
         .as_ref()
         .map(|t| !t.is_empty())
@@ -1869,9 +2004,26 @@ pub async fn handle_chat_completions(
             target_req.top_p = target.top_p;
         }
 
-        let requested_thinking = header_thinking
-            .or(parsed.thinking_override)
-            .or_else(|| req.get_reasoning_effort());
+                // Wave-12 R-THINK-01/02/03/04: unified four-source thinking decision —
+        // Wave-12 R-THINK-01/02/03/04: unified four-source thinking decision —
+        // ONLY for the deepseek-web provider (whose body `thinking` was
+        // previously ignored, G-TH1). Priority: body (`thinking` object, then
+        // `reasoning_effort`) > header > model suffix > default On; unknown
+        // `thinking.type` / effort values ignored + debug (never 4xx,
+        // R-THINK-02/04). OTHER providers keep the frozen legacy priority
+        // (header > model suffix > body reasoning_effort) anchored by
+        // `thinking_gateway_tests::test_thinking_precedence_header_wins`.
+        let requested_thinking = if target.upstream_protocol
+            == ponyllm_core::pool::UpstreamProtocol::DeepSeekWeb
+        {
+            web_requested_thinking_from_body(&req)
+                .or(header_thinking)
+                .or(parsed.thinking_override)
+        } else {
+            header_thinking
+                .or(parsed.thinking_override)
+                .or_else(|| req.get_reasoning_effort())
+        };
         let effective_thinking = target.resolve_thinking(requested_thinking);
 
         if effective_thinking.is_active() {
