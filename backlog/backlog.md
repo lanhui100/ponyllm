@@ -49,3 +49,4 @@
 - **B015** [P3] Wave1 审查 advisory：`previous_response_id`/`conversation`/`prompt` 已从全局黑名单移除以保留链式会话；如需防跨租户引用需上游侧校验（provider 责任边界）。
 - **B016** [P2] egress 校验启动面缺口（L3-P 复审）：provider/model/gateway 的 `proxy` 字段在配置加载期零校验零日志；CLI `--proxy` 仍接受 socks；缺启动自检告警。建议加载期统一走 `check_proxy_url_fast` 并输出可操作 warn。
 - **B017** [P3] NAT64 仅按 `64:ff9b::/96` 取末 32 位；RFC 6052/8215 允许 `/48` 等布局差异（部署相关）。若部署存在非 /96 前缀需扩展解析。
+- **B018** [P3] `deploy/ponyllm-config.example.toml` 存在重复键 `default_protocol`（`[providers.opencode-zen]` 节内出现两次），该示例文件无法被 TOML 解析器直接加载（本次冒烟实测 `duplicate key`）→ 清理为单一定义并加 `taplo`/`toml` 校验到 pre-commit。
