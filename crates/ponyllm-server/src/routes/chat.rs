@@ -453,6 +453,15 @@ pub async fn handle_chat_completions(
             }
             ponyllm_core::pool::UpstreamProtocol::Chat => {
                 let url = target.chat_completions_url();
+                // Same-protocol passthrough (contract C1/C2): `#[serde(flatten)]`
+                // extra is serialized after the typed fields, so a client key
+                // could otherwise override a gateway-computed value (clamped
+                // max_tokens, thinking shape, …). Sanitize for the target wire
+                // format before serializing.
+                target_req.extra = ponyllm_protocol::sanitize::sanitize_extra(
+                    std::mem::take(&mut target_req.extra),
+                    ponyllm_protocol::sanitize::TargetProtocol::OpenAiChat,
+                );
                 let mut val = match serde_json::to_value(&target_req) {
                     Ok(v) => v,
                     Err(e) => {

@@ -1,6 +1,7 @@
 use crate::error::{ProtocolError, Result};
 use crate::openai::chat::*;
 use crate::openai::responses::*;
+use crate::sanitize::{sanitize_extra, TargetProtocol};
 
 /// True when a Responses request carries any non-blank text for an upstream
 /// that cannot accept image-only input after translation drops images.
@@ -144,9 +145,10 @@ pub fn chat_to_responses_request(req: &ChatCompletionRequest) -> Result<CreateRe
         effort: Some(eff),
     });
 
-    let mut extra = req.extra.clone();
-    extra.remove("reasoning_effort");
-    extra.remove("thinking");
+    // Cross-protocol boundary (contract C1/C2): the Responses wire owns
+    // `max_output_tokens` / `metadata` / `reasoning`, so a client `extra` entry
+    // must not re-inject them on top of the gateway-computed values.
+    let extra = sanitize_extra(req.extra.clone(), TargetProtocol::OpenAiResponses);
 
     Ok(CreateResponseRequest {
         model: req.model.clone(),
@@ -391,7 +393,8 @@ pub fn responses_to_chat_request(req: &CreateResponseRequest) -> Result<ChatComp
         tool_choice: None,
         parallel_tool_calls: None,
         reasoning_effort,
-        extra: req.extra.clone(),
+        // Chat is the target wire format here (contract C1/C2).
+        extra: sanitize_extra(req.extra.clone(), TargetProtocol::OpenAiChat),
     })
 }
 

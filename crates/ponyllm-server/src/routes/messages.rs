@@ -525,6 +525,15 @@ pub async fn handle_messages(
                 }
                 target_req.messages = clean_messages;
 
+                // Same-protocol passthrough (contract C1/C2): strip reserved
+                // Anthropic fields and the global control keys from the
+                // flattened `extra` map before serializing, so a client entry
+                // can never override the gateway-computed values.
+                target_req.extra = ponyllm_protocol::sanitize::sanitize_extra(
+                    std::mem::take(&mut target_req.extra),
+                    ponyllm_protocol::sanitize::TargetProtocol::Anthropic,
+                );
+
                 let val = match serde_json::to_value(&target_req) {
                     Ok(v) => v,
                     Err(e) => {

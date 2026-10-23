@@ -3,6 +3,7 @@ use crate::anthropic::messages::*;
 use crate::common::{ReasoningEffort, StopCondition};
 use crate::error::Result;
 use crate::openai::chat::*;
+use crate::sanitize::{sanitize_extra, TargetProtocol};
 
 /// Convert OpenAI ChatCompletionRequest to Anthropic MessageRequest
 pub fn chat_to_anthropic_request(req: &ChatCompletionRequest) -> Result<MessageRequest> {
@@ -259,7 +260,10 @@ pub fn chat_to_anthropic_request(req: &ChatCompletionRequest) -> Result<MessageR
         thinking,
         output_config,
         reasoning_effort,
-        extra: req.extra.clone(),
+        // Cross-protocol boundary (contract C1/C2): a client `extra` key must
+        // never re-inject an Anthropic-owned field and override the
+        // gateway-computed system / thinking / max_tokens values.
+        extra: sanitize_extra(req.extra.clone(), TargetProtocol::Anthropic),
     })
 }
 
@@ -490,7 +494,9 @@ pub fn anthropic_to_chat_request(req: &MessageRequest) -> Result<ChatCompletionR
         tool_choice: None,
         parallel_tool_calls: None,
         reasoning_effort,
-        extra: req.extra.clone(),
+        // Chat is the target wire format here: strip Chat-owned fields and the
+        // global control keys the client could otherwise smuggle through.
+        extra: sanitize_extra(req.extra.clone(), TargetProtocol::OpenAiChat),
     })
 }
 

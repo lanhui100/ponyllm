@@ -426,6 +426,15 @@ pub async fn handle_responses(
                 (target.messages_url(), val)
             }
             ponyllm_core::pool::UpstreamProtocol::Responses => {
+                // Same-protocol passthrough (contract C1/C2): strip reserved
+                // Responses fields (`max_output_tokens` / `metadata` / …) and the
+                // global control keys from the flattened `extra` map before
+                // serializing, so a client entry cannot override the
+                // gateway-computed clamp.
+                target_req.extra = ponyllm_protocol::sanitize::sanitize_extra(
+                    std::mem::take(&mut target_req.extra),
+                    ponyllm_protocol::sanitize::TargetProtocol::OpenAiResponses,
+                );
                 let val = match serde_json::to_value(&target_req) {
                     Ok(v) => v,
                     Err(e) => {

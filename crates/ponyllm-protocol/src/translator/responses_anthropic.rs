@@ -2,6 +2,7 @@ use crate::anthropic::messages::*;
 use crate::common::ReasoningEffort;
 use crate::error::{ProtocolError, Result};
 use crate::openai::responses::*;
+use crate::sanitize::{sanitize_extra, TargetProtocol};
 
 use serde_json::json;
 
@@ -363,7 +364,9 @@ pub fn responses_to_anthropic_request(req: &CreateResponseRequest) -> Result<Mes
         thinking,
         output_config,
         reasoning_effort,
-        extra: req.extra.clone(),
+        // Cross-protocol boundary (contract C1/C2): a client `extra` key must
+        // never override the gateway-computed Anthropic fields.
+        extra: sanitize_extra(req.extra.clone(), TargetProtocol::Anthropic),
     })
 }
 
@@ -548,9 +551,10 @@ pub fn anthropic_to_responses_request(req: &MessageRequest) -> Result<CreateResp
         effort: Some(eff),
     });
 
-    let mut extra = req.extra.clone();
-    extra.remove("reasoning_effort");
-    extra.remove("thinking");
+    // Cross-protocol boundary (contract C1/C2): the Responses wire owns
+    // `max_output_tokens` / `metadata` / `reasoning`, so a client `extra` entry
+    // must not re-inject them on top of the gateway-computed values.
+    let extra = sanitize_extra(req.extra.clone(), TargetProtocol::OpenAiResponses);
 
     Ok(CreateResponseRequest {
         model: req.model.clone(),
