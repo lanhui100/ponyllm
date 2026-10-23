@@ -5,6 +5,7 @@ pub mod error;
 pub mod openai;
 pub mod anthropic;
 pub mod translator;
+pub mod sanitize;
 
 pub use common::*;
 pub use error::{ProtocolError, Result};
