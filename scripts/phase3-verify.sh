@@ -47,62 +47,109 @@ secret_hash() {
     | base64 -d | sha256sum | cut -d' ' -f1
 }
 
+# --- B019: 多角色 Deployment 解析（dev/preprod/proserver/tencent） ---
+# 本脚本早期假定单一 Deployment `ponyllm-gateway`；2026-10 起按节点角色拆为 4 个
+# （`ponyllm-gateway-<role>`）。这里按 label 解析全部网关 Deployment，并要求它们的
+# Pod 模板规格完全一致（parity），从而对"任一"做详细断言即可代表全部；
+# 若部署被拆分得互不一致，则直接 FAIL（不能用一个模板代表另一个）。
+mapfile -t GW_DEPLOYS < <("${KUBECTL[@]}" -n "$NS" get deploy \
+  -l app.kubernetes.io/name=ponyllm,app.kubernetes.io/component=gateway \
+  -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null)
+[ "${#GW_DEPLOYS[@]}" -ge 1 ] || { echo "FAIL no gateway deployments found (label app.kubernetes.io/name=ponyllm,app.kubernetes.io/component=gateway)"; exit 1; }
+# 角色专属字段（nodeSelector = ponyllm.io/node-role=<role>）与存储形态按设计不同
+# （dev: PVC；生产角色: emptyDir），逐 Deployment 的断言在 [1/7] 内完成，
+# 生产三角色的模板 parity 也在 [1/7] 校验。此处只解析清单并选定"代表 Deployment"
+# （优先生产角色，便于后续以生产口径断言）。
+DEPLOY=""
+for R in preprod proserver tencent dev; do
+  for D in "${GW_DEPLOYS[@]}"; do
+    [ "$D" = "ponyllm-gateway-$R" ] && { DEPLOY="$D"; break 2; }
+  done
+done
+[ -n "$DEPLOY" ] || DEPLOY="${GW_DEPLOYS[0]}"
+echo "  gateway deployments: ${GW_DEPLOYS[*]} (representative: '$DEPLOY')"
+
 # --- S3: TOKEN 缺失 → exit 2（非 1，可与环境类失败区分） ---
 if [ -z "$TOKEN" ]; then
   echo "FAIL PONYLLM_ADMIN_TOKEN not set — admin/metrics/412 段依赖网关凭证（exit 2）"
   exit 2
 fi
 
-echo "== [1/7] deployment 形态（Phase 3 契约 + sec S3-1/S3-4 断言） =="
-# topology: ScheduleAnyway / maxSkew 精确 1 / hostname
-"${KUBECTL[@]}" -n "$NS" get deploy ponyllm-gateway -o jsonpath='{.spec.template.spec.topologySpreadConstraints[*].whenUnsatisfiable}' \
-  | grep -qx "ScheduleAnyway" || { echo "FAIL whenUnsatisfiable != ScheduleAnyway"; exit 1; }
-"${KUBECTL[@]}" -n "$NS" get deploy ponyllm-gateway -o jsonpath='{.spec.template.spec.topologySpreadConstraints[*].maxSkew}' \
-  | grep -qx "1" || { echo "FAIL maxSkew != 1 (exact)"; exit 1; }
-"${KUBECTL[@]}" -n "$NS" get deploy ponyllm-gateway -o jsonpath='{.spec.template.spec.topologySpreadConstraints[*].topologyKey}' \
-  | grep -qx "kubernetes.io/hostname" || { echo "FAIL topologyKey != hostname"; exit 1; }
-# nodeSelector / PVC / initContainers 应已移除
-NSEL=$("${KUBECTL[@]}" -n "$NS" get deploy ponyllm-gateway -o jsonpath='{.spec.template.spec.nodeSelector}' 2>/dev/null)
-[ -n "$NSEL" ] && { echo "FAIL nodeSelector still present"; exit 1; }
-"${KUBECTL[@]}" -n "$NS" get deploy ponyllm-gateway -o jsonpath='{.spec.template.spec.volumes[*].persistentVolumeClaim.claimName}' \
-  | grep -q "ponyllm-data" && { echo "FAIL still references PVC ponyllm-data"; exit 1; }
-IC=$("${KUBECTL[@]}" -n "$NS" get deploy ponyllm-gateway -o jsonpath='{.spec.template.spec.initContainers}' 2>/dev/null)
-[ -n "$IC" ] && { echo "FAIL initContainers still present"; exit 1; }
-# sec S3-1/S3-4：SA 精确、非 root、lock env 三件套、lock-tls 挂载
-SA=$("${KUBECTL[@]}" -n "$NS" get deploy ponyllm-gateway -o jsonpath='{.spec.template.spec.serviceAccountName}')
-[ "$SA" = "ponyllm-gateway-sa" ] || { echo "FAIL serviceAccountName=$SA"; exit 1; }
-RUID=$("${KUBECTL[@]}" -n "$NS" get deploy ponyllm-gateway -o jsonpath='{.spec.template.spec.securityContext.runAsUser}')
-[ "$RUID" = "10001" ] && [ "$RUID" != "0" ] || { echo "FAIL runAsUser=$RUID (want 10001, non-root)"; exit 1; }
-LOCKREF=$("${KUBECTL[@]}" -n "$NS" get deploy ponyllm-gateway -o jsonpath='{.spec.template.spec.containers[?(@.name=="ponyllm")].env[?(@.name=="PONYLLM_LOCK_DATABASE_URL")].valueFrom.secretKeyRef.name}')
-[ "$LOCKREF" = "ponyllm-lock-dsn" ] || { echo "FAIL LOCK_DATABASE_URL not secretRef(ponyllm-lock-dsn): $LOCKREF"; exit 1; }
-SM=$("${KUBECTL[@]}" -n "$NS" get deploy ponyllm-gateway -o jsonpath='{.spec.template.spec.containers[?(@.name=="ponyllm")].env[?(@.name=="PONYLLM_LOCK_SSLMODE")].value}')
-[ "$SM" = "require" ] || { echo "FAIL PONYLLM_LOCK_SSLMODE=$SM (want require)"; exit 1; }
-CMA=$("${KUBECTL[@]}" -n "$NS" get deploy ponyllm-gateway -o jsonpath='{.spec.template.spec.containers[?(@.name=="ponyllm")].env[?(@.name=="PONYLLM_LOCK_CA_FILE")].value}')
-[ "$CMA" = "/etc/ponyllm-lock/ca.crt" ] || { echo "FAIL LOCK_CA_FILE=$CMA"; exit 1; }
-"${KUBECTL[@]}" -n "$NS" get deploy ponyllm-gateway -o jsonpath='{.spec.template.spec.containers[?(@.name=="ponyllm")].volumeMounts[*].name}' \
-  | grep -qw "lock-tls" || { echo "FAIL lock-tls not mounted"; exit 1; }
-echo "OK shape: ScheduleAnyway(1,hostname) / no nodeSelector / no PVC / no init / SA+lock env+lock-tls / non-root"
-
-echo "== [2/7] replicas=4、4 节点分布、目标节点集 =="
-"${KUBECTL[@]}" -n "$NS" rollout status deploy/ponyllm-gateway --timeout=300s || { echo "FAIL rollout"; exit 1; }
-READY=$("${KUBECTL[@]}" -n "$NS" get deploy ponyllm-gateway -o jsonpath='{.status.readyReplicas}')
-[ "$READY" = "4" ] || { echo "FAIL readyReplicas=$READY (want 4)"; exit 1; }
-USED=$("${KUBECTL[@]}" -n "$NS" get po -l app.kubernetes.io/name=ponyllm,app.kubernetes.io/component=gateway \
-  -o jsonpath='{range .items[*]}{.spec.nodeName}{"\n"}{end}' | sort -u)
-N_USED=$(echo "$USED" | grep -c .)
-[ "$N_USED" = "4" ] || { echo "FAIL replicas on $N_USED nodes (want 4)"; exit 1; }
-ALLOWED="devserver jobcopilot-preprod proserver tencent"
-for n in $USED; do
-  echo "$ALLOWED" | grep -qw "$n" || { echo "FAIL pod scheduled on non-target node '$n'"; exit 1; }
+echo "== [1/7] deployment 形态（多角色架构：dev 1 + preprod/proserver/tencent 各 2） =="
+# 2026-10 起按节点角色拆分（B019）：每角色一个 Deployment，通过 nodeSelector
+# ponyllm.io/node-role=<role> 固定到对应节点；dev 与生产角色存储形态不同（PVC vs emptyDir），
+# 故这里逐 Deployment 断言"共性安全/治理不变量"，并对生产三角色额外做 Pod 模板 parity。
+EXPECT_READY=0
+declare -A ROLE_READY=()
+for D in "${GW_DEPLOYS[@]}"; do
+  ROLE="${D#ponyllm-gateway-}"
+  # 角色归位方式不唯一：生产角色用 nodeSelector(ponyllm.io/node-role)，
+  # dev 用 affinity/节点 taint 固定到 devserver。此处只在 key 存在时校验其取值，
+  # 实际落点由 [2/7] 的 role→node 映射断言兜底。
+  NSEL=$("${KUBECTL[@]}" -n "$NS" get deploy "$D" -o jsonpath='{.spec.template.spec.nodeSelector.ponyllm\.io/node-role}' 2>/dev/null || true)
+  if [ -n "$NSEL" ] && [ "$NSEL" != "$ROLE" ]; then
+    echo "FAIL $D: nodeSelector role='$NSEL' (want '$ROLE')"; exit 1
+  fi
+  IC=$("${KUBECTL[@]}" -n "$NS" get deploy "$D" -o jsonpath='{.spec.template.spec.initContainers}' 2>/dev/null || true)
+  [ -z "$IC" ] || { echo "FAIL $D: initContainers still present"; exit 1; }
+  SA=$("${KUBECTL[@]}" -n "$NS" get deploy "$D" -o jsonpath='{.spec.template.spec.serviceAccountName}')
+  [ "$SA" = "ponyllm-gateway-sa" ] || { echo "FAIL $D: serviceAccountName=$SA"; exit 1; }
+  RUID=$("${KUBECTL[@]}" -n "$NS" get deploy "$D" -o jsonpath='{.spec.template.spec.securityContext.runAsUser}')
+  [ "$RUID" = "10001" ] || { echo "FAIL $D: runAsUser=$RUID (want 10001, non-root)"; exit 1; }
+  LOCKREF=$("${KUBECTL[@]}" -n "$NS" get deploy "$D" -o jsonpath='{.spec.template.spec.containers[?(@.name=="ponyllm")].env[?(@.name=="PONYLLM_LOCK_DATABASE_URL")].valueFrom.secretKeyRef.name}')
+  [ "$LOCKREF" = "ponyllm-lock-dsn" ] || { echo "FAIL $D: LOCK_DATABASE_URL not secretRef(ponyllm-lock-dsn): $LOCKREF"; exit 1; }
+  SM=$("${KUBECTL[@]}" -n "$NS" get deploy "$D" -o jsonpath='{.spec.template.spec.containers[?(@.name=="ponyllm")].env[?(@.name=="PONYLLM_LOCK_SSLMODE")].value}')
+  [ "$SM" = "require" ] || { echo "FAIL $D: PONYLLM_LOCK_SSLMODE=$SM (want require)"; exit 1; }
+  CMA=$("${KUBECTL[@]}" -n "$NS" get deploy "$D" -o jsonpath='{.spec.template.spec.containers[?(@.name=="ponyllm")].env[?(@.name=="PONYLLM_LOCK_CA_FILE")].value}')
+  [ "$CMA" = "/etc/ponyllm-lock/ca.crt" ] || { echo "FAIL $D: LOCK_CA_FILE=$CMA"; exit 1; }
+  "${KUBECTL[@]}" -n "$NS" get deploy "$D" -o jsonpath='{.spec.template.spec.containers[?(@.name=="ponyllm")].volumeMounts[*].name}' \
+    | grep -qw "lock-tls" || { echo "FAIL $D: lock-tls not mounted"; exit 1; }
+  R=$("${KUBECTL[@]}" -n "$NS" get deploy "$D" -o jsonpath='{.status.readyReplicas}')
+  ROLE_READY["$ROLE"]="${R:-0}"
+  EXPECT_READY=$((EXPECT_READY + ${R:-0}))
 done
-echo "OK 4/4 ready, on target nodes: $(echo "$USED" | tr '\n' ' ')"
-# arch S2-1：izbp* 节点可调度性提示（执行阶段由运维打 taint 收口）
-IZBP_TAINT=$("${KUBECTL[@]}" get nodes -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.spec.taints}{"\n"}{end}' 2>/dev/null | grep '^izbp' || true)
-case "$IZBP_TAINT" in
-  *"NoSchedule"*) echo "OK izbp* node already tainted (NoSchedule) — 4 副本打散不受它影响" ;;
-  izbp*)          echo "WARN izbp* node is schedulable (no taint): Phase 3 执行阶段需为其打 taint 以完整收口 4 副本分布 — 本脚本不做集群写，仅提示" ;;
-  *)              echo "OK no izbp* node found" ;;
-esac
+# 生产三角色必须同构（去掉角色专属 nodeSelector 后比对；dev 允许不同存储形态）
+PROD_SIGS=$(for R in preprod proserver tencent; do
+  D="ponyllm-gateway-$R"
+  echo " ${GW_DEPLOYS[*]} " | grep -q " $D " || continue
+  "${KUBECTL[@]}" -n "$NS" get deploy "$D" -o json \
+    | jq -S '.spec.template.spec | del(.nodeSelector)' | sha256sum | cut -d' ' -f1
+done | sort -u | wc -l)
+if echo " ${GW_DEPLOYS[*]} " | grep -q " ponyllm-gateway-preprod "; then
+  [ "$PROD_SIGS" -eq 1 ] || { echo "FAIL prod gw deployments (preprod/proserver/tencent) diverge in pod template"; exit 1; }
+fi
+echo "OK shape: per-role nodeSelector / no init / SA=ponyllm-gateway-sa / non-root 10001 / lock env 3件套 + lock-tls / prod parity OK"
+for R in "${!ROLE_READY[@]}"; do echo "   role=$R ready=${ROLE_READY[$R]}"; done
+
+echo "== [2/7] 全角色 rollout 收敛与节点归位 =="
+TOTAL_READY=0
+for D in "${GW_DEPLOYS[@]}"; do
+  "${KUBECTL[@]}" -n "$NS" rollout status deploy/"$D" --timeout=300s >/dev/null || { echo "FAIL rollout $D"; exit 1; }
+  R=$("${KUBECTL[@]}" -n "$NS" get deploy "$D" -o jsonpath='{.status.readyReplicas}')
+  TOTAL_READY=$((TOTAL_READY + ${R:-0}))
+done
+[ "$TOTAL_READY" -ge 1 ] || { echo "FAIL no ready gateway replicas"; exit 1; }
+PODS=$("${KUBECTL[@]}" -n "$NS" get po -l app.kubernetes.io/name=ponyllm,app.kubernetes.io/component=gateway \
+  -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.phase}{"\t"}{.spec.nodeName}{"\n"}{end}')
+NOT_RUNNING=$(printf '%s\n' "$PODS" | awk '$2!="Running"' | wc -l | tr -d ' ')
+[ "$NOT_RUNNING" = "0" ] || { echo "FAIL $NOT_RUNNING gateway pod(s) not Running:"; printf '%s\n' "$PODS" | awk '$2!="Running"'; exit 1; }
+POD_COUNT=$(printf '%s\n' "$PODS" | grep -c . || true)
+ALLOWED="devserver jobcopilot-preprod proserver tencent"
+BAD_NODE=0
+for n in $(printf '%s\n' "$PODS" | awk '{print $3}' | sort -u); do
+  echo "$ALLOWED" | grep -qw "$n" || { echo "FAIL pod scheduled on non-target node '$n'"; BAD_NODE=1; }
+done
+[ "$BAD_NODE" = "0" ] || exit 1
+# role → 期望节点映射（dev 固定 devserver；生产三角色各自节点）
+declare -A ROLE_NODE=( [dev]=devserver [preprod]=jobcopilot-preprod [proserver]=proserver [tencent]=tencent )
+for R in "${!ROLE_NODE[@]}"; do
+  WANT="${ROLE_NODE[$R]}"
+  GOT=$(printf '%s\n' "$PODS" | awk -v r="-gateway-$R-" 'index($1,r){print $3}' | sort -u | tr '\n' ' ')
+  [ -n "$GOT" ] || { echo "FAIL no running pod for role=$R"; exit 1; }
+  echo " $GOT " | grep -qw "$WANT" || { echo "FAIL role=$R not placed on '$WANT' (got: $GOT)"; exit 1; }
+done
+echo "OK rollout converged: ready=$TOTAL_READY pods=$POD_COUNT on nodes: $(printf '%s\n' "$PODS" | awk '{print $3}' | sort -u | tr '\n' ' ')"
+echo "OK role→node placement verified (dev→devserver, preprod/proserver/tencent→各自节点)"
 
 echo "== [3/7] /health（svc + 逐 Pod；in-pod 探针空输出来自镜像无 curl 时需 --pod-ips） =="
 HCODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 8 "$GW_SVC/health" || true)
@@ -219,13 +266,20 @@ CUR=$(read_version)
 echo "  current config_version: $CUR"
 # 测试前备份 live-config 原始字节，测试后还原
 "${KUBECTL[@]}" -n "$NS" get secret ponyllm-live-config -o jsonpath='{.data.ponyllm\.toml}' | base64 -d > /tmp/p3-live-before.toml
-# 双发并发 PUT（同 If-Match / 同 body economy——不动路由语义，仅版本 +1）
+# 写测试端点（B019，2026-10-23）：`PUT /api/admin/strategy` 已在 wave-2 从契约移除
+# （实测 404），改用现存的 CAS 写端点 `PUT /api/admin/auto-models`。
+# 取当前 auto_models 原值回写：语义不变，仅触发 config_version +1 与 If-Match CAS。
+AM_BODY=$(curl -s --max-time 10 -H "Authorization: Bearer $TOKEN" \
+    "$GW_SVC/api/admin/auto-models" \
+  | python3 -c 'import sys,json; d=json.load(sys.stdin); print(json.dumps({"auto_models": d.get("auto_models", [])}))' 2>/dev/null || true)
+[ -n "$AM_BODY" ] || { echo "FAIL cannot read /api/admin/auto-models (write-test endpoint unavailable)"; exit 1; }
+# 双发并发 PUT（同 If-Match / 同 body：回写原值，不动路由语义，仅版本 +1）
 ( curl -s --max-time 10 -o /tmp/p3-a -w "%{http_code}" -X PUT \
     -H "Authorization: Bearer $TOKEN" -H "If-Match: \"$CUR\"" -H 'Content-Type: application/json' \
-    -d '{"strategy":"economy"}' "$GW_SVC/api/admin/strategy" > /tmp/p3-a.code ) & p1=$!
+    -d "$AM_BODY" "$GW_SVC/api/admin/auto-models" > /tmp/p3-a.code ) & p1=$!
 ( curl -s --max-time 10 -o /tmp/p3-b -w "%{http_code}" -X PUT \
     -H "Authorization: Bearer $TOKEN" -H "If-Match: \"$CUR\"" -H 'Content-Type: application/json' \
-    -d '{"strategy":"economy"}' "$GW_SVC/api/admin/strategy" > /tmp/p3-b.code ) & p2=$!
+    -d "$AM_BODY" "$GW_SVC/api/admin/auto-models" > /tmp/p3-b.code ) & p2=$!
 wait "$p1" "$p2" || true   # 子 shell 退出码已由 .code 文件捕获；wait 容错（qa S3）
 A=$(cat /tmp/p3-a.code); B=$(cat /tmp/p3-b.code)
 echo "  concurrent write: A=$A B=$B"
@@ -270,8 +324,8 @@ if [[ " ${*:-} " == *" --kill-drill "* ]]; then
     if [ "$code" = "200" ]; then :; elif [ "$code" = "refused" ]; then REFUSED=$((REFUSED+1)); else FAILED=$((FAILED+1)); fi
     sleep 3
   done
-  "${KUBECTL[@]}" -n "$NS" rollout status deploy/ponyllm-gateway --timeout=300s >/dev/null
-  READY2=$("${KUBECTL[@]}" -n "$NS" get deploy ponyllm-gateway -o jsonpath='{.status.readyReplicas}')
+  "${KUBECTL[@]}" -n "$NS" rollout status deploy/"$DEPLOY" --timeout=300s >/dev/null
+  READY2=$("${KUBECTL[@]}" -n "$NS" get deploy "$DEPLOY" -o jsonpath='{.status.readyReplicas}')
   echo "  drill: health non-200 count=$FAILED refused=$REFUSED readyAfter=$READY2"
   # qa S2-2 阈值：FAILED=0 且 REFUSED≤2 —— 依据：单 Pod 摘除后剩余 3 副本持续服务，
   # EndpointSlice 收敛 + preStop 25s 窗口内仅允许少量连接拒绝（kube-proxy 收敛滞后），

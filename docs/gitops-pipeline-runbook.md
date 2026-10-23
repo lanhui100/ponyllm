@@ -81,7 +81,7 @@
 | 4 | 部署清单 digest 与目标一致后 `set image` | `kubectl -n ponyllm set image deploy ponyllm-gateway ponyllm=<完整坐标>@<digest>` |
 | 5 | 滚动完成 | `kubectl -n ponyllm rollout status deploy ponyllm-gateway --timeout=300s` |
 | 6 | **运行镜像 == 目标 digest 复核**（sec S3-3，与清单对照） | `kubectl -n ponyllm get deploy ponyllm-gateway -o jsonpath='{.spec.template.spec.containers[0].image}'`（输出须含 `@<digest>`） |
-| 7 | verify 全量门禁 | `PONYLLM_ADMIN_TOKEN=<网关admin token> bash scripts/phase3-verify.sh --pod-ips` |
+| 7 | verify 全量门禁 | `PONYLLM_ADMIN_TOKEN=<网关admin token> bash scripts/phase3-verify.sh --pod-ips`（[6/7] 写测试端点 = `PUT /api/admin/auto-models` 原值回写；B019 起不再使用已移除的 `/api/admin/strategy`） |
 | 8 | kill-drill（单 Pod 摘除零中断） | `PONYLLM_ADMIN_TOKEN=<…> bash scripts/phase3-verify.sh --pod-ips --kill-drill` |
 | 9 | 观察基线记录（各 Pod 计数器起点 + 时间） | **靠 review**：记录到 24h 观察日志（verify 头部方法学：计数器随 Pod 重建归零，基线在 rollout/演练后重记录） |
 | 10 | 回滚 digest 预填（release-gate 已校验） | 回滚命令见 `deploy/ponyllm-phase2-rollback.md` R0'/R0/R1 |
