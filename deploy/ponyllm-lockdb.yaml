@@ -51,6 +51,15 @@ data:
       -c "REVOKE ALL ON DATABASE ponyllm_lock FROM PUBLIC; GRANT CONNECT ON DATABASE ponyllm_lock TO ponyllm_lock;"
     psql -v ON_ERROR_STOP=1 -U postgres -d ponyllm_lock \
       -c "REVOKE ALL ON SCHEMA public FROM PUBLIC;"
+    # B020 (2026-10-24)：PG15+ 默认撤销了 public schema 的 CREATE 权限，而应用角色
+    # ponyllm_lock 非 superuser/非 createdb，导致 cluster telemetry 的
+    # `CREATE TABLE IF NOT EXISTS telemetry_hourly_cluster` 权限不足（日志只显示
+    # tokio_postgres 的 Display "db error"，排查成本高）。
+    # 修法：为应用角色建同名 schema（role 的 search_path = "$user", public 会命中它），
+    # 由它作为 owner 在该 schema 内建表；public 保持不可写（最小权限不回退）。
+    psql -v ON_ERROR_STOP=1 -U postgres -d ponyllm_lock \
+      -c "CREATE SCHEMA IF NOT EXISTS ponyllm_lock AUTHORIZATION ponyllm_lock;" \
+      -c "GRANT USAGE, CREATE ON SCHEMA ponyllm_lock TO ponyllm_lock;"
 ---
 apiVersion: apps/v1
 kind: Deployment
