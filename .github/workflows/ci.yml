@@ -10,6 +10,19 @@ permissions:
   contents: read
 
 jobs:
+  script-gates:
+    name: Script & contract drift gates (offline)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # B019 左移：验收脚本引用的 API 端点 / Deployment 名必须与契约和清单一致。
+      # 纯静态检查（bash -n + web/openapi.json + deploy/ponyllm-deployment.yaml），无需集群。
+      - name: Verify script/contract drift (API paths & deployment names)
+        shell: bash
+        run: bash scripts/check-verify-contract-drift.sh
+
   test:
     name: Test on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
@@ -352,3 +365,28 @@ jobs:
           PONYLLM_BASE_URL: https://tokens.ponyjob.top
         run: |
           bash scripts/post-deploy-smoke.sh
+
+      # 发布后真链验收门禁（B019 配套）：多角色形态 / rollout 收敛 / 逐 Pod health /
+      # reload 稳定性 / 锁窗口。写测试 [6/7] 在 CI 中跳过（ci-deployer 无 live-config
+      # 写权限，且 CI 不应改生产配置）；该步由发布操作员在具权限终端补跑完整版。
+      - name: Post-deploy full verification (phase3-verify)
+        env:
+          PONYLLM_ADMIN_TOKEN: ${{ secrets.PONYLLM_API_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${PONYLLM_ADMIN_TOKEN:-}" ]; then
+            echo "::error::admin 凭据未配置（secrets.PONYLLM_API_KEY 为空）——发布后验收门禁 fail-closed"
+            exit 1
+          fi
+          code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 \
+            -H "Authorization: Bearer ${PONYLLM_ADMIN_TOKEN}" \
+            https://tokens.ponyjob.top/api/admin/overview || echo 000)
+          if [ "$code" != "200" ]; then
+            # 凭据仅 inference 作用域时不静默放行：跑 kube-only 收敛门禁并显式告警，
+            # 要求运维用 admin token 补跑完整验收。
+            echo "::warning::admin 面不可用（HTTP $code）：CI 降级为 kube-only 收敛门禁；请用 admin token 补跑 scripts/phase3-verify.sh"
+            bash tests/pre-flight/check-cluster-image-parity.sh
+            bash -c 'for d in $(kubectl -n ponyllm get deploy -l app.kubernetes.io/name=ponyllm,app.kubernetes.io/component=gateway -o jsonpath="{range .items[*]}{.metadata.name}{\"\n\"}{end}"); do kubectl -n ponyllm rollout status deploy/$d --timeout=300s; done'
+            exit 0
+          fi
+          bash scripts/phase3-verify.sh --pod-ips --skip-write-test

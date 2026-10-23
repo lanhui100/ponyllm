@@ -113,9 +113,15 @@
 ## 6. 发布门禁层级（sec S3-3）
 
 ```
-release-gate.sh（§6 机械门禁：tag/digest 格式+本地+远端存在性+清单一致+verify bash -n+回滚预填）
-  → runbook §3 人工检查表（1-10，逐条非零退出命令）
-    → phase3-verify.sh --pod-ips 全量（含 [6/7] 并发写 412 刻意写测试）
-      → kill-drill → 观察基线 → 24h 观察
+CI script-gates（每次 push/PR，离线：`scripts/check-verify-contract-drift.sh`——脚本 bash -n +
+  引用的 /api 路径 vs web/openapi.json + Deployment 名 vs deploy/ponyllm-deployment.yaml）
+  → release-gate.sh（§6 机械门禁：tag/digest 格式+本地+远端存在性+清单一致+verify bash -n+回滚预填）
+    → runbook §3 人工检查表（1-10，逐条非零退出命令）
+      → CI deploy job 自动执行：serialized-rollout + parity + post-deploy-smoke +
+        phase3-verify --pod-ips --skip-write-test（[6/7] 写测试由操作员补跑）
+        → 操作员本地：phase3-verify.sh（完整，含 [6/7] 并发写 412）
+          → kill-drill → 观察基线 → 24h 观察
 ```
-未通过 release-gate **禁止** push/上线；§3 任一条失败即中止并按 R0'/R0/R1 回滚。
+未通过 script-gates / release-gate **禁止** push/上线；§3 或 CI 门禁任一条失败即中止并按 R0'/R0/R1 回滚。
+CI 端凭据为 `secrets.PONYLLM_API_KEY`；若其仅为 inference 作用域，CI 会显式 `::warning::` 降级为
+kube-only 收敛门禁（不静默放行），并要求用 admin token 补跑 `scripts/phase3-verify.sh`。

@@ -20,10 +20,15 @@
 #   bash scripts/phase3-verify.sh               # 完整（除 kill-drill）
 #   bash scripts/phase3-verify.sh --pod-ips     # + 逐 Pod IP /health 与逐副本采集
 #   bash scripts/phase3-verify.sh --kill-drill  # + 杀单节点演练（明确授权才用）
+#   bash scripts/phase3-verify.sh --skip-write-test
+#       # 跳过 [6/7] 的 live-config 写测试（CI 的 scoped ci-deployer 无 secret 写权限；
+#       # 写测试由发布操作员本地执行，或给 runner 提权后再跑完整版）
 set -euo pipefail
 
 NS="${NS:-ponyllm}"
 TOKEN="${PONYLLM_ADMIN_TOKEN:-}"
+SKIP_WRITE_TEST=0
+case " ${*:-} " in *" --skip-write-test "*) SKIP_WRITE_TEST=1 ;; esac
 KUBECTL=(kubectl)
 [ -n "${KUBECTL_CTX:-}" ] && KUBECTL=(kubectl --context "$KUBECTL_CTX")
 
@@ -262,6 +267,20 @@ else
 fi
 
 echo "== [6/7] 并发双写 412（A2）（刻意写测试：写版本+1 并在测试后还原原始字节） =="
+SKIP_REASON=""
+if [ "$SKIP_WRITE_TEST" = "1" ]; then
+  SKIP_REASON="--skip-write-test"
+else
+  # scoped runner（如 CI 的 ci-deployer）通常无 live-config 写权限：显式降级为 SKIP，
+  # 而不是把 RBAC 403 误报成契约失败。
+  CANI=$("${KUBECTL[@]}" auth can-i patch secrets/ponyllm-live-config 2>/dev/null || echo "no")
+  [ "$CANI" = "yes" ] || SKIP_REASON="no RBAC to patch secret ponyllm-live-config (can-i=$CANI)"
+fi
+if [ -n "$SKIP_REASON" ]; then
+  echo "SKIP [6/7] concurrent double-write test: $SKIP_REASON"
+  echo "      → 由发布操作员在具权限终端补跑：PONYLLM_ADMIN_TOKEN=<admin> bash scripts/phase3-verify.sh"
+  SKIPPED_STEPS="[6/7]"
+else
 CUR=$(read_version)
 echo "  current config_version: $CUR"
 # 测试前备份 live-config 原始字节，测试后还原
@@ -312,6 +331,8 @@ else
   echo "OK restored live-config to version $CUR (data-only patch)" 
 fi
 
+fi  # end of [6/7]
+
 if [[ " ${*:-} " == *" --kill-drill "* ]]; then
   echo "== [7/7] 杀单节点可用性演练（--kill-drill，明确授权才跑） =="
   KILL_POD=$("${KUBECTL[@]}" -n "$NS" get po -l app.kubernetes.io/name=ponyllm,app.kubernetes.io/component=gateway \
@@ -336,7 +357,11 @@ if [[ " ${*:-} " == *" --kill-drill "* ]]; then
   echo "OK kill-drill: 服务持续可用（FAILED=0, REFUSED=$REFUSED ≤2）"
 fi
 
-echo "== phase3-verify PASS =="
+if [ -n "${SKIPPED_STEPS:-}" ]; then
+  echo "== phase3-verify PASS (with SKIPPED: ${SKIPPED_STEPS} — see note above) =="
+else
+  echo "== phase3-verify PASS =="
+fi
 
 cat <<'EOF'
 == 回滚（Phase 3 → 各基线）==

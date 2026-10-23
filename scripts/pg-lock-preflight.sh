@@ -21,19 +21,28 @@ set -euo pipefail
 NS="${NS:-ponyllm}"
 command -v kubectl >/dev/null || { echo "FAIL kubectl missing"; exit 1; }
 
-echo "== [1/4] PONYLLM_LOCK_SSLMODE must not be 'disable' in the deployment =="
-SSLMODE_ENV="$(kubectl -n "$NS" get deploy ponyllm-gateway -o jsonpath='{.spec.template.spec.containers[?(@.name=="ponyllm")].env[?(@.name=="PONYLLM_LOCK_SSLMODE")].value}' 2>/dev/null || true)"
-if [ -n "$SSLMODE_ENV" ] && [ "$SSLMODE_ENV" = "disable" ]; then
-  echo "FAIL PONYLLM_LOCK_SSLMODE=disable is forbidden in production (kubectl set env to require)"
-  exit 1
-fi
-if [ -z "$SSLMODE_ENV" ]; then
-  echo "WARN PONYLLM_LOCK_SSLMODE unset on the deployment — the gateway defaults to 'require' (verify-full)"
-else
-  echo "OK PONYLLM_LOCK_SSLMODE=$SSLMODE_ENV"
-fi
-LOCK_DB_URL_SET="$(kubectl -n "$NS" get deploy ponyllm-gateway -o jsonpath='{.spec.template.spec.containers[?(@.name=="ponyllm")].env[?(@.name=="PONYLLM_LOCK_DATABASE_URL")].valueFrom.secretKeyRef.name}' 2>/dev/null || true)"
-[ -n "$LOCK_DB_URL_SET" ] && echo "OK PONYLLM_LOCK_DATABASE_URL -> Secret $LOCK_DB_URL_SET" || { echo "FAIL PONYLLM_LOCK_DATABASE_URL is not set on the deployment"; exit 1; }
+echo "== [1/4] PONYLLM_LOCK_SSLMODE must not be 'disable' in every gateway deployment =="
+# 2026-10 起网关按节点角色拆为 4 个 Deployment（ponyllm-gateway-<role>）；
+# 旧版硬编码单一 `ponyllm-gateway` 会 NotFound，故按 label 逐个校验（B019 同类漂移）。
+GW_DEPLOYS="$(kubectl -n "$NS" get deploy \
+  -l app.kubernetes.io/name=ponyllm,app.kubernetes.io/component=gateway \
+  -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null || true)"
+[ -n "$GW_DEPLOYS" ] || { echo "FAIL no gateway deployments found (label app.kubernetes.io/name=ponyllm,app.kubernetes.io/component=gateway)"; exit 1; }
+for D in $GW_DEPLOYS; do
+  SSLMODE_ENV="$(kubectl -n "$NS" get deploy "$D" -o jsonpath='{.spec.template.spec.containers[?(@.name=="ponyllm")].env[?(@.name=="PONYLLM_LOCK_SSLMODE")].value}' 2>/dev/null || true)"
+  if [ -n "$SSLMODE_ENV" ] && [ "$SSLMODE_ENV" = "disable" ]; then
+    echo "FAIL $D: PONYLLM_LOCK_SSLMODE=disable is forbidden in production (kubectl set env to require)"
+    exit 1
+  fi
+  if [ -z "$SSLMODE_ENV" ]; then
+    echo "WARN $D: PONYLLM_LOCK_SSLMODE unset — the gateway defaults to 'require' (verify-full)"
+  else
+    echo "OK $D: PONYLLM_LOCK_SSLMODE=$SSLMODE_ENV"
+  fi
+  LOCK_DB_URL_SET="$(kubectl -n "$NS" get deploy "$D" -o jsonpath='{.spec.template.spec.containers[?(@.name=="ponyllm")].env[?(@.name=="PONYLLM_LOCK_DATABASE_URL")].valueFrom.secretKeyRef.name}' 2>/dev/null || true)"
+  [ -n "$LOCK_DB_URL_SET" ] || { echo "FAIL $D: PONYLLM_LOCK_DATABASE_URL is not set"; exit 1; }
+  echo "OK $D: PONYLLM_LOCK_DATABASE_URL -> Secret $LOCK_DB_URL_SET"
+done
 
 echo "== [2/4] Node wall-clock sync (rotated_at cross-replica clock dep) =="
 # Read-only per-node probe via `kubectl debug node` (ephemeral debugging
@@ -57,7 +66,7 @@ else
   echo "OK CA file present: $CAFILE"
 fi
 echo "Manual pod-side check (run after the gateway is on kubernetes backend):"
-echo "  kubectl -n $NS exec deploy/ponyllm-gateway -- sh -c 'psql \"\$PONYLLM_LOCK_DATABASE_URL?sslmode=require&sslrootcert=/etc/ponyllm-lock/ca.crt\" -c \"SELECT pg_try_advisory_lock(hashtext('\''ponyllm-antigravity-refresh'\''))\"'"
+echo "  kubectl -n $NS exec deploy/ponyllm-gateway-preprod -- sh -c 'psql \"\$PONYLLM_LOCK_DATABASE_URL?sslmode=require&sslrootcert=/etc/ponyllm-lock/ca.crt\" -c \"SELECT pg_try_advisory_lock(hashtext('\''ponyllm-antigravity-refresh'\''))\"'"
 echo "WARN 'psql' may be absent from the runtime image; the executable assertion is the gateway's"
 echo "     refresh_lock_acquired_total > 0 over time (and refresh_lock_error_total = 0)."
 
