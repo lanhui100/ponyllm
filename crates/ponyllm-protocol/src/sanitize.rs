@@ -9,13 +9,15 @@
 //! `max_output_tokens` or `thinking`. This module is the single choke point that
 //! decides which names and which sizes may cross that boundary.
 //!
-//! Contract (frozen, v4):
+//! Contract (frozen, v5):
 //! - `reserved_keys(target)` = the target's own explicit request fields
-//!   ∪ [`GLOBAL_CONTROL_KEYS`], compared case-insensitively;
-//! - [`sanitize_extra`] drops reserved names, caps the map at
-//!   [`MAX_EXTRA_ENTRIES`] entries and drops any single value whose serialized
-//!   form exceeds [`MAX_EXTRA_VALUE_BYTES`]; every other entry passes through
-//!   byte-for-byte.
+//!   ∪ [`GLOBAL_CONTROL_KEYS`], compared case-insensitively; any key containing
+//!   a non-ASCII byte is dropped outright (Unicode simple-fold aliases such as
+//!   `ſystem` / `ma\u{212A}x_tokens` must never alias a reserved field);
+//! - [`sanitize_extra`] additionally caps a key at [`MAX_EXTRA_KEY_BYTES`] and
+//!   an entry at `key.len() + serialized value len ≤ MAX_EXTRA_VALUE_BYTES`,
+//!   measured with an early-aborting bounded writer;
+//! - everything else passes through byte-for-byte.
 
 use std::collections::HashMap;
 
@@ -50,9 +52,6 @@ pub const GLOBAL_CONTROL_KEYS: &[&str] = &[
     "stop_sequences",
     "reasoning",
     "reasoning_effort",
-    "previous_response_id",
-    "conversation",
-    "prompt",
     "safety_identifier",
     "stream_options",
 ];
@@ -94,9 +93,6 @@ pub const RESERVED_CHAT: &[&str] = &[
     "output_config",
     "stop_sequences",
     "reasoning",
-    "previous_response_id",
-    "conversation",
-    "prompt",
     "safety_identifier",
 ];
 
@@ -122,9 +118,6 @@ pub const RESERVED_RESPONSES: &[&str] = &[
     "store",
     "output_config",
     "stop_sequences",
-    "previous_response_id",
-    "conversation",
-    "prompt",
     "safety_identifier",
     "stream_options",
 ];
@@ -152,9 +145,6 @@ pub const RESERVED_ANTHROPIC: &[&str] = &[
     "store",
     "max_output_tokens",
     "reasoning",
-    "previous_response_id",
-    "conversation",
-    "prompt",
     "safety_identifier",
     "stream_options",
 ];
@@ -164,6 +154,12 @@ pub const MAX_EXTRA_ENTRIES: usize = 64;
 
 /// Hard cap on a single `extra` value's serialized size, in bytes.
 pub const MAX_EXTRA_VALUE_BYTES: usize = 16 * 1024;
+
+/// Hard cap on a single `extra` key's length, in bytes.
+///
+/// Key bytes are attacker-controlled too: without this cap a multi-megabyte key
+/// carrying a 1-byte value would slip past a value-only budget.
+pub const MAX_EXTRA_KEY_BYTES: usize = 256;
 
 /// Reserved field names owned by `target`'s wire format.
 ///
@@ -178,25 +174,68 @@ pub fn reserved_keys(target: TargetProtocol) -> &'static [&'static str] {
     }
 }
 
-/// Whether `key` is a reserved name for `target` (case-insensitive).
+/// Whether `key` must be dropped for `target`.
+///
+/// Two rules, both fail-closed:
+/// 1. any key containing a non-ASCII byte is reserved — Unicode simple-fold
+///    aliases (`ſystem` U+017F, `ma\u{212A}x_tokens` U+212A KELVIN SIGN) fold
+///    onto real field names in upstream case-folding implementations, so no
+///    alias may cross the boundary at all (no folding, no aliasing);
+/// 2. otherwise the name is compared case-insensitively (ASCII only, which is
+///    now total because rule 1 removed every non-ASCII key).
 pub fn is_reserved_key(key: &str, target: TargetProtocol) -> bool {
+    if !key.is_ascii() {
+        return true;
+    }
     reserved_keys(target)
         .iter()
         .any(|reserved| reserved.eq_ignore_ascii_case(key))
 }
 
-/// Serialized byte length of a single `extra` value; `None` when it cannot be
-/// serialized (defensive: an unserializable value must be dropped, not panic).
-fn serialized_len(value: &Value) -> Option<usize> {
-    serde_json::to_vec(value).ok().map(|bytes| bytes.len())
+/// Counts written bytes and fails as soon as the budget is exceeded, so an
+/// oversized value is rejected *while* serializing — the full serialization is
+/// never materialized (a 32 MiB value must not cost a 32 MiB copy).
+struct BoundedCounter {
+    written: usize,
+    limit: usize,
+}
+
+impl std::io::Write for BoundedCounter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match self.written.checked_add(buf.len()) {
+            Some(total) if total <= self.limit => {
+                self.written = total;
+                Ok(buf.len())
+            }
+            _ => Err(std::io::Error::other("extra value exceeds byte budget")),
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Serialized byte length of a single `extra` value, measuring at most `budget`
+/// bytes; `None` when the value cannot be serialized or exceeds the budget.
+fn serialized_len_within(value: &Value, budget: usize) -> Option<usize> {
+    let mut counter = BoundedCounter {
+        written: 0,
+        limit: budget,
+    };
+    serde_json::to_writer(&mut counter, value).ok()?;
+    Some(counter.written)
 }
 
 /// Filters a flattened `extra` map down to the names `target` tolerates.
 ///
 /// Rules (all fail-closed, none panicking):
-/// - names reserved by `target` (case-insensitive) are dropped;
-/// - an entry whose value serializes to more than [`MAX_EXTRA_VALUE_BYTES`] is
-///   dropped, so one hostile payload cannot bloat the upstream request;
+/// - names reserved by `target` are dropped, and so is any non-ASCII key
+///   (`is_reserved_key`);
+/// - a key longer than [`MAX_EXTRA_KEY_BYTES`] is dropped;
+/// - an entry whose `key.len() + serialized value length` exceeds
+///   [`MAX_EXTRA_VALUE_BYTES`] is dropped, measured with an early-aborting
+///   bounded writer so no oversized serialization is ever materialized;
 /// - at most [`MAX_EXTRA_ENTRIES`] entries survive — the retained subset is
 ///   chosen deterministically by key order, so the same input always yields the
 ///   same output (idempotent and reproducible under retries/replay);
@@ -208,7 +247,11 @@ pub fn sanitize_extra(
     let mut kept: Vec<(String, Value)> = extra
         .into_iter()
         .filter(|(key, _)| !is_reserved_key(key, target))
-        .filter(|(_, value)| serialized_len(value).is_some_and(|len| len <= MAX_EXTRA_VALUE_BYTES))
+        .filter(|(key, _)| key.len() <= MAX_EXTRA_KEY_BYTES)
+        .filter(|(key, value)| {
+            let budget = MAX_EXTRA_VALUE_BYTES.saturating_sub(key.len());
+            serialized_len_within(value, budget).is_some()
+        })
         .collect();
     if kept.len() > MAX_EXTRA_ENTRIES {
         kept.sort_by(|left, right| left.0.cmp(&right.0));
@@ -280,6 +323,42 @@ mod tests {
         assert!(once.contains_key("x_keep"));
         let twice = sanitize_extra(once.clone(), TargetProtocol::Anthropic);
         assert_eq!(twice, once);
+    }
+
+    #[test]
+    fn non_ascii_keys_and_overlong_keys_are_dropped() {
+        let overlong = "k".repeat(MAX_EXTRA_KEY_BYTES + 1);
+        let out = sanitize_extra(
+            map(&[
+                ("\u{017F}ystem", json!("fold-alias")),
+                ("ma\u{212A}x_tokens", json!(9)),
+                ("x_ünicode", json!("non-ascii")),
+                (overlong.as_str(), json!(1)),
+                ("x_keep", json!(2)),
+            ]),
+            TargetProtocol::OpenAiChat,
+        );
+        assert_eq!(
+            out.len(),
+            1,
+            "only the ASCII, in-budget key survives: {out:?}"
+        );
+        assert_eq!(out.get("x_keep"), Some(&json!(2)));
+    }
+
+    #[test]
+    fn key_bytes_count_against_the_size_budget() {
+        let key = "a".repeat(200);
+        let kept = sanitize_extra(
+            map(&[(key.as_str(), json!("b".repeat(15000)))]),
+            TargetProtocol::OpenAiChat,
+        );
+        assert_eq!(kept.len(), 1, "key(200)+value(15000) is inside 16 KiB");
+        let dropped = sanitize_extra(
+            map(&[(key.as_str(), json!("c".repeat(16350)))]),
+            TargetProtocol::OpenAiChat,
+        );
+        assert!(dropped.is_empty(), "key bytes must count toward the budget");
     }
 
     #[test]

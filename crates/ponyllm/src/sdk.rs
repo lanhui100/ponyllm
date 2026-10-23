@@ -7,6 +7,7 @@ use ponyllm_core::{canonicalize_model_name, normalize_chat_completions_url, norm
 use ponyllm_protocol::anthropic::messages::{MessageRequest, MessageResponse};
 use ponyllm_protocol::openai::chat::{ChatCompletionRequest, ChatCompletionResponse};
 use ponyllm_protocol::openai::responses::{CreateResponseRequest, ResponseObject};
+use ponyllm_protocol::sanitize::{sanitize_extra, TargetProtocol};
 use ponyllm_protocol::translator::*;
 
 #[derive(Debug, Clone)]
@@ -167,7 +168,16 @@ impl PonyGateway {
                 Ok(chat_resp)
             }
             UpstreamProtocol::Chat => {
-                let body = serde_json::to_value(req)?;
+                // F2 (contract v5): the embedded SDK serializes same-protocol
+                // requests directly, so the flattened `extra` map must be
+                // sanitized here too — otherwise the HTTP gateway's reserved-key
+                // protection silently does not apply on this path.
+                let mut wire_body = req.clone();
+                wire_body.extra = sanitize_extra(
+                    std::mem::take(&mut wire_body.extra),
+                    TargetProtocol::OpenAiChat,
+                );
+                let body = serde_json::to_value(&wire_body)?;
                 let resp_val = executor.execute_json_request(&provider.chat_url(), &body).await?;
                 let resp: ChatCompletionResponse = serde_json::from_value(resp_val)?;
                 Ok(resp)
@@ -194,7 +204,14 @@ impl PonyGateway {
 
         match provider.native_protocol() {
             UpstreamProtocol::Anthropic => {
-                let body = serde_json::to_value(req)?;
+                // F2 (contract v5): same-protocol boundary — sanitize before the
+                // bare `to_value`, see the Chat branch above.
+                let mut wire_body = req.clone();
+                wire_body.extra = sanitize_extra(
+                    std::mem::take(&mut wire_body.extra),
+                    TargetProtocol::Anthropic,
+                );
+                let body = serde_json::to_value(&wire_body)?;
                 let resp_val = executor.execute_json_request(&provider.messages_url(), &body).await?;
                 let ant_resp: MessageResponse = serde_json::from_value(resp_val)?;
                 Ok(ant_resp)
@@ -253,7 +270,14 @@ impl PonyGateway {
                 Ok(resp_obj)
             }
             UpstreamProtocol::Responses => {
-                let body = serde_json::to_value(req)?;
+                // F2 (contract v5): same-protocol boundary — sanitize before the
+                // bare `to_value`, see the Chat branch above.
+                let mut wire_body = req.clone();
+                wire_body.extra = sanitize_extra(
+                    std::mem::take(&mut wire_body.extra),
+                    TargetProtocol::OpenAiResponses,
+                );
+                let body = serde_json::to_value(&wire_body)?;
                 let resp_val = executor.execute_json_request(&provider.responses_url(), &body).await?;
                 let resp: ResponseObject = serde_json::from_value(resp_val)?;
                 Ok(resp)
