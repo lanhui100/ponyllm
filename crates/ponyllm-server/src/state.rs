@@ -37,7 +37,7 @@ const TOKEN_FRESHNESS_WINDOW: std::time::Duration = std::time::Duration::from_se
 /// before a key is quarantined — the propagation-window buffer.
 const INVALID_GRANT_QUARANTINE_N: u32 = 3;
 
-/// 空字符串视为禁用；显式路径优先，随 `event_log_dir` 次之。
+/// 空字符串视为禁用；显式路径优先，环境变量次之，随 `event_log_dir` / 容器目录兜底。
 fn resolve_snapshot_path(config: &GatewayConfig) -> Option<std::path::PathBuf> {
     if let Some(p) = config.telemetry_snapshot_path.as_deref() {
         if p.trim().is_empty() {
@@ -45,10 +45,20 @@ fn resolve_snapshot_path(config: &GatewayConfig) -> Option<std::path::PathBuf> {
         }
         return Some(std::path::PathBuf::from(p));
     }
+    if let Ok(env_val) = std::env::var("PONYLLM_TELEMETRY_SNAPSHOT_PATH") {
+        let t = env_val.trim();
+        if !t.is_empty() {
+            return Some(std::path::PathBuf::from(t));
+        }
+    }
     if let Some(dir) = config.event_log_dir.as_deref() {
         if !dir.trim().is_empty() {
             return Some(std::path::PathBuf::from(dir).join("telemetry-snapshot.json"));
         }
+    }
+    let var_lib = std::path::Path::new("/var/lib/ponyllm");
+    if var_lib.is_dir() {
+        return Some(var_lib.join("telemetry-snapshot.json"));
     }
     None
 }

@@ -155,6 +155,13 @@ pub fn snapshot_path_for_config(
     event_log_dir: Option<&str>,
     config_path: Option<&Path>,
 ) -> Option<std::path::PathBuf> {
+    // 0. Environment variable has highest priority if set
+    if let Ok(env_val) = std::env::var("PONYLLM_TELEMETRY_SNAPSHOT_PATH") {
+        let t = env_val.trim();
+        if !t.is_empty() {
+            return Some(std::path::PathBuf::from(t));
+        }
+    }
     if let Some(p) = explicit {
         let t = p.trim();
         if !t.is_empty() {
@@ -174,6 +181,11 @@ pub fn snapshot_path_for_config(
             }
             return Some(std::path::PathBuf::from("telemetry-snapshot.json"));
         }
+    }
+    // Default fallback in containerized / standard environments: check /var/lib/ponyllm
+    let var_lib = std::path::Path::new("/var/lib/ponyllm");
+    if var_lib.is_dir() {
+        return Some(var_lib.join("telemetry-snapshot.json"));
     }
     None
 }

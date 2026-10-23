@@ -204,6 +204,8 @@ spec:
               value: /etc/ponyllm-lock/ca.crt
             - name: PONYLLM_LOCK_SSLMODE
               value: "require"
+            - name: PONYLLM_TELEMETRY_SNAPSHOT_PATH
+              value: "/var/lib/ponyllm/telemetry-snapshot.json"
             - name: PONYLLM_PROBE_ALLOWLIST
               value: "pproxy-host,pproxy-host.ponyllm,pproxy-host.ponyllm.svc,pproxy-host.ponyllm.svc.cluster.local,egress-home-direct,egress-home-direct.ponyllm,egress-home-direct.ponyllm.svc,egress-home-direct.ponyllm.svc.cluster.local,egress-home-dev,egress-home-dev.ponyllm,egress-home-dev.ponyllm.svc,egress-home-dev.ponyllm.svc.cluster.local,egress-home-pre,egress-home-pre.ponyllm,egress-home-pre.ponyllm.svc,egress-home-pre.ponyllm.svc.cluster.local,egress-home-tencent,egress-home-tencent.ponyllm,egress-home-tencent.ponyllm.svc,egress-home-tencent.ponyllm.svc.cluster.local,workbuddy-host,workbuddy-host.ponyllm,workbuddy-host.ponyllm.svc,workbuddy-host.ponyllm.svc.cluster.local,100.95.193.103,100.97.143.121,100.105.241.39,192.168.101.161"
             - name: PONYLLM_USER_TOKENS_ENABLED
@@ -371,6 +373,8 @@ spec:
               value: /etc/ponyllm-lock/ca.crt
             - name: PONYLLM_LOCK_SSLMODE
               value: "require"
+            - name: PONYLLM_TELEMETRY_SNAPSHOT_PATH
+              value: "/var/lib/ponyllm/telemetry-snapshot.json"
             - name: PONYLLM_PROBE_ALLOWLIST
               value: "pproxy-host,pproxy-host.ponyllm,pproxy-host.ponyllm.svc,pproxy-host.ponyllm.svc.cluster.local,egress-home-direct,egress-home-direct.ponyllm,egress-home-direct.ponyllm.svc,egress-home-direct.ponyllm.svc.cluster.local,egress-home-dev,egress-home-dev.ponyllm,egress-home-dev.ponyllm.svc,egress-home-dev.ponyllm.svc.cluster.local,egress-home-pre,egress-home-pre.ponyllm,egress-home-pre.ponyllm.svc,egress-home-pre.ponyllm.svc.cluster.local,egress-home-tencent,egress-home-tencent.ponyllm,egress-home-tencent.ponyllm.svc,egress-home-tencent.ponyllm.svc.cluster.local,workbuddy-host,workbuddy-host.ponyllm,workbuddy-host.ponyllm.svc,workbuddy-host.ponyllm.svc.cluster.local,100.95.193.103,100.97.143.121,100.105.241.39,192.168.101.161"
             - name: PONYLLM_USER_TOKENS_ENABLED
@@ -522,6 +526,8 @@ spec:
               value: /etc/ponyllm-lock/ca.crt
             - name: PONYLLM_LOCK_SSLMODE
               value: "require"
+            - name: PONYLLM_TELEMETRY_SNAPSHOT_PATH
+              value: "/var/lib/ponyllm/telemetry-snapshot.json"
             - name: PONYLLM_PROBE_ALLOWLIST
               value: "pproxy-host,pproxy-host.ponyllm,pproxy-host.ponyllm.svc,pproxy-host.ponyllm.svc.cluster.local,egress-home-direct,egress-home-direct.ponyllm,egress-home-direct.ponyllm.svc,egress-home-direct.ponyllm.svc.cluster.local,egress-home-dev,egress-home-dev.ponyllm,egress-home-dev.ponyllm.svc,egress-home-dev.ponyllm.svc.cluster.local,egress-home-pre,egress-home-pre.ponyllm,egress-home-pre.ponyllm.svc,egress-home-pre.ponyllm.svc.cluster.local,egress-home-tencent,egress-home-tencent.ponyllm,egress-home-tencent.ponyllm.svc,egress-home-tencent.ponyllm.svc.cluster.local,workbuddy-host,workbuddy-host.ponyllm,workbuddy-host.ponyllm.svc,workbuddy-host.ponyllm.svc.cluster.local,100.95.193.103,100.97.143.121,100.105.241.39,192.168.101.161"
             - name: PONYLLM_USER_TOKENS_ENABLED
@@ -674,6 +680,8 @@ spec:
               value: /etc/ponyllm-lock/ca.crt
             - name: PONYLLM_LOCK_SSLMODE
               value: "require"
+            - name: PONYLLM_TELEMETRY_SNAPSHOT_PATH
+              value: "/var/lib/ponyllm/telemetry-snapshot.json"
             - name: PONYLLM_PROBE_ALLOWLIST
               value: "pproxy-host,pproxy-host.ponyllm,pproxy-host.ponyllm.svc,pproxy-host.ponyllm.svc.cluster.local,egress-home-direct,egress-home-direct.ponyllm,egress-home-direct.ponyllm.svc,egress-home-direct.ponyllm.svc.cluster.local,egress-home-dev,egress-home-dev.ponyllm,egress-home-dev.ponyllm.svc,egress-home-dev.ponyllm.svc.cluster.local,egress-home-pre,egress-home-pre.ponyllm,egress-home-pre.ponyllm.svc,egress-home-pre.ponyllm.svc.cluster.local,egress-home-tencent,egress-home-tencent.ponyllm,egress-home-tencent.ponyllm.svc,egress-home-tencent.ponyllm.svc.cluster.local,workbuddy-host,workbuddy-host.ponyllm,workbuddy-host.ponyllm.svc,workbuddy-host.ponyllm.svc.cluster.local,100.95.193.103,100.97.143.121,100.105.241.39,192.168.101.161"
             - name: PONYLLM_USER_TOKENS_ENABLED
