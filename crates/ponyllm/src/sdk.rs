@@ -30,8 +30,6 @@ impl ProviderInfo {
             || trimmed.ends_with("/messages")
         {
             UpstreamProtocol::Anthropic
-        } else if trimmed.contains("chat.deepseek.com") {
-            UpstreamProtocol::DeepSeekWeb
         } else {
             UpstreamProtocol::Chat
         }
@@ -182,9 +180,6 @@ impl PonyGateway {
                 let resp: ChatCompletionResponse = serde_json::from_value(chat_val)?;
                 Ok(resp)
             }
-            UpstreamProtocol::DeepSeekWeb => Err(CoreError::Internal(
-                "deepseek-web protocol requires the gateway SSE streaming path (PoW + /api/v0/chat/completion)".to_string(),
-            )),
         }
     }
 
@@ -228,9 +223,6 @@ impl PonyGateway {
                 let resp: MessageResponse = serde_json::from_value(msg_val)?;
                 Ok(resp)
             }
-            UpstreamProtocol::DeepSeekWeb => Err(CoreError::Internal(
-                "deepseek-web protocol requires the gateway SSE streaming path (PoW + /api/v0/chat/completion)".to_string(),
-            )),
         }
     }
 
@@ -270,9 +262,6 @@ impl PonyGateway {
             UpstreamProtocol::Antigravity => {
                 Err(CoreError::Internal("Antigravity protocol does not support Responses API".to_string()))
             }
-            UpstreamProtocol::DeepSeekWeb => Err(CoreError::Internal(
-                "deepseek-web protocol requires the gateway SSE streaming path (PoW + /api/v0/chat/completion)".to_string(),
-            )),
         }
     }
 }

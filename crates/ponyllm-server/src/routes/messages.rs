@@ -566,108 +566,6 @@ pub async fn handle_messages(
                 );
                 continue;
             }
-            ponyllm_core::pool::UpstreamProtocol::DeepSeekWeb => {
-                // Wave-10 R-VIS-17 (Lead ruling): deepseek-web IS served on
-                // /v1/messages — translate the Anthropic request to Chat,
-                // then to the deepseek-web completion body (prompt + ordered
-                // images), same bridge as /v1/chat/completions.
-                let url = target.deepseek_web_completion_url();
-                let mut chat_req = match anthropic_to_chat_request(&target_req) {
-                    Ok(cr) => cr,
-                    Err(e) => {
-                        last_error =
-                            format!("Translation error for {}: {}", target.provider_name, e);
-                        continue;
-                    }
-                };
-                if effective_thinking.is_active() {
-                    chat_req.reasoning_effort = Some(effective_thinking);
-                } else if requested_thinking == Some(ponyllm_protocol::common::ReasoningEffort::Off)
-                {
-                    chat_req.reasoning_effort =
-                        Some(ponyllm_protocol::common::ReasoningEffort::Off);
-                } else {
-                    chat_req.reasoning_effort = None;
-                    chat_req.extra.remove("reasoning_effort");
-                    chat_req.extra.remove("thinking");
-                }
-                // Wave-11 (R-MT-01/02 + R-TOOL-02/03/06): reuse the shared
-                // deepseek-web prompt builder — deterministic role template
-                // (`[system]/[user]/[assistant]/[tool:<name>]`), tool schema +
-                // convention injection, ordered image extraction. Same
-                // semantics as /v1/chat/completions (messages→chat translation
-                // already produced `chat_req` with typed messages + tools).
-                let parts = match crate::routes::chat::extract_web_prompt_parts(&chat_req) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        // R-TOOL-FAIL-01/04/05 + R-TOOL-10: explicit 4xx
-                        // (Anthropic envelope), never silent / never 5xx.
-                        let (msg, msg_code) = match &e {
-                            crate::routes::chat::WebPromptError::UnmatchedToolCallId(id) => (
-                                format!(
-                                    "role:tool message references unknown tool_call_id '{id}' (R-TOOL-FAIL-05)"
-                                ),
-                                "unmatched_tool_call_id",
-                            ),
-                            crate::routes::chat::WebPromptError::UnknownFunction(n) => (
-                                format!(
-                                    "tool_choice references undeclared function '{n}' (R-TOOL-FAIL-04)"
-                                ),
-                                "unknown_function",
-                            ),
-                            _ => (format!("{}", e), "tool_emulation_disabled"),
-                        };
-                        return crate::extractors::render_anthropic_error(
-                            StatusCode::BAD_REQUEST,
-                            "invalid_request_error",
-                            &format!("{} ({})", msg, msg_code),
-                        );
-                    }
-                };
-                let prompt = parts.text;
-                let images = parts.images;
-                let mut body_obj = serde_json::json!({
-                    "chat_session_id": "",
-                    "parent_message_id": null,
-                    "model_type": target.physical_model,
-                    "prompt": prompt,
-                    "ref_file_ids": [],
-                    "thinking_enabled": effective_thinking.is_active()
-                        || requested_thinking != Some(ponyllm_protocol::common::ReasoningEffort::Off),
-                    "search_enabled": false,
-                    "source": "default",
-                    "action": null,
-                    "preempt": false,
-                });
-                if !images.is_empty() {
-                    let wire: Vec<serde_json::Value> = images
-                        .iter()
-                        .map(|img| match img {
-                            crate::routes::chat::WebImageRef::ImageUrl(o) => {
-                                serde_json::json!({ "kind": "image_url", "url": o.url })
-                            }
-                            crate::routes::chat::WebImageRef::File(f) => {
-                                let mut m = serde_json::Map::new();
-                                m.insert("kind".into(), "file".into());
-                                if let Some(id) = &f.file_id {
-                                    m.insert("file_id".into(), serde_json::Value::String(id.clone()));
-                                }
-                                if let Some(u) = &f.file_url {
-                                    m.insert("file_url".into(), serde_json::Value::String(u.clone()));
-                                }
-                                if let Some(n) = &f.filename {
-                                    m.insert("filename".into(), serde_json::Value::String(n.clone()));
-                                }
-                                serde_json::Value::Object(m)
-                            }
-                        })
-                        .collect();
-                    if let Some(obj) = body_obj.as_object_mut() {
-                        obj.insert("__web_images".to_string(), serde_json::Value::Array(wire));
-                    }
-                }
-                (url, body_obj)
-            }
         };
 
         // VULN-07/F6: refuse to dial upstream URLs that resolve (or rebind)
@@ -729,9 +627,6 @@ pub async fn handle_messages(
         let executor = UpstreamExecutor::with_client(pool.clone(), http_client, max_retries)
             .with_downstream_headers(&headers)
             .with_opencode_zen(is_opencode_zen_target(&target.provider_name, &target_url))
-            .with_deepseek_web(
-                target.upstream_protocol == ponyllm_core::pool::UpstreamProtocol::DeepSeekWeb,
-            )
             .with_rate_limits(rate_limits)
             .with_ttfb_timeout(ttfb_timeout)
             .with_egress(egress_pool.clone(), egress_clients.clone())
@@ -815,10 +710,6 @@ pub async fn handle_messages(
                 )
                 .with_downstream_headers(&headers)
                 .with_opencode_zen(is_opencode_zen_target(&target.provider_name, &target_url))
-                .with_deepseek_web(
-                    target.upstream_protocol
-                        == ponyllm_core::pool::UpstreamProtocol::DeepSeekWeb,
-                )
                 .with_rate_limits(rate_limits)
                 .with_ttfb_timeout(if stream_attempt == 1 {
                     // First attempt keeps the configured TTFB verbatim
@@ -1157,25 +1048,6 @@ pub async fn handle_messages(
                                     "invalid_request_error",
                                     "Use /v1/systemone for systemone models",
                                 );
-                            }
-                            ponyllm_core::pool::UpstreamProtocol::DeepSeekWeb => {
-                                // Wave-10 R-VIS-17: deepseek-web served on
-                                // /v1/messages — deepseek-web SSE → OpenAI
-                                // chunks → Anthropic SSE events (same bridge
-                                // as chat, then Anthropic-format re-wrap).
-                                let openai_chunks = crate::routes::chat::deepseek_web_sse_to_openai_stream(
-                                    final_raw_stream,
-                                    &target.physical_model,
-                                    crate::routes::chat::web_tool_mode_for_anthropic(
-                                        &target_req,
-                                    ),
-                                );
-                                let stream = openai_sse_to_anthropic_stream(
-                                    openai_chunks,
-                                    &target.physical_model,
-                                );
-                                let monitored = wrap_telemetry_stream(stream, failure_ctx);
-                                axum::body::Body::from_stream(monitored)
                             }
                         };
 
@@ -1520,48 +1392,6 @@ pub async fn handle_messages(
                     }
                     Err(e) => (Err(e), None),
                 }
-            } else if target.upstream_protocol
-                == ponyllm_core::pool::UpstreamProtocol::DeepSeekWeb
-            {
-                // Wave-10 R-VIS-17: deepseek-web completion is SSE-only; a
-                // downstream non-streaming /v1/messages request forces the
-                // upstream SSE stream, translates deepseek-web chunks to
-                // OpenAI chat chunks, aggregates to OpenAI JSON, then the
-                // projection below converts to an Anthropic response.
-                match executor
-                    .execute_stream_request_with_timing_and_key(&target_url, &req_val)
-                    .await
-                {
-                    Ok((resp, _instant, kid)) => {
-                        let raw_stream = resp.bytes_stream();
-                        let translated = crate::routes::chat::deepseek_web_sse_to_openai_stream(
-                            raw_stream,
-                            &target.physical_model,
-                            crate::routes::chat::web_tool_mode_for_anthropic(
-                                &target_req,
-                            ),
-                        );
-                        let collected =
-                            crate::streaming::collect_chat_sse_to_json(translated).await;
-                        match collected {
-                            Ok(v) => (Ok(v), Some(kid)),
-                            Err(e) => {
-                                tracing::warn!(
-                                    provider = %target.provider_name,
-                                    error = %e,
-                                    "deepseek-web upstream stream collection failed"
-                                );
-                                (
-                                    Err(crate::routes::chat::deepseek_web_collect_error_to_core(
-                                        e,
-                                    )),
-                                    Some(kid),
-                                )
-                            }
-                        }
-                    }
-                    Err(e) => (Err(e), None),
-                }
             } else {
                 match executor
                     .execute_json_request_with_key(&target_url, &req_val)
@@ -1663,30 +1493,6 @@ pub async fn handle_messages(
                                     .to_string();
                             continue;
                         }
-                        ponyllm_core::pool::UpstreamProtocol::DeepSeekWeb => {
-                            // Wave-10 R-VIS-17: the collected value is an
-                            // OpenAI chat-completion JSON (deepseek-web SSE was
-                            // translated + aggregated above); project it to an
-                            // Anthropic response exactly like the Chat branch.
-                            let chat_resp: ChatCompletionResponse =
-                                match serde_json::from_value(resp_val) {
-                                    Ok(cr) => cr,
-                                    Err(e) => {
-                                        last_error = format!(
-                                            "Invalid deepseek-web translated response from {}: {}",
-                                            target.provider_name, e
-                                        );
-                                        continue;
-                                    }
-                                };
-                            match chat_to_anthropic_response(&chat_resp) {
-                                Ok(ar) => ar,
-                                Err(e) => {
-                                    last_error = format!("Translation error: {}", e);
-                                    continue;
-                                }
-                            }
-                        }
                     };
 
                     // Model Echo Rule: Strictly echo requested model name in response body
@@ -1779,19 +1585,6 @@ pub async fn handle_messages(
                     );
                     last_kind = err.kind();
 
-                    // Wave-11 (R-TOOL-FAIL-02/04/05): CLIENT/contract errors
-                    // terminate immediately with an explicit 4xx — never
-                    // retried / failed over / cooled. Anthropic envelope.
-                    if matches!(
-                        last_kind,
-                        ponyllm_core::error::GatewayErrorKind::ClientBadRequest
-                    ) {
-                        return crate::extractors::project_anthropic_error(
-                            &last_kind,
-                            &err.to_string(),
-                        );
-                    }
-
                     // Auto resilience: if model failed with ModelNotFound or 404/400 model error, trigger model circuit breaker & PonySentry report
                     if parsed.is_auto
                         && matches!(
@@ -1861,14 +1654,11 @@ pub async fn handle_messages(
         &request_id,
     );
 
-    // PonySentry 埋点上报网关耗尽/失败事件（过滤下游客户端 4xx/invalid_request_error 参数错误，
-    // 以及上游配额/限流/瞬态网络故障；瞬态故障走指标与告警而不创建 issue）
+    // PonySentry 埋点上报网关耗尽/失败事件（过滤下游客户端 4xx/invalid_request_error 参数错误）
     let is_client_bad_request = last_error.contains("invalid_request_error")
         || last_error.contains("400 Bad Request")
         || last_error.contains("Duplicate function_call_output");
-    if !is_client_bad_request
-        && crate::routes::should_report_sentry_exhaustion(&last_kind, &last_error)
-    {
+    if !is_client_bad_request {
         let mut tags = std::collections::HashMap::new();
         tags.insert("requested_model".to_string(), requested_raw_model.clone());
         tags.insert("route".to_string(), "v1/messages".to_string());

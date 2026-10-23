@@ -22,8 +22,6 @@
 
 ## 完成
 
-- **deepseek-web token 获取机制 REA**（2026-10-23）→ 已完成：token 由 `POST /api/v0/users/login_by_mobile_sms` 签发（请求体 AES-CBC+RSA-OAEP 加密 + guest PoW 头）；短信发送 `create_sms_verification_code` 服务端强制人机验证（无 captcha 实测 `biz_code=2`），故全自动不可行，合规上限为人类在环登录。**已实现并真实登录成功**：`scripts/deepseek_web_login.py`（短信码人工输入 → token → `--verify` 禁言门 + create_chat_session），26 项单测绿；真实链路 `biz_code=1`、token 已签发、session 创建成功。但账号随后被上游禁言（`biz_code=5`，`mute_until=2026-10-26 07:30:42`），chat 验收被阻断。ADR：`.agents/notes/implemented/process/2026-10-23-deepseek-web-token-acquisition-rea.md`、`2026-10-23-deepseek-web-mute-risk.md`；复现：`python3 scripts/deepseek-web-token-rea-probe.py`（exit 0）、`python3 scripts/deepseek_web_login.py --status --token-file <file>`（禁言 exit 14）；会话内证据：`.dev-team/contracts/wave-13-deepseek-web-{token-rea-evidence,mute-rea}.md`。
-
 - **B003**（2026-10-17）`/v1/models` 容量字段 → 已实施：列表与单模型详情新增 `context_window` /
   `max_output`（13 键），每模型按 `canonicalize_model_name` 同名组（default_model ∪ models 的
   `get_model_spec`）取分项 max，别名/多段名/gemini 变体不回落默认 ModelSpec，auto 取全局 max；
@@ -36,20 +34,3 @@
   热重载移植 usage tracker、schema v3 池级跨账号跨周期持久化累计基准 + benchmark 端点 + 前端接入。
 - **统一账户额度计量内核**（2026-09-30，本轮）：短窗计量 + 持久化迁移 + rate_limits 配置面
   + 调度消费 + 透明等待。ADR: `.agents/notes/implemented/architecture/2026-09-30-unified-quota-metering-governance-kernel.md`
-
-## DeepSeek Web Provider（deepseek-web）— waves 9–12 已交付（2026-10-22/23）
-
-- **wave-9** chat.deepseek.com 合规接入：PoW（DeepSeekHashV1 实测真值：prefix=salt_expireAt、23 轮 Keccak）、会话/SSE/翻译、错误映射、合规边界。
-- **wave-10** 图片输入桥接：OpenAI `image_url`/Anthropic `type:image` → SSRF-safe 上传 → `ref_file_ids`；SSRF 零外发；`/v1/messages` 支持 deepseek-web。
-- **wave-11** 工具调用模拟 + 多轮角色：`[system]/[user]/[assistant]/[tool:<name>]`；schema 注入 → `tool_calls`/`tool_use`；失败显式化（禁静默）。
-- **wave-12** 思考系统化：开关四来源统一、effort 映射、history `reasoning_content` 注入（≤4KB 尾部截断）、非泄漏/流式顺序。
-- **生产**：4 节点已滚动部署（wave-12 镜像 `sha256:d97098cdbf2b`）；`dompurify 3.4.17` 安全升级。
-- **文档**：ADR `.agents/notes/implemented/architecture/2026-10-22-deepseek-web-{provider,waves-10-12}.md`；运行手册 `docs/deepseek-web-provider.md`；README 挂载示例。
-- **验收**：R-VIS 23、R-MT/TOOL 28、R-THINK 14 全绿（`--test-threads=4`）；真实 E2E（识图 Red、工具循环、thinking 开关）本地+生产通过。
-
-## 待办（新会话 REA 主题）
-
-- **B005** [P1] deepseek-web 风控与官方 API 迁移评估：网页版反代/自动化 + 破限提示词触发账号级 3 天禁言（已实测）；换账号不解决。目标：把自动化/生产流量迁到官方 `deepseek` provider（api.deepseek.com），网页 token 仅保留人工低频通道；wave-11/12 对抗验收改走 mock 或官方 API；评估 provider 长期保留价值。归因 REA：`.dev-team/contracts/wave-13-deepseek-web-mute-rea.md`；ADR：`.agents/notes/implemented/process/2026-10-23-deepseek-web-mute-risk.md`。
-- **B004** [P2] 可选：deepseek-web 浏览器辅助登录脚本（Playwright 打开 `/sign_in`，人工完成验证码与短信码后读取 `localStorage["userToken"]`；不代解验证码、不自动发短信）。触发条件：手工复制 token 变频繁时。
-- **生产 thinking 专项验收**：需有效 token（旧 token 已失效 40003）后跑 `docs/deepseek-web-provider.md §4` 验证命令。
-- 可选：文档附件（非图片 file_id 桥接）；`expert` 上游启用后收敛别名。

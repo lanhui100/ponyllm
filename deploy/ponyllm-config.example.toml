@@ -130,32 +130,3 @@ default_protocol = "systemone"
 #   SameSite=Strict cookie，管理凭证不再常驻前端 sessionStorage（配合 XSS 加固断链）。
 # 多副本注意：会话表为 per-pod 内存（上限 4096 LRU），replica 间不共享、重启即失效。
 # 也可用环境变量在启动时覆盖：PONYLLM_ADMIN_SESSION_ENABLED=1 / PONYLLM_ADMIN_SESSION_TTL_SECS=<n>。
-
-# deepseek-web（chat.deepseek.com 网页版，wave-9/10）：key = 用户自持 web 登录态 token
-# （只进 live secret；PoW challenge/solve 由网关自动完成）。
-# 图片输入桥接（wave-10 R-VIS-03/19）：input_types 声明 image —— 网关把下游
-# image_url（base64 data URI / http(s) URL）经 SSRF 防护抓取/解码 → 上传 →
-# ref_file_ids 注入 → completion。token 占位；真值只进 live secret。
-# [providers.deepseek-web]
-# base_url = "https://chat.deepseek.com"
-# default_model = "deepseek-v4-flash"
-# strategy = "priority"
-# billing_mode = "free"
-# input_price = 0.0
-# cached_price = 0.0
-# output_price = 0.0
-# default_protocol = "deepseek-web"
-# models = ["deepseek-v4-flash"]
-#
-# [[providers.deepseek-web.model_configs]]
-# name = "deepseek-v4-flash"
-# tier = "S"
-# context_window = "128K"
-# max_output = "32K"
-# input_types = ["text", "image"]
-# output_types = ["text"]
-#
-# 模型别名收敛（wave-10 R-VIS-20）：生产曾配置 models=["default","expert"]，
-# 服务端实测 expert.enabled=false / switchable=false（expert 实落 default）。
-# 未启用别名不得静默落 default —— 只声明服务端真实可用的模型名；expert
-# 如仍需保留须标注不可用并让请求显式失败（不静默回退）。

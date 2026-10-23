@@ -485,13 +485,6 @@ pub async fn handle_responses(
                 );
                 continue;
             }
-            ponyllm_core::pool::UpstreamProtocol::DeepSeekWeb => {
-                last_error = format!(
-                    "deepseek-web protocol cannot be served by responses endpoint for {}",
-                    provider_name
-                );
-                continue;
-            }
         };
 
         // VULN-07/F6: refuse to dial upstream URLs that resolve (or rebind)
@@ -633,14 +626,6 @@ pub async fn handle_responses(
                                 "invalid_request_error",
                                 "protocol_mismatch",
                                 "Use /v1/systemone for systemone models",
-                            );
-                        }
-                        ponyllm_core::pool::UpstreamProtocol::DeepSeekWeb => {
-                            return crate::extractors::render_openai_error(
-                                StatusCode::BAD_REQUEST,
-                                "invalid_request_error",
-                                "protocol_mismatch",
-                                "deepseek-web models must be served through /v1/chat/completions",
                             );
                         }
                     };
@@ -1051,7 +1036,6 @@ pub async fn handle_responses(
                         }
                     }
                     ponyllm_core::pool::UpstreamProtocol::Systemone => resp_val,
-                    ponyllm_core::pool::UpstreamProtocol::DeepSeekWeb => resp_val,
                 };
                 let latency = start_time.elapsed();
                 let (prompt_tokens, completion_tokens, cached_tokens) =

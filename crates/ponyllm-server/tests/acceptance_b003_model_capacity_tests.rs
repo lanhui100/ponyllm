@@ -203,10 +203,7 @@ fn legacy_ids(state: &AppState) -> Vec<String> {
         .collect()
 }
 
-/// Contract §5.1 + wave-10 superset amendment (Lead ruling): the frozen 13
-/// keys, in order (preserve_order is workspace-wide), extended with the
-/// additive `input_types` / `output_types` capability keys (R-VIS-19). See
-/// `.agents/notes/implemented/feature/2026-10-17-b003-model-capacity-fields.md`.
+/// Contract §5.1 — the frozen 13 keys, in order (preserve_order is workspace-wide).
 fn expected_model_keys() -> Vec<String> {
     [
         "id",
@@ -222,8 +219,6 @@ fn expected_model_keys() -> Vec<String> {
         "parent",
         "context_window",
         "max_output",
-        "input_types",
-        "output_types",
     ]
     .iter()
     .map(|k| k.to_string())
@@ -267,15 +262,11 @@ async fn get_json(addr: std::net::SocketAddr, path: &str) -> (u16, Value) {
 // CAP — structure / capacity / order (§9.1)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// CAP-01 — `ListedModel` is a module-level `pub` struct with the six frozen
-/// fields / types (§2) plus the wave-10 additive `input_types`/`output_types`
-/// (Lead-ruled superset amendment, see
-/// `.agents/notes/implemented/feature/2026-10-17-b003-model-capacity-fields.md`).
-/// Constructed field-by-field at compile time.
+/// CAP-01 — `ListedModel` is a module-level `pub` struct with exactly the six
+/// frozen fields / types (§2). Constructed field-by-field at compile time.
 #[test]
 fn cap_01_listed_model_struct_shape() {
-    // Compile-time shape proof: field names and types must match §2 + the
-    // wave-10 superset exactly.
+    // Compile-time shape proof: field names and types must match §2 exactly.
     let model = ListedModel {
         id: "auto".to_string(),
         provider: "ponyllm".to_string(),
@@ -283,8 +274,6 @@ fn cap_01_listed_model_struct_shape() {
         protocol: "auto".to_string(),
         context_window: 1u64,
         max_output: 1u64,
-        input_types: vec!["text".to_string()],
-        output_types: vec!["text".to_string()],
     };
     let _: &String = &model.id;
     let _: &String = &model.provider;
@@ -292,8 +281,6 @@ fn cap_01_listed_model_struct_shape() {
     let _: &String = &model.protocol;
     let _: u64 = model.context_window;
     let _: u64 = model.max_output;
-    let _: &Vec<String> = &model.input_types;
-    let _: &Vec<String> = &model.output_types;
 
     fn requires_eq<T: Eq>() {}
     requires_eq::<ListedModel>();

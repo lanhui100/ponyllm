@@ -275,68 +275,9 @@ pub struct FunctionDefinition {
 pub enum ToolChoice {
     Mode(String),
     Specific {
-        // Wave-11 R-TOOL-06 (contract-frozen shape): the OpenAI tool_choice
-        // function form may omit `type` (`{"function":{"name":"<n>"}}`) and
-        // still must deserialize; default the type to "function" so the
-        // shape is accepted (round-trip keeps semantic equivalence).
-        #[serde(default = "default_tool_choice_type")]
         r#type: String,
         function: SpecificFunctionName,
     },
-}
-
-/// Default `tool_choice` type for the function-specific form (R-TOOL-06):
-/// `{"function":{"name":...}}` without an explicit `type` defaults to
-/// `"function"`.
-fn default_tool_choice_type() -> String {
-    "function".to_string()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// R-TOOL-06 (wave-11): the contract-frozen `{"function":{"name":...}}`
-    /// shape (no `type`) must deserialize; both explicit and omitted `type`
-    /// forms are accepted, and the omitted one defaults to "function".
-    #[test]
-    fn tool_choice_specific_accepts_omitted_type() {
-        // Omitted `type` → default "function" (R-TOOL-06 frozen shape).
-        let no_type: ToolChoice = serde_json::from_value(serde_json::json!({
-            "function": {"name": "get_weather"}
-        }))
-        .expect("tool_choice without type must parse");
-        match &no_type {
-            ToolChoice::Specific { r#type, function } => {
-                assert_eq!(r#type, "function", "omitted type defaults to function");
-                assert_eq!(function.name, "get_weather");
-            }
-            other => panic!("expected Specific variant, got {other:?}"),
-        }
-        // Round-trip: re-serializing keeps the semantic shape.
-        let re: serde_json::Value =
-            serde_json::to_value(&no_type).expect("reserialize must succeed");
-        assert_eq!(re["type"], "function");
-        assert_eq!(re["function"]["name"], "get_weather");
-
-        // Explicit `type` form unchanged.
-        let with_type: ToolChoice = serde_json::from_value(serde_json::json!({
-            "type": "function",
-            "function": {"name": "get_weather"}
-        }))
-        .expect("tool_choice with type must parse");
-        assert!(matches!(
-            with_type,
-            ToolChoice::Specific { r#type, .. } if r#type == "function"
-        ));
-
-        // Mode strings unchanged.
-        for m in ["auto", "none", "required"] {
-            let mode: ToolChoice = serde_json::from_value(serde_json::json!(m))
-                .unwrap_or_else(|_| panic!("mode {m} must parse"));
-            assert!(matches!(mode, ToolChoice::Mode(mm) if mm == m));
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
