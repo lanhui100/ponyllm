@@ -89,6 +89,12 @@ fn antigravity_executor() -> UpstreamExecutor {
 }
 
 async fn observe_request(client_request_id: &str) -> Observed {
+    observe_raw_request(json!(client_request_id)).await
+}
+
+/// Same scaffolding, but the client `requestId` may be any JSON shape
+/// (v6c: non-string values are illegal and must be replaced).
+async fn observe_raw_request(client_request_id: Value) -> Observed {
     let (endpoint, seen) = spawn_upstream_capture().await;
     let executor = antigravity_executor();
     let body = json!({
@@ -209,4 +215,68 @@ async fn v6_fallback_client_bounds_connect_wait() {
         err.is_connect() || err.is_timeout() || err.is_request(),
         "v6: expected a transport-level error from a black-holed target, got {err:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// 4b. v6c — a NON-STRING requestId is illegal as well
+// ---------------------------------------------------------------------------
+
+/// v6c behavioural contract: any non-string `requestId` (number / null /
+/// boolean / array / object) is illegal → the gateway replaces it in the HEADER
+/// **and** in the BODY with the same generated `agent/…/traj-default/1` value;
+/// the client's raw value must not survive anywhere.
+#[tokio::test]
+async fn v6c_non_string_request_id_is_replaced_in_header_and_body() {
+    for client_value in [json!(12345), json!(null), json!(true), json!(["a"])] {
+        let observed = observe_raw_request(client_value.clone()).await;
+        let header = observed.header_request_id.clone().unwrap_or_else(|| {
+            panic!(
+                "v6c: gateway must always send a requestId header (client value: {client_value})"
+            )
+        });
+        let body_id = observed.body.get("requestId").unwrap_or_else(|| {
+            panic!(
+                "v6c: upstream body must carry a requestId (client value {client_value}, body = {})",
+                observed.body
+            )
+        });
+
+        // The shared value is the generated canonical form.
+        assert!(
+            header.starts_with("agent/") && header.contains("/traj-default/1"),
+            "v6c: a non-string client requestId must be replaced by the gateway shape, got header '{header}' (client value: {client_value})"
+        );
+        assert!(
+            header.chars().all(|c| REQUEST_ID_ALLOWED.contains(c)),
+            "v6c: the generated requestId must stay inside the accepted charset, got '{header}'"
+        );
+
+        // Header and body carry the SAME generated value …
+        assert!(
+            body_id.is_string(),
+            "v6c: the body requestId must be rewritten to a string (client value: {client_value}), got {body_id}"
+        );
+        assert_eq!(
+            body_id.as_str().unwrap_or_default(),
+            header,
+            "v6c: header and body must carry the same generated requestId (client value: {client_value})"
+        );
+
+        // … and the client's raw value survives nowhere.
+        assert_ne!(
+            body_id,
+            &client_value,
+            "v6c: the client's non-string requestId must not survive in the body (client value: {client_value})"
+        );
+        let body_text = observed.body.to_string();
+        let client_text = client_value.to_string();
+        assert!(
+            !body_text.contains(&client_text),
+            "v6c: the client's raw value {client_text} must not appear in the upstream body; body = {body_text}"
+        );
+        assert_ne!(
+            header, client_text,
+            "v6c: the client's raw value {client_text} must not appear in the requestId header"
+        );
+    }
 }
