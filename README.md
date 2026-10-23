@@ -68,6 +68,10 @@ ponyllm init
 ponyllm provider list
 # 挂载 DeepSeek（三协议合一：chat/responses 走 base-url，messages 走独立路径）
 ponyllm provider add deepseek --base-url https://api.deepseek.com --model deepseek-v4-flash --strategy priority --messages-url https://api.deepseek.com/anthropic
+# 挂载 DeepSeek Web（chat.deepseek.com 网页版登录态；key = 用户 web token，非 sk-* / 非 cookie）
+ponyllm provider add deepseek-web --base-url https://chat.deepseek.com --model default
+ponyllm key add --provider deepseek-web --id ds-web-1 --key <web-token>
+# 完整配置、能力语义（图片/工具/思考）、运维与已知限制见 docs/deepseek-web-provider.md
 # 挂载并交互式授权接入 Google Antigravity (agy)（支持浏览器自动回调或远程 SSH 终端粘贴 Code；再次运行可为连接池追加更多账号）
 ponyllm provider add agy
 # 指定账户标签与无浏览器/远程模式
