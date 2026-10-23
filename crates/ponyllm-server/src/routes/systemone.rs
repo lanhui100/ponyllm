@@ -254,21 +254,23 @@ pub async fn handle_systemone(
 ///
 /// 契约（ADR: .agents/notes/implemented/process/2026-10-12-suppress-upstream-quota-errors-in-sentry.md）：
 /// 返回 `false`（不上报）当且仅当满足以下任一（OR 语义，任中即不报）：
-/// 1. `kind` 命中配额族：`RateLimitExceeded { .. }` 或 `QuotaExhausted`
+/// 1. `kind` 命中配额/限流/上游瞬态族：
+///    `RateLimitExceeded { .. }`、`QuotaExhausted` 或 `UpstreamUnavailable`
 ///    （`CoreError::NoAvailableKey(_)` 经 `CoreError::kind()` 折叠为
-///    `RateLimitExceeded { retry_after: None }`，因此"无可用 key"天然落入此规则）；
+///    `RateLimitExceeded { retry_after: None }`，因此"无可用 key"天然落入此规则；
+///    `UpstreamUnavailable` 涵盖上游网络超时、连接失败、DNS 与 5xx，属于
+///    provider/基础设施瞬态故障，应由指标与告警处理，不创建 issue）；
 /// 2. `last_error` 小写化后包含任一标记：
 ///    `"no available key"` / `"freeusagelimiterror"` / `"rate limit"` / `"quota"` / `"429"`
 ///    （文本兜底与 kind 正交：无论 kind 为何，文本命中即不报）。
-/// 其余 kind（AuthInvalid / UpstreamUnavailable / LockContention / ClientBadRequest /
-/// CapacityExhausted / ModelNotFound / Internal）→ 返回 `true`（上报）。
-pub fn should_report_sentry_exhaustion(
-    kind: &GatewayErrorKind,
-    last_error: &str,
-) -> bool {
+/// 其余 kind（AuthInvalid / LockContention / ClientBadRequest / CapacityExhausted /
+/// ModelNotFound / Internal）→ 返回 `true`（上报）。
+pub fn should_report_sentry_exhaustion(kind: &GatewayErrorKind, last_error: &str) -> bool {
     if matches!(
         kind,
-        GatewayErrorKind::RateLimitExceeded { .. } | GatewayErrorKind::QuotaExhausted
+        GatewayErrorKind::RateLimitExceeded { .. }
+            | GatewayErrorKind::QuotaExhausted
+            | GatewayErrorKind::UpstreamUnavailable
     ) {
         return false;
     }

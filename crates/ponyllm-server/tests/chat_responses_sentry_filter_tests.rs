@@ -6,10 +6,11 @@
 //! 上报块（chat.rs:1593-1615、responses.rs:1151-1173），根治上游配额/限流类噪音
 //! （deepseek-v4-flash 429 已证实 chat 路由同样漏报配置）。
 //!
-//! 契约（不变，v2）：pub fn should_report_sentry_exhaustion(kind, last_error) -> bool，
-//! OR 语义（kind ∈ {RateLimitExceeded{..}, QuotaExhausted} 或文本标记
+//! 契约（v3）：pub fn should_report_sentry_exhaustion(kind, last_error) -> bool，
+//! OR 语义（kind ∈ {RateLimitExceeded{..}, QuotaExhausted, UpstreamUnavailable} 或文本标记
 //! "no available key"/"freeusagelimiterror"/"rate limit"/"quota"/"429" 任一命中即不报）。
-//! 函数位于 ponyllm_server::routes::systemone，已 pub 导出。
+//! 上游网络超时/连接失败/DNS/5xx 归入 UpstreamUnavailable，不创建 issue；
+//! Internal 等代码/配置类错误仍上报。函数位于 ponyllm_server::routes::systemone。
 //!
 //! 红相说明：当前 chat/responses 上报块尚未接入闸门（`is_client_bad_request` 过滤
 //! 只拦 3 个客户端 4xx 文本标记，429/配额文本不受限）→ 本文件"配额类 0 上报"断言
@@ -76,15 +77,31 @@ async fn spawn_route_gateway(
     protocol: UpstreamProtocol,
     model: &str,
 ) -> (SocketAddr, Arc<AtomicUsize>) {
-    let body = upstream_body.clone();
+    spawn_route_gateway_with_pool(upstream_status, upstream_body, protocol, model, true).await
+}
+
+async fn spawn_route_gateway_with_pool(
+    upstream_status: StatusCode,
+    upstream_body: serde_json::Value,
+    protocol: UpstreamProtocol,
+    model: &str,
+    register_pool: bool,
+) -> (SocketAddr, Arc<AtomicUsize>) {
+    let chat_body = upstream_body.clone();
+    let responses_body = upstream_body.clone();
+    let messages_body = upstream_body;
     let upstream = Router::new()
         .route(
             "/v1/chat/completions",
-            post(move || async move { (upstream_status, Json(body.clone())) }),
+            post(move || async move { (upstream_status, Json(chat_body.clone())) }),
         )
         .route(
             "/v1/responses",
-            post(move || async move { (upstream_status, Json(upstream_body.clone())) }),
+            post(move || async move { (upstream_status, Json(responses_body.clone())) }),
+        )
+        .route(
+            "/v1/messages",
+            post(move || async move { (upstream_status, Json(messages_body.clone())) }),
         );
     let upstream_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let upstream_addr = upstream_listener.local_addr().unwrap();
@@ -131,9 +148,11 @@ async fn spawn_route_gateway(
         buffer_capacity: 16,
     }));
     let state = Arc::new(state);
-    let pool = Arc::new(KeyPool::new("zen-test", RoutingStrategy::RoundRobin));
-    pool.add_key(ApiKeyEntry::new("test-key", "sk-test", 1, 10));
-    state.register_pool("zen-test", pool);
+    if register_pool {
+        let pool = Arc::new(KeyPool::new("zen-test", RoutingStrategy::RoundRobin));
+        pool.add_key(ApiKeyEntry::new("test-key", "sk-test", 1, 10));
+        state.register_pool("zen-test", pool);
+    }
 
     let app = create_app(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -163,10 +182,23 @@ async fn post_responses(addr: &SocketAddr, model: &str) -> reqwest::Response {
         .expect("responses 请求必须发出")
 }
 
+async fn post_messages(addr: &SocketAddr, model: &str) -> reqwest::Response {
+    reqwest::Client::new()
+        .post(format!("http://{addr}/v1/messages"))
+        .json(&serde_json::json!({
+            "model": model,
+            "max_tokens": 16,
+            "messages": [{"role": "user", "content": "Hi"}]
+        }))
+        .send()
+        .await
+        .expect("messages 请求必须发出")
+}
+
 /// 场景（被测）：/v1/chat/completions 上游 429 → kind=RateLimitExceeded →
-/// 不得产生 Sentry 上报（红相：当前实现未接闸门 → 断言失败）。
-/// 正控（同测试内第二网关）：上游 500 + 干净文本 → kind=UpstreamUnavailable →
-/// 必须上报，证明 ingest 管道活着、计数器非真空。
+/// 不得产生 Sentry 上报；干净 500 → UpstreamUnavailable → 同样不得上报。
+/// 正控（同测试内第三网关）：无 key pool 触发 Internal 代码类错误 → 必须上报，
+/// 证明 ingest 管道活着、计数器非真空。
 #[tokio::test]
 async fn chat_completions_quota_rate_limit_skips_sentry_report() {
     // ---- 被测场景：429（限流/配额族）----
@@ -185,7 +217,7 @@ async fn chat_completions_quota_rate_limit_skips_sentry_report() {
         "[chat] 429 限流/配额耗尽不得产生 Sentry 上报（should_report_sentry_exhaustion 闸门缺失=红相）"
     );
 
-    // ---- 正控：同一环境模式的干净 500 必须上报 ----
+    // ---- 上游瞬态负控：干净 500 → UpstreamUnavailable → 不得上报 ----
     let (addr2, counter2) = spawn_route_gateway(
         StatusCode::INTERNAL_SERVER_ERROR,
         serde_json::json!({"error":{"message":"internal boom"}}),
@@ -196,15 +228,35 @@ async fn chat_completions_quota_rate_limit_skips_sentry_report() {
     let resp2 = post_chat(&addr2, "jev-chat").await;
     assert_eq!(resp2.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert!(
-        wait_ingest_count(&counter2, 1, Duration::from_millis(3000)).await,
-        "[chat] 非配额类上游故障（UpstreamUnavailable）必须上报（正控，证明管道存活）"
+        !wait_ingest_count(&counter2, 1, Duration::from_millis(1500)).await,
+        "[chat] UpstreamUnavailable（干净 500）不得上报"
     );
-    assert_eq!(counter2.load(Ordering::SeqCst), 1, "[chat] 正控应恰好 1 条 ingest 事件");
+
+    // ---- 正控：Internal（代码类错误）仍上报，证明 ingest 管道存活 ----
+    let (addr3, counter3) = spawn_route_gateway_with_pool(
+        StatusCode::OK,
+        serde_json::json!({}),
+        UpstreamProtocol::Chat,
+        "jev-chat",
+        false,
+    )
+    .await;
+    let resp3 = post_chat(&addr3, "jev-chat").await;
+    assert_eq!(resp3.status(), StatusCode::BAD_GATEWAY);
+    assert!(
+        wait_ingest_count(&counter3, 1, Duration::from_millis(3000)).await,
+        "[chat] Internal 代码类错误必须上报（正控，证明管道存活）"
+    );
+    assert_eq!(
+        counter3.load(Ordering::SeqCst),
+        1,
+        "[chat] 正控应恰好 1 条 ingest 事件"
+    );
 }
 
 /// 场景（被测）：/v1/responses 上游 429 → kind=RateLimitExceeded →
-/// 不得产生 Sentry 上报（红相：当前实现未接闸门 → 断言失败）。
-/// 正控（同测试内第二网关）：上游 500 + 干净文本 → 必须上报，证明管道存活。
+/// 不得产生 Sentry 上报；干净 500 → UpstreamUnavailable → 同样不得上报。
+/// 正控（同测试内第三网关）：无 key pool 触发 Internal → 必须上报，证明管道存活。
 #[tokio::test]
 async fn responses_route_quota_rate_limit_skips_sentry_report() {
     // ---- 被测场景：429（限流/配额族）----
@@ -223,7 +275,7 @@ async fn responses_route_quota_rate_limit_skips_sentry_report() {
         "[responses] 429 限流/配额耗尽不得产生 Sentry 上报（should_report_sentry_exhaustion 闸门缺失=红相）"
     );
 
-    // ---- 正控：同一环境模式的干净 500 必须上报 ----
+    // ---- 上游瞬态负控：干净 500 → UpstreamUnavailable → 不得上报 ----
     let (addr2, counter2) = spawn_route_gateway(
         StatusCode::INTERNAL_SERVER_ERROR,
         serde_json::json!({"error":{"message":"internal boom"}}),
@@ -234,8 +286,85 @@ async fn responses_route_quota_rate_limit_skips_sentry_report() {
     let resp2 = post_responses(&addr2, "jev-resp").await;
     assert_eq!(resp2.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert!(
-        wait_ingest_count(&counter2, 1, Duration::from_millis(3000)).await,
-        "[responses] 非配额类上游故障（UpstreamUnavailable）必须上报（正控，证明管道存活）"
+        !wait_ingest_count(&counter2, 1, Duration::from_millis(1500)).await,
+        "[responses] UpstreamUnavailable（干净 500）不得上报"
     );
-    assert_eq!(counter2.load(Ordering::SeqCst), 1, "[responses] 正控应恰好 1 条 ingest 事件");
+
+    // ---- 正控：Internal（代码类错误）仍上报，证明 ingest 管道存活 ----
+    let (addr3, counter3) = spawn_route_gateway_with_pool(
+        StatusCode::OK,
+        serde_json::json!({}),
+        UpstreamProtocol::Responses,
+        "jev-resp",
+        false,
+    )
+    .await;
+    let resp3 = post_responses(&addr3, "jev-resp").await;
+    assert_eq!(resp3.status(), StatusCode::BAD_GATEWAY);
+    assert!(
+        wait_ingest_count(&counter3, 1, Duration::from_millis(3000)).await,
+        "[responses] Internal 代码类错误必须上报（正控，证明管道存活）"
+    );
+    assert_eq!(
+        counter3.load(Ordering::SeqCst),
+        1,
+        "[responses] 正控应恰好 1 条 ingest 事件"
+    );
+}
+
+/// 场景（被测）：/v1/messages 上游 429 → kind=RateLimitExceeded → 不得上报；
+/// 干净 500 → UpstreamUnavailable → 同样不得上报。
+/// 正控（同测试内第三网关）：无 key pool 触发 Internal → 必须上报，证明管道存活。
+#[tokio::test]
+async fn messages_route_quota_and_upstream_unavailable_skip_sentry_report() {
+    // ---- 被测场景：429（限流/配额族）----
+    let (addr, counter) = spawn_route_gateway(
+        StatusCode::TOO_MANY_REQUESTS,
+        serde_json::json!({"error":{"message":"rate limit exceeded. please retry later"}}),
+        UpstreamProtocol::Anthropic,
+        "jev-msg",
+    )
+    .await;
+    let resp = post_messages(&addr, "jev-msg").await;
+    assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert!(
+        !wait_ingest_count(&counter, 1, Duration::from_millis(1500)).await,
+        "[messages] 429 限流/配额耗尽不得产生 Sentry 上报"
+    );
+
+    // ---- 上游瞬态负控：干净 500 → UpstreamUnavailable → 不得上报 ----
+    let (addr2, counter2) = spawn_route_gateway(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        serde_json::json!({"error":{"message":"internal boom"}}),
+        UpstreamProtocol::Anthropic,
+        "jev-msg",
+    )
+    .await;
+    let resp2 = post_messages(&addr2, "jev-msg").await;
+    assert_eq!(resp2.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(
+        !wait_ingest_count(&counter2, 1, Duration::from_millis(1500)).await,
+        "[messages] UpstreamUnavailable（干净 500）不得上报"
+    );
+
+    // ---- 正控：Internal（代码类错误）仍上报，证明 ingest 管道存活 ----
+    let (addr3, counter3) = spawn_route_gateway_with_pool(
+        StatusCode::OK,
+        serde_json::json!({}),
+        UpstreamProtocol::Anthropic,
+        "jev-msg",
+        false,
+    )
+    .await;
+    let resp3 = post_messages(&addr3, "jev-msg").await;
+    assert_eq!(resp3.status(), StatusCode::BAD_GATEWAY);
+    assert!(
+        wait_ingest_count(&counter3, 1, Duration::from_millis(3000)).await,
+        "[messages] Internal 代码类错误必须上报（正控，证明管道存活）"
+    );
+    assert_eq!(
+        counter3.load(Ordering::SeqCst),
+        1,
+        "[messages] 正控应恰好 1 条 ingest 事件"
+    );
 }

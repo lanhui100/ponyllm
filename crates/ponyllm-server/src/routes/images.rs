@@ -521,8 +521,8 @@ async fn run_images_request(
         &request_id,
     );
 
-    // PonySentry 埋点上报网关耗尽/失败事件
-    {
+    // PonySentry 埋点上报网关耗尽/失败事件；上游配额/限流/瞬态网络故障不上报。
+    if crate::routes::should_report_sentry_exhaustion(&last_kind, &last_error) {
         let mut tags = std::collections::HashMap::new();
         tags.insert("requested_model".to_string(), requested_raw_model.clone());
         tags.insert("route".to_string(), "v1/images/generations".to_string());

@@ -6,13 +6,15 @@
 //! - 共享任务板 task-4「契约冻结存档」
 //!
 //! 判定语义 = OR（任中即不报）：
-//! - 规则 A（kind 命中即 false）：kind ∈ { RateLimitExceeded{..}, QuotaExhausted }；
-//!   `CoreError::NoAvailableKey(_)` 经 `CoreError::kind()`（error.rs:133-135）折叠为
-//!   `RateLimitExceeded{retry_after:None}`，无需单独分支。
+//! - 规则 A（kind 命中即 false）：kind ∈ { RateLimitExceeded{..}, QuotaExhausted,
+//!   UpstreamUnavailable }；`CoreError::NoAvailableKey(_)` 经 `CoreError::kind()`
+//!   （error.rs:133-135）折叠为 `RateLimitExceeded{retry_after:None}`，无需单独分支。
+//!   `UpstreamUnavailable` 代表上游网络超时/连接失败/DNS/5xx，属于 provider 瞬态，
+//!   不应创建 issue。
 //! - 规则 B（文本命中即 false，与 kind 正交，大小写不敏感 `to_lowercase()` 子串）：
 //!   `"no available key"` / `"freeusagelimiterror"` / `"rate limit"` / `"quota"` / `"429"`。
-//! - 其余 kind（AuthInvalid / UpstreamUnavailable / LockContention / ClientBadRequest /
-//!   CapacityExhausted / ModelNotFound / Internal）→ true（报）。
+//! - 其余 kind（AuthInvalid / LockContention / ClientBadRequest / CapacityExhausted /
+//!   ModelNotFound / Internal）→ true（报）。
 //!
 //! 分级：L1（纯函数单元）+ L2（systemone 路由级集成，可注入接缝 = `AppState::sentry`
 //! 字段为 `pub`，可替换为指向本地 mock ingest 端点的 `SentryClient`）。
@@ -60,7 +62,10 @@ fn no_available_key_folds_to_rate_limit_exceeded_and_never_reports() {
     let report = should_report_sentry_exhaustion(&folded_kind, &err.to_string());
 
     // Assert: 无可用 key（配额/冷却族）不得上报
-    assert!(!report, "NoAvailableKey（→RateLimitExceeded）不得上报 Sentry");
+    assert!(
+        !report,
+        "NoAvailableKey（→RateLimitExceeded）不得上报 Sentry"
+    );
 }
 
 /// 规则 A：RateLimitExceeded 不看文本（含干净文本与空文本）恒不报。
@@ -111,10 +116,10 @@ fn text_marker_no_available_key_suppresses_report_orthogonal_to_kind() {
     );
 }
 
-/// 规则 B：文本标记 "freeusagelimiterror"（zen 免费额度上游体）压住 kind=UpstreamUnavailable。
+/// 规则 B：文本标记 "freeusagelimiterror"（zen 免费额度上游体）压住 kind=Internal。
 #[test]
 fn text_marker_freeusagelimiterror_suppresses_report_orthogonal_to_kind() {
-    let kind = GatewayErrorKind::UpstreamUnavailable;
+    let kind = GatewayErrorKind::Internal;
     let text = "upstream responded FreeUsageLimitError: zen free tier daily cap reached";
     assert!(
         !should_report_sentry_exhaustion(&kind, text),
@@ -158,12 +163,20 @@ fn text_marker_http_429_suppresses_report_orthogonal_to_kind() {
 /// 完整 kind 映射表（true 侧）：可报告 kind + 干净文本（以及空文本）必须上报。
 #[test]
 fn reportable_kinds_still_report_with_clean_text() {
-    let cases: [(GatewayErrorKind, &str); 8] = [
+    let cases: [(GatewayErrorKind, &str); 7] = [
         (GatewayErrorKind::AuthInvalid, "401 invalid api key"),
-        (GatewayErrorKind::UpstreamUnavailable, "connection reset by peer"),
-        (GatewayErrorKind::LockContention, "refresh lock held by another replica"),
-        (GatewayErrorKind::ClientBadRequest, "400 invalid parameter 'temperature'"),
-        (GatewayErrorKind::CapacityExhausted, "required context window exceeds capacity"),
+        (
+            GatewayErrorKind::LockContention,
+            "refresh lock held by another replica",
+        ),
+        (
+            GatewayErrorKind::ClientBadRequest,
+            "400 invalid parameter 'temperature'",
+        ),
+        (
+            GatewayErrorKind::CapacityExhausted,
+            "required context window exceeds capacity",
+        ),
         (GatewayErrorKind::ModelNotFound, "model 'x' does not exist"),
         (GatewayErrorKind::Internal, "internal core error: panic"),
         (GatewayErrorKind::Internal, ""), // 空输入边界：无标记文本，仍应上报
@@ -176,19 +189,47 @@ fn reportable_kinds_still_report_with_clean_text() {
     }
 }
 
-/// 契约边界（ADR 明确点名的正反例对）：同一"Antigravity stream collect failed"文本，
-/// kind=UpstreamUnavailable → 报；kind=QuotaExhausted → 不报（按 kind 判）。
+/// 契约边界：同一"Antigravity stream collect failed"文本，
+/// kind=UpstreamUnavailable 与 kind=QuotaExhausted 均不得上报（按 kind 判）。
 #[test]
-fn antigravity_stream_collect_failure_classified_by_kind() {
+fn antigravity_stream_collect_failure_does_not_report_transient_or_quota() {
     let transient = "Antigravity stream collect failed: upstream connection reset";
     assert!(
-        should_report_sentry_exhaustion(&GatewayErrorKind::UpstreamUnavailable, transient),
-        "上游瞬态（UpstreamUnavailable + 干净文本）应上报"
+        !should_report_sentry_exhaustion(&GatewayErrorKind::UpstreamUnavailable, transient),
+        "上游瞬态（UpstreamUnavailable + 干净文本）不得上报"
     );
     let quota = "Antigravity stream collect failed: Resource has been exhausted (e.g. check quota)";
     assert!(
         !should_report_sentry_exhaustion(&GatewayErrorKind::QuotaExhausted, quota),
         "上游配额帧（QuotaExhausted）不得上报"
+    );
+}
+
+/// 上游网络不可用（连接失败/超时/DNS/5xx）无论文本如何都不创建 issue。
+#[test]
+fn upstream_unavailable_never_reports_regardless_of_text() {
+    for text in [
+        "connection reset by peer",
+        "error sending request for url: dns error",
+        "upstream returned 500 Internal Server Error",
+        "",
+    ] {
+        assert!(
+            !should_report_sentry_exhaustion(&GatewayErrorKind::UpstreamUnavailable, text),
+            "UpstreamUnavailable 文本={text:?} 不得上报"
+        );
+    }
+}
+
+/// 正控：Internal（网关代码/不变量类错误）仍必须创建 issue。
+#[test]
+fn internal_error_still_reports() {
+    assert!(
+        should_report_sentry_exhaustion(
+            &GatewayErrorKind::Internal,
+            "internal invariant violated: unexpected state"
+        ),
+        "Internal 属于代码类错误，必须上报"
     );
 }
 
@@ -236,6 +277,14 @@ async fn wait_ingest_count(counter: &Arc<AtomicUsize>, expected: usize, timeout:
 async fn spawn_systemone_gateway(
     upstream_status: StatusCode,
     upstream_body: serde_json::Value,
+) -> (SocketAddr, Arc<AtomicUsize>) {
+    spawn_systemone_gateway_with_pool(upstream_status, upstream_body, true).await
+}
+
+async fn spawn_systemone_gateway_with_pool(
+    upstream_status: StatusCode,
+    upstream_body: serde_json::Value,
+    register_pool: bool,
 ) -> (SocketAddr, Arc<AtomicUsize>) {
     let upstream = Router::new().route(
         "/systemone",
@@ -287,9 +336,11 @@ async fn spawn_systemone_gateway(
         buffer_capacity: 16,
     }));
     let state = Arc::new(state);
-    let pool = Arc::new(KeyPool::new("zen-jev", RoutingStrategy::RoundRobin));
-    pool.add_key(ApiKeyEntry::new("jev-test", "test-key", 1, 10));
-    state.register_pool("zen-jev", pool);
+    if register_pool {
+        let pool = Arc::new(KeyPool::new("zen-jev", RoutingStrategy::RoundRobin));
+        pool.add_key(ApiKeyEntry::new("jev-test", "test-key", 1, 10));
+        state.register_pool("zen-jev", pool);
+    }
 
     let app = create_app(state.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -307,9 +358,10 @@ async fn post_systemone(addr: &SocketAddr) -> reqwest::Response {
         .expect("systemone 请求必须发出")
 }
 
-/// 场景 A（被测）：上游 429 → kind=RateLimitExceeded → 不得上报。
-/// 正控（同测试内第二网关）：上游 500 + 干净文本 → kind=UpstreamUnavailable → 必须上报，
-/// 证明 ingest 管道活着、计数器非真空——"0 事件"断言因此不是假阳性。
+/// 场景 A（被测）：上游 429 → kind=RateLimitExceeded → 不得上报；
+/// 干净 500 → kind=UpstreamUnavailable → 不得上报。
+/// 正控（同测试内第三网关）：无 key pool 触发 Internal 代码类错误 → 必须上报，
+/// 证明 ingest 管道活着、计数器非真空。
 #[tokio::test]
 async fn systemone_rate_limit_exhaustion_skips_sentry_report() {
     // ---- 被测场景：429（限流/配额族）----
@@ -327,7 +379,7 @@ async fn systemone_rate_limit_exhaustion_skips_sentry_report() {
         "429 限流/配额耗尽不得产生 Sentry 上报"
     );
 
-    // ---- 正控：同一环境模式的干净 500 必须上报 ----
+    // ---- 上游瞬态负控：干净 500 → UpstreamUnavailable → 不得上报 ----
     let (addr2, counter2) = spawn_systemone_gateway(
         StatusCode::INTERNAL_SERVER_ERROR,
         serde_json::json!({"error":{"message":"internal boom"}}),
@@ -336,19 +388,29 @@ async fn systemone_rate_limit_exhaustion_skips_sentry_report() {
     let resp2 = post_systemone(&addr2).await;
     assert_eq!(resp2.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert!(
-        wait_ingest_count(&counter2, 1, Duration::from_millis(3000)).await,
-        "非配额类上游故障（UpstreamUnavailable）必须上报（正控，证明管道存活）"
+        !wait_ingest_count(&counter2, 1, Duration::from_millis(1500)).await,
+        "UpstreamUnavailable（干净 500）不得上报"
+    );
+
+    // ---- 正控：Internal（代码类错误）仍上报，证明 ingest 管道存活 ----
+    let (addr3, counter3) =
+        spawn_systemone_gateway_with_pool(StatusCode::OK, serde_json::json!({}), false).await;
+    let resp3 = post_systemone(&addr3).await;
+    assert_eq!(resp3.status(), StatusCode::BAD_GATEWAY);
+    assert!(
+        wait_ingest_count(&counter3, 1, Duration::from_millis(3000)).await,
+        "Internal 代码类错误必须上报（正控，证明管道存活）"
     );
     assert_eq!(
-        counter2.load(Ordering::SeqCst),
+        counter3.load(Ordering::SeqCst),
         1,
         "正控应恰好 1 条 ingest 事件"
     );
 }
 
-/// 场景 B（被测，规则 B 文本兜底）：上游 500（kind=UpstreamUnavailable 本应报），
-/// 但错误文本含 "FreeUsageLimitError" → 文本命中 → 不得上报。
-/// 正控同测试内第二网关：同样 500、干净文本 → 必须上报（证明管道存活，文本兜底断言非真空）。
+/// 场景 B（被测）：上游 500 + FreeUsageLimitError 文本 → UpstreamUnavailable
+/// （且文本命中）→ 不得上报。正控同测试内第二网关：无 key pool 触发 Internal →
+/// 必须上报（证明 ingest 管道存活）。
 #[tokio::test]
 async fn systemone_upstream_quota_text_fallback_skips_sentry_report() {
     // ---- 被测场景：500 + FreeUsageLimitError 文本 ----
@@ -364,16 +426,13 @@ async fn systemone_upstream_quota_text_fallback_skips_sentry_report() {
         "文本兜底（FreeUsageLimitError）命中时不得上报，无论 kind 为何"
     );
 
-    // ---- 正控：干净 500 必须上报 ----
-    let (addr2, counter2) = spawn_systemone_gateway(
-        StatusCode::INTERNAL_SERVER_ERROR,
-        serde_json::json!({"error":{"message":"internal boom"}}),
-    )
-    .await;
+    // ---- 正控：Internal（代码类错误）仍上报，证明 ingest 管道存活 ----
+    let (addr2, counter2) =
+        spawn_systemone_gateway_with_pool(StatusCode::OK, serde_json::json!({}), false).await;
     let resp2 = post_systemone(&addr2).await;
-    assert_eq!(resp2.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(resp2.status(), StatusCode::BAD_GATEWAY);
     assert!(
         wait_ingest_count(&counter2, 1, Duration::from_millis(3000)).await,
-        "干净 500 必须上报（正控，证明文本兜底断言非真空）"
+        "Internal 代码类错误必须上报（正控，证明管道存活）"
     );
 }
