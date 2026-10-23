@@ -828,15 +828,17 @@ fn at06_empty_and_all_reserved_maps_are_safe() {
     );
 
     // Entirely reserved map: the result must be empty, not partially forwarded.
+    // v5 note: `previous_response_id` / `conversation` / `prompt` were REMOVED
+    // from GLOBAL_CONTROL_KEYS (CreateResponseRequest has no such explicit
+    // field; stripping them broke /v1/responses chained conversations), so they
+    // are asserted as PRESERVED in
+    // tests/security_extra_sanitize_v5_acceptance.rs.
     let out = sanitize_extra(
         extra_map(&[
             ("instructions", json!("evil")),
             ("store", json!(true)),
             ("metadata", json!({})),
             ("output_config", json!({"effort": "max"})),
-            ("previous_response_id", json!("resp_evil")),
-            ("conversation", json!("conv_evil")),
-            ("prompt", json!({"id": "p"})),
             ("safety_identifier", json!("sid")),
         ]),
         TargetProtocol::OpenAiResponses,
