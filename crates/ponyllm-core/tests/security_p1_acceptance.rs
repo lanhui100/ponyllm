@@ -294,8 +294,15 @@ async fn m2_unbuildable_proxy_falls_back_to_direct_dial() {
     }
 
     // The non-fallible factory must hand back a usable DIRECT client.
+    // POST (the mock route is a POST handler — a GET would 405 and make the
+    // assertion meaningless).
     let client = create_upstream_http_client_with_options(Some("http://127.0.0.1:notaport"), false);
-    let result = client.get(&endpoint).send().await;
+    let result = client
+        .post(&endpoint)
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .body("{}")
+        .send()
+        .await;
 
     // Restore the environment before asserting so a failure cannot leak it.
     for (key, value) in saved {
