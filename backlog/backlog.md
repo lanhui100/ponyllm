@@ -22,7 +22,7 @@
 
 ## 完成
 
-- **deepseek-web token 获取机制 REA**（2026-10-23）→ 已完成：token 由 `POST /api/v0/users/login_by_mobile_sms` 签发（请求体 AES-CBC+RSA-OAEP 加密 + guest PoW 头）；短信发送 `create_sms_verification_code` 服务端强制人机验证（无 captcha 实测 `biz_code=2`），故全自动不可行，合规上限为浏览器人工登录后取 `localStorage["userToken"]`，续期=重新登录（无 refresh 端点）。ADR：`.agents/notes/implemented/process/2026-10-23-deepseek-web-token-acquisition-rea.md`；复现：`python3 scripts/deepseek-web-token-rea-probe.py`（exit 0）；会话内证据：`.dev-team/contracts/wave-13-deepseek-web-token-rea-evidence.md`。
+- **deepseek-web token 获取机制 REA**（2026-10-23）→ 已完成：token 由 `POST /api/v0/users/login_by_mobile_sms` 签发（请求体 AES-CBC+RSA-OAEP 加密 + guest PoW 头）；短信发送 `create_sms_verification_code` 服务端强制人机验证（无 captcha 实测 `biz_code=2`），故全自动不可行，合规上限为人类在环登录。**已实现并真实登录成功**：`scripts/deepseek_web_login.py`（短信码人工输入 → token → `--verify` 禁言门 + create_chat_session），26 项单测绿；真实链路 `biz_code=1`、token 已签发、session 创建成功。但账号随后被上游禁言（`biz_code=5`，`mute_until=2026-10-26 07:30:42`），chat 验收被阻断。ADR：`.agents/notes/implemented/process/2026-10-23-deepseek-web-token-acquisition-rea.md`、`2026-10-23-deepseek-web-mute-risk.md`；复现：`python3 scripts/deepseek-web-token-rea-probe.py`（exit 0）、`python3 scripts/deepseek_web_login.py --status --token-file <file>`（禁言 exit 14）；会话内证据：`.dev-team/contracts/wave-13-deepseek-web-{token-rea-evidence,mute-rea}.md`。
 
 - **B003**（2026-10-17）`/v1/models` 容量字段 → 已实施：列表与单模型详情新增 `context_window` /
   `max_output`（13 键），每模型按 `canonicalize_model_name` 同名组（default_model ∪ models 的
@@ -49,6 +49,7 @@
 
 ## 待办（新会话 REA 主题）
 
+- **B005** [P1] deepseek-web 风控与官方 API 迁移评估：网页版反代/自动化 + 破限提示词触发账号级 3 天禁言（已实测）；换账号不解决。目标：把自动化/生产流量迁到官方 `deepseek` provider（api.deepseek.com），网页 token 仅保留人工低频通道；wave-11/12 对抗验收改走 mock 或官方 API；评估 provider 长期保留价值。归因 REA：`.dev-team/contracts/wave-13-deepseek-web-mute-rea.md`；ADR：`.agents/notes/implemented/process/2026-10-23-deepseek-web-mute-risk.md`。
 - **B004** [P2] 可选：deepseek-web 浏览器辅助登录脚本（Playwright 打开 `/sign_in`，人工完成验证码与短信码后读取 `localStorage["userToken"]`；不代解验证码、不自动发短信）。触发条件：手工复制 token 变频繁时。
 - **生产 thinking 专项验收**：需有效 token（旧 token 已失效 40003）后跑 `docs/deepseek-web-provider.md §4` 验证命令。
 - 可选：文档附件（非图片 file_id 桥接）；`expert` 上游启用后收敛别名。

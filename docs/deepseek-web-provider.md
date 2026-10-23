@@ -56,7 +56,8 @@ token 由登录接口在成功时签发（本账号走短信验证码登录）�
 
 - `POST /api/v0/users/login_by_mobile_sms` → `data.biz_data.user.token`。请求体须加密（AES-CBC + RSA-OAEP/SHA-256，头 `x-request-encryption-key`），并附 guest PoW 头 `X-DS-Guest-PoW-Response`（挑战 `POST /api/v0/users/create_guest_challenge`）。`biz_code`：0 新账号 / 1 已有账号成功；7 短信码过期 / 8 错误 / 11 风险设备。
 - 前置短信发送 `POST /api/v0/users/create_sms_verification_code`（`scenario=login`）**强制人机验证**：大陆数美、海外 Turnstile/hCaptcha；无 captcha 返回 `biz_code=2 RECAPTCHA_VERIFY_FAILED`。**不自动解验证码**（合规边界），故获取 token 必须由人工在浏览器完成验证码与短信码。
-- 合规取 token：浏览器登录后读 `localStorage["userToken"]`（DevTools → Application → Local Storage），再按下方轮换流程写入网关；cookie 不参与 API 鉴权，不要使用。
+- 合规取 token：浏览器登录后读 `localStorage["userToken"]`（DevTools → Application → Local Storage），或运行 `python3 scripts/deepseek_web_login.py --mobile <手机号>`（短信码人工输入）后按下方轮换流程写入网关；cookie 不参与 API 鉴权，不要使用。
+- 可用性门禁：token 有效 ≠ 可聊天。`GET /api/v0/users/current` 的 `chat.is_muted/mute_until` 是账号级禁言状态；`--verify` 会先检查，禁言时 exit 14；`--status --token-file <file>` 可单独查询。
 - 机制与决策：ADR `.agents/notes/implemented/process/2026-10-23-deepseek-web-token-acquisition-rea.md`；复现探针：`python3 scripts/deepseek-web-token-rea-probe.py`（exit 0 = PoW 前置 / 加密登录 / captcha 门禁三条断言成立；会话内证据 `.dev-team/contracts/wave-13-deepseek-web-token-rea-evidence.md`）。
 
 ### Token 轮换（零中断）
@@ -111,6 +112,7 @@ curl -s https://tokens.ponyjob.top/v1/chat/completions \
 7. **thinking 无分级**：effort low/medium/high 均映射为 On（web 无分级概念）。
 8. **Anthropic `budget_tokens` 忽略**：web 无预算概念，接受不报错。
 9. 模型名 `default`/`expert` 是**网关路由别名**，非上游模型名；上游实际模型由账号决定（真实链路回显 `model_type:"default"`）。
+10. **账号禁言风险（已实测）**：网页版反代/自动化 + 破限类提示词会触发上游自动风控，账号被禁言 3 天（实测 `biz_code=5`，`mute_until=2026-10-26 07:30:42`）；禁言是账号级，换 device/token 无效。自动化与对抗验收应走官方 API 或 mock，禁止把 wave-11/12 用例跑在真实 web 账号上。归因见 ADR `2026-10-23-deepseek-web-mute-risk`。
 
 ## 6. 交付与验证记录（截至 2026-10-23）
 
@@ -118,5 +120,6 @@ curl -s https://tokens.ponyjob.top/v1/chat/completions \
 - **测试**：R-VIS 23、R-MT/TOOL 28、R-THINK 14，`--test-threads=4` 全绿；wave-9 回归全绿。
 - **生产**：4 节点（dev/preprod/proserver/tencent）滚动至 `sha256:d97098cdbf2b`（wave-12），就绪 1/2/2/2。
 - **真实链路**：图片识色 Red（OpenAI/Anthropic）、工具调用与循环、thinking 开关、多轮角色分离——本地与生产均验证；**生产 thinking 专项验收待新 token**（旧 token 已失效 40003 INVALID_TOKEN）。
+- **2026-10-23 token 获取真实链路**：短信登录成功（`biz_code=1`）、token 已签发、`create_chat_session` 成功；但账号被上游禁言（`biz_code=5`，`mute_until=2026-10-26 07:30:42`），chat 链路被账号级风控阻断。工具 `scripts/deepseek_web_login.py` 已加 `--status`/`--verify` 禁言门（exit 14），20+ 单测全绿。
 - **安全**：SSRF 零外发（L2-AT canary）、dompurify 3.4.17 安全升级（GHSA-cg2g-xh64-v4q7/GHSA-mrv2-3pqr-j5jr）。
-- **待办**：① 新 token 后完成生产 thinking 验收；② ~~token 获取/续期研究~~（2026-10-23 完成：短信登录端点 + 加密 + guest PoW 已逆向并实测，captcha 门禁使全自动不可行；见 §4/§5.1、wave-13 REA）；③ 文档附件（可选）；④ `expert` 上游启用后收敛别名；⑤ 可选：浏览器辅助登录脚本（只读取 `localStorage["userToken"]`，不代解验证码）。
+- **待办**：① 新 token 且账号未禁言后完成生产 thinking 验收；② ~~token 获取/续期研究~~（2026-10-23 完成：短信登录端点 + 加密 + guest PoW 已逆向并实测，captcha 门禁使全自动不可行；见 §4/§5.1、wave-13 REA）；③ 文档附件（可选）；④ `expert` 上游启用后收敛别名；⑤ ~~浏览器辅助登录脚本~~（已由 `scripts/deepseek_web_login.py` 的 HTTP 半自动路径覆盖）；⑥ **官方 API 迁移评估**（自动化流量避开网页反代风控，见 B005）。
