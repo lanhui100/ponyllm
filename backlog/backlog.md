@@ -50,3 +50,4 @@
 - **B016** [P2] egress 校验启动面缺口（L3-P 复审）：provider/model/gateway 的 `proxy` 字段在配置加载期零校验零日志；CLI `--proxy` 仍接受 socks；缺启动自检告警。建议加载期统一走 `check_proxy_url_fast` 并输出可操作 warn。
 - **B017** [P3] NAT64 仅按 `64:ff9b::/96` 取末 32 位；RFC 6052/8215 允许 `/48` 等布局差异（部署相关）。若部署存在非 /96 前缀需扩展解析。
 - **B018** [P3] `deploy/ponyllm-config.example.toml` 存在重复键 `default_protocol`（`[providers.opencode-zen]` 节内出现两次），该示例文件无法被 TOML 解析器直接加载（本次冒烟实测 `duplicate key`）→ 清理为单一定义并加 `taplo`/`toml` 校验到 pre-commit。
+- **B019** [P2] `scripts/phase3-verify.sh` 步骤 [6/7] 仍 PUT `/api/admin/strategy`（wave-2 已移除该端点，实测 404），发布验收脚本与实际契约漂移 → 改用现存写端点（如 `/api/admin/auto-models` 或 provider PUT）做 200+412 并发双写验证；同时同步 `docs/gitops-pipeline-runbook.md` §3 item 7。
