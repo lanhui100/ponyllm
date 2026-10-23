@@ -453,19 +453,17 @@ async fn c7_5_free_tier_403_keeps_full_failover_no_fastfail() {
 // C7-6 — fast-fail structured WARN (key_id / provider / egress_pool=false)
 // ---------------------------------------------------------------------------
 
-/// Minimal `tracing::Subscriber` recording every WARN event's fields as
-/// (field-name, debug-value) pairs. No `tracing-subscriber` dependency needed;
-/// installed per-test via `tracing::dispatcher::set_default` (thread-local).
-/// `#[tokio::test]` runs a current-thread runtime, so every event the executor
-/// emits on this thread while the guard is held is captured deterministically.
-#[derive(Default)]
-struct CapturingSubscriber {
-    events: Arc<Mutex<Vec<Vec<(String, String)>>>>,
-}
+static GLOBAL_CAPTURED: Mutex<Option<Arc<Mutex<Vec<Vec<(String, String)>>>>>> = Mutex::new(None);
+static INIT_GLOBAL_TRACING: std::sync::Once = std::sync::Once::new();
 
-impl Subscriber for CapturingSubscriber {
+struct GlobalBroadcastingSubscriber;
+
+impl Subscriber for GlobalBroadcastingSubscriber {
     fn enabled(&self, _metadata: &Metadata<'_>) -> bool {
         true
+    }
+    fn max_level_hint(&self) -> Option<tracing::level_filters::LevelFilter> {
+        Some(tracing::level_filters::LevelFilter::TRACE)
     }
     fn new_span(&self, _span: &span::Attributes<'_>) -> Id {
         Id::from_u64(1)
@@ -489,11 +487,22 @@ impl Subscriber for CapturingSubscriber {
             }
             let mut collector = Collector { fields: Vec::new() };
             event.record(&mut collector);
-            self.events.lock().unwrap().push(collector.fields);
+            if let Ok(guard) = GLOBAL_CAPTURED.lock() {
+                if let Some(ref captured) = *guard {
+                    captured.lock().unwrap().push(collector.fields);
+                }
+            }
         }
     }
     fn enter(&self, _span: &Id) {}
     fn exit(&self, _span: &Id) {}
+}
+
+fn init_global_tracing() {
+    INIT_GLOBAL_TRACING.call_once(|| {
+        let subscriber = GlobalBroadcastingSubscriber;
+        let _ = tracing::subscriber::set_global_default(subscriber);
+    });
 }
 
 /// C7-6 Fast-fail structured logging: the contract requires a `tracing::warn!`
@@ -508,17 +517,19 @@ async fn c7_6_fast_fail_emits_warn_with_key_provider_egress_pool_fields() {
         (StatusCode::TOO_MANY_REQUESTS, zen_body.clone())
     }))
     .await;
-    let pool = zen_pool(&["zen-1", "zen-2", "zen-3"]);
+    let pool = zen_pool(&["zen-c7-6-1", "zen-c7-6-2", "zen-c7-6-3"]);
     let executor = UpstreamExecutor::new(pool.clone(), 3);
     let payload = chat_payload();
 
-    let subscriber = CapturingSubscriber::default();
-    let captured = subscriber.events.clone();
-    let dispatch = tracing::Dispatch::new(subscriber);
-    let _guard = tracing::dispatcher::set_default(&dispatch);
+    init_global_tracing();
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    *GLOBAL_CAPTURED.lock().unwrap() = Some(captured.clone());
 
     // Act
     let res = executor.execute_json_request(&endpoint, &payload).await;
+
+    // Clear after act
+    let _ = GLOBAL_CAPTURED.lock().unwrap().take();
 
     // Assert — red on current code (no fast-fail warn exists yet).
     assert!(
@@ -531,7 +542,7 @@ async fn c7_6_fast_fail_emits_warn_with_key_provider_egress_pool_fields() {
     let matched: Vec<_> = events
         .iter()
         .filter(|fields| {
-            has_field(fields, "key_id")
+            fields.iter().any(|(k, v)| k == "key_id" && v == "zen-c7-6-1")
                 && has_field(fields, "provider")
                 && has_field(fields, "egress_pool")
         })
