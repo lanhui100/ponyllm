@@ -68,6 +68,10 @@ fn blocked_v4(octets: [u8; 4], allow_loopback: bool) -> bool {
 /// - 6to4 `2002:<v4>::/48` — IPv4 in bits 16..48;
 /// - Teredo `2001:0000::/32` — server IPv4 in bits 32..64 (primary) and the
 ///   obfuscated client IPv4 in the last 32 bits, XOR `0xffff_ffff` (secondary);
+/// - NAT64 `64:ff9b::/96` and local-use `64:ff9b:1::/48` — IPv4 in the last
+///   32 bits;
+/// - SIIT IPv4-translated `::ffff:0:0/96` (`seg[4] == 0xffff`, `seg[5] == 0`;
+///   the mapped form `::ffff:a.b.c.d` is already handled by `to_ipv4()`);
 /// - ISATAP interface IDs `::5efe:<v4>` / `::200:5efe:<v4>` — IPv4 in the last
 ///   32 bits, under any prefix.
 fn embedded_ipv4_candidates(v6: &std::net::Ipv6Addr) -> Option<([u8; 4], Option<[u8; 4]>)> {
@@ -82,11 +86,45 @@ fn embedded_ipv4_candidates(v6: &std::net::Ipv6Addr) -> Option<([u8; 4], Option<
         let obfuscated = (((seg[6] as u32) << 16) | seg[7] as u32) ^ 0xffff_ffff;
         return Some((octets(seg[2], seg[3]), Some(obfuscated.to_be_bytes())));
     }
+    if seg[0] == 0x0064 && seg[1] == 0xff9b {
+        // NAT64 well-known 64:ff9b::/96 and local-use 64:ff9b:1::/48: the dialer
+        // reaches the embedded IPv4 through the translator, so the low 32 bits
+        // carry the address that must be judged.
+        return Some((octets(seg[6], seg[7]), None));
+    }
+    if seg[0] == 0 && seg[1] == 0 && seg[2] == 0 && seg[3] == 0 && seg[4] == 0xffff && seg[5] == 0 {
+        // SIIT IPv4-translated ::ffff:0:0/96.
+        return Some((octets(seg[6], seg[7]), None));
+    }
     if (seg[4] == 0x0000 || seg[4] == 0x0200) && seg[5] == 0x5efe {
         // ISATAP interface id.
         return Some((octets(seg[6], seg[7]), None));
     }
     None
+}
+
+/// Whether the literal is loopback, including loopback hidden in an
+/// IPv4-mapped / transition form (`[::ffff:127.0.0.1]`, 6to4/Teredo/NAT64 of
+/// `127.0.0.0/8`).
+///
+/// The proxy guard accepts those as the documented local-pproxy shape, and the
+/// config gate must reach the same verdict (v6 loopback parity) — otherwise the
+/// admin write path rejects a proxy the config file accepts.
+fn is_loopback_literal(ip: &IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => v4.octets()[0] == 127,
+        IpAddr::V6(v6) => {
+            if v6.is_loopback() {
+                return true;
+            }
+            if let Some(mapped) = v6.to_ipv4() {
+                return mapped.octets()[0] == 127;
+            }
+            embedded_ipv4_candidates(v6).is_some_and(|(first, second)| {
+                first[0] == 127 || second.is_some_and(|candidate| candidate[0] == 127)
+            })
+        }
+    }
 }
 
 /// Shared per-IP policy with an explicit loopback flag. Used by
@@ -244,43 +282,54 @@ pub(crate) fn parse_host(raw: &str) -> Result<String, String> {
 /// Proxy-URL policy for admin writes (H2 red-team).
 ///
 /// A proxy only *steers* outbound traffic (it is never fetched as content),
-/// so loopback proxies (local pproxy `127.0.0.1:8899`, `localhost:7890`)
-/// are legitimate and allowed. Everything else follows the probe policy:
-/// http/https(+socks for proxy use) scheme, no private/link-local/metadata
-/// targets. An attacker writing `proxy=http://169.254.169.254:80` or an
-/// external sniffer proxy is refused here instead of silently adopted.
+/// so loopback proxies (local pproxy `127.0.0.1:8899`, `localhost:7890`, and
+/// their IPv4-mapped forms) are legitimate and allowed. Everything else follows
+/// the probe policy: http/https scheme (socks is refused — this build has no
+/// socks support, so accepting one would silently dial DIRECT), no
+/// private/link-local/metadata targets. An attacker writing
+/// `proxy=http://169.254.169.254:80` or an external sniffer proxy is refused
+/// here instead of silently adopted.
+///
+/// Parsing uses the SAME WHATWG parser as `ponyllm_config::validate_egress_entry`
+/// and the dialer (`reqwest::Proxy::all` builds on the url crate): the previous
+/// hand-rolled splitter disagreed with them on fragment tricks
+/// (`http://10.0.0.5:8080#@127.0.0.1`), hex/decimal IPv4 literals and
+/// whitespace inside the authority, so this guard allowed targets the config
+/// gate blocked (v6 parser parity).
 pub fn check_proxy_url_fast(raw: &str) -> Result<(), String> {
     let trimmed = raw.trim();
-    let scheme_end = trimmed.find("://").ok_or_else(|| {
-        format!(
-            "invalid proxy URL '{}': must be scheme://host:port",
-            trimmed
-        )
-    })?;
-    let scheme = trimmed[..scheme_end].to_ascii_lowercase();
-    if scheme != "http" && scheme != "https" && scheme != "socks5" && scheme != "socks5h" {
+    // Never echo credentials back: these errors surface in admin API responses
+    // and gateway logs.
+    let shown = ponyllm_core::executor::sanitize_proxy_url(trimmed);
+    let parsed = reqwest::Url::parse(trimmed)
+        .map_err(|e| format!("invalid proxy URL '{}': {}", shown, e))?;
+    let scheme = parsed.scheme();
+    // socks convergence (v6): the provider/model `proxy` field enters here, and
+    // a socks proxy cannot be honoured by this build, so accepting it would mean
+    // a silent DIRECT fallback — de-coupling egress from the configured exit.
+    if scheme == "socks5" || scheme == "socks5h" {
         return Err(format!(
-            "proxy URL scheme must be http/https/socks5, got '{}'",
+            "proxy URL '{}' uses the unsupported '{}' scheme: socks proxies are not built into this \
+             gateway (reqwest without the socks feature), so the proxy would silently dial direct — use an \
+             http(s) CONNECT proxy instead",
+            shown, scheme
+        ));
+    }
+    if scheme != "http" && scheme != "https" {
+        return Err(format!(
+            "proxy URL scheme must be http/https, got '{}'",
             scheme
         ));
     }
-    // Reuse the host/IP policy with loopback permitted (local egress proxy
-    // is the documented deployment shape).
-    let after_scheme = &trimmed[scheme_end + 3..];
-    let host_port = after_scheme.split('/').next().unwrap_or("");
-    // Strip optional userinfo.
-    let host_port = host_port.rsplit('@').next().unwrap_or("");
-    // Strip optional port (careful with IPv6 literals).
-    let host = if let Some(stripped) = host_port
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| format!("proxy URL '{}' has no host", shown))?;
+    let host = host
         .strip_prefix('[')
-        .and_then(|h| h.split(']').next())
-    {
-        stripped
-    } else {
-        host_port.split(':').next().unwrap_or("")
-    };
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host);
     if host.is_empty() {
-        return Err(format!("proxy URL '{}' has no host", trimmed));
+        return Err(format!("proxy URL '{}' has no host", shown));
     }
     // B7: the operator allowlist exempts exact proxy hosts AND literal IPs
     // (on-prem/LAN proxy), consistent with the probe path.
@@ -296,11 +345,10 @@ pub fn check_proxy_url_fast(raw: &str) -> Result<(), String> {
         }
     }
     if let Ok(ip) = host.parse::<IpAddr>() {
-        match &ip {
-            // Loopback proxy explicitly allowed (documented shape).
-            IpAddr::V4(v4) if v4.octets()[0] == 127 => return Ok(()),
-            IpAddr::V6(v6) if v6.is_loopback() => return Ok(()),
-            _ => {}
+        // Loopback proxy explicitly allowed (documented shape), including the
+        // embedded forms — the config gate applies the same rule (v6 parity).
+        if is_loopback_literal(&ip) {
+            return Ok(());
         }
         if is_blocked_ip(&ip) {
             return Err(format!(
@@ -873,7 +921,8 @@ mod tests {
             "http://127.0.0.1:8899",
             "http://localhost:7890",
             "http://proxy.lan:8080",
-            "socks5://127.0.0.1:1080",
+            // Loopback in an embedded form: the config gate accepts it too.
+            "http://[::ffff:127.0.0.1]:8899",
         ] {
             assert!(check_proxy_url_fast(good).is_ok(), "should allow {}", good);
         }
@@ -884,6 +933,9 @@ mod tests {
             "http://[::ffff:169.254.169.254]:80",
             "gopher://127.0.0.1:70",
             "no-scheme-here",
+            // v6 socks convergence: no socks support in this build, so a socks
+            // proxy here would silently dial DIRECT.
+            "socks5://127.0.0.1:1080",
         ] {
             assert!(check_proxy_url_fast(bad).is_err(), "should block {}", bad);
         }

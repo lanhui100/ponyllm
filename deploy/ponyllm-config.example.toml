@@ -20,8 +20,13 @@ strategy = "round_robin"
 # zen 免费档按客户端出口 IP 记账（Redis ratelimit:ip:<ip>:<YYYYMMDD>，与 key 无关），
 # 调度维度从 key 轮询改为出口池轮询以拆分额度桶。每出口独立记账独立冷却；
 # 429 FreeUsageLimitError 只冷却该出口。条目：`direct`/`none`/空 = 网关本机直连出口；
-# http(s):// 或 socks5:// = 经该代理出网（每个代理一个独立 IP）。显式配置后替代
+# http(s):// = 经该代理出网（每个代理一个独立 IP）。显式配置后替代
 # provider/model 的 proxy 字段语义；不配置（或为空）则维持单 proxy 零迁移。
+# ⚠️ 2026-10-23 安全变更（contract v3/v6）：`socks5://` / `socks5h://` **一律被拒绝**
+#   （validate_egress_entry 与 admin 写路径的 check_proxy_url_fast 同口径）。本网关
+#   的 reqwest 未编译 socks feature，接受 socks 条目只会静默回退直连 = 出网语义脱钩。
+#   迁移：改用 http(s) CONNECT 代理（如 pproxy 的 http 口），见
+#   docs/security/2026-10-23-egress-socks-rejection-migration.md
 # ⚠️ 2026-10-10 决策（wave-5 T2，降爆炸半径）：egress_pool 收敛为仅 ["direct"]。
 #   动机：pproxy 曾整体卡死（accept 循环 Semaphore 饱和）拖垮全部 pproxy egress 出口，
 #   导致 opencode-zen 下所有模型（含 space-bunny/mimo/step-5 这些未受地域封锁的免费档）

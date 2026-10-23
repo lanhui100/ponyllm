@@ -1089,6 +1089,19 @@ fn is_safe_antigravity_request_id(value: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | ':' | '/' | '-'))
 }
 
+/// Canonical gateway-generated Antigravity `requestId`
+/// (`agent/<uuid>/<millis>/traj-default/1`, ~71 chars).
+///
+/// Used both for the `requestId` header and for rewriting an illegal
+/// client-supplied body value, so header and body always carry the same id.
+fn generated_antigravity_request_id() -> String {
+    format!(
+        "agent/{}/{}/traj-default/1",
+        uuid::Uuid::new_v4(),
+        chrono::Utc::now().timestamp_millis()
+    )
+}
+
 pub const DEFAULT_UPSTREAM_TTFB_TIMEOUT: Duration = Duration::from_secs(90);
 
 /// Create an optimized, connection-pooled HTTP client for upstream LLM providers.
@@ -1170,18 +1183,49 @@ pub fn create_upstream_http_client_with_timeout(
     match try_create_upstream_http_client_with_timeout(proxy_url, use_system_proxy, total_timeout) {
         Ok(client) => client,
         Err(e) => {
-            tracing::warn!(error = %e, "Failed to create configured proxy client, falling back to default");
-            // VULN-07/F6: the fallback client must carry the same redirect
-            // discipline as the primary builder.
-            // M2: and it must dial DIRECT explicitly — inheriting ambient
-            // `*_PROXY` env vars would route (or break) the request through a
-            // proxy the gateway never validated, silently de-coupling egress
-            // from the configured, SSRF-checked proxy.
-            reqwest::Client::builder()
-                .redirect(reqwest::redirect::Policy::none())
-                .no_proxy()
-                .build()
-                .unwrap_or_default()
+            tracing::warn!(error = %e, "Failed to create configured proxy client, falling back to direct");
+            fallback_direct_client(total_timeout)
+        }
+    }
+}
+
+/// Direct-dial fallback client used when the configured proxy cannot be built.
+///
+/// Three invariants, all security-relevant:
+/// - **no ambient proxy**: `Client::default()` / `unwrap_or_default()` inherit
+///   `*_PROXY` env vars, which would route a request the gateway never
+///   validated (egress de-coupling) — the fallback is always an explicit
+///   `.no_proxy()` builder and never a default client;
+/// - **bounded waits**: an un-timed client can hang forever on a black-holed
+///   upstream, so it carries the requested total budget and the probe's
+///   connect budget ([`EGRESS_PROBE_TIMEOUT`], 3s);
+/// - **no redirects**: same VULN-07/F6 discipline as the primary builder.
+fn fallback_direct_client(total_timeout: Duration) -> reqwest::Client {
+    let build = |timeout: Option<Duration>| {
+        let mut builder = reqwest::Client::builder()
+            .connect_timeout(EGRESS_PROBE_TIMEOUT)
+            .redirect(reqwest::redirect::Policy::none())
+            .no_proxy();
+        if let Some(budget) = timeout {
+            builder = builder.timeout(budget);
+        }
+        builder.build()
+    };
+    match build(Some(total_timeout)) {
+        Ok(client) => client,
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to build the direct fallback client with a total budget; retrying without it");
+            match build(None) {
+                Ok(client) => client,
+                Err(e) => {
+                    tracing::error!(error = %e, "Direct fallback client unavailable; using an explicit no-proxy minimal client");
+                    // Last resort: still never a default (env-proxy) client.
+                    reqwest::Client::builder()
+                        .no_proxy()
+                        .build()
+                        .unwrap_or_else(|_| reqwest::Client::new())
+                }
+            }
         }
     }
 }
@@ -1795,16 +1839,32 @@ impl UpstreamExecutor {
         body: &'a Value,
     ) -> std::borrow::Cow<'a, Value> {
         if key.is_antigravity() {
+            let mut patched: Option<Value> = None;
             if let Some(target_proj) = key.antigravity_manager().map(|m| m.project_id()) {
                 if let Some(obj) = body.as_object() {
                     if obj.contains_key("project")
                         && obj.get("project").and_then(|v| v.as_str()) != Some(&target_proj)
                     {
-                        let mut patched = body.clone();
-                        patched["project"] = Value::String(target_proj);
-                        return std::borrow::Cow::Owned(patched);
+                        let mut next = body.clone();
+                        next["project"] = Value::String(target_proj);
+                        patched = Some(next);
                     }
                 }
+            }
+            // v6: the `requestId` HEADER is rewritten when the client value is
+            // illegal — the BODY must be rewritten to the very same gateway id,
+            // otherwise upstream observes two different ids for one request.
+            let illegal_client_id = body
+                .get("requestId")
+                .and_then(|v| v.as_str())
+                .is_some_and(|id| !is_safe_antigravity_request_id(id));
+            if illegal_client_id {
+                let mut next = patched.take().unwrap_or_else(|| body.clone());
+                next["requestId"] = Value::String(generated_antigravity_request_id());
+                patched = Some(next);
+            }
+            if let Some(next) = patched {
+                return std::borrow::Cow::Owned(next);
             }
         }
         std::borrow::Cow::Borrowed(body)
@@ -1878,16 +1938,12 @@ impl UpstreamExecutor {
                 // N1: a client-controlled body value may only reach the header
                 // when it is a short, charset-clean `agent/...` id; otherwise
                 // the gateway generates one (header-injection / log-injection
-                // defense).
+                // defense). `prepare_effective_body` already rewrites an illegal
+                // body value, so this filter is the defense-in-depth layer that
+                // keeps header and body identical (v6).
                 .filter(|candidate| is_safe_antigravity_request_id(candidate))
                 .map(|s| s.to_string())
-                .unwrap_or_else(|| {
-                    format!(
-                        "agent/{}/{}/traj-default/1",
-                        uuid::Uuid::new_v4(),
-                        chrono::Utc::now().timestamp_millis()
-                    )
-                });
+                .unwrap_or_else(generated_antigravity_request_id);
             if let Ok(val) = HeaderValue::from_str(&req_id) {
                 headers.insert("requestId", val);
             }

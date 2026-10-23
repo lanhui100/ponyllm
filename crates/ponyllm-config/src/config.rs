@@ -1962,10 +1962,39 @@ fn egress_embedded_ipv4_candidates(ip: &std::net::Ipv6Addr) -> Option<([u8; 4], 
         let obfuscated = (((seg[6] as u32) << 16) | seg[7] as u32) ^ 0xffff_ffff;
         return Some((octets(seg[2], seg[3]), Some(obfuscated.to_be_bytes())));
     }
+    if seg[0] == 0x0064 && seg[1] == 0xff9b {
+        // NAT64 well-known 64:ff9b::/96 and local-use 64:ff9b:1::/48: the dialer
+        // reaches the embedded IPv4 through the translator, so the low 32 bits
+        // carry the address that must be judged.
+        return Some((octets(seg[6], seg[7]), None));
+    }
+    if seg[0] == 0 && seg[1] == 0 && seg[2] == 0 && seg[3] == 0 && seg[4] == 0xffff && seg[5] == 0 {
+        // SIIT IPv4-translated ::ffff:0:0/96 (the mapped ::ffff:a.b.c.d form is
+        // already handled by `to_ipv4()`).
+        return Some((octets(seg[6], seg[7]), None));
+    }
     if (seg[4] == 0x0000 || seg[4] == 0x0200) && seg[5] == 0x5efe {
         return Some((octets(seg[6], seg[7]), None));
     }
     None
+}
+
+/// Whether an IPv6 literal is loopback, including loopback hidden in an
+/// IPv4-mapped / transition form (`[::ffff:127.0.0.1]`, 6to4/Teredo/NAT64 of
+/// `127.0.0.0/8`).
+///
+/// The proxy guard in `ponyllm-server::egress::check_proxy_url_fast` applies the
+/// same rule, so an accepted local pproxy literal cannot be accepted by one
+/// gate and rejected by the other (v6 loopback parity).
+fn egress_is_loopback_v6(ip: &std::net::Ipv6Addr) -> bool {
+    if ip.is_loopback() {
+        return true;
+    }
+    if let Some(mapped) = ip.to_ipv4() {
+        return mapped.octets()[0] == 127;
+    }
+    egress_embedded_ipv4_candidates(ip)
+        .is_some_and(|(first, second)| first[0] == 127 || second.is_some_and(|v4| v4[0] == 127))
 }
 
 /// IPv6 policy for egress entries: unspecified, IPv4-mapped forms (judged by
@@ -2003,8 +2032,10 @@ fn check_egress_proxy_url(raw: &str) -> Result<(), String> {
     // SSRF-BYPASS-EGRESS-POOL — `http://0xa000005:3128` and
     // `http://10.0.0.5:8080#@127.0.0.1` were accepted by the old manual
     // parser while the dialer resolved them to 10.0.0.5).
-    let parsed = url::Url::parse(trimmed)
-        .map_err(|e| format!("invalid egress entry '{}': {}", trimmed, e))?;
+    // Never echo credentials: these messages reach admin API responses and logs.
+    let shown = ponyllm_core::sanitize_proxy_url(trimmed);
+    let parsed =
+        url::Url::parse(trimmed).map_err(|e| format!("invalid egress entry '{}': {}", shown, e))?;
     let scheme = parsed.scheme();
     // M2 (contract v3): socks5/socks5h are REFUSED at the configuration
     // boundary. This workspace builds reqwest WITHOUT the `socks` feature, so
@@ -2016,7 +2047,7 @@ fn check_egress_proxy_url(raw: &str) -> Result<(), String> {
             "egress entry '{}' uses the unsupported '{}' scheme: socks proxies are not built into this \
              gateway (reqwest without the socks feature), so the entry would silently dial direct — use an \
              http(s) CONNECT proxy instead",
-            trimmed, scheme
+            shown, scheme
         ));
     }
     if scheme != "http" && scheme != "https" {
@@ -2033,7 +2064,7 @@ fn check_egress_proxy_url(raw: &str) -> Result<(), String> {
     // unparseable/blank host (url::Url::parse already Err'd), empty host
     // (below).
     match parsed.host() {
-        None => Err(format!("egress entry '{}' has no host", trimmed)),
+        None => Err(format!("egress entry '{}' has no host", shown)),
         Some(url::Host::Ipv4(ip)) => {
             let o = ip.octets();
             // Loopback proxy explicitly allowed (documented local pproxy shape).
@@ -2050,7 +2081,10 @@ fn check_egress_proxy_url(raw: &str) -> Result<(), String> {
             Ok(())
         }
         Some(url::Host::Ipv6(ip)) => {
-            if ip.is_loopback() {
+            // Loopback in any form (::1, ::ffff:127.0.0.1, transition-embedded
+            // 127/8) is the documented local pproxy shape — the server proxy
+            // guard applies the same rule (v6 parity).
+            if egress_is_loopback_v6(&ip) {
                 return Ok(());
             }
             if egress_blocked_v6(&ip) {
