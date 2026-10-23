@@ -318,35 +318,49 @@ if [ -n "$SKIP_REASON" ]; then
   echo "      → 由发布操作员在具权限终端补跑：PONYLLM_ADMIN_TOKEN=<admin> bash scripts/phase3-verify.sh"
   SKIPPED_STEPS="[6/7]"
 else
-CUR=$(read_version)
-echo "  current config_version: $CUR"
+echo "  current config_version: $(read_version)"
 # 测试前备份 live-config 原始字节，测试后还原
 "${KUBECTL[@]}" -n "$NS" get secret ponyllm-live-config -o jsonpath='{.data.ponyllm\.toml}' | base64 -d > /tmp/p3-live-before.toml
 # 写测试端点（B019，2026-10-23）：`PUT /api/admin/strategy` 已在 wave-2 从契约移除
 # （实测 404），改用现存的 CAS 写端点 `PUT /api/admin/auto-models`。
-# 取当前 auto_models 原值回写：语义不变，仅触发 config_version +1 与 If-Match CAS。
-AM_BODY=$(curl -s --max-time 10 -H "Authorization: Bearer $TOKEN" \
-    "$GW_BASE/api/admin/auto-models" \
-  | python3 -c 'import sys,json; d=json.load(sys.stdin); print(json.dumps({"auto_models": d.get("auto_models", [])}))' 2>/dev/null || true)
-[ -n "$AM_BODY" ] || { echo "FAIL cannot read /api/admin/auto-models (write-test endpoint unavailable)"; exit 1; }
-# 双发并发 PUT（同 If-Match / 同 body：回写原值，不动路由语义，仅版本 +1）
-( curl -s --max-time 10 -o /tmp/p3-a -w "%{http_code}" -X PUT \
-    -H "Authorization: Bearer $TOKEN" -H "If-Match: \"$CUR\"" -H 'Content-Type: application/json' \
-    -d "$AM_BODY" "$GW_BASE/api/admin/auto-models" > /tmp/p3-a.code ) & p1=$!
-( curl -s --max-time 10 -o /tmp/p3-b -w "%{http_code}" -X PUT \
-    -H "Authorization: Bearer $TOKEN" -H "If-Match: \"$CUR\"" -H 'Content-Type: application/json' \
-    -d "$AM_BODY" "$GW_BASE/api/admin/auto-models" > /tmp/p3-b.code ) & p2=$!
-wait "$p1" "$p2" || true   # 子 shell 退出码已由 .code 文件捕获；wait 容错（qa S3）
-A=$(cat /tmp/p3-a.code); B=$(cat /tmp/p3-b.code)
-echo "  concurrent write: A=$A B=$B"
-# 412 可来自 If-Match（首写后版本已 +1，次写端 If-Match 过期）或 store CAS
-# （resourceVersion 冲突）——两者都是既定契约，命中其一即通过。
-if { [ "$A" = "200" ] && [ "$B" = "412" ]; } || { [ "$A" = "412" ] && [ "$B" = "200" ]; }; then
-  echo "OK concurrent double-write: one 200 + one 412 (If-Match or store CAS)"
-else
-  echo "FAIL expected 200+412, got $A+$B"
-  exit 1
-fi
+# 并发双写判定：契约 = 恰好一个 200 + 一个 412。
+# 控制面慢时合法降级为 503 `admin_store_degraded`（1s 预算），这既不是 CAS 违约、
+# 也不能当作通过 —— 视为"本轮不可判定"，有限重试（最多 3 轮），全部 503 才判 FAIL。
+# 唯一硬 FAIL：两个都 200（写串行化/CAS 真失效）。
+DELTA_503=0
+RESULT=""
+for attempt in 1 2 3; do
+  CUR=$(read_version)
+  [ "$CUR" = "?" ] && { echo "FAIL cannot read config_version for write test"; exit 1; }
+  AM_BODY=$(curl -s --max-time 10 -H "Authorization: Bearer $TOKEN" \
+      "$GW_BASE/api/admin/auto-models" \
+    | python3 -c 'import sys,json; d=json.load(sys.stdin); print(json.dumps({"auto_models": d.get("auto_models", [])}))' 2>/dev/null || true)
+  [ -n "$AM_BODY" ] || { echo "FAIL cannot read /api/admin/auto-models"; exit 1; }
+  ( curl -s --max-time 10 -o /tmp/p3-a -w "%{http_code}" -X PUT \
+      -H "Authorization: Bearer $TOKEN" -H "If-Match: \"$CUR\"" -H 'Content-Type: application/json' \
+      -d "$AM_BODY" "$GW_BASE/api/admin/auto-models" > /tmp/p3-a.code ) & p1=$!
+  ( curl -s --max-time 10 -o /tmp/p3-b -w "%{http_code}" -X PUT \
+      -H "Authorization: Bearer $TOKEN" -H "If-Match: \"$CUR\"" -H 'Content-Type: application/json' \
+      -d "$AM_BODY" "$GW_BASE/api/admin/auto-models" > /tmp/p3-b.code ) & p2=$!
+  wait "$p1" "$p2" || true   # 子 shell 退出码已由 .code 文件捕获；wait 容错（qa S3）
+  A=$(cat /tmp/p3-a.code); B=$(cat /tmp/p3-b.code)
+  echo "  attempt $attempt: A=$A B=$B (config_version=$CUR)"
+  if [ "$A" = "200" ] && [ "$B" = "200" ]; then
+    echo "FAIL both writes succeeded (200+200) — write serialization / CAS is broken"; exit 1
+  fi
+  if { [ "$A" = "200" ] && [ "$B" = "412" ]; } || { [ "$A" = "412" ] && [ "$B" = "200" ]; }; then
+    RESULT="ok"; break
+  fi
+  if [ "$A" = "503" ] || [ "$B" = "503" ]; then
+    DELTA_503=$((DELTA_503 + 1))
+    echo "  WARN attempt $attempt degraded to 503 admin_store_degraded (control-plane slowness) — retrying"
+    sleep 2
+    continue
+  fi
+  echo "FAIL unexpected concurrent-write statuses: A=$A B=$B"; exit 1
+done
+[ "$RESULT" = "ok" ] || { echo "FAIL concurrent double-write never produced 200+412 in 3 attempts (all degraded: $DELTA_503)"; exit 1; }
+echo "OK concurrent double-write: one 200 + one 412 (If-Match or store CAS; degraded_retries=$DELTA_503)"
 # qa S2-1 还原守卫：写后快照 H_post；还原前若 H_now ≠ H_post（说明窗口内有第三方
 # 写入 live-config）→ 跳过整份还原并 WARN（宁可保留我们测试 +1 的版本，也不 clobber
 # 外部写入；细粒度 strategy 回写成本更高且同样有竞态窗口，故选"整体跳过"）。
