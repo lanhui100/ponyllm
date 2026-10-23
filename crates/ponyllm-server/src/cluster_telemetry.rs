@@ -223,6 +223,33 @@ impl ClusterTelemetryStore {
         }
 
         let client = self.connect().await?;
+
+        // 确保 Schema 存在（自愈幂等建表）
+        let ddl = "
+            CREATE TABLE IF NOT EXISTS telemetry_hourly_cluster (
+                bucket_hour_ms BIGINT NOT NULL,
+                provider VARCHAR(64) NOT NULL DEFAULT '',
+                model VARCHAR(128) NOT NULL DEFAULT '',
+                total_requests BIGINT NOT NULL DEFAULT 0,
+                failed_requests BIGINT NOT NULL DEFAULT 0,
+                prompt_tokens BIGINT NOT NULL DEFAULT 0,
+                completion_tokens BIGINT NOT NULL DEFAULT 0,
+                cached_tokens BIGINT NOT NULL DEFAULT 0,
+                latency_sum_ms DOUBLE PRECISION NOT NULL DEFAULT 0,
+                latency_count BIGINT NOT NULL DEFAULT 0,
+                ttft_sum_ms DOUBLE PRECISION NOT NULL DEFAULT 0,
+                ttft_count BIGINT NOT NULL DEFAULT 0,
+                tps_sum_milli BIGINT NOT NULL DEFAULT 0,
+                tps_count BIGINT NOT NULL DEFAULT 0,
+                updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+                PRIMARY KEY (bucket_hour_ms, provider, model)
+            );
+            CREATE INDEX IF NOT EXISTS idx_telemetry_hourly_cluster_time ON telemetry_hourly_cluster(bucket_hour_ms);
+        ";
+        if let Err(e) = client.batch_execute(ddl).await {
+            tracing::warn!("telemetry schema ensure notice/warn: {}", e);
+        }
+
         let statement = "
             INSERT INTO telemetry_hourly_cluster (
                 bucket_hour_ms, provider, model,
