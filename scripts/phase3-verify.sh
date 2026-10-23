@@ -49,7 +49,14 @@ read_version() {
       | base64 -d | grep -m1 '^config_version' | grep -oE '[0-9]+'
   fi
 }
+CAN_READ_LIVE_CONFIG=$("${KUBECTL[@]}" auth can-i get secrets/ponyllm-live-config 2>/dev/null || echo no)
 secret_hash() {
+  # scoped runner（如 CI ci-deployer）通常无 live-config 读权限：返回哨兵，表示
+  # "无从判定 Secret 是否变更"，后续按聚合口径降级，但绝不静默跳过整个门禁。
+  if [ "$CAN_READ_LIVE_CONFIG" != "yes" ]; then
+    echo "rbac-forbidden"
+    return 0
+  fi
   "${KUBECTL[@]}" -n "$NS" get secret ponyllm-live-config -o jsonpath='{.data.ponyllm\.toml}' \
     | base64 -d | sha256sum | cut -d' ' -f1
 }
@@ -243,8 +250,15 @@ if [ "${#POD_IPS[@]}" -gt 0 ]; then
 else
   A=$(curl -s --max-time 8 -H "Authorization: Bearer $TOKEN" "$GW_BASE/v1/telemetry/metrics" | python3 -c "import sys,json; print(json.load(sys.stdin)['ha_ops']['config_reload_total'])" 2>/dev/null || echo '?')
   echo "  svc reload_total: ${B[0]} -> $A"
-  if [ "$H0" = "$H1" ]; then
-    [ "${B[0]}" = "$A" ] || { echo "FAIL config_reload_total changed ${B[0]}->$A without Secret change (2s storm?)"; exit 1; }
+  if [ "$H0" = "$H1" ] || [ "$H0" = "rbac-forbidden" ]; then
+    if [ "${B[0]}" != "$A" ]; then
+      D=$(( ${A:-0} - ${B[0]:-0} ))
+      if [ "$D" -lt 0 ]; then
+        echo "WARN config_reload_total ${B[0]}->$A (negative delta = replica switch under LB; 逐副本严格口径需 --pod-ips)"
+      else
+        echo "FAIL config_reload_total changed ${B[0]}->$A without Secret change (2s storm?)"; exit 1
+      fi
+    fi
   else
     DELTA=$((A - B[0]))
     [ "$DELTA" -le "$P3_EXPECTED_RELOADS" ] || { echo "FAIL svc reload delta $DELTA > $P3_EXPECTED_RELOADS (qa S2-3)"; exit 1; }

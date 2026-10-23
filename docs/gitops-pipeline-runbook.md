@@ -125,3 +125,6 @@ CI script-gates（每次 push/PR，离线：`scripts/check-verify-contract-drift
 未通过 script-gates / release-gate **禁止** push/上线；§3 或 CI 门禁任一条失败即中止并按 R0'/R0/R1 回滚。
 CI 端凭据为 `secrets.PONYLLM_API_KEY`；若其仅为 inference 作用域，CI 会显式 `::warning::` 降级为
 kube-only 收敛门禁（不静默放行），并要求用 admin token 补跑 `scripts/phase3-verify.sh`。
+CI runner 在集群外，故以 `--base-url https://tokens.ponyjob.top --skip-write-test` 运行；ClusterIP/
+Pod IP 探测与 [6/7] Secret 写测试只在集群内由操作员执行（scoped ci-deployer 无 secrets 读写权限，
+脚本对这类 RBAC 缺口显式降级并打印 WARN，不静默跳过）。
