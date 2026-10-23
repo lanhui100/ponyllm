@@ -6,10 +6,13 @@
 //!       strategy verbatim;
 //!     - a legacy provider WITHOUT the new fields keeps `proxy` untouched and
 //!       resolves to an empty pool (zero migration / proxy semantics).
-//! C3 — per-entry validation: `direct` / `none` / empty are legal; http(s)/
-//!     socks5 proxies to public or loopback targets are legal; invalid schemes,
-//!     missing hosts, and private / link-local / metadata targets are refused
-//!     (same SSRF posture as the existing proxy guard).
+//! C3 — per-entry validation: `direct` / `none` / empty are legal; http(s)
+//!     proxies to public or loopback targets are legal; `socks5`/`socks5h`
+//!     entries are REFUSED (contract v3: this workspace's reqwest is built
+//!     without the `socks` feature, so such an entry would silently dial
+//!     direct); invalid schemes, missing hosts, and private / link-local /
+//!     metadata targets are refused (same SSRF posture as the existing proxy
+//!     guard).
 //!
 //! These tests target the ASSUMED frozen interface:
 //! - `ProviderSection::egress_pool: Vec<String>` (empty = legacy proxy semantics)
@@ -162,13 +165,73 @@ fn c3_validate_egress_accepts_public_and_loopback_proxies() {
         "http://1.2.3.4:8899",              // public literal IP
         "http://egress-1.example.com:8899", // public hostname
         "https://egress-2.example.com:443",
-        "socks5://192.0.2.10:1080", // documentation-test range, public
         "http://user:pass@egress.example.com:8899", // public hostname + userinfo (legal proxy credential)
     ] {
         assert!(
             validate_egress_entry(entry).is_ok(),
             "entry '{entry}' must be accepted as a proxy egress"
         );
+    }
+}
+
+/// Contract v3 (Lead ruling, 2026-10-23): `socks5` / `socks5h` entries must be
+/// refused — the workspace `reqwest` is compiled without the `socks` feature,
+/// so accepting one would make the runtime fall back to a DIRECT dial (silent
+/// egress de-coupling). The message must name the socks scheme for operators.
+#[test]
+fn c3_validate_egress_rejects_socks5_proxies() {
+    for entry in [
+        "socks5://192.0.2.10:1080",             // public target, still refused
+        "socks5h://192.0.2.10:1080",            // remote-DNS variant, still refused
+        "socks5://[2606:4700:4700::1111]:1080", // IPv6 target, still refused
+        "socks5://127.0.0.1:1080",              // loopback proxy, still refused
+    ] {
+        let err = validate_egress_entry(entry).err().unwrap_or_else(|| {
+            panic!(
+                "entry '{entry}' must be refused (no reqwest socks feature), but it was accepted"
+            )
+        });
+        assert!(
+            err.to_ascii_lowercase().contains("socks"),
+            "refusal for '{entry}' must name the socks scheme, got '{err}'"
+        );
+    }
+}
+
+/// Contract v4 C4/M1 (config entry point): IPv6 literals carrying an embedded
+/// private / metadata IPv4 — 6to4 `2002::/16`, Teredo `2001::/32`, ISATAP
+/// `::5efe:` / `::200:5efe:` — must be refused, while global unicast IPv6 stays
+/// legal. Fixtures embed `10.0.0.1` / `169.254.169.254` (never loopback, whose
+/// allowance is environment-dependent).
+#[test]
+fn c3_validate_egress_rejects_ipv6_embedded_ipv4_families() {
+    for entry in [
+        // 6to4 2002::/16
+        "http://[2002:0a00:0001::1]:8899", // embedded 10.0.0.1
+        "http://[2002:a9fe:a9fe::1]:8899", // embedded 169.254.169.254
+        // Teredo 2001::/32 — embedded server IPv4
+        "http://[2001:0:0a00:0001::1]:8899", // server IPv4 10.0.0.1
+        // Teredo 2001::/32 — obfuscated client IPv4 (^0xffffffff)
+        "http://[2001:0:0:0:0:0:f5ff:fffe]:8899", // client IPv4 10.0.0.1
+        "http://[2001:0:0:0:0:0:5601:5601]:8899", // client IPv4 169.254.169.254
+        // ISATAP interface IDs under an otherwise-public prefix
+        "http://[2001:db8:1::5efe:0a00:0001]:8899", // ::5efe: 10.0.0.1
+        "http://[2001:db8:2::200:5efe:a9fe:a9fe]:8899", // ::200:5efe: 169.254.169.254
+    ] {
+        assert!(
+            validate_egress_entry(entry).is_err(),
+            "entry '{entry}' must be refused (embedded IPv4 bypass)"
+        );
+    }
+
+    // Over-tightening guard: real global unicast IPv6 stays legal.
+    for entry in [
+        "http://[2001:db8::1]:8899",
+        "https://[2606:4700:4700::1111]:443",
+        "https://[2001:4860:4860::8888]:443",
+    ] {
+        validate_egress_entry(entry)
+            .unwrap_or_else(|e| panic!("entry '{entry}' must stay legal (public IPv6), got {e:?}"));
     }
 }
 

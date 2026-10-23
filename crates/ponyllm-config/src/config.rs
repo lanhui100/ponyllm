@@ -2081,12 +2081,22 @@ mod egress_entry_tests {
             "http://1.2.3.4:8899",
             "http://egress-1.example.com:8899",
             "https://egress-2.example.com:443",
-            "socks5://192.0.2.10:1080",
-            "socks5h://[::1]:1080",
         ] {
             assert!(
                 validate_egress_entry(entry).is_ok(),
                 "entry '{entry}' must be accepted"
+            );
+        }
+        // Contract v3 (Lead ruling): socks5/socks5h are NO LONGER legal — the
+        // workspace reqwest has no `socks` feature, so such an entry would
+        // silently dial direct. Superseded the pre-v3 accept assertions here.
+        for entry in ["socks5://192.0.2.10:1080", "socks5h://[::1]:1080"] {
+            let err = validate_egress_entry(entry).err().unwrap_or_else(|| {
+                panic!("entry '{entry}' must be refused (no reqwest socks feature)")
+            });
+            assert!(
+                err.to_ascii_lowercase().contains("socks"),
+                "refusal for '{entry}' must name the socks scheme, got '{err}'"
             );
         }
     }
@@ -2155,10 +2165,17 @@ mod egress_entry_tests {
         // Hex-encoded loopback is still loopback → allowed (documented shape).
         assert!(validate_egress_entry("http://0x7f000001:3128").is_ok());
         // Port-less entries stay legal EXACTLY like the dialer: reqwest
-        // Proxy::all defaults http(s) ports and socks to 1080, so accepting
-        // them is not a fail-open (same acceptance as the dialer — review
-        // VALIDATION-FAIL-OPEN).
+        // Proxy::all defaults http(s) ports, so accepting them is not a
+        // fail-open (same acceptance as the dialer — review
+        // VALIDATION-FAIL-OPEN). socks is EXCLUDED: contract v3 refuses the
+        // whole scheme (no `socks` feature in this workspace's reqwest).
         assert!(validate_egress_entry("http://egress-1.example.com").is_ok());
-        assert!(validate_egress_entry("socks5://192.0.2.10").is_ok());
+        let socks_err = validate_egress_entry("socks5://192.0.2.10")
+            .err()
+            .expect("socks5 must be refused (contract v3)");
+        assert!(
+            socks_err.to_ascii_lowercase().contains("socks"),
+            "refusal must name the socks scheme, got '{socks_err}'"
+        );
     }
 }
