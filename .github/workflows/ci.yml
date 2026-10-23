@@ -389,4 +389,7 @@ jobs:
             bash -c 'for d in $(kubectl -n ponyllm get deploy -l app.kubernetes.io/name=ponyllm,app.kubernetes.io/component=gateway -o jsonpath="{range .items[*]}{.metadata.name}{\"\n\"}{end}"); do kubectl -n ponyllm rollout status deploy/$d --timeout=300s; done'
             exit 0
           fi
-          bash scripts/phase3-verify.sh --pod-ips --skip-write-test
+          # CI runner 在集群外：基址走公网入口；Pod IP 逐副本探测不可达故不传 --pod-ips。
+          bash scripts/phase3-verify.sh \
+            --base-url https://tokens.ponyjob.top \
+            --skip-write-test
