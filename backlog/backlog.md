@@ -22,6 +22,8 @@
 
 ## 完成
 
+- **deepseek-web token 获取机制 REA**（2026-10-23）→ 已完成：token 由 `POST /api/v0/users/login_by_mobile_sms` 签发（请求体 AES-CBC+RSA-OAEP 加密 + guest PoW 头）；短信发送 `create_sms_verification_code` 服务端强制人机验证（无 captcha 实测 `biz_code=2`），故全自动不可行，合规上限为浏览器人工登录后取 `localStorage["userToken"]`，续期=重新登录（无 refresh 端点）。ADR：`.agents/notes/implemented/process/2026-10-23-deepseek-web-token-acquisition-rea.md`；复现：`python3 scripts/deepseek-web-token-rea-probe.py`（exit 0）；会话内证据：`.dev-team/contracts/wave-13-deepseek-web-token-rea-evidence.md`。
+
 - **B003**（2026-10-17）`/v1/models` 容量字段 → 已实施：列表与单模型详情新增 `context_window` /
   `max_output`（13 键），每模型按 `canonicalize_model_name` 同名组（default_model ∪ models 的
   `get_model_spec`）取分项 max，别名/多段名/gemini 变体不回落默认 ModelSpec，auto 取全局 max；
@@ -47,6 +49,6 @@
 
 ## 待办（新会话 REA 主题）
 
-- **deepseek-web token 获取/续期研究**：当前凭据为浏览器手动取的 web token（长期有效，无 cookie→token 自动续期路径——已实测 cookie 不参与 API 鉴权、无 refresh 端点）。研究目标：可否以手机验证码登录（15538643833）换取/续期 token 的合规自动化路径。登录本身可用验证码；不触碰验证码/WAF 绕过边界。
+- **B004** [P2] 可选：deepseek-web 浏览器辅助登录脚本（Playwright 打开 `/sign_in`，人工完成验证码与短信码后读取 `localStorage["userToken"]`；不代解验证码、不自动发短信）。触发条件：手工复制 token 变频繁时。
 - **生产 thinking 专项验收**：需有效 token（旧 token 已失效 40003）后跑 `docs/deepseek-web-provider.md §4` 验证命令。
 - 可选：文档附件（非图片 file_id 桥接）；`expert` 上游启用后收敛别名。

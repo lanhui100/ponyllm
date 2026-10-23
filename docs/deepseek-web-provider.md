@@ -50,6 +50,15 @@ CLI：`ponyllm init` 向导选 "DeepSeek Web"；或 `ponyllm provider add deepse
 
 ## 4. 运维
 
+### Token 获取（登录，人工在环）
+
+token 由登录接口在成功时签发（本账号走短信验证码登录），无 refresh 端点；失效即重新登录：
+
+- `POST /api/v0/users/login_by_mobile_sms` → `data.biz_data.user.token`。请求体须加密（AES-CBC + RSA-OAEP/SHA-256，头 `x-request-encryption-key`），并附 guest PoW 头 `X-DS-Guest-PoW-Response`（挑战 `POST /api/v0/users/create_guest_challenge`）。`biz_code`：0 新账号 / 1 已有账号成功；7 短信码过期 / 8 错误 / 11 风险设备。
+- 前置短信发送 `POST /api/v0/users/create_sms_verification_code`（`scenario=login`）**强制人机验证**：大陆数美、海外 Turnstile/hCaptcha；无 captcha 返回 `biz_code=2 RECAPTCHA_VERIFY_FAILED`。**不自动解验证码**（合规边界），故获取 token 必须由人工在浏览器完成验证码与短信码。
+- 合规取 token：浏览器登录后读 `localStorage["userToken"]`（DevTools → Application → Local Storage），再按下方轮换流程写入网关；cookie 不参与 API 鉴权，不要使用。
+- 机制与决策：ADR `.agents/notes/implemented/process/2026-10-23-deepseek-web-token-acquisition-rea.md`；复现探针：`python3 scripts/deepseek-web-token-rea-probe.py`（exit 0 = PoW 前置 / 加密登录 / captcha 门禁三条断言成立；会话内证据 `.dev-team/contracts/wave-13-deepseek-web-token-rea-evidence.md`）。
+
 ### Token 轮换（零中断）
 
 token 为长期凭据（无 cookie→token 自动续期路径）；失效时换新：
@@ -93,7 +102,7 @@ curl -s https://tokens.ponyjob.top/v1/chat/completions \
 
 ## 5. 已知限制（如实记录）
 
-1. **token 获取/续期未自动化**：当前需浏览器登录手动取 token；cookie（ds_session_id）不参与 API 鉴权，无 refresh 端点——获取/续期研究列为后续工作（新会话 REA 主题）。
+1. **token 获取/续期未全自动（服务端强制人机验证）**：短信发送接口无 captcha 即 `biz_code=2`，自动解验证码属合规禁区；合规路径为浏览器人工登录后取 `localStorage["userToken"]`，续期=重新登录（无 refresh 端点；cookie 不参与 API 鉴权）。机制与证据见 §4 与 ADR `2026-10-23-deepseek-web-token-acquisition-rea`。
 2. **`expert` 上游未启用**：服务端 `file_feature` 实测 `expert.enabled=false`、`switchable=false`，别名调用落到 default 行为。
 3. **文档附件**（pdf/docx/xlsx 等非图片）：需下游 file_id 才可桥接，当前显式 4xx；图片已支持。
 4. **工具为模拟**：prompt 注入 + 输出解析，非上游原生 tool；解析失败且 `tool_choice=auto` 时原文透传。
@@ -110,4 +119,4 @@ curl -s https://tokens.ponyjob.top/v1/chat/completions \
 - **生产**：4 节点（dev/preprod/proserver/tencent）滚动至 `sha256:d97098cdbf2b`（wave-12），就绪 1/2/2/2。
 - **真实链路**：图片识色 Red（OpenAI/Anthropic）、工具调用与循环、thinking 开关、多轮角色分离——本地与生产均验证；**生产 thinking 专项验收待新 token**（旧 token 已失效 40003 INVALID_TOKEN）。
 - **安全**：SSRF 零外发（L2-AT canary）、dompurify 3.4.17 安全升级（GHSA-cg2g-xh64-v4q7/GHSA-mrv2-3pqr-j5jr）。
-- **待办**：① 新 token 后完成生产 thinking 验收；② token 获取/续期研究（新会话 REA）；③ 文档附件（可选）；④ `expert` 上游启用后收敛别名。
+- **待办**：① 新 token 后完成生产 thinking 验收；② ~~token 获取/续期研究~~（2026-10-23 完成：短信登录端点 + 加密 + guest PoW 已逆向并实测，captcha 门禁使全自动不可行；见 §4/§5.1、wave-13 REA）；③ 文档附件（可选）；④ `expert` 上游启用后收敛别名；⑤ 可选：浏览器辅助登录脚本（只读取 `localStorage["userToken"]`，不代解验证码）。
