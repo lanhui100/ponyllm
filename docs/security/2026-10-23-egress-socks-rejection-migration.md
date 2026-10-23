@@ -7,23 +7,29 @@
   `crates/ponyllm-protocol/tests/security_extra_sanitize_acceptance.rs`（v4）、
   `crates/ponyllm-server/tests/security_egress_v6_acceptance.rs`（v6）
 
-## 1. 症状
+## 1. 症状与生效位置（务必按实际行为理解）
 
-写入或启动校验时报错（HTTP 400 / 配置加载失败），错误文案含 `socks`：
+**校验点只有一个显式失败面 + 一个静默丢弃面：**
+
+| 入口 | 行为 |
+|------|------|
+| admin 写路径（PUT/POST provider、model 的 `proxy` 字段；egress_pool 条目写入） | ❌ **立即拒绝**，HTTP 400，文案含 `socks` |
+| `egress_pool` 里的 socks 条目（直接编辑 TOML / K8s Secret） | ⚠️ **配置加载不报错**；网关构建 egress pool 时逐条校验，**warn + 丢弃该条目**（日志 `dropping invalid egress pool entry`）；若 pool 被丢空，则回退到"该 provider 无 pool"的语义（其 `proxy` 字段 / 默认直连） |
+| provider/model 的 `proxy` 字段（直接编辑 TOML） | ⚠️ **加载期不校验**；运行期该代理无法构建，回退到显式 no-proxy 直连并 warn —— 出网会静默变成直连 |
+
+admin 写路径的错误样例（凭据已由 `ponyllm_core::sanitize_proxy_url` 脱敏为 `***`，http(s) 条目序列化会带尾部 `/`）：
 
 ```
-egress entry 'socks5://user:***@127.0.0.1:1080' uses the unsupported 'socks5' scheme:
+proxy URL 'socks5://***:***@127.0.0.1:1080' uses the unsupported 'socks5' scheme:
 socks proxies are not built into this gateway (reqwest without the socks feature),
-so the entry would silently dial direct — use an http(s) CONNECT proxy instead
+so the proxy would silently dial direct — use an http(s) CONNECT proxy instead
 ```
 
-admin 写路径（provider / model 的 `proxy`）：
+egress_pool 条目被拒时的文案（出现在 400 响应；同样脱敏）：
 
 ```
-proxy URL 'socks5://user:***@127.0.0.1:1080' uses the unsupported 'socks5' scheme: ...
+egress entry 'socks5://***:***@127.0.0.1:1080' uses the unsupported 'socks5' scheme: ...
 ```
-
-错误文案里的 `user:pass` 已脱敏（`ponyllm_core::sanitize_proxy_url`），不会回显口令。
 
 ## 2. 根因
 
@@ -61,10 +67,45 @@ proxy URL 'socks5://user:***@127.0.0.1:1080' uses the unsupported 'socks5' schem
 4. 重新校验：
 
    ```bash
-   # 配置加载（启动即校验 egress_pool / proxy）
-   ponyllm run --config ponyllm.toml --no-web
-   # admin 写路径（PUT provider）返回 400 且文案含 socks = 期望行为
+   # 启动网关（注意：子命令是 serve，ponyllm run 不存在）
+   ponyllm serve --config ponyllm.toml --no-web
    ```
+
+   配置加载本身**不会**因 socks 条目失败（见 §1）；真正的显式拦截面是 admin 写接口的 400。
+
+## 3.1 如何自查是否残留 socks 条目
+
+```bash
+# 1) 静态自查：配置文件 / 部署清单里是否还有 socks 字样
+grep -rniE "socks5h?://" ponyllm.toml deploy/*.yaml deploy/*.toml 2>/dev/null
+
+# 2) 运行期自查：egress_pool 里的 socks 条目会被 warn+丢弃，日志关键字如下
+#    （若出现，说明该出口没有生效，请求实际走了 pool 内其它出口或直连）
+ponyllm serve --config ponyllm.toml --no-web 2>&1 | grep -i "dropping invalid egress pool entry"
+
+# 3) admin 写接口自查：对目标 provider 重新 PUT 一次
+#    返回 400 且文案含 "socks"  → 该条目仍非法，必须迁移
+#    返回 200                    → 该条目已合法
+```
+
+判定口径：**日志里没有 `dropping invalid egress pool entry`、且 provider PUT 为 200**，才算迁移干净。
+
+## 3.2 回滚（若迁移后出网被证实不可用）
+
+**回滚前提**：先确认 socks 出口确实是该 provider 的**唯一**出网路径（其它 http(s) 出口/直连不可达或不被上游接受）。
+若只是某个出口不可用，优先在池内增加/替换 http(s) 出口，而不是回滚策略。
+
+**回滚步骤**（回滚的是"出口形态"，不是"是否校验"）：
+
+1. 把 `egress_pool` 中的 socks 条目替换为等价的 **`http(s)://` 代理**（pproxy 的 http 口、
+   SOCKS→HTTP 桥接暴露的本地端口等）；若该 provider 本应直连，则把 `proxy` **置空**。
+2. 重启网关：`ponyllm serve --config ponyllm.toml --no-web`。
+3. 用 §3.1 的三条命令复核（grep 静态扫 / `dropping invalid egress pool entry` 日志扫 / provider PUT 200）。
+4. 验证真实出网 IP 与预期一致（例如经该出口访问回显 IP 的服务），确认没有静默直连。
+
+**明确**：回滚到**旧版本二进制不会恢复 socks 支持**。旧版本同样不会真正经 socks 出网——
+它的行为是"请求期代理构建失败 → 回退直连并 warn"（provider `proxy`）或"启动时 warn + 丢弃该条目"
+（`egress_pool`），即静默脱钩仍然存在。降级无法解决该问题，只能改成 `http(s)` 或直连。
 
 ## 4. 仍被接受 / 被拒绝的条目（速查）
 

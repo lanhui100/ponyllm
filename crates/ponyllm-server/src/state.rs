@@ -1080,7 +1080,9 @@ impl AppState {
             if let Err(reason) = ponyllm_config::validate_egress_entry(trimmed) {
                 tracing::warn!(
                     provider = %name,
-                    entry = %trimmed,
+                    // Credential redaction: the entry may carry `user:pass` and
+                    // this warn lands in startup / hot-reload logs.
+                    entry = %ponyllm_core::sanitize_proxy_url(trimmed),
                     "dropping invalid egress pool entry: {}",
                     reason
                 );

@@ -1854,10 +1854,13 @@ impl UpstreamExecutor {
             // v6: the `requestId` HEADER is rewritten when the client value is
             // illegal — the BODY must be rewritten to the very same gateway id,
             // otherwise upstream observes two different ids for one request.
-            let illegal_client_id = body
-                .get("requestId")
-                .and_then(|v| v.as_str())
-                .is_some_and(|id| !is_safe_antigravity_request_id(id));
+            // A non-string value (number / null / bool / array / object) is never
+            // a usable id either, and is treated exactly like an illegal one.
+            let illegal_client_id = body.get("requestId").is_some_and(|value| {
+                value
+                    .as_str()
+                    .is_none_or(|id| !is_safe_antigravity_request_id(id))
+            });
             if illegal_client_id {
                 let mut next = patched.take().unwrap_or_else(|| body.clone());
                 next["requestId"] = Value::String(generated_antigravity_request_id());
@@ -4414,6 +4417,43 @@ mod session_header_tests {
         let prepared = UpstreamExecutor::prepare_effective_body(&key2, &pre_serialized_body);
         assert_eq!(prepared["project"], "project-of-key-2");
         assert_eq!(prepared["requestId"], "agent/u/1/t/1");
+    }
+
+    #[test]
+    fn prepare_effective_body_rewrites_non_string_request_id() {
+        let cred = crate::pool::AntigravityCredential {
+            access_token: Some("fake-tok".to_string()),
+            refresh_token: "1//rf".to_string(),
+            client_id: "id".to_string(),
+            client_secret: "sec".to_string(),
+            project_id: "proj".to_string(),
+            expiry: Some(chrono::Utc::now() + chrono::Duration::hours(1)),
+        };
+        let tm = Arc::new(crate::pool::AntigravityTokenManager::new(
+            "ag-k3",
+            cred,
+            reqwest::Client::new(),
+        ));
+        let key = ApiKeyEntry::new_antigravity("ag-k3", tm, 1, 10);
+
+        // Non-string ids are never usable: the body (and therefore the header,
+        // which reads the body) must carry the generated gateway id.
+        for hostile in [json!(12345), Value::Null, json!(true), json!([1, 2, 3])] {
+            let body = json!({ "project": "proj", "requestId": hostile });
+            let prepared = UpstreamExecutor::prepare_effective_body(&key, &body);
+            let id = prepared["requestId"]
+                .as_str()
+                .expect("non-string requestId must be replaced by a string id");
+            assert!(
+                id.starts_with("agent/") && id.contains("/traj-default/"),
+                "unexpected generated id: {id}"
+            );
+        }
+
+        // A legal string id is preserved verbatim.
+        let body = json!({ "project": "proj", "requestId": "agent/u/9/traj-x/2" });
+        let prepared = UpstreamExecutor::prepare_effective_body(&key, &body);
+        assert_eq!(prepared["requestId"], "agent/u/9/traj-x/2");
     }
 }
 
