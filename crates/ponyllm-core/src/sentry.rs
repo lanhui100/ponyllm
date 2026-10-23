@@ -62,6 +62,8 @@ pub struct SentryClient {
 #[derive(Debug)]
 struct SentryClientInner {
     sender: Sender<RawEvent>,
+    environment: Option<String>,
+    release: Option<String>,
 }
 
 impl SentryClient {
@@ -104,7 +106,11 @@ impl SentryClient {
         });
 
         Self {
-            inner: Some(Arc::new(SentryClientInner { sender: tx })),
+            inner: Some(Arc::new(SentryClientInner {
+                sender: tx,
+                environment: config.environment,
+                release: config.release,
+            })),
         }
     }
 
@@ -133,10 +139,15 @@ impl SentryClient {
         tags: Option<HashMap<String, String>>,
         extra: Option<serde_json::Value>,
     ) {
+        let (environment, release) = self
+            .inner
+            .as_ref()
+            .map(|inner| (inner.environment.clone(), inner.release.clone()))
+            .unwrap_or_default();
         let event = RawEvent {
             platform: "rust".to_string(),
-            release: option_env!("CARGO_PKG_VERSION").map(|s| s.to_string()),
-            environment: None,
+            release,
+            environment,
             message: Some(message.to_string()),
             exception: Some(Exception {
                 error_type: error_type.to_string(),
