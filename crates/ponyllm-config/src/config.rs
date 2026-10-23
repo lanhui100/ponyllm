@@ -1941,6 +1941,33 @@ fn egress_blocked_v4(o: [u8; 4]) -> bool {
         || o == [0, 0, 0, 0] // 0.0.0.0
 }
 
+/// IPv4 addresses embedded in an IPv6 transition / encapsulation form.
+///
+/// A private or metadata IPv4 target hides behind these apparently public IPv6
+/// literals: the V6 predicates below are all false for them and `to_ipv4()`
+/// covers only the mapped/compatible forms. Returns the primary embedded
+/// candidate plus an optional second one (Teredo carries two):
+/// - 6to4 `2002:<v4>::/48` — IPv4 in bits 16..48;
+/// - Teredo `2001:0000::/32` — server IPv4 in bits 32..64 (primary) and the
+///   obfuscated client IPv4 in the last 32 bits, XOR `0xffff_ffff` (secondary);
+/// - ISATAP interface IDs `::5efe:<v4>` / `::200:5efe:<v4>` — IPv4 in the last
+///   32 bits, under any prefix.
+fn egress_embedded_ipv4_candidates(ip: &std::net::Ipv6Addr) -> Option<([u8; 4], Option<[u8; 4]>)> {
+    let seg = ip.segments();
+    let octets = |hi: u16, lo: u16| [(hi >> 8) as u8, hi as u8, (lo >> 8) as u8, lo as u8];
+    if seg[0] == 0x2002 {
+        return Some((octets(seg[1], seg[2]), None));
+    }
+    if seg[0] == 0x2001 && seg[1] == 0 {
+        let obfuscated = (((seg[6] as u32) << 16) | seg[7] as u32) ^ 0xffff_ffff;
+        return Some((octets(seg[2], seg[3]), Some(obfuscated.to_be_bytes())));
+    }
+    if (seg[4] == 0x0000 || seg[4] == 0x0200) && seg[5] == 0x5efe {
+        return Some((octets(seg[6], seg[7]), None));
+    }
+    None
+}
+
 /// IPv6 policy for egress entries: unspecified, IPv4-mapped forms (judged by
 /// the embedded IPv4 rules), unique-local and link-local are refused; pure V6
 /// loopback is allowed by the caller before this runs.
@@ -1954,6 +1981,14 @@ fn egress_blocked_v6(ip: &std::net::Ipv6Addr) -> bool {
     // such addresses.
     if let Some(mapped) = ip.to_ipv4() {
         return egress_blocked_v4(mapped.octets());
+    }
+    // M1: 6to4 / Teredo / ISATAP embed an IPv4 address inside an otherwise
+    // public-looking literal — judge every embedded address (server AND
+    // obfuscated client for Teredo) with the shared IPv4 policy.
+    if let Some((embedded, second)) = egress_embedded_ipv4_candidates(ip) {
+        if egress_blocked_v4(embedded) || second.is_some_and(egress_blocked_v4) {
+            return true;
+        }
     }
     ip.is_unique_local() // fc00::/7
         || ip.is_unicast_link_local() // fe80::/10
@@ -1971,17 +2006,30 @@ fn check_egress_proxy_url(raw: &str) -> Result<(), String> {
     let parsed = url::Url::parse(trimmed)
         .map_err(|e| format!("invalid egress entry '{}': {}", trimmed, e))?;
     let scheme = parsed.scheme();
-    if scheme != "http" && scheme != "https" && scheme != "socks5" && scheme != "socks5h" {
+    // M2 (contract v3): socks5/socks5h are REFUSED at the configuration
+    // boundary. This workspace builds reqwest WITHOUT the `socks` feature, so
+    // an accepted socks entry would never dial the configured proxy — the
+    // runtime would fall back to a direct connection, silently de-coupling
+    // egress from the operator's chosen (and SSRF-checked) exit.
+    if scheme == "socks5" || scheme == "socks5h" {
         return Err(format!(
-            "egress entry scheme must be http/https/socks5, got '{}'",
+            "egress entry '{}' uses the unsupported '{}' scheme: socks proxies are not built into this \
+             gateway (reqwest without the socks feature), so the entry would silently dial direct — use an \
+             http(s) CONNECT proxy instead",
+            trimmed, scheme
+        ));
+    }
+    if scheme != "http" && scheme != "https" {
+        return Err(format!(
+            "egress entry scheme must be http/https, got '{}'",
             scheme
         ));
     }
     // Port is optional exactly like the dialer: reqwest's Proxy::all dials
-    // http(s) on the scheme default and socks on 1080 when the port is
-    // omitted, so a port-less entry is NOT a fail-open (the URL parses and
-    // Proxy::all accepts it — no silent direct fallback). What the guard must
-    // refuse are entries Proxy::all cannot use: unknown scheme (above),
+    // http(s) on the scheme default when the port is omitted, so a port-less
+    // entry is NOT a fail-open (the URL parses and Proxy::all accepts it — no
+    // silent direct fallback). What the guard must refuse are entries
+    // Proxy::all cannot use: unknown or socks scheme (above),
     // unparseable/blank host (url::Url::parse already Err'd), empty host
     // (below).
     match parsed.host() {
@@ -2040,10 +2088,14 @@ fn host_display(parsed: &url::Url) -> String {
 /// Validate one egress-pool entry (contract C3):
 ///
 /// - `direct` / `none` / empty / whitespace = legal (gateway node's own exit);
-/// - any other value must be a parseable `http(s)://` / `socks5://`/`socks5h://`
-///   forward-proxy URL whose host passes the same SSRF posture as the
-///   data-plane proxy guard: public or loopback targets allowed; private /
-///   link-local / metadata / in-cluster names refused.
+/// - any other value must be a parseable `http(s)://` forward-proxy URL whose
+///   host passes the same SSRF posture as the data-plane proxy guard: public or
+///   loopback targets allowed; private / link-local / metadata / in-cluster
+///   names refused. IPv6 literals carrying an embedded private/metadata IPv4
+///   (6to4, Teredo, ISATAP) are refused too;
+/// - `socks5://` / `socks5h://` are refused: this build's reqwest has no socks
+///   support, so such an entry would silently dial direct instead of through
+///   the configured proxy (contract v3).
 ///
 /// Mirrors `ponyllm-server::egress::check_proxy_url_fast` so config-side
 /// validation and the admin write path agree on one policy. The server's PUT

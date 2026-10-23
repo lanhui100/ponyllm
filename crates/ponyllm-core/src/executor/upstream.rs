@@ -1071,6 +1071,24 @@ pub fn sanitize_proxy_url(raw: &str) -> String {
     }
 }
 
+/// N1 (security): whether a caller-supplied Antigravity `requestId` may be
+/// forwarded verbatim.
+///
+/// The value is promoted to the `requestId` HTTP header and flows into the
+/// request log / trace pipeline, so a hostile body must not be able to inject
+/// CR/LF, spaces, `;`/`?` or an arbitrarily long payload. Only the canonical
+/// `agent/...` character set is accepted, capped at 128 chars (the canonical
+/// `agent/<uuid>/<millis>/traj-default/1` form is ~71 chars); anything else is
+/// replaced by a gateway-generated value.
+fn is_safe_antigravity_request_id(value: &str) -> bool {
+    const MAX_LEN: usize = 128;
+    !value.is_empty()
+        && value.len() <= MAX_LEN
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | ':' | '/' | '-'))
+}
+
 pub const DEFAULT_UPSTREAM_TTFB_TIMEOUT: Duration = Duration::from_secs(90);
 
 /// Create an optimized, connection-pooled HTTP client for upstream LLM providers.
@@ -1155,8 +1173,13 @@ pub fn create_upstream_http_client_with_timeout(
             tracing::warn!(error = %e, "Failed to create configured proxy client, falling back to default");
             // VULN-07/F6: the fallback client must carry the same redirect
             // discipline as the primary builder.
+            // M2: and it must dial DIRECT explicitly — inheriting ambient
+            // `*_PROXY` env vars would route (or break) the request through a
+            // proxy the gateway never validated, silently de-coupling egress
+            // from the configured, SSRF-checked proxy.
             reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
+                .no_proxy()
                 .build()
                 .unwrap_or_default()
         }
@@ -1852,6 +1875,11 @@ impl UpstreamExecutor {
             let req_id = body
                 .and_then(|b| b.get("requestId"))
                 .and_then(|v| v.as_str())
+                // N1: a client-controlled body value may only reach the header
+                // when it is a short, charset-clean `agent/...` id; otherwise
+                // the gateway generates one (header-injection / log-injection
+                // defense).
+                .filter(|candidate| is_safe_antigravity_request_id(candidate))
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| {
                     format!(

@@ -58,6 +58,37 @@ fn blocked_v4(octets: [u8; 4], allow_loopback: bool) -> bool {
         || octets == [0, 0, 0, 0] // 0.0.0.0
 }
 
+/// IPv4 addresses embedded in an IPv6 transition / encapsulation form.
+///
+/// These literals are how a private or metadata IPv4 target hides behind an
+/// apparently public IPv6 address: the V6 predicates (`is_unique_local`,
+/// `is_unicast_link_local`) are all false for them and `to_ipv4()` covers only
+/// the mapped/compatible forms. Returns the primary embedded candidate plus an
+/// optional second one (Teredo carries two):
+/// - 6to4 `2002:<v4>::/48` — IPv4 in bits 16..48;
+/// - Teredo `2001:0000::/32` — server IPv4 in bits 32..64 (primary) and the
+///   obfuscated client IPv4 in the last 32 bits, XOR `0xffff_ffff` (secondary);
+/// - ISATAP interface IDs `::5efe:<v4>` / `::200:5efe:<v4>` — IPv4 in the last
+///   32 bits, under any prefix.
+fn embedded_ipv4_candidates(v6: &std::net::Ipv6Addr) -> Option<([u8; 4], Option<[u8; 4]>)> {
+    let seg = v6.segments();
+    let octets = |hi: u16, lo: u16| [(hi >> 8) as u8, hi as u8, (lo >> 8) as u8, lo as u8];
+    if seg[0] == 0x2002 {
+        // 6to4.
+        return Some((octets(seg[1], seg[2]), None));
+    }
+    if seg[0] == 0x2001 && seg[1] == 0 {
+        // Teredo: BOTH the server address and the obfuscated client address.
+        let obfuscated = (((seg[6] as u32) << 16) | seg[7] as u32) ^ 0xffff_ffff;
+        return Some((octets(seg[2], seg[3]), Some(obfuscated.to_be_bytes())));
+    }
+    if (seg[4] == 0x0000 || seg[4] == 0x0200) && seg[5] == 0x5efe {
+        // ISATAP interface id.
+        return Some((octets(seg[6], seg[7]), None));
+    }
+    None
+}
+
 /// Shared per-IP policy with an explicit loopback flag. Used by
 /// [`is_blocked_ip`] (admin probes, loopback lifted only via
 /// `PONYLLM_ALLOW_LOOPBACK_PROBE`) and by [`check_data_plane_url`] (data
@@ -85,6 +116,17 @@ fn is_blocked_ip_with(ip: &IpAddr, allow_loopback: bool) -> bool {
             // enough).
             if let Some(mapped) = v6.to_ipv4() {
                 return blocked_v4(mapped.octets(), allow_loopback);
+            }
+            // 6to4 / Teredo / ISATAP embed an IPv4 address inside an otherwise
+            // public-looking literal; judge every embedded address with the
+            // shared IPv4 policy (M1) or a private/metadata target tunnels
+            // straight through the V6 branch below.
+            if let Some((embedded, second)) = embedded_ipv4_candidates(v6) {
+                if blocked_v4(embedded, allow_loopback)
+                    || second.is_some_and(|candidate| blocked_v4(candidate, allow_loopback))
+                {
+                    return true;
+                }
             }
             v6.is_unique_local() // fc00::/7
                 || v6.is_unicast_link_local() // fe80::/10
