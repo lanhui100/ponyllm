@@ -17,6 +17,75 @@ use tokio_postgres::NoTls;
 
 const HOUR_MS: u64 = 3_600_000;
 
+/// B022: cluster-telemetry 表名。默认不带 schema（依赖角色 search_path = "$user", public，
+/// bootstrap 见 deploy/ponyllm-lockdb.yaml）；可用 `PONYLLM_TELEMETRY_SCHEMA` 显式限定。
+/// schema 必须是安全标识符（环境变量属可信配置，但仍做白名单校验，避免 SQL 拼接注入）。
+pub fn qualified_table(schema: Option<&str>) -> String {
+    match schema.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(s) if s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') => {
+            format!("{s}.telemetry_hourly_cluster")
+        }
+        Some(s) => {
+            tracing::warn!(
+                schema = %s,
+                "PONYLLM_TELEMETRY_SCHEMA rejected (not a safe SQL identifier); falling back to search_path"
+            );
+            "telemetry_hourly_cluster".to_string()
+        }
+        None => "telemetry_hourly_cluster".to_string(),
+    }
+}
+
+/// B022: cluster-telemetry 表名（按环境变量解析）。
+fn telemetry_table() -> String {
+    qualified_table(std::env::var("PONYLLM_TELEMETRY_SCHEMA").ok().as_deref())
+}
+
+/// B022: `tokio_postgres::Error` 的 `Display` 只有字面 `db error`，排查时丢失 code/message/detail
+/// （B020 的根因就是这样被掩盖的）。这里把 PG 侧细节拼出来；非 DB 错误则带 source 链。
+fn describe_db_error(e: &tokio_postgres::Error) -> String {
+    use std::error::Error as _;
+    match e.as_db_error() {
+        Some(db) => {
+            let mut out = format!("code={} message={}", db.code().code(), db.message());
+            if let Some(detail) = db.detail() {
+                out.push_str(&format!(" detail={detail}"));
+            }
+            if let Some(hint) = db.hint() {
+                out.push_str(&format!(" hint={hint}"));
+            }
+            out
+        }
+        None => match e.source() {
+            Some(src) => format!("{e} (source: {src})"),
+            None => format!("{e}"),
+        },
+    }
+}
+
+/// B020/B022 收口：列迁移清单（CREATE TABLE IF NOT EXISTS 对"已存在但列不全"的表是空操作，
+/// 必须逐列 ADD COLUMN IF NOT EXISTS 才能自愈）。
+/// schema 迁移/建表告警只打一次，避免每 flush 周期刷屏（B022）。
+static SCHEMA_WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+const TELEMETRY_COLUMNS: &[(&str, &str)] = &[
+    ("total_requests", "BIGINT NOT NULL DEFAULT 0"),
+    ("failed_requests", "BIGINT NOT NULL DEFAULT 0"),
+    ("prompt_tokens", "BIGINT NOT NULL DEFAULT 0"),
+    ("completion_tokens", "BIGINT NOT NULL DEFAULT 0"),
+    ("cached_tokens", "BIGINT NOT NULL DEFAULT 0"),
+    ("latency_sum_ms", "DOUBLE PRECISION NOT NULL DEFAULT 0"),
+    ("latency_count", "BIGINT NOT NULL DEFAULT 0"),
+    ("ttft_sum_ms", "DOUBLE PRECISION NOT NULL DEFAULT 0"),
+    ("ttft_count", "BIGINT NOT NULL DEFAULT 0"),
+    ("tps_sum_milli", "BIGINT NOT NULL DEFAULT 0"),
+    ("tps_count", "BIGINT NOT NULL DEFAULT 0"),
+    (
+        "updated_at",
+        "TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()",
+    ),
+];
+
 #[derive(Debug, Default, Clone)]
 pub struct HourlyDelta {
     pub total_requests: u64,
@@ -187,7 +256,7 @@ impl ClusterTelemetryStore {
                     .map_err(|e| format!("PG connect failed: {}", e))?;
                 tokio::spawn(async move {
                     if let Err(e) = connection.await {
-                        tracing::warn!("telemetry cluster store connection error: {}", e);
+                        tracing::warn!(error = %describe_db_error(&e), "telemetry cluster store connection error");
                     }
                 });
                 client
@@ -204,7 +273,7 @@ impl ClusterTelemetryStore {
                     .map_err(|e| format!("PG TLS connect failed: {}", e))?;
                 tokio::spawn(async move {
                     if let Err(e) = connection.await {
-                        tracing::warn!("telemetry cluster store TLS connection error: {}", e);
+                        tracing::warn!(error = %describe_db_error(&e), "telemetry cluster store TLS connection error");
                     }
                 });
                 client
@@ -224,9 +293,11 @@ impl ClusterTelemetryStore {
 
         let client = self.connect().await?;
 
-        // 确保 Schema 存在（自愈幂等建表）
-        let ddl = "
-            CREATE TABLE IF NOT EXISTS telemetry_hourly_cluster (
+        // 确保 Schema 存在（自愈幂等建表 + 列迁移，B020/B022）
+        let table = telemetry_table();
+        let ddl = format!(
+            "
+            CREATE TABLE IF NOT EXISTS {table} (
                 bucket_hour_ms BIGINT NOT NULL,
                 provider VARCHAR(64) NOT NULL DEFAULT '',
                 model VARCHAR(128) NOT NULL DEFAULT '',
@@ -244,14 +315,40 @@ impl ClusterTelemetryStore {
                 updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
                 PRIMARY KEY (bucket_hour_ms, provider, model)
             );
-            CREATE INDEX IF NOT EXISTS idx_telemetry_hourly_cluster_time ON telemetry_hourly_cluster(bucket_hour_ms);
-        ";
-        if let Err(e) = client.batch_execute(ddl).await {
-            tracing::warn!("telemetry schema ensure notice/warn: {}", e);
+            CREATE INDEX IF NOT EXISTS idx_telemetry_hourly_cluster_time ON {table}(bucket_hour_ms);
+        "
+        );
+        if let Err(e) = client.batch_execute(&ddl).await {
+            // 只告警一次（避免每个 flush 周期刷屏），并带 PG 细节（code/message/detail）
+            if !SCHEMA_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                tracing::warn!(
+                    table = %table,
+                    error = %describe_db_error(&e),
+                    "telemetry schema ensure failed (migration skipped); will keep retrying silently"
+                );
+            } else {
+                tracing::debug!(table = %table, error = %describe_db_error(&e), "telemetry schema ensure retry failed");
+            }
+        } else {
+            // 列迁移：CREATE TABLE IF NOT EXISTS 不会补列，必须逐列 ADD COLUMN IF NOT EXISTS
+            for (col, ty) in TELEMETRY_COLUMNS {
+                let alter = format!("ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col} {ty}");
+                if let Err(e) = client.batch_execute(&alter).await {
+                    if !SCHEMA_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                        tracing::warn!(
+                            table = %table, column = %col,
+                            error = %describe_db_error(&e),
+                            "telemetry column migration failed"
+                        );
+                    }
+                    break;
+                }
+            }
         }
 
-        let statement = "
-            INSERT INTO telemetry_hourly_cluster (
+        let statement = format!(
+            "
+            INSERT INTO {table} AS tgt (
                 bucket_hour_ms, provider, model,
                 total_requests, failed_requests,
                 prompt_tokens, completion_tokens, cached_tokens,
@@ -270,24 +367,25 @@ impl ClusterTelemetryStore {
             )
             ON CONFLICT (bucket_hour_ms, provider, model)
             DO UPDATE SET
-                total_requests = telemetry_hourly_cluster.total_requests + EXCLUDED.total_requests,
-                failed_requests = telemetry_hourly_cluster.failed_requests + EXCLUDED.failed_requests,
-                prompt_tokens = telemetry_hourly_cluster.prompt_tokens + EXCLUDED.prompt_tokens,
-                completion_tokens = telemetry_hourly_cluster.completion_tokens + EXCLUDED.completion_tokens,
-                cached_tokens = telemetry_hourly_cluster.cached_tokens + EXCLUDED.cached_tokens,
-                latency_sum_ms = telemetry_hourly_cluster.latency_sum_ms + EXCLUDED.latency_sum_ms,
-                latency_count = telemetry_hourly_cluster.latency_count + EXCLUDED.latency_count,
-                ttft_sum_ms = telemetry_hourly_cluster.ttft_sum_ms + EXCLUDED.ttft_sum_ms,
-                ttft_count = telemetry_hourly_cluster.ttft_count + EXCLUDED.ttft_count,
-                tps_sum_milli = telemetry_hourly_cluster.tps_sum_milli + EXCLUDED.tps_sum_milli,
-                tps_count = telemetry_hourly_cluster.tps_count + EXCLUDED.tps_count,
+                total_requests = tgt.total_requests + EXCLUDED.total_requests,
+                failed_requests = tgt.failed_requests + EXCLUDED.failed_requests,
+                prompt_tokens = tgt.prompt_tokens + EXCLUDED.prompt_tokens,
+                completion_tokens = tgt.completion_tokens + EXCLUDED.completion_tokens,
+                cached_tokens = tgt.cached_tokens + EXCLUDED.cached_tokens,
+                latency_sum_ms = tgt.latency_sum_ms + EXCLUDED.latency_sum_ms,
+                latency_count = tgt.latency_count + EXCLUDED.latency_count,
+                ttft_sum_ms = tgt.ttft_sum_ms + EXCLUDED.ttft_sum_ms,
+                ttft_count = tgt.ttft_count + EXCLUDED.ttft_count,
+                tps_sum_milli = tgt.tps_sum_milli + EXCLUDED.tps_sum_milli,
+                tps_count = tgt.tps_count + EXCLUDED.tps_count,
                 updated_at = NOW();
-        ";
+        "
+        );
 
         let prep = client
-            .prepare(statement)
+            .prepare(&statement)
             .await
-            .map_err(|e| format!("prepare failed: {}", e))?;
+            .map_err(|e| format!("prepare failed: {}", describe_db_error(&e)))?;
 
         for ((hour_ms, prov, mdl), d) in deltas {
             let h_ms = hour_ms as i64;
@@ -346,7 +444,9 @@ impl ClusterTelemetryStore {
             current_bucket_start.saturating_sub((total_buckets as u64 - 1) * bucket_span_ms);
 
         let client = self.connect().await?;
-        let query_sql = "
+        let table = telemetry_table();
+        let query_sql = format!(
+            "
             SELECT
                 bucket_hour_ms,
                 provider,
@@ -362,16 +462,17 @@ impl ClusterTelemetryStore {
                 ttft_count,
                 tps_sum_milli,
                 tps_count
-            FROM telemetry_hourly_cluster
+            FROM {table}
             WHERE bucket_hour_ms >= $1
             ORDER BY bucket_hour_ms ASC;
-        ";
+        "
+        );
 
         let start_i64 = start_ms as i64;
         let rows = client
-            .query(query_sql, &[&start_i64])
+            .query(&query_sql, &[&start_i64])
             .await
-            .map_err(|e| format!("query history failed: {}", e))?;
+            .map_err(|e| format!("query history failed: {}", describe_db_error(&e)))?;
 
         let mut cluster_hourly: BTreeMap<u64, HourlyBucket> = BTreeMap::new();
 
@@ -626,7 +727,9 @@ impl ClusterTelemetryStore {
     /// 查询全集群累积的 Metrics 汇总
     pub async fn query_cluster_metrics(&self) -> Result<MetricsSummary, String> {
         let client = self.connect().await?;
-        let query_sql = "
+        let table = telemetry_table();
+        let query_sql = format!(
+            "
             SELECT
                 COALESCE(SUM(total_requests), 0)::BIGINT,
                 COALESCE(SUM(failed_requests), 0)::BIGINT,
@@ -639,13 +742,14 @@ impl ClusterTelemetryStore {
                 COALESCE(SUM(ttft_count), 0)::BIGINT,
                 COALESCE(SUM(tps_sum_milli), 0)::BIGINT,
                 COALESCE(SUM(tps_count), 0)::BIGINT
-            FROM telemetry_hourly_cluster;
-        ";
+            FROM {table};
+        "
+        );
 
         let row = client
-            .query_one(query_sql, &[])
+            .query_one(&query_sql, &[])
             .await
-            .map_err(|e| format!("query cluster metrics failed: {}", e))?;
+            .map_err(|e| format!("query cluster metrics failed: {}", describe_db_error(&e)))?;
 
         let total_reqs = row.get::<_, i64>(0).max(0) as u64;
         let failed_reqs = row.get::<_, i64>(1).max(0) as u64;
@@ -696,5 +800,33 @@ impl ClusterTelemetryStore {
             },
             ha_ops: Default::default(),
         })
+    }
+}
+
+#[cfg(test)]
+mod b022_table_name_tests {
+    use super::qualified_table;
+
+    #[test]
+    fn accepts_safe_schema_identifier() {
+        assert_eq!(
+            qualified_table(Some("ponyllm_lock")),
+            "ponyllm_lock.telemetry_hourly_cluster"
+        );
+        assert_eq!(
+            qualified_table(Some("  ponyllm_cluster  ")),
+            "ponyllm_cluster.telemetry_hourly_cluster"
+        );
+    }
+
+    #[test]
+    fn rejects_unsafe_or_empty_schema() {
+        assert_eq!(
+            qualified_table(Some("bad;drop table x")),
+            "telemetry_hourly_cluster"
+        );
+        assert_eq!(qualified_table(Some("a.b")), "telemetry_hourly_cluster");
+        assert_eq!(qualified_table(Some("   ")), "telemetry_hourly_cluster");
+        assert_eq!(qualified_table(None), "telemetry_hourly_cluster");
     }
 }
