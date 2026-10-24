@@ -229,8 +229,8 @@ async fn admin_store_hang_degrades_to_http_503_within_one_second() {
         "error code must be admin_store_degraded: {body}"
     );
     assert!(
-        elapsed < std::time::Duration::from_millis(2000),
-        "degraded response must arrive well within 1s budget, took {:?}",
+        elapsed < std::time::Duration::from_secs(3),
+        "degraded response must arrive within the 2s admin-store budget (+1s scheduler margin, B021), took {:?}",
         elapsed
     );
 }

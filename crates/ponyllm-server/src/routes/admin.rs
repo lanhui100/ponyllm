@@ -1256,10 +1256,18 @@ fn auth_mode(state: &AppState) -> &'static str {
     state.config.read().auth_mode.as_str()
 }
 
-/// Admin-layer fast-degradation budget (Phase 3): regardless of the store's
-/// own read/write timeouts, an admin request must degrade to 503 within this
-/// budget so the web console never hangs while the K8s control plane is down.
-const ADMIN_STORE_DEGRADE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+/// Admin-layer fast-degradation budget (Phase 3 + B021): regardless of the
+/// store's own read/write timeouts, an admin request must degrade to 503 within
+/// this budget so the web console never hangs while the K8s control plane is
+/// down.
+///
+/// B021 (2026-10-24): 实测真实写路径（Secret JSON Merge PATCH + resourceVersion
+/// CAS）fast path 约 100–400ms，但 k8s API 在 etcd fsync / 并发 apply / 冷启动尾
+/// 延迟下可瞬时 >1s，导致并发双写测试观测到双 503 `admin_store_degraded`
+/// （1059ms > 1000ms 预算）。1s 对"load + save 两步"没有余量；store 自身 kube
+/// 超时为 5s（DEFAULT_KUBE_*_TIMEOUT），故将降级预算上调至 2s —— 仍然 fail-fast
+/// （远小于 web 控制台 10s+ 预算），同时吸收 k8s 正常尾延迟，把 503 留给"真离线"。
+const ADMIN_STORE_DEGRADE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Outcome of the admin fast-degradation guard: the store call either settled
 /// (possibly with a backend error the caller maps) or was cut short by the
@@ -1321,9 +1329,12 @@ fn store_error_to_response(e: crate::admin_store::ConfigStoreError) -> axum::res
 }
 
 /// 503 degradation response when the admin fast-degradation budget elapses.
+/// B021: 携带 `Retry-After: 1`，提示客户端/调测方瞬时降级可短退避后重试
+/// （并发写下的 503 属合法 fail-fast，非永久故障）。
 fn store_degraded_response() -> axum::response::Response {
     (
         StatusCode::SERVICE_UNAVAILABLE,
+        [("Retry-After", "1")],
         Json(json!({"error": {"message": "config store degraded: control plane unresponsive", "code": "admin_store_degraded"}})),
     )
         .into_response()
@@ -6623,5 +6634,22 @@ mod pool_strategy_tests {
             RoutingStrategy::Priority
         );
         assert_eq!(parse_pool_strategy("random"), RoutingStrategy::Priority);
+    }
+}
+
+#[cfg(test)]
+mod b021_store_degraded_response_tests {
+    use super::store_degraded_response;
+
+    #[test]
+    fn degraded_response_is_503_with_retry_after() {
+        let resp = store_degraded_response();
+        let status = resp.status();
+        let headers = resp.headers();
+        assert_eq!(status, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            headers.get(axum::http::header::RETRY_AFTER).and_then(|v| v.to_str().ok()),
+            Some("1")
+        );
     }
 }
