@@ -1264,10 +1264,11 @@ fn auth_mode(state: &AppState) -> &'static str {
 /// B021 (2026-10-24): 实测真实写路径（Secret JSON Merge PATCH + resourceVersion
 /// CAS）fast path 约 100–400ms，但 k8s API 在 etcd fsync / 并发 apply / 冷启动尾
 /// 延迟下可瞬时 >1s，导致并发双写测试观测到双 503 `admin_store_degraded`
-/// （1059ms > 1000ms 预算）。1s 对"load + save 两步"没有余量；store 自身 kube
-/// 超时为 5s（DEFAULT_KUBE_*_TIMEOUT），故将降级预算上调至 2s —— 仍然 fail-fast
-/// （远小于 web 控制台 10s+ 预算），同时吸收 k8s 正常尾延迟，把 503 留给"真离线"。
-const ADMIN_STORE_DEGRADE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+/// （1059ms > 1000ms 预算）。1s 对"load + save 两步"没有余量。实测 2s 仍偶发命中
+/// 尾延迟（k8s PATCH + etcd fsync 在并发/冷启动时可 >2s），故进一步上调至 4s ——
+/// 仍远小于 store 自身 kube 超时 5s（DEFAULT_KUBE_*_TIMEOUT）与 web 控制台预算
+/// （10s+），把 503 留给"真离线"，用 `Retry-After` 引导瞬时降级退避。
+const ADMIN_STORE_DEGRADE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(4);
 
 /// Outcome of the admin fast-degradation guard: the store call either settled
 /// (possibly with a backend error the caller maps) or was cut short by the
