@@ -3,7 +3,7 @@ use ponyllm_core::pool::{
     ModelThinkingSpec, ModelTier, PricingConfig, PricingMode, PricingPeriod, UpstreamProtocol,
 };
 use ponyllm_protocol::common::ReasoningEffort;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io::Write;
 use std::path::Path;
@@ -665,6 +665,9 @@ pub struct ModelConfig {
     pub thinking_default: Option<ReasoningEffort>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking_max: Option<ReasoningEffort>,
+    /// Optional custom mapping from standard ReasoningEffort to upstream wire string/value.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub thinking_efforts: BTreeMap<String, String>,
     /// Optional outbound HTTP proxy override for this model (e.g. "http://127.0.0.1:8899", "direct", or "none").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxy: Option<String>,
@@ -717,6 +720,7 @@ impl Default for ModelConfig {
             base_url: None,
             thinking_default: None,
             thinking_max: None,
+            thinking_efforts: BTreeMap::new(),
             proxy: None,
             timeout_secs: None,
             rate_limits: None,
@@ -748,6 +752,7 @@ impl ModelConfig {
             base_url: None,
             thinking_default: None,
             thinking_max: None,
+            thinking_efforts: BTreeMap::new(),
             proxy: None,
             timeout_secs: None,
             rate_limits: None,
@@ -759,7 +764,9 @@ impl ModelConfig {
         let inferred = ModelThinkingSpec::infer_from_model_name(&self.name);
         let default_effort = self.thinking_default.unwrap_or(inferred.default_effort);
         let max_effort = self.thinking_max.unwrap_or(inferred.max_effort);
-        ModelThinkingSpec::new(default_effort, max_effort)
+        let mut spec = ModelThinkingSpec::new(default_effort, max_effort);
+        spec.thinking_efforts = self.thinking_efforts.clone();
+        spec
     }
 }
 

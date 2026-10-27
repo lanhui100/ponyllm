@@ -473,13 +473,36 @@ pub async fn handle_chat_completions(
                 // and `thinking: {"type": "disabled"}` to ensure upstream models (such as deepseek-v4-flash) disable reasoning.
                 if requested_thinking == Some(ponyllm_protocol::common::ReasoningEffort::Off) {
                     if let Some(obj) = val.as_object_mut() {
-                        obj.insert("reasoning_effort".to_string(), serde_json::json!("none"));
+                        match target.thinking_spec.wire_for_effort(ponyllm_protocol::common::ReasoningEffort::Off) {
+                            Some(Some(custom_wire)) => {
+                                obj.insert("reasoning_effort".to_string(), serde_json::json!(custom_wire));
+                            }
+                            Some(None) => {
+                                obj.remove("reasoning_effort");
+                            }
+                            None => {
+                                obj.insert("reasoning_effort".to_string(), serde_json::json!("none"));
+                            }
+                        }
                         obj.insert(
                             "thinking".to_string(),
                             serde_json::json!({ "type": "disabled" }),
                         );
                     }
                 } else if effective_thinking.is_active() {
+                    // Apply custom wire mapping if configured for this active tier
+                    if let Some(wire_res) = target.thinking_spec.wire_for_effort(effective_thinking) {
+                        if let Some(obj) = val.as_object_mut() {
+                            match wire_res {
+                                Some(custom_wire) => {
+                                    obj.insert("reasoning_effort".to_string(), serde_json::json!(custom_wire));
+                                }
+                                None => {
+                                    obj.remove("reasoning_effort");
+                                }
+                            }
+                        }
+                    }
                     // DeepSeek thinking-mode contract: When reasoning/thinking is active, upstream APIs require
                     // `reasoning_content` in assistant messages (especially when tools are passed back in multi-turn).
                     // If any assistant message lacks `reasoning_content`, inject an empty string `""` to satisfy

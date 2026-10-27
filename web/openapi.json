@@ -1651,6 +1651,18 @@
               "null"
             ]
           },
+          "thinking_efforts": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
           "thinking_max": {
             "type": [
               "string",
@@ -2367,6 +2379,15 @@
           },
           "thinking_default": {
             "type": "string"
+          },
+          "thinking_efforts": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
           },
           "thinking_max": {
             "type": "string"
@@ -3094,6 +3115,18 @@
               "string",
               "null"
             ]
+          },
+          "thinking_efforts": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
           },
           "thinking_max": {
             "type": [

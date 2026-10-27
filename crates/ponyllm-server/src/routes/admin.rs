@@ -9,6 +9,7 @@
 //! - Write-before-backup to `.bak`
 //! - Key dial-test with 3s hard timeout and desensitized logging
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -18,7 +19,7 @@ use axum::response::IntoResponse;
 use axum::Json;
 use ponyllm_config::{ConfigFile, KeyScope, KeySection, ModelConfig, ProviderSection};
 use ponyllm_core::pool::{
-    ApiKeyEntry, BillingMode, KeyPool, ModelTier, PricingMode, PricingPeriod, RateLimits,
+    ApiKeyEntry, BillingMode, KeyPool, ModelThinkingSpec, ModelTier, PricingMode, PricingPeriod, RateLimits,
     UpstreamProtocol,
 };
 use serde::{Deserialize, Serialize};
@@ -220,6 +221,8 @@ pub struct ModelView {
     pub proxy: Option<String>,
     pub thinking_default: String,
     pub thinking_max: String,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub thinking_efforts: BTreeMap<String, String>,
     /// Model-level price overrides (`None` inherits the provider baseline).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_price: Option<f64>,
@@ -508,6 +511,8 @@ pub struct CreateModelPayload {
     #[serde(default)]
     pub thinking_max: Option<String>,
     #[serde(default)]
+    pub thinking_efforts: Option<BTreeMap<String, String>>,
+    #[serde(default)]
     pub proxy: Option<String>,
     /// Optional total upstream timeout override (seconds, 60~1800).
     #[serde(default)]
@@ -564,6 +569,8 @@ pub struct UpdateModelPayload {
     pub thinking_default: Option<String>,
     #[serde(default)]
     pub thinking_max: Option<String>,
+    #[serde(default)]
+    pub thinking_efforts: Option<BTreeMap<String, String>>,
     #[serde(default)]
     pub proxy: Option<String>,
     /// Optional total upstream timeout override (seconds, 60~1800).
@@ -2238,6 +2245,7 @@ pub async fn handle_admin_provider_models(
                 base_url: m.base_url.clone(),
                 thinking_default: format!("{effective_default:?}"),
                 thinking_max: format!("{:?}", spec.max_effort),
+                thinking_efforts: m.thinking_efforts.clone(),
                 input_price: m.input_price,
                 cached_price: m.cached_price,
                 output_price: m.output_price,
@@ -2282,6 +2290,7 @@ pub async fn handle_admin_models(State(state): State<Arc<AppState>>) -> impl Int
                 base_url: m.base_url.clone(),
                 thinking_default: format!("{effective_default:?}"),
                 thinking_max: format!("{:?}", spec.max_effort),
+                thinking_efforts: m.thinking_efforts.clone(),
                 input_price: m.input_price,
                 cached_price: m.cached_price,
                 output_price: m.output_price,
@@ -2446,6 +2455,15 @@ pub async fn handle_admin_create_model(
         }
     }
 
+    let thinking_efforts = payload.thinking_efforts.clone().unwrap_or_default();
+    if let Err(msg) = ModelThinkingSpec::validate_thinking_efforts(&thinking_efforts) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": {"message": msg, "code": "invalid_thinking_efforts"}})),
+        )
+            .into_response();
+    }
+
     let m_cfg = ModelConfig {
         rate_limits: payload.rate_limits.map(Into::into),
         name: model_name.clone(),
@@ -2474,6 +2492,7 @@ pub async fn handle_admin_create_model(
         base_url: base_url.clone(),
         thinking_default: think_def,
         thinking_max: think_max,
+        thinking_efforts: thinking_efforts.clone(),
         proxy: model_proxy.clone(),
         timeout_secs: payload.timeout_secs,
         fallbacks: payload.fallbacks.clone().unwrap_or_default(),
@@ -2514,6 +2533,7 @@ pub async fn handle_admin_create_model(
         base_url: base_url.clone(),
         thinking_default: think_def,
         thinking_max: think_max,
+        thinking_efforts: thinking_efforts.clone(),
         proxy: model_proxy.clone(),
         timeout_secs: payload.timeout_secs,
         fallbacks: payload.fallbacks.clone().unwrap_or_default(),
@@ -2551,6 +2571,7 @@ pub async fn handle_admin_create_model(
             base_url,
             thinking_default: format!("{effective_def:?}"),
             thinking_max: format!("{:?}", spec_obj.max_effort),
+            thinking_efforts: thinking_efforts.clone(),
             input_price: payload.input_price,
             cached_price: payload.cached_price,
             output_price: payload.output_price,
@@ -2681,6 +2702,7 @@ pub async fn handle_admin_update_model(
             base_url: None,
             thinking_default: None,
             thinking_max: None,
+            thinking_efforts: BTreeMap::new(),
             proxy: None,
             timeout_secs: None,
             fallbacks: Vec::new(),
@@ -2719,6 +2741,16 @@ pub async fn handle_admin_update_model(
     }
     if let Some(ref tm) = payload.thinking_max {
         existing_config.thinking_max = parse_effort_opt(tm);
+    }
+    if let Some(ref te) = payload.thinking_efforts {
+        if let Err(msg) = ModelThinkingSpec::validate_thinking_efforts(te) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": {"message": msg, "code": "invalid_thinking_efforts"}})),
+            )
+                .into_response();
+        }
+        existing_config.thinking_efforts = te.clone();
     }
     // Per-model outbound proxy: normalize empty/"direct" to `None` so the
     // web toggle can turn proxying OFF for a model (empty would otherwise
@@ -2827,6 +2859,7 @@ pub async fn handle_admin_update_model(
         base_url: existing_config.base_url.clone(),
         thinking_default: existing_config.thinking_default,
         thinking_max: existing_config.thinking_max,
+        thinking_efforts: existing_config.thinking_efforts.clone(),
         proxy: existing_config.proxy.clone(),
         timeout_secs: existing_config.timeout_secs,
         fallbacks: existing_config.fallbacks.clone(),
@@ -2867,6 +2900,7 @@ pub async fn handle_admin_update_model(
         base_url: existing_config.base_url,
         thinking_default: format!("{effective_def:?}"),
         thinking_max: format!("{:?}", spec_obj.max_effort),
+        thinking_efforts: existing_config.thinking_efforts.clone(),
         input_price: existing_config.input_price,
         cached_price: existing_config.cached_price,
         output_price: existing_config.output_price,

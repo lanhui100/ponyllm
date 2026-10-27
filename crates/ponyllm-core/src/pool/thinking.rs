@@ -1,12 +1,13 @@
 use ponyllm_protocol::common::ReasoningEffort;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// Thinking capability specification for a model.
 ///
 /// Implements dual-guard resolution:
 /// - Baseline fallback: uses `default_effort` when the client does not specify an effort.
 /// - Ceiling clamping: strictly clamps requested effort to `max_effort`, preventing upstream 400s.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelThinkingSpec {
     /// Baseline effort when none requested by client (e.g. Medium for reasoner, Off for non-reasoner)
     #[serde(default = "default_thinking_default")]
@@ -14,6 +15,9 @@ pub struct ModelThinkingSpec {
     /// Ceiling maximum effort allowed by this model (e.g. High for deep-reasoner, Off for non-reasoner)
     #[serde(default = "default_thinking_max")]
     pub max_effort: ReasoningEffort,
+    /// Optional custom mapping from standard ReasoningEffort to upstream wire string/value.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub thinking_efforts: BTreeMap<String, String>,
 }
 
 pub fn default_thinking_default() -> ReasoningEffort {
@@ -29,6 +33,7 @@ impl Default for ModelThinkingSpec {
         Self {
             default_effort: ReasoningEffort::High,
             max_effort: ReasoningEffort::High,
+            thinking_efforts: BTreeMap::new(),
         }
     }
 }
@@ -38,6 +43,66 @@ impl ModelThinkingSpec {
         Self {
             default_effort: default_effort.min(max_effort),
             max_effort,
+            thinking_efforts: BTreeMap::new(),
+        }
+    }
+
+    /// Validate thinking_efforts mapping keys and values (DSH-aligned):
+    /// 1. Keys must be one of [off, low, medium, high, max] (case-insensitive)
+    /// 2. Non-off tiers must have non-empty wire string (<=64 chars, printable ascii)
+    /// 3. Off may have empty wire string (representing omission / send nothing) or non-empty
+    /// 4. If map is non-empty, must offer at least one non-off tier
+    pub fn validate_thinking_efforts(
+        efforts: &BTreeMap<String, String>,
+    ) -> Result<(), String> {
+        if efforts.is_empty() {
+            return Ok(());
+        }
+        let valid_keys = ["off", "low", "medium", "high", "max"];
+        let mut has_active = false;
+        for (k, v) in efforts {
+            let k_lower = k.trim().to_ascii_lowercase();
+            if !valid_keys.contains(&k_lower.as_str()) {
+                return Err(format!(
+                    "非法思考强度档位 '{}'，仅支持 off, low, medium, high, max",
+                    k
+                ));
+            }
+            if k_lower != "off" {
+                if v.trim().is_empty() {
+                    return Err(format!("非 off 档位 '{}' 的上游参数字符不能为空", k));
+                }
+                if v.len() > 64 {
+                    return Err(format!("档位 '{}' 的参数字符长度不能超过 64", k));
+                }
+                has_active = true;
+            }
+        }
+        if !has_active {
+            return Err("思考强度映射必须声明至少一个非 off 档位".to_string());
+        }
+        Ok(())
+    }
+
+    /// Resolve effective wire string for a given ReasoningEffort from thinking_efforts.
+    /// Returns:
+    /// - `Some(Some(wire_str))` if mapped to a non-empty string.
+    /// - `Some(None)` if mapped to an empty string (suppress parameter).
+    /// - `None` if no custom mapping is defined for this tier (fallback to default protocol behavior).
+    pub fn wire_for_effort(&self, effort: ReasoningEffort) -> Option<Option<&str>> {
+        if self.thinking_efforts.is_empty() {
+            return None;
+        }
+        let key = effort.as_str();
+        if let Some(val) = self.thinking_efforts.get(key) {
+            let trimmed = val.trim();
+            if trimmed.is_empty() {
+                Some(None)
+            } else {
+                Some(Some(trimmed))
+            }
+        } else {
+            None
         }
     }
 
@@ -64,6 +129,7 @@ impl ModelThinkingSpec {
         Self {
             default_effort: ReasoningEffort::High,
             max_effort: ReasoningEffort::High,
+            thinking_efforts: BTreeMap::new(),
         }
     }
 
@@ -72,6 +138,7 @@ impl ModelThinkingSpec {
         Self {
             default_effort: ReasoningEffort::High,
             max_effort: ReasoningEffort::High,
+            thinking_efforts: BTreeMap::new(),
         }
     }
 
@@ -80,6 +147,7 @@ impl ModelThinkingSpec {
         Self {
             default_effort: ReasoningEffort::Off,
             max_effort: ReasoningEffort::Off,
+            thinking_efforts: BTreeMap::new(),
         }
     }
 
@@ -122,6 +190,7 @@ impl ModelThinkingSpec {
             Self {
                 default_effort: ReasoningEffort::Off,
                 max_effort: ReasoningEffort::Max,
+                thinking_efforts: BTreeMap::new(),
             }
         } else {
             Self::standard_reasoner()

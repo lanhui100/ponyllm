@@ -73,6 +73,8 @@ export interface ModelView {
   output_types?: string[];
   thinking_default: string;
   thinking_max: string;
+  /** 上游思考强度字符映射字典 (标准档位 -> 上游字符串，如 {"high": "xhigh", "off": ""}) */
+  thinking_efforts?: Record<string, string> | null;
   protocol?: string | null;
   base_url?: string | null;
   /** Per-model outbound proxy override (`Some` = 该模型经代理拨上游；`None` = 直连/继承服务商). */
@@ -304,6 +306,7 @@ export interface CreateModelPayload {
   proxy?: string | null;
   thinking_default?: string | null;
   thinking_max?: string | null;
+  thinking_efforts?: Record<string, string> | null;
   input_price?: number | null;
   cached_price?: number | null;
   output_price?: number | null;
@@ -330,6 +333,7 @@ export interface UpdateModelPayload {
   proxy?: string | null;
   thinking_default?: string | null;
   thinking_max?: string | null;
+  thinking_efforts?: Record<string, string> | null;
   input_price?: number | null;
   cached_price?: number | null;
   output_price?: number | null;

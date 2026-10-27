@@ -2847,6 +2847,7 @@ fn priority_provider(
                 base_url: None,
                 thinking_default: None,
                 thinking_max: None,
+                thinking_efforts: std::collections::BTreeMap::new(),
                 proxy: None,
                 timeout_secs: None,
                 fallbacks: Vec::new(),

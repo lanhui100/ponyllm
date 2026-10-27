@@ -9,6 +9,7 @@ import UiBadge from '../ui/UiBadge.vue';
 import UiTooltip from '../ui/UiTooltip.vue';
 import UiCollapsible from '../ui/UiCollapsible.vue';
 import ThinkingEffortSelect from './ThinkingEffortSelect.vue';
+import ThinkingEffortMapEditor from './ThinkingEffortMapEditor.vue';
 import UpstreamModelPicker from './UpstreamModelPicker.vue';
 import HourRangePicker from './HourRangePicker.vue';
 import { formatTierLabel, formatContextWindow } from '../../utils/format';
@@ -153,6 +154,7 @@ const form = ref({
   tier: 'Smart',
   context_window: '256k',
   thinking_default: 'High',
+  thinking_efforts: null as Record<string, string> | null,
   input_types: ['text', 'image'] as string[],
   output_types: ['text'] as string[],
   protocol: '',
@@ -330,6 +332,7 @@ function openAddInline() {
     tier: 'Smart',
     context_window: '256k',
     thinking_default: 'High',
+    thinking_efforts: null as Record<string, string> | null,
     input_types: ['text', 'image'],
     output_types: ['text'],
     protocol: '',
@@ -388,6 +391,7 @@ function openEditInline(model: ModelView) {
     tier: normalizeTier(model.tier),
     context_window: cw,
     thinking_default: model.thinking_default || 'High',
+    thinking_efforts: model.thinking_efforts ? { ...model.thinking_efforts } : null,
     input_types: model.input_types && model.input_types.length > 0 ? [...model.input_types] : ['text'],
     output_types: model.output_types && model.output_types.length > 0 ? [...model.output_types] : ['text'],
     protocol: normalizeProtocol(model.protocol),
@@ -573,6 +577,7 @@ async function handleSubmit() {
       context_window: form.value.context_window,
       thinking_default: form.value.thinking_default,
       thinking_max: form.value.thinking_default === 'Off' ? 'Off' : 'High',
+      thinking_efforts: form.value.thinking_efforts,
       input_types: form.value.input_types,
       output_types: form.value.output_types,
       protocol: form.value.protocol ? form.value.protocol.trim() : '',
@@ -865,6 +870,11 @@ async function handleDelete(name: string) {
                   <ThinkingEffortSelect
                     v-model:default-effort="form.thinking_default"
                   />
+                  <div class="mt-2 pt-2 border-t border-slate-200/60">
+                    <ThinkingEffortMapEditor
+                      v-model="form.thinking_efforts"
+                    />
+                  </div>
                   <div class="mt-1 text-[11px] text-slate-400">
                     提示：未配置时默认映射为 High；超深度模型（如 xhigh/ultra）可映射为 Max/High。
                   </div>
@@ -1510,6 +1520,12 @@ async function handleDelete(name: string) {
                     v-model:default-effort="form.thinking_default"
                     :disabled="!adminWriteEnabled"
                   />
+                  <div class="mt-2 pt-2 border-t border-slate-200/60">
+                    <ThinkingEffortMapEditor
+                      v-model="form.thinking_efforts"
+                      :disabled="!adminWriteEnabled"
+                    />
+                  </div>
                   <div class="mt-1 text-[11px] text-slate-400">
                     提示：未配置时默认映射为 High；超深度模型（如 xhigh/ultra）可映射为 Max/High。
                   </div>
