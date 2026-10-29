@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+# >>> ponygo-gate: adr-verify v1 >>>
+if [ -f "$(git rev-parse --show-toplevel)/.meta/gates/adr-verify.sh" ]; then
+  bash "$(git rev-parse --show-toplevel)/.meta/gates/adr-verify.sh" || exit 1
+fi
+# <<< ponygo-gate: adr-verify v1 <<<
 # ponyllm pre-commit gate (Second-level ~1-2s)
 set -eo pipefail
 export PATH="/usr/bin:/bin:$PATH"
