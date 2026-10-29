@@ -45,15 +45,69 @@ else
 fi
 
 echo "== [3/3] minimal completion through $MODEL =="
-RESP="$(curl -s -m 90 -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
-  "$BASE/v1/chat/completions" \
-  -d "{\"model\":\"$MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"max_tokens\":10,\"stream\":false}")"
-FINISH="$(printf '%s' "$RESP" | python3 -c "import json,sys; d=json.load(sys.stdin); \
-print('ERROR:'+json.dumps(d.get('error'),ensure_ascii=False)) if d.get('error') else \
-print(d['choices'][0].get('finish_reason',''))" 2>/dev/null)"
-case "$FINISH" in
-  stop|length) echo "OK: completion finish=$FINISH" ;;
-  ERROR:*) echo "FAIL: gateway error $FINISH"; exit 1 ;;
-  *) echo "FAIL: unexpected/empty completion"; exit 1 ;;
-esac
-echo "PASS: post-deploy smoke OK"
+DELAYS=(2 5 10)
+MAX_ATTEMPTS=3
+BODY_TMP="$(mktemp)"
+trap 'rm -f "$BODY_TMP"' EXIT
+
+ATTEMPT=1
+while [ "$ATTEMPT" -le "$MAX_ATTEMPTS" ]; do
+  CURL_RC=0
+  HTTP_CODE="$(curl -s -m 90 -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+    "$BASE/v1/chat/completions" \
+    -d "{\"model\":\"$MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"max_tokens\":10,\"stream\":false}" \
+    -o "$BODY_TMP" -w '%{http_code}' 2>/dev/null)" || CURL_RC=$?
+
+  RAW_SNIPPET="$(head -c 500 "$BODY_TMP" 2>/dev/null || true)"
+  echo "[attempt $ATTEMPT/$MAX_ATTEMPTS] http_code=$HTTP_CODE curl_rc=$CURL_RC body_snippet=$RAW_SNIPPET"
+
+  # 成功路径：200 且 finish_reason ∈ {stop,length}
+  if [ "$CURL_RC" -eq 0 ] && [ "$HTTP_CODE" = "200" ]; then
+    FINISH="$(python3 -c "import json,sys
+try:
+    d = json.load(open(sys.argv[1]))
+    if d.get('error'):
+        print('ERROR:' + json.dumps(d.get('error'), ensure_ascii=False))
+    else:
+        print(d.get('choices', [{}])[0].get('finish_reason', ''))
+except Exception as e:
+    print('PARSE_ERROR:' + str(e))
+" "$BODY_TMP" 2>/dev/null || echo "PARSE_ERROR")"
+
+    case "$FINISH" in
+      stop|length)
+        echo "OK: completion finish=$FINISH"
+        echo "PASS: post-deploy smoke OK"
+        exit 0
+        ;;
+      ERROR:*)
+        # 200 下返回 payload error 视作网关内部异常，按 5xx 重试逻辑处理
+        IS_RETRYABLE=1
+        ;;
+      *)
+        IS_RETRYABLE=1
+        ;;
+    esac
+  elif [ "$CURL_RC" -ne 0 ] || [ "$HTTP_CODE" = "429" ] || [[ "$HTTP_CODE" =~ ^5[0-9]{2}$ ]]; then
+    IS_RETRYABLE=1
+  elif [[ "$HTTP_CODE" =~ ^4[0-9]{2}$ ]]; then
+    # 其它 4xx（如 400 Bad Request / 401 Unauthorized / 403 Forbidden / 404 Not Found）
+    echo "SMOKE-BROKEN: http_code=$HTTP_CODE curl_rc=$CURL_RC snippet=$RAW_SNIPPET" >&2
+    exit 1
+  else
+    IS_RETRYABLE=1
+  fi
+
+  if [ "$IS_RETRYABLE" -eq 1 ]; then
+    if [ "$ATTEMPT" -lt "$MAX_ATTEMPTS" ]; then
+      DELAY_SEC="${DELAYS[$((ATTEMPT - 1))]}"
+      echo "RETRYABLE failure detected (http_code=$HTTP_CODE, curl_rc=$CURL_RC). Backing off for ${DELAY_SEC}s..."
+      sleep "$DELAY_SEC"
+      ATTEMPT=$((ATTEMPT + 1))
+    else
+      echo "SMOKE-TRANSIENT: http_code=$HTTP_CODE curl_rc=$CURL_RC snippet=$RAW_SNIPPET" >&2
+      exit 1
+    fi
+  fi
+done
+
