@@ -9,7 +9,7 @@
 # 退出码：0 = 放行；非零 = 拒绝（pre-commit 会把非零翻译成"提交被拒"）。
 #
 # 语义边界（P6 诚实条款）：本门**不自己判** ADR 格式——判定真源是
-# `.agents/skills/write-adr/verify-note.sh`（maturity-ladder §5 的 1.1–1.9 机械影子）。
+# `.agents/skills/write-adr/verify-note.sh`（maturity-ladder §5 的 1.1–1.10 机械影子）。
 # 本门只多做三件它做不到的事：
 #   1) R6 TOCTOU：verify-note 读**工作区**，而 pre-commit 的输入是**暂存区文件名**。
 #      两者不一致时（staged 后又在工作区改过），校验的就不是将要提交的那份字节。
@@ -18,7 +18,7 @@
 #      并豁免 README.md / AGENTS.md（治理契约载体，非决策记录）。
 #   3) F9 非普通文件：symlink（120000）/ gitlink（160000）ADR 一律拒绝——否则"被校验的字节"
 #      可以指向工作区外内容，判定面被换掉。此检查必须排在 EOL 归一兜底之前（见 §4a 注释）。
-# 为什么不在本门里重写 1.1–1.9：一份判据两份实现必然漂移（P9），
+# 为什么不在本门里重写 1.1–1.10：一份判据两份实现必然漂移（P9），
 # 且 `ponygo gate adr` 子命令已按同一理由被否决（见 ADR 的 Alternatives R-新子命令）。
 #
 # 只读纪律：本脚本**不写仓库任何文件**。临时文件一律 `mktemp -d`，`trap` 清理。
@@ -35,8 +35,38 @@ die() {
   printf '[%s] FAIL：%s\n' "$PROG" "$*" >&2
   exit 1
 }
+# 归档封印的评估结果（在**任何 skip 之前**算好；输出留到 ADR 段之后打印，见 archive_finish）
+ARCHIVE_GATE=".meta/gates/archive-verify.sh"
+ARCHIVE_DONE=0
+ARCHIVE_RC=0
+ARCHIVE_OUT=""
+
+# 收口：打印归档段 → 归档未通过则拒绝（fail-closed），否则按调用方的退出码走。
+# 顺序语义：ADR 段永远在前、归档段永远在后（本地层两段既有顺序不变）；但**判定**发生在
+# 早期（archive_probe），所以"这次没有暂存 ADR"不能成为绕过封印的门。
+archive_finish() {
+  if [ "${ARCHIVE_DONE:-0}" = "1" ] && [ -n "${ARCHIVE_OUT:-}" ]; then
+    printf '%s\n' "$ARCHIVE_OUT"
+  fi
+  if [ "${ARCHIVE_DONE:-0}" = "1" ] && [ "${ARCHIVE_RC:-0}" -ne 0 ]; then
+    printf '[%s] 拒绝：归档封印未通过（见上：归档件被改动或未封印）→ 恢复原字节，或追加封印（bash .meta/gates/archive-verify.sh seal）后再提交\n' "$PROG" >&2
+    exit 1
+  fi
+  return 0
+}
+
+# 归档封印探测（A6 存在时无条件跑；缺失则优雅回退，不改变 ADR 判定）
+archive_probe() {
+  [ -f "$ARCHIVE_GATE" ] || return 0
+  ARCHIVE_OUT=$(bash "$ARCHIVE_GATE" check 2>&1)
+  ARCHIVE_RC=$?
+  ARCHIVE_DONE=1
+  return 0
+}
+
 skip() {
-  printf '[%s] 跳过：%s（exit 0）\n' "$PROG" "$*"
+  printf '[%s] 跳过：%s\n' "$PROG" "$*"
+  archive_finish
   exit 0
 }
 
@@ -44,6 +74,10 @@ skip() {
 ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || skip "非 git 仓库"
 [ -n "$ROOT" ] || skip "非 git 仓库"
 cd "$ROOT" || die "无法进入仓库根：$ROOT"
+
+# 1b) 归档封印（A6）在**任何 skip 之前**评估：删除/移出归档件不产生暂存 ADR 变更，
+#     若把 A6 留在末尾（旧实现），"本次没有暂存 ADR" 就成了绕过封印的门（实测缺陷）。
+archive_probe
 
 # 2) 无 .agents/notes → 该实例没有决策记录制度，本门不越权造制度
 [ -d .agents/notes ] || skip "无 .agents/notes 决策记录目录"
@@ -145,8 +179,12 @@ if [ "$bad_mode" -ne 0 ] || [ "$drift" -ne 0 ]; then
   exit 1
 fi
 
-# 5) 交给判定真源（唯一真值，不在本门复刻 1.1–1.9）
+# 5) 交给判定真源（唯一真值，不在本门复刻 1.1–1.10）
 bash "$VERIFY" ${PATHS[@]+"${PATHS[@]}"} || exit 1
 
 printf '[%s] 通过：%d 条 ADR 经 %s 校验（暂存区与工作区一致）\n' "$PROG" "${#PATHS[@]}" "$VERIFY"
+
+# 5) 归档 SHA-256 封印（A6 check）：**判定**已在步骤 1b 完成，这里只打印其输出并收口——
+#    归档件被改一字节、或归档件未封印，都拒绝提交。A6 缺失时优雅回退（步骤 1b 直接返回）。
+archive_finish
 exit 0

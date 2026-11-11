@@ -4,11 +4,52 @@
 就把它从"口传 / 现写"资产化为这里的一篇 `SKILL.md`；当技能失去真实消费者（对应流程
 不再发生），删掉它——删除是一次决策，需录 `.agents/notes/`。
 
-**为什么首版只有 write-adr**：流程资产化是 L4 的产物，依赖"已经有重复发生的流程"
-这一事实；首版不预置通用技能（空技能是被永久引用的死重）。唯一例外是 `write-adr/`：
-写决策记录是 L1 判据强制的高频流程，消费者由框架自身创造，第一次重复就值得资产化
-（Rule of three 对它天然满足）。它是**框架交付物，不计入** L4"实例已长出流程资产"
-的证据——L4 仍要求你的项目按 Rule of three 自己长出第一个 skill。
+**为什么首版只有 write-adr、governance-review 与 change-review**：流程资产化是 L3 的产物，依赖
+"已经有重复发生的流程"这一事实；首版不预置通用技能（空技能是被永久引用的死重）。
+三个框架交付技能各有豁免理由：
+- `write-adr/`：写决策记录是 L1 判据强制的高频流程，消费者由框架自身创造，
+  自动路由成立（Rule of three 天然满足）；
+- `governance-review/`：治理审查是重型 review 流程，**用户点名调用**而非自动路由
+  （`disable-model-invocation: true`，dsh-translate-docs 范式）——不满足 Rule of three，
+  但它是框架对"用户随时想做治理体检"这一刚需的入口封装。
+- `change-review/`：评审变更是否符合已记录决策，是框架判据的执行时刻；读旧 ADR 是
+  每次评审的固定动作，消费者由框架自身创造（Rule of three 豁免同 write-adr）。
+三者都是**框架交付物，不计入** L3"实例已长出流程资产"的证据——L3 仍要求你的项目
+按 Rule of three 自己长出第一个 skill。
+
+---
+
+## 三层归属：基线 / 模板库 / 实例自有
+
+`.agents/skills/` 下只有一类技能会出现在"已安装"语义里，但技能资产的**来源**有三种，判定口径不同：
+
+| 层 | 位置 | 所有者 | 计入 L3 证据 | 来源 |
+|---|---|---|---|---|
+| **基线** | `.agents/skills/{write-adr,change-review,governance-review}/` | 实例可改，模板逐字节锁 | 否 | `ponygo init` 必播 |
+| **模板库** | `.meta/skills-library/pg-*/` | 仅模板 | 否 | `ponygo init` 播种，**不自动安装** |
+| **实例自有** | 其余 `.agents/skills/*/` | 实例 | **是** | 项目按 Rule of three 自己长 |
+
+库技能名统一带 `pg-` 前缀（本项目命名空间）；基线名不带前缀（既有契约引用遍布 gates/tests/docs，
+改名是破坏性变更且无收益）。
+
+### 安装与三态（库 → 项目）
+
+```bash
+bash .meta/skills-library/install.sh list                    # 每个技能一行：已装/未装 + 三态
+bash .meta/skills-library/install.sh install pg-doc-hygiene  # 复制到 .agents/skills/，已存在则拒绝
+bash .meta/skills-library/install.sh check                   # ok / stale / modified
+```
+
+- `install` 成功后写 `.agents/skills/<name>/.ponygo-installed`（`library_sha256` + `installed_at`），
+  该标记同时是问③ 的**排除依据**——库安装的技能不计入"实例自有"；
+- `stale` = 库已更新；`modified` = 本地改过（**永不覆盖**，本地校准样例是正当改造）；
+- 只读 `check` 不写盘；无 `uninstall`：删除技能是一次决策，走 `.agents/notes/` 记录 + 手删。
+
+### 何时装哪个
+
+`ponygo audit` 在 `能力缺口建议（advisory）` 段按 `.meta/skills-library/catalog.tsv` 的证据规则
+给出候选与安装命令——证据可机械求值（笔记类别计数、归档封印数、文档规模、Web/测试/发布面），
+**是否真的到阈值、值不值得装，靠 review**；该段不计分、不改退出码，不装也不失败。
 
 > **「原理」引用的出处**：本文及实例骨架中的 methodology 引用，均指向 ponygo 框架仓库的
 > `docs/methodology.md`：<https://github.com/lanhui100/ponygo/blob/main/docs/methodology.md>。
@@ -49,13 +90,21 @@ disable-model-invocation: <可选。true = 只许用户点名，禁模型自主�
 - 跑 `<命令>`；输出：<格式>
 ```
 
-## 三条纪律（源自 dsh 实证，methodology §3.3）
+## 五条纪律（源自 dsh 实证，methodology §3.3）
+
+**本节仅约束本提交之后新增/改写，既有三技能豁免；改写指工具定义/提示节/步骤/样例/验证语义任一变更，纯 typo/格式除外（typo 与语义微调的边界靠 review）；既有三技能未来语义改写亦触发。**
 
 1. **调用权限分层**：重型 / 危险 / 高成本流程标 `disable-model-invocation: true`——
    只许用户点名，防模型误路由（范式：dsh-translate-docs）。
 2. **输入契约**：缺 scope 就停下报告，不推断、不采访。
 3. **证据面匹配**：技能里的验证步骤按改动表面选**最小充分证据**（行为→聚焦测试、
    文档→同步检查、真实依赖→端到端），不全量重跑。
+4. **工具定义卫生**：模型可见的工具定义改动（名/描述/参数/系统提示节）遵循最小上下文优先；
+   延迟加载资源全部可检索；关键约束（权限/破坏性/必备校验）前置到动作前；
+   输出有界（给标识或路径而非全文倾倒）；每事实只说一次；
+   有条件者记录（模型名 + 提示版本 + 输入 token 数），无条件者诚实标注未测。
+5. **简化勘探证据链**：删除或收窄类提案给出证据链四件套（owner、producer/consumer 路径、
+   消失/保留清单、最强反方）；符号零命中不等于可删；历史案例只作提问清单；计数不选优。
 
 ## 壳与逻辑体分离
 

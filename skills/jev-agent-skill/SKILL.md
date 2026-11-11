@@ -1,27 +1,27 @@
 ---
 name: jev-agent-skill
 description: |
-  Jev 零样本类型化判断 skill：经 POST /v1/systemone 做二分类/多分类/分级打分（只输出概率，不生成文本）。
+  Jev / Laya 零样本类型化判断 skill：经 POST /v1/systemone 做二分类/多分类/分级打分（只输出概率，不生成文本）。
 
   触发场景：
   - 做判断："这条工单紧不紧急？"、"这条评论该打几分？"、"这个请求该路由到哪个队列？"
-  - 定执行方式："Jev 返回 confidence 0.7，该自动执行还是转人工？"
+  - 定执行方式："返回 confidence 0.7，该自动执行还是转人工？"
   - 故障排查："systemone 返回 401/403 是什么意思？"、"这个响应的 legend 怎么读？"
 ---
 
-# jev-agent-skill — Jev 类型化判断（systemone）
+# jev-agent-skill — System One 类型化判断（Laya 引擎）
 
-Jev 是零样本类型化判断模型：做二分类 / 多分类 / 分级打分，输出概率；不生成文本（写文案、写代码请走 chat/completions 等生成入口，不要找 Jev）。
+本 Skill 承载零样本类型化判断能力：做二分类 / 多分类 / 分级打分，输出概率；不生成文本（写文案、写代码请走 chat/completions 等生成入口）。
+后端现已全面统一切换至 Laya 决策模型（`convaiinnovations/laya`，短别名 `laya`），上游已停用下架的 Jev 实例。
 
 ## 调用入口
 
 ```bash
-POST https://opencode.ai/zen/v1/systemone   # 标准端点
+POST <GW>/v1/systemone   # 网关标准端点
 ```
 
-- 鉴权：`Authorization: Bearer <Zen key>` + `Content-Type: application/json` + `User-Agent: opencode/1.18.31 (Linux; x64)`（实测 UA 必需）。
-- 401 = Zen key 错/过期（换 key）；403 = key 权限不足（换有 systemone 权限的 key，不要重试）。
-- 请求顶层三字段：`model`（jev 模型 id，如 `jev-1.13-free`）+ `state`（待判断的背景文本，任意字符串）+ `questions`（**dict**：题名自定义 → 题对象；多题同请求批量问，单题就是只放一题的 dict）。
+- 鉴权：`Authorization: Bearer <GATEWAY_KEY>` + `Content-Type: application/json`。
+- 请求顶层三字段：`model`（`convaiinnovations/laya` 或 `laya`）+ `state`（待判断的背景文本，任意字符串）+ `questions`（**dict**：题名自定义 → 题对象；多题同请求批量问，单题就是只放一题的 dict）。
 
 ## 三题型字段形态（2026-09-27 真实端点验证通过）
 
@@ -34,23 +34,23 @@ POST https://opencode.ai/zen/v1/systemone   # 标准端点
 ### 示例 1：noul 工单紧急度（二分类，实测 `noul: 0.96`）
 
 ```bash
-curl -s 'https://opencode.ai/zen/v1/systemone' \
-  -H "Authorization: Bearer <ZEN_KEY>" -H 'Content-Type: application/json' \
-  -H 'User-Agent: opencode/1.18.31 (Linux; x64)' -d '{
-    "model": "jev-1.13-free",
+curl -s 'http://127.0.0.1:8080/v1/systemone' \
+  -H "Authorization: Bearer <GATEWAY_KEY>" -H 'Content-Type: application/json' \
+  -d '{
+    "model": "laya",
     "state": "支付回调从今早开始全部超时，商家陆续投诉无法收款",
     "questions": {"is_urgent": {"type": "noul", "instructions": "判断该工单是否紧急。紧急指：生产故障、数据丢失、资金风险；普通咨询、功能建议不算紧急。"}}
   }'
-# → {"model":"jev-1.13-free","answers":{"is_urgent":{"type":"noul","noul":0.96}},"usage":{...}}
+# → {"model":"convaiinnovations/laya","answers":{"is_urgent":{"type":"noul","noul":0.96}},"usage":{...}}
 ```
 
 ### 示例 2：choice 工单路由（多分类，实测 `choice: billing, confidence: 1`）
 
 ```bash
-curl -s 'https://opencode.ai/zen/v1/systemone' \
-  -H "Authorization: Bearer <ZEN_KEY>" -H 'Content-Type: application/json' \
-  -H 'User-Agent: opencode/1.18.31 (Linux; x64)' -d '{
-    "model": "jev-1.13-free",
+curl -s 'http://127.0.0.1:8080/v1/systemone' \
+  -H "Authorization: Bearer <GATEWAY_KEY>" -H 'Content-Type: application/json' \
+  -d '{
+    "model": "laya",
     "state": "发票抬头开错了，申请重开",
     "questions": {"route": {
       "type": "choice",
@@ -69,10 +69,10 @@ curl -s 'https://opencode.ai/zen/v1/systemone' \
 ### 示例 3：score 评论打分（分级打分，实测 `score: 1.81, confidence: 0.84`）
 
 ```bash
-curl -s 'https://opencode.ai/zen/v1/systemone' \
-  -H "Authorization: Bearer <ZEN_KEY>" -H 'Content-Type: application/json' \
-  -H 'User-Agent: opencode/1.18.31 (Linux; x64)' -d '{
-    "model": "jev-1.13-free",
+curl -s 'http://127.0.0.1:8080/v1/systemone' \
+  -H "Authorization: Bearer <GATEWAY_KEY>" -H 'Content-Type: application/json' \
+  -d '{
+    "model": "laya",
     "state": "物流很快，但商品与描述不符，客服态度尚可",
     "questions": {"rating": {
       "type": "score",
@@ -122,16 +122,15 @@ Jev 上游对部分字段校验较宽松，生产 agent 不应完全依赖上游
 - certainty `0.5–0.85`：生成草稿，请人确认后再执行。
 - certainty `< 0.5`：转人工，不自动执行、不生成终稿。
 
-## 经网关调用与模型 Fallback 容灾
+## 经网关调用与决策模型规范
 
 ponyllm 网关提供统一接入点 `POST <GW>/v1/systemone`（网关鉴权 `Bearer <KEY>`，需 `inference` scope；401 = 网关 key 错，403 = scope 不足）：
 
-### 1. 主模型与 Fallback 模型定义
-- **默认主模型**：`jev-1.13-free`（提供商：`zen-jev`，直连 OpenCode Zen System One 节点）。
-- **备用降级模型 (Fallback)**：`convaiinnovations/laya`（短别名 `laya`，提供商：`vercel`，接入 Vercel AI Gateway 决策接口）。
-  - **协议兼容性**：Laya 与 Jev 均严格遵循 TypeSafe System One 契约（`state` + `questions`，包含 `noul`、`choice`、`score` 原语），返回结构完全一致，应用层无需适配代码。
-  - **网关自动降级**：ponyllm 内已为 `jev-1.13-free` 配置 `fallbacks = ["convaiinnovations/laya"]`。当主上游遭遇 429 限流/配额耗尽（`FreeUsageLimitError`）时，网关透明故障倒换至 Laya。
-  - **客户端显式调用**：客户端亦可直接请求 `model: "laya"` 或 `model: "convaiinnovations/laya"` 直达备选模型。
+### 1. 唯一决策模型：Laya
+- **模型标识**：`convaiinnovations/laya`（支持短别名 `laya` 或 `laya-free`，提供商：`vercel`，接入 Vercel AI Gateway 决策接口）。
+- **历史 Jev 清理**：原 `jev-1.13-free` 提供商已从网关配置彻底注销，接口只使用 Laya 模型。
+- **协议兼容性**：Laya 严格遵循 TypeSafe System One 契约（`state` + `questions`，包含 `noul`、`choice`、`score` 原语），返回结构与原协议完全一致。
+- **客户端调用**：客户端请求直接传入 `model: "laya"` 或 `model: "convaiinnovations/laya"`。
 
 ## 反模式
 

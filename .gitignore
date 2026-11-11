@@ -31,6 +31,9 @@ __pycache__/
 .dev-team/
 
 
+# magpie 宿主机 Docker 部署的本地密钥（MAGPIE_WEB_KEY，不入库；模板见 .env.example）：
+deploy/magpie/.env
+
 # IDE/编辑器目录：
 .idea/
 .vscode/

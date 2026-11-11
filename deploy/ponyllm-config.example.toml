@@ -10,6 +10,11 @@
 #      不带 proxy 字段。
 #   2. Jev / Systemone 模型：支持直连 https://opencode.ai/zen/v1，无需代理。
 #   3. antigravity：走 CONNECT 代理模式，proxy= 凭据形态不变（参照 live secret）。
+#   4. magpie（2026-11-07）：base_url 必须是 devserver 的 tailnet 字面 IP
+#      `http://100.95.193.103:3425/v1`，且该 IP 必须同时出现在 Deployment 的
+#      PONYLLM_PROBE_ALLOWLIST 里——egress.rs 的 blocked_v4 把 100.64/10（CGNAT）
+#      判为 blocked address，数据面拨号与 admin 写路径（check_probe_url_fast）
+#      同口径拒绝。两者成对维护，见本节 [providers.magpie]。
 
 [providers.opencode-zen]
 # 示例为占位：真值（内网 IP + PATH_TOKEN）只进 live secret，绝不进仓库。
@@ -78,24 +83,6 @@ protocol = "chat"
 thinking_default = "max"
 thinking_max = "max"
 
-# Jev is kept in a separate provider so systemone metrics, traces, tokens,
-# quota, and key health are isolated from text-generation Zen traffic.
-[providers.zen-jev]
-# Jev systemone supports direct HTTPS; proxy is optional for restricted egress.
-base_url = "https://opencode.ai/zen/v1"
-default_model = "jev-1.13-free"
-strategy = "round_robin"
-billing_mode = "free"
-input_price = 0.0
-cached_price = 0.0
-output_price = 0.0
-models = ["jev-1.13-free"]
-default_protocol = "systemone"
-
-[[providers.zen-jev.model_configs]]
-name = "jev-1.13-free"
-fallbacks = ["convaiinnovations/laya"]
-
 # Vercel AI Gateway - Laya System One 决策模型
 [providers.vercel]
 base_url = "https://ai-gateway.vercel.sh/typesafe/v1"
@@ -125,6 +112,56 @@ default_protocol = "systemone"
 # max_output = "32K"
 # input_types = ["text", "image"]
 # output_types = ["image"]
+
+# ── magpie：宿主机 Docker AI 网关（2026-11-07 接入，决策见
+#    .agents/notes/implemented/feature/2026-11-07-magpie-provider-in-ponyllm-gateway.md）
+#
+# 形态：magpie 容器跑在 devserver，只监听 tailnet 双栈；ponyllm 经 tailnet 字面 IP 直连，
+#   不配 proxy、不配 egress_pool（直连最短路）。
+# 凭据：magpie 的网关密钥（`docker exec magpie magpie gateway-key add <name>` 签发）
+#   进 key 池（Admin API `POST /api/admin/keys`），与 ponyllm 自身 gateway-key 体系无关。
+# 成本：billing_mode=metered + 三档 0.0 —— magpie 侧是订阅额度，网关不核算成本；
+#   若要让 economy 策略按真实成本决策，改 `free` 或填真实单价（另一次决策）。
+[providers.magpie]
+base_url = "http://100.95.193.103:3425/v1"
+default_model = "default"          # 占位；真值以 magpie 目录为准（新增上游后需重映射）
+strategy = "priority"
+billing_mode = "metered"
+input_price = 0.0
+cached_price = 0.0
+output_price = 0.0
+default_protocol = "chat"          # magpie 讲 Chat/Responses/Anthropic/Gemini 并可互译
+models = [
+    "trae-cn/deepseek-v4.1-flash",
+    "group/smart-split",
+# 下架（2026-11-07，实测）：trae-cn/kimi-k3.1-pro-auto 与 -auto-max 对 Trae CN 的
+# 参数校验不兼容——非流式、或带 max_tokens 一律 4001 "param is invalid"（magpie 侧直连
+# 即 502，非网关问题）。上游修好后可原样加回，见 ADR 收据。
+]
+
+# 元数据取 magpie GET /v1/models 原值；magpie 的思考档位只有 low/high/xhigh，
+# 网关侧映射到 low/high/max 三档（off 表示不带 reasoning 字段）。
+[[providers.magpie.model_configs]]
+name = "trae-cn/deepseek-v4.1-flash"
+tier = "S"
+context_window = "116k"
+max_output = "16k"
+input_types = ["text", "image"]
+output_types = ["text"]
+thinking_default = "high"
+thinking_max = "max"
+thinking_efforts = { off = "", low = "low", high = "high", max = "xhigh" }
+
+[[providers.magpie.model_configs]]
+name = "group/smart-split"         # magpie 的意图路由组：简单题给便宜模型，难题给强模型
+tier = "F"
+context_window = "200k"
+max_output = "32k"
+input_types = ["text", "image"]
+output_types = ["text"]
+thinking_default = "high"
+thinking_max = "max"
+thinking_efforts = { off = "", low = "low", high = "high", max = "xhigh" }
 
 # ── 安全：Phase-3 HttpOnly Cookie 管理会话（VULN-05，默认关闭）────────────────
 # 开启方式（生产建议启用，配合 Web 控制台后续版本）：

@@ -1,0 +1,57 @@
+# deploy/magpie/compose.yaml — magpie AI 网关的宿主机 Docker 部署形态
+#
+# 定位：本仓（ponyllm）之外的第二个本地网关，用于把订阅账号 / 各家 API key
+# 汇成 127.0.0.1:3425 上的统一入口（OpenAI / Anthropic / Gemini 三种协议均可）。
+# 与 ponyllm 无耦合：不共享配置、不共享端口、不写本仓构建产物。
+#
+# 事实来源：https://github.com/yetone/magpie 的 site/public/docs/zh/docker.html
+# 与仓内 Dockerfile（镜像已内建 HEALTHCHECK：`magpie healthcheck`）。
+#
+# 端口语义：
+#   :3425 —— Agent 调用的网关（容器外每个调用方都必须带网关密钥，否则 401）
+#   :3430 —— Web UI（`magpie web`），同时镜像 /v1 路由，反代只需转发这一个端口
+#
+# 默认两个端口都只发布在宿主机回环地址；要跨机访问请显式改 MAGPIE_BIND / 用 VPN。
+
+name: magpie
+
+services:
+  magpie:
+    image: ghcr.io/yetone/magpie:${MAGPIE_TAG:-latest}
+    container_name: magpie
+    restart: unless-stopped
+    ports:
+      # 双栈各一条：MagicDNS 同时返回 A 与 AAAA，只绑 v4 会让 v6 先撞连接拒绝再回落。
+      # 默认回环；设成 tailnet 地址即「只经 Tailscale 可达」，内核层拒绝其它来源。
+      - "${MAGPIE_BIND_V4:-127.0.0.1}:3425:3425"
+      - "[${MAGPIE_BIND_V6:-::1}]:3425:3425"
+      - "${MAGPIE_BIND_V4:-127.0.0.1}:3430:3430"
+      - "[${MAGPIE_BIND_V6:-::1}]:3430:3430"
+    environment:
+      # 重启后 key 不变；未设置则每次启动随机生成，cookie 只活一个浏览器会话。
+      MAGPIE_WEB_KEY: ${MAGPIE_WEB_KEY:?MAGPIE_WEB_KEY 未设置：cp .env.example .env 并填 key}
+      # 其它机器访问网关用的地址（容器只看得到 Docker 自己的 172.17.x）。
+      MAGPIE_PUBLIC_URL: ${MAGPIE_PUBLIC_URL:-http://127.0.0.1:3425}
+      # 可选的应用层来源白名单（连接自身地址，不认 X-Forwarded-For）。
+      # 留空 = 不限制（仍要求网关密钥）；用 tailnet 访问时可填 100.64.0.0/10,fd7a:115c:a1e0::/48
+      MAGPIE_ALLOW_IPS: ${MAGPIE_ALLOW_IPS:-}
+    volumes:
+      # 命名卷而非 bind mount：镜像内用户是 nonroot(65532)，命名卷免去 chown 陷阱。
+      - magpie-config:/config
+    command: ["web", "--addr", "0.0.0.0:3430", "--no-open"]
+    # 镜像 Dockerfile 已声明 HEALTHCHECK，此处显式重申，避免被上层 orchestration 覆盖后静默。
+    healthcheck:
+      test: ["CMD", "/magpie", "healthcheck"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  magpie-config:
+    name: magpie-config

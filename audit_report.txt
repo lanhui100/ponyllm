@@ -1,0 +1,41 @@
+ponygo: 审计深度：M 档（触发: 贡献者≥3(8) 已有治理痕迹×1）
+ponygo: M 档——机制层判定（判「对不对」）。
+ponygo: 2.3 gates/ 无负样本 spec（实例门无有效同名配对）
+
+===== ponygo 审计结果（M 档）=====
+命中 11 / 16 项
+ponygo: 当前治理级：L2
+
+缺口与最小改进动作（按杠杆排序，优先「强制层」）：
+  - gate_spec_missing 实例门缺同名负样本 spec：
+  - .meta/gates/check-tasks.ps1 缺负样本 spec .meta/gates/check-tasks.spec.ps1（同 Stem、同 .ps1 后缀；空 spec 不计）
+  - .meta/gates/check-tasks.sh 缺负样本 spec .meta/gates/check-tasks.spec.sh（同 Stem、同 .sh 后缀；空 spec 不计）
+  - .meta/gates/commit-msg-task-id.sh 缺负样本 spec .meta/gates/commit-msg-task-id.spec.sh（同 Stem、同 .sh 后缀；空 spec 不计）
+  - .meta/gates/verify-note.ps1 缺负样本 spec .meta/gates/verify-note.spec.ps1（同 Stem、同 .ps1 后缀；空 spec 不计）
+
+===== 技能（三层归属：基线 / 模板库 / 实例自有） =====
+技能：基线 2/3 齐；库 0 安装；实例自有 1
+  基线缺失（硬失败——框架必播的三篇技能不在场，缺口 id: skill_baseline_missing）：.agents/skills/change-review/SKILL.md
+    修法：git checkout 恢复，或跑 'ponygo init --repair-skeleton' 只补缺失文件
+  库缺口（可选资产，仅提示——不计分、不改退出码）：.meta/skills-library/README.md .meta/skills-library/install.sh .meta/skills-library/catalog.tsv .meta/skills-library/pg-delivery-checks/SKILL.md .meta/skills-library/pg-find-simplifications/SKILL.md .meta/skills-library/pg-doc-hygiene/SKILL.md .meta/skills-library/pg-test-reliability/SKILL.md .meta/skills-library/pg-upgrade-guide/SKILL.md .meta/skills-library/pg-gc-agent-notes/SKILL.md
+    → 跑 'ponygo init --repair-skeleton' 只补缺失的库文件（不覆盖既有文件）
+
+提示：程序只判「有无/对不对」，不判「值不值」——是否值得建某机制，靠 review（P6）。
+
+替代物认可：若你用非 ponygo 形态达成同等效果（如 CONTRIBUTING.md + CODEOWNERS + CI，
+或 docs/adr 而非 .agents/notes），本命令只做机械形状探测、不裁决价值——请按
+https://github.com/lanhui100/ponygo/blob/main/checklists/audit.md「已认可替代物」条款自评为命中，勿把形状分当价值分。
+
+===== 治理门接线（交付即接线） =====
+治理门接线：已接线（.meta/gates/pre-commit → .meta/gates/adr-verify.sh，暂存区 ADR 门生效）
+远端层：GitHub Actions 治理执行面已接线（ponygo-governance.yml 或 ci.yml 的 governance job → bash .meta/gates/ci-verify.sh）
+
+===== 门禁分层参考（P7 时间经济性，dsh 实证） =====
+  本地层 pre-commit（秒级）：有
+  中继层 pre-push（10秒级）：有
+  远端层 CI（分钟级）：有
+  每层只抓该层性价比最高的缺陷：本地窄、CI 全，两层跑同样检查 = 白付延迟（P7）。
+  注：分层是「值不值」的价值判断（P6）——小项目只上 CI 也合法；本表仅机械探测形状、供 review 参考。
+
+===== 骨架漂移（观察项，不改退出码） =====
+漂移 9 处：.agents/notes/README.md .agents/skills/README.md .agents/skills/write-adr/SKILL.md .agents/skills/write-adr/verify-note.sh .agents/skills/governance-review/SKILL.md .meta/gates/README.md .meta/gates/adr-verify.sh .meta/gates/adr-verify.spec.sh .meta/gates/ci-verify.sh
