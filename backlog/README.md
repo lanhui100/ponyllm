@@ -16,13 +16,14 @@
 | `backlog/legacy/` | 冻结历史（旧看板 / 旧波次账本 / 旧任务卡 + 迁移映射），只读、不参与校验 | ✅ |
 | `backlog/README.md` | 本契约 | ✅ |
 
-`backlog/` 根下的其余 markdown（`ponyllm-gateway-tencent-acr-pull-failure.md`、
-`pproxy-forward-connect-tunnel-failure.md`、`user-jwt-auth-requirements.md`）是**主题文档**
-（工单 / 需求稿），不是账本载体：它们不参与 `lint` / `doctor`，也不得再被当作状态真源。
+`backlog/` 根下**只有账本**（`tasks.jsonl` / `archive/` / `legacy/` / 本契约）：原先散在根下的
+3 份主题文档（两张运维工单 + 一份 JWT 需求稿）已于 2026-11-12 归档进 `backlog/legacy/`——
+它们不是账本载体、不参与 `lint` / `doctor`，也不再留在活跃路径上冒充状态真源。
 
-`.agents/tasks/` 是**已退役的旧任务载体**：有内容的独立任务卡已冻结进 `backlog/legacy/` 并入账
-（见 `backlog/legacy/README.md` 表三），`web-console/` 板 Active 五列为空、仅存归档件。
-其格式门 `.meta/gates/check-tasks.sh` 仍看守该目录结构，但**状态真源只有本账本**。
+`.agents/tasks/` **已整体退役**（2026-11-12）：独立任务卡冻结进 `backlog/legacy/` 并入账（见
+`backlog/legacy/README.md` 表三），空的 `web-console/` 板与其格式门 `check-tasks.*`、配套技能
+`manage-tasks` 一并归档/撤线（残留收据 = `.meta/gates/no-residue.manifest`）。
+**状态真源只有本账本**；`backlog/` 之外不再有任何待办载体。
 
 ## 记录模型
 

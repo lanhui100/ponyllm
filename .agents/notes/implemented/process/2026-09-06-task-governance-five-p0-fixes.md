@@ -9,7 +9,7 @@ Status: implemented
 1. **Done 生命周期**：`03_TASKS/` 永远是 Active 区（禁 Done/Dropped，门禁 FAIL 不变）；完工与归档同提交（`git mv` 卡进 `04_ARCHIVED/` + 新增 `02_REVIEWS/WEB-XX.md` + Board 备查行 + Dashboard 消行）；Board Done/Dropped 区改为归档备查（只放已归档 ID，≤5 条，超窗删最旧行）；门禁备查行验三件（`04_ARCHIVED` 有文件 + Done 须 review + 归档卡状态终态），Dashboard 不链归档 ID。
 2. **squash 收口**：`git branch --merged main` 改为 `git cherry main task/WEB-XX` 无 `+` 行即等价已合；清理四齐（已 push、PR merged、cherry 为空、工作区干净）后允许 `git branch -D`，其余情形仍禁 `-D`/`--force`。
 3. **commit-msg 钩子**：新增 `.meta/gates/commit-msg`（分发到 `commit-msg-task-id.sh`，逻辑单源），靠 `core.hooksPath=.meta/gates` 全 worktree 生效；废止往 `.git/hooks` 手工 cp。
-4. **门禁接线**：CI（`ci.yml`）全量跑 `check-tasks.sh`；`pre-commit` 仅当暂存区含 `.agents/tasks/` 或 `.agents/notes/` 时跑任务门禁（纯代码提交不受任务树状态影响）。
+4. **门禁接线**：CI（`ci.yml`）全量跑 `check-tasks.sh`；`pre-commit` 仅当暂存区含 `.agents/tasks/` 或 `.agents/notes/` 时跑任务门禁（纯代码提交不受任务树状态影响）。**（2026-11-12 退役：任务卡体系与 `check-tasks` 门一并归档/撤线，见 `.agents/notes/implemented/process/2026-11-12-retire-task-card-system.md`）**
 5. **本记录即补记**：此前任务体系（skill + 双门禁 + 并行认领/原子提交/撤回）无 ADR，本次以 `implemented/process` 追认并记录关键备选。
 
 并行相关顺带项：认领提交必须立刻 push（push 被拒 = 对方先认领，回退）；Board/Dashboard 配 `merge=union`；新增 `02_REVIEWS/_TEMPLATE.md`；skill 声明作用域（当前仅 `web-console`，Rust 主线未覆盖）。

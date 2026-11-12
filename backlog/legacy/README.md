@@ -8,6 +8,11 @@
 | `backlog.md` | 旧单文件看板（事项级，原文冻结，一字不改） |
 | `web-user-jwt-progress.md` | 旧第二份状态账本（JWT 波次进度，原文冻结；其 `B001`–`B004` 是**波次标签**、与主看板同号不同义，已在 2026-11-12 **补录**为 `B059`–`B062`，映射见下表二） |
 | `graceful-shutdown.md` | 旧独立任务卡（`.agents/tasks/graceful-shutdown.md`，ID `P1-OPS-001`，原文冻结）→ 已入账为 `B063` |
+| `web-console/` | 旧 Web 控制台任务卡板整体归档（`00_DASHBOARD` / `01_TASK_BOARD` / 02_REVIEWS / 04_ARCHIVED / 99_LOGS），Active 五列全「无」，仅存历史卡与评审；其格式门 `check-tasks.*` 已撤线 |
+| `skills-manage-tasks/` | 旧任务卡技能（`.agents/skills/manage-tasks/`），随任务卡体系退役冻结；不再被会话加载 |
+| `ponyllm-gateway-tencent-acr-pull-failure.md` | 主题文档（运维工单：tencent 节点镜像拉取认证失败），非账本；2026-11-12 自 `backlog/` 根归档至此 |
+| `pproxy-forward-connect-tunnel-failure.md` | 主题文档（运维工单：pproxy 正向 CONNECT 隧道失效，归属 cluster-infra / pproxy 仓），非账本 |
+| `user-jwt-auth-requirements.md` | 主题文档（Web 用户 JWT 鉴权需求稿 V0.1），实现已落地并由 4 份 ADR 取代，非账本 |
 | `README.md` | 本文件：旧锚点 → 账本记录的映射表与迁移口径 |
 
 旧路径 `backlog/backlog.md` 的内容现在在本目录的 `backlog.md`：历史文档里指向旧路径的引用按本表换算行号即可。
@@ -98,3 +103,16 @@
    按历史遗留波次标签理解；新编号不得回退到这些号段（编号由 `.next-id` 单调分配）。
 11. **非 `B` 编号的旧载体**：`.agents/tasks/` 下的独立任务卡（如 `P1-OPS-001`）不再作为状态真源；
     有内容的一律冻结进本目录并重编为账本记录（表三），空板（`web-console`）不迁移。
+
+12. **归档分层与删除条件**：本目录有三类文件——(a) **证据锚点**：`backlog.md` / `web-user-jwt-progress.md` /
+    `graceful-shutdown.md`，22 条记录的 `source_ref` 与 `evidence` 指向其中的行锚点，**不可删除**
+    （删了等于毁掉可复核凭证；真要删必须先改这 22 条记录，成本大于收益）；(b) **主题文档**：3 份工单/需求稿，
+    不承担账本角色，归档为只读参考；(c) **本 README**：映射与口径。
+    删除条件（立法）：只有当某载体不再被任何记录的 `source_ref` / `evidence` 引用，且删除方在同一提交
+    落新决策时，才允许 `git rm`；否则一律归档，不得"以后可能用得上"式保留在活跃路径。
+13. **任务卡体系退役（2026-11-12）**：`.agents/tasks/web-console/`（含 Board/Dashboard/评审/归档卡/日志）
+    与其格式门 `check-tasks.*`、配套技能 `manage-tasks` 一并退役。理由：板面 Active 五列全空、9 张卡已终态，
+    却仍要靠一门 + 一技能维持，且与账本并存构成第二状态真源；状态真源统一为 `backlog/tasks.jsonl`。
+    原文全部归档到本目录（一字不改），门与技能的接线从 `pre-commit` / `ci.yml` 移除，
+    删除收据见 `.meta/gates/no-residue.manifest`；决策记录
+    `.agents/notes/implemented/process/2026-11-12-retire-task-card-system.md`。

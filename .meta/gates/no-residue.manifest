@@ -1,0 +1,3 @@
+.meta/gates/check-tasks.sh	.github/workflows/ci.yml
+.meta/gates/check-tasks.sh	.meta/gates/pre-commit
+.agents/tasks/web-console/01_TASK_BOARD.md	.gitattributes

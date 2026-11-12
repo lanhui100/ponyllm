@@ -72,10 +72,6 @@ jobs:
           bash .agents/skills/write-adr/verify-note.sh
           bash .agents/skills/write-adr/tests/test-verify-note.sh
 
-      - name: Check task system governance
-        shell: bash
-        run: bash .meta/gates/check-tasks.sh
-
       - name: Check deployment prober CLI contract
         shell: bash
         run: bash tests/pre-flight/check-ci-prober-cli-contract.sh

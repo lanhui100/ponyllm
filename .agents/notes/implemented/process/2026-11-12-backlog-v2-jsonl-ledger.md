@@ -62,11 +62,14 @@ Status: implemented
   （`graceful-shutdown.md` / `P1-OPS-001`，而 `serve.rs` 的优雅停机与 `tests/graceful_shutdown_tests.rs`
   早已在树）——留着它就是第二个状态真源。故原文冻结进 `backlog/legacy/` 并重编为 `B063`（`done`，
   证据含可复跑的集成测试）；`web-console/` 板 Active 五列为空、只有归档件，不迁移内容，
-  其格式门 `check-tasks.sh` 照旧看守目录结构。
-- **主题文档不搬家**：`backlog/` 根下的 `ponyllm-gateway-tencent-acr-pull-failure.md`、
-  `pproxy-forward-connect-tunnel-failure.md`、`user-jwt-auth-requirements.md` 是工单/需求稿，
-  不是账本载体；它们被 `.agents/notes/**` 与 `.dev-team/contracts/**` 的历史证据引用，
-  移动等于改写历史证据，故保持原位并在 `backlog/README.md` 显式标注「不参与 lint/doctor、不得再当状态真源」。
+  空板与其格式门 `check-tasks.*`、配套技能 `manage-tasks` 随后整体退役（归档 + 撤线 + 零残留收据），
+  退役决策见 `.agents/notes/implemented/process/2026-11-12-retire-task-card-system.md`。
+- **主题文档归档进 `legacy/`（复核后改判）**：`backlog/` 根下原散着 3 份主题文档
+  （两张运维工单 + JWT 需求稿）。初判"保持原位"的理由是怕改历史引用，复核发现消费面只有
+  `backlog/README.md` 与本文两处文本（`.dev-team/contracts/**` 里的一条是未入仓的本地件），
+  改两处文本的成本远低于"根下留非账本文件、『唯一活账本』字面不成立"的长期代价。
+  故 2026-11-12 一并 `git mv` 进 `backlog/legacy/`，并在 `legacy/README.md` 口径 12 立下删除条件：
+  只有不再被任何 `source_ref` / `evidence` 引用且同提交落新决策时，才允许删，否则一律归档。
 - **高水位口径**：迁移后 `.next-id` 落 `56`（= 下一个候选编号；`B024`–`B055` 因判定真源编号下限 56 保留不用），
   使「保留不用」与 `.next-id` 的「下一候选」语义一致；B056 由 `record` 分配后自动推进到 `57`。
 - **文档的家**：账本契约 `backlog/README.md`；实例门登记 `.meta/gates/INSTANCE-GATES.md`；
