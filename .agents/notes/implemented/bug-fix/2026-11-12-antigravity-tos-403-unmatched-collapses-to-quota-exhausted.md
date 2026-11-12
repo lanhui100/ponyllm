@@ -106,6 +106,15 @@ tencent 530 / preprod 661）。
   仍按配额边界中止跨 provider 兜底；纯 transport / 锁竞争失败仍不提升为 quota。
 - 未覆盖（需运维动作，非代码可解）：antigravity 已被封的 7 个账号不会因此复活；`ag-city8585378`
   的模型额度要到 `2026-11-14T02:33:53Z` 才恢复。修复上线（重建镜像 + 滚动）前，线上仍是旧行为。
+- 上线与运维处置（2026-11-12，实测收据）：镜像 `v0.2.50-tos403` → digest
+  `sha256:603d635146b5dfa533a1df20cfc141d77e997a3618f4b0b144a848f57deea798`，四个 Deployment
+  滚动完成、parity PASS，上线后 dev 网关 15 分钟内 `unknown 403 body` 由 113/24h 降到 0；随后用
+  `DELETE /api/admin/keys/{id}?provider=antigravity` 移除 7 个 ToS 封禁账号（config_version
+  415→421），`ponyllm-live-config` 与四个副本池内均只剩 2 把 antigravity key。
+- 遗留（待运维决定）：`ag-bruthus08@gmail.com` 的 OAuth refresh 返回 `400 invalid_grant`
+  （凭证已废，非 ToS 封禁），因 2 把 key 触发 mass-disable 熔断只被降级为 5 分钟冷却；
+  `ag-city8585378@gmail.com` 仍处配额冷却。这两把不处理前，antigravity 的 gemini 家族仍会
+  以诚实的 `quota_exhausted` 结束。
 - 未改：`routes/chat.rs` 等处的配额边界守卫仍只看 `last_kind.is_quota_exhausted()`；当请求内确实
   出现真实配额 429（即使同池还有死号）时依旧按配额边界处理——这是有意的诚实信号优先级，
   因为该请求确实撞到了配额墙。
