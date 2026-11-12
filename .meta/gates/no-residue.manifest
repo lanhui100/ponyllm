@@ -1,3 +1,8 @@
+# 被删名字 → 检索范围（TAB 分隔；# 起注释）。用途：删门/删接线后用「字面串零命中」当删除收据。
+# 覆盖口径：只登记**曾有活接线**的字面串——check-tasks.sh（ci.yml / pre-commit）与两张旧板的路径
+# （.gitattributes 的两条 merge=union）。同批删除的 check-tasks.{ps1,spec.sh,spec.ps1} 与
+# commit-msg-task-id.* 没有其它接线点（前者只被人工直接调用，后者靠 core.hooksPath 按文件名发现），
+# 故不做全树登记：退役登记文件（INSTANCE-GATES.md / 决策记录）本身必须提到它们，全树登记会自命中。
 check-tasks.sh	.github/workflows/ci.yml
 check-tasks.sh	.meta/gates/pre-commit
 .agents/tasks/web-console/01_TASK_BOARD.md	.gitattributes

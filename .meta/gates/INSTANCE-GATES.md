@@ -33,6 +33,7 @@
 
 | 门 | 原脚本 | 退休日期 | 原因与去处 | 残留收据 |
 |---|---|---|---|---|
+| commit-msg 任务 ID 钩子 | `.meta/gates/commit-msg` + `commit-msg-task-id.{sh,spec.sh,spec.ps1}` | 2026-11-12 | 同一 2026-09-06 任务卡治理栈的遗留：只在 `task/WEB-*` 分支要求提交信息含 `WEB-xx`，而该前缀分支已无生成路径（卡体系退役）→ 属死接线，随栈一并删除；`core.hooksPath=.meta/gates` 下无同名文件即自动失效 | 无活接线（靠 hooksPath 按文件名发现，删除后零引用） |
 | 任务卡体系门 | `.meta/gates/check-tasks.{sh,ps1,spec.sh,spec.ps1}` | 2026-11-12 | 任务卡体系（`.agents/tasks/web-console/`，Active 五列全空、9 卡已归档）整体退役：状态真源统一为 `backlog/tasks.jsonl`（见决策记录 `2026-11-12-backlog-v2-jsonl-ledger.md`）。原文归档进 `backlog/legacy/`，`manage-tasks` 技能同时冻结；接线已从 `.meta/gates/pre-commit` 与 `.github/workflows/ci.yml` 移除 | `bash .meta/gates/no-residue.sh`（清单 4 条：`check-tasks.sh` ← CI/hook、两张旧板的路径 ← `.gitattributes`） |
 
 退休门的判据不再有消费者；`check-tasks` 这个名字若将来重新出现，必须先在 `backlog/` 立新记录并重跑

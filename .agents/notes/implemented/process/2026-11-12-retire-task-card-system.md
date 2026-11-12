@@ -25,9 +25,11 @@ Status: implemented
 
 - **归档**：`.agents/tasks/web-console/` 整目录 → `backlog/legacy/web-console/`（一字不改）；
   `.agents/skills/manage-tasks/` → `backlog/legacy/skills-manage-tasks/`（不再被会话加载）。
-- **撤线**：删除 `.meta/gates/check-tasks.{sh,ps1,spec.sh,spec.ps1}`；从 `.meta/gates/pre-commit`
-  移除任务域块、从 `.github/workflows/ci.yml` 移除 `Check task system governance` 步骤、
-  从 `.gitattributes` 移除两张板的 `merge=union`。
+- **撤线**：删除 `.meta/gates/check-tasks.{sh,ps1,spec.sh,spec.ps1}`，以及同一治理栈遗留的
+  `commit-msg` 钩子与 `commit-msg-task-id.{sh,spec.sh,spec.ps1}`（只在 `task/WEB-*` 分支要求提交信息含
+  `WEB-xx`，而该前缀分支已无生成路径，属死接线）；从 `.meta/gates/pre-commit` 移除任务域块、
+  从 `.github/workflows/ci.yml` 移除 `Check task system governance` 步骤、从 `.gitattributes`
+  移除两张板的 `merge=union`。
 - **留痕**：`.meta/gates/INSTANCE-GATES.md` 增「已退休的门」登记（原脚本/日期/原因/去处）；
   新建 `.meta/gates/no-residue.manifest` 四条登记（`check-tasks.sh` ← CI / hook、两张板的路径 ← `.gitattributes`），
   使 A8 零残留门从「跳过」变成**真判定**：`bash .meta/gates/no-residue.sh` → 通过（4 条零残留）。
@@ -55,7 +57,8 @@ Status: implemented
   `.github/workflows/ci.yml`、`.gitattributes` 各一处接线。
 - 归档：`backlog/legacy/web-console/`（Board + Dashboard + 9 评审 + 9 归档卡 + 13 日志）、
   `backlog/legacy/skills-manage-tasks/`。
-- 新增收据：`.meta/gates/no-residue.manifest`（4 条），并让 A8 门首次成为真判定而不是「跳过」。
+- 新增收据：`.meta/gates/no-residue.manifest`（4 条，带覆盖口径注释），并让 A8 门首次成为真判定而不是「跳过」。
+- 同栈遗留一并清理：`commit-msg` 钩子 + `commit-msg-task-id.{sh,spec.sh,spec.ps1}`（死接线，见 Decision）；
 - 机械验证（本仓可复跑）：`bash .meta/gates/no-residue.sh`（0 命中）、
   `bash .meta/gates/no-residue.spec.sh`（自检）、`bash .meta/gates/backlog-gate.sh`、
   `bash .meta/gates/backlog-gate.spec.sh`、`git config --get core.hooksPath`（`.meta/gates`）、
@@ -67,5 +70,5 @@ Status: implemented
      而是刻意的——流程已被账本 CLI 取代（`record`/`start`/`resolve`），恢复卡片式编排必须另立决策。
   3. 恢复条件（立法）：若再次需要「多会话并行、卡片级评审与状态」的编排视图，形态必须是**账本的视图**
      （从 `backlog/tasks.jsonl` 渲染 Board），不得重新引入第二份账本与第二道状态门。
-- 回退路径：`git revert` 本提交即可恢复门与技能；但必须先删掉 `.meta/gates/no-residue.manifest` 的三条登记
+- 回退路径：`git revert` 本提交即可恢复门与技能；但必须先删掉 `.meta/gates/no-residue.manifest` 的四条登记
   （否则恢复后的接线会被 A8 判为残留），并把 `INSTANCE-GATES.md` 的退休登记改为「已恢复」。
