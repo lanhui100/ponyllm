@@ -38,6 +38,8 @@
 
 `todo → in_progress → done`，允许 `in_progress → todo`（`release`）。**`done` 只能由 `resolve` 写入**
 （写入证据、追加归档并释放租约；从 `todo` 直接闭环也合法）。活跃池残留 `done` 由 `lint` 判违规。
+一次性迁移批次是显式豁免（7 条 `done` 由迁移脚本直写归档，`closed_at` 为历史日期），
+见决策记录「诚实边界」第 5 条；接线完成后该豁免不再适用。
 
 手改 JSONL 的状态跳变 CLI 不拦，但「记录非 `in_progress` 却仍持锁」会被 `lint`/`doctor` 判违规。
 会话中断后用 `owner` / `touched_paths` / `description` 与 `git diff --stat` 交叉确认真实进度——

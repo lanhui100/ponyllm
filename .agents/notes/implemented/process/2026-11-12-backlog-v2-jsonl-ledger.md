@@ -46,7 +46,7 @@ Status: implemented
   可见——这条在 fail-open 变异下必失败（已实测：变异后 spec rc=1）。
 - **迁移**：旧看板原文冻结为 `backlog/legacy/backlog.md`（`git mv`，一字不改）；
   17 个事项逐条落记录，`source_ref` 指回旧文件行锚点（`#L11-L13` 等），`evidence` 指回原文登记的
-  验收命令；旧锚点 → 账本编号的逐条对照与 8 条口径裁定落在 `backlog/legacy/README.md`。
+  验收命令；旧锚点 → 账本编号的逐条对照与 9 条口径裁定落在 `backlog/legacy/README.md`。
 - **第二份账本不迁移**：`backlog/web-user-jwt-progress.md` 的 `B001`–`B004` 是波次标签、与主看板
   同号不同义，并入只会制造新的 ID 撞车；其工作已落地（`crates/ponyllm-server/src/routes/user.rs`），
   故原文冻结进 `backlog/legacy/`，登记为历史而非活跃账本。
