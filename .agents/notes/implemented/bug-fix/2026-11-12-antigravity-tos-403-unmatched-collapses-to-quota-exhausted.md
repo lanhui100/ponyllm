@@ -115,6 +115,11 @@ tencent 530 / preprod 661）。
   （凭证已废，非 ToS 封禁），因 2 把 key 触发 mass-disable 熔断只被降级为 5 分钟冷却；
   `ag-city8585378@gmail.com` 仍处配额冷却。这两把不处理前，antigravity 的 gemini 家族仍会
   以诚实的 `quota_exhausted` 结束。
+- 收口（2026-11-12 21:0x，实测收据）：上一条的两把也按运维决定删除（config_version 422/423），
+  `ponyllm-live-config` 的 `[[providers.antigravity.keys]]` = **0**，7 个 pod 全 Running；
+  `gemini-3.8-flash-high` 探活 3/3 HTTP 200，`x-ponyllm-fallback-triggered: true`、
+  `x-ponyllm-provider: sense` —— 即 antigravity 零 key 时按模型声明的 fallbacks
+  （deepseek-v4-flash / deepseek-flash）透明兜底，不再对客户端报额度耗尽。
 - 未改：`routes/chat.rs` 等处的配额边界守卫仍只看 `last_kind.is_quota_exhausted()`；当请求内确实
   出现真实配额 429（即使同池还有死号）时依旧按配额边界处理——这是有意的诚实信号优先级，
   因为该请求确实撞到了配额墙。
