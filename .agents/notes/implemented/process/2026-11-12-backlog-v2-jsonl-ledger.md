@@ -46,10 +46,12 @@ Status: implemented
   可见——这条在 fail-open 变异下必失败（已实测：变异后 spec rc=1）。
 - **迁移**：旧看板原文冻结为 `backlog/legacy/backlog.md`（`git mv`，一字不改）；
   17 个事项逐条落记录，`source_ref` 指回旧文件行锚点（`#L11-L13` 等），`evidence` 指回原文登记的
-  验收命令；旧锚点 → 账本编号的逐条对照与 9 条口径裁定落在 `backlog/legacy/README.md`。
-- **第二份账本不迁移**：`backlog/web-user-jwt-progress.md` 的 `B001`–`B004` 是波次标签、与主看板
-  同号不同义，并入只会制造新的 ID 撞车；其工作已落地（`crates/ponyllm-server/src/routes/user.rs`），
-  故原文冻结进 `backlog/legacy/`，登记为历史而非活跃账本。
+  验收命令；旧锚点 → 账本编号的逐条对照与 10 条口径裁定落在 `backlog/legacy/README.md`。
+- **第二份账本重编号补录**：`backlog/web-user-jwt-progress.md` 的 `B001`–`B004` 是波次标签、与主看板
+  同号不同义，故**不沿用原号**，补录为 `B059`–`B062`（`done`；原波次号保留在 `title` 前缀与 `source_ref`）。
+  依据：其工作已落地（`routes/user.rs`/`routes/gate.rs`/`web/src/lib/userApi.ts`/4 份 ADR 在树），
+  不迁移就会留下「唯一的旧账本载体未入账」这一处双轨；重编号的代价只是一次一次性对账。
+  原文仍冻结进 `backlog/legacy/`，不再作为状态真源。
 - **编号口径**：保留旧身份 `B001`–`B022`，使 `docs/`、`.agents/notes/` 里的既有引用继续成立；
   「完成」区无编号事项补为 `B023`；`B004`–`B009` 是空白号段不是事项，不占用；`B024`–`B055` 保留不用
   （CLI 编号下限 56），新任务从 `B056` 起——本迁移的执行项即 `B056`。
@@ -99,7 +101,9 @@ Status: implemented
   5. **迁移期 `done` 记录由一次性脚本直写归档，不经 `resolve`**：`resolve` 只会写「当前时刻」的
      `closed_at`，而 7 条归档的 `closed_at` 是 2026-09-30 / 10-02 / 10-17 / 10-23 / 10-24 —— 这正是直写的证据。
      即「`done` 只能由 `resolve` 写入」是**接线完成后的不变量**，迁移批次是显式豁免。
-  6. 既有门禁红项在本变更前就存在，属独立缺陷，本决策不修（避免夹带）：
+  6. 第二份账本补录的 4 条（`B059`–`B062`）`closed_at` 是**补录时刻**（2026-11-12），不是历史完成时刻：
+     波次账本只记提交号与被阻塞状态、无完成日期字段，臆造完成日比留空更糟；历史完成以 `evidence` 里的提交为证。
+  7. 既有门禁红项在本变更前就存在，属独立缺陷，本决策不修（避免夹带）：
      `.agents/skills/write-adr/verify-note.sh` 整树 rc=1（48 条 FAIL：1.8=29 / 1.10=6 / 1.11=13，全部指向
      `.agents/notes/**` 的既有记录，本决策新增的 ADR 不在其中）、`.meta/gates/pre-commit.spec.sh` rc=1（1 条）。
      两者已用变更前提交（`git archive b86b847`）在干净目录复跑证实同红。
