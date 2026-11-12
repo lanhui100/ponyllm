@@ -497,6 +497,21 @@ const TOS_ACCOUNT_DEATH_SIGNATURES: &[&str] = &[
     "terms_of_service_violation",
     "terms of service violation",
     "violated terms of service",
+    // Observed antigravity body (2026-11-12, 7 accounts, `PERMISSION_DENIED`
+    // "This service has been disabled in this account for violation of Terms
+    // of Service. Please submit an appeal..."): the noun form "violation of
+    // terms of service" is NOT covered by the past-tense variants above, so
+    // the account fell through to the unknown-403 branch and was cooled only
+    // 60s — it returned on the next minute to burn another attempt, and the
+    // aggregate later surfaced as 429 `quota_exhausted` (ADR
+    // `2026-11-12-antigravity-tos-403-unmatched-collapses-to-quota-exhausted`).
+    "violation of terms of service",
+    // Google's own sentence frame for a disabled account. Anchored on the
+    // leading "service has been" on purpose: model-level / project-level
+    // disablements ("the model has been disabled in this account", "the API
+    // has not been enabled ...") describe a different blast radius and must
+    // stay on the recoverable unknown-403 path instead of burning credentials.
+    "service has been disabled in this account",
     "account_suspended",
     "account suspended",
     "consumer_suspended",
@@ -2127,15 +2142,20 @@ impl UpstreamExecutor {
                         // Rewriting to QuotaExhausted projected upstream
                         // unreachability/lock contention as 429 quota_exhausted and tripped
                         // dsh's isQuotaExceededError.
-                        let pure_transient = !attempt_kinds.is_empty()
+                        // `AuthInvalid` joins that set for the same reason: a
+                        // 403 account-death (ToS disable / validation) says the
+                        // ACCOUNT is unusable, never that its quota ran out
+                        // (ADR 2026-11-12-antigravity-tos-403-unmatched-collapses-to-quota-exhausted).
+                        let no_quota_evidence = !attempt_kinds.is_empty()
                             && attempt_kinds.iter().all(|k| {
                                 matches!(
                                     k,
                                     GatewayErrorKind::UpstreamUnavailable
                                         | GatewayErrorKind::LockContention
+                                        | GatewayErrorKind::AuthInvalid
                                 )
                             });
-                        if !pure_transient {
+                        if !no_quota_evidence {
                             if self.pool.any_key_quota_cooldown()
                                 || self.pool.any_key_family_exhausted_any()
                             {
@@ -2887,15 +2907,20 @@ impl UpstreamExecutor {
                             // Rewriting to QuotaExhausted projected upstream
                             // unreachability/lock contention as 429 quota_exhausted and tripped
                             // dsh's isQuotaExceededError.
-                            let pure_transient = !attempt_kinds.is_empty()
+                            // `AuthInvalid` joins that set for the same reason: a
+                            // 403 account-death (ToS disable / validation) says the
+                            // ACCOUNT is unusable, never that its quota ran out
+                            // (ADR 2026-11-12-antigravity-tos-403-unmatched-collapses-to-quota-exhausted).
+                            let no_quota_evidence = !attempt_kinds.is_empty()
                                 && attempt_kinds.iter().all(|k| {
                                     matches!(
                                         k,
                                         GatewayErrorKind::UpstreamUnavailable
                                             | GatewayErrorKind::LockContention
+                                            | GatewayErrorKind::AuthInvalid
                                     )
                                 });
-                            if !pure_transient {
+                            if !no_quota_evidence {
                                 if self.pool.any_key_quota_cooldown()
                                     || self.pool.any_key_family_exhausted_any()
                                 {

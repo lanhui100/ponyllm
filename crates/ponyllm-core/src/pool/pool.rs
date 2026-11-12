@@ -671,6 +671,35 @@ impl KeyPool {
         })
     }
 
+    /// True when a **majority** of the pool is permanently out of rotation,
+    /// i.e. the pool has already put those keys in `Disabled` (upstream account
+    /// death: ToS `PolicyViolation`, `AccountValidationRequired`, dead OAuth
+    /// credential — only an operator action revives them). Those keys never
+    /// come back by waiting for a quota window, so when they dominate the pool
+    /// the provider is *broken*, not quota-bound: reporting `quota_exhausted`
+    /// tells the client to wait for a reset that will not restore service and
+    /// blocks the cross-provider fallback that could still serve the request
+    /// (ADR `2026-11-12-antigravity-tos-403-unmatched-collapses-to-quota-exhausted`).
+    ///
+    /// The majority gate is deliberate: a single dead credential in an
+    /// otherwise quota-cooled pool must NOT cancel the quota boundary, or one
+    /// quota window would drain the backup provider's quota (the guarantee from
+    /// `2026-10-02` / `2026-10-04`). Strict majority (`disabled * 2 > total`)
+    /// keeps the half-dead boundary case on the protective side; a single-key
+    /// pool whose only key died counts as broken.
+    pub fn majority_permanently_unavailable(&self) -> bool {
+        let keys = self.keys.read();
+        let total = keys.len();
+        if total == 0 {
+            return false;
+        }
+        let disabled = keys
+            .iter()
+            .filter(|k| k.current_state() == KeyState::Disabled)
+            .count();
+        disabled * 2 > total
+    }
+
     /// True when any *non-disabled* key carries an unexpired quota-group
     /// exhaustion for some family (real upstream 429 writeback only). Feeds the
     /// H1 quota-boundary reclassification (extractors::pool_quota_exhausted):

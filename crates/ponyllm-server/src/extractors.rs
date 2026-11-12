@@ -408,6 +408,18 @@ pub fn format_exhausted_message(
 /// `is_zen_free_tier_gate_body`), so a fully-cooled zen pool reads as
 /// `quota_exhausted` — clients get an honest "free usage window closed"
 /// signal instead of a misleading gateway-side `rate_limit_exceeded`.
+///
+/// Guard (bugfix 2026-11-12): a pool whose capacity is gone because a
+/// **majority** of its keys are permanently dead (ToS-disabled /
+/// validation-required accounts) is broken, not quota-bound — waiting for the
+/// quota reset will not restore service, and claiming `quota_exhausted` both
+/// mislabels the failure and stops the cross-provider fallback that could
+/// still serve the request. Incident: 3 of 4 antigravity accounts returned
+/// `PERMISSION_DENIED` "violation of Terms of Service" while the 4th only had
+/// its model quota closed, and dsh rendered "当前请求的额度已用尽" (ADR
+/// `2026-11-12-antigravity-tos-403-unmatched-collapses-to-quota-exhausted`).
+/// A *minority* of dead keys deliberately keeps the quota boundary: that is
+/// the 2026-10-02/2026-10-04 guarantee against draining the backup provider.
 pub fn pool_quota_exhausted(
     err: &ponyllm_core::error::CoreError,
     pool: &ponyllm_core::pool::KeyPool,
@@ -415,6 +427,7 @@ pub fn pool_quota_exhausted(
     matches!(err, ponyllm_core::error::CoreError::NoAvailableKey(_))
         && pool.no_schedulable_keys()
         && (pool.any_key_quota_cooldown() || pool.any_key_family_exhausted_any())
+        && !pool.majority_permanently_unavailable()
 }
 
 /// Prefer upstream Retry-After, else earliest pool unlock ceiled to seconds.
@@ -761,5 +774,79 @@ mod tests {
         assert!(msg.contains("gemini-3.8-flash"), "msg: {msg}");
         assert!(msg.contains("req-upstream-transport"), "msg: {msg}");
         assert!(msg.contains("keys [redacted]"), "msg: {msg}");
+    }
+
+    /// H1 guard (bugfix 2026-11-12): a pool whose capacity is gone because
+    /// accounts were permanently killed (ToS disable) is NOT a quota boundary —
+    /// waiting for the quota reset will not restore service, and calling it
+    /// `quota_exhausted` blocks the cross-provider fallback.
+    #[test]
+    fn pool_quota_exhausted_requires_a_purely_quota_bound_pool() {
+        use ponyllm_core::error::CoreError;
+        use ponyllm_core::pool::{ApiKeyEntry, KeyPool, PoolErrorType, RoutingStrategy};
+        use std::time::Duration;
+
+        let err = CoreError::NoAvailableKey("antigravity".to_string());
+        let quota = PoolErrorType::QuotaExhausted {
+            retry_after: Some(Duration::from_secs(3600)),
+        };
+
+        // Pure quota boundary: every key is cooling on quota → still quota.
+        let pure = KeyPool::new("antigravity", RoutingStrategy::Priority);
+        pure.add_key(ApiKeyEntry::new("k1", "t1", 1, 10));
+        pure.add_key(ApiKeyEntry::new("k2", "t2", 2, 10));
+        pure.record_error("k1", quota.clone());
+        pure.record_error("k2", quota);
+        assert!(
+            super::pool_quota_exhausted(&err, &pure),
+            "an all-quota-cooled pool must still read as a quota boundary"
+        );
+
+        // Incident shape: the pool is dominated by ToS-dead accounts while the
+        // survivor only has its quota closed → broken pool, not quota-bound.
+        let broken = KeyPool::new("antigravity", RoutingStrategy::Priority);
+        broken.add_key(ApiKeyEntry::new("k1", "t1", 1, 10));
+        broken.add_key(ApiKeyEntry::new("k2", "t2", 2, 10));
+        broken.add_key(ApiKeyEntry::new("k3", "t3", 3, 10));
+        broken.record_error("k1", quota_cooldown());
+        // Two violations each force the permanent isolate past the mass-disable
+        // breaker, which is exactly how a banned fleet ends up here.
+        for id in ["k2", "k3"] {
+            broken.record_error(id, PoolErrorType::PolicyViolation);
+            broken.record_error(id, PoolErrorType::PolicyViolation);
+        }
+        assert_eq!(
+            broken.get_key_status("k2"),
+            Some(ponyllm_core::pool::KeyState::Disabled),
+            "a ToS account death must permanently isolate the key"
+        );
+        assert!(
+            !super::pool_quota_exhausted(&err, &broken),
+            "a pool dominated by ToS-dead accounts must NOT be reported as quota exhaustion"
+        );
+
+        // Minority guard: ONE dead credential in an otherwise quota-cooled pool
+        // keeps the quota boundary, so a quota window cannot drain the backup
+        // provider (2026-10-02 / 2026-10-04 guarantee).
+        let minority = KeyPool::new("antigravity", RoutingStrategy::Priority);
+        minority.add_key(ApiKeyEntry::new("k1", "t1", 1, 10));
+        minority.add_key(ApiKeyEntry::new("k2", "t2", 2, 10));
+        minority.add_key(ApiKeyEntry::new("k3", "t3", 3, 10));
+        minority.add_key(ApiKeyEntry::new("k4", "t4", 4, 10));
+        minority.record_error("k1", PoolErrorType::PolicyViolation);
+        minority.record_error("k1", PoolErrorType::PolicyViolation);
+        for id in ["k2", "k3", "k4"] {
+            minority.record_error(id, quota_cooldown());
+        }
+        assert!(
+            super::pool_quota_exhausted(&err, &minority),
+            "a single dead credential must NOT cancel the quota boundary"
+        );
+    }
+
+    fn quota_cooldown() -> ponyllm_core::pool::PoolErrorType {
+        ponyllm_core::pool::PoolErrorType::QuotaExhausted {
+            retry_after: Some(std::time::Duration::from_secs(3600)),
+        }
     }
 }
