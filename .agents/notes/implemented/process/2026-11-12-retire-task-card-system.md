@@ -29,8 +29,8 @@ Status: implemented
   移除任务域块、从 `.github/workflows/ci.yml` 移除 `Check task system governance` 步骤、
   从 `.gitattributes` 移除两张板的 `merge=union`。
 - **留痕**：`.meta/gates/INSTANCE-GATES.md` 增「已退休的门」登记（原脚本/日期/原因/去处）；
-  新建 `.meta/gates/no-residue.manifest` 三条登记（`check-tasks.sh` ← CI/hook、板路径 ← `.gitattributes`），
-  使 A8 零残留门从「跳过」变成**真判定**：`bash .meta/gates/no-residue.sh` → 通过（3 条零残留）。
+  新建 `.meta/gates/no-residue.manifest` 四条登记（`check-tasks.sh` ← CI / hook、两张板的路径 ← `.gitattributes`），
+  使 A8 零残留门从「跳过」变成**真判定**：`bash .meta/gates/no-residue.sh` → 通过（4 条零残留）。
 - **口径同步**：`backlog/README.md` 声明 `backlog/` 之外不再有待办载体；
   `backlog/legacy/README.md` 增文件表两行 + 口径 13（退役事实与决策指针）；
   旧决策 `2026-09-06-task-governance-five-p0-fixes.md` 的接线描述补 retire 指针（implemented 条按现态更新）。
@@ -55,7 +55,7 @@ Status: implemented
   `.github/workflows/ci.yml`、`.gitattributes` 各一处接线。
 - 归档：`backlog/legacy/web-console/`（Board + Dashboard + 9 评审 + 9 归档卡 + 13 日志）、
   `backlog/legacy/skills-manage-tasks/`。
-- 新增收据：`.meta/gates/no-residue.manifest`（3 条），并让 A8 门首次成为真判定而不是「跳过」。
+- 新增收据：`.meta/gates/no-residue.manifest`（4 条），并让 A8 门首次成为真判定而不是「跳过」。
 - 机械验证（本仓可复跑）：`bash .meta/gates/no-residue.sh`（0 命中）、
   `bash .meta/gates/no-residue.spec.sh`（自检）、`bash .meta/gates/backlog-gate.sh`、
   `bash .meta/gates/backlog-gate.spec.sh`、`git config --get core.hooksPath`（`.meta/gates`）、

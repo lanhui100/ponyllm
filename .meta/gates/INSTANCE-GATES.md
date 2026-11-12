@@ -33,7 +33,7 @@
 
 | 门 | 原脚本 | 退休日期 | 原因与去处 | 残留收据 |
 |---|---|---|---|---|
-| 任务卡体系门 | `.meta/gates/check-tasks.{sh,ps1,spec.sh,spec.ps1}` | 2026-11-12 | 任务卡体系（`.agents/tasks/web-console/`，Active 五列全空、9 卡已归档）整体退役：状态真源统一为 `backlog/tasks.jsonl`（见决策记录 `2026-11-12-backlog-v2-jsonl-ledger.md`）。原文归档进 `backlog/legacy/`，`manage-tasks` 技能同时冻结；接线已从 `.meta/gates/pre-commit` 与 `.github/workflows/ci.yml` 移除 | `bash .meta/gates/no-residue.sh`（清单 3 条：CI/hook/gitattributes 接线零残留） |
+| 任务卡体系门 | `.meta/gates/check-tasks.{sh,ps1,spec.sh,spec.ps1}` | 2026-11-12 | 任务卡体系（`.agents/tasks/web-console/`，Active 五列全空、9 卡已归档）整体退役：状态真源统一为 `backlog/tasks.jsonl`（见决策记录 `2026-11-12-backlog-v2-jsonl-ledger.md`）。原文归档进 `backlog/legacy/`，`manage-tasks` 技能同时冻结；接线已从 `.meta/gates/pre-commit` 与 `.github/workflows/ci.yml` 移除 | `bash .meta/gates/no-residue.sh`（清单 4 条：`check-tasks.sh` ← CI/hook、两张旧板的路径 ← `.gitattributes`） |
 
 退休门的判据不再有消费者；`check-tasks` 这个名字若将来重新出现，必须先在 `backlog/` 立新记录并重跑
 `no-residue` 清单（清单是删除的收据，不是装饰）。
