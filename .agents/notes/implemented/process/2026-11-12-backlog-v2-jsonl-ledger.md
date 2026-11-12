@@ -58,6 +58,11 @@ Status: implemented
 - **状态口径**：按事项内容判，不按旧分区判。`## 待办` 区里自带完成标记的 B002 落 `done`；
   `## 完成` 区按各自标记落 `done`（B002/B003/B019/B020/B021/B022/B023）；
   旧看板「进行中」为「（无）」，故迁移后无 `in_progress` 遗留、无伪造租约。
+- **`.agents/tasks/` 收口**：该目录下的独立任务卡不在任何看板里、却仍写着 `Status: Backlog`
+  （`graceful-shutdown.md` / `P1-OPS-001`，而 `serve.rs` 的优雅停机与 `tests/graceful_shutdown_tests.rs`
+  早已在树）——留着它就是第二个状态真源。故原文冻结进 `backlog/legacy/` 并重编为 `B063`（`done`，
+  证据含可复跑的集成测试）；`web-console/` 板 Active 五列为空、只有归档件，不迁移内容，
+  其格式门 `check-tasks.sh` 照旧看守目录结构。
 - **主题文档不搬家**：`backlog/` 根下的 `ponyllm-gateway-tencent-acr-pull-failure.md`、
   `pproxy-forward-connect-tunnel-failure.md`、`user-jwt-auth-requirements.md` 是工单/需求稿，
   不是账本载体；它们被 `.agents/notes/**` 与 `.dev-team/contracts/**` 的历史证据引用，
@@ -103,7 +108,10 @@ Status: implemented
      即「`done` 只能由 `resolve` 写入」是**接线完成后的不变量**，迁移批次是显式豁免。
   6. 第二份账本补录的 4 条（`B059`–`B062`）`closed_at` 是**补录时刻**（2026-11-12），不是历史完成时刻：
      波次账本只记提交号与被阻塞状态、无完成日期字段，臆造完成日比留空更糟；历史完成以 `evidence` 里的提交为证。
-  7. 既有门禁红项在本变更前就存在，属独立缺陷，本决策不修（避免夹带）：
+  7. 补录的 4 条（`B059`–`B062`）的 `source_ref` 是在 CLI `record` 之后**手工补写**的
+     （`record` 没有 `source_ref` 参数，只有 `--session` 会落到该字段）：这次订正改的是归档行，
+     已在本提交披露；CLI 无编辑归档行的路径，故该不变量登记为 `B057`（补进 `backlog/README.md`）。
+  8. 既有门禁红项在本变更前就存在，属独立缺陷，本决策不修（避免夹带）：
      `.agents/skills/write-adr/verify-note.sh` 整树 rc=1（48 条 FAIL：1.8=29 / 1.10=6 / 1.11=13，全部指向
      `.agents/notes/**` 的既有记录，本决策新增的 ADR 不在其中）、`.meta/gates/pre-commit.spec.sh` rc=1（1 条）。
      两者已用变更前提交（`git archive b86b847`）在干净目录复跑证实同红。

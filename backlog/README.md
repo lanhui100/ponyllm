@@ -13,12 +13,16 @@
 | `backlog/archive/tasks-<YYYY>.jsonl` | 闭环滚动归档（`resolve` 幂等追加，只存 `done`） | ✅ |
 | `backlog/.next-id` | ID 高水位（下一个候选编号，单调不减） | ✅ |
 | `backlog/.locks/<ID>.lock` | 任务级租约（含 pid / 会话 / 心跳，**本地运行时**） | ❌ 已 gitignore |
-| `backlog/legacy/` | 冻结历史（旧 markdown 看板与迁移映射），只读、不参与校验 | ✅ |
+| `backlog/legacy/` | 冻结历史（旧看板 / 旧波次账本 / 旧任务卡 + 迁移映射），只读、不参与校验 | ✅ |
 | `backlog/README.md` | 本契约 | ✅ |
 
 `backlog/` 根下的其余 markdown（`ponyllm-gateway-tencent-acr-pull-failure.md`、
 `pproxy-forward-connect-tunnel-failure.md`、`user-jwt-auth-requirements.md`）是**主题文档**
 （工单 / 需求稿），不是账本载体：它们不参与 `lint` / `doctor`，也不得再被当作状态真源。
+
+`.agents/tasks/` 是**已退役的旧任务载体**：有内容的独立任务卡已冻结进 `backlog/legacy/` 并入账
+（见 `backlog/legacy/README.md` 表三），`web-console/` 板 Active 五列为空、仅存归档件。
+其格式门 `.meta/gates/check-tasks.sh` 仍看守该目录结构，但**状态真源只有本账本**。
 
 ## 记录模型
 
