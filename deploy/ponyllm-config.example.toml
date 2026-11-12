@@ -67,7 +67,6 @@ default_protocol = "responses"
 # 注(2026-09-27)：deepseek-v4-flash-free 虽在上游目录但实测已下架
 # (400 Model is unavailable)，暂不加入；mimo-v2.6-flash-free 经网关
 # 真实推理验证通过（protocol = "chat"）。
-default_protocol = "responses"
 
 # space-bunny-free（2026-10-06）：上游 listing 1M 上下文 / 512K 输出 /
 # text+image+video 输入 / 强制推理默认 max。protocol 显式 chat

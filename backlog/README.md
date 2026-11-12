@@ -39,6 +39,15 @@
   迁移期历史项例外：`backlog/legacy/` 来的 `done` 记录只剩**指针证据**（指回旧看板原文登记的验收命令，
   迁移会话未复跑），见 `backlog/legacy/README.md` 口径 6——不得据指针证据声称「已复跑通过」。
 
+## 归档只追加（append-only）
+
+- `backlog/archive/tasks-<YYYY>.jsonl` 由 `resolve` **只追加**：既有行一个字节都不改，写入是
+  「整文件原子替换（tmp + rename）」，中断最坏是双份/半旧，由 `doctor` 对账发现。
+- CLI **没有**编辑归档行的路径（`annotate` 只改活跃池），因此归档 `evidence` 的订正只能手改 JSONL，
+  且必须：① 在同一提交里披露「哪个 ID、改了什么、为什么」；② 只改 `evidence` 文字，不动
+  `status` / `closed_at` / `archived_at` 运行记录；③ 改完复跑 `lint` + `doctor`。
+- 迁移批次的例外见 `backlog/legacy/README.md` 口径 6/12（指针证据、删除条件）。
+
 ## 状态机
 
 `todo → in_progress → done`，允许 `in_progress → todo`（`release`）。**`done` 只能由 `resolve` 写入**

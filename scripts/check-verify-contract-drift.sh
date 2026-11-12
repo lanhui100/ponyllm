@@ -10,7 +10,9 @@
 #      （前缀匹配，容忍 `$VAR` 拼接与路径参数）；
 #   3. 脚本中若出现 `deploy/<name>` 形式的 *单名* 网关 Deployment 引用，必须能在
 #      `deploy/ponyllm-deployment.yaml` 中找到同名对象（防 B019 的 `ponyllm-gateway`
-#      NotFound 类漂移）。
+#      NotFound 类漂移）；
+#   4. `deploy/*.toml`（含示例配置）必须能被 TOML 解析器加载（防重复键/语法漂移，
+#      即 B018：`ponyllm-config.example.toml` 曾有重复 `default_protocol`，示例直接不可加载）。
 #
 # Usage: bash scripts/check-verify-contract-drift.sh
 # Exit: 0 = 通过；1 = 发现漂移（打印 file:path 明细）
@@ -19,7 +21,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-echo "== [1/3] bash 语法检查 =="
+echo "== [1/4] bash 语法检查 =="
 SYNTAX_FAIL=0
 for f in scripts/*.sh deploy/*.sh tests/pre-flight/*.sh; do
   [ -f "$f" ] || continue
@@ -33,7 +35,7 @@ rm -f /tmp/drift-syntax.err
 [ "$SYNTAX_FAIL" = "0" ] || { echo "FAIL: bash -n 失败"; exit 1; }
 echo "OK all shell scripts parse"
 
-echo "== [2/3] API 端点漂移（脚本引用 vs web/openapi.json 契约） =="
+echo "== [2/4] API 端点漂移（脚本引用 vs web/openapi.json 契约） =="
 python3 - <<'PY'
 import glob, json, re, sys
 
@@ -75,7 +77,7 @@ if missing:
 print(f"OK all referenced API paths exist in contract ({len(paths)} paths)")
 PY
 
-echo "== [3/3] Deployment 名称漂移（脚本引用 vs deploy/ponyllm-deployment.yaml） =="
+echo "== [3/4] Deployment 名称漂移（脚本引用 vs deploy/ponyllm-deployment.yaml） =="
 python3 - <<'PY'
 import glob, re, sys
 
@@ -100,4 +102,26 @@ if singles:
 print(f"OK all referenced deployments declared ({sorted(declared)})")
 PY
 
-echo "== PASS: 脚本语法 / API 契约 / Deployment 名称均无漂移 =="
+echo "== [4/4] TOML 示例配置可加载性（B018 回归门） =="
+python3 - <<'PY'
+import glob, sys, tomllib
+
+files = sorted(glob.glob("deploy/*.toml"))
+if not files:
+    print("FAIL 未找到任何 deploy/*.toml（示例配置缺失？）")
+    sys.exit(1)
+bad = []
+for f in files:
+    try:
+        tomllib.load(open(f, "rb"))
+    except Exception as exc:
+        bad.append((f, str(exc)))
+if bad:
+    print("FAIL 以下 TOML 无法加载（重复键/语法错误）：")
+    for f, err in bad:
+        print(f"    {f}: {err}")
+    sys.exit(1)
+print(f"OK all deploy TOML load ({files})")
+PY
+
+echo "== PASS: 脚本语法 / API 契约 / Deployment 名称 / TOML 示例配置均无漂移 =="
