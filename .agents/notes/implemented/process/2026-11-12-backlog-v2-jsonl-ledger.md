@@ -22,7 +22,7 @@ Status: implemented
 采纳 pg-backlog v2（JSONL 单一账本），判据随仓、门禁双接线：
 
 - **账本**：`backlog/tasks.jsonl` 为唯一活账本（`todo` / `in_progress`，10 条）；
-  `resolve` 把 `done` 追加入 `backlog/archive/tasks-2026.jsonl`（7 条）并释放租约；
+  `resolve` 把 `done` 追加入 `backlog/archive/tasks-2026.jsonl`（迁移 7 条；执行项 B056 闭环后 8 条）并释放租约；
   `backlog/.next-id` 管编号高水位；租约 `.locks/<ID>.lock` 是本地运行时、不入仓（已 gitignore）。
 - **判据随仓**：`scripts/backlog.mjs`（`validateRecord` / `lint` / `doctor` / `record` / `start` /
   `resolve` / `reap`）逐字节复制自框架基线仓（pony-agent），本仓不改编排。
@@ -34,7 +34,7 @@ Status: implemented
 - **门禁**：`.meta/gates/backlog-gate.sh`（= `lint` + `doctor`）挂在本仓既有本地钩子
   `.meta/gates/pre-commit` 的 `# >>> backlog-gate: ledger v1 >>>` 哨兵块内（门缺失即 fail-closed）；
   远端层是 `.github/workflows/ci.yml` 的 `backlog-ledger` job（独立 job，不并入 Rust 测试矩阵）；
-  负样本自检 `.meta/gates/backlog-gate.spec.sh`（P1 + N1–N7 + H）随仓。登记落
+  负样本自检 `.meta/gates/backlog-gate.spec.sh`（P1 + N1–N8 + H）随仓。登记落
   `.meta/gates/INSTANCE-GATES.md`——框架 `.meta/gates/README.md` 在 ponygo 的 `UPGRADE_UNIVERSE` 内
   （逐字节锁定），往里加实例门会让 `ponygo upgrade --check` 长期报漂移。
 - **spec 的实例适配（H 段 + 新增 N8）**：基线 H 段假定钩子在 `.githooks/pre-commit`；本仓 `core.hooksPath = .meta/gates`，
