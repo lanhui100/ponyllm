@@ -66,7 +66,7 @@
 
 | 旧位置 | 旧 ID | 旧标题（截断） | 账本记录 | 补录状态 |
 |---|---|---|---|---|
-| `graceful-shutdown.md:1-23` | P1-OPS-001 | ponyllm serve 优雅停机（SIGTERM 排空在途流式请求） | `B063` | `done`（代码 + 集成测试在树，证据含复跑命令） |
+| `graceful-shutdown.md:1-24` | P1-OPS-001 | ponyllm serve 优雅停机（SIGTERM 排空在途流式请求） | `B063` | `done`（代码 + 集成测试在树，证据含复跑命令） |
 
 `.agents/tasks/web-console/` 板另论：Active 五列全「无」、9 张卡已归档，属**已空的历史板**，
 不迁移内容；其格式门 `.meta/gates/check-tasks.sh` 仍照常看守，不属账本范围（见 `backlog/README.md` 布局）。

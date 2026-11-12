@@ -46,7 +46,7 @@ Status: implemented
   可见——这条在 fail-open 变异下必失败（已实测：变异后 spec rc=1）。
 - **迁移**：旧看板原文冻结为 `backlog/legacy/backlog.md`（`git mv`，一字不改）；
   17 个事项逐条落记录，`source_ref` 指回旧文件行锚点（`#L11-L13` 等），`evidence` 指回原文登记的
-  验收命令；旧锚点 → 账本编号的逐条对照与 10 条口径裁定落在 `backlog/legacy/README.md`。
+  验收命令；旧锚点 → 账本编号的逐条对照与全部迁移口径裁定（状态 / category / 编号 / 时间 / 证据 / 补录 / 旧标签）落在 `backlog/legacy/README.md`。
 - **第二份账本重编号补录**：`backlog/web-user-jwt-progress.md` 的 `B001`–`B004` 是波次标签、与主看板
   同号不同义，故**不沿用原号**，补录为 `B059`–`B062`（`done`；原波次号保留在 `title` 前缀与 `source_ref`）。
   依据：其工作已落地（`routes/user.rs`/`routes/gate.rs`/`web/src/lib/userApi.ts`/4 份 ADR 在树），
