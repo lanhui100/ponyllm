@@ -26,7 +26,8 @@ use ponyllm_protocol::anthropic::messages::MessageStreamEvent;
 use ponyllm_protocol::openai::chat::ChatCompletionChunk;
 use ponyllm_protocol::openai::responses::ResponseStreamEvent;
 use ponyllm_protocol::translator::{
-    antigravity_chunk_to_chat_chunk, AnthropicStreamToChatFsm, AnthropicToResponsesFsm,
+    antigravity_chunk_to_chat_chunk, gemini_chat_id, gemini_chunk_to_chat_chunk,
+    gemini_terminal_chunk, AnthropicStreamToChatFsm, AnthropicToResponsesFsm,
     ChatStreamToAnthropicFsm, ChatToResponsesFsm, ResponsesToAnthropicFsm, ResponsesToChatFsm,
 };
 use std::sync::Arc;
@@ -1710,6 +1711,301 @@ where
                 );
                 Ok::<_, E>(synthetic)
             }
+        }))
+        .boxed()
+}
+
+/// Translate an upstream **Gemini** (`generativelanguage.googleapis.com`)
+/// SSE byte stream into **OpenAI** SSE frames (`data: {chunk}\n\n`,
+/// terminating with `data: [DONE]`).
+///
+/// Used by all three downstream routes when the routed upstream speaks the
+/// native Gemini API: the route layer then projects these OpenAI chat chunks
+/// onto Anthropic Messages (`openai_sse_to_anthropic_stream`) or Responses
+/// (`chat_sse_to_responses_stream`).
+///
+/// Unlike the Antigravity translator this stream has no `response` envelope,
+/// no frame-level `promptFeedback` gating contract and no empty-STOP preamble
+/// semantics: every parsed frame is mapped straight through
+/// `gemini_chunk_to_chat_chunk`. A truncated upstream (EOF without a
+/// `finishReason`) is still closed with one synthesized terminal chunk so a
+/// downstream client never hangs waiting for `finish_reason`.
+pub fn gemini_sse_to_openai_stream<S, E>(
+    stream: S,
+    fallback_model: &str,
+) -> impl Stream<Item = Result<Bytes, E>>
+where
+    S: Stream<Item = Result<Bytes, E>> + Send + 'static,
+    E: Send + 'static,
+{
+    let model = fallback_model.to_string();
+    // Gemini repeats `responseId` on every frame but a truncated stream may
+    // never carry one: the first parsed frame fixes the downstream id (derived
+    // from `responseId` when present) so chunk ids never change mid-stream.
+    let response_id: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let response_id_stream = response_id.clone();
+    let stopped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stopped_flag = stopped.clone();
+    let transport_errored = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let transport_errored_flag = transport_errored.clone();
+    let has_emitted_chunks = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let has_emitted_chunks_flag = has_emitted_chunks.clone();
+    let total_frames = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let total_frames_flag = total_frames.clone();
+    let total_text_bytes = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let total_text_bytes_flag = total_text_bytes.clone();
+    let total_thought_bytes = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let total_thought_bytes_flag = total_thought_bytes.clone();
+    let total_tool_calls = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let total_tool_calls_flag = total_tool_calls.clone();
+    let last_usage: Arc<Mutex<Option<serde_json::Value>>> = Arc::new(Mutex::new(None));
+    let last_usage_flag = last_usage.clone();
+    let latest_finish_reason: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let latest_finish_reason_flag = latest_finish_reason.clone();
+
+    let model_stream = model.clone();
+
+    tracing::debug!(
+        model = %model,
+        "Initiating Gemini SSE to OpenAI stream"
+    );
+
+    let translated = sse_event_stream(stream).flat_map(move |res| {
+        let mut out: Vec<Result<Bytes, E>> = Vec::new();
+        match res {
+            Ok(evt) => {
+                let data = evt.data.trim();
+                if data.is_empty() || data == "[DONE]" {
+                    // terminal / heartbeat frame: nothing to forward
+                } else {
+                    match serde_json::from_str::<serde_json::Value>(data) {
+                        Ok(val) => {
+                            total_frames_flag.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+                            // A frame-level `error` object is *not* success: log it
+                            // loudly and keep the stream structurally valid (the EOF
+                            // tail terminates it) instead of silently swallowing it.
+                            if let Some(err_obj) = val.get("error") {
+                                tracing::error!(
+                                    model = %model_stream,
+                                    error_code = %err_obj
+                                        .get("code")
+                                        .map(|c| c.to_string())
+                                        .unwrap_or_else(|| "none".to_string()),
+                                    error_message = %err_obj
+                                        .get("message")
+                                        .and_then(|m| m.as_str())
+                                        .unwrap_or("unknown error"),
+                                    "Gemini upstream returned an error frame during OpenAI SSE streaming"
+                                );
+                            }
+                            // Native shape has no envelope; tolerate one defensively.
+                            if let Some(block_reason) = val
+                                .get("promptFeedback")
+                                .or_else(|| {
+                                    val.get("response").and_then(|r| r.get("promptFeedback"))
+                                })
+                                .and_then(|f| f.get("blockReason"))
+                                .and_then(|b| b.as_str())
+                            {
+                                tracing::warn!(
+                                    model = %model_stream,
+                                    block_reason = %block_reason,
+                                    "Gemini prompt blocked by upstream safety/content filter"
+                                );
+                            }
+                            // Keep the freshest token accounting for the terminal
+                            // chunk: Gemini emits it on the last content frame, or on
+                            // a trailing usage-only frame.
+                            if let Some(usage) = val
+                                .get("usageMetadata")
+                                .or_else(|| {
+                                    val.get("response").and_then(|r| r.get("usageMetadata"))
+                                })
+                            {
+                                *last_usage_flag.lock() = Some(usage.clone());
+                            }
+
+                            let chunk_id = {
+                                let mut guard = response_id_stream.lock();
+                                guard
+                                    .get_or_insert_with(|| {
+                                        gemini_chat_id(
+                                            val.get("responseId").and_then(|id| id.as_str()),
+                                        )
+                                    })
+                                    .clone()
+                            };
+
+                            if let Some(mut chunk) =
+                                gemini_chunk_to_chat_chunk(&val, &model_stream, &chunk_id)
+                            {
+                                has_emitted_chunks_flag
+                                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                                for ch in &chunk.choices {
+                                    if let Some(text) = ch.delta.content.as_deref() {
+                                        total_text_bytes_flag.fetch_add(
+                                            text.len() as u64,
+                                            std::sync::atomic::Ordering::Relaxed,
+                                        );
+                                    }
+                                    if let Some(reasoning) = ch.delta.reasoning_content.as_deref()
+                                    {
+                                        total_thought_bytes_flag.fetch_add(
+                                            reasoning.len() as u64,
+                                            std::sync::atomic::Ordering::Relaxed,
+                                        );
+                                    }
+                                    if let Some(tc) = ch.delta.tool_calls.as_ref() {
+                                        total_tool_calls_flag.fetch_add(
+                                            tc.len() as u64,
+                                            std::sync::atomic::Ordering::Relaxed,
+                                        );
+                                    }
+                                }
+
+                                // Cross-frame tool-call state (E2E regression,
+                                // gemini-3.6-flash via /v1/chat/completions):
+                                // native Gemini emits the `functionCall` part and
+                                // the `finishReason: STOP` terminator in *separate*
+                                // frames. The translator maps one frame at a time,
+                                // so the STOP frame — which carries no tool_calls —
+                                // would otherwise surface as `finish_reason: stop`
+                                // and downstream clients (most visibly Anthropic's
+                                // FSM, `stop_reason: tool_use`) would end a tool
+                                // round-trip as an ordinary text completion.
+                                // Sticky promotion: once any tool call has been
+                                // seen, a plain Stop finish is rewritten to
+                                // ToolCalls. Non-Stop reasons (Length, …) are left
+                                // untouched — truncation is not a tool completion.
+                                let had_tools =
+                                    total_tool_calls_flag.load(std::sync::atomic::Ordering::Relaxed)
+                                        > 0;
+                                for ch in &mut chunk.choices {
+                                    if had_tools
+                                        && matches!(
+                                            ch.finish_reason,
+                                            Some(ponyllm_protocol::openai::chat::FinishReason::Stop)
+                                        )
+                                    {
+                                        tracing::debug!(
+                                            model = %model_stream,
+                                            response_id = %chunk_id,
+                                            "Gemini STOP frame follows tool calls; promoting finish_reason Stop -> ToolCalls"
+                                        );
+                                        ch.finish_reason =
+                                            Some(ponyllm_protocol::openai::chat::FinishReason::ToolCalls);
+                                    }
+                                    if let Some(ref fr) = ch.finish_reason {
+                                        *latest_finish_reason_flag.lock() =
+                                            Some(format!("{:?}", fr));
+                                    }
+                                }
+                                if chunk.choices.iter().any(|c| c.finish_reason.is_some()) {
+                                    tracing::debug!(
+                                        model = %model_stream,
+                                        response_id = %chunk_id,
+                                        finish_reason = ?chunk.choices.first().and_then(|c| c.finish_reason.as_ref()),
+                                        "Gemini SSE stream choice completed"
+                                    );
+                                    stopped_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                                }
+
+                                if let Ok(json) = serde_json::to_string(&chunk) {
+                                    out.push(Ok(Bytes::from(format!("data: {}\n\n", json))));
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            // Never panic and never fabricate content from a frame
+                            // the gateway could not read.
+                            tracing::warn!(
+                                model = %model_stream,
+                                error = %e,
+                                "Gemini upstream SSE frame is not valid JSON; skipping frame"
+                            );
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Gemini SSE to OpenAI stream transport error encountered");
+                transport_errored_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                stopped_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                out.push(Err(e));
+            }
+        }
+        let iter = futures_util::stream::iter(out);
+        futures_util::stream::BoxStream::from(Box::pin(iter)
+            as std::pin::Pin<Box<dyn futures_util::Stream<Item = Result<Bytes, E>> + Send>>)
+    });
+
+    // OpenAI streams must terminate with `data: [DONE]`, and an upstream that
+    // ended without `finishReason` must still hand the client a terminal chunk.
+    translated
+        .chain(futures_util::stream::once(async move {
+            let mut buf = Vec::new();
+            if !stopped.load(std::sync::atomic::Ordering::SeqCst)
+                && !transport_errored.load(std::sync::atomic::Ordering::SeqCst)
+            {
+                let id = {
+                    let mut guard = response_id.lock();
+                    guard.get_or_insert_with(|| gemini_chat_id(None)).clone()
+                };
+                let finish = if total_tool_calls.load(std::sync::atomic::Ordering::Relaxed) > 0 {
+                    ponyllm_protocol::openai::chat::FinishReason::ToolCalls
+                } else {
+                    ponyllm_protocol::openai::chat::FinishReason::Stop
+                };
+                let usage = last_usage.lock().clone();
+                let final_chunk = gemini_terminal_chunk(&model, &id, usage, finish);
+                if let Ok(json) = serde_json::to_string(&final_chunk) {
+                    buf.extend_from_slice(format!("data: {}\n\n", json).as_bytes());
+                }
+            }
+
+            let frames = total_frames.load(std::sync::atomic::Ordering::Relaxed);
+            let text_bytes = total_text_bytes.load(std::sync::atomic::Ordering::Relaxed);
+            let thought_bytes = total_thought_bytes.load(std::sync::atomic::Ordering::Relaxed);
+            let tool_calls = total_tool_calls.load(std::sync::atomic::Ordering::Relaxed);
+            let finish_reason = latest_finish_reason.lock().clone();
+            let emitted = has_emitted_chunks.load(std::sync::atomic::Ordering::SeqCst);
+
+            if text_bytes == 0
+                && tool_calls == 0
+                && !transport_errored.load(std::sync::atomic::Ordering::SeqCst)
+            {
+                if thought_bytes > 0 {
+                    tracing::debug!(
+                        model = %model,
+                        total_frames = frames,
+                        thought_bytes = thought_bytes,
+                        finish_reason = ?finish_reason,
+                        "Gemini SSE to OpenAI stream finalized with reasoning-only content (no visible text)"
+                    );
+                } else {
+                    tracing::warn!(
+                        model = %model,
+                        total_frames = frames,
+                        emitted_chunks = emitted,
+                        finish_reason = ?finish_reason,
+                        "Gemini SSE to OpenAI stream finalized with ZERO content bytes"
+                    );
+                }
+            } else {
+                tracing::debug!(
+                    model = %model,
+                    total_frames = frames,
+                    text_bytes = text_bytes,
+                    thought_bytes = thought_bytes,
+                    tool_calls = tool_calls,
+                    finish_reason = ?finish_reason,
+                    "Gemini SSE to OpenAI stream finalized with [DONE]"
+                );
+            }
+
+            buf.extend_from_slice(b"data: [DONE]\n\n");
+            Ok::<_, E>(Bytes::from(buf))
         }))
         .boxed()
 }

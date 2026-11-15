@@ -15,6 +15,10 @@
 #      PONYLLM_PROBE_ALLOWLIST 里——egress.rs 的 blocked_v4 把 100.64/10（CGNAT）
 #      判为 blocked address，数据面拨号与 admin 写路径（check_probe_url_fast）
 #      同口径拒绝。两者成对维护，见本节 [providers.magpie]。
+#   5. gemini（2026-11-15）：base_url 用 Gemini 的版本根 `/v1beta`（不是 OpenAI 的
+#      `/v1`），`default_protocol = "gemini"` 才会走原生 `generateContent`；
+#      key 由执行器放进 `x-goog-api-key`（不是 Bearer）。境内需 proxy/egress 出网，
+#      见本节 [providers.gemini]。
 
 [providers.opencode-zen]
 # 示例为占位：真值（内网 IP + PATH_TOKEN）只进 live secret，绝不进仓库。
@@ -161,6 +165,71 @@ output_types = ["text"]
 thinking_default = "high"
 thinking_max = "max"
 thinking_efforts = { off = "", low = "low", high = "high", max = "xhigh" }
+
+# ── gemini：Google Gemini Developer API 原生协议（2026-11-15 接入）
+#
+# 形态：base_url 用 Gemini 的版本根 `https://generativelanguage.googleapis.com/v1beta`
+#   （Gemini 的版本根不是 OpenAI 的 `/v1`，`normalize_gemini_url` 只接受这一形态）。
+#   `default_protocol = "gemini"` 让网关/嵌入式 SDK 走原生 `generateContent`
+#   （内部以 Chat 为枢轴双向翻译，下游仍可用 chat/messages/responses 三个入口）。
+#   模型名带不带 `models/` 前缀都可以，配置里建议去掉。
+# 凭据：静态 API key 由执行器放进 `x-goog-api-key` 请求头（**不是** Bearer）；
+#   真实 key 只进 live secret / Admin API，仓库里一律 `<GEMINI_API_KEY>` 占位。
+# 出网：generativelanguage.googleapis.com 在境内不可直连，**必须**经 proxy 或
+#   egress_pool 出海；示例给 `direct` 占位，实际部署换成可用的 CONNECT 代理出口
+#   （socks5 已被 validate_egress_entry 拒绝，见上文 opencode-zen 段说明）。
+[providers.gemini]
+base_url = "https://generativelanguage.googleapis.com/v1beta"
+default_model = "gemini-3.8-flash"
+strategy = "priority"
+billing_mode = "metered"
+input_price = 0.0
+cached_price = 0.0
+output_price = 0.0
+default_protocol = "gemini"
+models = [
+    "gemini-3.8-flash",
+    "gemini-3.6-flash",
+    "gemini-3.1-flash-lite",
+]
+# 免费层按模型 5 RPM 限流、热门模型（3.8-flash）会返回 503 high demand：
+# 用模型级 fallbacks 在同类模型间自动降级（同 provider，仍走 Gemini 协议）。
+[[providers.gemini.model_configs]]
+name = "gemini-3.8-flash"
+tier = "F"
+context_window = "1M"
+max_output = "64K"
+input_types = ["text", "image", "audio", "video"]
+output_types = ["text"]
+fallbacks = ["gemini-3.6-flash", "gemini-3.1-flash-lite"]
+
+[[providers.gemini.model_configs]]
+name = "gemini-3.6-flash"
+tier = "S"
+context_window = "1M"
+max_output = "64K"
+input_types = ["text", "image", "audio", "video"]
+output_types = ["text"]
+fallbacks = ["gemini-3.1-flash-lite"]
+
+[[providers.gemini.model_configs]]
+name = "gemini-3.1-flash-lite"
+tier = "L"
+context_window = "1M"
+max_output = "64K"
+input_types = ["text", "image", "audio", "video"]
+output_types = ["text"]
+
+# 境内出网：把 "direct" 换成真实 CONNECT 代理条目（如 pproxy 的 http 口），
+# 或保留 "direct" 表示网关节点本身已有可用出口。
+egress_pool = ["direct"]
+egress_strategy = "round_robin"
+# key 形态（真值不进仓库；也可用 Admin API `POST /api/admin/keys` 注入）：
+# [[providers.gemini.keys]]
+# id = "gemini-key-1"
+# api_key = "<GEMINI_API_KEY>"
+# priority = 1
+# weight = 10
 
 # ── 安全：Phase-3 HttpOnly Cookie 管理会话（VULN-05，默认关闭）────────────────
 # 开启方式（生产建议启用，配合 Web 控制台后续版本）：

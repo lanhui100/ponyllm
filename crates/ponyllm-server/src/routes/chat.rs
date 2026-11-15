@@ -4,10 +4,10 @@ use crate::state::{AppState, RoutedTarget};
 use crate::streaming::{
     anthropic_sse_to_openai_stream, antigravity_sse_to_openai_stream,
     collect_antigravity_sse_to_json, empty_stop_retry_delay, extract_usage_tokens,
-    is_transient_empty_stop_error, passthrough_sse, responses_sse_to_chat_stream, stall_guard,
-    verify_antigravity_stream_preamble_with_deadline, wrap_telemetry_stream,
-    AntigravityPreambleResult, StreamFailureContext, DEFAULT_PREAMBLE_DEADLINE,
-    DEFAULT_TAIL_STALL_IDLE,
+    gemini_sse_to_openai_stream, is_transient_empty_stop_error, passthrough_sse,
+    responses_sse_to_chat_stream, stall_guard, verify_antigravity_stream_preamble_with_deadline,
+    wrap_telemetry_stream, AntigravityPreambleResult, StreamFailureContext,
+    DEFAULT_PREAMBLE_DEADLINE, DEFAULT_TAIL_STALL_IDLE,
 };
 use axum::extract::State;
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
@@ -20,10 +20,11 @@ use ponyllm_core::executor::{is_opencode_zen_target, EventSinkCtx, UpstreamExecu
 use ponyllm_core::pool::GatewayRoutingStrategy;
 use ponyllm_core::telemetry::{EventCtx, GatewayEvent, StageTimings};
 use ponyllm_protocol::anthropic::messages::MessageResponse;
-use ponyllm_protocol::openai::chat::ChatCompletionRequest;
+use ponyllm_protocol::openai::chat::{ChatCompletionRequest, ChatCompletionResponse};
 use ponyllm_protocol::translator::{
     anthropic_to_chat_response, antigravity_to_chat_response, chat_to_anthropic_request,
-    chat_to_antigravity_request, chat_to_responses_request, responses_to_chat_response,
+    chat_to_antigravity_request, chat_to_gemini_request, chat_to_responses_request,
+    gemini_to_chat_response, responses_to_chat_response,
 };
 use std::str::FromStr;
 use std::sync::Arc;
@@ -552,11 +553,21 @@ pub async fn handle_chat_completions(
                 (url, val)
             }
             ponyllm_core::pool::UpstreamProtocol::Gemini => {
-                last_error = format!(
-                    "Gemini protocol wiring is not implemented yet for provider {}",
-                    target.provider_name
-                );
-                continue;
+                let url = target.gemini_url(is_streaming);
+                // Explicit-only thinking passthrough (see Antigravity above): the
+                // ceiling-enforced effort reaches the translator solely when the
+                // caller asked for it, otherwise the legacy wire shape holds.
+                let thinking = requested_thinking.map(|_| effective_thinking);
+                let val = match chat_to_gemini_request(&target_req, &target.physical_model, thinking)
+                {
+                    Ok(v) => v,
+                    Err(e) => {
+                        last_error =
+                            format!("Translation error for {}: {}", target.provider_name, e);
+                        continue;
+                    }
+                };
+                (url, val)
             }
             ponyllm_core::pool::UpstreamProtocol::Systemone => {
                 last_error = format!(
@@ -624,6 +635,9 @@ pub async fn handle_chat_completions(
         let executor = UpstreamExecutor::with_client(pool.clone(), http_client, max_retries)
             .with_downstream_headers(&headers)
             .with_opencode_zen(is_opencode_zen_target(&target.provider_name, &target_url))
+            .with_gemini(
+                target.upstream_protocol == ponyllm_core::pool::UpstreamProtocol::Gemini,
+            )
             .with_rate_limits(rate_limits)
             .with_ttfb_timeout(ttfb_timeout)
             .with_egress(egress_pool.clone(), egress_clients.clone())
@@ -715,6 +729,9 @@ pub async fn handle_chat_completions(
                 )
                 .with_downstream_headers(&headers)
                 .with_opencode_zen(is_opencode_zen_target(&target.provider_name, &target_url))
+                .with_gemini(
+                    target.upstream_protocol == ponyllm_core::pool::UpstreamProtocol::Gemini,
+                )
                 .with_rate_limits(rate_limits)
                 .with_ttfb_timeout(if stream_attempt == 1 {
                     // First attempt keeps the configured TTFB verbatim
@@ -1067,12 +1084,12 @@ pub async fn handle_chat_completions(
                                 axum::body::Body::from_stream(monitored)
                             }
                             ponyllm_core::pool::UpstreamProtocol::Gemini => {
-                                return crate::extractors::render_openai_error(
-                                    StatusCode::BAD_REQUEST,
-                                    "invalid_request_error",
-                                    "protocol_mismatch",
-                                    "Gemini protocol wiring is not implemented yet",
+                                let stream = gemini_sse_to_openai_stream(
+                                    final_raw_stream,
+                                    &target.physical_model,
                                 );
+                                let monitored = wrap_telemetry_stream(stream, failure_ctx);
+                                axum::body::Body::from_stream(monitored)
                             }
                             ponyllm_core::pool::UpstreamProtocol::Systemone => {
                                 return crate::extractors::render_openai_error(
@@ -1269,6 +1286,9 @@ pub async fn handle_chat_completions(
                     )
                     .with_downstream_headers(&headers)
                     .with_opencode_zen(is_opencode_zen_target(&target.provider_name, &target_url))
+                    .with_gemini(
+                        target.upstream_protocol == ponyllm_core::pool::UpstreamProtocol::Gemini,
+                    )
                     .with_rate_limits(rate_limits)
                     .with_ttfb_timeout(if collect_attempt == 1 {
                         // FIX-1: first attempt keeps the configured TTFB verbatim.
@@ -1537,6 +1557,32 @@ pub async fn handle_chat_completions(
                         }
                         ponyllm_core::pool::UpstreamProtocol::Antigravity => {
                             antigravity_to_chat_response(&resp_val, &target.physical_model)
+                        }
+                        ponyllm_core::pool::UpstreamProtocol::Gemini => {
+                            // Native Gemini response → Chat pivot. This arm must
+                            // stay explicit: the `_` fallback below treats the
+                            // body as an already-OpenAI chat completion, which a
+                            // `{candidates: […]}` payload can never satisfy.
+                            let chat_val =
+                                gemini_to_chat_response(&resp_val, &target.physical_model);
+                            let chat_resp: ChatCompletionResponse =
+                                match serde_json::from_value(chat_val) {
+                                    Ok(cr) => cr,
+                                    Err(e) => {
+                                        last_error = format!(
+                                            "Invalid Gemini translated response from {}: {}",
+                                            target.provider_name, e
+                                        );
+                                        continue;
+                                    }
+                                };
+                            match serde_json::to_value(&chat_resp) {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    last_error = format!("Serialization error: {}", e);
+                                    continue;
+                                }
+                            }
                         }
                         _ => {
                             // If caller explicitly requested thinking off, scrub reasoning_content from upstream chat response

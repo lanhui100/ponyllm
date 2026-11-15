@@ -3,7 +3,7 @@ use std::sync::Arc;
 use ponyllm_core::error::{CoreError, Result};
 use ponyllm_core::executor::UpstreamExecutor;
 use ponyllm_core::pool::{ApiKeyEntry, KeyPool, RoutingStrategy, UpstreamProtocol};
-use ponyllm_core::{canonicalize_model_name, normalize_chat_completions_url, normalize_messages_url, normalize_responses_url};
+use ponyllm_core::{canonicalize_model_name, normalize_chat_completions_url, normalize_gemini_url, normalize_messages_url, normalize_responses_url};
 use ponyllm_protocol::anthropic::messages::{MessageRequest, MessageResponse};
 use ponyllm_protocol::openai::chat::{ChatCompletionRequest, ChatCompletionResponse};
 use ponyllm_protocol::openai::responses::{CreateResponseRequest, ResponseObject};
@@ -46,6 +46,17 @@ impl ProviderInfo {
 
     fn responses_url(&self) -> String {
         normalize_responses_url(&self.base_url)
+    }
+
+    /// Native Gemini `generateContent` endpoint for `model` (non-streaming).
+    ///
+    /// Gemini's version root is `/v1beta`, so the OpenAI-shaped normalizers
+    /// above do not apply; this delegates to the shared
+    /// [`ponyllm_core::normalize_gemini_url`] so the SDK and the HTTP gateway
+    /// dial byte-identical URLs (including the `models/` prefix and trailing
+    /// `/models` base tolerance).
+    fn gemini_url(&self, model: &str) -> String {
+        normalize_gemini_url(&self.base_url, model, false)
     }
 
     fn antigravity_url(&self) -> String {
@@ -183,7 +194,15 @@ impl PonyGateway {
                 Ok(resp)
             }
             UpstreamProtocol::Gemini => {
-                return Err(CoreError::Internal("Gemini protocol is not yet implemented in the embedded SDK".to_string()))
+                // Chat is the single canonical pivot: the request is already
+                // Chat, so only the Chat → native Gemini hop applies.
+                let body = chat_to_gemini_request(req, &canonical, req.get_reasoning_effort())?;
+                let resp_val = executor
+                    .execute_json_request(&provider.gemini_url(&canonical), &body)
+                    .await?;
+                let chat_val = gemini_to_chat_response(&resp_val, &canonical);
+                let resp: ChatCompletionResponse = serde_json::from_value(chat_val)?;
+                Ok(resp)
             }
             UpstreamProtocol::Systemone => return Err(CoreError::Internal("Systemone protocol requires the /systemone API".to_string())),
             UpstreamProtocol::Antigravity => {
@@ -236,7 +255,19 @@ impl PonyGateway {
                 Ok(ant_resp)
             }
             UpstreamProtocol::Gemini => {
-                return Err(CoreError::Internal("Gemini protocol is not yet implemented in the embedded SDK".to_string()))
+                // Chat is the pivot: Messages → Chat (existing translator) then
+                // Chat → native Gemini; the response comes back as Chat and is
+                // projected to Messages.
+                let chat_req = anthropic_to_chat_request(req)?;
+                let body =
+                    chat_to_gemini_request(&chat_req, &canonical, chat_req.get_reasoning_effort())?;
+                let resp_val = executor
+                    .execute_json_request(&provider.gemini_url(&canonical), &body)
+                    .await?;
+                let chat_val = gemini_to_chat_response(&resp_val, &canonical);
+                let chat_resp: ChatCompletionResponse = serde_json::from_value(chat_val)?;
+                let ant_resp = chat_to_anthropic_response(&chat_resp)?;
+                Ok(ant_resp)
             }
             UpstreamProtocol::Systemone => return Err(CoreError::Internal("Systemone protocol requires the /systemone API".to_string())),
             UpstreamProtocol::Antigravity => {
@@ -289,7 +320,19 @@ impl PonyGateway {
                 Ok(resp)
             }
             UpstreamProtocol::Gemini => {
-                Err(CoreError::Internal("Gemini protocol is not yet implemented in the embedded SDK".to_string()))
+                // Chat is the pivot: Responses → Chat (existing translator)
+                // then Chat → native Gemini; the response comes back as Chat
+                // and is projected to the Responses object.
+                let chat_req = responses_to_chat_request(req)?;
+                let body =
+                    chat_to_gemini_request(&chat_req, &canonical, chat_req.get_reasoning_effort())?;
+                let resp_val = executor
+                    .execute_json_request(&provider.gemini_url(&canonical), &body)
+                    .await?;
+                let chat_val = gemini_to_chat_response(&resp_val, &canonical);
+                let chat_resp: ChatCompletionResponse = serde_json::from_value(chat_val)?;
+                let resp_obj = chat_to_responses_response(&chat_resp)?;
+                Ok(resp_obj)
             }
             UpstreamProtocol::Systemone => Err(CoreError::Internal("Systemone protocol requires the /systemone API".to_string())),
             UpstreamProtocol::Antigravity => {
@@ -394,5 +437,56 @@ impl PonyGatewayBuilder {
             max_retries: retries,
             http_client: ponyllm_core::executor::create_upstream_http_client(),
         }
+    }
+}
+
+#[cfg(test)]
+mod sdk_gemini_wiring_tests {
+    use super::*;
+
+    fn gemini_provider(base_url: &str) -> ProviderInfo {
+        ProviderInfo {
+            name: "gemini".to_string(),
+            base_url: base_url.to_string(),
+            default_model: "gemini-3.8-flash".to_string(),
+            models: vec![],
+            pool: Arc::new(KeyPool::new("gemini", RoutingStrategy::Priority)),
+            default_protocol: Some(UpstreamProtocol::Gemini),
+        }
+    }
+
+    #[test]
+    fn gemini_url_matches_gateway_normalizer() {
+        // The embedded SDK must dial the byte-identical URL the HTTP gateway
+        // builds, otherwise the two surfaces silently diverge.
+        let p = gemini_provider("https://generativelanguage.googleapis.com/v1beta");
+        assert_eq!(
+            p.gemini_url("gemini-3.8-flash"),
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent"
+        );
+        // Trailing slash on the base and an already-prefixed `models/` model
+        // are both tolerated (operator/stdlib shapes).
+        let p = gemini_provider("https://generativelanguage.googleapis.com/v1beta/");
+        assert_eq!(
+            p.gemini_url("models/gemini-3.8-flash"),
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent"
+        );
+        // Non-streaming only: generateContent, never streamGenerateContent.
+        assert!(!p.gemini_url("gemini-3.8-flash").contains("streamGenerateContent"));
+    }
+
+    #[test]
+    fn gemini_protocol_routes_to_native_branch() {
+        // `default_protocol = "gemini"` must win over the URL heuristic, so the
+        // SDK dispatches to the Gemini branch instead of OpenAI Chat.
+        let p = gemini_provider("https://generativelanguage.googleapis.com/v1beta");
+        assert_eq!(p.native_protocol(), UpstreamProtocol::Gemini);
+
+        // An unset protocol keeps the legacy heuristic untouched.
+        let mut legacy = gemini_provider("https://api.openai.com");
+        legacy.default_protocol = None;
+        assert_eq!(legacy.native_protocol(), UpstreamProtocol::Chat);
+        legacy.base_url = "https://api.anthropic.com".to_string();
+        assert_eq!(legacy.native_protocol(), UpstreamProtocol::Anthropic);
     }
 }

@@ -4197,6 +4197,130 @@ pub async fn handle_admin_test_key(
         return Json(test_view).into_response();
     }
 
+    // Gemini Developer API: probe `GET {base}/models?pageSize=1` with the static
+    // key in `x-goog-api-key`. The generic probe below authenticates with a
+    // Bearer token, which Gemini answers 401 — a false-negative dial test.
+    if p_sec.default_protocol == Some(UpstreamProtocol::Gemini) {
+        let raw_key = key_sec.api_key.clone();
+        let probe_url = gemini_models_url(&base_url, 1);
+        // H2: resolve-then-check immediately before dialing (see generic path).
+        if let Err(reason) = crate::egress::check_probe_url(&probe_url).await {
+            return Json(KeyTestView {
+                success: false,
+                latency_ms: 0,
+                http_status: None,
+                error_code: Some("egress_blocked".to_string()),
+                message: format!("probe target blocked by egress policy: {}", reason),
+                quota: None,
+                quota_groups: None,
+                usage: None,
+            })
+            .into_response();
+        }
+        let start = Instant::now();
+        // Same provider-effective egress as the data plane (a CN deployment
+        // reaches Gemini only through its proxy/egress pool), no redirects.
+        let result = state
+            .probe_http_client_for_provider(&p_name)
+            .get(&probe_url)
+            .timeout(std::time::Duration::from_secs(3))
+            .header(header::USER_AGENT, "ponyllm-dialtest/0.1")
+            .header("x-goog-api-key", raw_key.as_str())
+            .send()
+            .await;
+        let latency_ms = start.elapsed().as_millis() as u64;
+
+        let test_view = match result {
+            Ok(resp) => {
+                let status = resp.status();
+                if status.is_success() {
+                    KeyTestView {
+                        success: true,
+                        latency_ms,
+                        http_status: Some(status.as_u16()),
+                        error_code: None,
+                        message: "probe ok".to_string(),
+                        quota: None,
+                        quota_groups: None,
+                        usage: None,
+                    }
+                } else {
+                    // Carry the upstream status + body snippet: an API-key
+                    // rejection, a quota gate and a region gate are all
+                    // non-2xx and must be distinguishable in the console.
+                    let snippet = resp
+                        .text()
+                        .await
+                        .map(|b| summarize_upstream_body(&b))
+                        .unwrap_or_default();
+                    let detail = if snippet.is_empty() {
+                        String::new()
+                    } else {
+                        format!(": {}", snippet)
+                    };
+                    let (error_code, message) =
+                        if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+                            (
+                                "unauthorized",
+                                format!("upstream authentication failed{}", detail),
+                            )
+                        } else if status == StatusCode::TOO_MANY_REQUESTS {
+                            ("rate_limited", format!("upstream rate limit exceeded{}", detail))
+                        } else {
+                            (
+                                "upstream_error",
+                                format!("upstream returned HTTP {}{}", status.as_u16(), detail),
+                            )
+                        };
+                    KeyTestView {
+                        success: false,
+                        latency_ms,
+                        http_status: Some(status.as_u16()),
+                        error_code: Some(error_code.to_string()),
+                        message,
+                        quota: None,
+                        quota_groups: None,
+                        usage: None,
+                    }
+                }
+            }
+            Err(e) => {
+                if e.is_timeout() {
+                    KeyTestView {
+                        success: false,
+                        latency_ms: latency_ms.max(3000),
+                        http_status: None,
+                        error_code: Some("timeout".to_string()),
+                        message: "dial test timed out after 3s".to_string(),
+                        quota: None,
+                        quota_groups: None,
+                        usage: None,
+                    }
+                } else {
+                    KeyTestView {
+                        success: false,
+                        latency_ms,
+                        http_status: None,
+                        error_code: Some("connect_error".to_string()),
+                        message: "upstream connection error".to_string(),
+                        quota: None,
+                        quota_groups: None,
+                        usage: None,
+                    }
+                }
+            }
+        };
+
+        tracing::info!(
+            key_id = %id,
+            provider = %p_name,
+            success = test_view.success,
+            latency_ms = test_view.latency_ms,
+            "key dial-test executed (gemini)"
+        );
+        return Json(test_view).into_response();
+    }
+
     let raw_key = key_sec.api_key.clone();
     let is_anthropic = p_sec
         .default_protocol
@@ -6075,8 +6199,34 @@ fn upstream_models_url(base_url: &str) -> String {
     format!("{trimmed}/v1/models")
 }
 
+/// Native Gemini models-list URL: `{base}/models?pageSize=<n>`.
+///
+/// Gemini's version root is `/v1beta` (not the OpenAI `/v1`), so
+/// [`upstream_models_url`] does not apply. A trailing `/models` on the base is
+/// tolerated (the shape operators copy from a listing response). `pageSize`
+/// keeps the admin listing to one page: 1000 for the model picker, 1 for the
+/// dial-test probe.
+fn gemini_models_url(base_url: &str, page_size: u32) -> String {
+    let trimmed = base_url.trim_end_matches('/');
+    let base = trimmed.strip_suffix("/models").unwrap_or(trimmed);
+    format!("{base}/models?pageSize={page_size}")
+}
+
+/// Single-line, char-boundary-safe snippet of an upstream error body for admin
+/// views: at most 200 chars (never panics on multi-byte UTF-8, never echoes
+/// newlines into a toast).
+fn summarize_upstream_body(body: &str) -> String {
+    let one_line: String = body.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut out: String = one_line.chars().take(200).collect();
+    if one_line.chars().count() > 200 {
+        out.push('…');
+    }
+    out
+}
+
 /// List models offered by the provider's upstream (`source: "quota"` for
-/// Antigravity, `"upstream"` for OpenAI-style `/models`).
+/// Antigravity, `"upstream"` for OpenAI-style `/models` and native Gemini
+/// `{base}/models`).
 /// Providers without a listable interface answer 404 so the console can fall
 /// back to manual entry with a toast instead of a picker modal.
 #[utoipa::path(get, path = "/api/admin/providers/{name}/upstream-models", params(("name" = String, Path)), responses((status = 200, body = UpstreamModelsView)))]
@@ -6176,6 +6326,141 @@ pub async fn handle_admin_provider_upstream_models(
             )
                 .into_response(),
         };
+    }
+
+    // Gemini Developer API: the listing lives at `GET {base}/models` and is
+    // authenticated with the static key in `x-goog-api-key` (a Bearer token is
+    // not Gemini auth). Probed through the provider-effective egress client
+    // (same proxy/exit IP as the data plane) with no redirects.
+    if default_protocol == Some(UpstreamProtocol::Gemini) {
+        let (file, _store_version) = match load_store_config(&state).await {
+            Ok((f, ver)) => (f, ver),
+            Err(resp) => return resp,
+        };
+        let Some(p_sec) = file.providers.get(&name) else {
+            return not_found();
+        };
+        let Some(raw_key) = p_sec
+            .keys
+            .iter()
+            .find(|k| !k.is_antigravity(p_sec.default_protocol, &name))
+            .map(|k| k.api_key.clone())
+        else {
+            // A Gemini listing needs a static key; without one there is nothing
+            // to authenticate with. Say so explicitly instead of the generic
+            // "unsupported interface" 404 (the interface does exist).
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": {
+                    "message": format!("provider '{name}' has no API key configured; add a key before listing upstream models"),
+                    "code": "provider_has_no_key"
+                }})),
+            )
+                .into_response();
+        };
+
+        let url = gemini_models_url(&base_url, 1000);
+        // H2: same resolve-then-check as the dial-test above.
+        if let Err(reason) = crate::egress::check_probe_url(&url).await {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": {"message": format!("upstream target blocked by egress policy: {}", reason), "code": "egress_blocked"}})),
+            )
+                .into_response();
+        }
+        let client = state.probe_http_client_for_provider(&name);
+        let resp = match tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            client
+                .get(&url)
+                .header("x-goog-api-key", raw_key.as_str())
+                .header(header::USER_AGENT, "ponyllm-admin/0.1")
+                .send(),
+        )
+        .await
+        {
+            Ok(Ok(r)) => r,
+            Ok(Err(e)) => {
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    Json(json!({"error": {"message": format!("upstream models request failed: {}", summarize_upstream_body(&e.to_string())), "code": "upstream-models-unavailable"}})),
+                )
+                    .into_response();
+            }
+            Err(_) => {
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    Json(json!({"error": {"message": "upstream models request timed out", "code": "upstream-models-unavailable"}})),
+                )
+                    .into_response();
+            }
+        };
+        let status = resp.status();
+        let raw_body = match resp.text().await {
+            Ok(t) => t,
+            Err(_) => {
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    Json(json!({"error": {"message": "upstream models response body could not be read", "code": "upstream-models-unavailable"}})),
+                )
+                    .into_response();
+            }
+        };
+        if !status.is_success() {
+            // 401/403 = the key itself was rejected; everything else = the
+            // listing endpoint failed. Both surface the upstream status and a
+            // body snippet so the console can toast the real cause instead of
+            // a generic failure.
+            let code = if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+                "upstream-auth-failed"
+            } else {
+                "upstream-models-unavailable"
+            };
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({"error": {
+                    "message": format!(
+                        "upstream models request failed: HTTP {} {}",
+                        status.as_u16(),
+                        summarize_upstream_body(&raw_body)
+                    ),
+                    "code": code
+                }})),
+            )
+                .into_response();
+        }
+        let body: serde_json::Value = match serde_json::from_str(&raw_body) {
+            Ok(v) => v,
+            Err(_) => {
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    Json(json!({"error": {"message": "upstream models response was not JSON", "code": "upstream-models-unavailable"}})),
+                )
+                    .into_response();
+            }
+        };
+        // `{"models": [{"name": "models/gemini-3.8-flash", ...}]}` — the
+        // `models/` prefix is a resource-name scoping detail, not part of the
+        // model id callers configure.
+        let mut ids: Vec<String> = body
+            .get("models")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|m| m.get("name").and_then(|v| v.as_str()))
+                    .map(|n| n.trim().strip_prefix("models/").unwrap_or(n.trim()).to_string())
+                    .filter(|id| !id.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+        ids.sort();
+        ids.dedup();
+        return Json(UpstreamModelsView {
+            provider: name.clone(),
+            source: "upstream".to_string(),
+            models: ids.into_iter().map(|id| UpstreamModelItem { id }).collect(),
+        })
+        .into_response();
     }
 
     // Anthropic-native providers expose no generic list contract here.

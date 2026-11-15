@@ -83,7 +83,7 @@ pub enum Modal {
         default_model: String,
         strategy_idx: usize,
         billing_mode_idx: usize, // 0: Metered, 1: Plan (Coding Plan), 2: Free
-        protocol_idx: usize, // 0: 自动启发式, 1: chat, 2: responses, 3: anthropic
+        protocol_idx: usize, // 0: 自动启发式, 1: chat, 2: responses, 3: anthropic, 4: antigravity, 6: gemini（5=systemone 暂不进选择器）
         input_price: String,
         cached_price: String,
         output_price: String,
@@ -95,7 +95,7 @@ pub enum Modal {
         default_model: String,
         strategy_idx: usize,
         billing_mode_idx: usize,
-        protocol_idx: usize, // 0: 自动启发式, 1: chat, 2: responses, 3: anthropic
+        protocol_idx: usize, // 0: 自动启发式, 1: chat, 2: responses, 3: anthropic, 4: antigravity, 6: gemini（5=systemone 暂不进选择器）
         input_price: String,
         cached_price: String,
         output_price: String,
@@ -109,7 +109,7 @@ pub enum Modal {
         model_name: String,
         tier_idx: usize, // 0: Flagship, 1: Standard, 2: Light
         billing_mode_idx: usize, // 0: 继承提供商, 1: Metered, 2: Plan (Coding Plan), 3: Free
-        protocol_idx: usize, // 0: 继承提供商, 1: chat, 2: responses, 3: anthropic
+        protocol_idx: usize, // 0: 继承提供商, 1: chat, 2: responses, 3: anthropic, 4: antigravity, 6: gemini（5=systemone 暂不进选择器）
         input_price: String,
         cached_price: String,
         output_price: String,
@@ -125,7 +125,7 @@ pub enum Modal {
         model_name: String, // readonly
         tier_idx: usize,
         billing_mode_idx: usize, // 0: 继承提供商, 1: Metered, 2: Plan (Coding Plan), 3: Free
-        protocol_idx: usize, // 0: 继承提供商, 1: chat, 2: responses, 3: anthropic
+        protocol_idx: usize, // 0: 继承提供商, 1: chat, 2: responses, 3: anthropic, 4: antigravity, 6: gemini（5=systemone 暂不进选择器）
         input_price: String,
         cached_price: String,
         output_price: String,
@@ -1158,7 +1158,7 @@ fn handle_modal_key(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                         2 => default_model.push(' '),
                         3 => *strategy_idx = (*strategy_idx + 1) % 3,
                         4 => *billing_mode_idx = (*billing_mode_idx + 1) % 3,
-                        5 => *protocol_idx = (*protocol_idx + 1) % 5,
+                        5 => *protocol_idx = next_protocol_idx(*protocol_idx),
                         _ => {}
                     }
                     keep_modal = true;
@@ -1169,7 +1169,7 @@ fn handle_modal_key(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                     } else if *active_field == 4 && *billing_mode_idx > 0 {
                         *billing_mode_idx -= 1;
                     } else if *active_field == 5 && *protocol_idx > 0 {
-                        *protocol_idx -= 1;
+                        *protocol_idx = prev_protocol_idx(*protocol_idx);
                     }
                     keep_modal = true;
                 }
@@ -1178,8 +1178,8 @@ fn handle_modal_key(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                         *strategy_idx += 1;
                     } else if *active_field == 4 && *billing_mode_idx < 2 {
                         *billing_mode_idx += 1;
-                    } else if *active_field == 5 && *protocol_idx < 4 {
-                        *protocol_idx += 1;
+                    } else if *active_field == 5 && *protocol_idx < 6 {
+                        *protocol_idx = next_protocol_idx(*protocol_idx);
                     }
                     keep_modal = true;
                 }
@@ -1194,6 +1194,7 @@ fn handle_modal_key(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                 KeyCode::Char('3') if *active_field == 5 => { *protocol_idx = 2; keep_modal = true; }
                 KeyCode::Char('4') if *active_field == 5 => { *protocol_idx = 3; keep_modal = true; }
                 KeyCode::Char('5') if *active_field == 5 => { *protocol_idx = 4; keep_modal = true; }
+                KeyCode::Char('6') if *active_field == 5 => { *protocol_idx = 6; keep_modal = true; }
                 KeyCode::Backspace => {
                     match *active_field {
                         0 => { name.pop(); }
@@ -1307,7 +1308,7 @@ fn handle_modal_key(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                         1 => default_model.push(' '),
                         2 => *strategy_idx = (*strategy_idx + 1) % 3,
                         3 => *billing_mode_idx = (*billing_mode_idx + 1) % 3,
-                        4 => *protocol_idx = (*protocol_idx + 1) % 5,
+                        4 => *protocol_idx = next_protocol_idx(*protocol_idx),
                         _ => {}
                     }
                     keep_modal = true;
@@ -1318,7 +1319,7 @@ fn handle_modal_key(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                     } else if *active_field == 3 && *billing_mode_idx > 0 {
                         *billing_mode_idx -= 1;
                     } else if *active_field == 4 && *protocol_idx > 0 {
-                        *protocol_idx -= 1;
+                        *protocol_idx = prev_protocol_idx(*protocol_idx);
                     }
                     keep_modal = true;
                 }
@@ -1327,8 +1328,8 @@ fn handle_modal_key(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                         *strategy_idx += 1;
                     } else if *active_field == 3 && *billing_mode_idx < 2 {
                         *billing_mode_idx += 1;
-                    } else if *active_field == 4 && *protocol_idx < 4 {
-                        *protocol_idx += 1;
+                    } else if *active_field == 4 && *protocol_idx < 6 {
+                        *protocol_idx = next_protocol_idx(*protocol_idx);
                     }
                     keep_modal = true;
                 }
@@ -1343,6 +1344,7 @@ fn handle_modal_key(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                 KeyCode::Char('3') if *active_field == 4 => { *protocol_idx = 2; keep_modal = true; }
                 KeyCode::Char('4') if *active_field == 4 => { *protocol_idx = 3; keep_modal = true; }
                 KeyCode::Char('5') if *active_field == 4 => { *protocol_idx = 4; keep_modal = true; }
+                KeyCode::Char('6') if *active_field == 4 => { *protocol_idx = 6; keep_modal = true; }
                 KeyCode::Backspace => {
                     match *active_field {
                         0 => { base_url.pop(); }
@@ -1494,7 +1496,7 @@ fn handle_modal_key(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                         0 => model_name.push(' '),
                         1 => *tier_idx = (*tier_idx + 1) % 3,
                         2 => *billing_mode_idx = (*billing_mode_idx + 1) % 4,
-                        3 => *protocol_idx = (*protocol_idx + 1) % 5,
+                        3 => *protocol_idx = next_protocol_idx(*protocol_idx),
                         7 => context_window.push(' '),
                         8 => max_output.push(' '),
                         9 => input_modalities[0] = !input_modalities[0],
@@ -1510,7 +1512,7 @@ fn handle_modal_key(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                     } else if *active_field == 2 && *billing_mode_idx > 0 {
                         *billing_mode_idx -= 1;
                     } else if *active_field == 3 && *protocol_idx > 0 {
-                        *protocol_idx -= 1;
+                        *protocol_idx = prev_protocol_idx(*protocol_idx);
                     }
                     keep_modal = true;
                 }
@@ -1519,8 +1521,8 @@ fn handle_modal_key(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                         *tier_idx += 1;
                     } else if *active_field == 2 && *billing_mode_idx < 3 {
                         *billing_mode_idx += 1;
-                    } else if *active_field == 3 && *protocol_idx < 4 {
-                        *protocol_idx += 1;
+                    } else if *active_field == 3 && *protocol_idx < 6 {
+                        *protocol_idx = next_protocol_idx(*protocol_idx);
                     }
                     keep_modal = true;
                 }
@@ -1536,6 +1538,7 @@ fn handle_modal_key(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                 KeyCode::Char('3') if *active_field == 3 => { *protocol_idx = 2; keep_modal = true; }
                 KeyCode::Char('4') if *active_field == 3 => { *protocol_idx = 3; keep_modal = true; }
                 KeyCode::Char('5') if *active_field == 3 => { *protocol_idx = 4; keep_modal = true; }
+                KeyCode::Char('6') if *active_field == 3 => { *protocol_idx = 6; keep_modal = true; }
                 KeyCode::Char('1') if *active_field == 9 => { input_modalities[0] = !input_modalities[0]; keep_modal = true; }
                 KeyCode::Char('2') if *active_field == 9 => { input_modalities[1] = !input_modalities[1]; keep_modal = true; }
                 KeyCode::Char('3') if *active_field == 9 => { input_modalities[2] = !input_modalities[2]; keep_modal = true; }
@@ -1689,7 +1692,7 @@ fn handle_modal_key(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                     match *active_field {
                         0 => *tier_idx = (*tier_idx + 1) % 3,
                         1 => *billing_mode_idx = (*billing_mode_idx + 1) % 4,
-                        2 => *protocol_idx = (*protocol_idx + 1) % 5,
+                        2 => *protocol_idx = next_protocol_idx(*protocol_idx),
                         6 => context_window.push(' '),
                         7 => max_output.push(' '),
                         8 => input_modalities[0] = !input_modalities[0],
@@ -1705,7 +1708,7 @@ fn handle_modal_key(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                     } else if *active_field == 1 && *billing_mode_idx > 0 {
                         *billing_mode_idx -= 1;
                     } else if *active_field == 2 && *protocol_idx > 0 {
-                        *protocol_idx -= 1;
+                        *protocol_idx = prev_protocol_idx(*protocol_idx);
                     }
                     keep_modal = true;
                 }
@@ -1714,8 +1717,8 @@ fn handle_modal_key(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                         *tier_idx += 1;
                     } else if *active_field == 1 && *billing_mode_idx < 3 {
                         *billing_mode_idx += 1;
-                    } else if *active_field == 2 && *protocol_idx < 4 {
-                        *protocol_idx += 1;
+                    } else if *active_field == 2 && *protocol_idx < 6 {
+                        *protocol_idx = next_protocol_idx(*protocol_idx);
                     }
                     keep_modal = true;
                 }
@@ -1731,6 +1734,7 @@ fn handle_modal_key(app: &mut TuiApp, key: KeyCode, modifiers: KeyModifiers) {
                 KeyCode::Char('3') if *active_field == 2 => { *protocol_idx = 2; keep_modal = true; }
                 KeyCode::Char('4') if *active_field == 2 => { *protocol_idx = 3; keep_modal = true; }
                 KeyCode::Char('5') if *active_field == 2 => { *protocol_idx = 4; keep_modal = true; }
+                KeyCode::Char('6') if *active_field == 2 => { *protocol_idx = 6; keep_modal = true; }
                 KeyCode::Char('1') if *active_field == 8 => { input_modalities[0] = !input_modalities[0]; keep_modal = true; }
                 KeyCode::Char('2') if *active_field == 8 => { input_modalities[1] = !input_modalities[1]; keep_modal = true; }
                 KeyCode::Char('3') if *active_field == 8 => { input_modalities[2] = !input_modalities[2]; keep_modal = true; }
@@ -3379,6 +3383,42 @@ fn idx_to_protocol(idx: usize) -> Option<UpstreamProtocol> {
     }
 }
 
+/// Protocol slots the picker actually renders, in display order:
+/// `1:自动/继承`, `2:chat`, `3:resp`, `4:anth`, `5:antigravity`, `6:gemini`.
+///
+/// Slot `5` (Systemone) has no picker entry, so it is deliberately absent
+/// here while keeping its [`protocol_to_idx`]/[`idx_to_protocol`] mapping —
+/// existing configs that set `systemone` still round-trip unchanged.
+const PROTOCOL_PICKER_SLOTS: [usize; 6] = [0, 1, 2, 3, 4, 6];
+
+/// Next visible protocol slot (wraps). A hidden/unknown slot steps forward to
+/// the nearest visible one, so a walk never lands on an unlabeled entry.
+fn next_protocol_idx(cur: usize) -> usize {
+    match PROTOCOL_PICKER_SLOTS.iter().position(|i| *i == cur) {
+        Some(pos) => PROTOCOL_PICKER_SLOTS[(pos + 1) % PROTOCOL_PICKER_SLOTS.len()],
+        None => PROTOCOL_PICKER_SLOTS
+            .iter()
+            .copied()
+            .find(|i| *i > cur)
+            .unwrap_or(PROTOCOL_PICKER_SLOTS[0]),
+    }
+}
+
+/// Previous visible protocol slot. Callers clamp at `0`, so the wrap-around
+/// branch only matters for a hidden slot such as `5:systemone`.
+fn prev_protocol_idx(cur: usize) -> usize {
+    match PROTOCOL_PICKER_SLOTS.iter().position(|i| *i == cur) {
+        Some(pos) => PROTOCOL_PICKER_SLOTS
+            [(pos + PROTOCOL_PICKER_SLOTS.len() - 1) % PROTOCOL_PICKER_SLOTS.len()],
+        None => PROTOCOL_PICKER_SLOTS
+            .iter()
+            .copied()
+            .rev()
+            .find(|i| *i < cur)
+            .unwrap_or(0),
+    }
+}
+
 fn render_billing_mode_selector(mode_idx: usize, is_active: bool, is_model_level: bool) -> Line<'static> {
     let prefix = if is_active { "› 计费: " } else { "  计费: " };
     let prefix_style = if is_active {
@@ -3454,6 +3494,8 @@ fn render_protocol_selector(protocol_idx: usize, is_active: bool, is_model_level
             make_item(3, "4:anth"),
             Span::raw(" "),
             make_item(4, "5:antigravity"),
+            Span::raw(" "),
+            make_item(6, "6:gemini"),
         ])
     } else {
         Line::from(vec![
@@ -3467,6 +3509,8 @@ fn render_protocol_selector(protocol_idx: usize, is_active: bool, is_model_level
             make_item(3, "4:anth"),
             Span::raw(" "),
             make_item(4, "5:antigravity"),
+            Span::raw(" "),
+            make_item(6, "6:gemini"),
         ])
     }
 }
@@ -3769,5 +3813,42 @@ mod tests {
         handle_key_event(&mut app, KeyCode::Char('c'), KeyModifiers::CONTROL);
         assert_eq!(app.chat_messages.len(), 0);
         assert_eq!(app.status_message, "已清空当前会话历史。");
+    }
+
+    #[test]
+    fn test_protocol_picker_reaches_gemini_without_shifting_existing_slots() {
+        // Existing slots keep their indices (0=auto/inherit .. 4=antigravity);
+        // Gemini is appended as slot 6 so configs written before this change
+        // round-trip unchanged.
+        for (idx, proto) in [
+            (1_usize, UpstreamProtocol::Chat),
+            (2, UpstreamProtocol::Responses),
+            (3, UpstreamProtocol::Anthropic),
+            (4, UpstreamProtocol::Antigravity),
+            (5, UpstreamProtocol::Systemone),
+            (6, UpstreamProtocol::Gemini),
+        ] {
+            assert_eq!(idx_to_protocol(idx), Some(proto), "slot {idx}");
+            assert_eq!(protocol_to_idx(Some(proto)), idx, "slot {idx}");
+        }
+        assert_eq!(idx_to_protocol(0), None);
+        assert_eq!(protocol_to_idx(None), 0);
+
+        // Walking right from antigravity skips the unlabeled Systemone slot and
+        // lands on Gemini; wrapping and stepping back return the same path.
+        assert_eq!(next_protocol_idx(4), 6);
+        assert_eq!(next_protocol_idx(6), 0);
+        assert_eq!(next_protocol_idx(5), 6);
+        assert_eq!(prev_protocol_idx(6), 4);
+        assert_eq!(prev_protocol_idx(5), 4);
+        assert_eq!(prev_protocol_idx(1), 0);
+
+        // Both renderers expose the sixth entry.
+        for is_model_level in [false, true] {
+            let line = render_protocol_selector(6, true, is_model_level);
+            let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+            assert!(text.contains("6:gemini"), "picker text: {text}");
+            assert!(text.contains("[•] 6:gemini"), "gemini must render selected: {text}");
+        }
     }
 }

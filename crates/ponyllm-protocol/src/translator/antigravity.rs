@@ -288,7 +288,7 @@ fn clamp_max_output_for_thinking_budget(
         }
     }
 }
-fn push_or_merge_turn(contents: &mut Vec<Value>, role: &str, mut parts: Vec<Value>) {
+pub(crate) fn push_or_merge_turn(contents: &mut Vec<Value>, role: &str, mut parts: Vec<Value>) {
     if parts.is_empty() {
         return;
     }
@@ -452,7 +452,7 @@ pub fn sanitize_gemini_schema(schema: &Value) -> Value {
     Value::Object(out)
 }
 
-fn convert_tools_to_gemini(tools: &[crate::openai::chat::ToolDefinition]) -> Option<Value> {
+pub(crate) fn convert_tools_to_gemini(tools: &[crate::openai::chat::ToolDefinition]) -> Option<Value> {
     let mut decls = Vec::new();
     for t in tools {
         if t.r#type == "function" {

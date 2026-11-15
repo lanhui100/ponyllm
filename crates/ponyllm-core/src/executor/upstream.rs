@@ -826,11 +826,106 @@ pub fn is_zen_free_tier_gate_body(body: &str) -> bool {
     lower.contains("freetiererror") || lower.contains("free tier can only be used")
 }
 
+/// Whether a 429 body is the native Gemini Developer API quota rejection.
+///
+/// Gemini's 429 shape (observed on `generativelanguage.googleapis.com`):
+/// `{"error": {"code": 429, "message": "You exceeded your current quota,
+/// please check your plan and billing details.", "status": "RESOURCE_EXHAUSTED",
+/// "details": [{"@type": "type.googleapis.com/google.rpc.RetryInfo",
+/// "retryDelay": "12s"}]}}`. Without this branch the body fell through to the
+/// transient `RateLimit` path, which cools a closed daily/monthly window for a
+/// few seconds and hammers the upstream — the same anti-hammering argument as
+/// the cloudcode (`QUOTA_EXHAUSTED` + `Resets in ...`) and zen free-window
+/// branches.
+///
+/// Underscore/hyphen separators are normalized so the protobuf enum
+/// (`RESOURCE_EXHAUSTED`) and prose spellings match the same tokens.
+/// Transient rate-limit signals win (per [`body_has_rate_limit_signal`]): an
+/// upstream that mislabels an RPM rejection `quota_exceeded_error` (Sense/商汤)
+/// or a `"TPM quota exceeded"` body must keep the short rate-limit path.
+pub fn is_gemini_quota_body(body: &str) -> bool {
+    if body_has_rate_limit_signal(body) {
+        return false;
+    }
+    let normalized = body
+        .to_ascii_lowercase()
+        .replace(|c: char| c == '_' || c == '-', " ");
+    normalized.contains("resource exhausted")
+        || normalized.contains("resource has been exhausted")
+        || normalized.contains("exceeded your current quota")
+}
+
+/// Parse Gemini's `RetryInfo.retryDelay` hint (`"retryDelay": "12s"`,
+/// protobuf-duration style; also accepts `retry_delay` / `retry-delay` keys,
+/// `=` separators, and fractional seconds such as `"0.5s"`).
+///
+/// Returns `None` when no hint is present or the value is unparseable/zero, so
+/// callers fall back to `Resets in ...` / `Retry-After` / the pool default.
+/// Sub-millisecond precision is truncated; `ms` is accepted because some
+/// gateways re-serialize the duration.
+pub fn parse_gemini_retry_delay(body: &str) -> Option<Duration> {
+    let lower = body.to_ascii_lowercase();
+    let marker = ["retrydelay", "retry_delay", "retry-delay"]
+        .iter()
+        .filter_map(|m| lower.find(m))
+        .min()?;
+    let tail = &lower[marker..];
+    let tail = &tail[tail.find([':', '='])? + 1..];
+    let tail = tail.trim_start_matches(|c: char| c.is_whitespace() || c == '"' || c == '\'');
+
+    let mut chars = tail.chars().peekable();
+    let mut whole = String::new();
+    while matches!(chars.peek(), Some(c) if c.is_ascii_digit()) {
+        whole.push(chars.next().expect("peeked digit"));
+    }
+    let mut frac = String::new();
+    if chars.peek() == Some(&'.') {
+        chars.next();
+        while matches!(chars.peek(), Some(c) if c.is_ascii_digit()) {
+            frac.push(chars.next().expect("peeked fraction digit"));
+        }
+    }
+    if whole.is_empty() {
+        return None;
+    }
+    let whole: u64 = whole.parse().ok()?;
+    let unit: String = chars
+        .by_ref()
+        .take_while(|c| c.is_ascii_alphabetic())
+        .collect();
+    let unit_ms: u64 = match unit.as_str() {
+        "ms" => 1,
+        "s" => 1_000,
+        "m" => 60_000,
+        "h" => 3_600_000,
+        // Bare number without a unit: not a protobuf duration, refuse to guess.
+        _ => return None,
+    };
+    // First three fraction digits = milliseconds of the stated unit.
+    let mut frac_ms_text: String = frac.chars().take(3).collect();
+    while frac_ms_text.len() < 3 {
+        frac_ms_text.push('0');
+    }
+    let frac_ms: u64 = frac_ms_text.parse().unwrap_or(0);
+    let total_ms = whole
+        .checked_mul(unit_ms)?
+        .checked_add(frac_ms.saturating_mul(unit_ms) / 1_000)?;
+    if total_ms == 0 {
+        None
+    } else {
+        Some(Duration::from_millis(total_ms))
+    }
+}
+
 /// Classify a 429 into (gateway kind, pool action).
 ///
 /// - OpenCode zen free usage-limit (`FreeUsageLimitError`) → `QuotaExhausted`
 ///   even though the message says "Rate limit exceeded": the free window is
 ///   closed, and the quota boundary guard must stop cross-provider failover.
+/// - Native Gemini quota (`RESOURCE_EXHAUSTED` / "exceeded your current
+///   quota") → `QuotaExhausted`; the cooling window prefers the body
+///   `Resets in ...` hint, then the `Retry-After` header, then the Gemini
+///   `RetryInfo.retryDelay` value.
 /// - Quota wording → `QuotaExhausted` cooling for the advertised reset (body
 ///   `Resets in ...` first, then the `Retry-After` header, then the pool's
 ///   conservative default). No same-key transient retry: the window is closed.
@@ -844,6 +939,16 @@ fn classify_too_many_requests(
         return (
             GatewayErrorKind::QuotaExhausted,
             PoolErrorType::QuotaExhausted { retry_after },
+        );
+    }
+    if is_gemini_quota_body(err_body) {
+        return (
+            GatewayErrorKind::QuotaExhausted,
+            PoolErrorType::QuotaExhausted {
+                retry_after: parse_reset_duration(err_body)
+                    .or(retry_after)
+                    .or_else(|| parse_gemini_retry_delay(err_body)),
+            },
         );
     }
     let body_reset = parse_reset_duration(err_body);
@@ -4051,6 +4156,147 @@ mod session_header_tests {
             kind
         );
         assert!(matches!(pool_err, PoolErrorType::RateLimit { .. }));
+    }
+
+    #[test]
+    fn gemini_quota_bodies_are_detected() {
+        // Native Gemini Developer API 429 shapes: the protobuf status enum
+        // (underscore form) and the prose message both identify a closed
+        // quota window, not a transient per-second rate limit.
+        for body in [
+            r#"{"error":{"code":429,"message":"You exceeded your current quota, please check your plan and billing details.","status":"RESOURCE_EXHAUSTED"}}"#,
+            r#"{"error":{"code":429,"message":"Resource has been exhausted (e.g. check quota).","status":"RESOURCE_EXHAUSTED"}}"#,
+            r#"{"error":{"code":429,"message":"resource_exhausted: daily limit reached","status":"RESOURCE_EXHAUSTED"}}"#,
+            r#"{"error":{"code":429,"message":"RESOURCE_EXHAUSTED"}}"#,
+        ] {
+            assert!(is_gemini_quota_body(body), "body must be detected: {body}");
+            let (kind, pool_err) = classify_too_many_requests(body, None);
+            assert_eq!(kind, GatewayErrorKind::QuotaExhausted, "body: {body}");
+            assert!(
+                matches!(pool_err, PoolErrorType::QuotaExhausted { .. }),
+                "got {:?} (body: {body})",
+                pool_err
+            );
+        }
+    }
+
+    #[test]
+    fn gemini_quota_does_not_swallow_plain_rate_limits() {
+        // Anti-misclassification: a generic per-minute rate limit (even when it
+        // says "quota exceeded") must keep the short RateLimit path, otherwise
+        // a self-recovering window shuts down failover. Sense/商汤 mislabels an
+        // RPM rejection `quota_exceeded_error`, so the rate-limit signal guard
+        // matters here too.
+        for body in [
+            r#"{"error": {"message": "Rate limit exceeded"}}"#,
+            r#"{"error": {"message": "TPM quota exceeded"}}"#,
+            r#"{"error":{"message":"rpm exhausted","type":"quota_exceeded_error","code":"8"}}"#,
+            r#"{"error":{"message":"requests per minute exceeded","type":"quota_exceeded_error"}}"#,
+            // Gemini's *per-minute* quota 429 is a transient rate limit, not a
+            // closed window: the rate-limit signal guard keeps the short path
+            // so the key recovers on its own instead of cooling for a window.
+            r#"{"error":{"code":429,"message":"Quota exceeded for quota metric 'Generate Content API requests per minute' and limit 'GenerateContent request limit per minute for a region'","status":"RESOURCE_EXHAUSTED"}}"#,
+            // The generic token "quota exceeded" alone (no Gemini-specific
+            // RESOURCE_EXHAUSTED / "exceeded your current quota") must not
+            // enter the new Gemini long-cooldown branch: other upstreams use
+            // that wording for their own legacy quota path.
+            r#"{"error":{"message":"quota exceeded"}}"#,
+        ] {
+            assert!(
+                !is_gemini_quota_body(body),
+                "body must NOT be read as Gemini quota: {body}"
+            );
+            let (kind, pool_err) = classify_too_many_requests(body, None);
+            assert!(
+                matches!(kind, GatewayErrorKind::RateLimitExceeded { .. }),
+                "expected RateLimitExceeded, got {:?} (body: {body})",
+                kind
+            );
+            assert!(
+                matches!(pool_err, PoolErrorType::RateLimit { .. }),
+                "got {:?} (body: {body})",
+                pool_err
+            );
+        }
+    }
+
+    #[test]
+    fn gemini_retry_delay_is_parsed() {
+        // protobuf duration shapes Gemini emits in `RetryInfo.retryDelay`.
+        assert_eq!(
+            parse_gemini_retry_delay(r#"{"details":[{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"12s"}]}"#),
+            Some(Duration::from_secs(12))
+        );
+        assert_eq!(
+            parse_gemini_retry_delay(r#"{"retry_delay": "45s"}"#),
+            Some(Duration::from_secs(45))
+        );
+        assert_eq!(
+            parse_gemini_retry_delay(r#"{"retryDelay": "0.5s"}"#),
+            Some(Duration::from_millis(500))
+        );
+        assert_eq!(
+            parse_gemini_retry_delay(r#"{"retryDelay":"250ms"}"#),
+            Some(Duration::from_millis(250))
+        );
+        // Unparseable / absent / zero hints must not fabricate a cooldown.
+        for body in [
+            r#"{"error":{"message":"resource exhausted"}}"#,
+            r#"{"retryDelay":"abc"}"#,
+            r#"{"retryDelay":"12"}"#,
+            r#"{"retryDelay":"0s"}"#,
+        ] {
+            assert_eq!(
+                parse_gemini_retry_delay(body),
+                None,
+                "body must not yield a delay: {body}"
+            );
+        }
+    }
+
+    #[test]
+    fn gemini_quota_429_cools_for_retry_delay() {
+        // End to end: a native Gemini quota 429 without any `Resets in ...`
+        // hint cools for `RetryInfo.retryDelay` instead of the 3s rate-limit
+        // blip.
+        let body = r#"{"error":{"code":429,"message":"You exceeded your current quota, please check your plan and billing details.","status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"12s"}]}}"#;
+        let (kind, pool_err) = classify_too_many_requests(body, None);
+        assert_eq!(kind, GatewayErrorKind::QuotaExhausted);
+        match pool_err {
+            PoolErrorType::QuotaExhausted { retry_after } => {
+                assert_eq!(retry_after, Some(Duration::from_secs(12)));
+            }
+            other => panic!("expected quota cooldown, got {:?}", other),
+        }
+
+        // The body `Resets in ...` hint and the Retry-After header both keep
+        // precedence over retryDelay.
+        let with_reset = r#"{"error":{"status":"RESOURCE_EXHAUSTED","message":"quota exceeded. Resets in 1h0m0s. retryDelay":"99s"}}"#;
+        match classify_too_many_requests(with_reset, Some(Duration::from_secs(30))).1 {
+            PoolErrorType::QuotaExhausted { retry_after } => {
+                assert_eq!(retry_after, Some(Duration::from_secs(3600)));
+            }
+            other => panic!("expected quota cooldown, got {:?}", other),
+        }
+        let header_body = r#"{"error":{"status":"RESOURCE_EXHAUSTED","message":"quota exhausted","retryDelay":"99s"}}"#;
+        match classify_too_many_requests(header_body, Some(Duration::from_secs(30))).1 {
+            PoolErrorType::QuotaExhausted { retry_after } => {
+                assert_eq!(retry_after, Some(Duration::from_secs(30)));
+            }
+            other => panic!("expected quota cooldown, got {:?}", other),
+        }
+
+        // Pool-level effect: cooling with the Quota reason (feeds the quota
+        // boundary guard), never disabled.
+        let entry = ApiKeyEntry::new("k1", "sk-1", 1, 10);
+        entry.record_failure(PoolErrorType::QuotaExhausted {
+            retry_after: Some(Duration::from_secs(12)),
+        });
+        assert_eq!(entry.current_state(), KeyState::CoolingDown);
+        assert_eq!(
+            entry.cooldown_reason(),
+            Some(crate::pool::entry::CooldownReason::Quota)
+        );
     }
 
     #[test]

@@ -748,7 +748,7 @@
     "/api/admin/providers/{name}/upstream-models": {
       "get": {
         "tags": [],
-        "summary": "List models offered by the provider's upstream (`source: \"quota\"` for\nAntigravity, `\"upstream\"` for OpenAI-style `/models`).\nProviders without a listable interface answer 404 so the console can fall\nback to manual entry with a toast instead of a picker modal.",
+        "summary": "List models offered by the provider's upstream (`source: \"quota\"` for\nAntigravity, `\"upstream\"` for OpenAI-style `/models` and native Gemini\n`{base}/models`).\nProviders without a listable interface answer 404 so the console can fall\nback to manual entry with a toast instead of a picker modal.",
         "operationId": "handle_admin_provider_upstream_models",
         "parameters": [
           {
