@@ -48,7 +48,7 @@ fn is_gemini_25(model: &str) -> bool {
 /// Wire shape by family (both probe-accepted):
 /// - `gemini-2.5*`: `thinkingBudget` (1024 / 4096 / 16384 / 24576 tokens)
 /// - everything newer (`gemini-3.x`, `gemini-4.x`): `thinkingLevel`
-///   (`low` / `medium` / `high`)
+///   (`low` / `medium` / `high`, plus `xhigh` on `gemini-4-hydrogen`)
 ///
 /// `includeThoughts` always accompanies the numeric/level field so thought
 /// parts are actually returned (and land in `reasoning_content`).
@@ -68,13 +68,20 @@ pub fn gemini_thinking_config(model: &str, thinking: Option<ReasoningEffort>) ->
     // Gemini 3+: depth is a named level. `Off` still needs a level because the
     // field is what the 3.x backend understands; `includeThoughts: false` is
     // what actually suppresses thought output.
+    //
+    // Gemini 4 Hydrogen adds a fifth `xhigh` level (probe-verified 200) and
+    // rejects `minimal`; the gateway's `Max` maps to it. Carbon/Argon top out
+    // at `high`, so the promotion is scoped to Hydrogen.
+    let is_hydrogen = model.to_ascii_lowercase().contains("gemini-4-hydrogen");
     let level = match effort {
         ReasoningEffort::Off => {
             return Some(json!({ "includeThoughts": false, "thinkingLevel": "low" }))
         }
         ReasoningEffort::Low => "low",
         ReasoningEffort::Medium => "medium",
-        ReasoningEffort::High | ReasoningEffort::Max => "high",
+        ReasoningEffort::High => "high",
+        ReasoningEffort::Max if is_hydrogen => "xhigh",
+        ReasoningEffort::Max => "high",
     };
     Some(json!({ "includeThoughts": true, "thinkingLevel": level }))
 }

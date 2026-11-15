@@ -54,6 +54,8 @@ OpenAI 两种（Chat Completions、Responses）与 Anthropic 一种（Messages�
 4. **thinking**：只在调用方显式请求时下发（与 Antigravity 的 explicit-only 语义
    一致）。`gemini-2.5*` 用 `thinkingBudget`（1K/4K/16K/24K）+`includeThoughts`；
    3.x/4.x 用 `thinkingLevel`（low/medium/high）+`includeThoughts`；
+   Gemini 4 Hydrogen 额外支持 `xhigh`（代码把网关 `Max` 映射为 `xhigh`，
+   其余 Gemini 4 仍以 `high` 封顶；`minimal` 被上游 400 拒绝）；
    `Off` 用 2.5 的 0 预算或 3.x 的 `low` 并关闭 `includeThoughts`。
 5. **响应翻译**：Gemini → Chat 是唯一规范形。文本 part → `content`，
    `thought: true` → `reasoning_content`，`functionCall` → `tool_calls`
@@ -111,7 +113,9 @@ OpenAI 两种（Chat Completions、Responses）与 Anthropic 一种（Messages�
   19（translator）+ 9（provider）+ 2（admin）+ 10（独立验收）全绿，
   `cargo test --workspace` 全绿。真实 key 经 pproxy 的 E2E 收据见
   `.agents/receipts/2026-11-15-gemini-e2e.md`。
-- **免费层配额语义**：Gemini 免费层按"模型"计日配额（20/日/模型），而网关的
+- **免费层配额语义**：Gemini 免费层按"项目+模型"计日配额（实测
+  `gemini-3.6-flash` 与 `gemini-4-hydrogen` 均为 20/日/模型，quotaId
+  `GenerateRequestsPerDayPerProjectPerModel-FreeTier`），而网关的
   配额冷却按"key"内存态记录；一个模型 429 后同 key 其余模型会被本地跳过，
   直到重启或冷却到期。缓解：多 key、付费层，或显式开启
   `cross_provider_quota_failover` 接受跨 provider 配额 failover。
@@ -128,6 +132,10 @@ OpenAI 两种（Chat Completions、Responses）与 Anthropic 一种（Messages�
   只在 `response.completed.output` 内标 completed，不发
   `response.output_item.done`；该行为与既有 Chat 上游一致，属跨协议既有问题，
   不在本次改动内修复（收据 O1 有最小复现）。
+- **Gemini 4 Hydrogen 参数**：1,048,576 上下文（输入+思考+输出共享）、
+  65,536 同步输出；输入实测 text/image/PDF/audio 200（video 受代理 TLS 抖动未完成，
+  文档标称支持）；`temperature`/`top_p`/`top_k` 被上游忽略，网关仍按通用字段透传
+  （无害）。`minimal` thinking 被拒绝，网关不产生该档位。
 - **部署边界**：代码与配置样例已进仓库；线上 Secret 未修改。新 provider 需要
   新二进制部署后，经 Admin API（或 Secret）写入 `default_protocol="gemini"`
   的 provider、模型与 key；境内 Pod 必须配置可用的 Google 出网代理。

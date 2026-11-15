@@ -291,6 +291,21 @@ fn thinking_config_uses_budget_for_25_and_level_for_newer() {
         Some(json!({ "includeThoughts": false, "thinkingLevel": "low" }))
     );
 
+    // Gemini 4 Hydrogen adds `xhigh` (gateway Max) and keeps `high` as the
+    // top of the 3.x ladder for every other Gemini 4 sibling.
+    assert_eq!(
+        gemini_thinking_config("gemini-4-hydrogen", Some(ReasoningEffort::Max)),
+        Some(json!({ "includeThoughts": true, "thinkingLevel": "xhigh" }))
+    );
+    assert_eq!(
+        gemini_thinking_config("gemini-4-hydrogen", Some(ReasoningEffort::High)),
+        Some(json!({ "includeThoughts": true, "thinkingLevel": "high" }))
+    );
+    assert_eq!(
+        gemini_thinking_config("gemini-4-carbon", Some(ReasoningEffort::Max)),
+        Some(json!({ "includeThoughts": true, "thinkingLevel": "high" }))
+    );
+
     // No explicit effort → upstream default, no thinkingConfig at all.
     assert_eq!(gemini_thinking_config("gemini-3.6-flash", None), None);
 }

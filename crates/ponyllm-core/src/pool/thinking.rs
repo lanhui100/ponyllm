@@ -192,6 +192,16 @@ impl ModelThinkingSpec {
                 max_effort: ReasoningEffort::Max,
                 thinking_efforts: BTreeMap::new(),
             }
+        } else if lower.contains("gemini-4-hydrogen") {
+            // Hydrogen defaults to `high` upstream and adds an `xhigh` tier
+            // (gateway `Max`); the server applies `high` when the request omits
+            // thinkingConfig, so the default is represented as High here to
+            // match the model's documented behavior.
+            Self {
+                default_effort: ReasoningEffort::High,
+                max_effort: ReasoningEffort::Max,
+                thinking_efforts: BTreeMap::new(),
+            }
         } else {
             Self::standard_reasoner()
         }
@@ -257,6 +267,14 @@ mod tests {
         let gpt4o = ModelThinkingSpec::infer_from_model_name("gpt-4o");
         assert_eq!(gpt4o.default_effort, ReasoningEffort::Off);
         assert_eq!(gpt4o.max_effort, ReasoningEffort::Off);
+
+        let hydrogen = ModelThinkingSpec::infer_from_model_name("gemini-4-hydrogen");
+        assert_eq!(hydrogen.default_effort, ReasoningEffort::High);
+        assert_eq!(hydrogen.max_effort, ReasoningEffort::Max);
+        assert_eq!(
+            hydrogen.resolve(Some(ReasoningEffort::Max)),
+            ReasoningEffort::Max
+        );
 
         let embed = ModelThinkingSpec::infer_from_model_name("text-embedding-3-small");
         assert_eq!(embed.default_effort, ReasoningEffort::Off);

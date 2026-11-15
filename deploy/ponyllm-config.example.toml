@@ -180,7 +180,7 @@ thinking_efforts = { off = "", low = "low", high = "high", max = "xhigh" }
 #   （socks5 已被 validate_egress_entry 拒绝，见上文 opencode-zen 段说明）。
 [providers.gemini]
 base_url = "https://generativelanguage.googleapis.com/v1beta"
-default_model = "gemini-3.8-flash"
+default_model = "gemini-4-hydrogen"
 strategy = "priority"
 billing_mode = "metered"
 input_price = 0.0
@@ -188,18 +188,36 @@ cached_price = 0.0
 output_price = 0.0
 default_protocol = "gemini"
 models = [
+    "gemini-4-hydrogen",
     "gemini-3.8-flash",
     "gemini-3.6-flash",
     "gemini-3.1-flash-lite",
 ]
-# 免费层按模型 5 RPM 限流、热门模型（3.8-flash）会返回 503 high demand：
-# 用模型级 fallbacks 在同类模型间自动降级（同 provider，仍走 Gemini 协议）。
+# 免费层额度（实测 2026-11-15）：按项目+模型 20 次/日；RPM/TPM 以 AI Studio
+# 该项目的 rate-limit 页为准。429 body 的 quotaId 为
+# `GenerateRequestsPerDayPerProjectPerModel-FreeTier`（quotaValue=20）。
+# 热门模型（3.8-flash）会返回 503 high demand，因此用模型级 fallbacks 在同
+# provider 内自动降级（仍走 Gemini 协议）。
+[[providers.gemini.model_configs]]
+name = "gemini-4-hydrogen"
+tier = "F"
+context_window = "1M"
+max_output = "64K"
+# Hydrogen 输入：text / image / PDF(文档) / audio / video；同步输出 64K
+# （thinking 与可见输出共享 64K），上下文 1,048,576 由输入+思考+输出共享。
+input_types = ["text", "image", "audio", "video", "file"]
+output_types = ["text"]
+# 四档：low / medium / high(默认) / xhigh（网关 Max→xhigh，minimal 被上游拒绝）。
+thinking_default = "high"
+thinking_max = "max"
+fallbacks = ["gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.1-flash-lite"]
+
 [[providers.gemini.model_configs]]
 name = "gemini-3.8-flash"
 tier = "F"
 context_window = "1M"
 max_output = "64K"
-input_types = ["text", "image", "audio", "video"]
+input_types = ["text", "image", "audio", "video", "file"]
 output_types = ["text"]
 fallbacks = ["gemini-3.6-flash", "gemini-3.1-flash-lite"]
 
@@ -208,7 +226,7 @@ name = "gemini-3.6-flash"
 tier = "S"
 context_window = "1M"
 max_output = "64K"
-input_types = ["text", "image", "audio", "video"]
+input_types = ["text", "image", "audio", "video", "file"]
 output_types = ["text"]
 fallbacks = ["gemini-3.1-flash-lite"]
 
@@ -217,7 +235,7 @@ name = "gemini-3.1-flash-lite"
 tier = "L"
 context_window = "1M"
 max_output = "64K"
-input_types = ["text", "image", "audio", "video"]
+input_types = ["text", "image", "audio", "video", "file"]
 output_types = ["text"]
 
 # 境内出网：把 "direct" 换成真实 CONNECT 代理条目（如 pproxy 的 http 口），
