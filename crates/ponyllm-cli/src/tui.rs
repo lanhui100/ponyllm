@@ -2497,6 +2497,7 @@ fn render_providers_and_models_tab(f: &mut Frame, area: Rect, app: &mut TuiApp) 
                                 UpstreamProtocol::Responses => "responses",
                                 UpstreamProtocol::Anthropic => "messages",
                                 UpstreamProtocol::Antigravity => "antigravity",
+                                UpstreamProtocol::Gemini => "gemini",
                                  UpstreamProtocol::Systemone => "systemone",
                             }, proto),
                             None => format!("{}/v1/chat/completions [auto]", base_url.trim_end_matches('/')),
@@ -3362,6 +3363,7 @@ fn protocol_to_idx(protocol: Option<UpstreamProtocol>) -> usize {
         Some(UpstreamProtocol::Anthropic) => 3,
         Some(UpstreamProtocol::Antigravity) => 4,
         Some(UpstreamProtocol::Systemone) => 5,
+        Some(UpstreamProtocol::Gemini) => 6,
     }
 }
 
@@ -3372,6 +3374,7 @@ fn idx_to_protocol(idx: usize) -> Option<UpstreamProtocol> {
         3 => Some(UpstreamProtocol::Anthropic),
         4 => Some(UpstreamProtocol::Antigravity),
         5 => Some(UpstreamProtocol::Systemone),
+        6 => Some(UpstreamProtocol::Gemini),
         _ => None,
     }
 }

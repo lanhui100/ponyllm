@@ -19,6 +19,26 @@ pub fn normalize_messages_url(base_url: &str) -> String {
     normalize_endpoint_url(base_url, "messages")
 }
 
+/// Normalize a native Gemini API call URL:
+/// `{base}/models/{model}:generateContent` (or `:streamGenerateContent?alt=sse`).
+///
+/// Gemini's version root is `/v1beta` (not the OpenAI `/v1`), so the shared
+/// `normalize_endpoint_url` helper does not apply. A trailing `/models` on the
+/// caller's base is stripped, and a `models/` prefix on the model is accepted
+/// (both are the shapes Gemini listings and operators commonly paste).
+pub fn normalize_gemini_url(base_url: &str, model: &str, stream: bool) -> String {
+    let base = base_url.trim_end_matches('/');
+    let base = base.strip_suffix("/models").unwrap_or(base);
+    let model = model.trim();
+    let model = model.strip_prefix("models/").unwrap_or(model);
+    let verb = if stream {
+        "streamGenerateContent?alt=sse"
+    } else {
+        "generateContent"
+    };
+    format!("{}/models/{}:{}", base, model, verb)
+}
+
 /// Normalize to `<base>/systemone` (zen-jev 透传路由).
 ///
 /// 与其它协议不同:systemone 上游路径不带 `/v1` 前缀,base 去尾 slash 后
@@ -106,6 +126,22 @@ fn normalize_endpoint_url(base_url: &str, leaf: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_normalize_gemini_url_shapes() {
+        assert_eq!(
+            normalize_gemini_url("https://generativelanguage.googleapis.com/v1beta", "gemini-3.8-flash", false),
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent"
+        );
+        assert_eq!(
+            normalize_gemini_url("https://generativelanguage.googleapis.com/v1beta/", "models/gemini-3.8-flash", true),
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:streamGenerateContent?alt=sse"
+        );
+        assert_eq!(
+            normalize_gemini_url("https://generativelanguage.googleapis.com/v1beta/models", "gemini-3.8-flash", false),
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent"
+        );
+    }
 
     #[test]
     fn test_normalize_roots_and_full_paths() {

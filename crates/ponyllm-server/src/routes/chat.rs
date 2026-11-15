@@ -551,6 +551,13 @@ pub async fn handle_chat_completions(
                 };
                 (url, val)
             }
+            ponyllm_core::pool::UpstreamProtocol::Gemini => {
+                last_error = format!(
+                    "Gemini protocol wiring is not implemented yet for provider {}",
+                    target.provider_name
+                );
+                continue;
+            }
             ponyllm_core::pool::UpstreamProtocol::Systemone => {
                 last_error = format!(
                     "Systemone protocol cannot be served by chat endpoint for {}",
@@ -1058,6 +1065,14 @@ pub async fn handle_chat_completions(
                                 );
                                 let monitored = wrap_telemetry_stream(stream, failure_ctx);
                                 axum::body::Body::from_stream(monitored)
+                            }
+                            ponyllm_core::pool::UpstreamProtocol::Gemini => {
+                                return crate::extractors::render_openai_error(
+                                    StatusCode::BAD_REQUEST,
+                                    "invalid_request_error",
+                                    "protocol_mismatch",
+                                    "Gemini protocol wiring is not implemented yet",
+                                );
                             }
                             ponyllm_core::pool::UpstreamProtocol::Systemone => {
                                 return crate::extractors::render_openai_error(

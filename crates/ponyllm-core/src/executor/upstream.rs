@@ -133,6 +133,10 @@ pub struct UpstreamExecutor {
     /// byte-identical wire headers to before.
     opencode_zen: bool,
     systemone: bool,
+    /// Gemini Developer API scope: static key sent as `x-goog-api-key`
+    /// (instead of Bearer + `x-api-key`). Routes set this from the resolved
+    /// `UpstreamProtocol::Gemini`.
+    gemini: bool,
     /// Resolved short-window budget (provider default merged with the model
     /// override) plumbed by the routes. `None` = budget dimension disabled
     /// (legacy unlimited behavior). Feeds both the budget-filtered key
@@ -1376,6 +1380,7 @@ impl UpstreamExecutor {
             client_label: "ponyllm".to_string(),
             opencode_zen: false,
             systemone: false,
+            gemini: false,
             rate_limits: None,
             ttfb_timeout: Some(DEFAULT_UPSTREAM_TTFB_TIMEOUT),
             excluded_keys: Vec::new(),
@@ -1431,6 +1436,14 @@ impl UpstreamExecutor {
 
     pub fn with_systemone(mut self, enabled: bool) -> Self {
         self.systemone = enabled;
+        self
+    }
+
+    /// Use Gemini Developer API authentication (`x-goog-api-key`) instead of
+    /// the legacy Bearer + `x-api-key` pair. Routes set this from the resolved
+    /// `UpstreamProtocol::Gemini`.
+    pub fn with_gemini(mut self, enabled: bool) -> Self {
+        self.gemini = enabled;
         self
     }
 
@@ -1982,6 +1995,26 @@ impl UpstreamExecutor {
                 "API key for '{}' is empty",
                 key.id
             )));
+        }
+
+        // Gemini Developer API: the key travels in `x-goog-api-key`; sending a
+        // Bearer / `x-api-key` / `anthropic-version` trio is at best noise and
+        // at worst a conflicting credential to Google's gateway.
+        if self.gemini {
+            headers.insert(
+                "x-goog-api-key",
+                HeaderValue::from_str(clean_key).map_err(|e| {
+                    CoreError::Internal(format!(
+                        "Invalid characters in API key for '{}': {}",
+                        key.id, e
+                    ))
+                })?,
+            );
+            headers.insert(
+                reqwest::header::ACCEPT,
+                HeaderValue::from_static("text/event-stream, application/json"),
+            );
+            return Ok(headers);
         }
 
         // systemone only needs Bearer + Zen client headers; do not send

@@ -487,6 +487,13 @@ pub async fn handle_responses(
                 };
                 (url, val)
             }
+            ponyllm_core::pool::UpstreamProtocol::Gemini => {
+                last_error = format!(
+                    "Gemini protocol wiring is not implemented yet for provider {}",
+                    provider_name
+                );
+                continue;
+            }
             ponyllm_core::pool::UpstreamProtocol::Systemone => {
                 last_error = format!(
                     "Systemone protocol cannot be served by responses endpoint for {}",
@@ -628,6 +635,14 @@ pub async fn handle_responses(
                                 chat_sse_to_responses_stream(chat_stream, &target.physical_model);
                             let monitored = wrap_telemetry_stream(stream, failure_ctx);
                             axum::body::Body::from_stream(monitored)
+                        }
+                        ponyllm_core::pool::UpstreamProtocol::Gemini => {
+                            return crate::extractors::render_openai_error(
+                                StatusCode::BAD_REQUEST,
+                                "invalid_request_error",
+                                "protocol_mismatch",
+                                "Gemini protocol wiring is not implemented yet",
+                            );
                         }
                         ponyllm_core::pool::UpstreamProtocol::Systemone => {
                             return crate::extractors::render_openai_error(
@@ -1043,6 +1058,10 @@ pub async fn handle_responses(
                                 continue;
                             }
                         }
+                    }
+                    ponyllm_core::pool::UpstreamProtocol::Gemini => {
+                        last_error = "Gemini protocol wiring is not implemented yet".to_string();
+                        continue;
                     }
                     ponyllm_core::pool::UpstreamProtocol::Systemone => resp_val,
                 };

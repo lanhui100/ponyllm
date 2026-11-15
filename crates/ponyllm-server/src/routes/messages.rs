@@ -568,6 +568,13 @@ pub async fn handle_messages(
                 };
                 (url, val)
             }
+            ponyllm_core::pool::UpstreamProtocol::Gemini => {
+                last_error = format!(
+                    "Gemini protocol wiring is not implemented yet for provider {}",
+                    target.provider_name
+                );
+                continue;
+            }
             ponyllm_core::pool::UpstreamProtocol::Systemone => {
                 last_error = format!(
                     "Systemone protocol cannot be served by messages endpoint for {}",
@@ -1051,6 +1058,13 @@ pub async fn handle_messages(
                                 let monitored = wrap_telemetry_stream(stream, failure_ctx);
                                 axum::body::Body::from_stream(monitored)
                             }
+                            ponyllm_core::pool::UpstreamProtocol::Gemini => {
+                                return crate::extractors::render_anthropic_error(
+                                    StatusCode::BAD_REQUEST,
+                                    "invalid_request_error",
+                                    "Gemini protocol wiring is not implemented yet",
+                                );
+                            }
                             ponyllm_core::pool::UpstreamProtocol::Systemone => {
                                 return crate::extractors::render_anthropic_error(
                                     StatusCode::BAD_REQUEST,
@@ -1495,6 +1509,11 @@ pub async fn handle_messages(
                                     continue;
                                 }
                             }
+                        }
+                        ponyllm_core::pool::UpstreamProtocol::Gemini => {
+                            last_error =
+                                "Gemini protocol wiring is not implemented yet".to_string();
+                            continue;
                         }
                         ponyllm_core::pool::UpstreamProtocol::Systemone => {
                             last_error =

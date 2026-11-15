@@ -9,7 +9,8 @@ use ponyllm_core::pool::{
     RefreshPersistHook, SpeedScorer, UpstreamProtocol,
 };
 use ponyllm_core::{
-    canonicalize_model_name, model_aliases, same_model_modulo_free_suffix, strip_free_suffix,
+    canonicalize_model_name, model_aliases, normalize_gemini_url, same_model_modulo_free_suffix,
+    strip_free_suffix,
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -219,6 +220,16 @@ impl RoutedTarget {
 
     pub fn messages_url(&self) -> String {
         normalize_messages_url(self.endpoint_base.as_deref().unwrap_or(&self.base_url))
+    }
+
+    /// Native Gemini API endpoint for this target/model (streaming variant
+    /// selects `:streamGenerateContent?alt=sse`).
+    pub fn gemini_url(&self, stream: bool) -> String {
+        normalize_gemini_url(
+            self.endpoint_base.as_deref().unwrap_or(&self.base_url),
+            &self.physical_model,
+            stream,
+        )
     }
 
     pub fn antigravity_url(&self, _stream: bool) -> String {

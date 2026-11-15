@@ -16,6 +16,8 @@ pub enum UpstreamProtocol {
     Responses,
     /// Anthropic Messages (`/v1/messages`)
     Anthropic,
+    /// Google Gemini API (Generative Language, native `generateContent`)
+    Gemini,
     /// Google Antigravity Internal API
     Antigravity,
     /// Systemone透传 (zen-jev `/systemone` 纯透传,body原样转发)
@@ -28,6 +30,7 @@ impl UpstreamProtocol {
             Self::Chat => "chat",
             Self::Responses => "responses",
             Self::Anthropic => "anthropic",
+            Self::Gemini => "gemini",
             Self::Antigravity => "antigravity",
             Self::Systemone => "systemone",
         }
@@ -44,6 +47,10 @@ impl UpstreamProtocol {
     pub fn is_antigravity(&self) -> bool {
         matches!(self, Self::Antigravity)
     }
+
+    pub fn is_gemini(&self) -> bool {
+        matches!(self, Self::Gemini)
+    }
 }
 
 impl FromStr for UpstreamProtocol {
@@ -58,6 +65,8 @@ impl FromStr for UpstreamProtocol {
                 Ok(Self::Responses)
             }
             "anthropic" | "messages" | "claude" => Ok(Self::Anthropic),
+            "gemini" | "google" | "google-gemini" | "google_gemini" | "generativelanguage"
+            | "aistudio" => Ok(Self::Gemini),
             "antigravity" | "ant" | "gcli" | "cloudcode" => Ok(Self::Antigravity),
             "systemone" | "system_one" | "system-one" => Ok(Self::Systemone),
             _ => Err(format!("Unknown upstream protocol '{}'", s)),

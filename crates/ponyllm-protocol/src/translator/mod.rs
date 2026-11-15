@@ -4,6 +4,7 @@ pub mod responses_anthropic;
 pub mod responses_stream;
 pub mod stream;
 pub mod antigravity;
+pub mod gemini;
 
 pub use chat_anthropic::*;
 pub use chat_responses::*;
@@ -11,4 +12,5 @@ pub use responses_anthropic::*;
 pub use responses_stream::*;
 pub use stream::*;
 pub use antigravity::*;
+pub use gemini::*;
 
