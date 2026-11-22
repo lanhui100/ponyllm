@@ -1,29 +1,40 @@
-# backlog/ —— 本仓待办与执行账本（唯一活账本）
+# backlog/ —— 本仓待办与执行账本（v3 批次日志）
 
-> **判定真源 = `scripts/backlog.mjs`**（`validateRecord` / `lint` / `doctor`）。本文是它的可读契约：
-> 冲突时以代码与命令输出为准，本文只描述模型，不复刻判据细节。
-> 决策理由（为什么从单文件 markdown 换过来）见
-> `.agents/notes/implemented/process/2026-11-12-backlog-v2-jsonl-ledger.md`。
+> **判定真源 = `scripts/backlog.mjs`**（`validateTask` / `lint` / `fold` / `doctor` / `verifyArchive`）。
+> 本文是它的可读契约：冲突时以代码与命令输出为准，本文只描述模型，不复刻判据细节。
+> 模型标记：`backlog/MODEL` = `v3`。
+> 决策理由：v2 → v3 见 `.agents/notes/implemented/process/2026-11-22-backlog-v3-batch-log-ledger.md`；
+> 更早的 markdown → v2 见 `.agents/notes/implemented/process/2026-11-12-backlog-v2-jsonl-ledger.md`。
 
 ## 布局
 
 | 路径 | 角色 | 入仓 |
 |---|---|---|
-| `backlog/tasks.jsonl` | 唯一活账本，一行一任务（`todo` / `in_progress`） | ✅ |
-| `backlog/archive/tasks-<YYYY>.jsonl` | 闭环滚动归档（`resolve` 幂等追加，只存 `done`） | ✅ |
-| `backlog/.next-id` | ID 高水位（下一个候选编号，单调不减） | ✅ |
+| `backlog/MODEL` | 模型标记（`v3`） | ✅ |
+| `backlog/log/<batchId>.jsonl` | 活跃批次日志（只追加；本会话只写自己的批次） | ✅ |
+| `backlog/archive/batches/<year>/<batchId>.jsonl` | 已归档批次（只读、按批封存） | ✅ |
+| `backlog/archive/batches/<year>/manifest.sha256` | 归档清单（只追加，`sha256  <仓库相对路径>`） | ✅ |
+| `backlog/archive/tasks-<YYYY>.jsonl` | v2 遗留归档（只读，fold 并入历史） | ✅ |
 | `backlog/.locks/<ID>.lock` | 任务级租约（含 pid / 会话 / 心跳，**本地运行时**） | ❌ 已 gitignore |
+| `backlog/.state/batch` | 当前工作区活动批次 id（**本地运行时**） | ❌ 已 gitignore |
 | `backlog/legacy/` | 冻结历史（旧看板 / 旧波次账本 / 旧任务卡 + 迁移映射），只读、不参与校验 | ✅ |
 | `backlog/README.md` | 本契约 | ✅ |
 
-`backlog/` 根下**只有账本**（`tasks.jsonl` / `archive/` / `legacy/` / 本契约）：原先散在根下的
-3 份主题文档（两张运维工单 + 一份 JWT 需求稿）已于 2026-11-12 归档进 `backlog/legacy/`——
-它们不是账本载体、不参与 `lint` / `doctor`，也不再留在活跃路径上冒充状态真源。
+**账本根 = 当前 worktree 顶层**（`git rev-parse --show-toplevel`；`PONY_BACKLOG_ROOT` 可覆盖夹具）。
+每个分支/会话写自己的批次并随 PR 提交；不存在跨 worktree 共享的单文件。
 
-`.agents/tasks/` **已整体退役**（2026-11-12）：独立任务卡冻结进 `backlog/legacy/` 并入账（见
-`backlog/legacy/README.md` 表三），空的 `web-console/` 板与其格式门 `check-tasks.*`、配套技能
-`manage-tasks` 一并归档/撤线（残留收据 = `.meta/gates/no-residue.manifest`）。
-**状态真源只有本账本**；`backlog/` 之外不再有任何待办载体。
+`backlog/` 根下**只有账本**：3 份主题文档已于 2026-11-12 归档进 `backlog/legacy/`；它们不是账本载体、
+不参与 `lint` / `doctor`。`.agents/tasks/` 也已整体退役（任务卡冻结进 `legacy/`，格式门与技能撤线，
+残留收据 = `.meta/gates/no-residue.manifest`）。**状态真源只有本账本**。
+
+## 批次与写入纪律
+
+- 一次会话按发布面选一批任务 → 一个批次文件：`backlog/log/<YYYYMMDD>T<HHMMSS>Z-<surface>-<rand4>.jsonl`。
+- 首行必须是 `batch.start`（`model=backlog-v3`、`batch_id` 与文件名一致、`surface`、可选 `release`）。
+- 批内事件：`record` / `dedup` / `start` / `release` / `annotate` / `resolve`；**只追加**，批内 `at` 单调不减。
+- 写命令默认复用 `.state/batch`；`batch new --surface <s> [--release <v>]` 显式开新批次。
+- **只写自己的批次文件**；永不改他人批次与归档。记账即把该批次文件随 PR 提交。
+- 读 = `list` / `fold` 现算，不落盘、不手改；不维护任何 plan 文件。
 
 ## 记录模型
 
@@ -39,70 +50,79 @@
   迁移期历史项例外：`backlog/legacy/` 来的 `done` 记录只剩**指针证据**（指回旧看板原文登记的验收命令，
   迁移会话未复跑），见 `backlog/legacy/README.md` 口径 6——不得据指针证据声称「已复跑通过」。
 
-## 归档只追加（append-only）
-
-- `backlog/archive/tasks-<YYYY>.jsonl` 由 `resolve` **只追加**：既有行一个字节都不改，写入是
-  「整文件原子替换（tmp + rename）」，中断最坏是双份/半旧，由 `doctor` 对账发现。
-- CLI **没有**编辑归档行的路径（`annotate` 只改活跃池），因此归档 `evidence` 的订正只能手改 JSONL，
-  且必须：① 在同一提交里披露「哪个 ID、改了什么、为什么」；② 只改 `evidence` 文字，不动
-  `status` / `closed_at` / `archived_at` 运行记录；③ 改完复跑 `lint` + `doctor`。
-- 迁移批次的例外见 `backlog/legacy/README.md` 口径 6/12（指针证据、删除条件）。
-
 ## 状态机
 
-`todo → in_progress → done`，允许 `in_progress → todo`（`release`）。**`done` 只能由 `resolve` 写入**
-（写入证据、追加归档并释放租约；从 `todo` 直接闭环也合法）。活跃池残留 `done` 由 `lint` 判违规。
-一次性迁移批次是显式豁免（7 条 `done` 由迁移脚本直写归档，`closed_at` 为历史日期），
-见决策记录「诚实边界」第 5 条；接线完成后该豁免不再适用。
+`todo → in_progress → done`，允许 `in_progress → todo`（`release`）。**`done` 是终态**：
+只能由 `resolve` 写入（写入证据并释放租约；从 `todo` 直接闭环也合法）；回归开新任务并引用旧 ID。
+活跃视图残留 `done`、重复 `record` / `resolve`、非法状态字段均由 `lint` 判违规。
 
-手改 JSONL 的状态跳变 CLI 不拦，但「记录非 `in_progress` 却仍持锁」会被 `lint`/`doctor` 判违规。
-会话中断后用 `owner` / `touched_paths` / `description` 与 `git diff --stat` 交叉确认真实进度——
-本仓不维护任何 plan 文件。
+会话中断后用 `owner` / `touched_paths` / `description` 与 `git diff --stat` 交叉确认真实进度。
 
 ## 租约（并发控制）
 
 - `start` 以 `O_EXCL` 原子取 `<ID>.lock`：同一任务同时只允许一个会话；`heartbeat` 刷新，
-  `release` 释放，`resolve` 归档同时清锁。
+  `release` 释放，`resolve` 同时清锁。
 - `reap --id <ID> --minutes N [--dry-run]` 只回收指定任务的超龄租约；参数是白名单，
   `--id=B056` / `-id` / 位置参数一律 exit 2，不会回落为全局清理。
-- `.locks/` 是本地运行时状态，不入仓：干净克隆 / CI 缺锁只出 `NOTE`（不阻断）；
+- `.locks/` 与 `.state/` 是本地运行时状态，不入仓：干净克隆 / CI 缺锁只出 `NOTE`（不阻断）；
   只有本工作区确实存在 `.locks/` 时，「锁在而记录非 `in_progress`」才判违规。
-- 租约只保护「同一任务」，不保护账本追加：并发 `record` 仍可能丢行，靠「record 后立即提交 +
-  冲突人工合并」兜底。
+- 租约只保护「同一任务」，不保护批次追加：批次日志按会话分文件，天然无共享写入点。
 
 ## 编号口径
 
-- 编号永不复用：ID 由 `.next-id` 高水位分配，归档与删除都不回退。
-- 历史遗留编号 `B001`–`B023` 沿用旧看板的事项身份（跨文档既有引用如
-  `docs/release/2026-10-23-security-fix-nfr-report.md` 的「backlog B010–B018」因此继续成立）；
-  旧看板「完成」区唯一无编号的事项在迁移时补为 `B023`。逐条对照见 `backlog/legacy/README.md`。
-- `B004`–`B009` 在旧看板中从未使用；`B024`–`B055` 保留不用（判定真源编号下限是 56，本仓不改判据）；
-  **新任务从 `B056` 起递增**。
-- 第二份波次账本（`legacy/web-user-jwt-progress.md`）的 4 个波次标签 `B001`–`B004` 与主看板同号不同义，
-  已在 2026-11-12 补录为 `B059`–`B062`（`done`）；其 `closed_at` 是补录时刻，历史完成以 `evidence` 里的提交为证。
-- 提交信息与文档引用活跃任务写 `backlog:B056`；裸编号视为历史遗留编号。
+- 新任务：`B` + epoch 毫秒（13 位，仍匹配 `B\d{3,}`）——跨会话按时间取号，天然不撞号。
+- 旧短 ID **原样保留**（`B001`–`B023`、`B056`–`B066` 等），跨文档既有引用继续成立；
+  提交信息与文档引用写 `backlog:B0xx` / `backlog:B<epoch>`。
+- `done` 是终态，ID 永不复用；归档与删除都不回收编号。
+
+## 归档与封存（按批）
+
+- 只归档**批次内引用到的任务全部 `done`** 的批次；未闭环批次不归档。
+- 时机：随版本发布之后（发版 housekeeping）或每周兜底；`release` 元数据用于按版本筛选。
+- 动作：`node scripts/backlog.mjs archive [--release <v>] [--before <ISO>] [--dry-run]` →
+  文件移入 `backlog/archive/batches/<year>/` + 追加 `manifest.sha256` 行 + 删 `log/` 原件
+  （`git add`/`git rm` 由使用者提交）。
+- 归档批次**只读**；`verify-archive` 逐文件校验 sha256，被改动 / 未入清单即红。
+- v2 遗留归档 `archive/tasks-<YYYY>.jsonl` 永久只读，fold 并入历史；归档不丢历史。
 
 ## 命令
 
 ```bash
-node scripts/backlog.mjs list                 # 看板（状态/优先级排序）
-node scripts/backlog.mjs record --category Defect --title "..." --fingerprint "core::x::y" --priority P1
-node scripts/backlog.mjs start B056 --owner lane-1 --paths "crates/x/src/y.rs"
-node scripts/backlog.mjs heartbeat B056 --owner lane-1
-node scripts/backlog.mjs release B056         # 回退 todo 并清锁
-node scripts/backlog.mjs resolve B056 --evidence "cargo test --workspace 全绿；rc=0"
-node scripts/backlog.mjs lint                 # 记录不变量（非零 = 违规）
-node scripts/backlog.mjs doctor               # 跨归档/高水位/孤儿租约对账
-node scripts/backlog.mjs reap --id B056 --minutes 0   # 只清该任务的锁
+node scripts/backlog.mjs list                 # fold 现算视图（状态/优先级排序）
+node scripts/backlog.mjs record --category Defect --title "..." --fingerprint "core::x::y" --priority P1 --surface tui
+node scripts/backlog.mjs start <ID> --owner lane-1 --paths "crates/x/src/y.rs"
+node scripts/backlog.mjs heartbeat <ID> --owner lane-1
+node scripts/backlog.mjs release <ID>          # 回退 todo 并清锁
+node scripts/backlog.mjs resolve <ID> --evidence "cargo test --workspace 全绿；rc=0"
+node scripts/backlog.mjs annotate <ID> --priority P2 --description "..."
+node scripts/backlog.mjs batch new --surface tui --release 0.2.50   # 显式开新批次（可选）
+node scripts/backlog.mjs fold                  # JSON：活跃/批次/问题（排障用）
+node scripts/backlog.mjs lint
+node scripts/backlog.mjs doctor
+node scripts/backlog.mjs verify-archive
+node scripts/backlog.mjs archive [--release <v>] [--before <ISO>] [--dry-run]
+node scripts/backlog.mjs reap --id <ID> --minutes 0   # 只清该任务的锁
 ```
+
+## 迁移与历史（2026-11-22）
+
+- v2 单文件账本（`tasks.jsonl` + `.next-id`）已整库迁移为 v3 基线批次
+  `backlog/log/20261122T120054Z-legacy-migration-c739.jsonl`；旧文件已删，回滚点 =
+  `backup/backlog-v2-20261122-2000`。
+- 迁移对账：迁移前 v2 活跃 11 / 归档 17 → 迁移后 fold 活跃 11 / done 17（`legacyArchived` 17）。
+- 工具链随仓：`scripts/backlog.mjs`、`scripts/backlog-migrate-v2-v3.mjs`（v2→v3 与 `--adopt-v2`
+  在途分支接管）、`.meta/gates/backlog-gate.{sh,spec.sh}`。
+- `backlog/legacy/` 冻结只读；迁移映射与删改条件见 `backlog/legacy/README.md`。
 
 ## 门禁与接线
 
-- 门禁：`bash .meta/gates/backlog-gate.sh`（= `lint` + `doctor`）；负样本自检：
-  `bash .meta/gates/backlog-gate.spec.sh`（P1 + N1–N8 + H）。登记见 `.meta/gates/INSTANCE-GATES.md`。
+- 门禁：`bash .meta/gates/backlog-gate.sh`（v3 = `lint` + `doctor` + `verify-archive`；
+  账本缺失 → 明确跳过；布局不一致 / 无 `node` → fail-closed）；负样本自检：
+  `bash .meta/gates/backlog-gate.spec.sh`（P1–P3 放行 + N1–N9 拒绝 + H）。
+  登记见 `.meta/gates/INSTANCE-GATES.md`。
 - 本地层：`.meta/gates/pre-commit` 的 `# >>> backlog-gate: ledger v1 >>>` 哨兵块调门禁
   （门脚本缺失即 fail-closed；本仓 `core.hooksPath = .meta/gates`，不是 `.githooks`）。
-- 远端层：`.github/workflows/ci.yml` 的 `backlog-ledger` job 跑门 + 自检。
+- 远端层：`.github/workflows/ci.yml` 的 `backlog-ledger` job 跑门 + 自检（独立 step）。
 - 前提：`git config core.hooksPath .meta/gates`——git **不克隆**该配置，新 clone 需自行装配一次；
   未装配时本地门禁静默失效，仅 CI 兜底。
 - 改判据（`scripts/backlog.mjs`）或改本文属非平凡改动：须同步改 CLI + 本文 + spec，并按
