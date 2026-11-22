@@ -23,11 +23,12 @@ jobs:
         shell: bash
         run: bash scripts/check-verify-contract-drift.sh
 
-  # backlog 账本门（pg-backlog v2）：独立 job，不并入服务端测试矩阵——
-  # 判据真源是 scripts/backlog.mjs（lint + doctor 跨归档/租约对账），与 Rust 构建无关，分开跑才不会互相拖累。
-  # 迁移期（backlog/tasks.jsonl 未落盘）门自己打印"跳过"并 exit 0；无 node → fail-closed。
+  # backlog 账本门（pg-backlog v3）：独立 job，不并入服务端测试矩阵——
+  # 判据真源是 scripts/backlog.mjs（v3 = lint 批次/fold 不变量 + doctor 跨归档/租约 + verify-archive 封存），
+  # 与 Rust 构建无关，分开跑才不会互相拖累。
+  # 账本缺失 → 门自己打印"跳过"并 exit 0；布局不一致（有 log/ 缺 MODEL）/ 无 node → fail-closed。
   backlog-ledger:
-    name: Backlog ledger gate (lint + doctor)
+    name: "Backlog ledger gate (v3: lint + doctor + verify-archive)"
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -38,11 +39,11 @@ jobs:
         with:
           node-version: 22
 
-      - name: backlog-gate (lint + doctor 对账)
+      - name: backlog-gate (lint + doctor + verify-archive)
         shell: bash
         run: bash .meta/gates/backlog-gate.sh
 
-      - name: backlog-gate 负样本 spec（门必须会拒绝非法账本）
+      - name: backlog-gate 负样本 spec（P1–P3 放行 + N1–N9 拒绝 + H）
         shell: bash
         run: bash .meta/gates/backlog-gate.spec.sh
 

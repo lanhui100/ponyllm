@@ -2,6 +2,10 @@
 
 Status: implemented
 
+> 部分被取代：账本模型已由 v3 批次日志取代，见
+> `.agents/notes/implemented/process/2026-11-22-backlog-v3-batch-log-ledger.md`；
+> 本文保留 v2 时代的布局/编号/门禁决策原貌，不再作为当前账本契约。
+
 ## Problem
 
 旧 `backlog/backlog.md` 是一份 56 行的单文件看板，17 个事项全靠正文里手写的标记
