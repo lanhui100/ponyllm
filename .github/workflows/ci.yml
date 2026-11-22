@@ -28,7 +28,7 @@ jobs:
   # 与 Rust 构建无关，分开跑才不会互相拖累。
   # 账本缺失 → 门自己打印"跳过"并 exit 0；布局不一致（有 log/ 缺 MODEL）/ 无 node → fail-closed。
   backlog-ledger:
-    name: Backlog ledger gate (v3: lint + doctor + verify-archive)
+    name: "Backlog ledger gate (v3: lint + doctor + verify-archive)"
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
