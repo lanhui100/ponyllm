@@ -102,6 +102,9 @@ PATHS=()
 if [ "$#" -gt 0 ]; then
   # 带参模式：只接受 .agents/notes/ 下的相对路径；其余跳过（避免误伤调用者的宽参）
   for p in "$@"; do
+    case "$p" in
+      -*) die "未知参数：$p（本门只接受 .agents/notes/ 下的相对路径；未知选项一律拒绝）" ;;
+    esac
     p=${p#./}
     case "$p" in
       .agents/notes/*) ;;
