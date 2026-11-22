@@ -24,6 +24,9 @@ test 红则镜像不构建、生产不滚动。
 - 基线到期（2027-02-16）后必须重新生成或把存量修完，否则自动回到 FAIL；
 - 本次只提交 `verify-note.sh` 与基线 JSON，不改 48 份历史 ADR，也不改 CI 的 test 步骤。
 
+- 到期日解析跨平台：GNU `date -d` 与 BSD `date -j -f` 双路径，macOS matrix 不因无 GNU date
+  而把基线误判为损坏；两条路径都不可用时仍 fail-closed。
+
 收据：`bash .agents/skills/write-adr/verify-note.sh` → 0（存量基线豁免 48 条）；
 `bash .agents/skills/write-adr/tests/test-verify-note.sh` → 0；
 `bash .meta/gates/adr-verify.spec.sh` → 0（38 asserts）。
