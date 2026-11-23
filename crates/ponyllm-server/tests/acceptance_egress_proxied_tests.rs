@@ -578,3 +578,58 @@ async fn c10_dns_persistent_timeout_fail_closed() {
         "reason 必须包含 fail-closed 描述"
     );
 }
+
+/// 回归 5：国内与私网上游免疫全局出海代理（防 pproxy idle timeout 断流）
+/// 即使网关全局配置了出海代理，国内域名（如 sensenova.cn）和私网/Tailscale 目标
+/// 也严禁进入代理快路径，effective_proxy_url_for 必须为 None。
+#[tokio::test]
+async fn reg5_domestic_upstream_never_enters_proxied_fast_path() {
+    let mut cfg = GatewayConfig::default();
+    cfg.proxy = Some("http://127.0.0.1:8899".to_string());
+    cfg.providers.insert(
+        "sense".to_string(),
+        ProviderConfig {
+            egress_pool: vec![],
+            egress_strategy: "round_robin".to_string(),
+            base_url: "https://token.sensenova.cn/v1".to_string(),
+            default_model: "deepseek-flash".to_string(),
+            proxy: None, // 未配代理
+            ..Default::default()
+        },
+    );
+    cfg.providers.insert(
+        "magpie".to_string(),
+        ProviderConfig {
+            egress_pool: vec![],
+            egress_strategy: "round_robin".to_string(),
+            base_url: "http://100.95.193.103:3425/v1".to_string(),
+            default_model: "trae-cn/deepseek-v4.1-flash-max".to_string(),
+            proxy: None, // 未配代理
+            ..Default::default()
+        },
+    );
+
+    // 1. effective_proxy_url_for 必须解析为 None（Direct）
+    assert_eq!(
+        cfg.effective_proxy_url_for("sense", "deepseek-flash"),
+        None,
+        "sense 国内上游严禁继承网关代理"
+    );
+    assert_eq!(
+        cfg.effective_proxy_url_for("magpie", "trae-cn/deepseek-v4.1-flash-max"),
+        None,
+        "magpie 内网上游严禁继承网关代理"
+    );
+
+    // 2. data_plane_egress_guard 绝不能往 (true, host) 代理缓存写 ok
+    let state = Arc::new(AppState::new(cfg));
+    let _ = state
+        .data_plane_egress_guard_for_target("sense", "deepseek-flash", "https://token.sensenova.cn/v1")
+        .await;
+
+    // 代理快路径缓存 key 是 (true, host)；国内直连不走代理，因此 (true, "token.sensenova.cn") 绝不能存在
+    assert!(
+        cache_lookup(&state, (true, "token.sensenova.cn")).is_none(),
+        "国内直连目标绝不能在代理快路径缓存中留下条目"
+    );
+}
