@@ -228,7 +228,8 @@ cross_provider_quota_failover = false   # 默认：某 provider 额度耗尽即�
 
 > 同名模型与多提供商提示：`/v1/models` 中全部物理模型与合法别名均以 `provider/model` 格式提供，不再暴露裸物理模型名称，亦不再提供任何 `[1m]` / `[1024k]` 别名（纯 `auto` 虚拟模型保留）。<br>
 > 下游调用支持显式 pin（如 `sense/deepseek-v4-flash`）或直接使用裸模型名（如 `deepseek-v4-flash`）：使用裸模型名时，网关将根据各 provider 下该模型的权重（`priority` 优先级降序）依次尝试调用并在健康节点间透明倒换（某 provider 不可用时自动使用另一 provider 的同名模型）。裸模型名还会把免费档后缀视为透明：请求 `glm-5.3-flash` 可命中配置的 `glm-5.3-flash-free` / `glm-5.3-flash:free`（作为精确同名之后的兜底候选），请求 `glm-5.3-flash-free` 在无精确匹配时也可落到配置的 `glm-5.3-flash`。<br>
-> GET 查询支持多段路由，如 `GET /v1/models/{provider}/{model}` 或 `GET /v1/models/{bare_model}`；嵌入式 SDK `list_models` 保持裸名去重。
+> GET 查询支持多段路由，如 `GET /v1/models/{provider}/{model}` 或 `GET /v1/models/{bare_model}`；嵌入式 SDK `list_models` 保持裸名去重。<br>
+> **聚合模型（优先级链）**：可在 `[gateway]` 下声明 `[[gateway.aggregate_models]]`（`name` / `chain` / `cooldown_secs`），或在 Web 控制台「聚合模型」卡片里编辑。`chain` 条目必须写成 `provider/model`，声明顺序即执行顺序（不按价格/延迟重排）；链项失败后进入 `cooldown_secs`（默认 90s）冷却，冷却期内被跳过、到期自动回到链首位置——即「免费通道为主、备用顶替、到期回主」。链即授权：链里写了谁就按顺序用谁（含付费项），不设单独的付费开关，成本可见性由链项 `billing_mode` 与 `aggregate_fallback` 事件承担。客户端直接请求该聚合名即可，`/v1/models` 会列出它。
 
 > **对外服务安全环境变量**（部署注记）：
 >

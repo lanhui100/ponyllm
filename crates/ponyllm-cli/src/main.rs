@@ -81,6 +81,9 @@ fn build_gateway_config_and_pools(
     gw_config.antigravity_refresh_interval_secs =
         config_file.gateway.antigravity_refresh_interval_secs;
     gw_config.cross_provider_quota_failover = config_file.gateway.cross_provider_quota_failover;
+    // Aggregate models (virtual name + ordered `provider/model` chain): disk
+    // format -> runtime config. Empty stays empty (feature dormant).
+    gw_config.aggregate_models = config_file.gateway.aggregate_models.clone();
     // Phase-2 auth hardening passthrough (F1/F2/F4/F3): auth mode, failure
     // budget, admin IP fence and trusted proxies (disk format -> runtime).
     gw_config.auth_mode = config_file.gateway.auth_mode;

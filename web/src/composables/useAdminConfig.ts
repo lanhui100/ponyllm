@@ -22,6 +22,8 @@ import type {
   ProxyStatusView,
   QuotaCycleBenchmarkView,
   AutoModelsView,
+  AggregateModelView,
+  AggregateModelsView,
 } from '../types/admin';
 
 export interface UseAdminConfigOptions {
@@ -143,6 +145,7 @@ export function useAdminConfig(options: UseAdminConfigOptions = {}) {
   const keys = ref<KeyView[]>([]);
   const autoModels = ref<string[]>([]);
   const activeModelsOrder = ref<string[]>([]);
+  const aggregateModels = ref<AggregateModelView[]>([]);
   const configVersion = ref<number>(0);
   const loading = ref<boolean>(false);
   const error = ref<string | null>(null);
@@ -196,6 +199,10 @@ export function useAdminConfig(options: UseAdminConfigOptions = {}) {
           autoModels.value = am.auto_models || [];
           activeModelsOrder.value = am.active_models_order || [];
         }
+      }).catch(() => {});
+
+      void adminApi.getAggregateModels().send().then((ags) => {
+        if (ags) aggregateModels.value = ags.aggregate_models || [];
       }).catch(() => {});
 
       overview.value = ov;
@@ -252,6 +259,10 @@ export function useAdminConfig(options: UseAdminConfigOptions = {}) {
           autoModels.value = am.auto_models || [];
           activeModelsOrder.value = am.active_models_order || [];
         }
+      }).catch(() => {});
+
+      void adminApi.getAggregateModels().send().then((ags) => {
+        if (ags) aggregateModels.value = ags.aggregate_models || [];
       }).catch(() => {});
 
       overview.value = ov;
@@ -458,6 +469,19 @@ export function useAdminConfig(options: UseAdminConfigOptions = {}) {
     });
   }
 
+  async function saveAggregateModels(
+    list: AggregateModelView[],
+  ): Promise<AggregateModelsView> {
+    return runWithConflictCheck(async () => {
+      const res = await adminApi
+        .updateAggregateModels({ aggregate_models: list }, configVersion.value)
+        .send();
+      aggregateModels.value = res.aggregate_models;
+      configVersion.value = res.config_version;
+      return res;
+    });
+  }
+
   if (autoFetch && getCurrentInstance()) {
     onMounted(() => {
       void fetchAll().catch(() => {});
@@ -498,6 +522,8 @@ export function useAdminConfig(options: UseAdminConfigOptions = {}) {
     autoModels,
     activeModelsOrder,
     saveAutoModels,
+    aggregateModels,
+    saveAggregateModels,
     clearConflict,
     clearCreatedKeyResult,
     getAntigravityAuthUrl,

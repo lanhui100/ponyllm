@@ -13,6 +13,50 @@
     "version": "0.2.50"
   },
   "paths": {
+    "/api/admin/aggregate-models": {
+      "get": {
+        "tags": [],
+        "operationId": "handle_admin_get_aggregate_models",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AggregateModelsView"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [],
+        "operationId": "handle_admin_put_aggregate_models",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PutAggregateModelsPayload"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AggregateModelsView"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/admin/auth/rotate": {
       "post": {
         "tags": [],
@@ -1139,6 +1183,53 @@
             ],
             "format": "int64",
             "description": "Sliding window size in seconds (`None` = 60).",
+            "minimum": 0
+          }
+        }
+      },
+      "AggregateModelView": {
+        "type": "object",
+        "required": [
+          "name",
+          "chain",
+          "cooldown_secs"
+        ],
+        "properties": {
+          "chain": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Ordered `provider/model` priority chain. Declared order IS execution\norder; a failed entry cools down for `cooldown_secs` and then re-enters\nat the same position (automatic return to the primary)."
+          },
+          "cooldown_secs": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Chain-entry cooldown seconds after a retryable failure (default 90).",
+            "minimum": 0
+          },
+          "name": {
+            "type": "string",
+            "description": "Client-visible virtual model name (e.g. `deepseek-free`)."
+          }
+        }
+      },
+      "AggregateModelsView": {
+        "type": "object",
+        "required": [
+          "aggregate_models",
+          "config_version"
+        ],
+        "properties": {
+          "aggregate_models": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AggregateModelView"
+            }
+          },
+          "config_version": {
+            "type": "integer",
+            "format": "int64",
             "minimum": 0
           }
         }
@@ -2287,6 +2378,13 @@
               "null"
             ]
           },
+          "fallbacks": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Ordered model-level fallbacks (resolved by exact model name across\nproviders). Echoed back so the console can show what was written — the\nwrite path accepted this field long before the read path exposed it."
+          },
           "input_price": {
             "type": [
               "number",
@@ -2599,6 +2697,20 @@
               "string",
               "null"
             ]
+          }
+        }
+      },
+      "PutAggregateModelsPayload": {
+        "type": "object",
+        "required": [
+          "aggregate_models"
+        ],
+        "properties": {
+          "aggregate_models": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AggregateModelView"
+            }
           }
         }
       },

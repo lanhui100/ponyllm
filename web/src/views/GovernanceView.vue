@@ -4,6 +4,7 @@ import { useAdminConfig } from '../composables/useAdminConfig';
 import NavBar from '../components/NavBar.vue';
 import ProviderCard from '../components/governance/ProviderCard.vue';
 import StrategySection from '../components/governance/StrategySection.vue';
+import AggregateModelSection from '../components/governance/AggregateModelSection.vue';
 import CredentialsSection from '../components/governance/CredentialsSection.vue';
 import GovernanceSkeleton from '../components/GovernanceSkeleton.vue';
 import KeySecretModal from '../components/governance/KeySecretModal.vue';
@@ -47,6 +48,8 @@ const {
   batchTestAllKeys,
   autoModels,
   saveAutoModels,
+  aggregateModels,
+  saveAggregateModels,
   clearConflict,
   clearCreatedKeyResult,
   getAntigravityAuthUrl,
@@ -1022,12 +1025,18 @@ onUnmounted(() => {
 
 
       <!-- Strategy Tab：Auto 智能路由候选模型优先级 -->
-      <div v-else-if="currentTab === 'strategy'">
+      <div v-else-if="currentTab === 'strategy'" class="space-y-6">
         <StrategySection
           :admin-write-enabled="adminWriteEnabled"
           :auto-models="autoModels"
           :all-models="models"
           @update-auto-models="saveAutoModels"
+        />
+        <AggregateModelSection
+          :admin-write-enabled="adminWriteEnabled"
+          :aggregate-models="aggregateModels"
+          :all-models="models"
+          @update-aggregate-models="saveAggregateModels"
         />
       </div>
 
