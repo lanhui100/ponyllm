@@ -5,7 +5,8 @@
 # 契约（.meta/gates/README.md「负样本 spec 的两种形态」）：
 #   - 自包含：从自身路径解析仓库根，不依赖调用者 cwd；
 #   - 只读仓库：样本一律建在 `mktemp -d` 临时目录，退出时清理；不改仓库任何文件；
-#   - 秒级：自包裹 `timeout 30`（有 timeout 时）；
+#   - 秒级：自包裹上限 = `PONYGO_GATE_SPEC_TIMEOUT`（由 ponygo 派生下传，未设默认 30s），
+#     KILL 兜底 `-k 5`；无 timeout 或 ponygo 报告守卫不可用（`PONYGO_SPEC_NO_GUARD=1`）时不加包裹；
 #   - `PONYGO_IN_SPEC` 仅为旧环境信息，不作为本 spec 的跳过开关；
 #   - exit 0 = 自检通过（"门确实会拒绝非法样本，且会放行合法样本"）。
 #
@@ -17,10 +18,22 @@ set -u
 
 SPEC=adr-verify.spec
 
-# --- 秒级上限：自包裹 timeout 30，避免挂死拖死体检 ---
-if [ "${PONYGO_SPEC_SELFRUN:-0}" != "1" ] && command -v timeout >/dev/null 2>&1; then
+# 自包裹上限：PONYGO_GATE_SPEC_TIMEOUT（由 ponygo 派生下传，未设默认 30s）；KILL 兜底恒 5s。
+# spec 内**不做平台判定**（平台真值只留在 ponygo 一处），只读 env + 校验格式。
+GT=${PONYGO_GATE_SPEC_TIMEOUT:-30}
+case "$GT" in
+  *[!0-9]*|0*)
+    printf '[%s] FAIL 非法 PONYGO_GATE_SPEC_TIMEOUT=%s（须为 1..86400 的正整数秒）\n' "$SPEC" "$GT" >&2
+    exit 2 ;;
+esac
+# 值域上界（1..86400）：超长整数会让 GNU timeout 接受并视为「不设上限」，而预算行照打 = 假护栏。
+if [ "${#GT}" -gt 5 ] || { [ "${#GT}" -eq 5 ] && [ "$GT" -gt 86400 ]; }; then
+  printf '[%s] FAIL 非法 PONYGO_GATE_SPEC_TIMEOUT=%s（须为 1..86400 的正整数秒）\n' "$SPEC" "$GT" >&2
+  exit 2
+fi
+if [ "${PONYGO_SPEC_SELFRUN:-0}" != "1" ] && [ "${PONYGO_SPEC_NO_GUARD:-0}" != "1" ] && command -v timeout >/dev/null 2>&1; then
   export PONYGO_SPEC_SELFRUN=1
-  exec timeout 30 bash "$0" "$@"
+  exec timeout -k 5 "$GT" bash "$0" "$@"
 fi
 
 ROOT=$(cd "$(dirname "$0")/../.." && pwd) || {
@@ -29,7 +42,10 @@ ROOT=$(cd "$(dirname "$0")/../.." && pwd) || {
 }
 GATE="$ROOT/.meta/gates/adr-verify.sh"
 VERIFY="$ROOT/.agents/skills/write-adr/verify-note.sh"
-for f in "$GATE" "$VERIFY"; do
+# A6（归档封印门）：A1 在它缺失时 fail-closed（W1/U2）。夹具默认**在场**，否则"放行"类用例
+# 会一律被拒；「A6 缺失」专项用例自己删掉它再验拒绝语义。
+A6="$ROOT/.meta/gates/archive-verify.sh"
+for f in "$GATE" "$VERIFY" "$A6"; do
   [ -f "$f" ] || {
     printf '[%s] FAIL：缺被测资产 %s\n' "$SPEC" "$f" >&2
     exit 1
@@ -43,9 +59,15 @@ TMP=$(mktemp -d) || {
 trap 'rm -rf "$TMP"' EXIT
 
 FAIL=0
+# U4（W3b）运行时计数：asserts = PASS_N + FAIL_N；REJECTS = **期望被拒/期望非零退出**的断言条数，
+# 逐条在断言点累加（禁止手写常数——常数与真实断言数脱钩时，运行时契约就退化成又一个静态扫描）。
+PASS_N=0
+FAIL_N=0
+REJECTS=0
 fail() {
   printf 'FAIL  %s\n' "$*" >&2
   FAIL=1
+  FAIL_N=$((FAIL_N+1))
 }
 
 # 造一个"已安装接线"的最小 git 仓：A1 + 判定真源 + 四态 notes 目录
@@ -55,6 +77,7 @@ new_repo() { # $1 = 目录名（在 $TMP 下）
     "$d/.agents/notes/proposed/process" "$d/.agents/notes/implemented/process" \
     "$d/.agents/notes/rejected" "$d/.agents/notes/archived"
   cp "$GATE" "$d/.meta/gates/adr-verify.sh"
+  cp "$A6" "$d/.meta/gates/archive-verify.sh"
   cp "$VERIFY" "$d/.agents/skills/write-adr/verify-note.sh"
   git -C "$d" -c init.defaultBranch=main init -q
   git -C "$d" config user.email spec@example.invalid
@@ -84,23 +107,27 @@ expect_accept() { # $1=用例名 $2=仓 [extra args]
     printf '%s\n' "$out" | tail -n 3 | sed 's/^/      /' >&2
     return
   fi
+  PASS_N=$((PASS_N+1))
   printf 'PASS  %s（exit 0）\n' "$name"
 }
 
 expect_reject() { # $1=用例名 $2=仓 [extra args]
   local name="$1" d="$2" out rc
   shift 2
+  REJECTS=$((REJECTS+1))
   out=$(run_gate "$d" "$@") && rc=0 || rc=$?
   if [ "$rc" -eq 0 ]; then
     fail "$name：门应拒绝，实得 exit 0"
     printf '%s\n' "$out" | tail -n 3 | sed 's/^/      /' >&2
     return
   fi
+  PASS_N=$((PASS_N+1))
   printf 'PASS  %s（exit %d）\n' "$name" "$rc"
 }
 
 expect_reject_with() { # $1=用例名 $2=仓 $3=拒绝文案正则（补救必须可执行）
   local name="$1" d="$2" pat="$3" out rc
+  REJECTS=$((REJECTS+1))
   out=$(run_gate "$d") && rc=0 || rc=$?
   if [ "$rc" -eq 0 ]; then
     fail "$name：门应拒绝，实得 exit 0"
@@ -112,6 +139,7 @@ expect_reject_with() { # $1=用例名 $2=仓 $3=拒绝文案正则（补救必�
     printf '%s\n' "$out" | tail -n 3 | sed 's/^/      /' >&2
     return
   fi
+  PASS_N=$((PASS_N+1))
   printf 'PASS  %s（exit %d）\n' "$name" "$rc"
 }
 
@@ -214,6 +242,8 @@ elif ! printf '%s' "$OUT" | grep -q 'ADR 有未暂存改动，请先 git add'; t
   fail "TOCTOU 拒绝文案缺「ADR 有未暂存改动，请先 git add」→ 补救不可执行"
   printf '%s\n' "$OUT" | tail -n 3 | sed 's/^/      /' >&2
 else
+  REJECTS=$((REJECTS+1))
+  PASS_N=$((PASS_N+1))
   printf 'PASS  TOCTOU 拒绝且文案可执行（exit %d）\n' "$RC"
 fi
 
@@ -259,16 +289,21 @@ expect_reject_with "TOCTOU 反向（暂存非法/工作区合法）拒绝且文�
 # F9（A1 先查 `git ls-files -s` 模式 120000/160000）由 Executor 落地，落地前本 case 必然 FAIL。
 R=$(new_repo symlink-adr)
 write_adr "$R" legal-target.md "$LEGAL_BODY"
-ln -s ../../../../legal-target.md \
-  "$R/.agents/notes/implemented/process/2026-10-29-link.md"
-git -C "$R" add -A >/dev/null 2>&1
+# 用 git 索引的 120000 模式构造 symlink 样本，不依赖 OS 的 ln -s 权限（Windows runner 默认
+# 无 symlink 权限；A1 的 F9 判据只看 index 模式，故可跨平台证明同一拒绝语义）。
+link_blob=$(printf '%s' '../../../../legal-target.md' | git -C "$R" hash-object -w --stdin)
+git -C "$R" update-index --add --cacheinfo 120000,"$link_blob",.agents/notes/implemented/process/2026-10-29-link.md
 OUT=$(run_gate "$R") && RC=0 || RC=$?
 if [ "$RC" -eq 0 ]; then
   fail "符号链接 ADR 应拒绝，实得 exit 0（F9 未落地：ADR 必须是普通文件）"
   printf '%s\n' "$OUT" | tail -n 3 | sed 's/^/      /' >&2
 elif printf '%s' "$OUT" | grep -qE '普通文件|符号链接|120000'; then
+  REJECTS=$((REJECTS+1))
+  PASS_N=$((PASS_N+1))
   printf 'PASS  符号链接 ADR 拒绝且文案指向"必须是普通文件"（exit %d）\n' "$RC"
 else
+  REJECTS=$((REJECTS+1))
+  PASS_N=$((PASS_N+1))
   printf 'PASS  符号链接 ADR 已拒绝（exit %d）；WARN: 文案未指向"必须是普通文件"（F9 文案待补）\n' "$RC"
 fi
 
@@ -302,9 +337,12 @@ git -C "$R" commit -q -m init >/dev/null 2>&1
 expect_accept "无暂存 ADR 变更放行" "$R"
 
 # ---------- 10. 空场景一律放行：无 .agents/notes ----------
+# 夹具同样带 A6：真实实例的 gates 是框架资产（A6 与 notes 无关），本 case 要证明的是
+# 「没有决策记录制度时不越权」，不是「A6 缺失时也放行」——后者是 W1/U2 明确要堵的洞（见用例 17）。
 R="$TMP/no-notes"
 mkdir -p "$R/.meta/gates"
 cp "$GATE" "$R/.meta/gates/adr-verify.sh"
+cp "$A6" "$R/.meta/gates/archive-verify.sh"
 git -C "$R" -c init.defaultBranch=main init -q
 expect_accept "无 .agents/notes 放行" "$R"
 
@@ -573,9 +611,145 @@ other
 git -C "$R" add -A >/dev/null 2>&1
 expect_reject_with "围栏内的 ## Alternatives considered 不算在场（文案带「缺 ## Alternatives considered」）" "$R" '缺 ## Alternatives considered'
 
+# ---------- 17. W1/U2：A6 缺失 → A1 fail-closed（删掉门不能把封印从提交窗口里摘掉）----------
+# 正控制先立：A6 在场 + 无暂存 ADR → 仍放行（证明下面的拒绝来自 A6 缺失，不是门变严格了）
+R=$(new_repo a6-present-control)
+expect_accept "A6 在场 + 无暂存 ADR 放行（正控制，不得回退）" "$R"
+# 拒绝语义：删掉 A6 → 即便本次没有暂存 ADR 变更也必须非零（旧实现"缺失则优雅回退"正是被删的洞）
+R=$(new_repo a6-missing)
+rm -f "$R/.meta/gates/archive-verify.sh"
+expect_reject_with "A6 缺失 → fail-closed 拒绝（文案点名 A6 + fail-closed）" "$R" 'A6 缺失.*fail-closed|fail-closed.*A6'
+# 同样场景再点一次 A6 字样与补救可执行性（分两条断言，便于定位是"没拒"还是"没点名"）
+if printf '%s' "$(run_gate "$R")" | grep -q 'A6'; then
+  REJECTS=$((REJECTS+1))
+  PASS_N=$((PASS_N+1))
+  printf 'PASS  A6 缺失拒绝文案点名 A6\n'
+else
+  fail "A6 缺失拒绝文案未点名 A6（补救不可执行）"
+fi
+# 反向对照：A6 补回后同一棵树恢复放行（证明拒绝确由 A6 缺失造成）
+cp "$A6" "$R/.meta/gates/archive-verify.sh"
+expect_accept "A6 缺失用例：A6 补回后恢复放行（拒绝确由 A6 缺失造成）" "$R"
+
+# 同族第二形态：A6 不是被删除，而是被**清空/换成不判封印的空壳**（`> A6` 一行即可）。
+# 判据 = A6 的 check 输出必须带「归档封印」判定标记；缺标记的 rc=0 不算"通过"，算"没判过"。
+R=$(new_repo a6-emptied)
+: > "$R/.meta/gates/archive-verify.sh"
+expect_reject_with "A6 清空（0 字节）→ fail-closed 拒绝（文案点名 A6 不可判定）" "$R" 'A6.*不可判定|不可判定.*fail-closed'
+printf '#!/usr/bin/env bash\nexit 0\n' > "$R/.meta/gates/archive-verify.sh"
+expect_reject_with "A6 换成只 exit 0 的假门（无判定标记）→ 同样拒绝" "$R" 'A6.*fail-closed|fail-closed.*A6'
+cp "$A6" "$R/.meta/gates/archive-verify.sh"
+expect_accept "A6 清空用例：A6 补回后恢复放行" "$R"
+
+# ---------- 18. W2a/U3：删除决策记录必须同提交入册简化记录 ----------
+# A1 只判「入册事实」（有无同提交的 simplification 记录）；1.11 的形状（复活条件 + 检索收据）
+# 仍由真源 verify-note.sh 判——本 spec 同时证明这两层各自会响、且合法组合会放行。
+COMMIT_AS=(git -c user.name=spec -c user.email=spec@example.invalid)
+spec_commit() { # $1=仓 $2=说明
+  ( cd "$1" && "${COMMIT_AS[@]}" add -A >/dev/null 2>&1 && "${COMMIT_AS[@]}" commit -q -m "$2" >/dev/null 2>&1 )
+}
+write_simpl_note() { # $1=仓 [$2=--no-reintroduce]
+  local d="$1" mode="${2:-}"
+  mkdir -p "$d/.agents/notes/implemented/simplification"
+  {
+    printf '# Agent Note: 移除夹具决策（简化）\n\nStatus: implemented\n\n## Decision\n\n删掉夹具决策，能力由简化 note 接管。\n\n## Alternatives considered\n\n- 保留并标注过时：否决，过时决策会挤掉当前事实。\n\n## Removed surface\n\n- `.agents/notes/implemented/process/2026-10-29-to-remove.md`\n\n- 检索收据：rg --fixed-strings 2026-10-29-to-remove .agents/notes\n'
+    if [ "$mode" != "--no-reintroduce" ]; then
+      printf '\n## Reintroduction conditions\n\n若该决策重新成为当前事实，把它按 implemented 重新入册。\n'
+    fi
+  } > "$d/.agents/notes/implemented/simplification/2026-10-30-remove-sample.md"
+}
+
+# ① 删 ADR 且无同提交简化 note → 拒绝（A1 自己的入册判据）
+R=$(new_repo rm-adr-no-note)
+write_adr "$R" .agents/notes/implemented/process/2026-10-29-to-remove.md "$LEGAL_BODY"
+spec_commit "$R" base
+git -C "$R" rm -q .agents/notes/implemented/process/2026-10-29-to-remove.md >/dev/null 2>&1
+expect_reject_with "删除 ADR 而无简化 note → 拒绝（文案点名 simplification）" "$R" 'simplification'
+if printf '%s' "$(run_gate "$R")" | grep -q '移除本身是一次决策'; then
+  REJECTS=$((REJECTS+1))
+  PASS_N=$((PASS_N+1))
+  printf 'PASS  删除 ADR 拒绝文案声明「移除本身是一次决策」\n'
+else
+  fail "删除 ADR 拒绝文案缺「移除本身是一次决策」（理由不可见）"
+fi
+
+# ② 删 ADR + 同提交合法简化 note（含复活条件 + 检索收据）→ 放行
+R=$(new_repo rm-adr-with-note)
+write_adr "$R" .agents/notes/implemented/process/2026-10-29-to-remove.md "$LEGAL_BODY"
+spec_commit "$R" base
+git -C "$R" rm -q .agents/notes/implemented/process/2026-10-29-to-remove.md >/dev/null 2>&1
+write_simpl_note "$R"
+git -C "$R" add -A >/dev/null 2>&1
+expect_accept "删除 ADR + 同提交简化 note（含复活条件/检索收据）放行" "$R"
+
+# ③ 删 ADR + 简化 note 缺 ## Reintroduction conditions → 拒绝（由真源 1.11 判，A1 不复刻）
+R=$(new_repo rm-adr-note-no-reintro)
+write_adr "$R" .agents/notes/implemented/process/2026-10-29-to-remove.md "$LEGAL_BODY"
+spec_commit "$R" base
+git -C "$R" rm -q .agents/notes/implemented/process/2026-10-29-to-remove.md >/dev/null 2>&1
+write_simpl_note "$R" --no-reintroduce
+git -C "$R" add -A >/dev/null 2>&1
+expect_reject_with "删除 ADR + 简化 note 缺 ## Reintroduction conditions → 拒绝（1.11）" "$R" '缺 ## Reintroduction conditions'
+
+# ⑤ 生命周期迁移（同 basename 的 D+A）**不是删除**：新文件已进 PATHS 由真源校验 → 放行
+R=$(new_repo rm-adr-migration)
+write_adr "$R" .agents/notes/proposed/architecture/2026-10-29-migrate.md '# Agent Note: 待迁移提案
+
+Status: proposed
+
+## Problem
+
+样本。
+
+## Proposal
+
+样本提案。
+
+## Alternatives considered
+
+- 样本。'
+spec_commit "$R" base
+git -C "$R" rm -q .agents/notes/proposed/architecture/2026-10-29-migrate.md >/dev/null 2>&1
+write_adr "$R" .agents/notes/implemented/architecture/2026-10-29-migrate.md '# Agent Note: 迁移后
+
+Status: implemented
+
+## Decision
+
+样本决定。
+
+## Alternatives considered
+
+- 样本。'
+git -C "$R" add -A >/dev/null 2>&1
+expect_accept "生命周期迁移（同 basename 的 D+A）不算删除，不要求入册简化记录" "$R"
+
+# ⑥ 入册载体必须是真决策记录：simplification/README.md 不算
+R=$(new_repo rm-adr-readme-carrier)
+write_adr "$R" .agents/notes/implemented/process/2026-10-29-to-remove.md "$LEGAL_BODY"
+spec_commit "$R" base
+git -C "$R" rm -q .agents/notes/implemented/process/2026-10-29-to-remove.md >/dev/null 2>&1
+write_adr "$R" .agents/notes/implemented/simplification/README.md '# 简化记录目录说明
+
+本目录放简化记录。'
+git -C "$R" add -A >/dev/null 2>&1
+expect_reject_with "simplification/README.md 不是决策记录 → 仍拒绝（目录说明不能充当入册载体）" "$R" 'simplification'
+
+# ④ 带参模式语义不变：指定路径仍只判给定文件（删除项不参与）
+R=$(new_repo rm-adr-argmode)
+write_adr "$R" .agents/notes/implemented/process/2026-10-29-keep.md "$LEGAL_BODY"
+spec_commit "$R" base
+git -C "$R" rm -q .agents/notes/implemented/process/2026-10-29-keep.md >/dev/null 2>&1
+write_adr "$R" .agents/notes/implemented/process/2026-10-29-other.md "$LEGAL_BODY"
+git -C "$R" add -A >/dev/null 2>&1
+expect_accept "带参模式不受删除入册判据影响（只判给定文件）" "$R" .agents/notes/implemented/process/2026-10-29-other.md
+
 if [ "$FAIL" -ne 0 ]; then
   printf '[%s] 未通过：门禁的拒绝/放行语义与预期不符（见上方 FAIL）\n' "$SPEC" >&2
   exit 1
 fi
-printf '[%s] 全部通过：拒绝语义 + 放行语义 + TOCTOU 双向 + 非普通文件 + 1.10 缺备选节 + 1.7 rejected 理由（含 CJK 标点）+ 1.8 ## Decision/中文提案标题（含复合词）+ 围栏感知（1.8/1.10）均已证明（exit 0）\n' "$SPEC"
+# U4（W3b）运行时契约：**成功路径的最后一行**。asserts = 本 spec 自身 PASS+FAIL；
+# rejects = 期望被拒/期望非零退出的断言条数（逐断言累加，不是手写的常数）。
+printf '[%s] 全部通过：拒绝语义 + 放行语义 + TOCTOU 双向 + 非普通文件 + 1.10 缺备选节 + 1.7 rejected 理由（含 CJK 标点）+ 1.8 ## Decision/中文提案标题（含复合词）+ 围栏感知（1.8/1.10）+ A6 缺失/被清空/被换成假门 → fail-closed（含 A6 在场正控制与补回反向对照）+ 删除 ADR 必须同提交入册简化记录（无 note 拒 / 有合法 note 放 / 缺复活条件由 1.11 拒 / 带参模式不受影响 / 生命周期迁移不算删除 / README 不算入册载体）均已证明（exit 0）\n' "$SPEC"
+printf '##SPEC asserts=%s rejects=%s\n' "$((PASS_N + FAIL_N))" "$REJECTS"
 exit 0
