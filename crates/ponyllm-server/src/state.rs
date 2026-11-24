@@ -634,6 +634,12 @@ impl AppState {
         bus.add_projection(timeseries_proj.clone());
         bus.add_projection(connectivity_sampler.clone());
         bus.add_projection(Arc::new(FrameConverter::new(flight_recorder.clone())));
+        // Proactive performance alerting (opt-in). Registered after the
+        // telemetry projections so it observes the same StreamCompleted flow
+        // samples the dashboard derives from — no second measurement path.
+        if let Some(alerts) = crate::alerts::build_projection(&config.alerts) {
+            bus.add_projection(Arc::new(alerts));
+        }
         if let Some(dir) = config.event_log_dir.clone() {
             crate::segments::spawn_segment_drain(
                 &bus,

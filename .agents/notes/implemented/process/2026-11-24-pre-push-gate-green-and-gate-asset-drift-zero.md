@@ -56,7 +56,8 @@ status 的红由两个互相纠缠的原因造成，且**两者互为对方的�
   推送不再需要 `--no-verify`。
 - 实例侧门资产变为**纯模板字节**：此后任何人再改它们都会被 2.1 判红——这正是期望的封印行为。
 - 修复的有效性依赖框架 PR 合入 `main`：本机 CLI 目前装的是**分支版本**。PR 合并后需重跑
-  `install.sh`（拉 `main`）以免长期偏离；这是遗留动作，不是已完成事实。
+  `install.sh`（拉 `main`）以免长期偏离；这是遗留动作，不是已完成事实。已登记为
+  `backlog:B1795507565713`（跨仓事项仅登记，本仓不做框架仓写操作）。
 - `0424f0e` 的 `--no-verify` 复核结论：在修复后的门资产 + 当前基线重放下，
   `pre-commit.spec.sh` rc=0、`backlog-gate.sh` rc=0、`cargo check --workspace` rc=0、
   `verify-note.sh` 整树 rc=0（豁免 48 条）。**不带基线时 verify-note 会红**——那是迁移提交时点

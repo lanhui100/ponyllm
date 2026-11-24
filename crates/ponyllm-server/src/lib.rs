@@ -1,6 +1,7 @@
 //! ponyllm-server: Axum HTTP and SSE gateway service for ponyllm.
 
 pub mod admin_store;
+pub mod alerts;
 pub mod app;
 pub mod auth;
 pub mod auth_ratelimit;

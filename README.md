@@ -238,6 +238,41 @@ cross_provider_quota_failover = false   # 默认：某 provider 额度耗尽即�
 > | `PONYLLM_CORS_ALLOWLIST` | 空（仅同源） | 跨源浏览器控制台域名白名单，如 `https://console.example.com`；设为 `*` 恢复旧宽松行为，**生产禁止** |
 > | `PONYLLM_PROBE_ALLOWLIST` | 空 | 管理探针（拨测/upstream-models）放行的内网域名，如 `ollama.lan,models.corp`（精确或子域匹配） |
 > | `PONYLLM_ALLOW_LOOPBACK_PROBE` | 空（拦截回环） | 设为 `1` 放行回环探针，**仅测试/本地开发，生产禁止**（启动会双通道告警） |
+> | `PONYLLM_ALERT_WEBHOOK_URL` | 空（只落日志） | 性能告警 webhook 地址；非空时覆盖配置里的 `alerts.webhook_url`，便于运维不改配置就换端点 |
+
+#### 性能异常主动告警（`[alerts]`，默认关闭）
+
+阈值实时判定 + webhook 主动推送 + 结构化日志证据链。**纯可观测性**：不改任何路由/重试/超时/配额行为。
+
+```toml
+[gateway.alerts]
+enabled = false              # 默认关闭；开启后才有判定与推送
+# webhook_url = "https://im.example.com/hooks/pony"  # 留空 = 只落结构化日志（同 PPROXY_ALERT_WEBHOOK_URL 语义）
+ttft_slow_ms = 20000         # 单请求首 token 延迟阈值（严格大于才触发；恰 20000 不触发）
+stream_stall_gap_ms = 10000  # 流式块间 gap warning 阈值
+stream_stall_critical_ms = 60000  # 最坏静默升级 critical 的阈值
+retry_burst_warning = 3      # 单请求透明重试 warning 阈值（严格大于才触发）
+retry_burst_critical = 10    # 升级 critical 的阈值
+cooldown_secs = 60           # 同类事件冷却窗口；窗口内合并为 1 条推送并累计命中次数
+```
+
+事件 JSON（webhook POST 体，同时是结构化日志字段）：
+
+```json
+{
+  "event": "ttft_slow",            // ttft_slow | stream_stall | retry_burst
+  "level": "warning",              // warning | critical
+  "message": "首 token 延迟 32700ms 超过阈值 20000ms",
+  "ts": 1795490000000,             // epoch ms
+  "fields": {
+    "request_id": "...", "model": "gemini-3.8-flash-high", "provider": "antigravity",
+    "ttft_ms": 32700.0, "max_gap_ms": 120.0, "retries": 0, "total_latency_ms": 42000.0
+  }
+}
+```
+
+行为约定：① 推送在**分离任务**里发出，请求路径绝不等待 webhook；② 推送失败重试 1 次后丢弃并计数（告警风暴不得变成投递风暴）；③ 冷却窗口内同类事件合并，命中次数写进 `message`；④ 未超阈值请求零事件。
+
 
 ---
 
