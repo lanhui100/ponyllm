@@ -93,6 +93,13 @@ done
 GW_BASE="${GW_BASE_OVERRIDE:-${GW_BASE_URL:-$GW_SVC}}"
 echo "  gateway base url: $GW_BASE (clusterIP=$GW_SVC)"
 
+# --- 只读探针有界重试（传输层失败重试，判定口径不放宽） ---
+# 集群外 runner 对公网入口单次探测会把偶发断链判成部署失败（2026-11-24 实证：
+# [3/7] /health=000 与 [5/7] 首次快照为空，同一时刻人工复测均正常）。
+_P3_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/http-retry.sh
+. "$_P3_DIR/lib/http-retry.sh"
+
 # --- S3: TOKEN 缺失 → exit 2（非 1，可与环境类失败区分） ---
 if [ -z "$TOKEN" ]; then
   echo "FAIL PONYLLM_ADMIN_TOKEN not set — admin/metrics/412 段依赖网关凭证（exit 2）"
@@ -176,7 +183,7 @@ echo "OK rollout converged: ready=$TOTAL_READY pods=$POD_COUNT on nodes: $(print
 echo "OK role→node placement verified (dev→devserver, preprod/proserver/tencent→各自节点)"
 
 echo "== [3/7] /health（svc + 逐 Pod；in-pod 探针空输出来自镜像无 curl 时需 --pod-ips） =="
-HCODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 8 "$GW_BASE/health" || true)
+HCODE=$(http_code_retry "$GW_BASE/health" 8 3)
 [ "$HCODE" = "200" ] || { echo "FAIL svc /health=$HCODE"; exit 1; }
 PODS=$("${KUBECTL[@]}" -n "$NS" get po -l app.kubernetes.io/name=ponyllm,app.kubernetes.io/component=gateway \
   -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}')
@@ -221,18 +228,18 @@ fi
 B=()
 if [ "${#POD_IPS[@]}" -gt 0 ]; then
   for ip in "${POD_IPS[@]}"; do
-    B+=("$(curl -s --max-time 8 -H "Authorization: Bearer $TOKEN" "http://$ip:8080/v1/telemetry/metrics" | python3 -c "import sys,json; print(json.load(sys.stdin)['ha_ops']['config_reload_total'])" 2>/dev/null || echo '?')")
+    B+=("$(http_body_retry "http://$ip:8080/v1/telemetry/metrics" 8 3 "$TOKEN" | python3 -c "import sys,json; print(json.load(sys.stdin)['ha_ops']['config_reload_total'])" 2>/dev/null || echo '?')")
   done
 else
   echo "WARN 未用 --pod-ips：svc 聚合戳可能随机命中副本（逐副本口径仅在 --pod-ips 下严格）"
-  B=( "$(curl -s --max-time 8 -H "Authorization: Bearer $TOKEN" "$GW_BASE/v1/telemetry/metrics" | python3 -c "import sys,json; print(json.load(sys.stdin)['ha_ops']['config_reload_total'])" 2>/dev/null || echo '?')" )
+  B=( "$(http_body_retry "$GW_BASE/v1/telemetry/metrics" 8 3 "$TOKEN" | python3 -c "import sys,json; print(json.load(sys.stdin)['ha_ops']['config_reload_total'])" 2>/dev/null || echo '?')" )
 fi
 sleep 65
 H1=$(secret_hash)
 if [ "${#POD_IPS[@]}" -gt 0 ]; then
   i=0
   for ip in "${POD_IPS[@]}"; do
-    A="$(curl -s --max-time 8 -H "Authorization: Bearer $TOKEN" "http://$ip:8080/v1/telemetry/metrics" | python3 -c "import sys,json; print(json.load(sys.stdin)['ha_ops']['config_reload_total'])" 2>/dev/null || echo '?')"
+    A="$(http_body_retry "http://$ip:8080/v1/telemetry/metrics" 8 3 "$TOKEN" | python3 -c "import sys,json; print(json.load(sys.stdin)['ha_ops']['config_reload_total'])" 2>/dev/null || echo '?')"
     Bv="${B[$i]:-?}"
     echo "  pod $ip reload_total: $Bv -> $A"
     if [ "$H0" = "$H1" ]; then
@@ -248,7 +255,7 @@ if [ "${#POD_IPS[@]}" -gt 0 ]; then
     i=$((i+1))
   done
 else
-  A=$(curl -s --max-time 8 -H "Authorization: Bearer $TOKEN" "$GW_BASE/v1/telemetry/metrics" | python3 -c "import sys,json; print(json.load(sys.stdin)['ha_ops']['config_reload_total'])" 2>/dev/null || echo '?')
+  A=$(http_body_retry "$GW_BASE/v1/telemetry/metrics" 8 3 "$TOKEN" | python3 -c "import sys,json; print(json.load(sys.stdin)['ha_ops']['config_reload_total'])" 2>/dev/null || echo '?')
   echo "  svc reload_total: ${B[0]} -> $A"
   if [ "$H0" = "$H1" ] || [ "$H0" = "rbac-forbidden" ]; then
     if [ "${B[0]}" != "$A" ]; then
@@ -269,11 +276,11 @@ echo "OK reload stability window complete"
 
 echo "== [5/7] 锁 + 刷新健康（窗口 delta 口径，P32-arch） =="
 snap_ha() {
-  curl -s --max-time 8 -H "Authorization: Bearer $TOKEN" "$GW_BASE/v1/telemetry/metrics" | python3 -c "
+  http_body_retry "$GW_BASE/v1/telemetry/metrics" 8 3 "$TOKEN" | python3 -c "
 import sys,json
 d=json.load(sys.stdin)['ha_ops']
 print(d['refresh_lock_acquired_total'], d['refresh_lock_skipped_total'], d['refresh_lock_error_total'])
-"
+" 2>/dev/null
 }
 E0=$(snap_ha) || true
 sleep 30

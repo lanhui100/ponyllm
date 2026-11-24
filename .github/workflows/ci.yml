@@ -87,11 +87,13 @@ jobs:
 
       # digest pin 回写的并发语义防呆：pin 是「清单=最新 digest」的单点声明，
       # 不得走 rebase（连续两次 main push 会抢同一批 image 行，rebase 必冲突）。
+      # 同时跑验收脚本的只读探针重试自测（传输失败重试 / 真实 4xx-5xx 不重试）。
       - name: Check CI digest pin semantics (concurrency-safe)
         shell: bash
         run: |
           bash tests/pre-flight/check-ci-digest-pin-semantics.sh
           bash tests/pre-flight/check-ci-digest-pin-semantics.spec.sh
+          bash tests/pre-flight/http-retry.spec.sh
 
       # 2026-10-14 事故回归门禁：CI 身份缺集群级 nodes 读权限时，发布链路必须
       # fail-closed（禁止静默跳过全部滚动 / 以 0 个 Pod 判定 PASS）。纯 shim 驱动，
