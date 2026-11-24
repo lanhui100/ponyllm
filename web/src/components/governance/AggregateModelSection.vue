@@ -45,12 +45,51 @@ watch(
   { deep: true },
 );
 
-/** 目录里出现过的 `provider/model`，作为链项输入的建议值（仍允许手输未登记的物理名）。 */
-const chainSuggestions = computed(() =>
-  (props.allModels || [])
-    .filter((m) => Boolean(m.provider))
-    .map((m) => `${m.provider}/${m.name}`),
-);
+/** 目录里出现过的 provider（升序），作为链项第一段的下拉选项。 */
+const providerOptions = computed(() => {
+  const set = new Set<string>();
+  for (const m of props.allModels || []) {
+    if (m.provider) set.add(m.provider);
+  }
+  return [...set].sort();
+});
+
+function modelsForProvider(provider: string): string[] {
+  return (props.allModels || [])
+    .filter((m) => m.provider === provider)
+    .map((m) => m.name);
+}
+
+/**
+ * 链项 `provider/model` 的分解：取**第一段**为 provider，其余归 model
+ * （与后端 `split_once('/')` 一致，因此 `magpie/trae-cn/xxx` 这类
+ * 自带斜杠的物理名不会被截断）。
+ */
+function splitEntry(entry: string): { provider: string; model: string } {
+  const i = entry.indexOf('/');
+  if (i < 0) return { provider: '', model: entry };
+  return { provider: entry.slice(0, i), model: entry.slice(i + 1) };
+}
+
+function composeEntry(provider: string, model: string): string {
+  if (!provider) return model;
+  if (!model) return provider;
+  return `${provider}/${model}`;
+}
+
+/** 链项自身的 provider 选项：目录里的，加上当前值（未登记时不静默丢弃）。 */
+function entryProviders(entry: string): string[] {
+  const { provider } = splitEntry(entry);
+  const opts = providerOptions.value;
+  return provider && !opts.includes(provider) ? [provider, ...opts] : opts;
+}
+
+/** 链项自身的模型选项：该 provider 下的，加上当前值（未登记时不静默丢弃）。 */
+function entryModels(entry: string): string[] {
+  const { provider, model } = splitEntry(entry);
+  const opts = modelsForProvider(provider);
+  return model && !opts.includes(model) ? [model, ...opts] : opts;
+}
 
 const hasDuplicateName = computed(() => {
   const seen = new Set<string>();
@@ -97,8 +136,9 @@ function addChainEntry(modelIndex: number) {
   if (!props.adminWriteEnabled) return;
   const list = [...localModels.value];
   const entry = list[modelIndex];
-  const suggestion = chainSuggestions.value[0] || '';
-  entry.chain = [...entry.chain, suggestion];
+  const firstProvider = providerOptions.value[0] || '';
+  const firstModel = modelsForProvider(firstProvider)[0] || '';
+  entry.chain = [...entry.chain, composeEntry(firstProvider, firstModel)];
   localModels.value = list;
 }
 
@@ -125,11 +165,25 @@ function moveChainEntry(modelIndex: number, entryIndex: number, delta: -1 | 1) {
   localModels.value = list;
 }
 
-function setChainEntry(modelIndex: number, entryIndex: number, value: string) {
+function setChainProvider(modelIndex: number, entryIndex: number, provider: string) {
   const list = [...localModels.value];
   const entry = list[modelIndex];
   const chain = [...entry.chain];
-  chain[entryIndex] = value;
+  const current = splitEntry(chain[entryIndex] || '');
+  const candidates = modelsForProvider(provider);
+  // 保留仍属该 provider 的当前模型；否则落到该 provider 的第一个模型。
+  const nextModel = candidates.includes(current.model) ? current.model : candidates[0] || '';
+  chain[entryIndex] = composeEntry(provider, nextModel);
+  entry.chain = chain;
+  localModels.value = list;
+}
+
+function setChainModel(modelIndex: number, entryIndex: number, model: string) {
+  const list = [...localModels.value];
+  const entry = list[modelIndex];
+  const chain = [...entry.chain];
+  const { provider } = splitEntry(chain[entryIndex] || '');
+  chain[entryIndex] = composeEntry(provider, model);
   entry.chain = chain;
   localModels.value = list;
 }
@@ -256,7 +310,6 @@ async function handleSave() {
           <span
             class="text-[11px] text-slate-400"
             data-testid="aggregate-model-chain-is-authorization"
-            title="链即授权：链里写了谁就按顺序用谁（含付费项），不再有单独的付费开关"
           >
             链即授权
           </span>
@@ -289,15 +342,36 @@ async function handleSave() {
             >
               {{ entryIndex + 1 }}
             </span>
-            <input
-              :value="entry"
-              :list="`aggregate-chain-suggestions-${modelIndex}`"
-              data-testid="aggregate-chain-entry"
-              placeholder="provider/model，如 sense/deepseek-flash"
+            <select
+              :value="splitEntry(entry).provider"
+              :data-testid="`aggregate-chain-provider-${entryIndex}`"
               :disabled="!adminWriteEnabled"
-              class="flex-1 bg-white border border-slate-200/80 rounded-lg px-3 py-1.5 text-xs font-mono text-slate-800 focus:outline-none focus:ring-2 focus:ring-slate-400/20 focus:border-slate-500"
-              @input="setChainEntry(modelIndex, entryIndex, ($event.target as HTMLInputElement).value)"
-            />
+              aria-label="链项 provider"
+              class="w-32 shrink-0 bg-white border border-slate-200/80 rounded-lg px-2 py-1.5 text-xs font-mono text-slate-800 focus:outline-none focus:ring-2 focus:ring-slate-400/20 focus:border-slate-500"
+              @change="
+                setChainProvider(
+                  modelIndex,
+                  entryIndex,
+                  ($event.target as HTMLSelectElement).value,
+                )
+              "
+            >
+              <option value="">（裸模型名）</option>
+              <option v-for="p in entryProviders(entry)" :key="p" :value="p">{{ p }}</option>
+            </select>
+            <select
+              :value="splitEntry(entry).model"
+              :data-testid="`aggregate-chain-entry-${entryIndex}`"
+              :disabled="!adminWriteEnabled"
+              aria-label="链项模型"
+              class="flex-1 min-w-0 bg-white border border-slate-200/80 rounded-lg px-2 py-1.5 text-xs font-mono text-slate-800 focus:outline-none focus:ring-2 focus:ring-slate-400/20 focus:border-slate-500"
+              @change="
+                setChainModel(modelIndex, entryIndex, ($event.target as HTMLSelectElement).value)
+              "
+            >
+              <option value="">（选择模型）</option>
+              <option v-for="m in entryModels(entry)" :key="m" :value="m">{{ m }}</option>
+            </select>
             <UiBadge v-if="entryIndex === 0" variant="default" class="text-[10px] scale-90">
               主力
             </UiBadge>
@@ -338,10 +412,6 @@ async function handleSave() {
               ×
             </UiButton>
           </div>
-
-          <datalist :id="`aggregate-chain-suggestions-${modelIndex}`">
-            <option v-for="hint in chainSuggestions" :key="hint" :value="hint" />
-          </datalist>
 
           <UiButton
             variant="ghost"

@@ -53,6 +53,12 @@ async function type(input: HTMLInputElement, value: string) {
   await nextTick();
 }
 
+async function choose(select: HTMLSelectElement, value: string) {
+  select.value = value;
+  select.dispatchEvent(new Event('change'));
+  await nextTick();
+}
+
 describe('AggregateModelSection', () => {
   it('renders the empty state when no aggregate model is configured', () => {
     const { container, cleanup } = mountSection();
@@ -80,12 +86,20 @@ describe('AggregateModelSection', () => {
     (container.querySelector('[data-testid="aggregate-chain-add-0"]') as HTMLButtonElement).click();
     await nextTick();
 
+    // 链项是两级下拉：先选 provider，再选该 provider 下真实存在的模型。
+    const providers = container.querySelectorAll(
+      '[data-testid^="aggregate-chain-provider-"]',
+    ) as NodeListOf<HTMLSelectElement>;
+    expect(providers.length).toBe(2);
+    await choose(providers[0], 'sense');
+    await choose(providers[1], 'magpie');
+
     const entries = container.querySelectorAll(
-      '[data-testid="aggregate-chain-entry"]',
-    ) as NodeListOf<HTMLInputElement>;
+      '[data-testid^="aggregate-chain-entry-"]',
+    ) as NodeListOf<HTMLSelectElement>;
     expect(entries.length).toBe(2);
-    await type(entries[0], 'sense/deepseek-flash');
-    await type(entries[1], 'magpie/deepseek-v4.1-flash');
+    await choose(entries[0], 'deepseek-flash');
+    await choose(entries[1], 'deepseek-v4.1-flash');
 
     (container.querySelector('[data-testid="aggregate-model-save"]') as HTMLButtonElement).click();
     await nextTick();
@@ -99,6 +113,27 @@ describe('AggregateModelSection', () => {
     expect(
       container.querySelector('[data-testid="aggregate-model-chain-is-authorization"]'),
     ).toBeTruthy();
+    cleanup();
+  });
+
+  it('keeps an unregistered chain entry selectable instead of silently dropping it', async () => {
+    const { container, cleanup } = mountSection({
+      aggregateModels: [{ name: 'legacy', chain: ['retired/deepseek-flash'], cooldown_secs: 90 }],
+    });
+    await nextTick();
+
+    const provider = container.querySelector(
+      '[data-testid="aggregate-chain-provider-0"]',
+    ) as HTMLSelectElement;
+    const model = container.querySelector(
+      '[data-testid="aggregate-chain-entry-0"]',
+    ) as HTMLSelectElement;
+
+    // 目录里没有 retired：下拉必须把当前值保留成一个可选项，否则保存会把它清空。
+    expect(provider.value).toBe('retired');
+    expect([...provider.options].some((o) => o.value === 'retired')).toBe(true);
+    expect(model.value).toBe('deepseek-flash');
+    expect([...model.options].some((o) => o.value === 'deepseek-flash')).toBe(true);
     cleanup();
   });
 
