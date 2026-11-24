@@ -779,6 +779,9 @@ impl ClusterTelemetryStore {
         };
 
         Ok(MetricsSummary {
+            // 集群汇总（跨副本 SUM）不是任何单一进程的计数器：留空串，
+            // 让消费方（phase3-verify [5/7]）知道「此处不能拿两份快照判 delta」。
+            instance_id: String::new(),
             total_requests: total_reqs,
             successful_requests: successful_reqs,
             failed_requests: failed_reqs,

@@ -87,6 +87,18 @@ pub fn gap_percentiles(mut gaps_ms: Vec<f64>) -> (Option<f64>, Option<f64>, Opti
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MetricsSummary {
+    /// 副本身份：进程启动时生成一次，进程内恒定、重启即换。
+    ///
+    /// 存在的理由（实证 2026-11-24）：HA 计数器是**进程内** AtomicU64，各副本独立
+    /// 累加。经 LB / 公网基址做窗口采样时，前后两次快照可能落到不同副本，于是
+    /// 「换了副本」与「计数器真增长」在数值上无法区分——发布验收门
+    /// `scripts/phase3-verify.sh` 的 [5/7] 因此把 dev 副本上 191 次历史锁错误
+    /// 误判成「本窗口新增 +191」。带身份后调用方只在**同副本**快照之间判 delta。
+    ///
+    /// 空串 = 非单副本口径（PG 聚合的集群汇总，见
+    /// `cluster_telemetry::query_cluster_metrics`）。
+    #[serde(default)]
+    pub instance_id: String,
     pub total_requests: u64,
     pub successful_requests: u64,
     pub failed_requests: u64,
@@ -138,6 +150,17 @@ pub struct MetricsCollector {
 impl MetricsCollector {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// 本进程的副本身份（首次调用时生成，此后恒定；进程重启即换新值）。
+    ///
+    /// 进程级而非 collector 级：一个副本 = 一个进程，HA 计数器也按进程独立累加，
+    /// 两者必须是同一粒度，否则同进程内的两个 collector 会伪装成两个副本。
+    pub fn instance_id() -> &'static str {
+        static PROCESS_INSTANCE_ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        PROCESS_INSTANCE_ID
+            .get_or_init(|| uuid::Uuid::new_v4().to_string())
+            .as_str()
     }
 
     pub fn record_request(
@@ -264,6 +287,7 @@ impl MetricsCollector {
         let ttft_samples = self.ttft_samples.load(Ordering::Relaxed);
         let tps_samples = self.tps_samples.load(Ordering::Relaxed);
         MetricsSummary {
+            instance_id: Self::instance_id().to_string(),
             total_requests: self.total_requests.load(Ordering::Relaxed),
             successful_requests: self.successful_requests.load(Ordering::Relaxed),
             failed_requests: self.failed_requests.load(Ordering::Relaxed),

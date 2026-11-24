@@ -99,6 +99,8 @@ echo "  gateway base url: $GW_BASE (clusterIP=$GW_SVC)"
 _P3_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/http-retry.sh
 . "$_P3_DIR/lib/http-retry.sh"
+# shellcheck source=lib/ha-window.sh
+. "$_P3_DIR/lib/ha-window.sh"
 
 # --- S3: TOKEN 缺失 → exit 2（非 1，可与环境类失败区分） ---
 if [ -z "$TOKEN" ]; then
@@ -274,41 +276,24 @@ else
 fi
 echo "OK reload stability window complete"
 
-echo "== [5/7] 锁 + 刷新健康（窗口 delta 口径，P32-arch） =="
-snap_ha() {
-  http_body_retry "$GW_BASE/v1/telemetry/metrics" 8 3 "$TOKEN" | python3 -c "
-import sys,json
-d=json.load(sys.stdin)['ha_ops']
-print(d['refresh_lock_acquired_total'], d['refresh_lock_skipped_total'], d['refresh_lock_error_total'])
-" 2>/dev/null
-}
-E0=$(snap_ha) || true
+echo "== [5/7] 锁 + 刷新健康（同副本窗口 delta 口径，P32-arch） =="
+# 为什么按副本配对（实证 2026-11-24 run 45418316435）：HA 计数器是进程内 AtomicU64，
+# 各副本独立累加。经 LB 采两次快照若落到不同副本，「换了副本」与「真增长」在数值上
+# 不可区分——旧口径据此把 dev 副本 191 次历史锁错误判成「本窗口 +191」而 FAIL。
+# 判定逻辑见 scripts/lib/ha-window.sh（同副本才判 delta，跨副本降级为 WARN）。
+HA_BEFORE="$(mktemp)"
+HA_AFTER="$(mktemp)"
+trap 'rm -f "$HA_BEFORE" "$HA_AFTER"' EXIT
+# 每侧取 3 个样本：经 LB 时单次采样可能只命中一个副本，多点采样才能凑出「同副本前后对」。
+for _ in 1 2 3; do ha_snapshot_line "$GW_BASE/v1/telemetry/metrics" 8 3 "$TOKEN" >> "$HA_BEFORE"; done
 sleep 30
-E1=$(snap_ha) || true
-# P33 S3：快照非空校验——任一为空则说明 metrics 端点不可达，直接 FAIL
-# （防"双空快照 Δ==0"的平凡通过）。
-if [ -z "$E0" ] || [ -z "$E1" ]; then
-  echo "FAIL metrics 不可达（E0='$E0' E1='$E1'）——无法判定锁错误 delta，中止"
+for _ in 1 2 3; do ha_snapshot_line "$GW_BASE/v1/telemetry/metrics" 8 3 "$TOKEN" >> "$HA_AFTER"; done
+if [ ! -s "$HA_BEFORE" ] && [ ! -s "$HA_AFTER" ]; then
+  echo "FAIL metrics 不可达（窗口前后均无快照）——无法判定锁错误 delta，中止"
   exit 1
 fi
-A0=$(echo "$E0" | awk '{print $1}'); S0=$(echo "$E0" | awk '{print $2}'); R0=$(echo "$E0" | awk '{print $3}')
-A1=$(echo "$E1" | awk '{print $1}'); S1=$(echo "$E1" | awk '{print $2}'); R1=$(echo "$E1" | awk '{print $3}')
-echo "  30s 窗口: acquired $A0->$A1 | skipped $S0->$S1 | errors $R0->$R1"
-if [ "$R0" != "$R1" ]; then
-  DELTA=$((R1 - R0))
-  if [ "$DELTA" -lt 0 ]; then
-    # 经 LB/公网基址时两次快照可能落到不同副本（各副本计数器独立），
-    # 回退说明"换了副本"，不构成锁错误增长；逐副本严格口径需 --pod-ips。
-    echo "WARN refresh_lock_error_total went $R0->$R1 (negative delta = replica switch under LB); 逐副本严格口径请用 --pod-ips"
-  else
-    echo "FAIL refresh_lock_error_total delta +$DELTA != 0"; exit 1
-  fi
-fi
-if [ "$((A1 - A0))" -eq 0 ] && [ "$((S1 - S0))" -eq 0 ]; then
-  echo "WARN 本窗口无刷新活动，Δ==0 证据不足，请于下个 keepalive/401 窗口复查"
-else
-  echo "OK 有刷新活动且锁 errors Δ==0（acquired/skipped 见上）"
-fi
+echo "  30s 窗口（前后各 3 次采样，按副本身份配对）:"
+ha_window_verdict "$HA_BEFORE" "$HA_AFTER" || exit 1
 
 echo "== [6/7] 并发双写 412（A2）（刻意写测试：写版本+1 并在测试后还原原始字节） =="
 SKIP_REASON=""
