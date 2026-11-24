@@ -312,3 +312,47 @@ fn test_flight_recorder_preserves_distinct_attempt_failures() {
     assert_eq!(frames[1].attempt, Some(1));
     assert_eq!(frames[1].status_code, Some(200));
 }
+
+/// 副本身份的契约：进程内恒定（否则「同副本」判据失效），且出现在 summary 里
+/// （否则 phase3-verify 的 [5/7] 拿不到它，只能退回跨副本误判）。
+#[test]
+fn test_instance_id_is_process_stable_and_present_in_summary() {
+    let a = MetricsCollector::new().get_summary();
+    let b = MetricsCollector::new().get_summary();
+    assert!(
+        !a.instance_id.is_empty(),
+        "instance_id must be non-empty so consumers can pair snapshots"
+    );
+    assert_eq!(
+        a.instance_id, b.instance_id,
+        "instance_id must be process-stable: two collectors in one process are the same replica"
+    );
+    // 同一进程内不随 collector 数量变化——这正是 HA 计数器的累加粒度。
+    assert_eq!(a.instance_id, MetricsCollector::instance_id());
+}
+
+/// 序列化契约：instance_id 必须出现在 JSON 顶层（验收脚本按字段名取），
+/// 且旧客户端（无该字段）反序列化时降级为空串而不是报错。
+#[test]
+fn test_instance_id_serialization_contract() {
+    let summary = MetricsCollector::new().get_summary();
+    let json = serde_json::to_value(&summary).expect("summary must serialize");
+    assert!(
+        json.get("instance_id").and_then(|v| v.as_str()).is_some(),
+        "instance_id must be a top-level string field in the metrics JSON"
+    );
+
+    // 旧载荷（无 instance_id）仍可解析：跨版本滚动期间新旧副本并存。
+    let legacy = serde_json::json!({
+        "total_requests": 0,
+        "successful_requests": 0,
+        "failed_requests": 0,
+        "total_failover": 0,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_tokens": 0
+    });
+    let parsed: MetricsSummary =
+        serde_json::from_value(legacy).expect("legacy payload must still deserialize");
+    assert_eq!(parsed.instance_id, "");
+}
