@@ -84,3 +84,20 @@ dev 副本的 191 是自 48 分钟前启动以来**恒定**的历史累计（连
 | `cargo check --workspace --all-targets` | rc=0 |
 | `bash scripts/check-verify-contract-drift.sh` | PASS（脚本语法 / API 契约 / Deployment 名 / TOML 示例） |
 | `bash tests/pre-flight/http-retry.spec.sh` | rc=0（既有探针重试自测未回归） |
+
+### 上线实测（PR #8 合并后，run 45444791468）
+
+`main` 部署**全绿**（此前连续两次红），`[5/7]` 实际输出转为 WARN 而非 FAIL：
+
+```
+== [5/7] 锁 + 刷新健康（同副本窗口 delta 口径）
+WARN no replica sampled on both sides (before=91e611a2…,ed3a29a4…,def9152f… after=91437cc3…,5f18eefc…,6d9eaeca…)
+     -- sampling through a LB hits random replicas; a cross-replica delta is NOT evidence of lock error growth.
+```
+
+**同时暴露第二个缺陷**：每侧只采 3 次，7 副本下 6 次命中 6 个不同副本、零配对 → 门禁降级成
+「证据不足」，等于没判（生日问题：n=7/k=3 碰撞率仅约 39%）。已改为自适应：
+`HA_SAMPLES = 2 × 副本数 + 2`（7 副本 → 16 次）。k ≥ n+1 时由鸽笼原理保证**必然**存在重复，
+同副本配对不再是概率事件。实测 16 次采样命中全部 7 个副本（3/3/2/2/2/2/2），
+`ha_window_verdict` 输出 7 条配对行，dev 副本 `errors 191->191` 恒定 —— 正是本缺陷要拦的形态，
+现在被判为「无活动 WARN」而不是「+191 FAIL」。
