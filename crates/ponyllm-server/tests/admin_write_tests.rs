@@ -254,6 +254,12 @@ async fn test_admin_write_disabled_gate() {
         ),
         ("DELETE", "/api/admin/keys/key-1", serde_json::json!({})),
         ("POST", "/api/admin/keys/key-1/test", serde_json::json!({})),
+        // 聚合模型写面同样受 admin_write_enabled 门禁约束（fail-closed 404）。
+        (
+            "PUT",
+            "/api/admin/aggregate-models",
+            serde_json::json!({"aggregate_models": []}),
+        ),
         // C1 regression: auth rotate must also honor the gate. The former
         // strategy PUT leg was retired together with /api/admin/strategy
         // (wave-2); the retired route is asserted 404 elsewhere.
@@ -1823,4 +1829,111 @@ async fn test_admin_rate_limits_rejects_zero_window() {
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["error"]["code"], "invalid_rate_limits");
+}
+
+/// 聚合模型（虚拟名 + 有序 `provider/model` 链）的管理面契约：
+/// GET 回显、PUT 落盘且链序原样保留，以及四类非法输入被 400 拒绝。
+#[tokio::test]
+async fn test_aggregate_models_read_write_roundtrip_and_validation() {
+    let harness = WriteTestHarness::new(true).await;
+    let client = reqwest::Client::new();
+    let auth = format!("Bearer {}", harness.api_key);
+    let url = format!("http://{}/api/admin/aggregate-models", harness.addr);
+
+    // 1. 初始为空，并带回当前 config_version。
+    let resp = client
+        .get(&url)
+        .header("Authorization", &auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["aggregate_models"], serde_json::json!([]));
+    let v1 = body["config_version"].as_u64().unwrap();
+
+    // 2. PUT 合法链：链序即执行序，原样回显。
+    let resp = client
+        .put(&url)
+        .header("Authorization", &auth)
+        .header("If-Match", format!("\"{v1}\""))
+        .json(&serde_json::json!({
+            "aggregate_models": [{
+                "name": "deepseek-free",
+                "chain": ["openai/gpt-4o"],
+                "cooldown_secs": 90
+            }]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let saved: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(saved["aggregate_models"][0]["name"], "deepseek-free");
+    assert_eq!(
+        saved["aggregate_models"][0]["chain"],
+        serde_json::json!(["openai/gpt-4o"])
+    );
+    let v2 = saved["config_version"].as_u64().unwrap();
+    assert!(v2 > v1, "聚合配置写入必须推进 config_version");
+
+    // 3. 读回与写入一致（不是只回显请求体）。
+    let body: serde_json::Value = client
+        .get(&url)
+        .header("Authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(body["aggregate_models"][0]["cooldown_secs"], 90);
+    assert_eq!(
+        body["aggregate_models"][0]["chain"],
+        serde_json::json!(["openai/gpt-4o"])
+    );
+
+    // 4. 非法输入逐条被拒，且不推进版本。
+    let invalid_payloads = vec![
+        // 空链：路由无法执行。
+        serde_json::json!([{
+            "name": "empty",
+            "chain": [],
+            "cooldown_secs": 90
+        }]),
+        // 重名（忽略大小写）。
+        serde_json::json!([
+            {"name": "dup", "chain": ["openai/gpt-4o"], "cooldown_secs": 90},
+            {"name": "DUP", "chain": ["openai/gpt-4o"], "cooldown_secs": 90}
+        ]),
+        // 与物理模型同名：物理名永远优先，聚合会静默失效。
+        serde_json::json!([{
+            "name": "gpt-4o",
+            "chain": ["openai/gpt-4o"],
+            "cooldown_secs": 90
+        }]),
+        // 链项必须是 `provider/model`（裸名留给路由层宽松匹配，管理面强制显式）。
+        serde_json::json!([{
+            "name": "bare",
+            "chain": ["gpt-4o"],
+            "cooldown_secs": 90
+        }]),
+    ];
+    for payload in invalid_payloads {
+        let resp = client
+            .put(&url)
+            .header("Authorization", &auth)
+            .header("If-Match", format!("\"{v2}\""))
+            .json(&serde_json::json!({ "aggregate_models": payload }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "非法聚合配置必须被 400 拒绝"
+        );
+        let err: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(err["error"]["code"], "invalid_aggregate_models");
+    }
 }

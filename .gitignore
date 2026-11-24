@@ -48,3 +48,6 @@ backlog/.state/
 
 # 并发会话在飞的 Python 虚拟环境（构建产物，等价于 target/ 与 node_modules/）
 .venv-test/
+
+# PonyAgent 运行时图记录（每次会话都会变，属运行产物；不入仓）
+.pony-agent/PonyAgent/graph-runs.json

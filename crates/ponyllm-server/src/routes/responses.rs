@@ -229,13 +229,27 @@ pub async fn handle_responses(
     let mut last_req_snippet: Option<String> = None;
     let is_streaming = req.stream.unwrap_or(false);
 
+    // Ladder mode: only an explicitly configured ladder (a virtual aggregate
+    // model, configured `fallbacks`, or `auto`) gets chain-entry circuit
+    // breaking — record a cooldown on failure and skip cooling entries.
+    // Same-name multi-provider failover keeps the legacy behaviour.
+    let aggregate_cooldown = state.aggregate_cooldown(&parsed.clean_model_name);
+    let ladder_mode = parsed.is_auto
+        || aggregate_cooldown.is_some()
+        || state.has_configured_fallbacks(&parsed.clean_model_name);
+    // Chain-entry cooldown window: aggregate models declare their own (default
+    // 90s — free tiers recover within minutes); `auto` and configured
+    // `fallbacks` keep the legacy 600s breaker window.
+    let model_cooldown = aggregate_cooldown.unwrap_or(std::time::Duration::from_secs(600));
+
     // Quota boundary (bugfix): a quota-exhaustion failure on one provider must
     // not silently drain a second provider that carries the same model, unless
     // the operator explicitly opts back into cross-provider quota failover, OR
-    // when the request is an auto-managed virtual model (`auto`) where zero-interruption
-    // failover across providers is the explicit contract requested by downstream agents.
+    // the request runs a routing ladder (an aggregate chain / `auto`), where
+    // zero-interruption failover across providers is the explicit contract
+    // requested by downstream agents.
     let quota_failover_enabled =
-        parsed.is_auto || state.config.read().cross_provider_quota_failover;
+        ladder_mode || state.config.read().cross_provider_quota_failover;
 
     // Request-level pre-commit global wall-clock budget (contract
     // `2026-10-07-empty-stop-budget-contract` & task-2): one deadline taken
@@ -271,7 +285,7 @@ pub async fn handle_responses(
             }
         }
         // If target is currently cooling down under the model circuit breaker, skip it
-        if parsed.is_auto
+        if ladder_mode
             && state.is_model_cooling_down(&target.provider_name, &target.physical_model)
         {
             tracing::warn!(
@@ -711,18 +725,26 @@ pub async fn handle_responses(
                     );
                     last_kind = err.kind();
 
-                    // Auto resilience: if model failed with ModelNotFound or 404/400 model error, trigger model circuit breaker & PonySentry report
+                    // Chain-entry breaker: aggregate chains, configured
+                    // fallbacks, and `auto` all cool a failing entry down so the
+                    // next request skips it, and traffic returns to the primary
+                    // once the window expires.
+                    if ladder_mode && crate::extractors::is_chain_retryable(&last_kind) {
+                        state.record_model_outage(
+                            &target.provider_name,
+                            &target.physical_model,
+                            model_cooldown,
+                        );
+                    }
+
+                    // Auto resilience: PonySentry report when an auto-routed
+                    // model turns out not to exist upstream.
                     if parsed.is_auto
                         && matches!(
                             last_kind,
                             ponyllm_core::error::GatewayErrorKind::ModelNotFound
                         )
                     {
-                        state.record_model_outage(
-                            &target.provider_name,
-                            &target.physical_model,
-                            std::time::Duration::from_secs(600),
-                        );
 
                         let mut tags = std::collections::HashMap::new();
                         tags.insert("event_type".to_string(), "auto_model_failover".to_string());
@@ -1207,18 +1229,26 @@ pub async fn handle_responses(
                 );
                 last_kind = err.kind();
 
-                // Auto resilience: if model failed with ModelNotFound or 404/400 model error, trigger model circuit breaker & PonySentry report
+                // Chain-entry breaker: aggregate chains, configured fallbacks,
+                // and `auto` all cool a failing entry down so the next request
+                // skips it, and traffic returns to the primary once the window
+                // expires.
+                if ladder_mode && crate::extractors::is_chain_retryable(&last_kind) {
+                    state.record_model_outage(
+                        &target.provider_name,
+                        &target.physical_model,
+                        model_cooldown,
+                    );
+                }
+
+                // Auto resilience: PonySentry report when an auto-routed model
+                // turns out not to exist upstream.
                 if parsed.is_auto
                     && matches!(
                         last_kind,
                         ponyllm_core::error::GatewayErrorKind::ModelNotFound
                     )
                 {
-                    state.record_model_outage(
-                        &target.provider_name,
-                        &target.physical_model,
-                        std::time::Duration::from_secs(600),
-                    );
 
                     let mut tags = std::collections::HashMap::new();
                     tags.insert("event_type".to_string(), "auto_model_failover".to_string());

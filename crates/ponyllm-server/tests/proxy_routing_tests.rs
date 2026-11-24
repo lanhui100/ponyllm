@@ -230,3 +230,108 @@ max_output = "16K"
         ponyllm_config::default_upstream_timeout_secs()
     );
 }
+
+#[test]
+fn test_domestic_and_private_upstream_proxy_immunity() {
+    let mut config = GatewayConfig::default();
+    // Gateway has global pproxy egress configured
+    config.proxy = Some("http://127.0.0.1:8899".to_string());
+
+    // 1. Domestic and private providers without explicit proxy
+    let test_cases = vec![
+        ("magpie", "http://100.95.193.103:3425/v1", "trae-cn/deepseek-v4.1-flash-max"),
+        ("workbuddy", "http://workbuddy-host:8788/v1", "deepseek-v4.1-flash"),
+        ("sense", "https://token.sensenova.cn/v1", "deepseek-flash"),
+        ("deepseek", "https://api.deepseek.com", "deepseek-chat"),
+        ("aliyun", "https://dashscope.aliyuncs.com/compatible-mode/v1", "qwen-max"),
+        ("volces", "https://ark.cn-beijing.volces.com/api/v3", "doubao-pro-32k"),
+        ("moonshot", "https://api.moonshot.cn/v1", "moonshot-v1-32k"),
+        ("private-lan-10", "http://10.0.1.50:8000/v1", "custom-model"),
+        ("private-lan-192", "http://192.168.1.100:8000/v1", "custom-model"),
+        ("loopback", "http://127.0.0.1:8000/v1", "local-model"),
+    ];
+
+    for (p_name, base_url, model_name) in &test_cases {
+        config.providers.insert(
+            p_name.to_string(),
+            ProviderConfig {
+                base_url: base_url.to_string(),
+                default_model: model_name.to_string(),
+                proxy: None, // No proxy specified => should trigger domestic immunity!
+                ..Default::default()
+            },
+        );
+    }
+
+    // 2. Foreign provider without explicit proxy => must inherit gateway proxy
+    config.providers.insert(
+        "openai".to_string(),
+        ProviderConfig {
+            base_url: "https://api.openai.com/v1".to_string(),
+            default_model: "gpt-4o".to_string(),
+            proxy: None, // Should inherit gateway proxy
+            ..Default::default()
+        },
+    );
+
+    // 3. Domestic provider with EXPLICIT proxy override => explicit override wins
+    config.providers.insert(
+        "sense-custom-proxy".to_string(),
+        ProviderConfig {
+            base_url: "https://token.sensenova.cn/v1".to_string(),
+            default_model: "deepseek-flash".to_string(),
+            proxy: Some("http://127.0.0.1:10808".to_string()),
+            ..Default::default()
+        },
+    );
+
+    // 4. Model-level base_url override with domestic target
+    config.providers.insert(
+        "foreign-base-domestic-model".to_string(),
+        ProviderConfig {
+            base_url: "https://api.openai.com/v1".to_string(),
+            default_model: "default-m".to_string(),
+            proxy: None,
+            model_specs: vec![
+                ModelSpec {
+                    name: "domestic-override-model".to_string(),
+                    base_url: Some("https://api.deepseek.com".to_string()),
+                    proxy: None,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        },
+    );
+
+    // Assert domestic/private providers are immune from inheriting gateway pproxy
+    for (p_name, _, model_name) in &test_cases {
+        assert_eq!(
+            config.effective_proxy_url_for(p_name, model_name),
+            None,
+            "Provider {} with model {} must resolve to Direct (None), not inherit gateway proxy",
+            p_name, model_name
+        );
+    }
+
+    // Assert foreign provider inherits gateway proxy
+    assert_eq!(
+        config.effective_proxy_url_for("openai", "gpt-4o"),
+        Some("http://127.0.0.1:8899".to_string()),
+        "Foreign provider should inherit gateway proxy"
+    );
+
+    // Assert explicit proxy on domestic provider is respected
+    assert_eq!(
+        config.effective_proxy_url_for("sense-custom-proxy", "deepseek-flash"),
+        Some("http://127.0.0.1:10808".to_string()),
+        "Explicit proxy on domestic provider must take precedence"
+    );
+
+    // Assert model-level domestic base_url is immune from inheriting gateway proxy
+    assert_eq!(
+        config.effective_proxy_url_for("foreign-base-domestic-model", "domestic-override-model"),
+        None,
+        "Model with domestic base_url must resolve to Direct"
+    );
+}

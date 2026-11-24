@@ -91,6 +91,8 @@ export interface ModelView {
   priority?: number | null;
   /** 短窗频率限额（RPM/TPM/窗口/并发），见 [`RateLimits`]。 */
   rate_limits?: RateLimits | null;
+  /** 该模型的跨模型降级链（后端 `ModelSpec.fallbacks`，按序尝试）。 */
+  fallbacks?: string[] | null;
 }
 
 export interface UpstreamModelItem {
@@ -260,6 +262,27 @@ export interface AutoModelsView {
 
 export interface PutAutoModelsPayload {
   auto_models: string[];
+}
+
+/**
+ * 客户端可见的「聚合模型」：一个虚拟名字 + 一条显式优先级链。
+ * 链序即执行序；某项失败后按 `cooldown_secs` 冷却，到期自动回到原位。
+ * 链即授权：选中的链项（含付费项）都会按声明顺序使用，不再设「是否允许付费」开关。
+ */
+export interface AggregateModelView {
+  name: string;
+  /** 有序 `provider/model` 链项；裸 `model` 表示任意提供该名的 provider。 */
+  chain: string[];
+  cooldown_secs: number;
+}
+
+export interface AggregateModelsView {
+  aggregate_models: AggregateModelView[];
+  config_version: number;
+}
+
+export interface PutAggregateModelsPayload {
+  aggregate_models: AggregateModelView[];
 }
 
 export interface CreateProviderPayload {

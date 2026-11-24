@@ -430,6 +430,25 @@ pub fn pool_quota_exhausted(
         && !pool.majority_permanently_unavailable()
 }
 
+/// Whether a failed chain entry should trip the model circuit breaker so the
+/// next request skips it until the cooldown window expires.
+///
+/// Only retryable, entry-specific failures qualify: a missing model, an
+/// upstream 429, an exhausted quota, or a 5xx/connection failure. Client errors
+/// (400 parameter problems) and auth failures are NOT chain-entry faults — the
+/// next provider would fail identically, and cooling the entry would only hide
+/// a config bug.
+pub fn is_chain_retryable(kind: &ponyllm_core::error::GatewayErrorKind) -> bool {
+    use ponyllm_core::error::GatewayErrorKind as K;
+    matches!(
+        kind,
+        K::ModelNotFound
+            | K::RateLimitExceeded { .. }
+            | K::QuotaExhausted
+            | K::UpstreamUnavailable
+    )
+}
+
 /// Prefer upstream Retry-After, else earliest pool unlock ceiled to seconds.
 ///
 /// The 60s cap applies ONLY to the sliding-window `RateLimitExceeded` branch

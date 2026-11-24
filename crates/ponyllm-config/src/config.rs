@@ -163,6 +163,36 @@ pub struct GatewaySection {
     /// Default order: `["gemini-3.8-flash", "deepseek-v4-flash"]`.
     #[serde(default = "default_auto_models")]
     pub auto_models: Vec<String>,
+    /// Explicit aggregate models (virtual model name + ordered priority chain).
+    /// Each chain entry is `provider/model` (pinned) or a bare `model` (any
+    /// provider). The declared order IS the execution order: the router never
+    /// re-sorts an aggregate chain by price/latency. Empty = feature dormant
+    /// (legacy configs are byte-for-byte unaffected).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aggregate_models: Vec<AggregateModelSpec>,
+}
+
+/// One aggregate (virtual) model: a client-visible name backed by an ordered
+/// chain of physical `provider/model` targets.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct AggregateModelSpec {
+    /// Client-visible virtual model name (e.g. `deepseek-free`).
+    pub name: String,
+    /// Ordered priority chain. Entry form: `provider/model` (pinned to that
+    /// provider) or bare `model` (any provider carrying that exact model name).
+    #[serde(default)]
+    pub chain: Vec<String>,
+    /// Cooldown applied to a chain entry after a retryable failure. While
+    /// cooling down the entry is skipped; once it expires the entry re-enters
+    /// the chain at its declared position (automatic return to the primary).
+    #[serde(default = "default_aggregate_cooldown_secs")]
+    pub cooldown_secs: u64,
+}
+
+/// Default chain-entry cooldown (seconds): 90s. Free tiers usually recover
+/// within minutes; the legacy `auto` breaker's 600s is far too slow for that.
+pub fn default_aggregate_cooldown_secs() -> u64 {
+    90
 }
 
 pub fn default_auto_models() -> Vec<String> {
@@ -608,6 +638,7 @@ impl Default for GatewaySection {
             admin_session_enabled: default_admin_session_enabled(),
             admin_session_ttl_secs: default_admin_session_ttl_secs(),
             auto_models: default_auto_models(),
+            aggregate_models: Vec::new(),
         }
     }
 }

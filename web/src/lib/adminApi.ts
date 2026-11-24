@@ -9,6 +9,8 @@ import type {
   ModelTestView,
   AutoModelsView,
   PutAutoModelsPayload,
+  AggregateModelsView,
+  PutAggregateModelsPayload,
   CreateProviderPayload,
   UpdateProviderPayload,
   CreateModelPayload,
@@ -73,6 +75,17 @@ export const adminApi = {
 
   updateAutoModels(payload: PutAutoModelsPayload, ifMatchVersion?: number | string) {
     return alova.Put<AutoModelsView>('/api/admin/auto-models', payload, {
+      headers: ifMatchHeaders(ifMatchVersion),
+    });
+  },
+
+  /** 聚合模型（虚拟名 + 有序 provider/model 链）：链序即执行序。 */
+  getAggregateModels() {
+    return alova.Get<AggregateModelsView>('/api/admin/aggregate-models');
+  },
+
+  updateAggregateModels(payload: PutAggregateModelsPayload, ifMatchVersion?: number | string) {
+    return alova.Put<AggregateModelsView>('/api/admin/aggregate-models', payload, {
       headers: ifMatchHeaders(ifMatchVersion),
     });
   },

@@ -127,6 +127,7 @@ default_protocol = "systemone"
 #   若要让 economy 策略按真实成本决策，改 `free` 或填真实单价（另一次决策）。
 [providers.magpie]
 base_url = "http://100.95.193.103:3425/v1"
+proxy = "direct"                  # 直连免疫：Tailscale 内网直达，严禁继承出海代理（防 pproxy idle timeout 断流）
 default_model = "default"          # 占位；真值以 magpie 目录为准（新增上游后需重映射）
 strategy = "priority"
 billing_mode = "metered"
@@ -258,3 +259,23 @@ egress_strategy = "round_robin"
 #   SameSite=Strict cookie，管理凭证不再常驻前端 sessionStorage（配合 XSS 加固断链）。
 # 多副本注意：会话表为 per-pod 内存（上限 4096 LRU），replica 间不共享、重启即失效。
 # 也可用环境变量在启动时覆盖：PONYLLM_ADMIN_SESSION_ENABLED=1 / PONYLLM_ADMIN_SESSION_TTL_SECS=<n>。
+
+# ── 路由：聚合模型（优先级链 + 链项冷却回归，2026-11-23）─────────────────────
+# 场景：免费通道（并发低）为主、同名异源顶替、冷却到期自动回主。
+# 语义（契约 .agents/notes/implemented/architecture/2026-11-23-aggregate-model-priority-chain.md）：
+#   • chain 的顺序 = 执行顺序，网关不会按价格/延迟重排；
+#   • 条目必须写成 `provider/model`，用于消解跨 provider 的命名差异；
+#   • 链项失败后冷却 cooldown_secs（默认 90s），冷却期内被跳过，到期回到原位；
+#   • 链即授权：链里写了谁就按顺序用谁，含付费项（不设单独的「是否允许付费」开关；
+#     成本可见性靠链项 billing_mode 与 aggregate_fallback 事件）。
+# 启用后客户端直接请求 `deepseek-free` 即可（/v1/models 会列出该虚拟名）。
+# [gateway]
+# [[gateway.aggregate_models]]
+# name = "deepseek-free"
+# chain = ["sense/deepseek-flash", "magpie/deepseek-v4.1-flash", "workbuddy/deepseek-v4.1-flash"]
+# cooldown_secs = 90
+#
+# 等价管理面（Web 控制台「聚合模型」卡片走同一接口）：
+#   GET /api/admin/aggregate-models
+#   PUT /api/admin/aggregate-models   （需 If-Match: <config_version>）
+

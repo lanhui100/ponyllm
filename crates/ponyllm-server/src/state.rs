@@ -877,6 +877,40 @@ impl AppState {
             false
         }
     }
+
+    /// Chain-entry cooldown window when `model` is an aggregate (virtual) model.
+    ///
+    /// `None` = not an aggregate model, so the caller keeps the legacy 600s
+    /// `auto` breaker window. Aggregate chains declare their own window
+    /// (default 90s): free tiers recover within minutes, and a long window
+    /// would keep traffic parked on the fallback long after the primary healed.
+    pub fn aggregate_cooldown(&self, model: &str) -> Option<std::time::Duration> {
+        let requested = model.trim();
+        let config = self.config.read();
+        config
+            .aggregate_models
+            .iter()
+            .find(|a| a.name.eq_ignore_ascii_case(requested))
+            .map(|a| std::time::Duration::from_secs(a.cooldown_secs.max(1)))
+    }
+
+    /// Whether the request targets an explicitly configured routing ladder:
+    /// a virtual aggregate model, or a physical model whose spec declares
+    /// non-empty `fallbacks`.
+    ///
+    /// This is deliberately narrower than "more than one candidate": several
+    /// providers publishing the same model name is legacy transparent
+    /// failover, and a pinned request there must keep the quota boundary
+    /// (`cross_provider_quota_failover = false` by default) instead of silently
+    /// draining a second provider's quota.
+    pub fn has_configured_fallbacks(&self, model: &str) -> bool {
+        let requested = model.trim();
+        let config = self.config.read();
+        config.providers.values().any(|p_cfg| {
+            (p_cfg.default_model == requested || p_cfg.models.iter().any(|m| m == requested))
+                && !p_cfg.get_model_spec(requested).fallbacks.is_empty()
+        })
+    }
     pub fn save_telemetry_snapshot(&self) -> std::io::Result<()> {
         let path = match &self.telemetry_snapshot_path {
             Some(p) => p.clone(),
@@ -2368,6 +2402,22 @@ impl AppState {
 
         let cached_provider = prompt.and_then(|p| self.hot_cache.probe_cached_provider(p));
 
+        // Aggregate (virtual) models: exact-name match, declared chain order.
+        // Checked before auto/pinned so the feature owns one branch only; a
+        // physical model name still wins (see `resolve_aggregate_targets`).
+        if !parsed.is_auto {
+            if let Some(resolved) = self.resolve_aggregate_targets(
+                parsed,
+                strategy,
+                &config,
+                proto_override,
+                inbound,
+                required_modalities,
+            ) {
+                return resolved;
+            }
+        }
+
         if parsed.is_auto {
             self.resolve_auto_targets(
                 parsed,
@@ -2497,6 +2547,197 @@ impl AppState {
         }
 
         Ok(self.sort_auto_candidates(candidates, strategy, config, cached_provider, inbound))
+    }
+
+    /// Resolve an aggregate (virtual) model into its declared priority chain.
+    ///
+    /// `None` = the requested name is not an aggregate model, so the caller
+    /// keeps the untouched legacy `auto` / pinned path. This also means a
+    /// physical model name always shadows an aggregate of the same name.
+    ///
+    /// `Some(..)` = it is one. The returned order is exactly the declared
+    /// chain order — never re-sorted by price / latency / health — with
+    /// cooling-down entries skipped and unknown entries skipped with a WARN.
+    /// The chain is itself the authorization: whatever the operator selected
+    /// is tried, free or paid; cost stays visible through `billing_mode` on
+    /// every target and the `aggregate_fallback` event rather than a gate.
+    fn resolve_aggregate_targets(
+        &self,
+        parsed: &ParsedRequestModel,
+        strategy: GatewayRoutingStrategy,
+        config: &GatewayConfig,
+        proto_override: Option<UpstreamProtocol>,
+        inbound: Option<UpstreamProtocol>,
+        required_modalities: &[&str],
+    ) -> Option<Result<Vec<RoutedTarget>>> {
+        let requested = parsed.clean_model_name.trim();
+        // Physical names always win: an aggregate never shadows a model some
+        // provider really serves (keeps legacy configs byte-for-byte intact).
+        let shadows_physical = config.providers.values().any(|p_cfg| {
+            p_cfg.default_model == requested || p_cfg.models.iter().any(|m| m == requested)
+        });
+        if shadows_physical {
+            return None;
+        }
+        let aggr = config
+            .aggregate_models
+            .iter()
+            .find(|a| a.name.eq_ignore_ascii_case(requested))?;
+
+        if aggr.chain.is_empty() {
+            return Some(Err(CoreError::Internal(format!(
+                "Aggregate model '{}' has an empty chain",
+                aggr.name
+            ))));
+        }
+
+        let ordered_pnames = provider_names_ordered(&config.providers);
+        let mut targets: Vec<RoutedTarget> = Vec::new();
+
+        for entry in &aggr.chain {
+            let entry = entry.trim();
+            if entry.is_empty() {
+                continue;
+            }
+
+            // `provider/model` pins one provider; a bare `model` accepts every
+            // provider that really carries that exact name.
+            let mut matched: Vec<(String, String)> = Vec::new();
+            match entry.split_once('/') {
+                Some((p_name, model_name)) => {
+                    let (p_name, model_name) = (p_name.trim(), model_name.trim());
+                    let known = config.providers.get(p_name).is_some_and(|p_cfg| {
+                        p_cfg.default_model == model_name
+                            || p_cfg.models.iter().any(|m| m == model_name)
+                    });
+                    if known {
+                        matched.push((p_name.to_string(), model_name.to_string()));
+                    } else {
+                        tracing::warn!(
+                            aggregate = %aggr.name,
+                            entry = %entry,
+                            "aggregate chain entry is not a configured provider/model; skipping"
+                        );
+                    }
+                }
+                None => {
+                    for p_name in &ordered_pnames {
+                        let p_cfg = &config.providers[p_name];
+                        if p_cfg.default_model == entry || p_cfg.models.iter().any(|m| m == entry)
+                        {
+                            matched.push((p_name.clone(), entry.to_string()));
+                        }
+                    }
+                    if matched.is_empty() {
+                        tracing::warn!(
+                            aggregate = %aggr.name,
+                            entry = %entry,
+                            "aggregate chain entry matches no configured provider; skipping"
+                        );
+                    }
+                }
+            }
+
+            for (p_name, model_name) in matched {
+                // Chain-entry circuit breaker: a cooling entry is skipped, and
+                // once its window expires it re-enters at this same position —
+                // traffic therefore returns to the primary by itself.
+                if self.is_model_cooling_down(&p_name, &model_name) {
+                    tracing::info!(
+                        aggregate = %aggr.name,
+                        provider = %p_name,
+                        model = %model_name,
+                        "aggregate chain entry cooling down; skipping"
+                    );
+                    continue;
+                }
+
+                let p_cfg = &config.providers[&p_name];
+                let m_spec = p_cfg.get_model_spec(&model_name);
+                let billing_mode = p_cfg.get_model_billing_mode(&model_name);
+                let pricing = p_cfg.get_model_pricing(&model_name);
+
+                // Cost visibility, not a gate: the declared chain IS the
+                // operator's authorization, so paid entries are tried as
+                // written. Trace the billing mode so a fallback onto a paid
+                // provider stays auditable after the fact.
+                if billing_mode != BillingMode::Free && !pricing.is_free() {
+                    tracing::info!(
+                        aggregate = %aggr.name,
+                        provider = %p_name,
+                        model = %model_name,
+                        "aggregate chain entry is paid; trying it as declared in the chain"
+                    );
+                }
+
+                if parsed.is_1m_context
+                    && !is_context_capacity_compatible("1M", &m_spec.context_window)
+                {
+                    tracing::warn!(
+                        aggregate = %aggr.name,
+                        provider = %p_name,
+                        model = %model_name,
+                        "aggregate chain entry cannot serve the requested 1M context; skipping"
+                    );
+                    continue;
+                }
+
+                let (protocol, endpoint_base) =
+                    resolve_effective_protocol(&p_name, p_cfg, &model_name, proto_override, inbound);
+                let target = RoutedTarget {
+                    provider_name: p_name.clone(),
+                    base_url: m_spec
+                        .base_url
+                        .clone()
+                        .unwrap_or_else(|| p_cfg.base_url.clone()),
+                    physical_model: model_name.clone(),
+                    tier: m_spec.tier,
+                    priority: m_spec.priority,
+                    strategy,
+                    upstream_protocol: protocol,
+                    endpoint_base,
+                    context_window: m_spec.context_window.clone(),
+                    billing_mode,
+                    pricing,
+                    thinking_spec: m_spec.thinking_spec(),
+                    temperature: m_spec.temperature,
+                    top_p: m_spec.top_p,
+                    input_types: m_spec.input_types.clone(),
+                    max_output: m_spec.max_output.clone(),
+                    output_types: m_spec.output_types.clone(),
+                };
+                if !required_modalities.is_empty()
+                    && !target.supports_modalities(required_modalities)
+                {
+                    tracing::warn!(
+                        aggregate = %aggr.name,
+                        provider = %p_name,
+                        model = %model_name,
+                        "aggregate chain entry lacks a required modality; skipping"
+                    );
+                    continue;
+                }
+                targets.push(target);
+            }
+        }
+
+        if targets.is_empty() {
+            return Some(Err(CoreError::Internal(format!(
+                "Aggregate model '{}' has no usable chain entry (unknown, cooling down, or lacking the requested modality/context)",
+                aggr.name
+            ))));
+        }
+
+        tracing::debug!(
+            aggregate = %aggr.name,
+            chain = ?targets
+                .iter()
+                .map(|t| format!("{}/{}", t.provider_name, t.physical_model))
+                .collect::<Vec<_>>(),
+            "aggregate model resolved to declared chain order"
+        );
+
+        Some(Ok(targets))
     }
 
     fn resolve_pinned_targets(
@@ -3301,6 +3542,40 @@ impl AppState {
                 }
             }
         }
+
+        // 4. Aggregate (virtual) models: a client-visible name backed by an
+        // ordered `provider/model` chain. Listed AFTER physical models so a
+        // physical name always wins the id collision (same rule as routing).
+        for aggr in &config.aggregate_models {
+            let name = aggr.name.trim();
+            if name.is_empty() || seen.contains(name) {
+                continue;
+            }
+            // Capacity = max over the chain's resolvable entries: an aggregate
+            // is only as capable as its best entry, never more.
+            let (ctx, out) = aggr
+                .chain
+                .iter()
+                .filter_map(|entry| {
+                    let model = entry
+                        .rsplit_once('/')
+                        .map(|(_, m)| m.trim())
+                        .unwrap_or(entry.trim());
+                    groups.get(&canonicalize_model_name(model)).copied()
+                })
+                .fold((0u64, 0u64), |acc, cur| (acc.0.max(cur.0), acc.1.max(cur.1)));
+            let (context_window, max_output) = if ctx == 0 { auto_cap } else { (ctx, out) };
+            result.push(ListedModel {
+                id: name.to_string(),
+                provider: "ponyllm".to_string(),
+                display_name: Some(format!("Aggregate({})", aggr.chain.join(" -> "))),
+                protocol: "auto".to_string(),
+                context_window,
+                max_output,
+            });
+            seen.insert(name.to_string());
+        }
+
         result
     }
 

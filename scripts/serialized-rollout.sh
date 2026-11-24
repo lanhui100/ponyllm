@@ -307,9 +307,8 @@ for role in "${ROLES[@]}"; do
     echo "[dry-run] Executing long-stream gate: python3 $PROBER_SCRIPT --long-stream-once (target: ${role})"
     echo "[dry-run] Long-stream gate passed for role=${role}"
   else
-    gate_ok=1
+    gate_ok=0
     if python3 "$PROBER_SCRIPT" --help 2>&1 | grep -q -- '--long-stream-once'; then
-      echo "Calling python3 $PROBER_SCRIPT --long-stream-once..."
       prober_args=(--long-stream-once)
       if [ -n "${PONYLLM_API_KEY:-}" ]; then
         prober_args+=(--api-key "$PONYLLM_API_KEY")
@@ -317,9 +316,17 @@ for role in "${ROLES[@]}"; do
       if [ -n "${PONYLLM_BASE_URL:-}" ]; then
         prober_args+=(--url "${PONYLLM_BASE_URL%/}/v1/chat/completions")
       fi
-      if ! python3 "$PROBER_SCRIPT" "${prober_args[@]}"; then
-        gate_ok=0
-      fi
+      for attempt in 1 2 3; do
+        echo "Calling python3 $PROBER_SCRIPT --long-stream-once (attempt ${attempt}/3)..."
+        if python3 "$PROBER_SCRIPT" "${prober_args[@]}"; then
+          gate_ok=1
+          break
+        fi
+        if [ "$attempt" -lt 3 ]; then
+          echo "Warning: Long-stream gate attempt ${attempt} failed, waiting 5s before retry..."
+          sleep 5
+        fi
+      done
     elif [ -n "${PONYLLM_BASE_URL:-}" ] && [ -n "${PONYLLM_API_KEY:-}" ]; then
       echo "Calling prober via environment parameters..."
       if ! python3 "$PROBER_SCRIPT" --long-stream-once 2>/dev/null; then

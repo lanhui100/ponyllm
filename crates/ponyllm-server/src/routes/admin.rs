@@ -250,6 +250,11 @@ pub struct ModelView {
     /// inherits the provider-level default. See [`AdminRateLimits`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rate_limits: Option<AdminRateLimits>,
+    /// Ordered model-level fallbacks (resolved by exact model name across
+    /// providers). Echoed back so the console can show what was written — the
+    /// write path accepted this field long before the read path exposed it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fallbacks: Vec<String>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -2259,6 +2264,7 @@ pub async fn handle_admin_provider_models(
                 priority: m.priority,
                 proxy: m.proxy.clone(),
                 rate_limits: m.rate_limits.map(Into::into),
+                fallbacks: m.fallbacks.clone(),
             }
         })
         .collect();
@@ -2305,6 +2311,7 @@ pub async fn handle_admin_models(State(state): State<Arc<AppState>>) -> impl Int
                 priority: m.priority,
                 proxy: m.proxy.clone(),
                 rate_limits: m.rate_limits.map(Into::into),
+                fallbacks: m.fallbacks.clone(),
             });
         }
     }
@@ -2587,6 +2594,7 @@ pub async fn handle_admin_create_model(
             priority: payload.priority,
             proxy: model_proxy,
             rate_limits: payload.rate_limits,
+            fallbacks: payload.fallbacks.clone().unwrap_or_default(),
         }),
     )
         .into_response()
@@ -2921,6 +2929,7 @@ pub async fn handle_admin_update_model(
         priority: existing_config.priority,
         proxy: existing_config.proxy.clone(),
         rate_limits: existing_config.rate_limits.map(Into::into),
+        fallbacks: existing_config.fallbacks.clone(),
     })
     .into_response()
 }
@@ -4605,6 +4614,173 @@ pub async fn handle_admin_put_auto_models(
     Json(AutoModelsView {
         auto_models: cleaned_models,
         active_models_order,
+        config_version: new_version,
+    })
+    .into_response()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct AggregateModelView {
+    /// Client-visible virtual model name (e.g. `deepseek-free`).
+    pub name: String,
+    /// Ordered `provider/model` priority chain. Declared order IS execution
+    /// order; a failed entry cools down for `cooldown_secs` and then re-enters
+    /// at the same position (automatic return to the primary).
+    pub chain: Vec<String>,
+    /// Chain-entry cooldown seconds after a retryable failure (default 90).
+    pub cooldown_secs: u64,
+}
+
+impl From<&ponyllm_config::AggregateModelSpec> for AggregateModelView {
+    fn from(spec: &ponyllm_config::AggregateModelSpec) -> Self {
+        Self {
+            name: spec.name.clone(),
+            chain: spec.chain.clone(),
+            cooldown_secs: spec.cooldown_secs,
+        }
+    }
+}
+
+impl From<&AggregateModelView> for ponyllm_config::AggregateModelSpec {
+    fn from(view: &AggregateModelView) -> Self {
+        Self {
+            name: view.name.trim().to_string(),
+            chain: view.chain.clone(),
+            cooldown_secs: view.cooldown_secs.max(1),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+pub struct AggregateModelsView {
+    pub aggregate_models: Vec<AggregateModelView>,
+    pub config_version: u64,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct PutAggregateModelsPayload {
+    pub aggregate_models: Vec<AggregateModelView>,
+}
+
+/// Reject configurations the router cannot honour, so the console never
+/// persists a silently-dead aggregate (empty chain, duplicate name, or a name
+/// that shadows a physical model — physical names always win at routing).
+fn validate_aggregate_models(
+    models: &[AggregateModelView],
+    config: &crate::config::GatewayConfig,
+) -> Result<Vec<ponyllm_config::AggregateModelSpec>, String> {
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut out: Vec<ponyllm_config::AggregateModelSpec> = Vec::with_capacity(models.len());
+    for view in models {
+        let name = view.name.trim();
+        if name.is_empty() {
+            return Err("aggregate model name must not be empty".to_string());
+        }
+        if !seen.insert(name.to_ascii_lowercase()) {
+            return Err(format!("duplicate aggregate model name '{name}'"));
+        }
+        let shadows_physical = config.providers.values().any(|p| {
+            p.default_model == name || p.models.iter().any(|m| m == name)
+        });
+        if shadows_physical {
+            return Err(format!(
+                "aggregate model name '{name}' collides with a configured physical model"
+            ));
+        }
+        let mut chain: Vec<String> = Vec::with_capacity(view.chain.len());
+        for entry in &view.chain {
+            let entry = entry.trim();
+            if entry.is_empty() {
+                continue;
+            }
+            match entry.split_once('/') {
+                Some((p, model)) if !p.trim().is_empty() && !model.trim().is_empty() => {}
+                _ => {
+                    return Err(format!(
+                        "chain entry '{entry}' must be written as 'provider/model'"
+                    ))
+                }
+            }
+            chain.push(entry.to_string());
+        }
+        if chain.is_empty() {
+            return Err(format!(
+                "aggregate model '{name}' needs at least one chain entry"
+            ));
+        }
+        out.push(ponyllm_config::AggregateModelSpec {
+            name: name.to_string(),
+            chain,
+            cooldown_secs: view.cooldown_secs.max(1),
+        });
+    }
+    Ok(out)
+}
+
+#[utoipa::path(get, path = "/api/admin/aggregate-models", responses((status = 200, body = AggregateModelsView)))]
+pub async fn handle_admin_get_aggregate_models(
+    State(state): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let (file, _store_version) = match load_store_config(&state).await {
+        Ok((f, ver)) => (f, ver),
+        Err(resp) => return resp.into_response(),
+    };
+    let aggregate_models: Vec<AggregateModelView> = state
+        .config
+        .read()
+        .aggregate_models
+        .iter()
+        .map(AggregateModelView::from)
+        .collect();
+    Json(AggregateModelsView {
+        aggregate_models,
+        config_version: file.config_version,
+    })
+    .into_response()
+}
+
+#[utoipa::path(put, path = "/api/admin/aggregate-models", request_body = PutAggregateModelsPayload, responses((status = 200, body = AggregateModelsView)))]
+pub async fn handle_admin_put_aggregate_models(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<PutAggregateModelsPayload>,
+) -> impl IntoResponse {
+    if let Err(resp) = check_admin_write_enabled(&state) {
+        return resp;
+    }
+    let _lock = state.admin_write_lock.lock().await;
+
+    let (mut file, store_version) = match load_store_config(&state).await {
+        Ok((f, ver)) => (f, ver),
+        Err(resp) => return resp,
+    };
+    if let Err(resp) = check_if_match(&headers, file.config_version) {
+        return resp;
+    }
+
+    let validated = {
+        let cfg = state.config.read();
+        match validate_aggregate_models(&body.aggregate_models, &cfg) {
+            Ok(v) => v,
+            Err(msg) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": {"message": msg, "code": "invalid_aggregate_models"}})),
+                )
+                    .into_response()
+            }
+        }
+    };
+
+    file.gateway.aggregate_models = validated.clone();
+    let new_version = match save_store_config(&state, &mut file, &store_version).await {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
+    state.config.write().aggregate_models = validated.clone();
+
+    Json(AggregateModelsView {
+        aggregate_models: validated.iter().map(AggregateModelView::from).collect(),
         config_version: new_version,
     })
     .into_response()
@@ -6590,6 +6766,8 @@ pub async fn handle_admin_provider_upstream_models(
         handle_users_reset_usage,
         handle_admin_get_auto_models,
         handle_admin_put_auto_models,
+        handle_admin_get_aggregate_models,
+        handle_admin_put_aggregate_models,
         handle_admin_service_status,
         handle_admin_auth_rotate,
         handle_admin_antigravity_auth_url,
@@ -6625,6 +6803,9 @@ pub async fn handle_admin_provider_upstream_models(
         UpdateUserPayload,
         AutoModelsView,
         PutAutoModelsPayload,
+        AggregateModelView,
+        AggregateModelsView,
+        PutAggregateModelsPayload,
         ServiceStatusView,
         RotateView,
         AntigravityAuthUrlView,
@@ -6712,6 +6893,10 @@ pub fn admin_routes() -> axum::Router<Arc<AppState>> {
         .route(
             "/api/admin/auto-models",
             get(handle_admin_get_auto_models).put(handle_admin_put_auto_models),
+        )
+        .route(
+            "/api/admin/aggregate-models",
+            get(handle_admin_get_aggregate_models).put(handle_admin_put_aggregate_models),
         )
         .route(
             "/api/admin/service/status",

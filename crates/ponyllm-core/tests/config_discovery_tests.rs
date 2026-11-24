@@ -1,9 +1,30 @@
 use ponyllm_core::discovery::resolve_config_path_from;
 use std::fs;
 use std::path::Path;
+use std::sync::{Mutex, MutexGuard};
+
+/// `resolve_config_path_from` consults two process-global things: the
+/// `PONYLLM_CONFIG` environment variable and, when no `start_dir` is given, the
+/// current working directory. Cargo runs test functions on parallel threads
+/// inside one process, so `test_env_var_override` setting the variable could
+/// race a walk-up assertion on another thread and win the read.
+///
+/// That is exactly what CI saw on macOS (`left: "/env/override/ponyllm.toml"`,
+/// `right: "<tmpdir>/ponyllm.toml"`) while linux/windows happened to schedule
+/// the writes and reads apart. Serialize every test that touches the resolver
+/// instead of trusting the scheduler; a poisoned lock still yields the guard so
+/// one failing test cannot wedge the rest of the file.
+static RESOLVER_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+fn env_lock() -> MutexGuard<'static, ()> {
+    RESOLVER_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 #[test]
 fn test_explicit_path_takes_precedence() {
+    let _guard = env_lock();
     let explicit = Path::new("custom/path/ponyllm.toml");
     let resolved = resolve_config_path_from(Some(explicit), None);
     assert_eq!(resolved, explicit);
@@ -11,14 +32,16 @@ fn test_explicit_path_takes_precedence() {
 
 #[test]
 fn test_env_var_override() {
+    let _guard = env_lock();
     std::env::set_var("PONYLLM_CONFIG", "/env/override/ponyllm.toml");
     let resolved = resolve_config_path_from(None, None);
-    assert_eq!(resolved.to_str().unwrap(), "/env/override/ponyllm.toml");
     std::env::remove_var("PONYLLM_CONFIG");
+    assert_eq!(resolved.to_str().unwrap(), "/env/override/ponyllm.toml");
 }
 
 #[test]
 fn test_walk_upwards_from_child_directory() {
+    let _guard = env_lock();
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();
     let root_config = root.join("ponyllm.toml");
@@ -34,6 +57,7 @@ fn test_walk_upwards_from_child_directory() {
 
 #[test]
 fn test_fallback_when_none_exists() {
+    let _guard = env_lock();
     let temp = tempfile::tempdir().unwrap();
     let empty_dir = temp.path().join("empty");
     fs::create_dir_all(&empty_dir).unwrap();

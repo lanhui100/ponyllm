@@ -373,6 +373,20 @@ impl ProviderConfig {
             }
             return EffectiveProxy::Custom(trimmed);
         }
+
+        // Defensive immunity: if no explicit proxy is configured, domestic or
+        // private/LAN/Tailscale endpoints MUST default to Direct, preventing
+        // accidental routing to pproxy or gateway fallback egress.
+        let target_url = self
+            .model_specs
+            .iter()
+            .find(|m| m.name == model_name)
+            .and_then(|m| m.base_url.as_deref())
+            .unwrap_or(&self.base_url);
+        if is_domestic_or_private_upstream(target_url) {
+            return EffectiveProxy::Direct;
+        }
+
         EffectiveProxy::InheritGateway
     }
 
@@ -579,6 +593,13 @@ pub struct GatewayConfig {
     /// Ordered list of candidate models for pure `auto` routing.
     #[serde(default = "ponyllm_config::default_auto_models")]
     pub auto_models: Vec<String>,
+    /// Explicit aggregate models: a client-visible virtual name backed by an
+    /// ordered `provider/model` chain. Declared order IS execution order (no
+    /// price/latency re-sort), and a failed entry cools down for its
+    /// `cooldown_secs` before re-entering the chain at the same position.
+    /// Empty = dormant; legacy configs deserialize unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aggregate_models: Vec<ponyllm_config::AggregateModelSpec>,
 }
 
 fn default_admin_session_enabled() -> bool {
@@ -659,6 +680,7 @@ impl Default for GatewayConfig {
             user_tokens_enabled: default_false(),
             jwt_secret: None,
             auto_models: ponyllm_config::default_auto_models(),
+            aggregate_models: Vec::new(),
         }
     }
 }
@@ -761,6 +783,160 @@ impl GatewayConfig {
     }
 }
 
+/// Helper to robustly extract hostname/IP from a URL string without requiring
+/// a heavy full URI parser. Strips scheme, credentials, port, and trailing paths.
+pub fn extract_host_from_url(raw: &str) -> Option<&str> {
+    let s = raw.trim();
+    let after_scheme = if let Some(idx) = s.find("://") {
+        &s[idx + 3..]
+    } else {
+        s
+    };
+    // Strip userinfo if present: user:pass@host:port
+    let host_and_rest = if let Some(at_idx) = after_scheme.find('@') {
+        let slash_idx = after_scheme.find('/');
+        if slash_idx.map(|si| at_idx < si).unwrap_or(true) {
+            &after_scheme[at_idx + 1..]
+        } else {
+            after_scheme
+        }
+    } else {
+        after_scheme
+    };
+
+    // Cut off path/query/fragment: find first '/', '?', '#'
+    let host_port = host_and_rest
+        .split(&['/', '?', '#'][..])
+        .next()
+        .unwrap_or(host_and_rest)
+        .trim();
+
+    if host_port.is_empty() {
+        return None;
+    }
+
+    // Handle IPv6 literal [::1]:8080
+    if host_port.starts_with('[') {
+        if let Some(close_bracket) = host_port.find(']') {
+            return Some(&host_port[1..close_bracket]);
+        }
+    }
+
+    // Strip port for standard hostname/IPv4
+    let host = host_port.split(':').next().unwrap_or(host_port).trim();
+    if host.is_empty() {
+        None
+    } else {
+        Some(host)
+    }
+}
+
+/// Determines if an upstream URL belongs to a domestic (China) endpoint or a
+/// private/LAN/Tailscale network. Such upstreams must never accidentally inherit
+/// the gateway's global egress proxy (e.g. pproxy) because doing so triggers
+/// idle timeout disconnections during long streaming and violates network topology.
+pub fn is_domestic_or_private_upstream(raw_url: &str) -> bool {
+    let host = match extract_host_from_url(raw_url) {
+        Some(h) if !h.is_empty() => h.to_ascii_lowercase(),
+        _ => return false,
+    };
+
+    // 1. Literal IP addresses (IPv4 & IPv6)
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        match ip {
+            std::net::IpAddr::V4(v4) => {
+                let octets = v4.octets();
+                // Loopback (127.0.0.0/8)
+                if v4.is_loopback() {
+                    return true;
+                }
+                // Private RFC 1918 (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16)
+                if octets[0] == 10
+                    || (octets[0] == 172 && (16..=31).contains(&octets[1]))
+                    || (octets[0] == 192 && octets[1] == 168)
+                {
+                    return true;
+                }
+                // CGNAT / Tailscale (100.64.0.0/10)
+                if octets[0] == 100 && (64..=127).contains(&octets[1]) {
+                    return true;
+                }
+                // Link-local (169.254.0.0/16) or unspecified (0.0.0.0)
+                if v4.is_link_local() || v4.is_unspecified() {
+                    return true;
+                }
+            }
+            std::net::IpAddr::V6(v6) => {
+                if v6.is_loopback() || v6.is_unspecified() {
+                    return true;
+                }
+                let seg = v6.segments();
+                // ULA (fc00::/7)
+                if (seg[0] & 0xfe00) == 0xfc00 {
+                    return true;
+                }
+                // Link-local (fe80::/10)
+                if (seg[0] & 0xffc0) == 0xfe80 {
+                    return true;
+                }
+            }
+        }
+    }
+
+    // 2. Local/Internal Hostnames (single-label names like 'workbuddy-host', 'localhost', etc.)
+    if !host.contains('.') || host == "localhost" {
+        return true;
+    }
+    if host.ends_with(".local")
+        || host.ends_with(".lan")
+        || host.ends_with(".internal")
+        || host.ends_with(".cluster.local")
+        || host.ends_with(".svc")
+    {
+        return true;
+    }
+
+    // 3. Domestic China TLDs (.cn, .com.cn, .net.cn, .org.cn, etc.)
+    if host == "cn" || host.ends_with(".cn") {
+        return true;
+    }
+
+    // 4. Known domestic AI platform / cloud domains (regardless of TLD)
+    const DOMESTIC_DOMAINS: &[&str] = &[
+        "deepseek.com",
+        "sensenova.cn",
+        "aliyun.com",
+        "aliyuncs.com",
+        "baidubce.com",
+        "baidu.com",
+        "volces.com",
+        "volcengine.com",
+        "moonshot.cn",
+        "zhipuai.cn",
+        "bigmodel.cn",
+        "minimax.chat",
+        "minimaxi.com",
+        "stepfun.com",
+        "01.ai",
+        "lingyiwanwu.com",
+        "xfyun.cn",
+        "xf-yun.com",
+        "tencent.com",
+        "tencentcloudapi.com",
+        "siliconflow.cn",
+        "siliconflow.com",
+        "psydo.top",
+    ];
+
+    for domain in DOMESTIC_DOMAINS {
+        if host == *domain || host.ends_with(&format!(".{domain}")) {
+            return true;
+        }
+    }
+
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -835,5 +1011,42 @@ mod tests {
             Some(std::time::Duration::from_secs(120))
         );
         assert_eq!(cfg.effective_ttfb_timeout("disabled_prov"), None);
+    }
+
+    #[test]
+    fn test_is_domestic_or_private_upstream_classification() {
+        // Private / LAN / Tailscale
+        assert!(is_domestic_or_private_upstream("http://100.95.193.103:3425/v1"));
+        assert!(is_domestic_or_private_upstream("http://10.1.2.3:8080"));
+        assert!(is_domestic_or_private_upstream("http://172.20.0.5/api"));
+        assert!(is_domestic_or_private_upstream("http://192.168.1.1:80"));
+        assert!(is_domestic_or_private_upstream("http://127.0.0.1:8899"));
+        assert!(is_domestic_or_private_upstream("http://localhost:3000"));
+        assert!(is_domestic_or_private_upstream("http://workbuddy-host:8788/v1"));
+        assert!(is_domestic_or_private_upstream("http://api.service.internal/v1"));
+        assert!(is_domestic_or_private_upstream("http://gateway.cluster.local/v1"));
+        assert!(is_domestic_or_private_upstream("http://pproxy-host.ponyllm.svc:8899"));
+        assert!(is_domestic_or_private_upstream("http://[::1]:8080/v1"));
+
+        // Domestic China TLDs & Platforms
+        assert!(is_domestic_or_private_upstream("https://token.sensenova.cn/v1"));
+        assert!(is_domestic_or_private_upstream("https://api.deepseek.com"));
+        assert!(is_domestic_or_private_upstream("https://dashscope.aliyuncs.com/compatible-mode/v1"));
+        assert!(is_domestic_or_private_upstream("https://ark.cn-beijing.volces.com/api/v3"));
+        assert!(is_domestic_or_private_upstream("https://api.moonshot.cn/v1"));
+        assert!(is_domestic_or_private_upstream("https://open.bigmodel.cn/api/paas/v4"));
+        assert!(is_domestic_or_private_upstream("https://api.minimax.chat/v1"));
+        assert!(is_domestic_or_private_upstream("https://api.stepfun.com/v1"));
+        assert!(is_domestic_or_private_upstream("https://api.lingyiwanwu.com/v1"));
+        assert!(is_domestic_or_private_upstream("https://spark-api.xf-yun.com/v1"));
+        assert!(is_domestic_or_private_upstream("https://api.siliconflow.cn/v1"));
+        assert!(is_domestic_or_private_upstream("https://api.psydo.top/v1"));
+
+        // Foreign Public Endpoints (should NOT be marked domestic/private)
+        assert!(!is_domestic_or_private_upstream("https://api.openai.com/v1"));
+        assert!(!is_domestic_or_private_upstream("https://api.anthropic.com/v1"));
+        assert!(!is_domestic_or_private_upstream("https://generativelanguage.googleapis.com/v1beta"));
+        assert!(!is_domestic_or_private_upstream("https://ai-gateway.vercel.sh/typesafe/v1"));
+        assert!(!is_domestic_or_private_upstream("https://opencode.ai/zen/v1"));
     }
 }

@@ -36,8 +36,13 @@ GATE="$HERE/no-residue.sh"
 }
 
 FAILN=0
-ok()  { printf '  [ok]   %s\n' "$*"; }
-bad() { printf '  [FAIL] %s\n' "$*" >&2; FAILN=$((FAILN+1)); }
+# U4（W3b）运行时计数：asserts = PASS_N + FAIL_N；REJECTS = **期望被拒（期望非零退出）**的断言条数，
+# 由 assert_rc 依"期望值"自动累加（贴着断言走，不是手写常数）。
+PASS_N=0
+FAIL_N=0
+REJECTS=0
+ok()  { PASS_N=$((PASS_N+1)); printf '  [ok]   %s\n' "$*"; }
+bad() { printf '  [FAIL] %s\n' "$*" >&2; FAILN=$((FAILN+1)); FAIL_N=$((FAIL_N+1)); }
 
 TMP=$(mktemp -d 2>/dev/null) || { printf 'no-residue.spec: FAIL 无法创建样本目录\n' >&2; exit 1; }
 trap 'rm -rf "$TMP"' EXIT
@@ -70,6 +75,7 @@ run_gate_grep() { # <样本仓根>（强制 grep 退化路径）
 }
 tail_of() { printf '%s' "$OUT" | tail -n 2 | tr '\n' ' '; }
 assert_rc() { # <期望 rc> <描述>
+  case "$1" in 0) ;; *) REJECTS=$((REJECTS+1)) ;; esac   # 期望非零 = 一条拒绝断言
   if [ "$RC" -eq "$1" ]; then ok "$2（exit $RC）"
   else bad "$2（期望 exit $1，实得 $RC；输出尾部：$(tail_of)）"; fi
 }
@@ -227,9 +233,34 @@ if [ -n "$D" ]; then
   fi
 fi
 
+# ---------- ⑫ 被 .gitignore 忽略的目录同样在检索面内（两条路径同口径）----------
+# 复现的假放行：.gitignore 写 dist/，dist/bundle.js 含被删字面串；rg 默认尊重 ignore → exit 0，
+# 而 grep 退化路径不看 ignore → exit 1。更松的一侧是 rg = 假放行（W2b/U10）。
+D=$(new_case) || bad "A9⑫ 样本仓创建失败"
+if [ -n "$D" ]; then
+  printf 'dist/\n' > "$D/.gitignore"
+  mkdir -p "$D/dist"
+  printf 'var x = PonyGoIgnoredProbe7;\n' > "$D/dist/bundle.js"
+  printf 'PonyGoIgnoredProbe7\t.\n' > "$(manifest_of "$D")"
+  run_gate "$D"
+  assert_rc 1 "A9⑫ 命中只在被 .gitignore 忽略的目录 → 必须拒（rg 须 --no-ignore）"
+  assert_out_has "dist/bundle.js" "A9⑫ rg 路径必须点名被忽略目录里的命中文件"
+  run_gate_grep "$D"
+  assert_rc 1 "A9⑫ 退化 grep 路径：被忽略目录命中同样必须拒（两条路径口径一致）"
+  assert_out_has "dist/bundle.js" "A9⑫ 退化路径同样点名该文件"
+  # 正控制：删掉残留 → 两条路径都必须放行（别把 --no-ignore 写成一律拒绝）
+  rm -f "$D/dist/bundle.js"
+  run_gate "$D"
+  assert_rc 0 "A9⑫ 被忽略目录清空后 → rg 路径放行（正控制）"
+  run_gate_grep "$D"
+  assert_rc 0 "A9⑫ 被忽略目录清空后 → grep 路径放行（正控制）"
+fi
+
 if [ "$FAILN" -ne 0 ]; then
   printf '== no-residue.spec：未通过（%s 项不符预期——门要么失效要么误拒）==\n' "$FAILN" >&2
   exit 1
 fi
-printf '== no-residue.spec：通过（负样本必拒 + 正样本放行 + 参数/清单/范围/字面口径全部符合预期）==\n'
+printf '== no-residue.spec：通过（负样本必拒 + 正样本放行 + 参数/清单/范围/字面口径 + rg/grep 检索面同口径（隐藏目录、被 ignore 目录）全部符合预期）==\n'
+# U4（W3b）运行时契约：成功路径的最后一行
+printf '##SPEC asserts=%s rejects=%s\n' "$((PASS_N + FAIL_N))" "$REJECTS"
 exit 0

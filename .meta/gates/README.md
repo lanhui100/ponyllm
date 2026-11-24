@@ -11,25 +11,25 @@ repo 模板文件与 `ponygo` 内 heredoc 双写，EOL 归一后逐字节一致�
 
 | 资产 | 路径 | 角色 | 退出语义 |
 |---|---|---|---|
-| A1 | `.meta/gates/adr-verify.sh` | 暂存区 ADR 格式门（无参=暂存 ADR；带参=指定路径）；A6 `check` 在**任何跳过分支之前**早期 probe（见下「A6 的时序」） | 0 放行 / 非零拒绝 |
+| A1 | `.meta/gates/adr-verify.sh` | 暂存区 ADR 格式门（无参=暂存 ADR；带参=指定路径）；A6 `check` 在**任何跳过分支之前**早期 probe（见下「A6 的时序」）；**A6 缺失 → fail-closed 拒绝**（A6 不可判定即不许提交，删一个文件不能把封印摘掉） | 0 放行 / 非零拒绝 |
 | A2 | `.meta/gates/adr-verify.spec.sh` | A1 的负样本执行判据（非法→拒、合法→放行、TOCTOU→拒） | 0 = 自检通过 |
 | A3 | `.githooks/pre-commit`（或既有钩子内追加块） | 本地层挂载点 | 转发 A1 的退出码 |
 | A4 | `.meta/gates/ci-verify.sh` | forge 无关全树门（verify-note 整树 + A2 + A6/A7 + A8/A9，四段） | 0 放行 / 非零拒绝 |
-| A5 | `.github/workflows/ponygo-governance.yml` | GitHub 薄适配器（checkout + A4）；等价形态是主 `ci.yml` 内 `governance` job 直接跑 A4——只有同 workflow 的 job 才能被聚合门 `needs` 消费 | 同 A4 |
+| A5 | `.github/workflows/ponygo-governance.yml` | GitHub 薄适配器（checkout + A4 + 步骤 ②：`ponygo status`）；步骤 ② 覆盖 A4 看不见的判据面 2.1/2.4/2.5/2.6/1.2/1.9b/1.9c，实例无 CLI 时 `::warning::` + exit 0（如实声明未验证，**不是通过**）；等价形态是主 `ci.yml` 内 `governance` job 直接跑 A4——只有同 workflow 的 job 才能被聚合门 `needs` 消费 | 同 A4（步骤 ② 无 CLI 时不改退出码） |
 | A6 | `.meta/gates/archive-verify.sh` | 归档 SHA-256 封印门：`check`（默认，只读）/ `seal`（追加封印，互斥 + 原子替换），零旗标 | 0 通过 / 1 拒绝 |
 | A7 | `.meta/gates/archive-verify.spec.sh` | A6 的负样本执行判据（篡改/缺条目/孤儿/重复/非追加 → 必须拒；合法样本 → 放行） | 0 = 自检通过 |
-| A8 | `.meta/gates/no-residue.sh` | 零残留门（删除/收窄后的符号检索验收）：读清单 `.meta/gates/no-residue.manifest`（每行 `<pattern><TAB><scope>`），`rg --fixed-strings` 按字面检索（无 `rg` 退化 `grep -rIlF`）；缺清单/空清单 → 放行并打印跳过 | 0 放行（无命中 / 跳过）/ 1 命中、清单格式非法、未知参数 |
+| A8 | `.meta/gates/no-residue.sh` | 零残留门（删除/收窄后的符号检索验收）：读清单 `.meta/gates/no-residue.manifest`（每行 `<pattern><TAB><scope>`），`rg --no-ignore --fixed-strings --hidden` 按字面检索（无 `rg` 退化 `grep -rIlF`；两条路径**检索面同口径**：都不尊重 ignore 规则，含隐藏目录与被忽略文件）；**骨架不播种清单**——清单是**删除发生时**由人登记的判定项，**空清单不构成验证**（补一份空清单只是让门看起来在跑的仪式，判定不了任何东西）；缺清单/空清单 → 放行并打印跳过 | 0 放行（无命中 / 跳过）/ 1 命中、清单格式非法、未知参数 |
 | A9 | `.meta/gates/no-residue.spec.sh` | A8 的负样本执行判据（命中→拒 / 无命中→放行 / 空清单→放行 / 未知参数→拒 / 特殊字符按字面） | 0 = 自检通过 |
 
 **宇宙表只登记 A1/A2/A4/A6/A7/A8/A9**（不可变资产）：A3/A5 是实例可编辑文件（有人会追加自己的钩子逻辑、
 改 CI 触发），塞进 `UPGRADE_UNIVERSE` 会让实例永久 drift 红。`scratch-hygiene.sh` 也不进宇宙表——它是
 **本仓实例门**，不由 `init` 播种（见下节）。
 
-### 实例卫生门 scratch-hygiene.sh（init 不播种，CI 单点接线 `ci.yml:47`）
+### 实例卫生门 scratch-hygiene.sh（init 不播种，CI 单点接线见 `ci.yml` 的 governance 步）
 
 常载命约 7「临时产物统一下沉」的机械看守，只拦三类可判违例（`.scratch/` 被 Git 跟踪 / 根 `.gitignore` 缺
 `.scratch/` 声明 / 发布安装链引用 `.scratch`）；「平铺在源码旁」是 review 项，门不覆盖。接线 = **CI 单点**：
-`.github/workflows/ci.yml:47` 的 `governance` job 跑 `bash .meta/gates/scratch-hygiene.sh && bash .meta/gates/scratch-hygiene.spec.sh`；
+`ci.yml` 的 `governance` job 跑 `bash .meta/gates/scratch-hygiene.sh && bash .meta/gates/scratch-hygiene.spec.sh`；
 本地 pre-commit 不跑它，秒级预算留给 A1。
 
 ### 承诺 → 非零退出命令
@@ -47,6 +47,20 @@ repo 模板文件与 `ponygo` 内 heredoc 双写，EOL 归一后逐字节一致�
 | 删除/收窄后无残留符号 | `bash .meta/gates/no-residue.sh` | A8（清单 pattern 零命中；缺/空清单放行） |
 | 零残留门自己会拒绝非法样本 | `bash .meta/gates/no-residue.spec.sh` | A9（命中→拒 / 无命中→放行 / 空清单→放行 / 未知参数→拒） |
 | 远端层全树兜底 | `bash .meta/gates/ci-verify.sh` | A4（= `verify-note.sh` 整树 + A2 + A6/A7 + A8/A9，四段） |
+| 存量违例只豁免一次、不豁免增量 | `bash ponygo upgrade adopt`（写 `.meta/notes-baseline.json`，到期 ≤365 天） | 基线内违例被豁免；**基线外新增违例仍 exit 1**；过期后基线整体作废 |
+| 植入版本可追溯（不判断、只分类） | `bash ponygo upgrade --check`（读 `.meta/.ponygo-seed`） | 漂移行尾标注 `[stale]`（实例仍是植入字节）/ `[modified]`（实例侧被改）；退出码语义不变 |
+
+### 存量违例基线棘轮（U6）与植入版本基线（U8）
+
+两条**实例侧**的机器态文件，均由命令独占写入、禁止手填：
+
+- `.meta/notes-baseline.json`：`upgrade adopt` 写入的存量违例基线。fingerprint = `sha256(判据 \t 文件 \t
+  规范化明细)`——同一文件同一判据**明细变了就是新违例**，冻结不等于给该判据开永久后门。基线到期日
+  硬上限 365 天；过期后 `verify-note.sh` 把全部违例重新计入（`status`/`audit` 的摘要行会显示条数与到期日）。
+  基线过滤长在判定真源 `verify-note.sh` 里，故 A1（暂存区门）与 A4（全树门）**字节零改动**即获得棘轮语义。
+- `.meta/.ponygo-seed`：`init`/`upgrade apply` 写入的「框架 commit + 十七骨架文件 sha256」。
+  `upgrade --check` 用它把漂移分成 `stale`（实例仍是植入时字节）与 `modified`（实例侧被改）；
+  缺失/损坏只降级为 `unknown` + WARN，**不改变退出码**（provenance 不是判定面，把它变成门会重演 upgrade cliff）。
 
 ### 归档时先 seal（A6 的写路径）
 
@@ -72,7 +86,12 @@ A1 里 A6 是**早期 probe**，不是末尾收口：判定在任何 `skip` 分�
 变的是**判定时机**——把 A6 留到末尾会把"本次没有暂存 ADR"变成绕过封印的门（实测缺陷：
 删除或移出归档件不产生暂存 ADR 变更，末尾调用的 A6 永远跑不到）。故：
 `archive_probe` 先算出 A6 的 rc 与输出 → ADR 段照常判 → `archive_finish` 打印归档段并按 rc
-fail-closed 收口。门缺失时优雅回退（不影响 ADR 判定）。
+fail-closed 收口。
+
+**门缺失 → 拒绝（fail-closed）**：A6 不在场时 `archive_probe` 直接把 `ARCHIVE_RC=2` 并给出
+点名 A6 的拒绝文案（补救：跑 `ponygo init` 补回）。理由：封印是"归档件字节未变"的证据，而
+**删掉证据源本身**恰恰是最省力的绕过——旧实现"缺失则优雅回退"让 `rm .meta/gates/archive-verify.sh`
+一句话就永久关掉了封印判定（实测：删 A6 后篡改归档件 A1 仍 exit 0）。
 
 ### 本地层与远端层：互补，**不等价**（B5 实测结论）
 
@@ -243,6 +262,46 @@ bash .meta/gates/ci-verify.sh
 - 挂载：`git config core.hooksPath .githooks` + 在 .githooks/ 放 pre-commit / pre-push；
 - 每门一条"承诺 → 命令"的对应（凡机械可查的承诺必配命令，P2）。
 
+## 逃生口留痕（bypass ledger，**非门禁**）
+
+门禁的逃生口（`env-skip` / 跳过开关 / `--no-verify` 之外的显式放行口）**放行前必须追加一行留痕**。
+这一节只钉死**路径与格式**，不做成门：理由成不成立属语义判断（P6），门只能看到"有没有字"，
+看不到"该不该放"——把留痕做成硬门只会逼人绕开留痕本身（删日志比讲道理省事）。
+
+**路径**：`<git-common-dir>/ponygo-gate/bypass.log`
+
+- 用 `git rev-parse --git-common-dir` 解析（worktree / submodule 下与仓库根不同）；
+  返回相对路径时相对仓库根（`git rev-parse --show-toplevel`）拼接；
+- 非 git 仓 = 不存在；目录需自行 `mkdir -p`（本框架不代建，也不播种空文件——
+  空文件与"没有留痕"是同一件事，多一个空壳只会让人以为"机制在跑"）。
+
+**格式**：JSONL，**一行一个 JSON 对象 = 一次放行事件**，追加-only（不得改写/删除既有行）：
+
+```json
+{"ts":"2026-11-17T21:05:00+0800","gate":"git-flow-gate","why":"热修复直推 master","commit":"abc1234","owner":"dm"}
+```
+
+| 键 | 必填 | 语义 |
+|---|---|---|
+| `ts` | ✅ | 事件时间（ISO8601 或 epoch 秒） |
+| `gate` | ✅ | 逃生口所属门名（如 `git-flow-gate` / `drift-strict`） |
+| `why` | ✅ | 非空理由（为什么这次值得绕过） |
+| `commit` | — | 被放行的提交 sha |
+| `owner` | — | 写者标识（人/会话） |
+
+**多出的键不算错**（向前兼容）；缺任一必填键 = 该行格式不合法。
+
+**可见性**：`ponygo audit` 的人读面在判据明细之后、结论行之前打印一行（`audit --json` / `status --json`
+的字段词表**零改动**，JSON 消费者看不到该行）：
+
+```
+逃生口留痕：2 条（最近 2026-11-17T21:05:00+0800 git-flow-gate：热修复直推 master）
+逃生口留痕：3 条，其中 1 条格式不合法（按 gates/README 的格式修复：ts/gate/why 三键必填）
+```
+
+行不改变任何退出码：留痕是**观察项**，不是判据。核对口径是**形状判据**（该行含非空 `ts`/`gate`/`why`），
+不追求完整 JSON 解析——理由质量靠 review。
+
 ## 负样本 spec 的两种形态（判据 2.3）
 
 | 形态 | 判据强度 | 写法 |
@@ -269,9 +328,26 @@ bash .meta/gates/<name>.spec.sh   # CI / pre-push 层的等价写法
 
 `*.spec.sh` 契约（违反即执行判据失败）：
 
+- **自报运行时计数 `##SPEC`**（U4/W3b，灰度）：成功路径的**最后一行**打印
+  `##SPEC asserts=<PASS+FAIL> rejects=<期望被拒断言数>`。
+  - `rejects` 必须**逐断言累加**（在每条"期望门拒绝/期望非零退出"的断言旁
+    `REJECTS=$((REJECTS+1))`），**禁止手写常数**——常数迟早与真实断言数脱钩，那时"运行时契约"
+    就退化成又一个静态扫描；
+  - `rejects>=1` 是硬要求：`rejects=0` 等于 spec 自报"我没有拒绝断言" → `--run-specs` **立即判 FAIL**
+    （`[bad] … 自报 rejects=0：没有拒绝断言`）；
+  - **legacy 灰度**：不打印 `##SPEC` 的既有 spec 本轮只打 `[warn] … 未提供 ##SPEC 运行时计数
+    （legacy；本轮 WARN，v3 起判 FAIL）`，**不改退出码**；v3 起 legacy 转 FAIL；
+  - 为什么静态扫描不够：2.3 的形状判据只能看"文本里有没有 `exit 1` 字样"，
+    `if false; then exit 1; fi`、注释掉调用行、把拒绝断言塞进不可达分支都能骗过它；而 spec 自己
+    exit 0 又会把门洗成绿的。运行时自报的 `rejects` 是**执行中真的走到过**的拒绝断言条数。
 - **自包含**：从自身路径解析仓库根（`ROOT=$(cd "$(dirname "$0")/../.." && pwd)`），不依赖调用者 cwd；
 - **只读仓库**：样本一律建在 `mktemp -d` 临时目录、退出时清理；不得改动仓库文件；
-- **秒级**：有 `timeout` 时施加 **软 25s + KILL 兜底 5s**（最坏 30s；无视 TERM 的挂死 spec 会被强杀，不会拖死体检）；
+- **秒级**：有 `timeout` 时施加**分档软超时 + KILL 兜底 5s**（KILL 窗口恒 5s，不随预算/平台变）：
+  **平台真值只在 `ponygo` 一处**（`PONYGO_SPEC_TIMEOUT` 优先，未设时 Windows 180 / 其他 90；值域 1..86400），
+  并在结论区打印 `spec 预算=<N>s（来源：…）`；同一派生值经 `PONYGO_GATE_SPEC_TIMEOUT` **下传**给
+  spec 的自包裹上限（`GT=${PONYGO_GATE_SPEC_TIMEOUT:-30}`，**spec 内零平台判定**；非法/越界（1..86400）→ `exit 2`）；
+  调用侧判定护栏不可用时置 `PONYGO_SPEC_NO_GUARD=1`，spec 也不自包裹（端到端如实降级，不假红）；
+  无视 TERM 的挂死 spec 会被强杀，不会拖死体检；
 - **exit 0 = 自检通过**（"门确实会拒绝非法样本"）；非零 → 报 FAIL 并回显该 spec 输出尾部；
 - **防递归**：嵌套由调起方判定——`ponygo audit` 在 `PONYGO_AUDIT_SPEC_DEPTH ≥ 1` 时拒绝再跑 spec
   （该层不执行任何 spec，按 `SKIPPED` 处理并 **exit 3**）；第一层 spec **必须真跑**。
