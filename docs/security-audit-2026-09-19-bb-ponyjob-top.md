@@ -131,6 +131,6 @@ echo | openssl s_client -connect bb.ponyjob.top:443 -servername bb.ponyjob.top 2
 
 ## 7. 方法与限制声明
 
-- 8 路子智能体证据分别落盘 `.agents/notes/proposed/bb-external-baseline.md`、`bb-transport-findings.md`、`bb-authabuse-findings.md`、`bb-osint-findings.md`、`bb2-frontend-audit.md`、`bb2-auth-findings.md`、`bb2-uagate-findings.md`、`bb2-logic-findings.md`；本报告为去重汇总。
+- 8 路子智能体证据分别落盘 `.agents/notes/archived/testing/2026-09-19-bb-external-baseline.md`、`2026-09-19-bb-transport-findings.md`、`2026-09-19-bb-authabuse-findings.md`、`2026-09-19-bb-osint-findings.md`、`2026-09-19-bb2-frontend-audit.md`、`2026-09-19-bb2-auth-findings.md`、`2026-09-19-bb2-uagate-findings.md`、`2026-09-19-bb2-logic-findings.md`（已归档·冻结快照）；本报告为去重汇总。
 - 未采纳：无命令输出或无源码行号支撑的推测一律记“未知/待验证”，不列入修复承诺。
 - 授权边界：全部探测为非破坏性只读；登录 POST 实测（含错密码限流验证）、cipher 全枚举、登录后横向越权、绕过边缘直测源站均被明确拒绝，未执行；其中 login 防护/`cwd` 隔离/横向越权三项结论靠源码 review，标注如上。

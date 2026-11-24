@@ -12,6 +12,15 @@ Status: proposed
 3. **强制注入 aspectRatio 破坏构图**：若客户端或 SDK 默认带 `size: 1024x1024`，网关强行注入 `imageConfig.aspectRatio = "1:1"`，当原图非 1:1 时会导致模型重采样或舍弃原图构图。
 4. **Session 隔离混淆**：`extract_or_generate_session_id` 仅基于 prompt 生成哈希，不同图片但相同 prompt 会共享同一个 sessionId 产生会话污染。
 
+## 落地状态（2026-11-24 代码复核）
+
+- 已落地 ①：`image` 缺失/空即 400（`crates/ponyllm-server/src/routes/images.rs:215`，`image is required for image editing`）。
+- 已落地 ②：图生图提示词锚定（`crates/ponyllm-protocol/src/translator/antigravity.rs` 中 `image_part.is_some()` 分支，
+  已含 `based on the input image` / `edit this image` 等显式指令的短路判断）。
+- 已落地 ④：session 种子纳入图片前缀（同函数内 `session_seed = "{prompt}:{b64 前 32 字节}"`）。
+- **未落地 ③**：编辑模式仍无条件把 `size` 映射成 `generationConfig.imageConfig.aspectRatio`
+  （同文件 `if let Some(ar) = aspect_ratio` 分支），即「图生图不强加纵横比」尚未实现。
+
 ## Proposal
 
 1. **协议层与路由层入口校验（Fail-Fast）**：

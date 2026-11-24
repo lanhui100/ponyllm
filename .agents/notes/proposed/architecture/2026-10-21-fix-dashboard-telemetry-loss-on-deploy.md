@@ -16,6 +16,14 @@ Status: proposed
 4. **Kubernetes 模式下缺乏显式快照路径环境变量支持与默认发现**：
    生产部署运行参数为 `serve --config-backend=kubernetes`，此时未指定 `--config` 文件，服务端默认推导出的快照路径指向只读文件系统根目录（`/telemetry-snapshot.json`），导致快照写入失败且无法落盘至挂载的 `/var/lib/ponyllm/telemetry-snapshot.json`。
 
+## 落地状态（2026-11-24 代码复核）
+
+- 已落地：① 快照路径自愈——`PONYLLM_TELEMETRY_SNAPSHOT_PATH`（`crates/ponyllm-server/src/state.rs:49`、
+  `telemetry_snapshot.rs:159`，`deploy/ponyllm-deployment.yaml` 四副本各自注入）；② 集群遥测表自愈——
+  `cluster_telemetry.rs` 的 `CREATE TABLE IF NOT EXISTS` + 逐列 `ADD COLUMN IF NOT EXISTS`。
+- 未落地：③ PG 数据卷持久化。`deploy/ponyllm-lockdb.yaml` 的 `pgdata` 仍是 `emptyDir`（对 advisory lock 按设计可丢，
+  但 `telemetry_hourly_cluster` 历史的持久化前提并未因此成立）。
+
 ## Proposal
 
 拟采用以下三层闭环机制彻底修复遥测数据清空问题：

@@ -1,6 +1,6 @@
 # Agent Note: bb.ponyjob.top 传输与浏览器安全评估（TLS/头/CORS）
 
-Status: proposed
+Status: archived
 
 ## Problem
 

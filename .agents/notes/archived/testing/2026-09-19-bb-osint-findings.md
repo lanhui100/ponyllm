@@ -1,6 +1,6 @@
 # Agent Note: bb.ponyjob.top 资产归因与 OSINT 关联
 
-Status: proposed
+Status: archived
 
 ## Problem
 

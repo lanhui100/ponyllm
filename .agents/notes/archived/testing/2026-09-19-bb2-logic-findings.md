@@ -1,6 +1,6 @@
 # Agent Note: bb.ponyjob.top 业务逻辑与归因（JS 语义只读）
 
-Status: proposed
+Status: archived
 
 ## Problem
 

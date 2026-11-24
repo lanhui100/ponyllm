@@ -8,7 +8,7 @@ Status: implemented
 
 ## Decision
 
-采用 4 路 Agent Team 并行只读诊断（外部基线 / 传输与浏览器安全 / 鉴权与滥用 / OSINT 归因）＋ Lead 独立复核；结论是 bb 全站请求在 TencentEdgeOne 边缘即被统一 403 拦截，源站不可达，**无 Critical、无 High**，定级 2 个 Medium＋1 个条件性 Medium，其余为 Low/Info；判定 bb 与 tokens 不同源、不同栈，bb 在本仓零引用、属未纳管外部资产。最终报告归档为 `docs/security-audit-2026-09-19-bb-ponyjob-top.md`，四路原始证据分别保留在 `.agents/notes/proposed/bb-*-*.md`。
+采用 4 路 Agent Team 并行只读诊断（外部基线 / 传输与浏览器安全 / 鉴权与滥用 / OSINT 归因）＋ Lead 独立复核；结论是 bb 全站请求在 TencentEdgeOne 边缘即被统一 403 拦截，源站不可达，**无 Critical、无 High**，定级 2 个 Medium＋1 个条件性 Medium，其余为 Low/Info；判定 bb 与 tokens 不同源、不同栈，bb 在本仓零引用、属未纳管外部资产。最终报告归档为 `docs/security-audit-2026-09-19-bb-ponyjob-top.md`，四路原始证据分别保留在 `.agents/notes/archived/testing/2026-09-19-bb*-*.md`（已归档·冻结快照）。
 
 机器可验（复制即跑，不含 secret）：
 

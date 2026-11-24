@@ -8,6 +8,12 @@ Status: proposed
 
 现状证据：`kubectl get nodes -o wide` 显示 `devserver`、`tencent` 和其他节点已在**同一个** k3s 集群内；`ponyllm-gateway` 位于 `ponyllm` namespace，Deployment 固定调度到 `devserver`，PVC 使用 `local-path`，镜像来自阿里云仓库路径 `job-copilot/api-v2`。`pproxy-host` 的 selector-less Endpoints 指向腾讯节点 Tailscale 地址。仅把流量导入家庭节点不会隔离这个集群的控制面、其余 workload、现有 PVC 或镜像命名空间。计费模块有 PostgreSQL 代码，但尚无证据表明商业数据库已经在线或已与网关集成。
 
+## 落地状态（2026-11-24 代码复核）
+
+**未实施**：仓内无对应 manifest/配置/代码，本记录自身亦声明「方案仍未实施」。
+另需注意边界：`ponygo.fun` 入口与家庭节点承载属集群级基础设施，权威事实在 `cluster-infra` 仓，
+本仓只保留方案讨论，不作为部署真相源。
+
 ## Proposal
 
 ### 目标拓扑与边界

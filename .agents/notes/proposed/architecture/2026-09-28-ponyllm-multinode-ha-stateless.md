@@ -23,6 +23,20 @@ RWO local-path PVC），多副本读写同一份文件产生 If-Match 412 配置
 **NetworkPolicy 完全不执行**（"egress 已锁 IMDS"与任何 netpol 收紧均为装饰）；
 ② k3s **未启用 Secret 静态加密**，etcd 及 12h 明文快照沉淀全部凭据。
 
+## 落地状态（2026-11-24 代码复核）
+
+分层已落地，且各层都有独立决策记录：
+
+- 4 个 Deployment（dev 单写者 `replicas: 1`，其余 2）+ `nodeSelector`：`deploy/ponyllm-deployment.yaml:147-148/321`；
+- 配置真相源走 K8s Secret + 乐观锁轮询：`crates/ponyllm-server/src/config_poller.rs`；
+- antigravity 刷新串行化：`crates/ponyllm-server/src/refresh_lock.rs` + `deploy/ponyllm-lockdb.yaml` 的 advisory lock；
+- 优雅停机：`terminationGracePeriodSeconds: 180` + `preStop` + 进程内 drain；
+- 分层决策见 `2026-09-26-k3s-edgeone-ponyllm-ha`、`2026-09-29-ponyllm-phase3-multinode-execution`、
+  `2026-09-30-weighted-multi-node-traffic-routing`、`2026-10-01-config-poller-fallback-and-exponential-backoff`、
+  `2026-10-02-cluster-wide-telemetry-postgres-aggregation`。
+
+本记录保留为总体设计与阶段清单（含尚未收敛的多 Endpoint 容灾与容量规划）。
+
 ## Proposal
 
 把 ponyllm 从"单实例 + 本地文件状态"改造为**无状态多副本**：配置真相源外置到

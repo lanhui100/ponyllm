@@ -1,6 +1,6 @@
 # Agent Note: bb.ponyjob.top 外部攻击面基线（默认 UA 视角）
 
-Status: proposed
+Status: archived
 
 ## Problem
 

@@ -6,6 +6,15 @@ Status: proposed
 
 ponyllm is currently a single-deployment, operator-managed gateway. Existing scoped gateway keys grant machine privileges, while model pricing is an upstream cost estimate; neither is a tenant identity, a customer tariff nor a financial ledger. Serving unrelated paying customers requires strict isolation, durable settlement and operational evidence without breaking the self-hosted CLI/SDK.
 
+## 落地状态（2026-11-24 代码复核）
+
+- Stage 0：契约冻结稿在 `docs/commercial-stage0-rfc.md`（自身仍是 proposed 态）。
+- Stage 1：基础已落地——`crates/ponyllm-billing` 含 tenant/ledger/reservation schema 与 migrations，
+  决策见 `implemented/architecture/2026-09-27-commercial-persistence-and-config-foundation.md`。
+- Stage 2–4（账本与推理集成、限额与对账、生产发布门）：未落地，仓内无对应实现。
+
+本记录继续承载未落地的 Stage 2–4 路线图。
+
 ## Proposal
 
 ### Objective and scope

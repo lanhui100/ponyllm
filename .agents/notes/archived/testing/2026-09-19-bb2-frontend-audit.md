@@ -1,6 +1,6 @@
 # Agent Note: bb.ponyjob.top 前端静态审计（BB10 UA SPA）
 
-Status: proposed
+Status: archived
 
 ## Problem
 

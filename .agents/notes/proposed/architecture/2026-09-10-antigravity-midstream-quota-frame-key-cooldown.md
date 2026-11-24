@@ -25,6 +25,12 @@ Status: proposed
 触发这一形态的先决条件是：非流式请求走 Antigravity 协议（网关内部改用 SSE 收集器），
 或流式请求已发出并开始消费帧。
 
+## 落地状态（2026-11-24 代码复核）
+
+**未落地**：`crates/ponyllm-server/src/streaming.rs` 无 `AntigravityStreamError`，
+`collect_antigravity_sse_to_json[_with_timeout]` 仍返回 `Result<Value, String>`（:2014 / :2296），
+「错误类型化 → 捕获 KeySelected → 帧内配额冷冻 + failover」三步均未进代码。跟踪项：`backlog:B001`。
+
 ## Proposal
 
 把「帧内配额」也纳入同一套冷冻语义，分三步：

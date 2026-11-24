@@ -1,6 +1,6 @@
 # Agent Note: ponyllm 网关（tokens.ponyjob.top）全面测试计划
 
-Status: proposed
+Status: archived
 
 ## Problem
 

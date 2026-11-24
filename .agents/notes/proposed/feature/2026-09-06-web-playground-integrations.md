@@ -6,6 +6,10 @@ Status: proposed
 
 `curl` 手测三协议费时，跨协议转译（thinking 保留）无处对比；Claude Code、Codex、OpenCode 三工具接入串靠手抄 BaseURL 易错，后续工具需可插拔追加。
 
+## 落地状态（2026-11-24 代码复核）
+
+**未落地**：`web/src` 与 `crates/ponyllm-server/src` 均无 playground 相关页面、路由或接口（grep 零命中）。
+
 ## Proposal
 
 将新增 Playground：左选模型与协议 Tab（chat/messages/responses）加 thinking 四档下拉（Off/Low/Medium/High，沿用统一标尺），中为 SSE 打字机并计时 TTFT/TPS，右为请求 JSON、路由解释（`X-Pony-*` 头）与 cURL 一键复制，支持同 prompt 双协议对比。thinking 请求走 `X-Pony-Thinking` 头，回显 effective 档位与是否被天花板截断。Integrations 按工具注册表给 BaseURL、Key、Model 三行复制（首版 Claude Code、Codex、OpenCode，见下），附 `获取模型列表` 联通测试。
