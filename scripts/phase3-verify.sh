@@ -284,15 +284,31 @@ echo "== [5/7] 锁 + 刷新健康（同副本窗口 delta 口径，P32-arch） =
 HA_BEFORE="$(mktemp)"
 HA_AFTER="$(mktemp)"
 trap 'rm -f "$HA_BEFORE" "$HA_AFTER"' EXIT
-# 每侧取 3 个样本：经 LB 时单次采样可能只命中一个副本，多点采样才能凑出「同副本前后对」。
-for _ in 1 2 3; do ha_snapshot_line "$GW_BASE/v1/telemetry/metrics" 8 3 "$TOKEN" >> "$HA_BEFORE"; done
+# 采样数必须**盖过副本数**，否则同副本配对靠运气：
+#   实证 2026-11-24 run 45444791468：7 副本、每侧 3 次采样 → 6 次命中 6 个不同副本，
+#   零配对 → [5/7] 降级成 WARN「证据不足」，门禁等于没判。
+#   生日问题：n 副本下 k 次采样至少一次撞车的概率 1 - (n-1)!/n^k /(n-k)!，n=7/k=3 仅 ~39%。
+# 取 2n+2 次（7 副本 → 16 次）：k≥n+1 时由鸽笼原理**必然**存在重复，配对不再是概率事件。
+HA_REPLICAS=$("${KUBECTL[@]}" -n "$NS" get po \
+  -l app.kubernetes.io/name=ponyllm,app.kubernetes.io/component=gateway \
+  -o jsonpath='{range .items[*]}{.status.podIP}{"\n"}{end}' 2>/dev/null | grep -c . || true)
+[ "${HA_REPLICAS:-0}" -gt 0 ] 2>/dev/null || HA_REPLICAS=3
+HA_SAMPLES=$(( HA_REPLICAS * 2 + 2 ))
+echo "  采样计划：$HA_REPLICAS 个副本 → 每侧 $HA_SAMPLES 次（同副本必然配对）"
+_p3_ha_sample() {
+  local out="$1" i
+  for (( i = 0; i < HA_SAMPLES; i++ )); do
+    ha_snapshot_line "$GW_BASE/v1/telemetry/metrics" 8 3 "$TOKEN" >> "$out"
+  done
+}
+_p3_ha_sample "$HA_BEFORE"
 sleep 30
-for _ in 1 2 3; do ha_snapshot_line "$GW_BASE/v1/telemetry/metrics" 8 3 "$TOKEN" >> "$HA_AFTER"; done
+_p3_ha_sample "$HA_AFTER"
 if [ ! -s "$HA_BEFORE" ] && [ ! -s "$HA_AFTER" ]; then
   echo "FAIL metrics 不可达（窗口前后均无快照）——无法判定锁错误 delta，中止"
   exit 1
 fi
-echo "  30s 窗口（前后各 3 次采样，按副本身份配对）:"
+echo "  30s 窗口（前后各 $HA_SAMPLES 次采样，按副本身份配对）:"
 ha_window_verdict "$HA_BEFORE" "$HA_AFTER" || exit 1
 
 echo "== [6/7] 并发双写 412（A2）（刻意写测试：写版本+1 并在测试后还原原始字节） =="
