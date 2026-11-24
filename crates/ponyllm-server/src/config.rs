@@ -495,6 +495,11 @@ pub struct GatewayConfig {
     pub pre_commit_total_timeout_secs: Option<u64>,
     #[serde(default = "default_request_body_limit")]
     pub request_body_limit: usize,
+    /// Proactive performance alerting (`[alerts]`). Disabled by default:
+    /// observability-only, opt-in. See `crate::alerts` and
+    /// `TASK-2026-09-29-alerting-handover.md`.
+    #[serde(default)]
+    pub alerts: crate::alerts::AlertConfig,
     /// Hourly JSONL event-log directory. `None` (default) keeps events in the
     /// in-memory ring only; set to persist the single-append truth with rotation.
     #[serde(default)]
@@ -654,6 +659,7 @@ impl Default for GatewayConfig {
             empty_stop_total_timeout_secs: None,
             pre_commit_total_timeout_secs: None,
             request_body_limit: default_request_body_limit(),
+            alerts: crate::alerts::AlertConfig::default(),
             event_log_dir: None,
             event_log_retention_days: default_event_log_retention_days(),
             event_log_max_bytes: default_event_log_max_bytes(),
