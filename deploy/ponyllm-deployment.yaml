@@ -190,7 +190,7 @@ spec:
         - name: aliyun-registry
       containers:
         - name: ponyllm
-          image: crpi-3cfwwtc3um8h6d3q.cn-hangzhou.personal.cr.aliyuncs.com/job-copilot/api-v2@sha256:e8b4ce4db5533d6e899662da8330e8d5903020aa211b089cf7dc46505e127fb6
+          image: crpi-3cfwwtc3um8h6d3q.cn-hangzhou.personal.cr.aliyuncs.com/job-copilot/api-v2@sha256:8b7fb1774f814d4bec65d9e1ce2eb49228a7c328fdd26da93813ccc4b6bc1f4e
           imagePullPolicy: IfNotPresent
           env:
             # 锁库（独立 ponyllm-lockdb，TLS=require）DSN 经 Secret 注入
@@ -361,7 +361,7 @@ spec:
         - name: aliyun-registry
       containers:
         - name: ponyllm
-          image: crpi-3cfwwtc3um8h6d3q.cn-hangzhou.personal.cr.aliyuncs.com/job-copilot/api-v2@sha256:e8b4ce4db5533d6e899662da8330e8d5903020aa211b089cf7dc46505e127fb6
+          image: crpi-3cfwwtc3um8h6d3q.cn-hangzhou.personal.cr.aliyuncs.com/job-copilot/api-v2@sha256:8b7fb1774f814d4bec65d9e1ce2eb49228a7c328fdd26da93813ccc4b6bc1f4e
           imagePullPolicy: IfNotPresent
           env:
             - name: PONYLLM_LOCK_DATABASE_URL
@@ -514,7 +514,7 @@ spec:
         - name: aliyun-registry
       containers:
         - name: ponyllm
-          image: crpi-3cfwwtc3um8h6d3q.cn-hangzhou.personal.cr.aliyuncs.com/job-copilot/api-v2@sha256:e8b4ce4db5533d6e899662da8330e8d5903020aa211b089cf7dc46505e127fb6
+          image: crpi-3cfwwtc3um8h6d3q.cn-hangzhou.personal.cr.aliyuncs.com/job-copilot/api-v2@sha256:8b7fb1774f814d4bec65d9e1ce2eb49228a7c328fdd26da93813ccc4b6bc1f4e
           imagePullPolicy: IfNotPresent
           env:
             - name: PONYLLM_LOCK_DATABASE_URL
@@ -668,7 +668,7 @@ spec:
         - name: aliyun-registry
       containers:
         - name: ponyllm
-          image: crpi-3cfwwtc3um8h6d3q.cn-hangzhou.personal.cr.aliyuncs.com/job-copilot/api-v2@sha256:e8b4ce4db5533d6e899662da8330e8d5903020aa211b089cf7dc46505e127fb6
+          image: crpi-3cfwwtc3um8h6d3q.cn-hangzhou.personal.cr.aliyuncs.com/job-copilot/api-v2@sha256:8b7fb1774f814d4bec65d9e1ce2eb49228a7c328fdd26da93813ccc4b6bc1f4e
           imagePullPolicy: IfNotPresent
           env:
             - name: PONYLLM_LOCK_DATABASE_URL
