@@ -58,6 +58,14 @@ repo 模板文件与 `ponygo` 内 heredoc 双写，EOL 归一后逐字节一致�
   规范化明细)`——同一文件同一判据**明细变了就是新违例**，冻结不等于给该判据开永久后门。基线到期日
   硬上限 365 天；过期后 `verify-note.sh` 把全部违例重新计入（`status`/`audit` 的摘要行会显示条数与到期日）。
   基线过滤长在判定真源 `verify-note.sh` 里，故 A1（暂存区门）与 A4（全树门）**字节零改动**即获得棘轮语义。
+  **CLI 判据面也读它（B023）**：`ponygo status` / `audit` 的 `verify_ladder` 自己复刻了 1.1–1.9，
+  早先不读基线 → ponylm 实机（48 条存量冻结、门禁面全绿）`status` 仍 `exit 1`，判据面与门禁面结论相反。
+  现在 1.8 段按基线做**逐文件**豁免（条件：基线存在、`expires_at` 可解析且未过期；过期则按全量判定并打
+  `ponygo: WARN 存量基线已过期（…）→ 判据 1.8 按全量判定；跑 'ponygo upgrade adopt' 重签`）。
+  **粒度诚实条款**：CLI 面按 **(file, criterion)** 豁免，比真源的 **(criterion, file, 明细) 指纹**更粗——
+  同一文件"换了一种 1.8 违例"在 CLI 摘要视图里会被一并豁免；真源（A1/A4 与 CI 全树门）仍按指纹拒绝，
+  且 `status` 会打一行 `判据 1.8：N 条存量违例由存量基线覆盖（…）` 明示"这是被基线吃掉的，不是修好的"。
+  CLI 面**不替代**真源：假绿的风险留给真源兜底，别把 `status` 的绿当作"存量债已清"。
 - `.meta/.ponygo-seed`：`init`/`upgrade apply` 写入的「框架 commit + 十七骨架文件 sha256」。
   `upgrade --check` 用它把漂移分成 `stale`（实例仍是植入时字节）与 `modified`（实例侧被改）；
   缺失/损坏只降级为 `unknown` + WARN，**不改变退出码**（provenance 不是判定面，把它变成门会重演 upgrade cliff）。
@@ -345,7 +353,10 @@ bash .meta/gates/<name>.spec.sh   # CI / pre-push 层的等价写法
 - **秒级**：有 `timeout` 时施加**分档软超时 + KILL 兜底 5s**（KILL 窗口恒 5s，不随预算/平台变）：
   **平台真值只在 `ponygo` 一处**（`PONYGO_SPEC_TIMEOUT` 优先，未设时 Windows 180 / 其他 90；值域 1..86400），
   并在结论区打印 `spec 预算=<N>s（来源：…）`；同一派生值经 `PONYGO_GATE_SPEC_TIMEOUT` **下传**给
-  spec 的自包裹上限（`GT=${PONYGO_GATE_SPEC_TIMEOUT:-30}`，**spec 内零平台判定**；非法/越界（1..86400）→ `exit 2`）；
+  spec 的自包裹上限（`GT=${PONYGO_GATE_SPEC_TIMEOUT:-90}`，**spec 内零平台判定**；非法/越界（1..86400）→ `exit 2`；
+  默认 90s 的理由：Windows Git Bash 的进程启动开销使 A2 这类含数十条 git 断言的自检超过 30s——内建 spec
+  在"未设 env"的直接调用（测试/人工）下不得被自身默认值误杀；决策见
+  `.agents/notes/implemented/testing/2026-11-18-spec-default-timeout.md`）；
   调用侧判定护栏不可用时置 `PONYGO_SPEC_NO_GUARD=1`，spec 也不自包裹（端到端如实降级，不假红）；
   无视 TERM 的挂死 spec 会被强杀，不会拖死体检；
 - **exit 0 = 自检通过**（"门确实会拒绝非法样本"）；非零 → 报 FAIL 并回显该 spec 输出尾部；
