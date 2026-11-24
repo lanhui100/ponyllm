@@ -27,7 +27,7 @@ OpenAI 兼容中转通道；`crates/ponyllm-core/src/executor/upstream.rs:1646-1
 - 官网 Token Plan 页（订阅是"积分 / 5 小时"制，key 管理在控制台）：
   <https://www.sensenova.cn/token-plan>
 
-## Decision（调研结论，先行）
+## Decision
 
 1. **该通道没有余额/额度/按 key 用量查询接口。** 官方 `API.md`（全文约 17KB）
    的目录只有：注册取 key、Agent 框架、模型、基础调用、采样参数、多轮对话、

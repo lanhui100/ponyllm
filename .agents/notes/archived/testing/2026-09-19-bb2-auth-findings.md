@@ -1,6 +1,6 @@
 # Agent Note: bb.ponyjob.top 后端鉴权测绘（BB10 UA 只读）
 
-Status: proposed
+Status: archived
 
 ## Problem
 

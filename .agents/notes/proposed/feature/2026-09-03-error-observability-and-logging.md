@@ -27,6 +27,12 @@ Status: proposed
    字段名为 `key_id` → 该列永远显示 "-"；遥测拉取失败被 `if let Ok` 静默吞掉，网关离线时
    `flight_frames` 被清空且无任何提示；详情面板是原始 JSON dump，error 行不突出。
 
+## 落地状态（2026-11-24 代码复核）
+
+- A（逐次尝试录波）已落地：`crates/ponyllm-core/src/executor/upstream.rs:90` 的 `AttemptObserver` / `AttemptEvent`，
+  由 executor 逐次尝试回调（:123 / :1789）。
+- B（文件日志）、C（TUI 指标对齐）、D（门禁）未见实现：CLI 与 server 侧 grep 无 `log_file` / `log-dir` / `FileAppender`。
+
 ## Proposal
 
 按四个互补层落地错误可观测性（全部向后兼容，不破坏 embedded SDK 调用方）：

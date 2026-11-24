@@ -1,6 +1,6 @@
 # Agent Note: bb.ponyjob.top UA 门控与传输差异（对比复测）
 
-Status: proposed
+Status: archived
 
 ## Problem
 

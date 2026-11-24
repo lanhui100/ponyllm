@@ -12,7 +12,7 @@ ponyllm 网关已有多 key 池（`crates/ponyllm-core/src/pool/`：`quota.rs` �
 - 官方 SDK 源码：`googleapis/python-genai`（`google/genai/_api_client.py` 重试语义）、`xai-org/xai-sdk-python`（`src/xai_sdk/client.py` 双 key 设计：`api_key` + `management_api_key`，`api.x.ai` / `management-api.x.ai` 双 host）；
 - LiteLLM 源码（`BerriAI/litellm`，`main` 分支 2026-09-19 快照）：`llms/azure/{azure.py,common_utils.py}`（header 透传实证）、`llms/xai/{common_utils.py,cost_calculator.py}`（Bearer 鉴权 + 服务端上报费用）、`llms/volcengine/common_utils.py`（方舟 Bearer + base）、`llms/minimax/chat/transformation.py`（OpenAI 兼容双 base）、`llms/tencent/chat/transformation.py`（混元 OpenAI 兼容 base）。
 
-## Decision（调研结论，先行）
+## Decision
 
 1. **三家国际头部都没有"按业务 key 查余额"的公开接口**——与 OpenAI/Anthropic 结论一致：余额/费用是 Console（人工）面的事，网关能拿到的实时信号只有**响应头余量 + 429 分类 + 轻探测**。不要为任何一家设计余额轮询器。
 2. **Google Gemini Developer API**：按 `?key=` API key 鉴权（无需 Admin 面）；配额在 AI Studio / Cloud Console 按项目+模型配（RPM/TPM/RPD），**无公开读接口**；失败是 Google RPC 形态（`429 RESOURCE_EXHAUSTED` + `RetryInfo.retryDelay`，或 `400 API_KEY_INVALID`）；`GET /v1beta/models?key=` 做存活探测。网关现有 `upstream.rs` 的 `QUOTA_EXHAUSTED` / `Resets in` 分类正是为此形态写的——**直接复用**，另补 `RetryInfo.retryDelay` 解析。

@@ -14,6 +14,17 @@ Status: implemented
 
 共同规律：DeepSeek / Kimi / 智谱的推理网关都是标准 `Authorization: Bearer <key>`（与 OpenAI 兼容），key 池现有 `GET {base}/models` 探针在这三家语义都正确；只有 DeepSeek 和 Kimi 额外给了“同 key 可查”的余额接口。阿里是例外：推理 key 与账单 API 分属两套鉴权体系。
 
+## Decision
+
+- 结论按上表冻结：DeepSeek `GET /user/balance` 与 Kimi `GET /v1/users/me/balance` 可用 key 直查；
+  阿里 Qwen 账单 API 不接受 DashScope key；智谱 GLM 无 key 级余额接口。
+- **四家均未接入**：额度行统一 `source = probe_only`（`crates/ponyllm-server/src/routes/admin.rs:863`），
+  `quota` / `quota_groups` 为 `null`。唯一有真实额度接口的 provider 是 antigravity
+  （`crates/ponyllm-core/src/pool/antigravity.rs` 的 `fetch_quota_summary` / `fetch_quota`，
+  管理面 `admin.rs:895` 写 `source = "buckets"`）。
+- 接入顺序按 `## 网关统一集成建议`：先 DeepSeek / Kimi 的 balance 探针（复用 models 探针节奏）；
+  Qwen 走账单 API 需额外 IAM 凭据 → 不做；GLM 永不做额度轮询。
+
 ## 1. 阿里 Qwen（DashScope / 百炼 Model Studio）
 
 - **结论**：有官方账单 API，但走**阿里云 OpenAPI（POP）鉴权**，DashScope 的 Bearer key 查不了；且返回的是**账单费用**（花了多少钱），不是“剩余额度”。网关只能做账户级集成。

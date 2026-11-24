@@ -32,6 +32,17 @@ key（`sk-test-invalid-0000`），不记录任何 Key 原文。
   `unknown`（见 `quota-api-design.md` §2），永不伪装成 `balance` /
   `limit_remaining`。
 
+## Decision
+
+- Zen 无官方额度/余额接口，网关**不自算**额度：`/api/admin/quota` 该 provider 行固定
+  `source = probe_only`（`crates/ponyllm-server/src/routes/admin.rs:863`）。
+- 唯一额度信号是上游 429 `FreeUsageLimitError`：`is_zen_free_usage_limit_body` +
+  `classify_too_many_requests`（`crates/ponyllm-core/src/executor/upstream.rs`）归为
+  `QuotaExhausted` 并冷却该 key；带 `Retry-After` 遵之，否则 15min 默认
+  （`crates/ponyllm-core/src/pool/entry.rs:624`）。
+- 记账维度是**出口 IP**（`x-real-ip`）而非 key——同出口多 key 共享额度桶，详见
+  `.agents/notes/implemented/feature/2026-10-06-zen-free-quota-ip-basis.md`。
+
 ## Candidates（逐项指纹）
 
 ### A. `GET /zen/v1/models`（存活探测：200，但不鉴权）

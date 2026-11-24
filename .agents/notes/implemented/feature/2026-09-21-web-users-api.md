@@ -13,6 +13,17 @@ Status: implemented
 - 403 矩阵：签发/吊销是 `AdminWrite`——`inference`/`readonly` 调用一律 403 `forbidden`（`auth.rs:scope_allows` 已实现，设计只列矩阵不断言新逻辑）；`GET` 列表是 `AdminRead`——`inference` 403、`readonly` 放行（见矩阵表）。
 - OpenAPI 同步点：`AdminApiDoc.paths` + `components.schemas` 注册三视图/两载荷，`web/openapi.json` 用 dump helper 重生成（`admin_contract_tests::openapi_dump`），`test_openapi_no_real_secret` 断言 `sk-pony-(admin|infer|read)-` 真密钥零命中（示例只用占位前缀）。
 
+## Decision
+
+- `/api/user/**` 是 **JWT-only** 命名空间：`/api/user/login`、`/api/user/logout` 自鉴权，其余需
+  `Authorization: Bearer <jwt>` 或 `ponyllm_jwt` cookie；`/api/user/admin/**` 另需
+  `claims.role == "admin"`（`crates/ponyllm-server/src/app.rs:114-193`）。
+- 自助 token 复用 `GatewayKeyEntry`（`user_owned` / `created_by`，强制 `scope=inference`）；
+  推理入口双闸 = `user.check_access(model)` ∧ `token.check_access(model)`
+  （`crates/ponyllm-server/src/routes/chat.rs` / `responses.rs`）。
+- 403 / 404 语义按本文 §403 矩阵：作用域不足 403（`insufficient_scope`），开关未启用时整个
+  `/api/user/**` 命名空间 404。
+
 ## 端点明细
 
 ### 1. `GET /api/admin/gateway-keys` → 200 `[GatewayKeyView]`

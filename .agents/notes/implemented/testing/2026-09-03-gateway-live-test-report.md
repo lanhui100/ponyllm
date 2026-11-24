@@ -4,7 +4,7 @@ Status: implemented
 
 ## Problem
 
-按 `proposed/testing/2026-09-03-gateway-live-test-plan.md` 的计划，对线上
+按 `archived/testing/2026-09-03-gateway-live-test-plan.md`（已归档·冻结快照） 的计划，对线上
 `ponyllm serve` 网关（域名 tokens.ponyjob.top，DNS 101.37.23.94，/health 返回
 v0.2.10）执行 A–H 全部矩阵测试，记录结果、确认缺陷、落地修复并回归。
 

@@ -18,7 +18,7 @@ Status: implemented
 
 这二者具有明确的业务与运维语义差异。
 
-## 决策 (Decision)
+## Decision
 
 1. **已配置账号未查到额度的占位色标**：
    - 当账号存在于池中，但在配额探测链路中未查到配额信息（`!testResult || !isQuotaResultFresh || g5hFraction == null`）且未处于冷却/硬故障态时，热力色块必须使用**极浅绿色**占位，与 GitHub 单色阶底色保持视觉同系与层级区分。
@@ -33,7 +33,7 @@ Status: implemented
      c) 此外，前端在页面首屏及卡片中，对未 probe 过的 key 仅在用户手动点击“刷新配额”或后台 `handleRefreshMissingQuotas` 串行执行完毕后才会落盘 localStorage；若前端缓存过期或单次请求锁竞争（`lock_busy`），方块即处于“等待刷新配额”状态。
      d) 修正矩阵方块色阶后，即使该账号等待刷新，方块也会清晰呈现极浅绿色，消除“看起来像没有配置账号”的混淆。
 
-## 替代方案 (Alternatives considered)
+## Alternatives considered
 
 1. **使用纯白或带边框透明色 (`bg-transparent border border-slate-300`)**：
    - 缺点：与矩阵整体的实体方块风格不统一，视觉重心脱节。

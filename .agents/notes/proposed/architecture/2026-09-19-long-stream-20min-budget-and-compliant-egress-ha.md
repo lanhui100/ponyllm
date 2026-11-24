@@ -18,6 +18,12 @@ Status: proposed
 - 合规出口（`daily-cloudcode-pa.googleapis.com` 等 Cloud Code 系）在节能模式下**跳过池化、只走 Vercel 冷建连**（[/home/dm/pproxy/crates/server/src/connect.rs](/home/dm/pproxy/crates/server/src/connect.rs) 合规专项注释；每次 `establish_ms 842~1734, pooled=false`），且 Vercel 端点 `target_size=0` 从不预建（[/home/dm/pproxy/crates/transport/src/pool.rs](/home/dm/pproxy/crates/transport/src/pool.rs)）。长流全程骑在一条 120s 寿命的冷建连上，抖动面最大。
 - opencode 路由（`muse-spark`）经 `route_upstreams.opencode = vercel` 走 vedge HTTP 转发（[/home/dm/pproxy/config.json](/home/dm/pproxy/config.json)，网关侧 `base_url=http://127.0.0.1:8899/pony_…` 见 `~/.config/ponyllm/ponyllm.toml`），同样受 vedge 120s 上限约束。
 
+## 落地状态（2026-11-24 代码复核）
+
+P1（分层超时）/ P3（失败语义）/ P4（可观测门禁）已落地并单独入册：
+`implemented/architecture/2026-09-19-long-stream-layered-timeouts-and-stall-detection.md`。
+本记录现仅代表 **P2（VPS 常驻合规出口）**；VPS 上线前 Vercel 侧 `maxDuration=120` 硬上限仍在。
+
 ## Proposal
 
 目标：**单流 20 分钟可达、高可用优先、Vercel 花费只在故障时产生、必须走代理的约束不变**。

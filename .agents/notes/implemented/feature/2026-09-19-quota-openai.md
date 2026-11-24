@@ -13,7 +13,7 @@ ponyllm 网关维护多 key 池（`crates/ponyllm-core/src/pool/`：`quota.rs` �
 - `https://developers.openai.com/api/reference/` 索引页（HTTP 200）——确认 usage/costs/rate_limits 方法页存在；
 - `GET https://api.openai.com/v1/models` 带假 key 实测返回 `401 invalid_api_key`，确认该端点存活且用普通 key 鉴权。
 
-## Decision（调研结论，先行）
+## Decision
 
 1. **OpenAI 没有"按普通 key 查余额"的公开接口。** 旧的 `GET /dashboard/billing/*`（total_granted/total_used/total_available）已下线：当前官方 OpenAPI spec 中 `billing`/`credit_grants` 路径数为 0（`grep -c` 验证），不要再集成。
 2. **用量/费用真相源是 Organization Usage + Costs 家族（全部要 Admin key）。** 普通业务 key 调这些端点会 401/403。按 key 维度查询是可能的，但条件是：持有 Admin key，并用 `api_key_ids` 过滤 / `group_by=api_key_id` 分组，且入参传的是 key 的 **ID**（`key_abc…`），不是 `sk-…` 明文。

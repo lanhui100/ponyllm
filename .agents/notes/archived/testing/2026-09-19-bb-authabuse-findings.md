@@ -1,6 +1,6 @@
 # Agent Note: bb.ponyjob.top 鉴权与滥用面评估（轻量只读）
 
-Status: proposed
+Status: archived
 
 ## Problem
 

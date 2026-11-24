@@ -111,7 +111,7 @@ Status: implemented
   `deny_unknown_fields` 时会被静默忽略（安全）；若将来启用严格模式则会报错（可接受，属显式失败）。
 - **拖拽与按钮的状态竞争**：两者共用 `localAutoModels`，若拖拽结束后未清理 `dragover` 高亮态会导致
   视觉残留。缓解：验收测试断言拖拽后的数组顺序而非仅样式。
-## 验收结果（机器收据）
+### 机器收据（验收结果）
 
 隔离工作区 `/home/dm/ponyllm-wave2`（分支 `wave-2/global-strategy-removal`，基于 `e0f65c4`）：
 

@@ -28,6 +28,15 @@ open 绕过、admin_write 门控绕过、telemetry 全帧越权、quota 遍历�
   重放 + 跨 scope + 写门控 OFF 排序 + open（含 `none`）绕过 + 计时 200 样本。
 - 契约：`.agents/notes/implemented/feature/2026-09-20-auth-eval.md` §3（401/403 信封、顺序铁律、命名空间隔离）。
 
+## Decision
+
+- 本轮**零代码改动**：F1–F5（越权矩阵、伪造/截断/跨 scope、open 绕过、revoke、回显）是拦截成功项，
+  行为本身即结论，不再改实现。
+- F6 / F7 暂缓 P3，且截至本次补记仍在：`crates/ponyllm-cli/src/cli.rs:679`
+  `format_web_status_url` 没有 redact 参数（key 仍进 URL），
+  `crates/ponyllm-server/src/auth.rs:128` 仍把 `/api/admin/oauth/antigravity/pending` 归 `AdminRead`。
+- 计时侧信道与「重放无 nonce」不修：无状态 Bearer 设计使然，吊销 / 过期 / rotate 是唯一失效路径。
+
 ## Findings（F1–F9，按严重度）
 
 ### F1. ✅ 拦截成功 — 越权矩阵全组合符合契约（dual/strict 一致）
@@ -140,7 +149,7 @@ open 绕过、admin_write 门控绕过、telemetry 全帧越权、quota 遍历�
 
 - 未测（lead 明确留给 task-24；现网二进制是旧版，测了也对照不上新矩阵）。
 
-## Alternatives considered（修/不修/暂缓逐项）
+## Alternatives considered
 
 - **F1–F5 拦截成功项：不修**——矩阵/伪造/open/revoke/回显五面全绿，
   行为与 `.auth-eval.md` §3 一致；重测留给 task-24 live 网关。

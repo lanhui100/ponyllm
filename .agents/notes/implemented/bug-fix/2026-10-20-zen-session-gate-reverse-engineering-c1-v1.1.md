@@ -27,7 +27,7 @@ opencode 1.18.4 Bun bundle 中 `promptCacheKey: /^ses_[0-9a-f]{64}$/` 正则的
    - `x-opencode-client=ponyllm`、`x-opencode-project=prj_+32hex`、UA=1.18.35 均 → 200（C2 其余指纹不构成硬门禁）。
 3. **结论**：免费层唯一硬门禁 = 会话值形态 `^ses_[A-Za-z0-9]{26}$`（总长 30）。
 
-## Decision（CONTRACT-v1 v1.1）
+## Decision
 
 1. `new_upstream_session_id()` 恢复为 `ses_` + 26 位 base62（30 字符）；
    `is_valid_zen_session_format()` 只接受 `^ses_[A-Za-z0-9]{26}$`；64-hex 及一切非标形态必须被丢弃回退。

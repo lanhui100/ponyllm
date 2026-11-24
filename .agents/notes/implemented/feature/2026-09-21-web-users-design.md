@@ -8,6 +8,15 @@ Date: 2026-09-21
 > runWithConflictCheck 范式）/ `adminApi.ts`（If-Match helper）/
 > `KeySecretModal.vue`（上游 key 一次性明文弹窗范式）。
 
+## Decision
+
+- Credentials Tab 按代码现状落地为 `web/src/views/UsersView.vue` 与 `TokensView.vue`：
+  用户自助创建/吊销 token（绑定本人 `user_id`、强制 `scope=inference`），管理员经
+  `/api/user/admin/**` 管理用户；登录改为 username/password（`Connect.vue`）。
+- 越权边界双层保持：前端隐藏入口只是提示，真判据在服务端 JWT `claims.role` 与 scope 强制
+  （`crates/ponyllm-server/src/app.rs:192-193`）。
+- 「本期不做」仍不做：无用户库/无 OIDC、无 per-user 计费页。
+
 ## 功能清单（Credentials Tab，第三 Tab）
 
 | # | 功能 | 交互 | 字段/接口 |

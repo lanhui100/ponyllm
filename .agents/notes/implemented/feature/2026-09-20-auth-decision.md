@@ -7,6 +7,17 @@ Date: 2026-09-20
 `auth-rbac.md`（task-16 矩阵）/ `auth-migration.md`（task-17 迁移）。
 只写文档，不写代码。
 
+## Decision
+
+- 采纳**方案 C：API Key 分级 + 资源矩阵**。落地形态是 `KeyScope{Admin,Inference,Readonly}` ×
+  `Resource` 多类矩阵（`crates/ponyllm-server/src/auth.rs:171` `scope_allows`），单 `api_key` 零迁移
+  映射 `admin`；401（凭证无效）与 403（作用域不足 `insufficient_scope`）分离。
+- 兼容三态 `auth_compat`（`ponyllm_config::AuthCompat::{LegacyOnly,Dual,Strict}`）+ open 模式冻结 +
+  `admin_write_enabled` 写门控均已落地。
+- 与本文三问的差异（以代码为准）：分级用**三作用域最小集**，未上四角色全矩阵；
+  「人类账号登录（A）」以更小形态补位——2026-10-09 起 `/api/user/**` 用 PBKDF2 口令 + 自签 HS256 JWT，
+  不引入 sqlite 用户库；B（OIDC）未做（`grep -rli oidc crates` 无实现）。
+
 ## 一页可行性结论
 
 - **做不做：做。** 现状单 token = 推理+管理读+管理写+telemetry 全帧同权

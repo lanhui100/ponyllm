@@ -6,6 +6,16 @@ Status: proposed
 
 网关对外暴露三个入口（`/v1/chat/completions`、`/v1/responses`、`/v1/messages`），对内却只有 `is_anthropic_upstream: bool` 二值判定（`crates/ponyllm-server/src/state.rs`），靠 `base_url.contains("anthropic")` 猜协议。`opencode muse-spark` 这类 Responses 原生模型、`deepseek` 同厂商三协议三地址，均无法表达。`responses` 入口只取首目标无跨 provider failover（`routes/responses.rs`），`429 No available key` 与对端 `429` 共用同一文案无法区分。
 
+## 落地状态（2026-11-24 代码复核）
+
+P1/P2/P3 已落地并单独入册：`UpstreamProtocol{Chat,Responses,Anthropic,Gemini}`（`crates/ponyllm-core/src/pool/protocol.rs`）、
+`default_protocol`（`crates/ponyllm/src/sdk.rs:20`）、请求头覆盖（`crates/ponyllm-server/src/extractors.rs:122`）、
+`responses<->chat` 与 `responses<->anthropic` 直转（`translator/chat_responses.rs`、`translator/responses_anthropic.rs`）；
+决策见 `implemented/architecture/2026-09-05-upstream-protocol-resolution-core.md`。
+
+仍开放：**P4 单 provider 多 base_url 合一**——配置层无 `endpoints{chat,responses,messages}` 三地址表（全仓 grep 无该结构），
+`deepseek` 仍须拆成多个 provider 共用 key。本记录的实际待办范围已收窄到 P4。
+
 ## Proposal
 
 将分四个阶段落地：

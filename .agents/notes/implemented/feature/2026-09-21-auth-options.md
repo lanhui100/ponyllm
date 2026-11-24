@@ -13,6 +13,14 @@ Status: implemented
 维度：依赖体积、离线可用、迁移成本、与现有单 token 兼容、安全边界，
 给出推荐与否决项。只写文档，不写代码。
 
+## Decision
+
+- 选 C（API Key 分级 + 作用域矩阵），否决默认 A / B：落地 `KeyScope{Admin,Inference,Readonly}` ×
+  `Resource` 矩阵（`crates/ponyllm-server/src/auth.rs:171`）。
+- A 以「不建用户库」的轻量形态补位：2026-10-09 起 `/api/user/**` 走 PBKDF2 口令 + HS256 自签 JWT
+  （`crates/ponyllm-server/src/app.rs:114-193`、`routes/user.rs`），不引入 sqlite / argon2 账号库。
+- B（OIDC）不做——仓内无 OIDC 鉴权实现（`grep -rli oidc crates` 零命中）。
+
 ## 现状基线（真相源）
 
 - 单 token：`Authorization: Bearer`（scheme 大小写不敏感）/ 裸 token /

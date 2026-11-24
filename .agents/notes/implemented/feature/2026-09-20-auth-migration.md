@@ -8,6 +8,16 @@ Date: 2026-09-20
 > 现状事实均为本次只读核对代码所得（文件+行号见 §0），不依赖兄弟文档结论；
 > 选型相关处以"选型无关的风险框架 + 各选型差异注释"写法保持兼容。
 
+## Decision
+
+- 迁移由 `auth_compat` 三态承载：`legacy-only`（旧单 token 全权）→ `dual`（旧 token 映射 `Admin`，
+  与分级 key 并存）→ `strict`（旧 token 全路径 401，报 `Legacy token disabled … re-issue a scoped key`）；
+  取值与判定见 `ponyllm_config::AuthCompat`、`crates/ponyllm-server/src/auth.rs:305` 与
+  `routes/session.rs:149`。
+- 回退点是**配置项**不是版本回滚：把 `auth_compat` 改回 `dual` 即恢复旧 token 可用。
+- 落地收据是 `crates/ponyllm-server/tests/auth_compat_p0_tests.rs` 的三态断言；本文 §2「已发 token
+  作废策略」的逐分发面清单未单列实现，实际按 `strict` 一次性失效 + 重签作用域 key 处理。
+
 ## 0. 现状事实（已核对代码，只读）
 
 | 触点 | 现状 | 代码位置 |
@@ -115,7 +125,7 @@ Date: 2026-09-20
 - 禁止事项立法：**禁止在 `dual` 窗口内执行全局 rotate 来"清理旧 token"**
   （等于提前单方面切 strict 且不可回滚）；清理旧 token 唯一合法路径是切 `strict`。
 
-## 6. Alternatives considered
+## Alternatives considered
 
 - **A1. 无兼容窗口，一次性切新系统（否决）**：少写兼容代码；但所有存量客户端
   （CLI/Web/skill/第三方）瞬间全断，且 rotate 不可逆，回滚只能靠备份恢复，
