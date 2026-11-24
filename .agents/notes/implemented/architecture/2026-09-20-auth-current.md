@@ -12,6 +12,20 @@ CLI/skill、外部 agent）全拿同一 `gateway.api_key` 直连网关。
 `?token=` 直连、skill/MCP token 分发、OpenAPI 契约现状，再输出风险清单与改造触点。
 本文只读代码，不做任何代码变更。
 
+## Decision
+
+- 鉴权面是**三层并存**：① 网关密钥（`Authorization: Bearer` / `x-api-key`）按
+  `KeyScope{Admin,Inference,Readonly}` × `Resource{Exempt,Inference,AdminRead,AdminWrite,TeleFull,
+  TeleSummary,Quota,UserSelf,UserAdmin}` 矩阵判定（`crates/ponyllm-server/src/auth.rs:171` `scope_allows`）；
+  ② 可选人机会话 `POST /api/admin/session` → HttpOnly `ponyllm_session` cookie
+  （`crates/ponyllm-server/src/routes/session.rs`、`session.rs`）；
+  ③ `/api/user/**` 自 2026-10-09 起是 **JWT-only** 命名空间（`crates/ponyllm-server/src/app.rs:114-193`，
+  `claims.role == "admin"` 才放行 `/api/user/admin/**`），不经 `scope_allows`。
+- 兼容与门控：`auth_compat = legacy-only | dual | strict`（`ponyllm_config::AuthCompat`，
+  `routes/admin.rs:52` 回显给控制台）；单 `api_key` 在 dual / legacy-only 下映射 `Admin`
+  （`auth.rs:305`）；`admin_write_enabled=false` 时写口 404，且**鉴权 403 先于门控 404**。
+- 免鉴面只有 `/health` 与 `/oauth2callback`（`Resource::Exempt`）。
+
 ## 现状盘点（以代码为准，逐段给行号）
 
 ### 1. 单 token 机制：`auth_middleware`（`crates/ponyllm-server/src/app.rs:108-168`）
@@ -126,7 +140,7 @@ CLI/skill、外部 agent）全拿同一 `gateway.api_key` 直连网关。
 - 好的约束：schema 示例值是占位符（`admin.rs:33-34` 注释 `openapi_no_real_secret`），
   历史审计确认 `openapi.json` 干净（L7），但只靠自律，无 CI grep 门禁。
 
-## 风险清单（按严重度）
+## 已知风险与缓解（按严重度）
 
 | # | 风险 | 证据 | 后果 |
 |---|---|---|---|

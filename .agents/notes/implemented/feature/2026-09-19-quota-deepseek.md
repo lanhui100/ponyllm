@@ -10,6 +10,17 @@ Status: implemented
 - OpenAI 风格的 billing 接口（`/v1/billing/credit_grants`、`/v1/dashboard/billing/*`）在 DeepSeek 文档站 sitemap 中**不存在对应页面**，视为**无此接口**，不要按 OpenAI 惯性去接。
 - 注意 DeepSeek 原生路径**没有 `/v1` 前缀**：文档首页的 chat 示例就是 `https://api.deepseek.com/chat/completions`，balance 与 models 同理直接挂在根下。`/v1/user/balance`、`/v1/models` 这类变体不要用。
 
+## Decision
+
+- **不接入** DeepSeek `GET /user/balance`：网关没有 per-key 余额探针，DeepSeek key 的额度行固定
+  `source = probe_only`（内存状态 + 冷却，`crates/ponyllm-server/src/routes/admin.rs:863`）；
+  `grep -rn 'user/balance' crates` 零命中。
+- 拨测语义沿用 `GET {base}/models`（只能证明 key 有效/连通，不含任何额度字段），与 `admin.rs`
+  默认探针一致。
+- 接余额的触发条件：真要做 per-key 余额展示时，按 `## 网关集成建议` 接
+  `https://api.deepseek.com/user/balance`（注意**无 `/v1` 前缀**、Bearer 直接可查）并补解析单测；
+  在此之前不得声称已展示余额。
+
 ## 候选接口明细
 
 | 候选 | URL | Method | 鉴权（Bearer key 能否直接查） | 返回字段 | 结论 |

@@ -3,7 +3,7 @@
 - **交接日期**：2026-09-29
 - **来源**：pproxy 代理网络稳定性测试（2026-09-29，四路并行，约 28 分钟窗口 + 24h 历史）
 - **交接方**：pproxy 侧测试负责人（评估报告见 `/home/dm/pproxy/docs/ops/stability-report-2026-09-29.md`；原始数据 `/home/dm/pproxy/.agents/tests/stability-2026-09-29/`；方法论 ADR `.agents/notes/implemented/testing/2026-09-29-proxy-network-stability-test.md`）
-- **状态**：待开工（本文件为任务起点；开工后请先落决策记录再动手，遵循本仓 `.agents/notes/` 与 `AGENTS.md` 约定）
+- **状态**：待开工 —— 已于 2026-11-24 登记入账本 `backlog:B1795490123835`（此前未入账，属游离待办）；本文件是任务起点与验收口径，状态真源看账本。开工后先落决策记录再动手（`.agents/notes/` 与 `AGENTS.md` 约定）
 
 ---
 

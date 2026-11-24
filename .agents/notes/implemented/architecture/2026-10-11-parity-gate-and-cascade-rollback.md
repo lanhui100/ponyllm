@@ -18,7 +18,7 @@ Status: implemented
   - 镜像校验不能仅看 Deployment spec，还必须校验实际 Running 状态的 Pod 容器镜像，防止处于滚动挂起、ImagePullBackOff 或未就绪状态假绿；
   - 门禁必须机械可执行，作为独立脚本 `tests/pre-flight/check-cluster-image-parity.sh` 沉淀，供 CI 和日常探针复用。
 
-## 3. Decision (实施决策)
+## Decision
 
 1. **重构 `scripts/serialized-rollout.sh`**：
    - 引入 `COMPLETED_ROLES` 动态跟踪机制；
@@ -27,7 +27,7 @@ Status: implemented
 2. **新增 `tests/pre-flight/check-cluster-image-parity.sh`**：
    - 针对 `ponyllm-gateway-(dev|preprod|proserver|tencent)` 进行 Deployment 与 Pod 双层镜像指纹比对，确保无裂脑。
 
-## 4. Alternatives considered
+## Alternatives considered
 
 - **直接放弃串行分批，退回 1 个 Deployment 全量滚动**：
   - 否决。4 节点分别位于不同物理机且绑定特异 nodeSelector（如 dev 挂载单写者 PVC，tencent 为低带宽控制面），分批串行配合加权流量摘除是长流零中断（85s drain）的核心前提，不能倒退。

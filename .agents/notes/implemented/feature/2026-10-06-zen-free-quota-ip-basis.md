@@ -9,6 +9,17 @@ Date: 2026-10-06
 免费模型接口无需鉴权（配置里 zen-3 就是 `api_key = "public"`），因此上游判定额度
 的依据是 **IP** 而非 key。要求验证。
 
+## Decision
+
+- 网关**不自算** opencode-zen 免费额度：`/api/admin/quota` 该行固定 `source = probe_only`
+  （内存状态 + 冷却），见 `crates/ponyllm-server/src/routes/admin.rs:863`（`source: "probe_only"`）。
+- 上游 429 `FreeUsageLimitError` 经 `classify_too_many_requests` +
+  `is_zen_free_usage_limit_body`（`crates/ponyllm-core/src/executor/upstream.rs`）归为
+  `QuotaExhausted` 并冷却该 key；带 `Retry-After` 遵之，否则 15min 默认
+  （`crates/ponyllm-core/src/pool/entry.rs:624`）。
+- 记账维度是**出口 IP**（上游键 `x-real-ip`），同出口多 key 共享同一额度桶：
+  加 key 不拆分母桶，拆额度只能换出口（VPS / IPv6 / Worker）。
+
 ## 结论（先行）
 
 - **上游（opencode.ai/zen Console）免费档额度 = 按客户端 IP 记账，与 key 无关。**

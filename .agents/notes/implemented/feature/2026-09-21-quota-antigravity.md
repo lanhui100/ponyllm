@@ -18,6 +18,19 @@ endpoint、鉴权、返回字段，并给出网关集成建议。
   ← `retrieveUserQuotaSummary` 分组桶（5h / weekly）。
 - `AccountQuotaSnapshot { models, quota_groups, fetched_at }` ← 两者合并快照。
 
+## Decision
+
+- antigravity 是**唯一**已接真实额度接口的 provider：`fetch_quota_summary`（models 平铺）与
+  `fetch_quota`（5h / weekly 桶）产出 `AccountQuotaSnapshot`
+  （`crates/ponyllm-core/src/pool/antigravity.rs:728` / `:871`），管理面在
+  `crates/ponyllm-server/src/routes/admin.rs:895-897` 写成 `source = "buckets"` + `quota` /
+  `quota_groups` 双视图。
+- 双视图是**只读观测**：`crates/ponyllm-server/src/state.rs:2197-2245` 用探针快照刷新
+  `observe_upstream_probe_dual` 与 `apply_quota_groups`，但**不再据此预写 family-exhausted 判定**——
+  冷却账本只由真实 429 回写产生（ADR `2026-10-04-antigravity-group-quota-aware-scheduling`）。
+- 不接 Cloud Billing API；agent 侧复用 `GET /admin/antigravity/pool` 的
+  `AntigravityQuotaItemView` / `AntigravityQuotaGroupView`，不另开端点。
+
 ## Candidates
 
 ### A. `fetchAvailableModels`（主用，模型级可用性）

@@ -13,7 +13,7 @@ ponyllm 网关维护多 key 池（`crates/ponyllm-core/src/pool/`：`quota.rs` �
 - 线上 API 实测（无 key）：`GET /v1/models`、`POST /v1/messages`、`GET /v1/organizations/rate_limits?beta=true` 均返回 `401 {"type":"error","error":{"type":"authentication_error","message":"x-api-key header is required"}}`，确认三端点存活、鉴权头均为 `x-api-key`；
 - LiteLLM 源码（`BerriAI/litellm`，`litellm/llms/anthropic/common_utils.py::process_anthropic_headers`）——第三方对 Anthropic 限流响应头的字段级交叉验证。
 
-## Decision（调研结论，先行）
+## Decision
 
 1. **Anthropic 没有"查余额/剩余额度"的公开接口。** 官方 SDK 全量 `/v1/…` 路径枚举中 `billing`/`balance`/`credit`/`subscription` 路径数为 0；Console 的费用/用量页无公开 API。不要为"余额查询"设计任何轮询器。
 2. **最接近"配额真相源"的是 Admin beta 的 Organization rate limits（读上限，不是读余量）。** `GET /v1/organizations/rate_limits?beta=true` 返回每个模型组/ API 面的配置上限（requests_per_minute、input/output_tokens_per_minute 等），需 organization admin key + beta opt-in；普通业务 key 会 403。**它告诉你天花板在哪，不告诉你还剩多少。**

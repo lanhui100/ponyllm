@@ -10,6 +10,18 @@ key 是否有效（401），还要看 key 级剩余额度（`limit_remaining`）
 ponyllm 网关目前对 OpenRouter 只有透传调用，尚无 key 级额度探针。本次调研确认
 候选接口的 endpoint、鉴权、返回字段，并给出网关集成建议。
 
+## Decision
+
+- **不接入** OpenRouter 官方额度接口：网关没有 per-key 额度探针，`/api/admin/quota`
+  该 provider 行固定 `source = probe_only`（`crates/ponyllm-server/src/routes/admin.rs:863`），
+  `quota` / `quota_groups` 恒为 `null`；本文的调研结论只冻结接入设计与字段口径。
+- 真正接额度的触发条件：启用 OpenRouter 付费 key 池时，按 `## 网关集成建议` 第 1 条接
+  `GET /api/v1/key`（Bearer 被检 key、15s 超时、低频轮询 + 402/失败即时刷新），按第 2 条把
+  `limit_remaining` / `free_model_daily_requests.remaining` 接进调度，并补
+  `cargo test -p ponyllm-core openrouter_quota`（当前 `grep -rn openrouter crates` 只剩 provider
+  模板与文档字符串，无 quota 解析）。
+- 不做：management key 常驻轮询 `/credits`、analytics 实时推算、把无文档的 `/auth/key` 当主端点。
+
 ## Candidates
 
 ### A. `GET /api/v1/key`（主用：当前 key 的 label / limit / usage 全量视图）

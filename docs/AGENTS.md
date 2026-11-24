@@ -6,6 +6,7 @@
 | 常载命约 | 每次会话必载的 standing orders | 故事/示例/复述 | `AGENTS.md` |
 | 架构与决策 | ADR 决策记录与演进状态 | 临时草稿 | `.agents/notes/` |
 | 待办与执行账本 | 活跃/在途任务的唯一活账本与账本契约 | 决策理由（落 `.agents/notes/`）、执行级会话步骤 | `backlog/` |
+| 验收收据 | 独立验收（拨测 / 实网 E2E / 上线观测）的可复跑产物与结论 | 决策理由（落 `.agents/notes/`）、任务状态（落 `backlog/`） | `.agents/receipts/` |
 | 模块契约 | 单包配置、语义、限制与扩展点 | 逐行源码复述 | `crates/*/README.md` |
 | 用户手册 | CLI 使用指南与配置文档 | 内部决策史 | `README.md` |
 

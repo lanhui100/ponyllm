@@ -10,7 +10,7 @@ Date: 2026-09-21
 浏览器里签发/吊销是否真的端到端可用，都必须实测；同时需要红队确认
 一次性明文面与越权矩阵没有缺口。
 
-## Decision（验证动作与结论）
+## Decision
 
 环境：现网 `http://127.0.0.1:8080`，`auth_compat = dual`，配置备份
 `ponyllm.toml.bak-creds-20260921*`。重编 release 并 `stop → 换 bin → serve`
