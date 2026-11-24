@@ -9,6 +9,14 @@ on:
 permissions:
   contents: read
 
+# main 上的部署必须串行：两次连续合并会各自钉自己的 digest 并对同一批
+# Deployment 发起滚动，interleaving 会让「清单即真相」与集群实际镜像脱节，
+# 也会让长流门禁在别人滚动到一半时误判 503（实证 2026-11-24 PR#4/#5）。
+# PR 侧则相反——新提交直接取消旧运行，省 runner。
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   script-gates:
     name: Script & contract drift gates (offline)
@@ -76,6 +84,14 @@ jobs:
       - name: Check deployment prober CLI contract
         shell: bash
         run: bash tests/pre-flight/check-ci-prober-cli-contract.sh
+
+      # digest pin 回写的并发语义防呆：pin 是「清单=最新 digest」的单点声明，
+      # 不得走 rebase（连续两次 main push 会抢同一批 image 行，rebase 必冲突）。
+      - name: Check CI digest pin semantics (concurrency-safe)
+        shell: bash
+        run: |
+          bash tests/pre-flight/check-ci-digest-pin-semantics.sh
+          bash tests/pre-flight/check-ci-digest-pin-semantics.spec.sh
 
       # 2026-10-14 事故回归门禁：CI 身份缺集群级 nodes 读权限时，发布链路必须
       # fail-closed（禁止静默跳过全部滚动 / 以 0 个 Pod 判定 PASS）。纯 shim 驱动，
@@ -324,6 +340,9 @@ jobs:
           echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
           echo "resolved: crpi-3cfwwtc3um8h6d3q.cn-hangzhou.personal.cr.aliyuncs.com/job-copilot/api-v2@$DIGEST"
 
+      # 本步只做「解析 + 断言」：把 digest 钉进工作区清单并断言恰 4 行。
+      # 真正落盘的钉在下一步（Commit digest pin），它从 origin/main 基线重钉，
+      # 因此这里的工作区改动会被覆盖——两处都必须用同一条 sed 表达式。
       - name: Pin digest into manifest
         run: |
           DIGEST="${{ steps.resolve.outputs.digest }}"
@@ -337,19 +356,49 @@ jobs:
 
       - name: Commit digest pin back to main (skip CI)
         run: |
+          set -uo pipefail
           git config user.name "ponyllm-ci"
           git config user.email "ci@ponyllm.local"
-          git add deploy/ponyllm-deployment.yaml
-          if git diff --cached --quiet; then
-            echo "no manifest change (digest already current)"
-            exit 0
-          fi
-          git commit -m "deploy(prod): pin image digest sha256:${GITHUB_SHA::7} [skip ci]"
-          # 并发 push（docs/[skip ci] 等）会造成非快进拒绝（fetch first）：
-          # fetch+rebase 吸收远端新提交后重推（实证 2026-09-30 一次 race）
-          git fetch origin main
-          git rebase origin/main
-          git push origin main
+          MANIFEST=deploy/ponyllm-deployment.yaml
+          DIGEST="${{ steps.resolve.outputs.digest }}"
+          IMG="crpi-3cfwwtc3um8h6d3q.cn-hangzhou.personal.cr.aliyuncs.com/job-copilot/api-v2@$DIGEST"
+          # pin 是「清单 = 最新 digest」的单点声明，不带历史语义：连续两次 main push
+          # 会各自把同一批 image 行改成自己的 digest，旧写法的 fetch+rebase 必然
+          # content conflict（实证 2026-11-24：PR#4 与 PR#5 连续合并，两次部署均红）。
+          # 新口径：只有「本 SHA 仍是 origin/main tip」的那一次 run 负责钉；被后来者
+          # 超越的 run 交还清单（checkout origin/main 版本）并放行，由超越它的 run 钉
+          # 自己的 digest —— 无 rebase、无冲突，也不会用旧镜像逆行覆盖新清单。
+          for attempt in 1 2 3; do
+            git fetch origin main
+            TIP=$(git rev-parse origin/main)
+            if [ "$TIP" != "$GITHUB_SHA" ]; then
+              echo "superseded: origin/main=$TIP != 本 run SHA=$GITHUB_SHA —— 交还清单并跳过 pin（由超越者钉其 digest）"
+              git checkout origin/main -- "$MANIFEST"
+              exit 0
+            fi
+            # 以最新清单为基线重钉：sed 只认 sha256 占位，重复执行结果一致（幂等）
+            git checkout origin/main -- "$MANIFEST"
+            sed -i "s|image: crpi-3cfwwtc3um8h6d3q.cn-hangzhou.personal.cr.aliyuncs.com/job-copilot/api-v2@sha256:[0-9a-f]*|image: $IMG|g" "$MANIFEST"
+            COUNT=$(grep -c "image: crpi-3cfwwtc3um8h6d3q.cn-hangzhou.personal.cr.aliyuncs.com/job-copilot/api-v2@" "$MANIFEST")
+            echo "pinned image lines: $COUNT (expect 4)"
+            [ "$COUNT" -eq 4 ] || { echo "FAIL: expected 4 image lines pinned, got $COUNT"; exit 1; }
+            git add "$MANIFEST"
+            if git diff --cached --quiet; then
+              echo "no manifest change (digest already current)"
+              exit 0
+            fi
+            git commit -m "deploy(prod): pin image digest sha256:${GITHUB_SHA::7} [skip ci]"
+            # 并发 push 造成非快进拒绝：丢弃本次提交后重来（不进 rebase，故不会冲突）
+            if git push origin HEAD:main; then
+              echo "digest pinned on attempt ${attempt}"
+              exit 0
+            fi
+            git reset --hard HEAD~1
+            echo "push rejected (concurrent main update), retrying (attempt ${attempt}/3)"
+            sleep 5
+          done
+          echo "FAIL: could not pin digest after 3 attempts"
+          exit 1
 
       - name: Apply non-rolling manifests (IngressRoute)
         run: |

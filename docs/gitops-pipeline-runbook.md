@@ -128,3 +128,20 @@ kube-only 收敛门禁（不静默放行），并要求用 admin token 补跑 `s
 CI runner 在集群外，故以 `--base-url https://tokens.ponyjob.top --skip-write-test` 运行；ClusterIP/
 Pod IP 探测与 [6/7] Secret 写测试只在集群内由操作员执行（scoped ci-deployer 无 secrets 读写权限，
 脚本对这类 RBAC 缺口显式降级并打印 WARN，不静默跳过）。
+
+## 7. digest pin 回写与 main 串行（2026-11-24）
+
+`ci.yml` 的 `Commit digest pin back to main` 是**单点声明**，不带历史语义：
+
+- 只有「本 run 的 `GITHUB_SHA` 仍是 `origin/main` tip」的那次 run 负责钉自己的 digest；
+  已被后来者超越的 run 把清单 `git checkout origin/main --` 交还最新版后 `exit 0`（**非失败**）；
+- 钉的动作是「以最新清单为基线重跑同一条 sed（只认 `sha256:` 占位）+ commit + push」，
+  push 遇并发非快进时丢弃本次提交重试（≤3 轮），**不使用 `git rebase`**——
+  pin 改的是同一批 4 行 image，rebase 重放旧 digest 必然 content conflict（2026-11-24 实证：PR#4/#5 连续合并，两次部署均红）；
+- workflow 顶层 `concurrency` 串行化 main 部署（`cancel-in-progress` 仅对 PR 生效），
+  避免两次 run 交叉向集群滚动；main 上的运行**不可被取消**，否则会留下已 apply 未验收的集群。
+
+判据机械影子：`tests/pre-flight/check-ci-digest-pin-semantics.sh`（+ `.spec.sh` 负样本 P1/N1–N7），
+随 CI `test` job 执行——把 pin 改回 rebase、去掉让位判定或去掉 concurrency 即红。
+决策记录：`.agents/notes/implemented/process/2026-11-24-digest-pin-supersede-semantics.md`。
+
