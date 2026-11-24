@@ -55,14 +55,14 @@ printf 'r1 10 2 5\n' > "$TMP/b3"
 printf 'r1 10 2 5\n' > "$TMP/a3"
 out=$(ha_window_verdict "$TMP/b3" "$TMP/a3" 2>&1); rc=$?
 [ "$rc" -eq 0 ] && ok "P3 无活动 → exit 0" || no "P3 期望 exit 0，实际 $rc"
-echo "$out" | grep -q "证据不足" && ok "P3 输出证据不足 WARN" || no "P3 缺 WARN：$out"
+echo "$out" | grep -q "insufficient evidence" && ok "P3 输出证据不足 WARN" || no "P3 缺 WARN：$out"
 
 # ---- P4：窗口前后无同副本 → 不得 FAIL（本次修复的核心承诺） ----
 printf 'r1 10 2 0\n' > "$TMP/b4"
 printf 'r2 99 9 7\n' > "$TMP/a4"
 out=$(ha_window_verdict "$TMP/b4" "$TMP/a4" 2>&1); rc=$?
 [ "$rc" -eq 0 ] && ok "P4 跨副本采样不判 FAIL（exit 0）" || no "P4 期望 exit 0，实际 $rc：$out"
-echo "$out" | grep -q "跨副本" && ok "P4 明确说明跨副本不采信" || no "P4 缺跨副本说明：$out"
+echo "$out" | grep -q "cross-replica delta is NOT evidence" && ok "P4 明确说明跨副本不采信" || no "P4 缺跨副本说明：$out"
 
 # ---- P5：复刻 2026-11-24 误判场景（0 -> 191 正 delta，实为换了副本） ----
 # before 采到 r2(全 0)，after 采到 r1(历史累计 191)：旧口径判 +191 FAIL，新口径须放行。
@@ -111,6 +111,20 @@ MOCK
 chmod +x "$TMP/bin/curl"
 line=$(PATH="$TMP/bin:$PATH" ha_snapshot_line "http://example.invalid/v1/telemetry/metrics" 8 1 "")
 [ -z "$line" ] && ok "P8b 缺 ha_ops → 空行" || no "P8b 期望空行，实际：'$line'"
+
+# ---- P9：判定输出必须是纯 ASCII ----
+# 实证 2026-11-24 CI windows-latest：GitHub runner 的 python3 stdout 编码是 cp1252，
+# 判定函数 print 中文 → UnicodeEncodeError → traceback 退出 1 → 门禁假红。
+# 门禁脚本不得依赖终端编码，这条断言把它钉住。
+printf 'r1 10 2 5\n' > "$TMP/b9"
+printf 'r1 14 2 5\n' > "$TMP/a9"
+out=$(PYTHONIOENCODING=cp1252 ha_window_verdict "$TMP/b9" "$TMP/a9" 2>&1); rc=$?
+# 用 python3 判 ASCII（不用 grep -P：BSD grep / git-bash 未必支持 -P）。
+if [ "$rc" -eq 0 ] && printf '%s' "$out" | python3 -c "import sys; sys.exit(0 if sys.stdin.read().isascii() else 1)"; then
+  ok "P9 判定输出纯 ASCII（cp1252 环境下不炸）"
+else
+  no "P9 cp1252 下判定异常（rc=$rc）：$out"
+fi
 
 echo "---- $SPEC: pass=$pass fail=$fail ----"
 [ "$fail" -eq 0 ] || exit 1

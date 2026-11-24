@@ -58,6 +58,10 @@ except Exception:
 
 # 窗口判定：两个快照文件（每行一条 ha_snapshot_line 输出）。
 # stdout = 判定文本（可多行）；exit 0 放行 / 1 拒绝。
+#
+# 输出**只用 ASCII**（实证 2026-11-24 CI windows-latest）：GitHub runner 的
+# python3 默认 stdout 编码是 cp1252，print 中文直接 UnicodeEncodeError，
+# 整个判定函数 traceback 退出 1——门禁脚本不得依赖终端编码。
 ha_window_verdict() {
   local before="$1" after="$2"
   python3 - "$before" "$after" <<'PY'
@@ -65,7 +69,7 @@ import sys
 from collections import OrderedDict
 
 def load(path):
-    """读快照文件 → [(instance, acq, skip, err)]；跳过空行与畸形行。"""
+    """Read snapshot file -> [(instance, acq, skip, err)]; skip blank/malformed."""
     rows = []
     with open(path, encoding="utf-8") as fh:
         for line in fh:
@@ -83,19 +87,20 @@ before = load(sys.argv[1])
 after = load(sys.argv[2])
 
 if not before or not after:
-    print("WARN 快照为空（before=%d after=%d 条）——无法判定锁错误 delta，证据不足"
+    print("WARN empty snapshot (before=%d after=%d rows) -- cannot judge lock error delta, insufficient evidence"
           % (len(before), len(after)))
     sys.exit(0)
 
-# 每个 instance 取「窗口前最后一条」与「窗口后最后一条」：同副本内计数单调不减，
-# 取端点即覆盖整个窗口。
+# Per instance keep the last row on each side: counters are monotonic within one
+# process, so the endpoints cover the whole window.
 b_last = OrderedDict((r[0], r) for r in before)
 a_last = OrderedDict((r[0], r) for r in after)
 paired = [i for i in b_last if i in a_last]
 
 if not paired:
-    print("WARN 窗口前后未采到同一副本（before=%s after=%s）——经 LB 采样会随机命中副本，"
-          "跨副本 delta 不构成锁错误增长的证据；硬证据请用 --pod-ips 逐副本直采"
+    print("WARN no replica sampled on both sides (before=%s after=%s) -- sampling through a LB hits "
+          "random replicas; a cross-replica delta is NOT evidence of lock error growth. "
+          "For hard evidence use --pod-ips to sample each replica directly"
           % (",".join(b_last), ",".join(a_last)))
     sys.exit(0)
 
@@ -117,15 +122,17 @@ if failed:
     sys.exit(1)
 
 if not activity:
-    print("WARN 同副本窗口内无刷新活动，Δ==0 证据不足，请于下个 keepalive/401 窗口复查")
+    print("WARN no refresh activity within the same replica -- delta==0 is insufficient evidence, "
+          "re-check on the next keepalive/401 window")
 else:
-    print("OK 同副本窗口内锁 errors Δ==0 且有刷新活动")
+    print("OK same-replica window: lock errors delta==0 with refresh activity")
 
-# 若窗口里还有「只出现在一侧」的副本，说明期间发生过副本切换——如实标注，
-# 但不影响同副本结论。
+# Replicas seen on one side only mean a replica switch happened inside the window:
+# report it honestly, but it does not change the same-replica conclusion.
 unpaired = sorted(set(b_last) ^ set(a_last))
 if unpaired:
-    print("NOTE 窗口内出现副本切换（单侧出现：%s）；已按同副本样本判定，未采信跨副本 delta"
+    print("NOTE replica switch inside the window (seen on one side only: %s); judged on same-replica "
+          "pairs only, cross-replica delta not trusted"
           % ",".join(unpaired))
 sys.exit(0)
 PY
